@@ -711,6 +711,24 @@ usage_file = "{}"
         std::fs::write(&self.config_path, patched).expect("write config");
     }
 
+    /// fix-pending-queue-liveness：把 `[dispatch] turn_stall_timeout`（秒）
+    /// 写进沙箱 config——停滞看门狗的短阈值供 e2e 快速周转。必须在 spawn
+    /// 之前调用。
+    pub fn set_turn_stall_timeout(&self, secs: u64) {
+        let toml = std::fs::read_to_string(&self.config_path).expect("read config");
+        let needle = "[dispatch]\n";
+        assert!(
+            toml.contains(needle),
+            "[dispatch] section not found in config"
+        );
+        let patched = toml.replace(
+            needle,
+            &format!("{needle}turn_stall_timeout = {secs}\n"),
+        );
+        assert_ne!(toml, patched, "turn_stall_timeout patch did not apply");
+        std::fs::write(&self.config_path, patched).expect("write config");
+    }
+
     /// （add-agent-mode-selection）给 fake-claude 加 `--journal`，让每个
     /// spawn 的 argv 与 in/out 帧都落盘——argv 断言（mode 是否进了子进程
     /// 参数）与运行时切换断言（mode_change 记录）的数据源。必须在 spawn

@@ -1188,6 +1188,9 @@ impl SessionBackend for FakeBackend {
             msg_count: 0,
             // session-slash-commands：fake 会话无命令面（空表不上 wire）。
             available_commands: Vec::new(),
+            // fix-pending-queue-liveness 2.3：fake 会话（spawning 占位）恒
+            // 占用（spawn 窗口）。
+            turn_engaged: true,
         };
         let ev = SessionEvent::Created { session };
         if let SessionEvent::Created { session } = &ev {
@@ -1457,6 +1460,7 @@ mod tests {
                 effective_mode: None,
                 msg_count: 0,
                 available_commands: Vec::new(),
+                turn_engaged: false,
             }])
             .await;
         backend.push_turn("s9", "prompt", "p1").await;

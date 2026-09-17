@@ -1356,4 +1356,171 @@ exit 0
         assert_eq!(placement_for("gemini", home.path()), None, "gemini 本期不加表行");
         assert_eq!(placement_for("no-such-backend", home.path()), None);
     }
+
+    // ── 补充覆盖（review add-agent-skills）───────────────────────────────────
+
+    /// 临时覆写 HOME/USERPROFILE（锁内执行，结束恢复原值）——同
+    /// tests/cli_skills_test.rs 的 HomeGuard 姿态。
+    fn with_home_env<R>(
+        home: Option<&Path>,
+        userprofile: Option<&Path>,
+        f: impl FnOnce() -> R,
+    ) -> R {
+        let _env = ENV_LOCK.lock().unwrap();
+        let orig_home = std::env::var_os("HOME");
+        let orig_up = std::env::var_os("USERPROFILE");
+        unsafe {
+            match home {
+                Some(p) => std::env::set_var("HOME", p),
+                None => std::env::remove_var("HOME"),
+            }
+            match userprofile {
+                Some(p) => std::env::set_var("USERPROFILE", p),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+        }
+        let out = f();
+        unsafe {
+            match orig_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match orig_up {
+                Some(v) => std::env::set_var("USERPROFILE", v),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+        }
+        out
+    }
+
+    /// resolve_home 的 env 优先序：HOME > USERPROFILE > dirs 兜底。两个 env 都
+    /// 钉进 tempdir——USERPROFILE 恒在场，绝不走到 `dirs::home_dir()` 的
+    /// getpwuid 路径，测试不触真实 HOME。
+    #[test]
+    fn resolve_home_env_priority() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("h");
+        let up_dir = tmp.path().join("u");
+        fs::create_dir_all(&home_dir).unwrap();
+        fs::create_dir_all(&up_dir).unwrap();
+
+        with_home_env(Some(&home_dir), Some(&up_dir), || {
+            assert_eq!(resolve_home(), home_dir, "HOME 在场时优先于 USERPROFILE");
+        });
+        with_home_env(None, Some(&up_dir), || {
+            assert_eq!(resolve_home(), up_dir, "HOME 缺失时回退 USERPROFILE");
+        });
+        with_home_env(Some(Path::new("")), Some(&up_dir), || {
+            assert_eq!(
+                resolve_home(),
+                up_dir,
+                "空 HOME 视同缺失（env-first 的空值过滤）"
+            );
+        });
+    }
+
+    /// configured_kinds：`[acp.agents.*]` 键按 kind 排序；一个都没配时回退
+    /// default kind（出厂配置也有明确可投影对象，tasks 4.4 语义）。
+    #[test]
+    fn configured_kinds_sorted_with_default_fallback() {
+        let none = crate::config::Config::parse("").unwrap();
+        assert_eq!(
+            configured_kinds(&none),
+            vec!["claude".to_string()],
+            "无 agent 配置回退 default kind（隐式 claude）"
+        );
+
+        let both = crate::config::Config::parse(
+            "[acp.agents.gemini]\ndriver = \"claude\"\n\n[acp.agents.claude]\ndriver = \"claude\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            configured_kinds(&both),
+            vec!["claude".to_string(), "gemini".to_string()],
+            "按 kind 排序（HashMap 无序，输出必须稳定）"
+        );
+
+        let explicit_default =
+            crate::config::Config::parse("[acp]\ndefault = \"gemini\"\n").unwrap();
+        assert_eq!(configured_kinds(&explicit_default), vec!["gemini".to_string()]);
+    }
+
+    /// skill_detail（webui GET /api/skills/{name} 的取材）：SKILL.md 文件缺失
+    /// 的条目如实给 text=None（不冒充空正文，也不冒充 404）；文件在但
+    /// frontmatter 不可解析 → 原文照给（valid 与否是列表的事）；未知名 /
+    /// 非法名 → None。
+    #[test]
+    fn skill_detail_serves_invalid_entry_and_rejects_bad_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = tmp.path().join("store");
+        make_skill(&store, "beads", SKILL_BODY);
+        // 文件真缺失：目录在、SKILL.md 不在。
+        let missing_md = store.join("no-md");
+        fs::create_dir_all(&missing_md).unwrap();
+        fs::write(missing_md.join("ref.md"), "doc").unwrap();
+        // 文件在但 frontmatter 不可解析（invalid 的另一种成因）。
+        make_skill(&store, "no-fence", "name: x\ndescription: 无围栏\n");
+
+        let beads = skill_detail(&store, "beads").unwrap();
+        assert_eq!(beads.name, "beads");
+        assert_eq!(beads.text.as_deref(), Some(SKILL_BODY));
+
+        let no_md = skill_detail(&store, "no-md").unwrap();
+        assert_eq!(no_md.text, None, "缺 SKILL.md 文件 → text=None，诚实呈现");
+        assert_eq!(no_md.attachments, vec!["ref.md".to_string()]);
+
+        let no_fence = skill_detail(&store, "no-fence").unwrap();
+        assert_eq!(
+            no_fence.text.as_deref(),
+            Some("name: x\ndescription: 无围栏\n"),
+            "文件在场就给原文（渲染与否是前端的事）"
+        );
+
+        assert!(skill_detail(&store, "no-such").is_none());
+        assert!(skill_detail(&store, "../escape").is_none(), "非法名不出详情");
+    }
+
+    /// 多技能仓撞名预检（add_from_git）：任一候选与仓内同名 → 整体报错不写
+    /// （不收一半）。
+    #[test]
+    fn add_git_multi_repo_collision_harvests_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = tmp.path().join("store");
+        make_skill(&store, "a", SKILL_BODY);
+        let before = fs::read_to_string(store.join("a").join(SKILL_FILE)).unwrap();
+        let stub_bin = make_git_stub(tmp.path());
+        let err = with_path_prepended(&stub_bin, || {
+            unsafe { std::env::set_var("SEBAS_STUB_GIT_MODE", "multi") };
+            let r = add_from_git("https://example.com/stub-repo.git", &store);
+            unsafe { std::env::remove_var("SEBAS_STUB_GIT_MODE") };
+            r
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("\"a\""), "撞名报错指名条目：{err}");
+        assert!(!store.join("b").exists(), "预检失败后不得写任何候选（不收一半）");
+        assert_eq!(
+            fs::read_to_string(store.join("a").join(SKILL_FILE)).unwrap(),
+            before,
+            "既有条目原样保留"
+        );
+    }
+
+    /// git URL → 克隆目录名（= 单技能仓落仓名）：末段、去 `.git` 后缀、去尾
+    /// 斜杠、scp 形态（`git@host:owner/repo.git`）、推不出末段时 `repo` 兜底。
+    #[test]
+    fn repo_dir_name_handles_url_shapes() {
+        assert_eq!(repo_dir_name("https://example.com/my-skill.git"), "my-skill");
+        assert_eq!(
+            repo_dir_name("https://example.com/my-skill.git/"),
+            "my-skill",
+            "尾斜杠不进名字"
+        );
+        assert_eq!(
+            repo_dir_name("git@github.com:owner/repo.git"),
+            "repo",
+            "scp 形态取冒号后末段"
+        );
+        assert_eq!(repo_dir_name("https://example.com/a/b/my-deploy"), "my-deploy");
+        assert_eq!(repo_dir_name(""), "repo", "推不出末段时兜底");
+    }
 }

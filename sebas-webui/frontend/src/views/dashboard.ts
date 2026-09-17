@@ -166,6 +166,19 @@ export class SebasDashboard extends LitElement {
    */
   @state() private droppedPending: PendingSubmission[] | null = null
   @state() private droppedPendingFor: string | null = null
+  /**
+   * fix-pending-queue-liveness 3.2：聚焦会话（本机）在等操作者批复的审查卡
+   * 数 > 0。`sebas-review-cards` 在其待决集合变化时上报（远端会话的同一
+   * 事实走 detail 的 `remote.parked_approvals`）。提交控件的「等待你的审批」
+   * 指示与待执行栈的阻塞原因据此呈现。
+   */
+  @state() private parkedLocal = false
+
+  /** review-cards 的待决集合变化（仅聚焦会话的卡在该组件内渲染）。 */
+  private onReviewPendingChanged = (e: Event): void => {
+    const { count } = (e as CustomEvent<{ count: number }>).detail ?? { count: 0 }
+    this.parkedLocal = count > 0
+  }
 
   // ─── 执行节点可用性（add-remote-execution-node 8.2/8.5）─────────────────
   @state() private nodes: NodeInfo[] = []
@@ -847,10 +860,18 @@ export class SebasDashboard extends LitElement {
     const projectName = this.selectedPath
       ? (this.selectedPath.split(/[\\/]/).filter(Boolean).pop() ?? this.selectedPath)
       : null
-    // D4：turn 在飞 = 聚焦会话 status == Working（与引擎 card FSM 的
-    // WORKING 同源）。深链/摘要两个数据源兜底取值。
-    const turnInFlight =
+    // fix-pending-queue-liveness 3.1（design D3）：「turn 在飞」优先消费引擎
+    // 的结构化事实 `turn_engaged`（WORKING ∨ 泊车 ∨ spawn 窗口），不再猜展
+    // 示词 slug；键缺省（旧 core 组合）回退 `status_slug === 'working'` 旧判
+    // 定。深链/摘要两个数据源兜底取值。
+    const turnEngaged =
+      this.focusedDetail?.turn_engaged ??
+      d.active_session?.turn_engaged ??
       (this.focusedDetail?.status_slug ?? d.active_session?.status_slug ?? null) === 'working'
+    // fix-pending-queue-liveness 3.2：泊车事实——远端看 remote 视图的悬空
+    // 审批数，本机看聚焦会话的待决审查卡（review-cards 上报）。「在等你的
+    // 审批」指示据此呈现，提交读作「排在一次可回答的提问后面」。
+    const waitingApproval = this.parkedLocal || (this.focusedDetail?.remote?.parked_approvals ?? 0) > 0
     return html`
       <wa-split-panel
         class="vsplit"
@@ -918,16 +939,22 @@ export class SebasDashboard extends LitElement {
         </div>
         <div slot="end" class="composer-col">
           <div class="composer-area">
-            <sebas-review-cards .sessionKey=${focusKey}></sebas-review-cards>
+            <sebas-review-cards
+              .sessionKey=${focusKey}
+              @review-pending-changed=${this.onReviewPendingChanged}
+            ></sebas-review-cards>
             <sebas-pending-stack
               .sessionKey=${focusKey}
               .pending=${this.focusedDetail?.pending ?? []}
               .dropped=${this.droppedPending}
+              .turnEngaged=${turnEngaged}
+              .waitingApproval=${waitingApproval}
               @pending-changed=${this.onComposerSent}
             ></sebas-pending-stack>
             <sebas-workbench-composer
               .sessionKey=${focusKey}
-              .turnInFlight=${turnInFlight}
+              .turnInFlight=${turnEngaged}
+              .waitingApproval=${waitingApproval}
               .agentKind=${this.focusedDetail?.agent_kind ?? d.active_session?.agent_kind ?? null}
               .sessionModels=${this.focusedDetail?.available_models ?? d.active_session?.available_models ?? []}
               .currentModel=${this.focusedDetail?.current_model ?? d.active_session?.current_model ?? null}

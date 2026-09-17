@@ -297,6 +297,18 @@ describe('unified notice interception (add-webui-tiered-notices 4.1)', () => {
     expect(seen[seen.length - 1].items).toHaveLength(0)
   })
 
+  it('does not notify for exempt call points (skills store surface, add-agent-skills 5.2)', async () => {
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValue(errorResponse(503, { error: 'backend down' }))
+
+    // skills 管理面四个调用点（settings-modal Skills 分区全部内联呈现失败）。
+    await api.skillsList().catch(() => undefined)
+    await api.skillDetail('beads').catch(() => undefined)
+    await api.skillsDelete('beads').catch(() => undefined)
+    await api.skillsSync().catch(() => undefined)
+    expect(seen[seen.length - 1].items).toHaveLength(0)
+  })
+
   it('never lets a 401 into the notice layer (login redirect owns it)', async () => {
     vi.stubGlobal('fetch', fetchMock)
     fetchMock.mockResolvedValue(errorResponse(401, { error: 'login required' }))

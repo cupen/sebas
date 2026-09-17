@@ -59,31 +59,48 @@ export class ProjectRail {
   }
 
   /**
-   * Archive a session row (by its displayed label — since
-   * rail-declutter-unread the first prompt's preview). Goes through the
-   * row's … menu.
+   * The archive confirm dialog（workbench-live-conversation-flow 4.2：归档
+   * 即关闭、是会话唯一的生命周期出口——确认框点名将被丢弃的待执行条数）。
+   * Hosted by the rail; the host reads hidden in the top layer, assert the
+   * rendered contents.
    */
-  async archiveSession(rowLabel: string): Promise<void> {
+  archiveDialog(): Locator {
+    return this.page.locator('sebas-project-rail wa-dialog[label="归档会话"]')
+  }
+
+  /**
+   * Drive a session row's … menu to the archive confirm dialog（归档一律
+   * 内联确认——「将丢弃 N 条待执行」的告知不依赖会话状态）. Returns the
+   * open dialog so callers can assert the naming before confirming.
+   */
+  async openArchiveDialog(rowLabel: string): Promise<Locator> {
     await this.openSessionMenu(rowLabel)
     await this.host
       .locator('li.session-item:not(.archived)', { hasText: rowLabel })
       .first()
       .locator('wa-dropdown-item[value="archive"]')
       .click()
+    const dialog = this.archiveDialog()
+    await expect(dialog.locator('wa-button').filter({ hasText: '归档' })).toBeVisible()
+    return dialog
+  }
+
+  /** Confirm the archive dialog (the danger footer button). */
+  async confirmArchive(): Promise<void> {
+    await this.archiveDialog()
+      .locator('wa-button')
+      .filter({ hasText: '归档' })
+      .click()
   }
 
   /**
-   * Close (delete) a session row by its displayed label, via the row's …
-   * menu. Inactive sessions close immediately; active ones raise the inline
-   * confirm dialog — callers that need the dialog handle it themselves.
+   * Archive a session row (by its displayed label — since
+   * rail-declutter-unread the first prompt's preview): … menu → 归档 →
+   * confirm the inline dialog.
    */
-  async closeSession(rowLabel: string): Promise<void> {
-    await this.openSessionMenu(rowLabel)
-    await this.host
-      .locator('li.session-item:not(.archived)', { hasText: rowLabel })
-      .first()
-      .locator('wa-dropdown-item[value="close"]')
-      .click()
+  async archiveSession(rowLabel: string): Promise<void> {
+    await this.openArchiveDialog(rowLabel)
+    await this.confirmArchive()
   }
 
   /**

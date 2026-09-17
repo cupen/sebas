@@ -83,6 +83,7 @@ async function mount(initial: Partial<SebasWorkbenchComposer> = {}) {
   if (initial.sessionModels !== undefined) el.sessionModels = initial.sessionModels
   if (initial.currentModel !== undefined) el.currentModel = initial.currentModel
   if (initial.turnInFlight !== undefined) el.turnInFlight = initial.turnInFlight
+  if (initial.waitingApproval !== undefined) el.waitingApproval = initial.waitingApproval
   if (initial.sessionCommands !== undefined) el.sessionCommands = initial.sessionCommands
   if (initial.childStarting !== undefined) el.childStarting = initial.childStarting
   if (initial.currentMode !== undefined) el.currentMode = initial.currentMode
@@ -567,6 +568,58 @@ describe('submit control state machine (4.3, design D4)', () => {
   })
 })
 
+// ── fix-pending-queue-liveness 3.2 泊车指示与 waiting/starting 形态 ──────
+
+describe('sebas-workbench-composer (parked / spawn-window submit control)', () => {
+  function stateOf(el: SebasWorkbenchComposer): string | null {
+    return (
+      el.shadowRoot
+        ?.querySelector('[data-testid="submit-control"]')
+        ?.getAttribute('data-state') ?? null
+    )
+  }
+
+  it('parked with empty input still offers stop and shows the waiting-on-operator hint', async () => {
+    const el = await mount({ ...focus, turnInFlight: true, waitingApproval: true })
+    // 停止在泊车态可达（不用去找审批卡）。
+    expect(stateOf(el)).toBe('stop')
+    const hint = el.shadowRoot?.querySelector('[data-testid="parked-hint"]')
+    expect(hint).toBeTruthy()
+    expect(hint?.textContent).toContain('等待你的审批')
+  })
+
+  it('parked with text queues visibly together with the waiting-on-operator indication', async () => {
+    const el = await mount({ ...focus, turnInFlight: true, waitingApproval: true })
+    await type(el, 'after you decide')
+    expect(stateOf(el)).toBe('queued')
+    const hint = el.shadowRoot?.querySelector('[data-testid="parked-hint"]')
+    expect(hint?.textContent).toContain('等待你的审批')
+    // 提交仍走排队路径（语义不变：泊车下提交 = 排在可回答的提问后面）。
+    ;(el.shadowRoot?.querySelector('[data-testid="submit-control"]') as HTMLElement).click()
+    await new Promise((r) => setTimeout(r, 0))
+    expect(api.sendMessage).toHaveBeenCalledWith('web%00web-1', 'after you decide')
+  })
+
+  it('running turn without the parked fact renders no hint', async () => {
+    const el = await mount({ ...focus, turnInFlight: true, waitingApproval: false })
+    await type(el, 'queue behind')
+    expect(stateOf(el)).toBe('queued')
+    expect(el.shadowRoot?.querySelector('[data-testid="parked-hint"]')).toBeNull()
+  })
+
+  it('spawn window (starting) with text offers the queued affordance', async () => {
+    // spawn 窗口经 turn_engaged 折算成 turnInFlight=true（dashboard 供数）；
+    // composer 的形态判定对 starting 与 working 一致——都是「回合占用」。
+    const el = await mount({ ...focus, turnInFlight: true, childStarting: true })
+    await type(el, 'first message staged')
+    expect(stateOf(el)).toBe('queued')
+    expect(el.shadowRoot?.querySelector('[data-testid="parked-hint"]')).toBeNull()
+    el.turnInFlight = false
+    await el.updateComplete
+    expect(stateOf(el)).toBe('send')
+  })
+})
+
 // ── session-slash-commands 3.1/3.2 命令面板 ──────────────────────────────
 
 /** claude 形态的广告表（goal 带参数提示；compact 恰好也被 claude 广告）。 */
@@ -598,7 +651,7 @@ describe('command palette (session-slash-commands 3.1/3.2, design D4)', () => {
       ?.getAttribute('data-command')
   }
 
-  it('opens on a leading slash listing name, argument hint, and description; first option is highlighted', async () => {
+  it('opens on a leading slash listing single-line rows (name + hint); first option is highlighted', async () => {
     const el = await mount({ ...focus, sessionCommands: claudeCommands })
     await type(el, '/')
 
@@ -611,13 +664,27 @@ describe('command palette (session-slash-commands 3.1/3.2, design D4)', () => {
       'compact',
       'review',
     ])
-    // 行内容三要素：命令名 + 参数提示 + 说明。
+    // （input-polish 3.1）行收敛：命令名 + 参数提示单行；描述不再内联
+    // 铺开（描述只经 hover/高亮气泡呈现，见气泡 describe）。
     expect(options[0]?.textContent).toContain('/goal')
     expect(options[0]?.textContent).toContain('<condition>')
-    expect(options[0]?.textContent).toContain('跨回合追踪目标')
+    expect(options[0]?.textContent).not.toContain('跨回合追踪目标')
     // 面板打开即高亮首位；aria-selected 模式同 model 菜单的 listbox。
     expect(options[0]?.getAttribute('aria-selected')).toBe('true')
     expect(options[1]?.getAttribute('aria-selected')).toBe('false')
+  })
+
+  it('keeps the two-phase completion and highlight behavior after the row collapse (3.1 regression)', async () => {
+    const el = await mount({ ...focus, sessionCommands: claudeCommands })
+    await type(el, '/RE')
+    expect(optionsOf(el).map((o) => o.getAttribute('data-command'))).toEqual(['review'])
+    await pressKey(el, 'Tab')
+    const ta = el.shadowRoot?.querySelector('wa-textarea') as unknown as { value: string }
+    expect(ta.value).toBe('/review ')
+    expect(api.sendMessage).not.toHaveBeenCalled()
+    // 行收敛后的结构守卫：行内描述的渲染与样式已从源码删除。
+    const src = readFileSync(join(here, 'workbench-composer.ts'), 'utf8')
+    expect(src).not.toContain('cmd-desc')
   })
 
   it('narrows live by a case-insensitive prefix as the operator types', async () => {
@@ -710,6 +777,183 @@ describe('command palette (session-slash-commands 3.1/3.2, design D4)', () => {
     const ta = el.shadowRoot?.querySelector('wa-textarea') as unknown as { value: string }
     expect(ta.value).toBe('/review ')
     expect(api.sendMessage).not.toHaveBeenCalled()
+  })
+})
+
+// ── input-polish 3.2 描述气泡（hover ∨ 高亮同源，markdown sanitize）──────
+
+/** 混合形态：bare 无 description——收泡路径（移开/高亮到无描述行）的载体。 */
+const mixedCommands: AvailableCommandInfo[] = [
+  { name: 'goal', description: '跨回合追踪目标', hint: '<condition>' },
+  { name: 'compact', description: '压缩**会话**历史' },
+  { name: 'bare', description: '' },
+]
+
+describe('command description bubble (workbench-composer-input-polish 3.2, design D1-D3)', () => {
+  function bubbleOf(el: SebasWorkbenchComposer): HTMLElement | null {
+    return el.shadowRoot?.querySelector<HTMLElement>('[data-testid="command-bubble"]') ?? null
+  }
+  function hoverRow(el: SebasWorkbenchComposer, name: string, kind: 'enter' | 'leave'): void {
+    ;(
+      el.shadowRoot?.querySelector(`[data-command="${name}"]`) as unknown as HTMLElement
+    )?.dispatchEvent(new Event(kind === 'enter' ? 'mouseenter' : 'mouseleave'))
+  }
+
+  it('shows a markdown bubble for the keyboard-highlighted row and moves it with ↑/↓', async () => {
+    const el = await mount({ ...focus, sessionCommands: mixedCommands })
+    await type(el, '/')
+    // 高亮态出泡（面板打开即高亮首位 = goal）。
+    let bubble = bubbleOf(el)
+    expect(bubble).toBeTruthy()
+    expect(bubble?.textContent).toContain('跨回合追踪目标')
+    expect(bubble?.getAttribute('role')).toBe('tooltip')
+    // 高亮移动 → 气泡跟随（同源渲染，即时切换）。
+    await pressKey(el, 'ArrowDown')
+    bubble = bubbleOf(el)
+    expect(bubble?.textContent).toContain('压缩')
+    expect(bubble?.textContent).toContain('会话')
+    expect(bubble?.textContent).not.toContain('跨回合追踪目标')
+    // 高亮到无描述行 → 收泡。
+    await pressKey(el, 'ArrowDown')
+    expect(bubbleOf(el)).toBeNull()
+  })
+
+  it('hover shows the hovered row bubble and takes precedence over the highlight', async () => {
+    const el = await mount({ ...focus, sessionCommands: mixedCommands })
+    await type(el, '/')
+    // hover compact：气泡切到 hover 行（即便高亮仍在 goal）。
+    hoverRow(el, 'compact', 'enter')
+    await el.updateComplete
+    expect(bubbleOf(el)?.textContent).toContain('压缩')
+    expect(bubbleOf(el)?.textContent).not.toContain('跨回合追踪目标')
+    // 移开（悬停到无描述的 bare 再离开）→ 回落键盘高亮行（goal，有描述）
+    // 的同一渲染——鼠标路径与键盘路径天然同源（D3）。
+    hoverRow(el, 'bare', 'enter')
+    await el.updateComplete
+    expect(bubbleOf(el)).toBeNull()
+    hoverRow(el, 'bare', 'leave')
+    await el.updateComplete
+    expect(bubbleOf(el)?.textContent).toContain('跨回合追踪目标')
+  })
+
+  it('collapses with the palette on Escape and never renders without a command surface', async () => {
+    const el = await mount({ ...focus, sessionCommands: mixedCommands })
+    await type(el, '/')
+    expect(bubbleOf(el)).toBeTruthy()
+    await pressKey(el, 'Escape')
+    expect(el.shadowRoot?.querySelector('[data-testid="command-palette"]')).toBeNull()
+    expect(bubbleOf(el)).toBeNull()
+
+    // 无命令表面：无面板即无气泡（诚实退化不因气泡而破）。
+    const bare = await mount({ ...focus, sessionCommands: [] })
+    await type(bare, '/')
+    expect(bubbleOf(bare)).toBeNull()
+    bare.remove()
+  })
+
+  it('reopens cleanly after Escape: the next keystroke restores palette and bubble (no dismissed/hover leak)', async () => {
+    const el = await mount({ ...focus, sessionCommands: mixedCommands })
+    await type(el, '/')
+    // 悬停到 compact 再 Esc 收面板——hoverIndex 与 paletteDismissed 都必须
+    // 随重开路径复位（任何重开都经过文本变化）。
+    hoverRow(el, 'compact', 'enter')
+    await el.updateComplete
+    await pressKey(el, 'Escape')
+    expect(el.shadowRoot?.querySelector('[data-testid="command-palette"]')).toBeNull()
+    // 继续输入重开：面板回来、高亮复位到过滤后首位（goal），气泡同源跟随。
+    await type(el, '/g')
+    expect(el.shadowRoot?.querySelector('[data-testid="command-palette"]')).toBeTruthy()
+    const bubble = bubbleOf(el)
+    expect(bubble).toBeTruthy()
+    expect(bubble?.textContent).toContain('跨回合追踪目标')
+    expect(bubble?.textContent).not.toContain('压缩')
+  })
+
+  it('clamps a stale hover index in-bounds when the command surface shrinks mid-palette', async () => {
+    const el = await mount({ ...focus, sessionCommands: mixedCommands })
+    await type(el, '/')
+    // 悬停中行 compact（下标 1），随后 agent 重新广告了更短的命令表（文本
+    // 未动——不走 text 复位路径）：hoverIndex 瞬时越界，气泡必须钳位到收
+    // 缩后候选范围内，绝不渲染越界/陈旧内容。
+    hoverRow(el, 'compact', 'enter')
+    await el.updateComplete
+    expect(bubbleOf(el)?.textContent).toContain('压缩')
+    el.sessionCommands = [{ name: 'goal', description: '新表的目标描述', hint: null }]
+    await el.updateComplete
+    // 唯一候选是 goal：钳位下标 0 → 气泡是 goal 的新描述，不是悬停残留。
+    const bubble = bubbleOf(el)
+    expect(bubble).toBeTruthy()
+    expect(bubble?.textContent).toContain('新表的目标描述')
+    expect(bubble?.textContent).not.toContain('压缩')
+    expect(
+      el.shadowRoot?.querySelectorAll('[data-testid="command-palette"] [role="option"]').length,
+    ).toBe(1)
+  })
+
+  it('sanitizes markdown and keeps the 360×240 internally-scrollable caps (D2)', async () => {
+    const hostile: AvailableCommandInfo[] = [
+      {
+        name: 'evil',
+        description: 'do **bold** things\n\n<script>alert(1)</script> <img src=x onerror="alert(2)">',
+      },
+    ]
+    const el = await mount({ ...focus, sessionCommands: hostile })
+    await type(el, '/')
+    const bubble = bubbleOf(el)
+    expect(bubble).toBeTruthy()
+    // markdown 经共享 renderMarkdown() 管线渲染（sanitize 语义同源）。
+    expect(bubble?.innerHTML).toContain('<strong>bold</strong>')
+    expect(bubble?.innerHTML).not.toContain('<script')
+    expect(bubble?.innerHTML).not.toContain('alert(1)')
+    expect(bubble?.innerHTML).not.toContain('onerror')
+    // 尺寸上限与内部滚动是 CSS 契约（jsdom 无布局，做结构守卫）。
+    const src = readFileSync(join(here, 'workbench-composer.ts'), 'utf8')
+    expect(src).toContain('max-width: 360px')
+    expect(src).toContain('max-height: 240px')
+    expect(src).toContain('overflow-y: auto')
+  })
+})
+
+// ── input-polish 2.4 只读 current 芯片 ───────────────────────────────────
+
+describe('read-only current model chip (workbench-composer-input-polish 2.4)', () => {
+  it('a session with an observed current but no options renders the model read-only', async () => {
+    const el = await mount({ ...focus, sessionModels: [], currentModel: 'claude-sonnet-4-5' })
+    // 只读展示当前模型——不再是「无可用模型」误导占位。
+    const chip = el.shadowRoot?.querySelector('[data-testid="model-chip-readonly"]')
+    expect(chip).toBeTruthy()
+    expect(chip?.textContent).toContain('claude-sonnet-4-5')
+    expect(el.shadowRoot?.querySelector('[data-testid="model-chip-unavailable"]')).toBeNull()
+    expect(el.shadowRoot?.querySelector('[data-testid="model-chip"]')).toBeNull()
+    // 无菜单可开（role=status，纯状态展示）。
+    expect(chip?.getAttribute('role')).toBe('status')
+  })
+
+  it('no options and no observed current keeps the honest unavailability note', async () => {
+    const el = await mount({ ...focus, sessionModels: [], currentModel: null })
+    expect(el.shadowRoot?.querySelector('[data-testid="model-chip-readonly"]')).toBeNull()
+    expect(el.shadowRoot?.querySelector('[data-testid="model-chip-unavailable"]')).toBeTruthy()
+  })
+
+  it('the switchable chip still wins when options exist alongside a current model', async () => {
+    const el = await mount(focus) // sessionModels + currentModel
+    expect(el.shadowRoot?.querySelector('[data-testid="model-chip"]')).toBeTruthy()
+    expect(el.shadowRoot?.querySelector('[data-testid="model-chip-readonly"]')).toBeNull()
+  })
+
+  it('the starting placeholder wins over the read-only chip while the child is spawning', async () => {
+    // 优先级次序（input-polish 2.4）：子进程拉起中（模型表尚未上报）先于
+    // 只读 current——此刻快照里的 current 还是 spawn 拼装的暂态值，展示
+    // 「启动中…」比把暂态值钉成只读状态更诚实。
+    const el = await mount({
+      ...focus,
+      sessionModels: [],
+      currentModel: 'default',
+      childStarting: true,
+    })
+    expect(el.shadowRoot?.querySelector('[data-testid="model-chip-starting"]')).toBeTruthy()
+    expect(el.shadowRoot?.querySelector('[data-testid="model-chip-readonly"]')).toBeNull()
+    expect(el.shadowRoot?.querySelector('[data-testid="model-chip-unavailable"]')).toBeNull()
   })
 })
 

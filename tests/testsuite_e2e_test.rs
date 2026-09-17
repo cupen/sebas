@@ -1097,7 +1097,15 @@ async fn turn_queue_timing_and_dropped_accounting() {
                         .json::<serde_json::Value>()
                         .await
                         .ok()?;
-                    let streamed = v["entries"].as_array().is_some_and(|b| !b.is_empty());
+                    // 只认 agent 内容帧（kind=content）：seed 的 prompt 条目
+                    // 在卡片 SEED 阶段就进 transcript——只等非空会在「开轮前」
+                    // 放行，忙中提交就会开新轮而不是排队（turn-queue 既有
+                    // 探测的边界收窄，fix-pending-queue-liveness 1.1 复用同
+                    // 一文件时顺带钉住）。
+                    let streamed = v["entries"].as_array().is_some_and(|b| {
+                        b.iter()
+                            .any(|e| e["kind"].as_str() == Some("content"))
+                    });
                     streamed.then_some(v)
                 })
             }
@@ -1213,10 +1221,14 @@ async fn turn_queue_timing_and_dropped_accounting() {
     );
 
     // close 记账：再造一个带队列的会话并关闭 → discarded_pending: 1。
+    // 用 "stall" 场景（一帧内容后子进程对 ACP 永久沉默、回合不收尾）：
+    // WORKING 窗口无限长，close 的丢弃记账不再与回合收尾/排队 drain 竞速
+    // （"stream" 的 800ms 窗口是既有的计时边沿，曾在并行负载下偶发把
+    // discarded 记成 0）。
     let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "prompt": "stream", "agent": "claude" }),
+        serde_json::json!({ "prompt": "stall", "agent": "claude" }),
     )
     .await
     .expect("create second session");
@@ -1224,7 +1236,7 @@ async fn turn_queue_timing_and_dropped_accounting() {
     let key2 = body["key"].as_str().expect("key").to_string();
     let detail2 = format!("{}/api/sessions/{key2}", sb.webui_url());
     wait_for(
-        "second session content to stream",
+        "second session turn to be in flight",
         Duration::from_secs(25),
         &hint,
         {
@@ -1242,10 +1254,14 @@ async fn turn_queue_timing_and_dropped_accounting() {
                         .json::<serde_json::Value>()
                         .await
                         .ok()?;
-                    v["entries"]
-                        .as_array()
-                        .is_some_and(|b| !b.is_empty())
-                        .then_some(v)
+                    // 与 submit_turn 的 in-flight 判定同谓词：状态 working
+                    // 时提交才确定性入队（prompt-only 会开新轮——seed 的
+                    // prompt 条目在卡片 SEED 阶段就进 transcript）。
+                    let working = v["status_slug"].as_str() == Some("working");
+                    let content_seen = v["entries"].as_array().is_some_and(|b| {
+                        b.iter().any(|e| e["kind"].as_str() == Some("content"))
+                    });
+                    (working && content_seen).then_some(v)
                 })
             }
         },
@@ -1273,7 +1289,6 @@ async fn turn_queue_timing_and_dropped_accounting() {
         "close must name the dropped submission count: {resp}"
     );
 }
-
 /// make-core-own-provider-data 3.4 / router-admin-api「Configuration source」
 /// 「card-edited provider reaches router」+「External change hot reload」
 /// 「card edit hot-applies」：watchdog 形态下 router 以独立子进程运行
@@ -1875,9 +1890,157 @@ async fn slash_commands_advertise_and_reach_stub() {
     wait_turn_done(&cli, &sb, &detail_url).await;
 }
 
-/// Poll the session detail until the current turn settles to Done.
-async fn wait_turn_done(cli: &reqwest::Client, sb: &Sandbox, detail_url: &str) {
+/// （workbench-composer-input-polish 2.2/2.3）claude 会话的模型面与切换链路：
+/// 内置别名表随快照可达（available_models 含 default/opus/sonnet/haiku），
+/// current 从 spawn 缺省被帧观察覆盖为 fake 的真实模型；POST /model 把控制
+/// 请求送达 stub（journal 记 model_change），快照乐观跟随，后续回合帧确认
+/// 不回跳。全程零真模型调用。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn claude_model_surface_reaches_snapshot_and_switch_round_trips() {
+    let sb = Sandbox::new("testsuite_e2e", "claude-model-surface");
+    let journal = sb.journal_fake_agent();
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "prompt": "hello", "agent": "claude" }),
+    )
+    .await
+    .expect("create session");
+    assert_eq!(status, 201, "create session: {body}");
+    let key = body["key"].as_str().expect("key").to_string();
+    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+
+    // 1) 首回合 Done 后：别名表随快照可达，current 已被 init 帧观察覆盖
+    //    （fake 报 "fake"）——快照拼装与覆盖次序的进程级证据。
+    let detail = wait_for(
+        "claude model surface to reach the snapshot (alias table + observed current)",
+        Duration::from_secs(25),
+        &sb.path.clone(),
+        {
+            let cli = cli.clone();
+            let url = detail_url.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    let done = v["status_slug"].as_str() == Some("done");
+                    let models = v["available_models"].as_array()?;
+                    let aliased = ["default", "opus", "sonnet", "haiku"]
+                        .iter()
+                        .all(|a| models.iter().any(|m| m.as_str() == Some(*a)));
+                    let observed = v["current_model"].as_str() == Some("fake");
+                    (done && aliased && observed).then_some(v)
+                })
+            }
+        },
+    )
+    .await;
+    assert_eq!(
+        detail["current_model"], "fake",
+        "frame observation must overwrite the spawn-time default: {detail}"
+    );
+
+    // 2) 切换到 "opus"：webui 只投递（200）→ 驱动 set_model 控制请求 →
+    //    乐观 ModelChanged → 快照 current 同步。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions/{key}/model", sb.webui_url()),
+        serde_json::json!({ "model_id": "opus" }),
+    )
+    .await
+    .expect("switch model");
+    assert_eq!(status, 200, "model switch must be delivered: {body}");
     wait_for(
+        "current_model to follow the optimistic switch",
+        Duration::from_secs(15),
+        &sb.path.clone(),
+        {
+            let cli = cli.clone();
+            let url = detail_url.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    (v["current_model"].as_str() == Some("opus")).then_some(v)
+                })
+            }
+        },
+    )
+    .await;
+    wait_for(
+        "set_model control request to reach the stub (journal model_change)",
+        Duration::from_secs(15),
+        &sb.path.clone(),
+        {
+            let journal = journal.clone();
+            move || {
+                let journal = journal.clone();
+                Box::pin(async move {
+                    let Ok(content) = std::fs::read_to_string(&journal) else {
+                        return None;
+                    };
+                    content
+                        .lines()
+                        .any(|l| l.contains("model_change") && l.contains("\"model\":\"opus\""))
+                        .then_some(())
+                })
+            }
+        },
+    )
+    .await;
+
+    // 3) 下一回合：assistant 帧报告已切换的模型（fake 行为）→ 观察值与
+    //    乐观值一致，current 不回跳（帧确认半边）。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+        serde_json::json!({ "message": "hello" }),
+    )
+    .await
+    .expect("follow-up message");
+    assert_eq!(status, 200, "{body}");
+    wait_turn_done(&cli, &sb, &detail_url).await;
+    let after = get_json_status(&cli, &detail_url)
+        .await
+        .expect("detail after the confirming turn")
+        .1;
+    assert_eq!(
+        after["current_model"], "opus",
+        "confirmed switch must survive the confirming frames: {after}"
+    );
+    assert_eq!(
+        after["available_models"]
+            .as_array()
+            .expect("model list survives")
+            .len(),
+        4
+    );
+}
+
+/// Poll the session detail until the current turn settles to Done.
+async fn wait_turn_done(cli: &reqwest::Client, sb: &Sandbox, detail_url: &str) {    wait_for(
         "session turn to reach Done",
         Duration::from_secs(25),
         &sb.path.clone(),
@@ -2314,4 +2477,247 @@ async fn turn_appends_stream_over_ws() {
     assert!(prompt_seen, "prompt entry must stream over ws");
     assert!(agent_seen, "agent content must stream over ws");
     let _ = ws.close(None).await;
+}
+
+/// fix-pending-queue-liveness 1.1/4.1：停滞看门狗自愈。
+///
+/// fake-claude 的 `stall` 场景：首帧内容让卡片 FSM 进 WORKING（回合确实在
+/// 跑），随后子进程**活着但对 ACP 完全沉默**（liveness 探测照常应答——驱动
+/// 的 hang 升级链因此不触发）。这是「队列前进 100% 依赖终态事件」的结构性
+/// 缺陷的进程级复现：忙中提交入队后，旧引擎永不 drain。
+///
+/// 修复后：`[dispatch] turn_stall_timeout = 2` 的看门狗在阈值后强制收尾
+/// 停滞回合（SEED/WORKING → DONE）、drain 队头，队列自愈前进；core.log 留
+/// 有点名会话与释放条目数的 warn（TurnStalled 通知事实，前端据此弹分级
+/// 通知——呈现链路由 webui api/ws 单测钉住）。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn stalled_turn_force_settles_and_the_queue_self_heals() {
+    let sb = Sandbox::new("testsuite_e2e", "turn-stall");
+    sb.set_turn_stall_timeout(2);
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    // 创建会话（"stall" → 一帧内容后子进程沉默）→ 等首帧内容上屏。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "prompt": "stall", "agent": "claude" }),
+    )
+    .await
+    .expect("create session");
+    assert_eq!(status, 201, "create session: {body}");
+    let key = body["key"].as_str().expect("key").to_string();
+    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+    let hint = sb.path.clone();
+    wait_for(
+        "first turn content to stream",
+        Duration::from_secs(40),
+        &hint,
+        {
+            let cli = cli.clone();
+            let url = detail_url.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    let streamed = v["entries"].as_array().is_some_and(|b| !b.is_empty());
+                    streamed.then_some(v)
+                })
+            }
+        },
+    )
+    .await;
+
+    // 忙中提交 → 入队；且引擎事实 turn_engaged=true 随 payload 下发
+    // （提交控件的排队/停止形态数据源）。
+    let (status, resp) = post_json(
+        &cli,
+        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+        serde_json::json!({ "message": "queued while stalled" }),
+    )
+    .await
+    .expect("submit while stalled");
+    assert_eq!(status, 200, "busy-time submission must be accepted: {resp}");
+    let mid: serde_json::Value = cli
+        .get(&detail_url)
+        .send()
+        .await
+        .expect("detail mid-stall")
+        .json()
+        .await
+        .expect("detail json");
+    assert_eq!(
+        mid["turn_engaged"], true,
+        "a stalled-but-engaged turn must report turn_engaged: {mid}"
+    );
+    assert_eq!(
+        mid["pending"].as_array().map(|p| p.len()),
+        Some(1),
+        "the submission rides in pending behind the stalled turn: {mid}"
+    );
+
+    // 看门狗收尾 + 队列自愈：queued 提交开轮（prompt 进 transcript、
+    // pending 清空），transcript 就地点名收尾原因。
+    wait_for(
+        "watchdog to settle the stalled turn and start the queued one",
+        Duration::from_secs(45),
+        &hint,
+        {
+            let cli = cli.clone();
+            let url = detail_url.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    let drained = v["pending"].as_array().map(|p| p.is_empty()) == Some(true);
+                    let queued_started = v["entries"].as_array().is_some_and(|entries| {
+                        entries.iter().any(|e| {
+                            e["kind"].as_str() == Some("prompt")
+                                && e["content"].as_str() == Some("queued while stalled")
+                        })
+                    });
+                    let explained = v["entries"].as_array().is_some_and(|entries| {
+                        entries.iter().any(|e| {
+                            e["element_type"].as_str() == Some("error")
+                                && e["content"]
+                                    .as_str()
+                                    .is_some_and(|c| c.contains("回合停滞被强制收尾"))
+                        })
+                    });
+                    (drained && queued_started && explained).then_some(v)
+                })
+            }
+        },
+    )
+    .await;
+
+    // 通知事实可达：core.log 的 warn 点名会话与释放条目数（TurnStalled
+    // 事件的发射点）。
+    wait_for(
+        "core.log to carry the stall warning",
+        Duration::from_secs(10),
+        &hint,
+        {
+            let log = sb.core_log.clone();
+            move || {
+                let log = log.clone();
+                Box::pin(async move {
+                    let text = std::fs::read_to_string(&log).ok()?;
+                    text.contains("turn stalled").then_some(())
+                })
+            }
+        },
+    )
+    .await;
+}
+
+/// fix-pending-queue-liveness 1.1（泊车豁免半边）：泊在权限请求上的回合
+/// **不计时**——超过 `turn_stall_timeout` 后看门狗不得收尾，排队提交保持
+/// 入栈（等的是操作者的批复，不是引擎的假设）。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn parked_permission_does_not_trip_the_stall_guard() {
+    let sb = Sandbox::new("testsuite_e2e", "turn-stall-parked");
+    sb.set_turn_stall_timeout(2);
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    // "perm" → Bash 工具调用被 PreToolUse 审批泊住（等 hook 决定）。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "prompt": "perm", "agent": "claude" }),
+    )
+    .await
+    .expect("create session");
+    assert_eq!(status, 201, "create session: {body}");
+    let key = body["key"].as_str().expect("key").to_string();
+    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+    let hint = sb.path.clone();
+
+    // 忙中提交（泊车中 turn 在飞）→ 入队。
+    wait_for(
+        "permission prompt to park the turn (tool entry visible)",
+        Duration::from_secs(40),
+        &hint,
+        {
+            let cli = cli.clone();
+            let url = detail_url.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    let tool_seen = v["entries"].as_array().is_some_and(|entries| {
+                        entries
+                            .iter()
+                            .any(|e| e["element_type"].as_str() == Some("tool"))
+                    });
+                    tool_seen.then_some(v)
+                })
+            }
+        },
+    )
+    .await;
+    let (status, resp) = post_json(
+        &cli,
+        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+        serde_json::json!({ "message": "queued behind the permission" }),
+    )
+    .await
+    .expect("submit while parked");
+    assert_eq!(status, 200, "parked-time submission must be accepted: {resp}");
+
+    // 静置越过阈值（2s ×3 + 扫描间隔余量）：看门狗不得收尾。
+    tokio::time::sleep(Duration::from_secs(9)).await;
+    let after: serde_json::Value = cli
+        .get(&detail_url)
+        .send()
+        .await
+        .expect("detail after the window")
+        .json()
+        .await
+        .expect("detail json");
+    assert_eq!(
+        after["pending"].as_array().map(|p| p.len()),
+        Some(1),
+        "the guard must not fire while a permission is parked: {after}"
+    );
+    assert!(
+        !after["status_slug"].as_str().is_some_and(|s| s == "done"),
+        "the parked turn must stay in flight: {after}"
+    );
+    let log = std::fs::read_to_string(&sb.core_log).unwrap_or_default();
+    assert!(
+        !log.contains("turn stalled"),
+        "no stall warning may be logged for a parked session"
+    );
 }

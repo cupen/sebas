@@ -747,7 +747,7 @@ async fn worker_main(
     ready: std::sync::mpsc::Sender<Result<(), String>>,
 ) {
     let driver: Arc<dyn AgentDriver> = match cfg.driver {
-        AgentDriverKind::Claude => Arc::new(ClaudeDriver),
+        AgentDriverKind::Claude => Arc::new(ClaudeDriver::default()),
         AgentDriverKind::Acp => Arc::new(AcpDriver),
     };
     let mut agents: HashMap<String, AgentEntry> = HashMap::new();

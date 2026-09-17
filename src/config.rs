@@ -185,6 +185,11 @@ pub struct AcpClaudeConfig {
     pub startup_timeout_secs: u64,
     #[serde(default = "default_idle_kill")]
     pub idle_kill_secs: u64,
+    /// （workbench-composer-input-polish 2.1）模型别名表覆盖：`None`（键缺
+    /// 省）与空表都回退内置别名表（default/opus/sonnet/haiku）；非空列表
+    /// 整体替换内置表。全名模型 id（如 `sonnet[1m]`）亦可写进来。
+    #[serde(default)]
+    pub models: Option<Vec<String>>,
 }
 
 impl Default for AcpClaudeConfig {
@@ -197,6 +202,19 @@ impl Default for AcpClaudeConfig {
             work_dir: None,
             startup_timeout_secs: default_startup_timeout(),
             idle_kill_secs: default_idle_kill(),
+            models: None,
+        }
+    }
+}
+
+impl AcpClaudeConfig {
+    /// （workbench-composer-input-polish 2.1）本 agent 实例生效的模型别名
+    /// 表，单一归一出处：键缺省（`None`）与显式空表都回退内置——空表没有
+    /// 可选词汇，等效「未覆盖」（任务 2.1「空表回退内置」）。
+    pub fn resolved_models(&self) -> Vec<String> {
+        match self.models.as_deref() {
+            Some(list) if !list.is_empty() => list.to_vec(),
+            _ => sebas_acp::claude::builtin_claude_models(),
         }
     }
 }
@@ -323,6 +341,13 @@ pub struct DispatchConfig {
     pub channel_buffer: usize,
     #[serde(default = "default_max_concurrent")]
     pub max_concurrent_sessions: usize,
+    /// （fix-pending-queue-liveness 1.2）回合停滞看门狗阈值（秒）：WORKING
+    /// 会话在无泊车审批、且持续该时长**没有任何事件**到达时，引擎强制把回合
+    /// 收尾到终态、drain 待执行队列，并发出 warn 通知。`0` = 关闭看门狗。
+    /// 默认 600（10 分钟）：claude 驱动自带的 hang 升级链（5m 静默 →
+    /// interrupt ×3 → SIGTERM）先于它触发，看门狗只兜驱动判不了的场景。
+    #[serde(default = "default_turn_stall_timeout")]
+    pub turn_stall_timeout: u64,
 }
 
 impl Default for DispatchConfig {
@@ -331,6 +356,7 @@ impl Default for DispatchConfig {
             state_file: default_state_file(),
             channel_buffer: default_channel_buffer(),
             max_concurrent_sessions: default_max_concurrent(),
+            turn_stall_timeout: default_turn_stall_timeout(),
         }
     }
 }
@@ -343,6 +369,9 @@ fn default_channel_buffer() -> usize {
 }
 fn default_max_concurrent() -> usize {
     32
+}
+fn default_turn_stall_timeout() -> u64 {
+    600
 }
 
 fn default_node_link_listen() -> String {
@@ -612,6 +641,22 @@ pub fn resolve_workspace_root(
     }
 }
 
+/// add-system-dir-denylist 3.1：workspace root 解析为系统目录时打启动 warn
+/// （不阻断——名单对 root 只提示不执法，注册层才是执法线）。判定与注册
+/// 执法同源（sebas_webui::fs::is_system_dir，双侧 canonicalize 精确匹配），
+/// 抽成小函数供两处装配点（run.rs core --webui / webui_cmd.rs 独立 webui）
+/// 共用与直测。
+pub(crate) fn warn_if_workspace_root_is_system_dir(root: &std::path::Path) {
+    if sebas_webui::fs::is_system_dir(root) {
+        let msg = format!(
+            "workspace root 解析为系统目录 {}；系统目录不可注册为项目，且此配置下注册围栏形同虚设——建议改指具体工作区（[workspace] root 或 SEBAS_WORKSPACE_ROOT）",
+            root.display()
+        );
+        tracing::warn!("{msg}");
+        eprintln!("warning: {msg}");
+    }
+}
+
 fn default_webui_enabled() -> bool {
     true
 }
@@ -745,6 +790,42 @@ fn warn_deprecated_watchdog_keys(raw: &str) {
     }
 }
 
+/// [service.webui] 未知键点名（webui auth e2e 复盘）：该节承载 auth 开关，
+/// serde 刻意不拒绝未知键（旧二进制读新配置的前向兼容），代价是键名打错
+/// 或写错节都静默落回默认——`auth` 误配的症状（首启设置页翻登录页）与
+/// 「开关开着」完全同貌，无从排查。启动期把被忽略的键点名，误配当场可见。
+fn warn_unknown_webui_keys(raw: &str) {
+    let unknown = unknown_webui_keys(raw);
+    if !unknown.is_empty() {
+        // 同 warn_deprecated_watchdog_keys：tracing 可能尚未初始化，stderr 兜底。
+        let msg = format!(
+            "config [service.webui] has unknown field(s) ({}) ignored: typo or removed key - a miswritten `auth` key silently means auth stays on",
+            unknown.join(", ")
+        );
+        tracing::warn!("{msg}");
+        eprintln!("warning: {msg}");
+    }
+}
+
+/// 纯收集（测试锚点）：raw 中 `[service.webui]` 表内不在已知字段集的键。
+fn unknown_webui_keys(raw: &str) -> Vec<String> {
+    const KNOWN: [&str; 5] = ["enabled", "host", "port", "auth", "archive_retention_days"];
+    let Ok(v) = toml::from_str::<toml::Value>(raw) else {
+        return Vec::new(); // 解析失败由主 parse 报错，这里不抢戏
+    };
+    v.get("service")
+        .and_then(|s| s.get("webui"))
+        .and_then(|w| w.as_table())
+        .map(|table| {
+            table
+                .keys()
+                .filter(|k| !KNOWN.contains(&k.as_str()))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn default_github_repo() -> String {
     "cupen/sebas".into()
 }
@@ -784,6 +865,7 @@ impl Config {
     /// defaults (CLI flags are applied by the caller before/after this).
     pub fn parse(s: &str) -> Result<Self> {
         warn_deprecated_watchdog_keys(s);
+        warn_unknown_webui_keys(s);
         let mut cfg: Config =
             toml::from_str(s).map_err(|e| SebasError::Config(format!("toml parse: {e}")))?;
         cfg.acp.apply_implicit_default();
@@ -1169,6 +1251,25 @@ allowed_roots = ["~/work", "/srv/projects"]
     }
 
     #[test]
+    fn warn_if_workspace_root_is_system_dir_flags_denylist_hits_only() {
+        // add-system-dir-denylist 3.1：告警判定与注册执法同源。函数无返回值
+        // （可观察行为是 stderr/tracing 告警），这里钉两态谓词 + 装配函数
+        // 不 panic：unix 用 `/` 断言命中分支，tempdir 与不存在路径是放行分支。
+        assert!(
+            sebas_webui::fs::is_system_dir(std::path::Path::new("/")),
+            "unix `/` must hit the denylist (warn branch)"
+        );
+        let t = tempfile::tempdir().unwrap();
+        assert!(
+            !sebas_webui::fs::is_system_dir(t.path()),
+            "tempdir under /tmp must pass (silent branch)"
+        );
+        warn_if_workspace_root_is_system_dir(std::path::Path::new("/"));
+        warn_if_workspace_root_is_system_dir(t.path());
+        warn_if_workspace_root_is_system_dir(std::path::Path::new("/no/such/root"));
+    }
+
+    #[test]
     fn feishu_optional_but_not_half_configured() {
         // 同时留空 = 不启用飞书，合法。
         let both_empty = Config::parse("").expect("同时留空应可解析");
@@ -1279,6 +1380,21 @@ auth = false
             !cfg.service.webui.auth,
             "显式 false 应优先于默认值"
         );
+    }
+
+    #[test]
+    fn unknown_webui_keys_are_named_for_the_operator() {
+        // 键名打错（auht）：parse 仍成功（前向兼容刻意宽容），但键被点名。
+        let raw = "[service.webui]\nauht = false\n";
+        assert!(Config::parse(raw).is_ok());
+        assert_eq!(unknown_webui_keys(raw), vec!["auht".to_string()]);
+        // 已退役的 allowed_roots 同样被点名（静默忽略 → 启动期可见）。
+        let legacy = "[service.webui]\nallowed_roots = [\"/tmp\"]\n";
+        assert_eq!(unknown_webui_keys(legacy), vec!["allowed_roots".to_string()]);
+        // 干净配置零误报：全字段 + 缺节都不在名单上。
+        let clean = "[service.webui]\nenabled = true\nhost = \"127.0.0.1\"\nport = 9797\nauth = false\narchive_retention_days = 30\n";
+        assert!(unknown_webui_keys(clean).is_empty());
+        assert!(unknown_webui_keys("[feishu]\nenabled = false\n").is_empty());
     }
 
     #[test]

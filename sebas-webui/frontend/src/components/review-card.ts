@@ -306,6 +306,27 @@ export class SebasReviewCards extends LitElement {
       </div>
     `
   }
+
+  protected updated(changed: Map<string, unknown>): void {
+    // fix-pending-queue-liveness 3.2：把「聚焦会话在等操作者批复」的事实
+    // 上报给宿主（dashboard 据此点亮 composer 的「等待你的审批」指示与
+    // 待执行栈的阻塞原因）。只数待决卡（expired 不算——已无人可答）；计数
+    // 变化即发（含清零与 sessionKey 切换后的重算），宿主幂等消费。
+    if (!changed.has('cards') && !changed.has('sessionKey')) return
+    const count = this.cards.filter((c) => c.state !== 'expired').length
+    if (count === this.lastReportedPending) return
+    this.lastReportedPending = count
+    this.dispatchEvent(
+      new CustomEvent('review-pending-changed', {
+        detail: { count },
+        bubbles: true,
+        composed: true,
+      }),
+    )
+  }
+
+  /** 上次上报的待决计数（-1 = 尚未上报，0 也要发一次以对齐宿主）。 */
+  private lastReportedPending = -1
 }
 
 declare global {

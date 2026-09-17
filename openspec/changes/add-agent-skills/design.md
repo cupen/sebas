@@ -106,6 +106,37 @@ dir = "~/.agents/skills"   # 可选, 默认即此
 不加 `enabled` 开关（目录缺失就当空仓处理，不是错误）；不加 per-backend 开关
 （spec 语义是「投影到所有有落点的 backend」）。
 
+### D6: 输入框可见性 = agent 广告域，sebas 不做仓来源的会话内提示
+
+技能投影的契约终点是 backend 目录；操作者在 composer 里能否「看见」技能，归
+agent 自身广告域，不由本变更提供（review 时操作者实测「已加载的技能在输入框
+没有任何提示」，此节即该缺口的裁决）：
+
+- **claude**：skills 以 slash commands 形态被 claude code 自身暴露，经
+  `session-slash-commands` 的命令面板自然可见——数据源是 initialize 握手的
+  `commands` 数组（会话域真相），不是本仓。快照语义要如实告知：cc-agent-sdk
+  无 commands_changed 回调，命令表是 spawn 时刻快照，**sync 后旧会话看不到
+  新技能，新会话才见**。
+- **opencode**：skills 是上下文材质而非命令，其 `available_commands_update`
+  永不含技能——面板不列是如实语义，不是缺陷（两条 intake 的刷新语义不对称：
+  ACP 可中途重推刷新，claude 只在重连时）。
+- **否决「仓来源」提示**（输入框徽标「已加载 N 个 skill」、仓 typeahead）：
+  投影是手动的，仓不知道某个会话的 agent 实际加载了什么，这类提示是会话
+  谎言——正是本仓到处在消灭的假 UI。
+- **否决独立命令查询端点**：composer 是响应式消费，会话载荷字段 + 既有事件
+  流已覆盖（`session-slash-commands` 2.2 已实现），无第二调用方，YAGNI。
+
+**实证（6.4，2026-09-16）**：claude v2.1.236 的 initialize `commands` 数组
+**确实含 skills 条目**——沙箱把 `HOME` 钉进零凭据临时目录、置 marker skill 于
+`~/.claude/skills/`，按 cc-agent-sdk 同款 wire 帧（stream-json 双向 + stdin 发
+`control_request{subtype:"initialize"}`）直接驱动真 CLI，应答 commands 首条即
+该 skill：`{"name":"z-visibility-probe","description":"… (user)",
+"argumentHint":""}`——用户级 skill 的 description 带 `(user)` 后缀、argumentHint
+恒空。凭据问题一并实证：**握手先于任何 turn、不需凭据**（零凭据 HOME 下
+initialize 正常应答、stderr 干净、无 onboarding 门）。claude 面板可见性成立。
+附带观察：同沙箱走 sebas 全链路 spawn 时，无上游凭据则首回合必然失败、会话
+随即移除——属「子进程诚实死亡」，非通道故障；上表证据取自 wire 级直驱。
+
 ## Risks / Trade-offs
 
 - **`sync` 覆盖用户手改** → 这是 spec 明定的「仓 wins」语义，不是 bug；但响应里

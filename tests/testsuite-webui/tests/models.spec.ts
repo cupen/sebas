@@ -3,10 +3,10 @@
  * cover-core-channel-test-gaps B2.2 + redesign-provider-models-settings 5.1 +
  * revamp-settings-nav-and-models-editor).
  *
- * 功能：模型管理覆盖 / 子功能：无模型诚实缺省、settings provider 可编辑可
- * 抓取（模型条目 + 能力标记可编辑并持久；抓取入口在编辑器内、成功整单替换
- * 草稿列表、保存才落库、取消即丢弃；无 URL 不渲染入口）、有模型面的正向
- * 切换与 typed rejection
+ * 功能：模型管理覆盖 / 子功能：claude 别名模型面与切换（workbench-composer-
+ * input-polish）、settings provider 可编辑可抓取（模型条目 + 能力标记可编辑
+ * 并持久；抓取入口在编辑器内、成功整单替换草稿列表、保存才落库、取消即丢
+ * 弃；无 URL 不渲染入口）、有模型面的正向切换与 typed rejection
  *
  * redesign-provider-models-settings：provider 模型列表是条目列表（id + 能力
  * 标记），WebUI 编辑器可增删条目、勾选 vision/audio/video（browsing 仍
@@ -19,13 +19,15 @@
  *
  * ## 两条拒绝路径的区分（B2.2 要求先写清；7f1d7c9 后 SetModel 一律非终态）
  *
- * 判别器是 **agent 是否通告模型面（configOptions.model）**，两者不共享会话、
- * 不共享后端，互不为 flake：
- * - 3.2（默认 claude 会话）：claude 驱动不暴露 configOptions、模型面为空 →
- *   SetModel 得到驱动的 NON-terminal 错误 → 会话存活、模型不变（7f1d7c9 起
- *   不再 teardown）。
- * - 本组新增用例（`fakeacp` agent 会话）：沙箱通过
- *   `[acp.agents.fakeacp]`（generic-ACP 驱动 + fake-acp-agent）通告
+ * 判别器是 **agent 是否通告模型面**，两者不共享会话、不共享后端，互不为
+ * flake。workbench-composer-input-polish 之后 claude 驱动自报别名模型面
+ * （内置 default/opus/sonnet/haiku + `[acp.agents.<name>] models` 覆盖），
+ * 原「无模型 claude 会话」的诚实缺省浏览器载体随之退役——claude 现在有
+ * 模型面，无模型会话的诚实缺省由前端单测（workbench-composer.test.ts）与
+ * 无 configOptions 的通用 ACP agent 承载：
+ * - claude（默认 agent）：别名表随快照可达、current 来自 wire 帧观察、
+ *   切换走驱动控制协议且乐观同步（本组新增旅程）。
+ * - `fakeacp` agent 会话（generic-ACP 驱动 + fake-acp-agent）：通告
  *   `ok-model`/`bad-model` 两个模型 id（初值 = 列表首位 bad-model），
  *   并对 `bad-model` 的 set_config_option 回 RPC 错误：
  *   - `ok-model` POST → agent 接受 → ModelChanged → current_model 同步；
@@ -55,40 +57,48 @@ test.describe('模型管理覆盖', () => {
     collector = new ErrorCollector(page)
   })
 
-  test.describe('无模型诚实缺省', () => {
-    test('3.2 set_model on a model-less session fails non-terminally and honestly', async ({
+  test.describe('claude 别名模型面与切换（workbench-composer-input-polish）', () => {
+    test('alias table reaches the snapshot, the switch rides the control protocol, and the chip follows', async ({
       page,
     }) => {
       const detail = new FocusedSession(page)
 
       await resetState(page.request)
-      const key = await createSession(page.request, { prompt: 'modeless' })
+      const key = await createSession(page.request, { prompt: 'model-claude' })
       await waitStatus(page.request, key, ['done'])
-      await page.goto(`/sessions/${key}`)
-      await expect(detail.host).toBeVisible()
 
-      // No picker anywhere (D4 presentation, re-pinned here as the pre-state).
-      await expect(detail.modelPick).toHaveCount(0)
+      // The built-in alias table reaches the snapshot, and the wire-frame
+      // observation has overwritten the spawn-time "default" (fake-claude's
+      // init frame reports "fake").
+      await expect
+        .poll(async () => (await getSession(page.request, key)).detail?.current_model, {
+          timeout: 15_000,
+          intervals: [250],
+        })
+        .toBe('fake')
+      const models = (await getSession(page.request, key)).detail?.available_models ?? []
+      for (const alias of ['default', 'opus', 'sonnet', 'haiku']) {
+        expect(models).toContain(alias)
+      }
 
-      // The webui delivers the command (HTTP 200). The Claude driver answers
-      // SetModel with a NON-terminal error (7f1d7c9): the session survives,
-      // the model is unchanged, and no fake success is recorded.
+      // Switch through the driver's control-protocol channel: POST is
+      // delivered (200) and the optimistic ModelChanged syncs the snapshot.
       const resp = await page.request.post(`/api/sessions/${key}/model`, {
-        data: { model_id: 'no-such-model-3.2' },
+        data: { model_id: 'opus' },
       })
       expect(resp.ok()).toBe(true)
-
-      // Session survives the rejected switch: still listed, detail resolvable.
       await expect
-        .poll(async () =>
-          (await listSessions(page.request)).some((r) => r.encoded_key === key),
-        )
-        .toBe(true)
-      const after = await getSession(page.request, key)
-      expect(after.status).toBe(200)
-      // Honest absence: no fabricated model surface after the rejection.
-      expect(after.detail?.current_model).toBeNull()
-      expect(after.detail?.available_models ?? []).toEqual([])
+        .poll(async () => (await getSession(page.request, key)).detail?.current_model, {
+          timeout: 15_000,
+          intervals: [250],
+        })
+        .toBe('opus')
+
+      // The composer chip renders the switched model.
+      await page.goto(`/sessions/${key}`)
+      await expect(detail.host).toBeVisible()
+      await expect(detail.modelPick).toBeVisible()
+      await expect(detail.modelPick).toContainText('opus', { timeout: 15_000 })
 
       expect(collector.clean()).toEqual([])
     })
@@ -131,8 +141,8 @@ test.describe('模型管理覆盖', () => {
         })
         .toBe('ok-model')
 
-      // The UI renders the model picker for this session and shows the new
-      // model selected.
+      // The UI renders the composer model chip for this session and shows
+      // the new model selected（4.2：选择器归 composer 底沿）.
       await page.goto(`/sessions/${key}`)
       await expect(detail.host).toBeVisible()
       await expect(detail.modelPick).toBeVisible()

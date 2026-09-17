@@ -1751,6 +1751,7 @@ mod workspace_root_tests {
             effective_mode: None,
             msg_count: 0,
             available_commands: Vec::new(),
+            turn_engaged: false,
         }
     }
 
@@ -2068,3 +2069,198 @@ mod workspace_root_tests {
         );
     }
 }
+
+#[cfg(all(test, unix))]
+mod system_dir_denylist_tests {
+    //! add-system-dir-denylist 2.1/2.3 路由级验收：注册执法在 containment
+    //! 之后追加名单判定；browse-dirs 树内隐藏名单子目录。unix 门控——名单
+    //! 命中分支依赖真实系统目录（`/` 与其子目录），Windows 侧的名单语义由
+    //! fs.rs 的 #[cfg(windows)] 单测覆盖。
+    use super::*;
+    use crate::models::RouterInfo;
+    use crate::session_backend::FakeBackend;
+    use axum::body::Body;
+    use axum::extract::ConnectInfo;
+    use http_body_util::BodyExt;
+    use sebas_feishu::cards::CardConfig;
+    use serde_json::Value;
+    use std::net::{IpAddr, SocketAddr};
+    use tower::ServiceExt;
+
+    fn test_addr() -> SocketAddr {
+        SocketAddr::new(IpAddr::from([127, 0, 0, 1]), 12345)
+    }
+
+    fn app_with_workspace_root(root: std::path::PathBuf) -> Router {
+        build_router_with_workspace_root(
+            Arc::new(FakeBackend::new()),
+            RouterInfo::default(),
+            CardConfig::default(),
+            Arc::new(crate::agent_kinds::ConfigAgentKindProvider::new(Vec::new())),
+            Arc::new(AuthHandle::disabled()),
+            root,
+        )
+    }
+
+    async fn req(
+        app: Router,
+        method: &str,
+        uri: &str,
+        body: Option<String>,
+    ) -> (StatusCode, Value) {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("host", "127.0.0.1:12345")
+            .extension(ConnectInfo(test_addr()));
+        if body.is_some() {
+            builder = builder.header("content-type", "application/json");
+        }
+        let req = builder.body(Body::from(body.unwrap_or_default())).unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let v = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+        };
+        (status, v)
+    }
+
+    /// 与 workspace_root_tests 同款：注册走文件注册表降级路径，env 进程级，
+    /// 共用同一把串行锁，用完恢复。
+    #[allow(clippy::await_holding_lock)]
+    async fn with_registry_env<F, R>(f: F) -> R
+    where
+        F: AsyncFnOnce() -> R,
+    {
+        let _g = crate::projects::test_env_lock();
+        let prev = std::env::var("SEBAS_PROJECTS_PATH").ok();
+        let registry = tempfile::tempdir().unwrap();
+        // SAFETY: test_env_lock 保证进程内注册表相关测试串行。
+        unsafe {
+            std::env::set_var("SEBAS_PROJECTS_PATH", registry.path().join("p.json"));
+        }
+        let r = f().await;
+        // SAFETY: 同上。
+        unsafe {
+            match prev {
+                Some(p) => std::env::set_var("SEBAS_PROJECTS_PATH", p),
+                None => std::env::remove_var("SEBAS_PROJECTS_PATH"),
+            }
+        }
+        r
+    }
+
+    /// 2.3 主场景：workspace root=`/` 时——名单目录精确命中 400 点名入参
+    /// （不含服务端解析形），根内普通目录照常 201。tempdir 都在 /tmp 之下，
+    /// 按「子树放行」语义天然是合法注册位。
+    #[tokio::test]
+    async fn project_add_rejects_denylisted_dir_but_accepts_subtree() {
+        with_registry_env(|| async {
+            let app = app_with_workspace_root(std::path::PathBuf::from("/"));
+            let body = serde_json::json!({ "path": "/usr" });
+            let (status, resp) = req(app.clone(), "POST", "/api/projects", Some(body.to_string())).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "resp: {resp}");
+            let msg = resp["error"].as_str().unwrap_or_default();
+            assert!(msg.contains("系统目录不可注册"), "got: {msg}");
+            assert!(msg.contains("/usr"), "must name the caller input: {msg}");
+
+            let legit = tempfile::tempdir().unwrap();
+            let body = serde_json::json!({ "path": legit.path().to_str().unwrap() });
+            let (status, _) = req(app, "POST", "/api/projects", Some(body.to_string())).await;
+            assert_eq!(status, StatusCode::CREATED, "subtree of /tmp registers fine");
+        })
+        .await;
+    }
+
+    /// 2.3 判定先行次序：root 收窄到普通 tempdir 后，root 外的系统目录
+    /// （/usr）先撞 containment——返回越界文案而非名单文案。
+    #[tokio::test]
+    async fn project_add_containment_precedes_denylist() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(t.path().join("proj")).unwrap();
+        let app = app_with_workspace_root(t.path().to_path_buf());
+        let body = serde_json::json!({ "path": "/usr" });
+        let (status, resp) = req(app, "POST", "/api/projects", Some(body.to_string())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let msg = resp["error"].as_str().unwrap_or_default();
+        assert!(msg.contains("超出允许范围"), "containment first, got: {msg}");
+    }
+
+    /// 2.1/1.3 联动：browse-dirs 树内隐藏——root=`/` 时顶层条目不含名单
+    /// 目录（usr、etc、bin…），普通目录照旧；不误伤 /tmp 之下的 tempdir。
+    #[tokio::test]
+    async fn browse_dirs_hides_denylisted_top_level_entries() {
+        let app = app_with_workspace_root(std::path::PathBuf::from("/"));
+        let (status, body) = req(app, "GET", "/api/fs/browse-dirs", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let names: Vec<&str> = body["entries"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|e| e["name"].as_str()).collect())
+            .unwrap_or_default();
+        for deny in ["usr", "etc", "bin", "var", "proc", "tmp"] {
+            assert!(
+                !names.contains(&deny),
+                "denylisted top-level dir must be hidden: {names:?}"
+            );
+        }
+    }
+
+    /// 2.1 遍历/别名形（spec「alias and traversal resolve before the
+    /// comparison」API 级）：`..` 段、双斜杠别名与 workspace root 自身都要被
+    /// 名单拦下，且文案点名**原始入参**——`/tmp/../etc` 原样出现，而非服务端
+    /// 解析形替换后的文案。
+    #[tokio::test]
+    async fn project_add_traversal_and_root_forms_rejected_naming_raw_input() {
+        with_registry_env(|| async {
+            let app = app_with_workspace_root(std::path::PathBuf::from("/"));
+            for raw in ["/tmp/../etc", "/tmp/..", "//usr", "/"] {
+                let body = serde_json::json!({ "path": raw });
+                let (status, resp) =
+                    req(app.clone(), "POST", "/api/projects", Some(body.to_string())).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "raw={raw} resp: {resp}");
+                let msg = resp["error"].as_str().unwrap_or_default();
+                assert!(msg.contains("系统目录不可注册"), "raw={raw} got: {msg}");
+                assert!(msg.contains(raw), "must name the raw input {raw}: {msg}");
+            }
+        })
+        .await;
+    }
+
+    /// 2.1 副作用（spec「no project SHALL be registered」）：名单 400 之外
+    /// 列表必须保持空——拒绝路径不得在任何降级分支落注册记录。
+    #[tokio::test]
+    async fn project_add_denylist_rejection_creates_no_project() {
+        with_registry_env(|| async {
+            let app = app_with_workspace_root(std::path::PathBuf::from("/"));
+            let body = serde_json::json!({ "path": "/usr" });
+            let (status, _) =
+                req(app.clone(), "POST", "/api/projects", Some(body.to_string())).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            let (_, list) = req(app, "GET", "/api/projects", None).await;
+            let projects = list["projects"].as_array().expect("projects array");
+            assert!(
+                projects.is_empty(),
+                "rejected registration must leave no project: {list}"
+            );
+        })
+        .await;
+    }
+
+    /// 1.x round-trip 契约在「起点自身在名单上」的退化形态（root=`/`）下仍
+    /// 成立：回显的 `/` 原样回传必须 200——过滤只作用于子目录条目，不改写
+    /// 回显语义。
+    #[tokio::test]
+    async fn browse_dirs_round_trip_at_denylisted_root_still_works() {
+        let app = app_with_workspace_root(std::path::PathBuf::from("/"));
+        let (status, first) = req(app.clone(), "GET", "/api/fs/browse-dirs", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let echo = first["path"].as_str().expect("echo path must be present");
+        assert_eq!(echo, "/");
+        let (status2, _) = req(app, "GET", "/api/fs/browse-dirs?path=/", None).await;
+        assert_eq!(status2, StatusCode::OK, "echoed root must round-trip");
+    }
+}
+

@@ -304,6 +304,11 @@ pub async fn session_detail(
         data["available_commands"] =
             serde_json::to_value(&info.available_commands).unwrap_or_default();
     }
+    // fix-pending-queue-liveness 2.3：回合占用事实（同 summary 的插键规则：
+    // 只在 true 时上 wire，键缺省 = 前端回退 status_slug === 'working'）。
+    if info.turn_engaged {
+        data["turn_engaged"] = serde_json::Value::Bool(true);
+    }
     Json(data).into_response()
 }
 
@@ -1587,6 +1592,16 @@ pub async fn projects_add(
             "路径超出允许范围: 不在 workspace root 内",
         );
     }
+    // add-system-dir-denylist：containment 之后插入名单判定（spec：既有越界
+    // 判定保持先行次序与文案）。判定内部两侧 canonicalize——`..` 段、别名与
+    // symlink 都还原成真实路径再精确比对；候选不可解析不在此拒（交给下方
+    // 既有存在性分支，保持文案）。400 点名**入参**，不回显服务端解析形。
+    if crate::fs::is_system_dir(dir) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            format!("系统目录不可注册为项目: {path}"),
+        );
+    }
     if !dir.exists() {
         return api_error(StatusCode::BAD_REQUEST, format!("路径不存在: {path}"));
     }
@@ -2247,6 +2262,16 @@ fn session_event_to_frame(ev: SessionEvent) -> Option<WebUiEvent> {
                     priority: d.priority,
                 })
                 .collect(),
+        }),
+        // fix-pending-queue-liveness 2.2：看门狗强制收尾的事实转发给前端，
+        // 分级通知的低档（warn）就地呈现（点名会话与释放条目数）。
+        SessionEvent::TurnStalled {
+            channel,
+            key,
+            released,
+        } => Some(WebUiEvent::SessionTurnStalled {
+            session_id: encode_channel_key(&channel, &key),
+            released,
         }),
         SessionEvent::Resync => None,
     }

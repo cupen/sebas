@@ -1017,6 +1017,120 @@ describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
     expect(el.shadowRoot!.querySelector('[data-testid="skill-row"]')).toBeNull()
     el.remove()
   })
+
+  it('Refresh re-reads the store: on-disk additions appear, kept previews survive, vanished previews collapse', async () => {
+    const el = await mount()
+    await goto(el, 4)
+    // 打开 beads 预览（spec：refresh 后预览属于当前视图状态）。
+    skillRows(el)
+      .find((r) => r.dataset.name === 'beads')!
+      .querySelector<HTMLElement>('.skills-row-name')!
+      .click()
+    await settle(el)
+    expect(el.shadowRoot!.querySelector('[data-testid="skill-preview"]')).toBeTruthy()
+
+    // 模拟社区工具在盘上动了仓：新增 git-cloned、broken 被删。
+    apiMocks.skillsList.mockResolvedValue({
+      skills: [
+        { name: 'beads', description: 'beads 工作流', attachments: [], valid: true },
+        { name: 'git-cloned', description: '来自 git clone', attachments: [], valid: true },
+      ],
+    })
+    waButtons(el)
+      .find((b) => b.textContent?.trim() === 'Refresh')!
+      .click()
+    await settle(el)
+
+    const rows = skillRows(el)
+    expect(rows.some((r) => r.dataset.name === 'git-cloned')).toBe(true, '新落盘条目出现')
+    expect(rows.some((r) => r.dataset.name === 'broken')).toBe(false, '已消失条目退场')
+    expect(el.shadowRoot!.querySelector('.provider-toolbar span.label')?.textContent).toContain(
+      '2 skills in store',
+    )
+    // 预览目标仍在 → 预览保留。
+    expect(el.shadowRoot!.querySelector('[data-testid="skill-preview"]')).toBeTruthy()
+
+    // 预览目标随刷新消失 → 预览收起（详情随条目一起没了）。
+    apiMocks.skillsList.mockResolvedValue({
+      skills: [{ name: 'git-cloned', description: '来自 git clone', attachments: [], valid: true }],
+    })
+    waButtons(el)
+      .find((b) => b.textContent?.trim() === 'Refresh')!
+      .click()
+    await settle(el)
+    expect(el.shadowRoot!.querySelector('[data-testid="skill-preview"]')).toBeNull()
+    el.remove()
+  })
+
+  it('renders the empty-store placeholder instead of a list when the store has no entries', async () => {
+    apiMocks.skillsList.mockResolvedValue({ skills: [] })
+    const el = await mount()
+    await goto(el, 4)
+    expect(el.shadowRoot!.querySelector('.provider-toolbar span.label')?.textContent).toContain(
+      '0 skills in store',
+    )
+    const placeholder = el.shadowRoot!.querySelector('.prefs-placeholder')
+    expect(placeholder).toBeTruthy()
+    expect(placeholder!.textContent).toContain('The skill store is empty')
+    expect(placeholder!.textContent).toContain('sebas skills add')
+    expect(skillRows(el)).toHaveLength(0)
+    el.remove()
+  })
+
+  it('sync failure renders the inline error callout instead of a result panel and unsets busy', async () => {
+    const el = await mount()
+    await goto(el, 4)
+    apiMocks.skillsSync.mockRejectedValue(new ApiError(500, 'reconcile exploded'))
+    waButtons(el)
+      .find((b) => b.textContent?.trim() === 'Sync')!
+      .click()
+    await settle(el)
+
+    const err = el.shadowRoot!.querySelector('[data-testid="skills-sync-error"]')
+    expect(err).toBeTruthy()
+    expect(err!.textContent).toContain('Sync failed')
+    expect(err!.textContent).toContain('reconcile exploded')
+    expect(el.shadowRoot!.querySelector('[data-testid="skills-sync-result"]')).toBeNull()
+    // busy 复位：按钮恢复可点（否则一次失败就永久卡死 Sync）。
+    const syncBtn = waButtons(el).find((b) => b.textContent?.trim() === 'Sync')!
+    expect((syncBtn as unknown as HTMLButtonElement).disabled).toBe(false)
+    el.remove()
+  })
+
+  it('preview surfaces a detail fetch failure inline instead of a skeleton', async () => {
+    const el = await mount()
+    await goto(el, 4)
+    apiMocks.skillDetail.mockRejectedValue(new ApiError(404, '仓里没有条目 "beads"'))
+    skillRows(el)
+      .find((r) => r.dataset.name === 'beads')!
+      .querySelector<HTMLElement>('.skills-row-name')!
+      .click()
+    await settle(el)
+
+    // 详情失败在行内出 callout（错误分支直接挂在行上，无 preview 容器），
+    // 且不冒充正文：无 markdown 渲染区。
+    const row = skillRows(el).find((r) => r.dataset.name === 'beads')!
+    expect(row.querySelector('.callout-error[role="alert"]')).toBeTruthy()
+    expect(row.textContent).toContain('仓里没有条目')
+    expect(row.querySelector('.skills-md')).toBeNull()
+    el.remove()
+  })
+
+  it('invalid entry preview states the missing SKILL.md honestly (text null on the wire)', async () => {
+    const el = await mount()
+    await goto(el, 4)
+    apiMocks.skillDetail.mockResolvedValue({ name: 'broken', text: null, attachments: [] })
+    skillRows(el)
+      .find((r) => r.dataset.name === 'broken')!
+      .querySelector<HTMLElement>('.skills-row-name')!
+      .click()
+    await settle(el)
+
+    const preview = el.shadowRoot!.querySelector('[data-testid="skill-preview"]')!
+    expect(preview.textContent).toContain('SKILL.md 缺失')
+    expect(preview.querySelector('.skills-md')).toBeNull()
+    el.remove()
+  })
 })
 
 describe('unify-router-process-shape：router 停止被拒的强制出口（D4）', () => {

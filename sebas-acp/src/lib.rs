@@ -5,7 +5,7 @@ pub mod session;
 
 pub use acp_driver::AcpDriver;
 pub use agent_driver::{AgentDriver, DriverConfig, DriverError, DriverHandle};
-pub use claude::ClaudeDriver;
+pub use claude::{ClaudeDriver, DEFAULT_CLAUDE_MODEL, builtin_claude_models};
 pub use session::{
     AcpCommand, AcpEvent, AcpModelInfo, AcpSessionHandle, AvailableCommand, Decision, SessionMeta,
     TurnUsage,

@@ -191,6 +191,12 @@ pub fn browse_dirs(
     {
         let name = entry.file_name().to_string_lossy().to_string();
         if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            // add-system-dir-denylist：命中名单的子目录不出现在树里（体验
+            // 粗滤，与注册执法层同一 [`is_system_dir`] 判定——漏过由注册层
+            // 兜底，两层语义同源不矛盾）。join 后判定，symlink 别名同样吸收。
+            if is_system_dir(&entry.path()) {
+                continue;
+            }
             // Check if this subdirectory itself has any subdirectories.
             let has_subdirs = entry.path().read_dir().ok().is_some_and(|mut rd| {
                 rd.any(|e| e.ok().is_some_and(|e| e.file_type().ok().is_some_and(|t| t.is_dir())))
@@ -207,6 +213,146 @@ pub fn browse_dirs(
         path: echo,
         entries,
     })
+}
+
+// ---- 内置系统目录屏蔽名单（add-system-dir-denylist）----
+
+/// Unix 名单（spec 逐条枚举；`/lib*` 以条目模式表达为 lib/lib32/lib64/libx32）。
+/// 刻意不含 `/opt` `/srv` `/mnt` `/media`——它们是合法项目位置。
+#[cfg(not(windows))]
+const SYSTEM_DIR_DENYLIST: &[&str] = &[
+    "/",
+    "/bin",
+    "/sbin",
+    "/boot",
+    "/dev",
+    "/etc",
+    "/lib",
+    "/lib32",
+    "/lib64",
+    "/libx32",
+    "/proc",
+    "/sys",
+    "/usr",
+    "/var",
+    "/run",
+    "/root",
+    "/home",
+    "/tmp",
+];
+
+/// Windows 名单（spec）：盘符根不进名单（[`is_drive_root`] 按模式判定）；
+/// 无盘符前缀的卷根杂项目录按末段目录名匹配（每个卷的根下都有）。
+/// 比较大小写不敏感。
+#[cfg(windows)]
+const SYSTEM_DIR_DENYLIST: &[&str] = &[
+    r"C:\Windows",
+    r"C:\Program Files",
+    r"C:\Program Files (x86)",
+    r"C:\ProgramData",
+    r"C:\Users",
+    // 无根条目：按候选解析形的末段目录名匹配。
+    "System Volume Information",
+    "$Recycle.Bin",
+];
+
+/// 一条名单：绝对条目存解析形（两侧同规范比较）；Windows 无根条目存目录名
+/// （`by_name`，按候选末段匹配）。名单内置固定，无 config 扩展（Non-goals）。
+struct DenyEntry {
+    path: PathBuf,
+    #[cfg(windows)]
+    by_name: bool,
+}
+
+/// 名单构建（首次使用时逐条 canonicalize，17+ 条 syscall 进程一次）：解析成功
+/// 存解析形——吸收平台目录别名（macOS `/tmp` → `/private/tmp`、`/lib` →
+/// `/usr/lib` symlink）且候选侧的别名解析自动同域；失败保留字面形（不存在的
+/// 系统目录候选也命中不了，无损失）。
+fn denylist_entries() -> &'static [DenyEntry] {
+    static ENTRIES: std::sync::OnceLock<Vec<DenyEntry>> = std::sync::OnceLock::new();
+    ENTRIES.get_or_init(|| {
+        SYSTEM_DIR_DENYLIST
+            .iter()
+            .map(|raw| {
+                #[cfg(windows)]
+                let by_name = !Path::new(raw).is_absolute();
+                #[cfg(windows)]
+                if by_name {
+                    return DenyEntry {
+                        path: PathBuf::from(raw),
+                        by_name,
+                    };
+                }
+                let resolved = std::fs::canonicalize(raw).unwrap_or_else(|_| PathBuf::from(raw));
+                #[cfg(windows)]
+                // Windows 比较域：dunce 普通形（verbatim 前缀判等恒假），
+                // 小写比较在匹配函数里做。
+                let resolved = dunce::simplified(&resolved).to_path_buf();
+                DenyEntry {
+                    path: resolved,
+                    #[cfg(windows)]
+                    by_name,
+                }
+            })
+            .collect()
+    })
+}
+
+/// Windows 盘符根模式判定（spec：drive roots 按模式而非枚举）：解析形仅剩
+/// 盘符前缀分量（`C:\`）即命中。UNC 根（`\\server\share`）不是盘符根，不拦。
+#[cfg(windows)]
+fn is_drive_root(resolved: &Path) -> bool {
+    use std::path::Prefix;
+    resolved.parent().is_none()
+        && resolved.has_root()
+        && matches!(
+            resolved.prefix(),
+            Some(Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+        )
+}
+
+/// 候选解析形与单条名单的比较（精确相等——只拦名单目录本身，子树放行）。
+#[cfg(not(windows))]
+fn matches_deny_entry(resolved: &Path, entry: &DenyEntry) -> bool {
+    resolved == entry.path
+}
+
+/// Windows：两侧 dunce 普通形后按小写字符串比较（std 的组件比较不做 case
+/// fold）；无根条目按候选末段目录名匹配（大小写不敏感）。
+#[cfg(windows)]
+fn matches_deny_entry(resolved: &Path, entry: &DenyEntry) -> bool {
+    let lower = |p: &Path| p.to_string_lossy().to_lowercase();
+    if entry.by_name {
+        return resolved.file_name().map(lower) == Some(lower(&entry.path));
+    }
+    lower(resolved) == lower(&entry.path)
+}
+
+/// 候选路径是否解析到内置系统目录名单上（add-system-dir-denylist 原语）。
+///
+/// 两侧都先 `std::fs::canonicalize` 再比较：候选经真实路径解析（`..` 段、
+/// 别名与 symlink 全部还原），名单条目在首次构建时同样解析——平台变体自动
+/// 吸收。**精确匹配**：只拦名单目录本身，子树放行（`/home`、`C:\Users`、
+/// `/tmp` 之下的自建目录仍是合法项目位置）。候选不可解析（不存在等）返回
+/// false——拒绝文案由调用方既有存在性分支负责，这里不抢。
+///
+/// 消费方：`api.rs` 注册执法链（containment 之后）、[`browse_dirs`] 条目粗滤、
+/// 主 crate 启动告警（workspace root 过宽提示）。判定输入是真实路径，测试
+/// 一律用 tempdir，勿以真实系统目录做写操作。
+pub fn is_system_dir(path: &Path) -> bool {
+    let resolved = match std::fs::canonicalize(path) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    #[cfg(windows)]
+    let resolved = dunce::simplified(&resolved).to_path_buf();
+    #[cfg(windows)]
+    if is_drive_root(&resolved) {
+        return true;
+    }
+    denylist_entries()
+        .iter()
+        .any(|entry| matches_deny_entry(&resolved, entry))
 }
 
 /// Windows request-path normalization: undo verbatim prefixes (they skip
@@ -527,5 +673,203 @@ mod tests {
         let stored = canonicalize_plain(&doomed).unwrap();
         std::fs::remove_dir_all(&doomed).unwrap();
         assert!(stored_path_in_workspace_root(&stored, dir.path()) == Some(true));
+    }
+
+    // ---- 内置系统目录屏蔽名单（add-system-dir-denylist）----
+
+    #[cfg(unix)]
+    #[test]
+    fn system_dir_denylist_hits_exact_entries_and_subtree_passes() {
+        use std::os::unix::fs::symlink;
+
+        // 命中：真实存在的名单目录（用 /tmp 自身——存在性由沙箱保证；其余
+        // 名单目录在容器里未必都在，不逐一依赖）。
+        assert!(is_system_dir(Path::new("/tmp")), "/tmp must hit");
+        assert!(is_system_dir(Path::new("/")), "root must hit");
+
+        // 子树放行：tempdir 名单目录（/tmp）之下的自建目录不命中——spec
+        // 「只拦名单目录本身」。
+        let (dir, sub) = dir_with_sub();
+        assert!(!is_system_dir(dir.path()), "tempdir under /tmp must pass");
+        assert!(!is_system_dir(&sub), "subtree of a denylisted dir passes");
+
+        // `..` 段解析后再比较：/tmp/../tmp 解析回名单目录本身 → 命中。
+        assert!(
+            is_system_dir(Path::new("/tmp/../tmp")),
+            ".. segments resolve before matching"
+        );
+
+        // symlink 指向名单目录：解析真实目标后命中。
+        let link = dir.path().join("to_tmp");
+        symlink("/tmp", &link).unwrap();
+        assert!(is_system_dir(&link), "symlink onto denylist resolves to hit");
+
+        // 不存在路径：fail 路径返回 false（不在此拒，交给调用方存在分支）。
+        assert!(!is_system_dir(&dir.path().join("__ghost__")));
+
+        // tempdir 子树（/tmp 下）恒不误伤：browse 语义的既有测试形态依赖它。
+        assert!(!is_system_dir(dir.path().join("sub").join("deep").as_path()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_dir_denylist_tmp_resolves_to_private_variant() {
+        // macOS /tmp → /private/tmp 变体由「两侧解析」机制吸收：这里断言
+        // 解析形确实与字面形可能不同时仍命中（/tmp 本身存在，canonicalize
+        // 必成功——若环境把 /tmp 链到别处，解析形进名单照样命中）。
+        let literal = PathBuf::from("/tmp");
+        let resolved = std::fs::canonicalize(&literal).unwrap();
+        assert!(is_system_dir(&resolved), "resolved form of /tmp must hit");
+        // 字面形与解析形在 Linux 一致时本断言即退化为主用例，无损失。
+        assert!(is_system_dir(&literal));
+    }
+
+    #[test]
+    fn system_dir_denylist_unresolvable_candidate_is_false() {
+        let (dir, _sub) = dir_with_sub();
+        assert!(
+            !is_system_dir(&dir.path().join("no").join("such").join("dir")),
+            "unresolvable candidate is not a denylist hit"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn system_dir_denylist_windows_case_insensitive_and_drive_root() {
+        assert!(is_system_dir(Path::new(r"c:\WINDOWS")), "case-insensitive hit");
+        assert!(is_system_dir(Path::new(r"C:\windows")));
+        assert!(is_system_dir(Path::new(r"C:\Program Files")));
+        assert!(is_system_dir(Path::new(r"c:\PROGRAM FILES")));
+        assert!(is_system_dir(Path::new(r"C:\")), "drive root by pattern");
+        // 模式判定的纯函数面：任意盘符（含不存在的盘）都按根分量命中。
+        assert!(is_drive_root(Path::new(r"Q:\")));
+        assert!(!is_drive_root(Path::new(r"C:\Users")));
+        // 子树放行。
+        assert!(!is_system_dir(Path::new(r"C:\Users\someone\code")));
+        assert!(!is_system_dir(Path::new(r"C:\Windows\System32")));
+        // 不存在的路径 fail 路径。
+        assert!(!is_system_dir(Path::new(r"C:\__no_such_dir__")));
+    }
+
+    #[test]
+    fn browse_dirs_omits_denylisted_children_others_unchanged() {
+        // 名单形子目录造在 tempdir 里（tempdir 在 /tmp 之下，其**子**目录
+        // 按精确匹配语义不命中——所以这里造的是解析形恰为名单形的东西：
+        // unix 上唯一的名单形子目录是 /tmp 自身，它作为 tempdir 的孩子
+        // 无法自然出现；改用 symlink 造「解析到名单目录」的条目，这正是
+        // 过滤要拦的形态（列表条目解析到名单即隐藏，无论字面名是什么）。
+        let (dir, _sub) = dir_with_sub();
+        std::os::unix::fs::symlink("/tmp", dir.path().join("usr")).unwrap();
+        std::os::unix::fs::symlink("/etc", dir.path().join("etc")).unwrap();
+
+        let resp = browse_dirs("", None, dir.path()).unwrap();
+        let names: Vec<&str> = resp.entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(
+            !names.contains(&"usr") && !names.contains(&"etc"),
+            "denylisted-resolving children must be filtered: {names:?}"
+        );
+        // 其余条目照旧 + round-trip 不变。
+        assert!(names.contains(&"sub") && names.contains(&"zeta"));
+        let child = format!("{}/sub", resp.path);
+        let second = browse_dirs(&child, None, dir.path()).unwrap();
+        assert!(second.entries.iter().any(|e| e.name == "deep"), "round-trip holds");
+    }
+
+    #[test]
+    fn browse_dirs_tempdir_children_are_never_denylist_hits() {
+        // 粗滤不误伤：tempdir（/tmp 下）的普通子目录必须照常列出。
+        let (dir, _sub) = dir_with_sub();
+        let resp = browse_dirs("", None, dir.path()).unwrap();
+        let names: Vec<&str> = resp.entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"sub") && names.contains(&"zeta"), "{names:?}");
+    }
+
+    // ---- 名单补强（review 轮新增：内容钉死 / 全条目命中 / 文件候选 / 显式 root）----
+
+    #[cfg(unix)]
+    #[test]
+    fn system_dir_denylist_unix_entries_match_spec_exactly() {
+        // 钉死名单内容 = spec 逐条枚举（防静默增删：删条目会让对应系统目录
+        // 可注册，加条目会误伤合法位置）。顺序也按 spec，diff 可读。
+        let expected: &[&str] = &[
+            "/",
+            "/bin",
+            "/sbin",
+            "/boot",
+            "/dev",
+            "/etc",
+            "/lib",
+            "/lib32",
+            "/lib64",
+            "/libx32",
+            "/proc",
+            "/sys",
+            "/usr",
+            "/var",
+            "/run",
+            "/root",
+            "/home",
+            "/tmp",
+        ];
+        assert_eq!(SYSTEM_DIR_DENYLIST, expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_dir_denylist_every_existing_entry_hits() {
+        // 逐条断言「本机真实存在」的名单条目必命中（容器里不存在的条目
+        // canonicalize 失败，候选侧同样解析不了，跳过而非弱化）。merged-usr
+        // 发行版上 /bin、/lib 是指向 /usr/* 的 symlink——两侧同解析机制必须
+        // 让字面条目经解析形照样命中。
+        for raw in SYSTEM_DIR_DENYLIST {
+            let p = Path::new(raw);
+            if std::fs::canonicalize(p).is_ok() {
+                assert!(is_system_dir(p), "existing denylist entry {raw} must hit");
+            }
+        }
+        // 尾随斜杠与 `..` 归位后仍命中：`/tmp/` 归位 `/tmp`；`/tmp/..` 归位
+        // `/`（root 条目经遍历形命中）。
+        assert!(is_system_dir(Path::new("/tmp/")), "trailing slash normalizes");
+        assert!(is_system_dir(Path::new("/tmp/..")), "/tmp/.. resolves onto /");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_dir_denylist_leaves_deliberate_roots_alone() {
+        // spec 明文刻意不拦的四个根：存在与否都不命中（不存在时
+        // canonicalize 失败 → false，同一断言两种形态都过）。
+        for p in ["/opt", "/srv", "/mnt", "/media"] {
+            assert!(!is_system_dir(Path::new(p)), "{p} must stay registrable");
+        }
+    }
+
+    #[test]
+    fn system_dir_denylist_file_candidates_never_hit() {
+        // 文件（非目录）候选不命中：精确匹配按完整路径，与末段名无关——
+        // tempdir 里与名单目录同名的**文件**照常放行。注册侧这类候选由既有
+        // is_dir 分支以「路径不是目录」拒绝，名单不抢戏（也不在 Windows 的
+        // by-name 条目上误伤同名文件——unix 无 by-name 条目，此处钉行为面）。
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["usr", "etc", "tmp"] {
+            let f = dir.path().join(name);
+            std::fs::write(&f, b"x").unwrap();
+            assert!(!is_system_dir(&f), "file named {name} must not hit");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn browse_dirs_filters_denylisted_children_with_explicit_root() {
+        // root 参数与 workspace root 组合下过滤语义一致：显式 root 的条目
+        // 产出走同一 is_system_dir 滤除，非名单条目与 round-trip 不受影响。
+        let (dir, _sub) = dir_with_sub();
+        std::os::unix::fs::symlink("/tmp", dir.path().join("usr")).unwrap();
+        let resp = browse_dirs("", Some(dir.path().to_str().unwrap()), dir.path()).unwrap();
+        let names: Vec<&str> = resp.entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(
+            !names.contains(&"usr"),
+            "explicit root must filter too: {names:?}"
+        );
+        assert!(names.contains(&"sub") && names.contains(&"zeta"));
     }
 }

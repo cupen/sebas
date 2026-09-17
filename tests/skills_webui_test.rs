@@ -261,3 +261,24 @@ async fn sync_writes_placements_and_reports_no_placement() {
         .unwrap()
         .ends_with("new version"));
 }
+
+/// invalid 条目的详情（add-agent-skills 5.1 wire 语义）：条目在仓但缺
+/// SKILL.md → 200 + `text=null`，不冒充 404（core `skill_detail` 的「诚实
+/// 呈现」经 handler 落到 wire）。
+#[tokio::test]
+async fn detail_of_invalid_entry_is_200_with_null_text_not_404() {
+    let h = Harness::new();
+    // 目录在、SKILL.md 文件真缺失（invalid 的「缺文件」成因）。
+    let broken = h.store.join("broken");
+    std::fs::create_dir_all(&broken).unwrap();
+    std::fs::write(broken.join("ref.md"), "doc").unwrap();
+
+    let (status, body) = h.req("GET", "/api/skills/broken", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["name"], "broken");
+    assert!(
+        body["text"].is_null(),
+        "缺 SKILL.md 的条目 text=null（诚实呈现）: {body}"
+    );
+    assert_eq!(body["attachments"], serde_json::json!(["ref.md"]));
+}

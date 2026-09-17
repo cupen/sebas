@@ -10,6 +10,7 @@
 ```bash
 invoke testsuite-webui                 # 构建（dist 自动重建）→ 全量旅程 → 清理
 invoke testsuite-webui --case auth     # 仅鉴权旅程（auth-on 形态，端口 9898）
+invoke testsuite-webui --case auth-setup  # 仅首启建户旅程（auth 开、零用户，端口 9896）
 invoke testsuite-webui --case first-paint  # 仅单个旅程 spec
 ```
 
@@ -24,8 +25,8 @@ pnpm --dir tests/testsuite-webui exec playwright test
 
 ## 旅程与账本
 
-树形账本，与 `tests/acceptance/COVERAGE.md` 的 `testsuite-webui-browser` 一节同源
-（同为 35 行）：大功能 = spec 顶层 `test.describe`（对应 requirement），子功能 =
+树形账本，与 `tests/acceptance/COVERAGE.md` 的 `testsuite-webui-browser` 一节同源：
+大功能 = spec 顶层 `test.describe`（对应 requirement），子功能 =
 二层 `test.describe`，锚点格式 `<requirement>「<scenario>」`，对应
 `openspec/specs/testsuite-webui-browser/spec.md` 的 scenario 名。
 
@@ -35,6 +36,11 @@ pnpm --dir tests/testsuite-webui exec playwright test
 | 鉴权闭环 | 深链重定向 | deep link under auth redirects to the login page | `auth.spec.ts` | 鉴权与访问旅程「登录闭环」 |
 | 鉴权闭环 | 登录与登出 | session cookie survives reload until logout, then the gate returns | `auth.spec.ts` | 鉴权与访问旅程「登录闭环」 |
 | 鉴权闭环 | 登录与登出 | wrong credentials rejected, admin/admin enters, logout returns | `auth.spec.ts` | 鉴权与访问旅程「登录闭环」 |
+| 鉴权闭环 | 免登录直达 | the workbench is the homepage and no gate ever appears | `auth-off.spec.ts` | 鉴权与访问旅程「免登录直达」 |
+| 首启 root 引导 | 首启门禁 | homepage shows the setup card and never flips to the login gate | `auth-setup.spec.ts` | 鉴权与访问旅程「首启 root 引导」 |
+| 首启 root 引导 | 校验与建户 | in-place validation rejects short password and mismatch without submitting | `auth-setup.spec.ts` | 鉴权与访问旅程「首启 root 引导」 |
+| 首启 root 引导 | 校验与建户 | creating root enters the workbench and the session survives reload | `auth-setup.spec.ts` | 鉴权与访问旅程「首启 root 引导」 |
+| 首启 root 引导 | 校验与建户 | a second setup POST is refused after root exists (409) | `auth-setup.spec.ts` | 鉴权与访问旅程「首启 root 引导」 |
 | agent 对话覆盖 | 首回合往返与重载恢复 | composer submit → reply → done → reload restores | `session-roundtrip.spec.ts` | agent 对话覆盖「首回合往返」、会话核心旅程「重载恢复」 |
 | agent 对话覆盖 | 流式分批 | chunks arrive in batches and the turn converges to done | `streaming.spec.ts` | agent 对话覆盖「流式分批渲染」 |
 | agent 对话覆盖 | 多轮连续 | 4.1 two consecutive rounds append in order and survive reload | `dialog.spec.ts` | agent 对话覆盖「同会话多轮连续」 |
@@ -70,7 +76,11 @@ pnpm --dir tests/testsuite-webui exec playwright test
 > ¹ 设置面（S1–S4, S6）的锚点指向尚未归档的 change `expand-webui-e2e-settings` 的 delta
 > scenario（尚未同步进主 spec）；S5a/S5b 锚到主 spec `模型管理覆盖`「settings provider
 > 只读」（provider 写 503 语义已由该 scenario 吸收）。harness 级 scenario（沙箱装配、
-> 一键入口）与鉴权「免登录直达」（全部主 config 用例隐式承担）不设单用例行。
+> 一键入口）不设单用例行。
+>
+> 首启 root 引导四例（`auth-setup.spec.ts`）跑在第三种沙箱形态上：auth 开关打开、
+> 零用户、不预建户（tasks.py `TESTSUITE_AUTH_SETUP=1`，端口 9896）——首启设置页
+> 姿态本身是旅程被测前提，main/auth 两种形态都构造不出来。
 >
 > Settings 语义修正（fix-settings-menu-and-services-semantics，spec 改动 `1e4a807`）：
 > S1 改写为 `/api/admin/services` 响应驱动、S6 新增裸 core 退化覆盖；实施清单见
@@ -84,10 +94,27 @@ pnpm --dir tests/testsuite-webui exec playwright test
 |---|---|
 | `TESTSUITE_KEEP=1 invoke testsuite-webui` | 通过后也保留沙箱现场（排障）|
 | `TESTSUITE_REUSE=1` | 复用上一次保留的沙箱（配合 TESTSUITE_KEEP）|
-| `TESTSUITE_PORT=<port>` | 覆盖沙箱端口（默认 9899；`TESTSUITE_AUTH=1` 时 9898）|
+| `TESTSUITE_PORT=<port>` | 覆盖沙箱端口（默认 9899；`TESTSUITE_AUTH=1` 时 9898；`TESTSUITE_AUTH_SETUP=1` 时 9896）|
 
 任一用例失败时，keep-on-fail reporter 会把沙箱目录保留下来并在输出里打印路径
 （含后端日志 `core.log`），供复现。
+
+## WS 帧形态（add-ws-rpc-protocol 起）
+
+`/ws` 上的事件以 RPC 封套投递：`Notification{method, params}`，`method` 即原
+事件 type（`turn.append`、`session.updated` 等），原载荷整体在 `params` 下、
+字段名逐字保真；裸 `{type, ...}` 帧已退役。断言实时事件的新用例请匹配
+`v["method"]` 并从 `v["params"]` 取字段（进程级参照
+`tests/testsuite_e2e_test.rs` 的 `turn_appends_stream_over_ws`，集成参照
+`sebas-webui/tests/ws_test.rs`）。协议往返可用内置 `ping` 方法自证。
+
+## core 可达性推送（add-core-reachability-ws-push 起）
+
+前端不再 5s 轮询 `/api/summary` 取可达性：app-shell 在 WS 连接建立/重连时发
+`core.reachability.get` 取当前态，此后随 `core.reachability` 翻转通知即时
+更新（横幅与 composer 提交门同源）。涉及横幅/提交门断言的新用例请直接驱动
+沙箱 core 进程起停（翻转即达，无需等轮询窗）；集成级参照
+`sebas-webui/tests/ws_test.rs` 的 FlipBackend 用例。
 
 ## 平台适配
 

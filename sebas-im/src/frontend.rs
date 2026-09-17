@@ -565,6 +565,9 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
                 // workbench-turn-queue：丢弃标注事件对 IM 前端是建议性的
                 // （队列管理面在 webui），随后的 Removed 帧会移除该会话视图。
                 Ok(SessionEvent::PendingDropped { .. }) => {}
+                // fix-pending-queue-liveness：停滞收尾通知的呈现面在 webui
+                // 通知层；IM 侧回合收尾事实已随 Updated（相位 DONE）到达。
+                Ok(SessionEvent::TurnStalled { .. }) => {}
                 Ok(SessionEvent::Resync) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                     warn!(lagged = n, "session event lag; resyncing from snapshot");
@@ -1381,6 +1384,8 @@ mod tests {
             desired_mode: None,
             effective_mode: None,
             msg_count: 0,
+            // fix-pending-queue-liveness 2.3：turn_engaged 缺省（不占用）。
+            turn_engaged: false,
             available_commands: Vec::new(),
         };
         fe.on_session_info(info.clone()).await;
@@ -1540,6 +1545,8 @@ mod tests {
             desired_mode: None,
             effective_mode: None,
             msg_count: 0,
+            // fix-pending-queue-liveness 2.3：turn_engaged 缺省（不占用）。
+            turn_engaged: false,
             available_commands: Vec::new(),
         })
         .await;
@@ -1720,6 +1727,8 @@ mod tests {
             desired_mode: None,
             effective_mode: None,
             msg_count: 0,
+            // fix-pending-queue-liveness 2.3：turn_engaged 缺省（不占用）。
+            turn_engaged: false,
             available_commands: Vec::new(),
         }
     }

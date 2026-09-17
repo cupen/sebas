@@ -28,6 +28,7 @@ use sebas_router::config::RouterConfig;
 use sebas_dispatch::engine::DispatchHandle;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{error, info, warn};
 
 /// Assemble the kind → driver registry the `SessionManager` routes sessions
@@ -39,7 +40,10 @@ fn build_agent_registry(cfg: &Config) -> HashMap<String, AgentEntry> {
         .iter()
         .map(|(slug, agent_cfg)| {
             let driver: Arc<dyn AgentDriver> = match agent_cfg {
-                AgentConfig::Claude(_) => Arc::new(ClaudeDriver),
+                // （workbench-composer-input-polish 2.1）claude 驱动实例携带
+                // 各自的模型别名表：`[acp.agents.<slug>] models` 覆盖值，缺省
+                // /空表回退内置（resolved_models 单点归一）。
+                AgentConfig::Claude(c) => Arc::new(ClaudeDriver::with_models(c.resolved_models())),
                 AgentConfig::Acp { .. } => Arc::new(AcpDriver),
             };
             let entry = AgentEntry {
@@ -240,6 +244,25 @@ pub async fn run(
         }
     });
 
+    // ── 回合停滞看门狗（fix-pending-queue-liveness 2.2，design D1/D6）──
+    // `[dispatch] turn_stall_timeout`（默认 600s，0 = 关闭）配置进引擎；
+    // 周期扫描复用出站泵的装配点。扫描间隔钳在 1–15s（≈阈值）：默认 600s
+    // 用 15s 的巡检节奏，收尾迟滞 ≤ 一个间隔；小阈值供 e2e 快速周转。
+    let stall_timeout = cfg.dispatch.turn_stall_timeout;
+    router.set_turn_stall_timeout(stall_timeout);
+    if stall_timeout > 0 {
+        let stall_router = router.clone();
+        tokio::spawn(async move {
+            let mut ticker =
+                tokio::time::interval(Duration::from_secs(stall_timeout.clamp(1, 15)));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                stall_router.force_settle_stalled_turns().await;
+            }
+        });
+    }
+
     // 注册表：web 常驻（webui 入站面）。extract-im-service M3 后 core 不再
     // 注册任何 IM 适配器（im-service spec「多 IM 适配器宿主」）。
     info!(
@@ -307,6 +330,8 @@ pub async fn run(
                 webui_workspace_root.display()
             );
         }
+        // add-system-dir-denylist 3.1：root 落在系统目录上只警示不阻断。
+        crate::config::warn_if_workspace_root_is_system_dir(&webui_workspace_root);
         // 登录鉴权与独立 webui 进程同一套（add-webui-multiuser-rbac 3.4，
         // design D4）：开关关闭 → disabled 态全路由免登录；打开 → 建库 +
         // env 引导 root，零用户留给首启设置页。装配提到 bind 之前，让非

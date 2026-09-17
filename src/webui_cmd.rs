@@ -381,6 +381,8 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
             webui_workspace_root.display()
         );
     }
+    // add-system-dir-denylist 3.1：root 落在系统目录上只警示不阻断。
+    crate::config::warn_if_workspace_root_is_system_dir(&webui_workspace_root);
 
     // Run the WebUI server. This blocks until the server stops.
     // fix-webui-detached-status：router 静态事实（listen/debug/has_auth 与
