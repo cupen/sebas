@@ -304,7 +304,7 @@ requirement），子功能 = 二层 `test.describe`，一行 = 一条用例；�
 | agent 对话覆盖 | 输入守卫 | 4.2 special-char long text round-trips without loss or console errors | `dialog.spec.ts` | agent 对话覆盖「composer 输入守卫」 |
 | agent 对话覆盖 | 错误诚实呈现 | refuse — non-terminal: session survives, next message works | `errors.spec.ts` | 会话核心旅程「错误呈现」 |
 | agent 对话覆盖 | 错误诚实呈现 | crash — honest death: mapping torn down, row gone, open view retains transcript | `errors.spec.ts` | 会话核心旅程「错误呈现」 |
-| agent 对话覆盖 | spawn 失败内显 | spawn failure inline: error event in transcript, session stays as spawn-failed | `errors.spec.ts` | webui「web_spawn 失败的立即内显」（fail-fast-on-startup-errors） |
+| agent 对话覆盖 | spawn 失败内显 | spawn failure inline: error event in transcript, session stays as spawn-failed | `errors.spec.ts` | webui「web_spawn 失败的立即内显」（fail-fast-on-startup-errors）；聚焦触发的 activate 会重排 SpawnFailed 致转录换址（sebas-il7s），旅程暂以 route 拦截 stabilize，产品修复后移除 |
 | 审批卡片旅程 | 拒绝路径 | deny path — refusal semantics, turn completes | `permission.spec.ts` | 审批卡片旅程「拒绝路径」 |
 | 审批卡片旅程 | 单次允许路径 | allow-once path — allowed semantics, turn completes | `permission.spec.ts` | 审批卡片旅程「单次允许路径」 |
 | 审批卡片旅程 | 会话级允许 | allow-session path — session switches to auto mode, follow-up is no longer gated | `permission.spec.ts` | 审批卡片旅程「会话级允许」 |
@@ -317,7 +317,7 @@ requirement），子功能 = 二层 `test.describe`，一行 = 一条用例；�
 | 会话管理 | close 与 archive | close removes the session from the active list | `session-mgmt.spec.ts` | 会话管理覆盖「close 与 archive」 |
 | 会话管理 | close 与 archive | archive hides from list, shows in History | `session-mgmt.spec.ts` | 会话管理覆盖「close 与 archive」 |
 | 会话管理 | 深链与退役路径 | deep link renders the session via SPA fallback; /settings redirects to / | `session-mgmt.spec.ts` | 会话管理覆盖「深链与退役路径」 |
-| 会话管理 | 模型面诚实缺省 | model honest absence — no selector, switch attempt keeps model absent | `session-mgmt.spec.ts` | 工作台、项目与会话管理面旅程「模型面诚实缺省」 |
+| 会话管理 | claude 芯片在场诚实形态（原「模型面诚实缺省」随 claude 自报模型面退役）| model surface honest default — the claude chip renders the observed current, never the placeholder | `session-mgmt.spec.ts` | 工作台、项目与会话管理面旅程「模型面诚实缺省」（workbench-composer-input-polish 改写：chip 在场 + 误导占位不得出现；无模型诚实缺省由前端单测 + 无 configOptions 通用 ACP 承载）|
 | 会话管理 | close 与 archive | History lists newly archived sessions newest-first (rail-declutter-unread D7) | `session-mgmt.spec.ts` | project-session-actions「History is sorted newest-first」（rail-declutter-unread） |
 | 未读徽标 | 真实回复点亮与聚焦清零 | a reply to an unfocused session lights the badge; focusing clears it and parks the anchor | `unread-badge.spec.ts` | session-unread-badge「new reply on an unfocused session」「focusing the session clears the badge」「first visit shows no unread」（rail-declutter-unread，跨层旅程：fake-claude 回复 → API `msg_count` 投影 → 徽标免刷新亮起 → 聚焦清零且锚落 localStorage） |
 | 会话管理 | 多会话切换 | 2.1 dual-session switch (rail + deep-link) does not crosstalk | `sessions.spec.ts` | 会话管理覆盖「多会话切换」 |

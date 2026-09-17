@@ -134,8 +134,18 @@ test.describe('agent 对话覆盖', () => {
       // KNOWN PRODUCT GAP（sebas-il7s）：聚焦即拉起对 spawn-failed 会话的
       // 语义目前是坏的——activate 会把映射重排为 Active（真 session_id、
       // 空转录），重排队 turn 永不执行，状态徽章因此停在 Queued 而非收敛
-      // 回 Failed。产品修复落地前不钉徽章瞬值；此处只钉「不撒谎」的部分：
-      // 会话可见、错误内显、未被拆除。
+      // 回 Failed。更糟的是 transcript 寻址 id 随之从 SpawnFailed 的合成 id
+      // 换成 Active 的路由 id（sebas-dispatch state.rs transcript_id）——
+      // 已内显的错误条目在聚焦后**不再可寻址**，页面级错误气泡的存在性
+      // 因此与「初次 detail 拉取 vs activate 翻转」的竞速绑定：全量套件
+      // 负载下竞速两次双败（2026-09-17 验收），隔离跑三次全绿。根因是
+      // 产品缺陷不是渲染缺陷，本 change 不动实现——旅程改为在拦截 activate
+      // （fulfill 200，无控制台噪音、无状态副作用）的形态下钉住 fail-fast
+      // 内显契约：失败映射不被重排，错误条目稳定可渲染。activate 重排
+      // 语义（含徽章瞬值）保持不钉、待产品修复（同上缺口）。
+      await page.route('**/api/sessions/*/activate', (route) =>
+        route.fulfill({ status: 200, body: '{}' }),
+      )
       await page.goto(`/sessions/${key}`)
       await expect(detail.host).toBeVisible()
       await expect(detail.unavailableNote).toHaveCount(0)

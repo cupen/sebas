@@ -9,8 +9,11 @@
  * rail-declutter-unread 收敛了行操作并移除了 Inbox 分组) and the History
  * group shows the archived entry; the sessions list no longer lists it. Deep links: a /sessions/:key URL loaded cold (SPA fallback)
  * renders the session. Retired path: /settings canonically redirects to /.
- * Model honest absence: a fake-claude session exposes NO model selector
- * anywhere, and an API-level switch attempt leaves the model absent.
+ * Model honest default: workbench-composer-input-polish 之后 claude 会话
+ * 自报别名模型面——浏览器沙箱已无「无模型会话」载体（claude/fakeacp 都有
+ * 模型面；无 configOptions 的通用 ACP 与前端单测承载诚实缺省），本旅程改
+ * 钉新现实：claude 芯片在场且只读呈现观察值，绝不渲染「无可用模型」占位、
+ * 不报错。切换链路旅程归 models.spec（分工去重）。
  */
 import { expect, test } from '@playwright/test'
 import {
@@ -172,7 +175,13 @@ test.describe('会话管理', () => {
   })
 
   test.describe('模型面诚实缺省', () => {
-    test('model honest absence — no selector, switch attempt keeps model absent', async ({
+    // workbench-composer-input-polish 2.2/2.4 改写：claude 驱动自报别名模
+    // 型面（内置 default/opus/sonnet/haiku），「无模型会话」的浏览器载体不
+    // 复存在（沙箱只有 claude/fakeacp，都有模型面；fakeacp 的切换/拒绝旅
+    // 程归 models.spec）。本旅程钉住新的诚实缺省：芯片在场、呈现观察到的
+    // 当前模型，绝不渲染「无可用模型」误导占位、不报错；模型面缺席的诚实
+    // 分支（无选项且无观察值）由前端单测 workbench-composer.test.ts 承载。
+    test('model surface honest default — the claude chip renders the observed current, never the placeholder', async ({
       page,
     }) => {
       const detail = new FocusedSession(page)
@@ -184,25 +193,27 @@ test.describe('会话管理', () => {
 
       await page.goto(`/sessions/${key}`)
       await expect(detail.host).toBeVisible()
-      // D4: the head has no model picker; the follow-mode composer has no
-      // model dropdown; and nothing errored while rendering.
-      await expect(detail.modelPick).toHaveCount(0)
+      // 会话头的 model 选择器仍缺席（选择器语义归创建对话框/composer 芯片）。
       await expect(page.locator('sebas-workbench-composer wa-select[aria-label="Model"]')).toHaveCount(
         0,
       )
-
-      // The API accepts the request but the truth doesn't change: no model
-      // materialises on a session whose agent exposes none.
-      await expect
-        .poll(
-          async () => (await getSession(page.request, key)).detail?.current_model,
-          { timeout: 5_000, intervals: [200] },
-        )
-        .toBeNull()
+      // 芯片在场（别名表随快照可达），且不是「无可用模型」占位、不是启动
+      // 中态、无错误横幅。
+      await expect(detail.modelPick).toBeVisible()
+      await expect(
+        page.locator('sebas-workbench-composer [data-testid="model-chip-unavailable"]'),
+      ).toHaveCount(0)
+      await expect(
+        page.locator('sebas-workbench-composer [data-testid="model-chip-starting"]'),
+      ).toHaveCount(0)
+      await expect(
+        page.locator('sebas-workbench-composer [data-testid="composer-error"]'),
+      ).toHaveCount(0)
+      // API 真源：观察值与别名表都已落地（具体值/切换链路归 models.spec）。
       const after = await getSession(page.request, key)
       expect(after.detail).not.toBeNull()
-      expect(after.detail!.current_model).toBeNull()
-      expect(after.detail!.available_models ?? []).toEqual([])
+      expect(after.detail!.current_model).not.toBeNull()
+      expect(after.detail!.available_models?.length ?? 0).toBeGreaterThan(0)
 
       expect(collector.clean()).toEqual([])
     })
