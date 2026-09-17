@@ -68,6 +68,10 @@ struct Flags {
     continue_used: bool,
     fork_session: bool,
     session_id: String,
+    /// （workbench-composer-input-polish）运行时 `set_model` 控制请求的当前
+    /// 值：后续 assistant 帧的 model 字段报告它（真 CLI 行为——切换从下一
+    /// 轮生效并在帧上可见）。`None` = 未切换过，报告 init 帧同款 "fake"。
+    model: Option<String>,
 }
 
 const SCENARIOS: &[&str] = &["hello", "bash", "deny", "thinking"];
@@ -115,6 +119,7 @@ fn parse_flags() -> Flags {
         continue_used: false,
         fork_session: false,
         session_id: "fake-1".into(),
+        model: None,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -362,6 +367,25 @@ fn main() {
                             "response": {"subtype": "success", "request_id": req_id, "response": {}}
                         }));
                     }
+                    "set_model" => {
+                        // （workbench-composer-input-polish）运行时模型切换：
+                        // 记 journal（e2e 断言控制请求送达与值；null = SDK
+                        // None，即 "default" 的特判形态），更新内部模型（后续
+                        // assistant 帧报告新值——真 CLI 行为），照常 ack。
+                        let requested = v.pointer("/request/model").cloned().unwrap_or(Value::Null);
+                        io.journal_write(
+                            "model_change",
+                            &json!({ "type": "model_change", "model": requested }),
+                        );
+                        flags.model = match requested {
+                            Value::String(s) if !s.is_empty() => Some(s),
+                            _ => None,
+                        };
+                        io.emit(&json!({
+                            "type": "control_response",
+                            "response": {"subtype": "success", "request_id": req_id, "response": {}}
+                        }));
+                    }
                     _ => {
                         // set_model / ... : ack and ignore.
                         io.emit(&json!({
@@ -375,7 +399,7 @@ fn main() {
                 let text = user_text(&v);
                 if text.contains("crash") {
                     // D6: mid-session process crash — one last frame, then die.
-                    io.emit(&assistant_text(&flags.session_id, "boom"));
+                    io.emit(&assistant_text(&flags.session_id, "boom", reported_model(&flags)));
                     io.out.flush().unwrap();
                     std::process::exit(1);
                 }
@@ -409,7 +433,7 @@ fn main() {
                     // 状态——control_request 探测照常应答（驱动 hang 链因此
                     // 不触发），但再无任何事件帧。引擎停滞看门狗（
                     // `[dispatch] turn_stall_timeout`）是这种停滞的唯一兜底。
-                    io.emit(&assistant_text(&flags.session_id, "stalling..."));
+                    io.emit(&assistant_text(&flags.session_id, "stalling...", reported_model(&flags)));
                     hanging = true;
                 } else if text == "perm" {
                     perm_turn(&flags, &mut io, &mut lines, &mut hook_counter);
@@ -483,8 +507,9 @@ fn perm_turn(
 /// fake's "stream" trigger).
 fn stream_turn(flags: &Flags, io: &mut Io) {
     let sid = &flags.session_id;
+    let model = reported_model(flags);
     for i in 0..5 {
-        io.emit(&assistant_text(sid, &format!("chunk{i} ")));
+        io.emit(&assistant_text(sid, &format!("chunk{i} "), model));
     }
     // 800ms: the 150ms debounce tick must flush a transient 🚧 card well
     // before the result frame; SDK startup (version probe + spawn) adds
@@ -509,8 +534,9 @@ fn run_scenario(
     };
     match flags.scenario.as_str() {
         "hello" => {
-            io.emit(&assistant_text(sid, "hello "));
-            io.emit(&assistant_text(sid, "world"));
+            let model = reported_model(flags);
+            io.emit(&assistant_text(sid, "hello ", model));
+            io.emit(&assistant_text(sid, "world", model));
             settle();
             io.emit(&result_frame(sid, "success", false));
         }
@@ -520,9 +546,9 @@ fn run_scenario(
                 "session_id": sid,
                 "message": {"role": "assistant", "content": [
                     {"type": "thinking", "thinking": "hmm"}
-                ]}
+                ], "model": reported_model(flags)}
             }));
-            io.emit(&assistant_text(sid, "thought out loud"));
+            io.emit(&assistant_text(sid, "thought out loud", reported_model(flags)));
             settle();
             io.emit(&result_frame(sid, "success", false));
         }
@@ -638,14 +664,20 @@ fn user_text(v: &Value) -> String {
     }
 }
 
-fn assistant_text(sid: &str, text: &str) -> Value {
+fn assistant_text(sid: &str, text: &str, model: &str) -> Value {
     json!({
         "type": "assistant",
         "session_id": sid,
         "message": {"role": "assistant", "content": [
             {"type": "text", "text": text}
-        ]}
+        ], "model": model}
     })
+}
+
+/// assistant 帧 model 字段的当前值：set_model 切换过的值优先，否则 init 帧
+/// 同款 "fake"（真 CLI 行为——帧上总能看到生效模型）。
+fn reported_model(flags: &Flags) -> &str {
+    flags.model.as_deref().unwrap_or("fake")
 }
 
 fn tool_result_frame(sid: &str, tool_id: &str, content: &str, is_error: bool) -> Value {

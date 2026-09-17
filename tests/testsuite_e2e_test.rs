@@ -1890,9 +1890,157 @@ async fn slash_commands_advertise_and_reach_stub() {
     wait_turn_done(&cli, &sb, &detail_url).await;
 }
 
-/// Poll the session detail until the current turn settles to Done.
-async fn wait_turn_done(cli: &reqwest::Client, sb: &Sandbox, detail_url: &str) {
+/// （workbench-composer-input-polish 2.2/2.3）claude 会话的模型面与切换链路：
+/// 内置别名表随快照可达（available_models 含 default/opus/sonnet/haiku），
+/// current 从 spawn 缺省被帧观察覆盖为 fake 的真实模型；POST /model 把控制
+/// 请求送达 stub（journal 记 model_change），快照乐观跟随，后续回合帧确认
+/// 不回跳。全程零真模型调用。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn claude_model_surface_reaches_snapshot_and_switch_round_trips() {
+    let sb = Sandbox::new("testsuite_e2e", "claude-model-surface");
+    let journal = sb.journal_fake_agent();
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "prompt": "hello", "agent": "claude" }),
+    )
+    .await
+    .expect("create session");
+    assert_eq!(status, 201, "create session: {body}");
+    let key = body["key"].as_str().expect("key").to_string();
+    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+
+    // 1) 首回合 Done 后：别名表随快照可达，current 已被 init 帧观察覆盖
+    //    （fake 报 "fake"）——快照拼装与覆盖次序的进程级证据。
+    let detail = wait_for(
+        "claude model surface to reach the snapshot (alias table + observed current)",
+        Duration::from_secs(25),
+        &sb.path.clone(),
+        {
+            let cli = cli.clone();
+            let url = detail_url.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    let done = v["status_slug"].as_str() == Some("done");
+                    let models = v["available_models"].as_array()?;
+                    let aliased = ["default", "opus", "sonnet", "haiku"]
+                        .iter()
+                        .all(|a| models.iter().any(|m| m.as_str() == Some(*a)));
+                    let observed = v["current_model"].as_str() == Some("fake");
+                    (done && aliased && observed).then_some(v)
+                })
+            }
+        },
+    )
+    .await;
+    assert_eq!(
+        detail["current_model"], "fake",
+        "frame observation must overwrite the spawn-time default: {detail}"
+    );
+
+    // 2) 切换到 "opus"：webui 只投递（200）→ 驱动 set_model 控制请求 →
+    //    乐观 ModelChanged → 快照 current 同步。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions/{key}/model", sb.webui_url()),
+        serde_json::json!({ "model_id": "opus" }),
+    )
+    .await
+    .expect("switch model");
+    assert_eq!(status, 200, "model switch must be delivered: {body}");
     wait_for(
+        "current_model to follow the optimistic switch",
+        Duration::from_secs(15),
+        &sb.path.clone(),
+        {
+            let cli = cli.clone();
+            let url = detail_url.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    (v["current_model"].as_str() == Some("opus")).then_some(v)
+                })
+            }
+        },
+    )
+    .await;
+    wait_for(
+        "set_model control request to reach the stub (journal model_change)",
+        Duration::from_secs(15),
+        &sb.path.clone(),
+        {
+            let journal = journal.clone();
+            move || {
+                let journal = journal.clone();
+                Box::pin(async move {
+                    let Ok(content) = std::fs::read_to_string(&journal) else {
+                        return None;
+                    };
+                    content
+                        .lines()
+                        .any(|l| l.contains("model_change") && l.contains("\"model\":\"opus\""))
+                        .then_some(())
+                })
+            }
+        },
+    )
+    .await;
+
+    // 3) 下一回合：assistant 帧报告已切换的模型（fake 行为）→ 观察值与
+    //    乐观值一致，current 不回跳（帧确认半边）。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+        serde_json::json!({ "message": "hello" }),
+    )
+    .await
+    .expect("follow-up message");
+    assert_eq!(status, 200, "{body}");
+    wait_turn_done(&cli, &sb, &detail_url).await;
+    let after = get_json_status(&cli, &detail_url)
+        .await
+        .expect("detail after the confirming turn")
+        .1;
+    assert_eq!(
+        after["current_model"], "opus",
+        "confirmed switch must survive the confirming frames: {after}"
+    );
+    assert_eq!(
+        after["available_models"]
+            .as_array()
+            .expect("model list survives")
+            .len(),
+        4
+    );
+}
+
+/// Poll the session detail until the current turn settles to Done.
+async fn wait_turn_done(cli: &reqwest::Client, sb: &Sandbox, detail_url: &str) {    wait_for(
         "session turn to reach Done",
         Duration::from_secs(25),
         &sb.path.clone(),

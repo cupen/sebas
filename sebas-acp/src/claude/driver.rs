@@ -20,6 +20,7 @@
 use crate::claude::session::{
     AcpCommand, AcpEvent, AvailableCommand, Decision, ResponderSlot, TurnUsage,
 };
+use crate::session::AcpModelInfo;
 use claude_agent_sdk::{
     ClaudeAgentOptions, ClaudeClient, ContentBlock, HookCallback, HookEvent, HookInput,
     HookJsonOutput, HookMatcher, HookSpecificOutput, Message, PreToolUseHookSpecificOutput,
@@ -69,6 +70,10 @@ pub struct ConnectConfig {
     /// 就是 CLI 默认。post-cancel respawn 传当前值，运行时切换过的模式
     /// 在重生后不回退。
     pub permission_mode: Option<claude_agent_sdk::PermissionMode>,
+    /// （workbench-composer-input-polish 2.1）模型别名表：`[acp.agents.<name>]
+    /// models` 的覆盖值（各 claude agent 实例各自的表）。空 = 内置别名表。
+    /// 握手成功时拼装 `AcpModelInfo.options` 上报（D4）。
+    pub models: Vec<String>,
     pub startup_timeout: Duration,
     pub evt_tx: mpsc::Sender<AcpEvent>,
     pub pending_perms: Arc<Mutex<HashMap<String, ResponderSlot>>>,
@@ -84,6 +89,15 @@ pub struct CcDriver {
     extra_env: Vec<(String, String)>,
     evt_tx: mpsc::Sender<AcpEvent>,
     pending_perms: Arc<Mutex<HashMap<String, ResponderSlot>>>,
+    /// （workbench-composer-input-polish D4）模型别名表（配置覆盖或内置）。
+    /// `SetModel` 的可选词汇与 `AcpModelInfo.options` 的唯一出处。
+    models: Vec<String>,
+    /// （workbench-composer-input-polish D5）最近观察到的当前模型：来自
+    /// 携带 model 名的 wire 帧（system session_start/init 帧优先、assistant
+    /// 帧兜底）与 SetModel 成功后的乐观写入共用同一单元。帧观察值与乐观值
+    /// 不一致时发 `ModelChanged` 纠偏——SDK `set_model` 无失败回执，agent
+    /// 不认识的 id 表现为「后续帧仍是旧 model」，观察值覆盖即自然纠偏。
+    observed_model: Option<String>,
     /// tool_use_id → tool_name, so User(tool_result) frames can emit ToolEnd
     /// with the tool name (the frames themselves only carry the id).
     tool_names: HashMap<String, String>,
@@ -179,11 +193,20 @@ impl CcDriver {
             session_id,
             resume,
             permission_mode,
+            models,
             startup_timeout,
             evt_tx,
             pending_perms,
             terminal_sent,
         } = cfg;
+
+        // （workbench-composer-input-polish D4）别名表：配置覆盖 > 内置。空
+        // 配置表回退内置（config 层已做同样归一，这里是驱动侧的最后防线）。
+        let models = if models.is_empty() {
+            builtin_claude_models()
+        } else {
+            models
+        };
 
         // （add-agent-mode-selection）权限模式的单一出处：显式覆盖（post-cancel
         // respawn 携带的运行时值）> argv 里的 `--permission-mode`（dispatch 的
@@ -330,6 +353,14 @@ impl CcDriver {
                 .await;
         }
 
+        // （workbench-composer-input-polish 2.2/D5）握手成功即拼装模型选择面：
+        // options = 别名表（配置覆盖或内置），current = 观察值或 "default"。
+        // 此刻 wire 帧尚未被本驱动泵过（观察从 run() 开始），观察值恒缺省，
+        // current 落在 "default"；后续帧观察经 `ModelChanged` 覆盖纠偏（D5
+        // 的自愈语义）。拼装落在 ClaudeDriver::spawn 组装 DriverHandle 处
+        // （字段同模块可读：resolved 表在 `self.models`、观察在
+        // `self.observed_model`）。
+
         Ok(Self {
             client,
 
@@ -343,6 +374,8 @@ impl CcDriver {
             extra_env,
             evt_tx,
             pending_perms,
+            models,
+            observed_model: None,
             tool_names: HashMap::new(),
             terminal_sent,
             stderr_tail,
@@ -547,20 +580,38 @@ impl CcDriver {
                     }
                 }
                 Sel::Cmd(Some(AcpCommand::SetModel { model_id, .. })) => {
-                    // 模型选择是 ACP 原生能力（`session/set_config_option`），
-                    // Claude 专用驱动不支持。发非终态 Error 并保活会话（acp-driver
-                    // spec "Unsupported agent reports explicit error" + acp-model-selection：
-                    // 失败后当前模型不变、会话不被销毁）。
-                    let _ = self
-                        .evt_tx
-                        .send(AcpEvent::Error {
-                            session_id: self.session_id.clone(),
-                            message: format!(
-                                "set model {model_id:?} 需要支持 configOptions 的 ACP 会话；当前驱动（Claude 专用）不支持，模型未变"
-                            ),
-                            terminal: false,
-                        })
-                        .await;
+                    // （workbench-composer-input-polish 2.3/D6）模型选择接线：
+                    // 控制面词汇 → SDK `set_model`（control 协议），替换旧
+                    // 「驱动不支持」拒绝分支。`"default"` 特判为 `None`（= 用
+                    // CLI 默认模型）。SDK 无失败回执语义（control request 发
+                    // 出即成功）：成功 → 乐观写 current 并发 `ModelChanged`，
+                    // 后续 wire 帧观察覆盖纠偏（D5）；传输层失败 → 非终态
+                    // Error（current 不变、会话存活，与 SetMode 同语义）。
+                    let target = sdk_model_arg(&model_id);
+                    match self.client.set_model(target).await {
+                        Ok(()) => {
+                            self.observed_model = Some(model_id.clone());
+                            let _ = self
+                                .evt_tx
+                                .send(AcpEvent::ModelChanged {
+                                    session_id: self.session_id.clone(),
+                                    model_id,
+                                })
+                                .await;
+                        }
+                        Err(e) => {
+                            let _ = self
+                                .evt_tx
+                                .send(AcpEvent::Error {
+                                    session_id: self.session_id.clone(),
+                                    message: format!(
+                                        "set model {model_id:?} 未送达（{e}），模型未变"
+                                    ),
+                                    terminal: false,
+                                })
+                                .await;
+                        }
+                    }
                 }
                 Sel::Msg(Some(Ok(m))) => {
                     // Any real message from the child counts as activity:
@@ -577,6 +628,24 @@ impl CcDriver {
                     for evt in map_message(&self.session_id, &mut self.tool_names, &m) {
                         let is_terminal = matches!(evt, AcpEvent::Error { terminal: true, .. });
                         if self.evt_tx.send(evt).await.is_err() || is_terminal {
+                            return;
+                        }
+                    }
+                    // （workbench-composer-input-polish 2.2/D5）current 观察：
+                    // 携带 model 名的 wire 帧（system init/session_start 帧
+                    // 优先、assistant 帧兜底）与共享 observed_model 单元比对，
+                    // 变化即发 `ModelChanged`——引擎既有到达线把快照的
+                    // current_model 覆盖成观察值（乐观切换错位在这里自愈，
+                    // agent 拒绝切换时回退到旧 model 同理）。
+                    if let Some(observed) = observed_model_from_frame(&m)
+                        && self.observed_model.as_deref() != Some(observed.as_str())
+                    {
+                        self.observed_model = Some(observed.clone());
+                        let evt = AcpEvent::ModelChanged {
+                            session_id: self.session_id.clone(),
+                            model_id: observed,
+                        };
+                        if self.evt_tx.send(evt).await.is_err() {
                             return;
                         }
                     }
@@ -640,6 +709,8 @@ impl CcDriver {
             resume: true,
             // 运行时切换过的权限模式在重生后保持（覆盖 argv 里的启动值）。
             permission_mode: Some(load_mode(&self.permission_mode)),
+            // 别名表随重生保持（同一会话的模型词汇不变）。
+            models: self.models.clone(),
             startup_timeout: self.cfg.startup_timeout,
             evt_tx: self.evt_tx.clone(),
             pending_perms: self.pending_perms.clone(),
@@ -1116,11 +1187,64 @@ pub(crate) fn map_message(
     }
 }
 
+/// （workbench-composer-input-polish D4）内置 claude 模型别名表：对齐 claude
+/// CLI 自身 `/model` 词汇。`default` 是显式条目（映射 SDK `set_model(None)` =
+/// 用 CLI 默认模型）。配置覆盖（`[acp.agents.<name>] models`）整体替换本表；
+/// 逐驱动知识由配置逃生口兜底（D4 决策：claude 专属驱动内含 claude 专属
+/// 词汇不违反 agent 自广告原则的实质，且给了覆盖口）。
+pub fn builtin_claude_models() -> Vec<String> {
+    ["default", "opus", "sonnet", "haiku"]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
+/// 别名表中的显式缺省条目：SetModel 语义 = 回到 CLI 默认模型（SDK
+/// `set_model(None)`）。
+pub const DEFAULT_CLAUDE_MODEL: &str = "default";
+
+/// （workbench-composer-input-polish 2.3/D6）控制面模型词汇 → SDK
+/// `set_model` 参数：`"default"` 特判为 `None`（= CLI 默认），其余原样下发
+/// （全名模型 id 亦可经配置别名表进入词汇）。
+fn sdk_model_arg(model_id: &str) -> Option<&str> {
+    if model_id == DEFAULT_CLAUDE_MODEL {
+        None
+    } else {
+        Some(model_id)
+    }
+}
+
+/// （workbench-composer-input-polish 2.2/D5）从一帧 wire 消息提取当前模型
+/// 观察值：system 帧（真 CLI 与 fake-claude 的 `init`、部分版本的
+/// `session_start`）携带 model 名者优先，assistant 帧兜底；不携带的帧返回
+/// `None`（Result 帧的 usage 无 model 名，不产生观察）。
+fn observed_model_from_frame(msg: &Message) -> Option<String> {
+    match msg {
+        Message::System(s) => s.model.clone(),
+        Message::Assistant(a) => a.message.model.clone(),
+        _ => None,
+    }
+}
+
 /// The [`crate::AgentDriver`] implementation for the dedicated Claude Code
 /// path. Wraps the low-level [`CcDriver`] engine so `SessionManager` can drive
 /// it through the driver-agnostic seam without knowing claude specifics
 /// (including the resume-rejection → fresh fallback, which is claude-only).
-pub struct ClaudeDriver;
+///
+/// （workbench-composer-input-polish D4）`models` 是该驱动实例的模型别名表
+/// （`[acp.agents.<name>] models` 的覆盖值；空 = 内置别名表）——装配点在
+/// kind → driver 注册表（`build_agent_registry`），逐 agent 实例各自一份。
+#[derive(Debug, Clone, Default)]
+pub struct ClaudeDriver {
+    models: Vec<String>,
+}
+
+impl ClaudeDriver {
+    /// 配置覆盖的别名表（空表回退内置——归一在 `CcDriver::connect` 兜底）。
+    pub fn with_models(models: Vec<String>) -> Self {
+        Self { models }
+    }
+}
 
 #[async_trait::async_trait]
 impl crate::agent_driver::AgentDriver for ClaudeDriver {
@@ -1164,6 +1288,9 @@ impl crate::agent_driver::AgentDriver for ClaudeDriver {
             // 初始模式来自 argv 里的 `--permission-mode`（connect 内解析）；
             // DriverConfig 不承载 mode——dispatch 通过 command argv 传递。
             permission_mode: None,
+            // （workbench-composer-input-polish D4）驱动实例的别名表进
+            // ConnectConfig，握手成功即拼装 AcpModelInfo 上报。
+            models: self.models.clone(),
             startup_timeout,
             evt_tx: evt_tx.clone(),
             pending_perms: pending_perms.clone(),
@@ -1192,6 +1319,17 @@ impl crate::agent_driver::AgentDriver for ClaudeDriver {
                 Err(e) => return Err(conn_err(e)),
             };
 
+        // （workbench-composer-input-polish 2.2/D5）握手成功即拼装模型选择面：
+        // current = 观察值（connect 阶段恒缺省）或 "default"，options = 别名
+        // 表（connect 内已归一：配置覆盖或内置）。
+        let model = Some(AcpModelInfo {
+            current: driver
+                .observed_model
+                .clone()
+                .unwrap_or_else(|| DEFAULT_CLAUDE_MODEL.to_string()),
+            options: driver.models.clone(),
+        });
+
         let run: futures::future::BoxFuture<'static, ()> =
             Box::pin(async move { driver.run(cmd_rx, cancel_rx).await });
 
@@ -1201,10 +1339,10 @@ impl crate::agent_driver::AgentDriver for ClaudeDriver {
             // Claude's conversation id IS the routing id — no separate ACP
             // session id to map; resume is addressed by the routing id itself.
             acp_session_id: None,
-            // Claude 暴露 configOptions/模型选择（add-acp-model-selection
-            // D4：无模型选项的 agent 不显示模型 UI）；handshake=None 时由
-            // manager 直接取该字段。
-            model: None,
+            // （workbench-composer-input-polish 2.2）claude 驱动的模型面 =
+            // 内置/配置别名表 + 观察值；handshake=None 时由 manager 直接取
+            // 该字段（此前恒 None，「无可用模型」误导占位的根源）。
+            model,
             handshake: None,
             run,
         })
@@ -1819,5 +1957,100 @@ mod tests {
         let m: Message = serde_json::from_value(v).expect("system parses");
         let evts = map_message("s1", &mut names, &m);
         assert!(evts.is_empty());
+    }
+
+    // ---- workbench-composer-input-polish 2.1/2.2/2.3：别名表与模型观察 ----
+
+    #[test]
+    fn builtin_alias_table_carries_explicit_default_entry() {
+        assert_eq!(
+            builtin_claude_models(),
+            vec![
+                "default".to_string(),
+                "opus".to_string(),
+                "sonnet".to_string(),
+                "haiku".to_string()
+            ]
+        );
+        assert_eq!(DEFAULT_CLAUDE_MODEL, "default");
+    }
+
+    #[test]
+    fn sdk_model_arg_maps_default_to_none_and_passes_ids_through() {
+        // "default" 特判为 None（= SDK 语义「用 CLI 默认模型」）；其余词汇
+        // （含全名 id）原样下发。
+        assert_eq!(sdk_model_arg("default"), None);
+        assert_eq!(sdk_model_arg("opus"), Some("opus"));
+        assert_eq!(sdk_model_arg("claude-sonnet-4-20250514"), Some("claude-sonnet-4-20250514"));
+    }
+
+    #[test]
+    fn sdk_model_arg_is_an_exact_match_case_sensitive() {
+        // 词汇匹配是精确匹配（workbench-composer-input-polish 边界）：大小写
+        // 变体与空白变体都不是 "default"，原样下发——模型 id 的合法性由
+        // agent 侧裁决，驱动不做归一（配置覆盖表逐字直传的同一语义）。
+        assert_eq!(sdk_model_arg("Default"), Some("Default"));
+        assert_eq!(sdk_model_arg("DEFAULT"), Some("DEFAULT"));
+        assert_eq!(sdk_model_arg(" default"), Some(" default"));
+        assert_eq!(sdk_model_arg(""), Some(""), "empty id is passed through, not defaulted");
+    }
+
+    #[test]
+    fn observed_model_reads_system_init_and_assistant_frames() {
+        // fake-claude 帧序形状：system init 帧带 model（优先观察源）。
+        let v = serde_json::json!({
+            "type": "system", "subtype": "init",
+            "session_id": "s1", "model": "fake",
+            "cwd": "/tmp", "tools": ["Bash"]
+        });
+        let m: Message = serde_json::from_value(v).expect("init frame parses");
+        assert_eq!(
+            observed_model_from_frame(&m).as_deref(),
+            Some("fake"),
+            "system init frame carries the current model"
+        );
+
+        // assistant 帧兜底：message 内层 model 字段。
+        let v = serde_json::json!({
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "hi"}
+            ], "model": "claude-opus-4-20250514"}
+        });
+        let m: Message = serde_json::from_value(v).expect("assistant frame parses");
+        assert_eq!(
+            observed_model_from_frame(&m).as_deref(),
+            Some("claude-opus-4-20250514")
+        );
+
+        // 无 model 字段的 assistant 帧 / Result / tool_result 帧：无观察。
+        let m = assistant_msg(serde_json::json!([{"type": "text", "text": "hi"}]));
+        assert_eq!(observed_model_from_frame(&m), None);
+        let v = serde_json::json!({
+            "type": "result", "subtype": "success", "is_error": false,
+            "duration_ms": 1, "duration_api_ms": 1, "num_turns": 1, "session_id": "s1",
+            "usage": {"input_tokens": 1, "output_tokens": 2}
+        });
+        let m: Message = serde_json::from_value(v).expect("result parses");
+        assert_eq!(observed_model_from_frame(&m), None, "result usage carries no model name");
+    }
+
+    #[test]
+    fn observation_skips_frames_that_repeat_the_current_value() {
+        // 纠偏判据（D5）：观察值 == 共享单元现值时不发 ModelChanged——
+        // run() 循环的去重逻辑钉死为纯函数语义（先提取再比对）。
+        let first = "fake";
+        let mut observed: Option<String> = None;
+        let v = serde_json::json!({
+            "type": "system", "subtype": "init",
+            "session_id": "s1", "model": first
+        });
+        let m: Message = serde_json::from_value(v).unwrap();
+        let next = observed_model_from_frame(&m);
+        assert_ne!(observed.as_deref(), next.as_deref(), "first observation changes");
+        observed = next;
+        // 同值帧不再触发。
+        let again = observed_model_from_frame(&m);
+        assert_eq!(observed.as_deref(), again.as_deref(), "repeat frame is a no-op");
     }
 }

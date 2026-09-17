@@ -22,7 +22,11 @@
  * (`loadModelCatalog`); ids the catalog cannot place fall into an explicit
  * "会话提供" group at the bottom; a wholly unavailable catalog degrades to a
  * flat list. Switching goes through `session/set_config_option`
- * (`POST /api/sessions/{key}/model`). No models = explicit honest note.
+ * (`POST /api/sessions/{key}/model`). A session that reports a current model
+ * but offers no switchable options renders the chip READ-ONLY
+ * (`workbench-composer-input-polish 2.4` — the honest observation display
+ * that replaces the misleading "no models" placeholder); no model surface at
+ * all keeps the explicit honest note.
  *
  * Core reachability is PUSHED (add-core-reachability-ws-push D4): the
  * composer consumes the structured state the app-shell passes down
@@ -34,12 +38,17 @@
  * surfaced inline via the shared `.callout-error` style and the message text
  * is preserved so the operator can retry.
  *
- * Command palette (session-slash-commands 3.1–3.2/D4): when the input's
- * first character is `/` and the focused session advertises commands
- * (`available_commands` — the agent's own advertisement, never hardcoded),
- * a filtered palette opens above the textarea (same floating recipe as the
- * model menu). Each row shows name + argument hint + description; ↑/↓ move
- * the highlight, Esc dismisses, and Enter/Tab are TWO-PHASE: the first
+ * Command palette (session-slash-commands 3.1–3.2/D4 + workbench-composer-
+ * input-polish 3.1/3.2): when the input's first character is `/` and the
+ * focused session advertises commands (`available_commands` — the agent's own
+ * advertisement, never hardcoded), a filtered palette opens above the
+ * textarea (same floating recipe as the model menu). Each row shows name +
+ * argument hint on a SINGLE compact line; the description is never rendered
+ * inline — it appears in a floating detail bubble (hover ∨ keyboard
+ * highlight, same rendering) anchored to the highlighted row, sanitized
+ * markdown via the shared `renderMarkdown()` pipeline, size-capped
+ * (360×240) and internally scrollable. ↑/↓ move the highlight (and the
+ * bubble with it), Esc dismisses, and Enter/Tab are TWO-PHASE: the first
  * press completes the highlighted command (inserts `name + space`, keeps
  * focus for arguments) and never submits; after the arguments the next
  * Enter submits normally. Filtering is a live case-insensitive prefix match
@@ -58,6 +67,7 @@
 
 import { LitElement, css, html, nothing, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
+import { unsafeHTML } from 'lit/directives/unsafe-html.js'
 import { api, type AvailableCommandInfo } from '../api/client.js'
 import type { CoreReachabilityState } from '../api/ws.js'
 import {
@@ -66,6 +76,7 @@ import {
   SESSION_PROVIDED_GROUP_LABEL,
   type ModelCatalog,
 } from '../api/model-catalog.js'
+import { renderMarkdown } from '../components/markdown.js'
 import { icon } from '../components/icons.js'
 import { viewStyles } from '../styles/shared.js'
 import '@awesome.me/webawesome/dist/components/textarea/textarea.js'
@@ -183,6 +194,17 @@ export class SebasWorkbenchComposer extends LitElement {
    * 请求；用户修改文本后清除，可再提交。
    */
   @state() private slashNotice: string | null = null
+  /**
+   * （workbench-composer-input-polish 3.2/D3）命令面板 hover 行下标：hover
+   * 与键盘高亮两态同源出泡——hover 优先，未 hover 时回落到键盘高亮行。
+   * `null` = 指针不在任何行上。
+   */
+  @state() private hoverIndex: number | null = null
+  /**
+   * （3.2/D1）气泡的垂直锚点（面板坐标系内高亮行的 offsetTop，运行时
+   * 布局读取；jsdom 恒 0）。`null` = 无法锚定（面板未开/行不存在）。
+   */
+  @state() private bubbleTop: number | null = null
 
   /**
    * 提交门的不可达视图（add-core-reachability-ws-push D4）：消费下传的
@@ -224,6 +246,7 @@ export class SebasWorkbenchComposer extends LitElement {
       // detail 后经 sessionCommands 到达）。
       this.paletteDismissed = false
       this.paletteIndex = 0
+      this.hoverIndex = null
       this.slashNotice = null
       const prev = changed.get('sessionKey')
       if (prev !== undefined && this.sessionKey !== prev) this.text = ''
@@ -233,7 +256,18 @@ export class SebasWorkbenchComposer extends LitElement {
     if (changed.has('text')) {
       this.paletteDismissed = false
       this.paletteIndex = 0
+      this.hoverIndex = null
       this.slashNotice = null
+    }
+    // （3.2/D1）气泡锚点跟随高亮/hover/候选表变化（面板重开时也要重算）。
+    if (
+      changed.has('paletteIndex') ||
+      changed.has('hoverIndex') ||
+      changed.has('text') ||
+      changed.has('sessionCommands') ||
+      changed.has('paletteDismissed')
+    ) {
+      this.syncBubbleTop()
     }
   }
 
@@ -461,7 +495,11 @@ export class SebasWorkbenchComposer extends LitElement {
     return name
   }
 
-  /** 面板浮层（3.1）：定位与视觉照抄 model 菜单（textarea 上方弹出）。 */
+  /**
+   * 面板浮层（3.1，workbench-composer-input-polish 行收敛）：定位与视觉
+   * 照抄 model 菜单（textarea 上方弹出）。行只渲染「/命令名 + 参数提示」
+   * 单行——描述不再内联铺开（spec：描述只能经 hover/高亮气泡呈现）。
+   */
   private renderCommandPalette() {
     if (!this.paletteOpen()) return nothing
     const items = this.filteredCommands()
@@ -471,6 +509,7 @@ export class SebasWorkbenchComposer extends LitElement {
         role="listbox"
         aria-label="Session commands"
         data-testid="command-palette"
+        @scroll=${() => this.syncBubbleTop()}
       >
         ${items.map((c, i) => {
           const selected = i === this.paletteIndex
@@ -482,15 +521,75 @@ export class SebasWorkbenchComposer extends LitElement {
               aria-selected=${selected ? 'true' : 'false'}
               data-command=${c.name}
               @click=${() => this.completeCommand(c.name)}
+              @mouseenter=${() => {
+                this.hoverIndex = i
+                this.syncBubbleTop()
+              }}
+              @mouseleave=${() => {
+                this.hoverIndex = null
+                this.syncBubbleTop()
+              }}
             >
               <span class="menu-item-label">/${c.name}</span>
               ${c.hint ? html`<span class="cmd-hint">${c.hint}</span>` : nothing}
-              ${c.description
-                ? html`<span class="cmd-desc">${c.description}</span>`
-                : nothing}
             </button>
           `
         })}
+      </div>
+    `
+  }
+
+  /**
+   * （3.2/D3）气泡目标行：hover 优先（鼠标态），未 hover 回落键盘高亮
+   * 行——两态共用同一渲染，↑/↓ 移动高亮即移动气泡（键盘可达）。越界钳位
+   * （候选表实时收缩时 hover/高亮下标可能瞬时指向不存在的行）。
+   */
+  private bubbleIndex(): number {
+    const count = this.filteredCommands().length
+    const raw = this.hoverIndex ?? this.paletteIndex
+    return Math.min(Math.max(raw, 0), Math.max(0, count - 1))
+  }
+
+  /**
+   * （3.2/D1）把气泡垂直锚进 .cmd-palette 坐标系内高亮行的位置。面板是
+   * `overflow-y: auto` 的滚动容器，剪裁其绝对定位子级——气泡因此挂在面板
+   * 的定位锚（.input-wrap，无剪裁）上，右缘与面板右缘对齐（D2），垂直按
+   * 「面板 offsetTop + 行 offsetTop − 面板 scrollTop」追行。jsdom 无布局
+   * （offsetTop 恒 0），单测只断言出现/内容/消失，不断言像素。
+   */
+  private syncBubbleTop(): void {
+    const palette = this.renderRoot.querySelector<HTMLElement>('.cmd-palette')
+    if (!palette || !this.paletteOpen()) {
+      if (this.bubbleTop !== null) this.bubbleTop = null
+      return
+    }
+    const rows = palette.querySelectorAll<HTMLElement>('.menu-item')
+    const row = rows[this.bubbleIndex()]
+    if (!row) {
+      if (this.bubbleTop !== null) this.bubbleTop = null
+      return
+    }
+    const next = palette.offsetTop + row.offsetTop - palette.scrollTop
+    if (next !== this.bubbleTop) this.bubbleTop = next
+  }
+
+  /**
+   * （3.2/D3）描述气泡：hover 行 ∨ 键盘高亮行的 description 经
+   * `renderMarkdown()`（marked → DOMPurify 既有 sanitize 管线）注入。
+   * 无描述的行不出泡；面板关闭/命令表面缺席随 `paletteOpen()` 消失。
+   */
+  private renderCommandBubble() {
+    if (!this.paletteOpen()) return nothing
+    const target = this.filteredCommands()[this.bubbleIndex()]
+    if (!target?.description) return nothing
+    return html`
+      <div
+        class="cmd-bubble"
+        role="tooltip"
+        data-testid="command-bubble"
+        style="top: ${this.bubbleTop ?? 0}px"
+      >
+        <div class="cmd-bubble-body">${unsafeHTML(renderMarkdown(target.description))}</div>
       </div>
     `
   }
@@ -548,7 +647,19 @@ export class SebasWorkbenchComposer extends LitElement {
           >启动中…</span
         >`
       }
-      // 显式诚实态：该会话无可选模型，绝不渲染空菜单（agent-workbench
+      // （workbench-composer-input-polish 2.4）有观察 current 但无切换选项
+      // 的会话：芯片只读展示当前模型（spec「observed current model renders
+      // read-only」）——不再是误导性的「无可用模型」占位。
+      if (this.currentModel) {
+        return html`<span
+          class="chip chip-readonly"
+          data-testid="model-chip-readonly"
+          role="status"
+          title="该会话仅上报当前模型（无切换选项）"
+          >${icon('zap', 12)}<span class="chip-label">${this.currentModel}</span></span
+        >`
+      }
+      // 显式诚实态：该会话既无选项也无观察值，绝不渲染空菜单（agent-workbench
       // delta「chip without session models is stated honestly」）。
       return html`<span
         class="label placeholder model-chip-empty"
@@ -701,6 +812,7 @@ export class SebasWorkbenchComposer extends LitElement {
       <div class="composer">
         <div class="input-wrap">
           ${this.renderCommandPalette()}
+          ${this.renderCommandBubble()}
           <wa-textarea
             placeholder="Ask for follow-up changes…"
             aria-label="Message"
@@ -824,11 +936,6 @@ export class SebasWorkbenchComposer extends LitElement {
         padding: 4px;
         z-index: 20;
       }
-      .cmd-palette .menu-item {
-        flex-wrap: wrap;
-        row-gap: 2px;
-      }
-      /* 键盘高亮态：与 hover 同视觉（design D4 键盘可达）。 */
       .cmd-palette .menu-item.highlighted {
         background: var(--sebas-surface-2);
         color: var(--sebas-text-bright);
@@ -842,13 +949,33 @@ export class SebasWorkbenchComposer extends LitElement {
         color: var(--sebas-text-faint);
         font-style: italic;
       }
-      .cmd-palette .cmd-desc {
-        flex-basis: 100%;
-        font-size: 0.7rem;
-        color: var(--sebas-text-faint);
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+      /* （workbench-composer-input-polish 3.2/D1）描述气泡：挂在 .input-wrap
+         （面板的定位锚，无 overflow 剪裁——面板自身是滚动容器，剪裁其绝对
+         定位子级），右缘与面板右缘对齐（D2：面板 left:0/right:0 铺满
+         input-wrap，right:0 即面板右缘），垂直 top 由 syncBubbleTop() 按高
+         亮行追行。尺寸上限 D2：360×240，超出内部滚动。 */
+      .cmd-bubble {
+        position: absolute;
+        right: 0;
+        max-width: 360px;
+        max-height: 240px;
+        overflow-y: auto;
+        background: var(--sebas-surface);
+        border: 1px solid var(--sebas-border-strong);
+        border-radius: var(--sebas-radius-md);
+        box-shadow: var(--sebas-shadow-2);
+        padding: 8px 10px;
+        font-size: 0.74rem;
+        line-height: 1.45;
+        color: var(--sebas-text-dim);
+        z-index: 21;
+        pointer-events: none;
+      }
+      .cmd-bubble-body > :first-child {
+        margin-top: 0;
+      }
+      .cmd-bubble-body > :last-child {
+        margin-bottom: 0;
       }
       /* 剥掉 wa-textarea 自带的底色/边框/阴影，只留纯文本输入区；高度随
          分割面拉伸（resize=none 关掉组件自带的拖角，5.2 的分割线是唯一的
@@ -950,6 +1077,15 @@ export class SebasWorkbenchComposer extends LitElement {
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+      }
+      /* （2.4）只读态芯片：有观察 current、无切换选项——纯状态展示，不响应
+         指针（role=status，无菜单可开）。 */
+      .chip.chip-readonly {
+        cursor: default;
+      }
+      .chip.chip-readonly:hover {
+        color: var(--sebas-text-dim);
+        border-color: var(--sebas-border);
       }
       .model-chip-empty {
         font-size: 0.72rem;

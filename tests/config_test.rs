@@ -1,4 +1,4 @@
-use sebas::config::Config;
+use sebas::config::{AgentConfig, Config};
 
 #[test]
 fn minimal_config_loads_with_defaults() {
@@ -266,4 +266,102 @@ download_dir = "{}/sub"
     let cfg = Config::parse(&toml).unwrap();
     assert!(cfg.validate_runtime().is_err());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── workbench-composer-input-polish 2.1：[acp.agents.<name>] models 覆盖 ──
+
+/// 键缺省（`models` 不出现）= 内置别名表（default/opus/sonnet/haiku）。
+#[test]
+fn claude_models_key_absent_falls_back_to_builtin_aliases() {
+    let toml = r#"
+[acp.agents.claude]
+driver = "claude"
+path = "/bin/cat"
+"#;
+    let cfg = Config::parse(toml).unwrap();
+    let AgentConfig::Claude(c) = cfg.acp.agents.get("claude").unwrap() else {
+        panic!("claude agent must parse as Claude config");
+    };
+    assert!(c.models.is_none(), "key absent must deserialize to None");
+    assert_eq!(
+        c.resolved_models(),
+        vec![
+            "default".to_string(),
+            "opus".to_string(),
+            "sonnet".to_string(),
+            "haiku".to_string()
+        ]
+    );
+}
+
+/// 非空 `models` 列表整体替换内置表（全名模型 id 亦可进入词汇）。
+#[test]
+fn claude_models_key_overrides_builtin_aliases() {
+    let toml = r#"
+[acp.agents.claude]
+driver = "claude"
+path = "/bin/cat"
+models = ["sonnet[1m]", "claude-opus-4-20250514"]
+"#;
+    let cfg = Config::parse(toml).unwrap();
+    let AgentConfig::Claude(c) = cfg.acp.agents.get("claude").unwrap() else {
+        panic!("claude agent must parse as Claude config");
+    };
+    assert_eq!(
+        c.resolved_models(),
+        vec!["sonnet[1m]".to_string(), "claude-opus-4-20250514".to_string()]
+    );
+}
+
+/// 覆盖表逐字直传（spec：「exactly that list」）：重复项不去重、大小写不归
+/// 一、含 `default` 的自定义表不特殊化——别名表是操作员的原文词汇，归一
+/// 语义只存在于 SetModel 的 `"default"` 精确特判（driver 侧 sdk_model_arg）。
+#[test]
+fn claude_models_override_is_verbatim_no_dedup_or_normalization() {
+    let toml = r#"
+[acp.agents.claude]
+driver = "claude"
+path = "/bin/cat"
+models = ["default", "Opus", "opus", "opus", "sonnet[1m]"]
+"#;
+    let cfg = Config::parse(toml).unwrap();
+    let AgentConfig::Claude(c) = cfg.acp.agents.get("claude").unwrap() else {
+        panic!("claude agent must parse as Claude config");
+    };
+    assert_eq!(
+        c.resolved_models(),
+        vec![
+            "default".to_string(),
+            "Opus".to_string(),
+            "opus".to_string(),
+            "opus".to_string(),
+            "sonnet[1m]".to_string(),
+        ],
+        "override table must pass through verbatim (order, duplicates, case)"
+    );
+}
+
+/// 显式空表没有可选词汇，等效「未覆盖」——回退内置（任务 2.1）。
+#[test]
+fn claude_models_empty_list_falls_back_to_builtin_aliases() {
+    let toml = r#"
+[acp.agents.claude]
+driver = "claude"
+path = "/bin/cat"
+models = []
+"#;
+    let cfg = Config::parse(toml).unwrap();
+    let AgentConfig::Claude(c) = cfg.acp.agents.get("claude").unwrap() else {
+        panic!("claude agent must parse as Claude config");
+    };
+    assert_eq!(c.models.as_deref(), Some(&[][..]), "empty list deserializes to Some(empty)");
+    assert_eq!(
+        c.resolved_models(),
+        vec![
+            "default".to_string(),
+            "opus".to_string(),
+            "sonnet".to_string(),
+            "haiku".to_string()
+        ]
+    );
 }

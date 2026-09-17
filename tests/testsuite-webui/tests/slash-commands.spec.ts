@@ -4,7 +4,10 @@
  * advertises goal/compact via `--advertise-commands`).
  *
  * - 命令面板: typing the first char `/` opens the palette listing the
- *   advertised table — command name + argumentHint + description (3.1).
+ *   advertised table — one compact row per command: command name +
+ *   argumentHint (3.1). The description is NOT rendered inline: it appears
+ *   in the detail bubble anchored to the highlighted (or hovered) row
+ *   (workbench-composer-input-polish 3.1/3.2).
  * - 增量过滤: typing narrows the candidates; a prefix with no match keeps
  *   the panel hidden (3.2).
  * - 两段式补全: picking a completion inserts `name + space`, keeps focus in
@@ -54,22 +57,37 @@ test.describe('slash 命令面板（session-slash-commands）', () => {
       await expect(detail.sessionHead).toBeVisible()
 
       // `/` (command-name segment, no whitespace) opens the palette with the
-      // full advertised table: name + param hint + description (3.1).
+      // full advertised table — one compact row per command: name + param
+      // hint only (workbench-composer-input-polish 3.1); the description
+      // moved into the detail bubble (3.2), rendered for the keyboard
+      // highlight (the palette opens with the first option highlighted; the
+      // hover path shares the same rendering and is unit-covered — the
+      // vertical workbench overlay intercepts pointer events here, see the
+      // finding below).
       const palette = page.locator('sebas-workbench-composer [data-testid="command-palette"]')
+      const bubble = page.locator('sebas-workbench-composer [data-testid="command-bubble"]')
       await workbench.composerTextarea.fill('/')
       await expect(palette).toBeVisible()
       const goal = palette.locator('[data-command="goal"]')
       await expect(goal).toContainText('/goal')
       await expect(goal).toContainText('<condition>')
-      await expect(goal).toContainText('Track a goal across turns')
+      // Row collapse (3.1): the description is no longer inline in the row.
+      await expect(goal).not.toContainText('Track a goal across turns')
+      // Bubble (3.2): the highlighted row's description renders as sanitized
+      // markdown inside the bounded bubble anchored to that row.
+      await expect(bubble).toBeVisible()
+      await expect(bubble).toContainText('Track a goal across turns')
       const compact = palette.locator('[data-command="compact"]')
       await expect(compact).toContainText('/compact')
-      await expect(compact).toContainText('Clear conversation context')
+      await expect(compact).not.toContainText('Clear conversation context')
 
-      // Incremental filter (3.2): `c` narrows to compact; goal drops out.
+      // Incremental filter (3.2): `c` narrows to compact; goal drops out and
+      // the bubble follows the (reset) highlight onto compact's description.
       await workbench.composerTextarea.pressSequentially('c')
       await expect(palette.locator('[data-command="goal"]')).toHaveCount(0)
       await expect(palette.locator('[data-command="compact"]')).toBeVisible()
+      await expect(bubble).toContainText('Clear conversation context')
+      await expect(bubble).not.toContainText('Track a goal across turns')
 
       // Two-stage completion via KEYBOARD (3.1's primary path): Tab inserts
       // `compact ` (name + space), closes the palette, focus stays in the
@@ -81,6 +99,9 @@ test.describe('slash 命令面板（session-slash-commands）', () => {
       await expect(compact).toHaveAttribute('aria-selected', 'true')
       await workbench.composerTextarea.press('Tab')
       await expect(palette).toBeHidden()
+      // Palette closed → the detail bubble collapses with it (3.2 collapse
+      // timing: Esc / completion / surface absence all close the palette).
+      await expect(bubble).toHaveCount(0)
       await expect(workbench.composerTextarea).toHaveValue('/compact ')
 
       // Enter submits. `/compact` is the dispatch built-in: accepted (no

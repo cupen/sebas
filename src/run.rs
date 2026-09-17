@@ -40,7 +40,10 @@ fn build_agent_registry(cfg: &Config) -> HashMap<String, AgentEntry> {
         .iter()
         .map(|(slug, agent_cfg)| {
             let driver: Arc<dyn AgentDriver> = match agent_cfg {
-                AgentConfig::Claude(_) => Arc::new(ClaudeDriver),
+                // （workbench-composer-input-polish 2.1）claude 驱动实例携带
+                // 各自的模型别名表：`[acp.agents.<slug>] models` 覆盖值，缺省
+                // /空表回退内置（resolved_models 单点归一）。
+                AgentConfig::Claude(c) => Arc::new(ClaudeDriver::with_models(c.resolved_models())),
                 AgentConfig::Acp { .. } => Arc::new(AcpDriver),
             };
             let entry = AgentEntry {
