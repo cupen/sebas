@@ -123,9 +123,18 @@ export class SebasWorkbenchComposer extends LitElement {
   @property({ attribute: false }) currentModel: string | null = null
   /**
    * （workbench-interaction-polish 4.3，design D4）聚焦会话是否有 turn 在飞
-   * （status == Working）。dashboard 供数；turn 结束（WS 推送）自动复位。
+   * （fix-pending-queue-liveness 3.1 起：dashboard 供数 = 引擎事实
+   * `turn_engaged`（WORKING ∨ 泊车 ∨ spawn 窗口），旧 core 缺省回退
+   * status_slug === 'working'）。turn 结束（WS 推送）自动复位。
    */
   @property({ type: Boolean }) turnInFlight = false
+  /**
+   * （fix-pending-queue-liveness 3.2）聚焦会话在等操作者的权限批复（泊车）。
+   * turn 在飞 + 泊车：排队形态附「等待你的审批」指示（提交读作排在一次可
+   * 回答的提问后面）；空输入仍是停止方块（spec「stop stays reachable while
+   * parked」）。
+   */
+  @property({ type: Boolean }) waitingApproval = false
   /**
    * （workbench-live-conversation-flow 3.2）聚焦会话的子进程正在拉起
    * （0-turn 占位激活中 / Dormant resume 在途）。模型芯片据此显示
@@ -616,6 +625,24 @@ export class SebasWorkbenchComposer extends LitElement {
     )
   }
 
+  /**
+   * 泊车指示（fix-pending-queue-liveness 3.2）：会话在等操作者的权限批复时
+   * 贴着提交控件就地呈现——排队提交读作「排在一次可回答的提问后面」，而
+   * 不是消失进一个无法解释的队列（spec「submission while a permission
+   * prompt is parked queues visibly」）。空输入的停止态同样可见（停止在
+   * 泊车态可达的另一半契约）。
+   */
+  private renderParkedHint() {
+    if (!this.turnInFlight || !this.waitingApproval) return nothing
+    return html`<span
+      class="parked-hint"
+      data-testid="parked-hint"
+      role="status"
+      title="会话在等你的权限批复：提交将排队，直到你处理审批"
+      >等待你的审批</span
+    >`
+  }
+
   /** 提交控件：按 submitState() 渲染五态（design D4）。 */
   private renderSubmitButton() {
     const state = this.submitState()
@@ -709,6 +736,7 @@ export class SebasWorkbenchComposer extends LitElement {
           </div>
           <div class="right-tools">
             ${this.renderModelChip()}
+            ${this.renderParkedHint()}
             ${this.renderSubmitButton()}
           </div>
         </div>
@@ -997,6 +1025,13 @@ export class SebasWorkbenchComposer extends LitElement {
         font-weight: 700;
       }
       /* ── 提交控件状态机（design D4）──────────────────────────────────── */
+      /* 泊车指示（fix-pending-queue-liveness 3.2）：提交控件左侧的就地状态
+         词——等待批复 = 你的回合。signal 强调色与审查卡同源。 */
+      .parked-hint {
+        font-size: 0.72rem;
+        color: var(--sebas-signal);
+        white-space: nowrap;
+      }
       /* 28px accent icon send button; disabled dims instead of vanishing. */
       .send-button {
         width: 28px;

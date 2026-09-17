@@ -947,6 +947,10 @@ impl RemoteProjection {
             // （session-slash-commands）远端行的命令表同样不在节点链路投影
             // 面上——如实空表（前端无命令面板），待节点链路统一透出后再接。
             available_commands: Vec::new(),
+            // fix-pending-queue-liveness 2.3：远端行的回合占用事实——节点流
+            // 活跃（OnIt）或在等审批即占用。远端队列不归本进程（Non-goal：
+            // 不动远端节点会话），保守取这两个可见事实。
+            turn_engaged: parked > 0 || node_phase == "active",
         })
     }
 }

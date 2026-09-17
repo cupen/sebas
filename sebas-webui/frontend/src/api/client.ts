@@ -122,6 +122,12 @@ export interface SessionRow {
    * 面板、不拦截 `/` 输入）。
    */
   available_commands?: AvailableCommandInfo[]
+  /**
+   * （fix-pending-queue-liveness 2.3）「回合占用」的引擎事实（WORKING ∨
+   * 泊车 ∨ spawn 窗口）。只在 true 时上 wire：键缺省 = 旧 core 组合，消费
+   * 方回退 `status_slug === 'working'` 判定。
+   */
+  turn_engaged?: boolean
 }
 
 export interface SessionSummary {
@@ -150,6 +156,12 @@ export interface SessionSummary {
    * 可选：空表不上 wire；缺省/空 = 无命令表面。
    */
   available_commands?: AvailableCommandInfo[]
+  /**
+   * （fix-pending-queue-liveness 2.3）「回合占用」的引擎事实（WORKING ∨
+   * 泊车 ∨ spawn 窗口）。只在 true 时上 wire：键缺省 = 旧 core 组合，消费
+   * 方回退 `status_slug === 'working'` 判定。
+   */
+  turn_engaged?: boolean
   /**
    * Focused session only（workbench-conversation-view 1.4）: the conversation
    * as one ordered entry sequence, same shape as the detail endpoint.
@@ -330,6 +342,12 @@ export interface SessionDetail {
    * wire（旧 core 组合下键缺省）；缺省/空 = 无命令表面。
    */
   available_commands?: AvailableCommandInfo[]
+  /**
+   * （fix-pending-queue-liveness 2.3）「回合占用」的引擎事实（WORKING ∨
+   * 泊车 ∨ spawn 窗口）。只在 true 时上 wire：键缺省 = 旧 core 组合，消费
+   * 方回退 `status_slug === 'working'` 判定。
+   */
+  turn_engaged?: boolean
 }
 
 /**

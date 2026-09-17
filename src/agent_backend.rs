@@ -131,6 +131,9 @@ impl NativeSession {
             // AgentEvent 词汇不动，命令表恒空（composer 不渲染面板、
             // `/` 前缀按普通文本放行的诚实退化）。
             available_commands: Vec::new(),
+            // fix-pending-queue-liveness 2.3：native 内核不产 ACP 卡片相位，
+            // 回合占用事实不可得——如实 false（前端回退 slug 判定）。
+            turn_engaged: false,
         }
     }
 }

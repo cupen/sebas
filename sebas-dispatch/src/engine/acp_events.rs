@@ -23,6 +23,10 @@ impl DispatchHandle {
     /// dispatch_acp_event → apply_event_to_out（同步 flush），仅把 **pump** 从
     /// dispatch_acp_event 改为 apply_event + debounce + flush_card。
     pub async fn apply_event_to_out(&self, session_id: String, event: &AcpEvent) {
+        // fix-pending-queue-liveness 2.1：事件时钟单点写入（即时漏斗臂——
+        // Finished / terminal Error / PermissionRequest 与 dispatch_acp_event
+        // 直达路径都经这里）。流式事件由 apply_event 的对称钩子覆盖。
+        self.stall.touch(&session_id).await;
         match event {
             AcpEvent::PermissionRequest {
                 session_id,
@@ -30,6 +34,12 @@ impl DispatchHandle {
                 tool_name,
                 args,
             } => {
+                // fix-pending-queue-liveness 2.1（design D2）：权限请求泊车
+                // 登记——该回合在等人批复，看门狗豁免计时；批复经 emit 的
+                // PermissionReply 钩子解除后重新计时。
+                self.stall
+                    .note_permission_parked(session_id, request_id)
+                    .await;
                 // 独立权限广播（design D6）：与飞书卡片路径并行，任何订阅者
                 // （如 webui InProcessBackend）都能拿到这条 PermissionRequest。
                 // 即使通道侧因无 ChannelKey 而丢弃卡片，广播也照发不误。
@@ -113,6 +123,9 @@ impl DispatchHandle {
                 // 终态会话同时清 root msg_id（与 web_close_session 对称），防止
                 // session_id→msg_id 条目长期积累内存泄漏 / 复用 id 继承 stale msg_id。
                 self.msgid.drop(sid).await;
+                // fix-pending-queue-liveness：停滞看门狗的时钟与泊车登记随
+                // 会话消亡清空（复用 id 不继承 stale 事实）。
+                self.stall.drop_session(sid).await;
             }
             AcpEvent::Error {
                 terminal: false, ..

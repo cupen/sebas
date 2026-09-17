@@ -203,6 +203,12 @@ pub struct SessionRow {
     /// 键不上 wire（旧前端看到的形状不变）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub available_commands: Vec<sebas_acp::AvailableCommand>,
+    /// （fix-pending-queue-liveness 2.3）「回合占用」的引擎事实（WORKING ∨
+    /// 泊车 ∨ spawn 窗口）。提交控件的排队/停止形态据此判定；只在 `true`
+    /// 时上 wire——键缺省 = 旧 core 组合，前端回退 `status_slug === 'working'`
+    /// 判定（design D3 / Migration Plan）。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub turn_engaged: bool,
 }
 
 /// Dashboard overview data.

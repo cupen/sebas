@@ -403,6 +403,10 @@ export class SebasApp extends LitElement {
     // add-core-reachability-ws-push D4：订阅 core.reachability 翻转推送
     // （shell 常驻，订阅不漏帧；初始态由连接建立时的 get 补齐）。
     this.unsubscribeWs = sharedWs.subscribe(this.onCoreReachabilityEvent)
+    // fix-pending-queue-liveness 2.2：停滞回合被看门狗强制收尾 → warn 分级
+    // 通知就地呈现（点名会话与释放的搁浅条目数）。shell 常驻订阅，会话无
+    // 论是否聚焦都可见。
+    this.unsubscribeStall = sharedWs.subscribe(this.onSessionTurnStalled)
     // 会话过期 / 中途启用鉴权：任何 API 401 都把界面切回登录页。首启设置
     // 页态除外——零用户时登录门永不可过（没有凭据能试）。
     setUnauthorizedHandler(() => {
@@ -434,6 +438,31 @@ export class SebasApp extends LitElement {
     if (ev.type !== 'core.reachability') return
     const { ok, kind, cause } = ev as { type: 'core.reachability'; ok: boolean; kind?: CoreReachabilityState['kind']; cause?: string }
     this.applyCoreReachability({ ok, ...(kind ? { kind } : {}), ...(cause ? { cause } : {}) })
+  }
+
+  private unsubscribeStall?: () => void
+
+  /**
+   * fix-pending-queue-liveness 2.2：看门狗强制收尾通知（warn 低档）。文案
+   * 点名会话与释放的搁浅条目数；dedupeKey 按会话隔离，8s 去重窗内同一会话
+   * 的重复帧不刷屏。
+   */
+  private onSessionTurnStalled = (ev: { type: string }): void => {
+    if (ev.type !== 'session.turn_stalled') return
+    const { session_id, released } = ev as {
+      type: 'session.turn_stalled'
+      session_id: string
+      released: number
+    }
+    // encoded key 的尾段是会话引用（`channel%00reference`）——呈现用人读词，
+    // 不展示编码形态。
+    const label = decodeURIComponent(session_id.split('%00').pop() ?? session_id)
+    const releasedText = released > 0 ? `，${released} 条待执行提交已解除卡死` : ''
+    notify({
+      level: 'warn',
+      message: `会话「${label}」的回合长时间无任何事件，已被强制收尾${releasedText}。`,
+      dedupeKey: `session.turn_stalled:${session_id}`,
+    })
   }
 
   /**
@@ -529,6 +558,8 @@ export class SebasApp extends LitElement {
     window.removeEventListener('sebas:ws-state', this.onWsState)
     this.unsubscribeWs?.()
     this.unsubscribeWs = null
+    this.unsubscribeStall?.()
+    this.unsubscribeStall = undefined
     super.disconnectedCallback()
   }
 

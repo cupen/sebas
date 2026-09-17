@@ -323,6 +323,13 @@ pub struct DispatchConfig {
     pub channel_buffer: usize,
     #[serde(default = "default_max_concurrent")]
     pub max_concurrent_sessions: usize,
+    /// （fix-pending-queue-liveness 1.2）回合停滞看门狗阈值（秒）：WORKING
+    /// 会话在无泊车审批、且持续该时长**没有任何事件**到达时，引擎强制把回合
+    /// 收尾到终态、drain 待执行队列，并发出 warn 通知。`0` = 关闭看门狗。
+    /// 默认 600（10 分钟）：claude 驱动自带的 hang 升级链（5m 静默 →
+    /// interrupt ×3 → SIGTERM）先于它触发，看门狗只兜驱动判不了的场景。
+    #[serde(default = "default_turn_stall_timeout")]
+    pub turn_stall_timeout: u64,
 }
 
 impl Default for DispatchConfig {
@@ -331,6 +338,7 @@ impl Default for DispatchConfig {
             state_file: default_state_file(),
             channel_buffer: default_channel_buffer(),
             max_concurrent_sessions: default_max_concurrent(),
+            turn_stall_timeout: default_turn_stall_timeout(),
         }
     }
 }
@@ -343,6 +351,9 @@ fn default_channel_buffer() -> usize {
 }
 fn default_max_concurrent() -> usize {
     32
+}
+fn default_turn_stall_timeout() -> u64 {
+    600
 }
 
 fn default_node_link_listen() -> String {

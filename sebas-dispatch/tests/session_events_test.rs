@@ -151,6 +151,9 @@ async fn applying_events_to_snapshot_reproduces_router_state() {
             // workbench-turn-queue 5.2：丢弃标注事件不携带可折叠的全量状态，
             // 折叠测试对它无操作（会话本身随 Removed 离开缓存）。
             SessionEvent::PendingDropped { .. } => {}
+            // fix-pending-queue-liveness：停滞收尾通知同样不携带全量状态，
+            // 折叠测试对它无操作。
+            SessionEvent::TurnStalled { .. } => {}
             SessionEvent::Resync => {}
         }
     }

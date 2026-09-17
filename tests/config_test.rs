@@ -13,8 +13,37 @@ owner_id = "ou_x"
     // defaults filled
     assert_eq!(cfg.acp.idle_kill_for("claude"), 172800);
     assert_eq!(cfg.dispatch.max_concurrent_sessions, 32);
+    // fix-pending-queue-liveness 1.2：看门狗阈值默认 600s。
+    assert_eq!(cfg.dispatch.turn_stall_timeout, 600);
     assert_eq!(cfg.log.level, "info");
     assert!(cfg.log.file.is_none());
+}
+
+/// fix-pending-queue-liveness 1.2：`[dispatch] turn_stall_timeout` 显式配置
+/// 生效；`0` = 关闭看门狗（合法值，不是校验错误）。
+#[test]
+fn turn_stall_timeout_overrides_and_zero_disables() {
+    let toml = r#"
+[feishu]
+app_id = "cli_x"
+app_secret = "sec"
+
+[dispatch]
+turn_stall_timeout = 90
+"#;
+    let cfg = Config::parse(toml).expect("parse");
+    assert_eq!(cfg.dispatch.turn_stall_timeout, 90);
+
+    let toml = r#"
+[feishu]
+app_id = "cli_x"
+app_secret = "sec"
+
+[dispatch]
+turn_stall_timeout = 0
+"#;
+    let cfg = Config::parse(toml).expect("0 must parse (guard disabled)");
+    assert_eq!(cfg.dispatch.turn_stall_timeout, 0, "0 = watchdog off");
 }
 
 #[test]

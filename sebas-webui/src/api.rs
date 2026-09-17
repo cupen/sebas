@@ -304,6 +304,11 @@ pub async fn session_detail(
         data["available_commands"] =
             serde_json::to_value(&info.available_commands).unwrap_or_default();
     }
+    // fix-pending-queue-liveness 2.3：回合占用事实（同 summary 的插键规则：
+    // 只在 true 时上 wire，键缺省 = 前端回退 status_slug === 'working'）。
+    if info.turn_engaged {
+        data["turn_engaged"] = serde_json::Value::Bool(true);
+    }
     Json(data).into_response()
 }
 
@@ -2257,6 +2262,16 @@ fn session_event_to_frame(ev: SessionEvent) -> Option<WebUiEvent> {
                     priority: d.priority,
                 })
                 .collect(),
+        }),
+        // fix-pending-queue-liveness 2.2：看门狗强制收尾的事实转发给前端，
+        // 分级通知的低档（warn）就地呈现（点名会话与释放条目数）。
+        SessionEvent::TurnStalled {
+            channel,
+            key,
+            released,
+        } => Some(WebUiEvent::SessionTurnStalled {
+            session_id: encode_channel_key(&channel, &key),
+            released,
         }),
         SessionEvent::Resync => None,
     }

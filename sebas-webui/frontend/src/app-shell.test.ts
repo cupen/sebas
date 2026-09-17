@@ -93,7 +93,7 @@ vi.mock('./views/workbench-composer.js', () => ({
 
 import { matchRoute, redirectFor } from './router.js'
 import { ROUTES, SebasApp } from './app-shell.js'
-import { resetNotices } from './notify.js'
+import { resetNotices, subscribeNotices } from './notify.js'
 import { APP_TAGLINE } from './branding.js'
 import './views/dashboard.js'
 import { readFileSync } from 'node:fs'
@@ -338,8 +338,7 @@ describe('deep-link reachability (workbench-conversation-view 3.1)', () => {
  * add-webui-tiered-notices 3.2：旧 app-shell `ws-banner` 已删除，`/ws` 断线
  * 收编为通知层的持续 warn 驻留横幅（重连即消，`sebas:refetch` 钩子不动）。
  */
-describe('ws 断线 → 持续 warn 驻留横幅（add-webui-tiered-notices 3.2）', () => {
-  /** 让子组件（通知层/横幅）的 Lit 更新落定。 */
+describe('ws 断线 → 持续 warn 驻留横幅（add-webui-tiered-notices 3.2）', () => {  /** 让子组件（通知层/横幅）的 Lit 更新落定。 */
   async function flush(el: SebasApp): Promise<void> {
     await new Promise((r) => setTimeout(r, 0))
     await new Promise((r) => setTimeout(r, 0))
@@ -374,6 +373,72 @@ describe('ws 断线 → 持续 warn 驻留横幅（add-webui-tiered-notices 3.2�
     window.dispatchEvent(new CustomEvent('sebas:ws-state', { detail: { connected: true } }))
     await flush(el)
     expect(layer.shadowRoot.querySelector('[data-testid="ws-down-banner"]')).toBeNull()
+    el.remove()
+  })
+})
+
+/**
+ * fix-pending-queue-liveness 2.2：看门狗强制收尾的 warn 分级通知——shell
+ * 常驻订阅 `session.turn_stalled`，就地弹 warn toast 点名会话（encoded key
+ * 尾段解码成人读引用）与释放的搁浅条目数（released=0 不带释放句）；
+ * dedupeKey 按会话隔离，8s 去重窗内同一会话的重复帧不刷屏，别的会话
+ * 各自成条。core-session-channel「 SHALL emit a visible warning notice」
+ * 的呈现半边（引擎发射与帧形状由 Rust 侧单测钉住）。
+ */
+describe('session.turn_stalled → warn 分级通知（fix-pending-queue-liveness 2.2）', () => {
+  /** 让通知 store 广播 / Lit 重渲染都落定。 */
+  async function flush(el: SebasApp): Promise<void> {
+    await new Promise((r) => setTimeout(r, 0))
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+  }
+
+  function toasts(el: SebasApp): HTMLElement[] {
+    const layer = el.shadowRoot!.querySelector('sebas-notice-layer') as unknown as
+      | (HTMLElement & { shadowRoot: ShadowRoot })
+      | null
+    expect(layer).toBeTruthy()
+    return [...layer!.shadowRoot.querySelectorAll('wa-toast-item')]
+  }
+
+  it('names the session and released count at warn level, deduped per session', async () => {
+    const seen: { level: string; message: string; dedupeKey: string }[] = []
+    const unsubscribe = subscribeNotices((state) => {
+      seen.length = 0
+      seen.push(
+        ...state.items.map((it) => ({
+          level: it.level,
+          message: it.message,
+          dedupeKey: it.dedupeKey,
+        })),
+      )
+    })
+    const el = await mountShell()
+    await flush(el)
+    expect(toasts(el)).toHaveLength(0)
+
+    // encoded key 尾段要解码（`%20` → 空格）：呈现人读词，不展示编码形态。
+    wsMocks.emit({ type: 'session.turn_stalled', session_id: 'web%00proj%20x', released: 2 })
+    await flush(el)
+    expect(seen).toHaveLength(1)
+    expect(seen[0].level).toBe('warn')
+    expect(seen[0].message).toContain('「proj x」')
+    expect(seen[0].message).toContain('回合长时间无任何事件')
+    expect(seen[0].message).toContain('2 条待执行提交已解除卡死')
+    expect(seen[0].dedupeKey).toBe('session.turn_stalled:web%00proj%20x')
+    expect(toasts(el)).toHaveLength(1)
+
+    // 同会话重复帧在去重窗内静默丢弃；released=0 的会话成条但不带释放句。
+    wsMocks.emit({ type: 'session.turn_stalled', session_id: 'web%00proj%20x', released: 2 })
+    wsMocks.emit({ type: 'session.turn_stalled', session_id: 'web%00other', released: 0 })
+    await flush(el)
+    expect(seen).toHaveLength(2)
+    const other = seen.find((it) => it.dedupeKey === 'session.turn_stalled:web%00other')
+    expect(other?.message).toContain('「other」')
+    expect(other?.message).not.toContain('已解除卡死')
+    expect(toasts(el)).toHaveLength(2)
+
+    unsubscribe()
     el.remove()
   })
 })

@@ -40,6 +40,10 @@ pub enum WebUiEvent {
         session_id: String,
         dropped: Vec<PendingSubmissionView>,
     },
+    /// （fix-pending-queue-liveness 2.2）某会话的停滞回合被看门狗强制收尾。
+    /// `released` = 解除卡死的待执行提交条数；前端据此弹 warn 分级通知。
+    #[serde(rename = "session.turn_stalled")]
+    SessionTurnStalled { session_id: String, released: usize },
     /// Configuration was updated. No sender exists yet; the variant is
     /// reserved so clients must tolerate it (and unknown types) arriving.
     #[serde(rename = "config.updated")]
@@ -141,6 +145,18 @@ mod tests {
                     "dropped": [
                         {"id": 5, "text": "never ran", "disposition": "turn", "priority": true}
                     ]
+                }),
+            ),
+            // fix-pending-queue-liveness 2.2：停滞收尾通知帧点名会话与释放数。
+            (
+                WebUiEvent::SessionTurnStalled {
+                    session_id: "oc_b".into(),
+                    released: 2,
+                },
+                json!({
+                    "type": "session.turn_stalled",
+                    "session_id": "oc_b",
+                    "released": 2
                 }),
             ),
             (WebUiEvent::ConfigUpdated, json!({"type": "config.updated"})),

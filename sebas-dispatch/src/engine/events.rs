@@ -141,6 +141,14 @@ pub struct SessionInfo {
     /// 的 wire 形状一致）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub available_commands: Vec<sebas_acp::AvailableCommand>,
+    /// （fix-pending-queue-liveness 2.3，design D3）**回合占用**的引擎事实：
+    /// WORKING 相位 ∨ 泊车审批在等 ∨ spawn 窗口。呈现层据此驱动「turn 在飞」
+    /// 判定（提交控件排队/停止形态），不再猜展示词 slug——`waiting` 等呈现
+    /// 词只服务徽标配色。`#[serde(default)]` 兼容旧快照/旧事件；序列化只在
+    /// `true` 时上 wire（webui 投影层职责），缺省 = 旧前端的
+    /// `status_slug === 'working'` 回退判定（Migration Plan）。
+    #[serde(default)]
+    pub turn_engaged: bool,
 }
 
 /// 可见回复段的计数口径（rail-declutter-unread D2，用户拍板「可见回复段」）：
@@ -210,6 +218,14 @@ pub enum SessionEvent {
         channel: String,
         key: String,
         dropped: Vec<crate::state::PendingSubmission>,
+    },
+    /// （fix-pending-queue-liveness 2.2，design D5）回合停滞被看门狗强制
+    /// 收尾：点名会话与释放的搁浅待执行提交数。分级通知的低档（warn）由
+    /// 呈现层据此就地呈现——引擎不关心通知形状，只发事实。
+    TurnStalled {
+        channel: String,
+        key: String,
+        released: usize,
     },
     /// Emitted by channel clients (never by the router itself) after a
     /// reconnect: subscribers should re-snapshot because the client resumed
@@ -445,6 +461,8 @@ mod tests {
             effective_mode: None,
             // rail-declutter-unread：msg_count 随 SessionInfo 往返。
             msg_count: 0,
+            // fix-pending-queue-liveness 2.3：turn_engaged 随 SessionInfo 往返。
+            turn_engaged: true,
             // session-slash-commands：命令表随 SessionInfo 往返。
             available_commands: vec![
                 sebas_acp::AvailableCommand {
@@ -524,6 +542,8 @@ mod tests {
             desired_mode: None,
             effective_mode: None,
             msg_count: 0,
+            // fix-pending-queue-liveness 2.3：turn_engaged 缺省兼容。
+            turn_engaged: false,
             // session-slash-commands：无发现能力会话的命令表恒空。
             available_commands: Vec::new(),
         };
@@ -678,6 +698,8 @@ fn session_info_usage_field_is_additive() {
         desired_mode: None,
         effective_mode: None,
         msg_count: 3,
+        // fix-pending-queue-liveness 2.3：usage 段用例顺带覆盖 turn_engaged。
+        turn_engaged: false,
         available_commands: Vec::new(),
     };
     let json = serde_json::to_string(&full).unwrap();
@@ -719,6 +741,8 @@ fn session_info_available_commands_field_is_additive() {
         desired_mode: None,
         effective_mode: None,
         msg_count: 0,
+        // fix-pending-queue-liveness 2.3：turn_engaged 随 SessionInfo 往返。
+        turn_engaged: true,
         available_commands: vec![sebas_acp::AvailableCommand {
             name: "goal".into(),
             description: "Set a goal".into(),
@@ -856,4 +880,63 @@ fn chat_message_count_ignores_noise_and_empty_entries() {
         assert_eq!(back, ev);
         assert!(json.contains("\"channel\":\"web\""));
         assert!(json.contains("\"entries\":["));
+    }
+
+    /// fix-pending-queue-liveness 2.3：`turn_engaged` 字段的 serde 兼容。
+    /// 旧 core 报文（无该键）→ 反序列化 false（前端回退 slug 判定）；
+    /// 新 core 完整往返；wire 形状带布尔键。
+    #[test]
+    fn session_info_turn_engaged_field_is_additive() {
+        let legacy = r#"{"channel":"web","key":"engage-1","session_id":"s1","status":"active","phase":null,"user_prompt":null,"last_active_unix":1,"project_dir":null,"current_model":null,"available_models":null,"agent_kind":null}"#;
+        let back: SessionInfo = serde_json::from_str(legacy).unwrap();
+        assert!(
+            !back.turn_engaged,
+            "missing key must deserialize to not-engaged (legacy fallback semantics)"
+        );
+
+        let engaged = SessionInfo {
+            channel: "web".into(),
+            key: "engage-2".into(),
+            session_id: Some("s1".into()),
+            status: "active".into(),
+            phase: Some("OnIt".into()),
+            user_prompt: None,
+            last_active_unix: 1,
+            project_dir: None,
+            current_model: None,
+            available_models: None,
+            agent_kind: None,
+            usage: None,
+            backend: None,
+            pending: Vec::new(),
+            remote: None,
+            desired_mode: None,
+            effective_mode: None,
+            msg_count: 0,
+            turn_engaged: true,
+            available_commands: Vec::new(),
+        };
+        let json = serde_json::to_string(&engaged).unwrap();
+        let back: SessionInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, engaged);
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["turn_engaged"], true);
+    }
+
+    /// fix-pending-queue-liveness 2.2：TurnStalled 事件携带会话寻址与释放的
+    /// 搁浅提交数，wire 形状带 snake_case 的 type 标签，serde 完整往返。
+    #[test]
+    fn turn_stalled_event_round_trips() {
+        let ev = SessionEvent::TurnStalled {
+            channel: "web".into(),
+            key: "web-stall".into(),
+            released: 2,
+        };
+        let json = serde_json::to_value(&ev).unwrap();
+        assert_eq!(json["type"], "turn_stalled");
+        assert_eq!(json["channel"], "web");
+        assert_eq!(json["key"], "web-stall");
+        assert_eq!(json["released"], 2);
+        let back: SessionEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(back, ev);
     }

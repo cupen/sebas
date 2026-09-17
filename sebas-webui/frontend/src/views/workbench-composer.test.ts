@@ -83,6 +83,7 @@ async function mount(initial: Partial<SebasWorkbenchComposer> = {}) {
   if (initial.sessionModels !== undefined) el.sessionModels = initial.sessionModels
   if (initial.currentModel !== undefined) el.currentModel = initial.currentModel
   if (initial.turnInFlight !== undefined) el.turnInFlight = initial.turnInFlight
+  if (initial.waitingApproval !== undefined) el.waitingApproval = initial.waitingApproval
   if (initial.sessionCommands !== undefined) el.sessionCommands = initial.sessionCommands
   if (initial.childStarting !== undefined) el.childStarting = initial.childStarting
   if (initial.currentMode !== undefined) el.currentMode = initial.currentMode
@@ -564,6 +565,58 @@ describe('submit control state machine (4.3, design D4)', () => {
     await el.updateComplete
     const err = el.shadowRoot?.querySelector('[data-testid="composer-error"]')
     expect(err?.textContent).toContain('会话空闲')
+  })
+})
+
+// ── fix-pending-queue-liveness 3.2 泊车指示与 waiting/starting 形态 ──────
+
+describe('sebas-workbench-composer (parked / spawn-window submit control)', () => {
+  function stateOf(el: SebasWorkbenchComposer): string | null {
+    return (
+      el.shadowRoot
+        ?.querySelector('[data-testid="submit-control"]')
+        ?.getAttribute('data-state') ?? null
+    )
+  }
+
+  it('parked with empty input still offers stop and shows the waiting-on-operator hint', async () => {
+    const el = await mount({ ...focus, turnInFlight: true, waitingApproval: true })
+    // 停止在泊车态可达（不用去找审批卡）。
+    expect(stateOf(el)).toBe('stop')
+    const hint = el.shadowRoot?.querySelector('[data-testid="parked-hint"]')
+    expect(hint).toBeTruthy()
+    expect(hint?.textContent).toContain('等待你的审批')
+  })
+
+  it('parked with text queues visibly together with the waiting-on-operator indication', async () => {
+    const el = await mount({ ...focus, turnInFlight: true, waitingApproval: true })
+    await type(el, 'after you decide')
+    expect(stateOf(el)).toBe('queued')
+    const hint = el.shadowRoot?.querySelector('[data-testid="parked-hint"]')
+    expect(hint?.textContent).toContain('等待你的审批')
+    // 提交仍走排队路径（语义不变：泊车下提交 = 排在可回答的提问后面）。
+    ;(el.shadowRoot?.querySelector('[data-testid="submit-control"]') as HTMLElement).click()
+    await new Promise((r) => setTimeout(r, 0))
+    expect(api.sendMessage).toHaveBeenCalledWith('web%00web-1', 'after you decide')
+  })
+
+  it('running turn without the parked fact renders no hint', async () => {
+    const el = await mount({ ...focus, turnInFlight: true, waitingApproval: false })
+    await type(el, 'queue behind')
+    expect(stateOf(el)).toBe('queued')
+    expect(el.shadowRoot?.querySelector('[data-testid="parked-hint"]')).toBeNull()
+  })
+
+  it('spawn window (starting) with text offers the queued affordance', async () => {
+    // spawn 窗口经 turn_engaged 折算成 turnInFlight=true（dashboard 供数）；
+    // composer 的形态判定对 starting 与 working 一致——都是「回合占用」。
+    const el = await mount({ ...focus, turnInFlight: true, childStarting: true })
+    await type(el, 'first message staged')
+    expect(stateOf(el)).toBe('queued')
+    expect(el.shadowRoot?.querySelector('[data-testid="parked-hint"]')).toBeNull()
+    el.turnInFlight = false
+    await el.updateComplete
+    expect(stateOf(el)).toBe('send')
   })
 })
 

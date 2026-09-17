@@ -1751,6 +1751,7 @@ mod workspace_root_tests {
             effective_mode: None,
             msg_count: 0,
             available_commands: Vec::new(),
+            turn_engaged: false,
         }
     }
 
