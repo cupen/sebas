@@ -307,6 +307,8 @@ pub async fn run(
                 webui_workspace_root.display()
             );
         }
+        // add-system-dir-denylist 3.1：root 落在系统目录上只警示不阻断。
+        crate::config::warn_if_workspace_root_is_system_dir(&webui_workspace_root);
         // 登录鉴权与独立 webui 进程同一套（add-webui-multiuser-rbac 3.4，
         // design D4）：开关关闭 → disabled 态全路由免登录；打开 → 建库 +
         // env 引导 root，零用户留给首启设置页。装配提到 bind 之前，让非

@@ -612,6 +612,22 @@ pub fn resolve_workspace_root(
     }
 }
 
+/// add-system-dir-denylist 3.1：workspace root 解析为系统目录时打启动 warn
+/// （不阻断——名单对 root 只提示不执法，注册层才是执法线）。判定与注册
+/// 执法同源（sebas_webui::fs::is_system_dir，双侧 canonicalize 精确匹配），
+/// 抽成小函数供两处装配点（run.rs core --webui / webui_cmd.rs 独立 webui）
+/// 共用与直测。
+pub(crate) fn warn_if_workspace_root_is_system_dir(root: &std::path::Path) {
+    if sebas_webui::fs::is_system_dir(root) {
+        let msg = format!(
+            "workspace root 解析为系统目录 {}；系统目录不可注册为项目，且此配置下注册围栏形同虚设——建议改指具体工作区（[workspace] root 或 SEBAS_WORKSPACE_ROOT）",
+            root.display()
+        );
+        tracing::warn!("{msg}");
+        eprintln!("warning: {msg}");
+    }
+}
+
 fn default_webui_enabled() -> bool {
     true
 }
@@ -1203,6 +1219,25 @@ allowed_roots = ["~/work", "/srv/projects"]
         let (root, fell_back) = resolve_workspace_root(Some("  "), Some(""), cwd);
         assert_eq!(root, cwd, "空白取值视同未配置");
         assert!(fell_back);
+    }
+
+    #[test]
+    fn warn_if_workspace_root_is_system_dir_flags_denylist_hits_only() {
+        // add-system-dir-denylist 3.1：告警判定与注册执法同源。函数无返回值
+        // （可观察行为是 stderr/tracing 告警），这里钉两态谓词 + 装配函数
+        // 不 panic：unix 用 `/` 断言命中分支，tempdir 与不存在路径是放行分支。
+        assert!(
+            sebas_webui::fs::is_system_dir(std::path::Path::new("/")),
+            "unix `/` must hit the denylist (warn branch)"
+        );
+        let t = tempfile::tempdir().unwrap();
+        assert!(
+            !sebas_webui::fs::is_system_dir(t.path()),
+            "tempdir under /tmp must pass (silent branch)"
+        );
+        warn_if_workspace_root_is_system_dir(std::path::Path::new("/"));
+        warn_if_workspace_root_is_system_dir(t.path());
+        warn_if_workspace_root_is_system_dir(std::path::Path::new("/no/such/root"));
     }
 
     #[test]

@@ -1587,6 +1587,16 @@ pub async fn projects_add(
             "路径超出允许范围: 不在 workspace root 内",
         );
     }
+    // add-system-dir-denylist：containment 之后插入名单判定（spec：既有越界
+    // 判定保持先行次序与文案）。判定内部两侧 canonicalize——`..` 段、别名与
+    // symlink 都还原成真实路径再精确比对；候选不可解析不在此拒（交给下方
+    // 既有存在性分支，保持文案）。400 点名**入参**，不回显服务端解析形。
+    if crate::fs::is_system_dir(dir) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            format!("系统目录不可注册为项目: {path}"),
+        );
+    }
     if !dir.exists() {
         return api_error(StatusCode::BAD_REQUEST, format!("路径不存在: {path}"));
     }
