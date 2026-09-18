@@ -45,7 +45,10 @@ async fn dump_uses_structured_channel_key_round_trip() {
     m.insert(feishu.clone(), Mapping::active("s1"))
         .await
         .unwrap();
-    m.insert(web.clone(), Mapping::active("s2")).await.unwrap();
+    // web 会话必须从属于项目（无项目的非飞书行会被 dump 按不变量跳过）。
+    let mut web_mapping = Mapping::active("s2");
+    web_mapping.project_dir = Some("/tmp/proj-web".into());
+    m.insert(web.clone(), web_mapping).await.unwrap();
 
     let json = m.dump_json().await.unwrap();
     // key 内容：`{"channel":"feishu","reference":"oc_x\u0000t1"}`（转义后）。

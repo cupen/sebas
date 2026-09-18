@@ -154,14 +154,17 @@ test.describe('agent 对话覆盖', () => {
         timeout: 10_000,
       })
       await expect(transcript.turnWith('missing-agent').first()).toBeVisible()
-      // （1.3）行相位如实是失败态：`spawn-failed`（映射停在 SpawnFailed）或
-      // `failed`（已收敛到 Failed）——绝不是 spawning/queued/working，绝不
-      // 假装在跑。这条断言走本轮已取的 API 真源而非 rail 圆点：spawn 失败
-      // 会话的项目路径没落定，行归不到任何项目，rail 里没有它的行——这类会话
-      // 的可见面就是工作台内显（本用例上文已钉）。
-      expect(['spawn-failed', 'failed']).toContain(
-        rows.find((r) => r.encoded_key === key)?.status_slug,
-      )
+      // （3.6/D6b）状态只挂 rail 行首圆点一处；「会话必须从属于项目」下，
+      // spawn 失败的会话**仍归属它的项目**（失败只翻状态，不抹身份），所以
+      // 它照常出现在项目行下（这正是本用例要钉的：会话不从项目里消失）。
+      // 圆点读的是操作者七词 slug —— spawn 失败 = `failed`（raw status 才是
+      // `spawn-failed`）。
+      //
+      // 行标签：失败会话没有 chat_id/session_id_short，`fullSessionLabel` 落到
+      // 键尾段（= reference），故按 reference 定位而不是 prompt（它不是 rail
+      // 行名）。
+      const reference = decodeURIComponent(key).split('\0').pop()!
+      await detail.expectSessionStatus(reference, 'failed')
 
       expect(collector.clean()).toEqual([])
     })

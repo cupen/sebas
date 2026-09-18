@@ -10,6 +10,7 @@ import { sharedWs } from '../api/shared-ws.js'
 import { navigate } from '../router.js'
 import { icon } from '../components/icons.js'
 import { viewStyles } from '../styles/shared.js'
+import type { Project } from '../api/client.js'
 import { fullSessionLabel } from './project-rail.js'
 import { agentUnavailableLabel } from './new-session-dialog.js'
 import { guardedHide } from '../components/wa-hide-guard.js'
@@ -26,6 +27,9 @@ export class SebasSessions extends LitElement {
   @state() private error = ''
   @state() private prompt = ''
   @state() private agent = ''
+  /** 目标项目（**必填**：会话必须从属于项目，无项目 = 无归属无可见面）。 */
+  @state() private projectId = ''
+  @state() private projects: Project[] = []
   @state() private kinds: AgentKindInfo[] = []
   @state() private creating = false
   @state() private closeTarget: string | null = null
@@ -67,6 +71,10 @@ export class SebasSessions extends LitElement {
       .composer wa-input {
         flex: 1;
         min-width: 220px;
+      }
+      .composer .project-select,
+      .composer .backend-select {
+        min-width: 150px;
       }
       .grid {
         display: grid;
@@ -181,8 +189,28 @@ export class SebasSessions extends LitElement {
     super.connectedCallback()
     this.refetch()
     this.loadKinds()
+    this.loadProjects()
     this.unsubscribe = sharedWs.subscribe(() => this.refetch())
     window.addEventListener('sebas:refetch', this.refetch)
+  }
+
+  /**
+   * 项目列表（创建表单的必选目标）。空项目表 = 无可创建目标——表单禁用并
+   * 说明原因，绝不放行一个无项目会话。
+   */
+  private loadProjects(): void {
+    api
+      .projects
+      .list()
+      .then((d) => {
+        this.projects = d.projects
+        if (!this.projectId) {
+          this.projectId = d.projects[0]?.id ?? ''
+        }
+      })
+      .catch(() => {
+        this.projects = []
+      })
   }
 
   private loadKinds(): void {
@@ -220,10 +248,20 @@ export class SebasSessions extends LitElement {
 
   private async create(e: Event): Promise<void> {
     e.preventDefault()
+    // 项目必选：没有目标项目就没有归属，服务端也会 400——这里先如实拦住，
+    // 并给出可操作的说明而不是发一个注定失败的请求。
+    if (!this.projectId) {
+      this.error = '会话必须从属于项目：请先注册并在上方选择一个项目。'
+      return
+    }
     if (!this.prompt.trim() || this.creating) return
     this.creating = true
     try {
-      const { key } = await api.createSession({ prompt: this.prompt.trim(), agent: this.agent })
+      const { key } = await api.createSession({
+        prompt: this.prompt.trim(),
+        agent: this.agent,
+        projectId: this.projectId,
+      })
       this.prompt = ''
       navigate(`/sessions/${key}`)
     } catch (err) {
@@ -306,6 +344,20 @@ export class SebasSessions extends LitElement {
             @input=${(e: Event) => (this.prompt = (e.target as HTMLInputElement).value)}
           ></wa-input>
           <wa-select
+            class="project-select"
+            aria-label="Project"
+            data-testid="new-session-project"
+            value=${this.projectId}
+            ?disabled=${this.projects.length === 0}
+            @change=${(e: Event) => {
+              this.projectId = (e.target as HTMLInputElement).value
+            }}
+          >
+            ${this.projects.length === 0
+              ? html`<wa-option value="" disabled>尚未注册项目</wa-option>`
+              : this.projects.map((p) => html`<wa-option value=${p.id}>${p.name}</wa-option>`)}
+          </wa-select>
+          <wa-select
             class="backend-select"
             aria-label="Agent"
             value=${this.agent}
@@ -323,7 +375,12 @@ export class SebasSessions extends LitElement {
                     >`,
             )}
           </wa-select>
-          <wa-button variant="brand" appearance="accent" ?loading=${this.creating} type="submit"
+          <wa-button
+            variant="brand"
+            appearance="accent"
+            ?loading=${this.creating}
+            ?disabled=${!this.projectId || this.projects.length === 0}
+            type="submit"
             >New session</wa-button
           >
         </div>

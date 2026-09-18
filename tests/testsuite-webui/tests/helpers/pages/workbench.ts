@@ -165,6 +165,18 @@ export class FocusedSession {
   }
 
   /**
+   * 指定会话行的相位（按行标签子串定位，不依赖「当前」标记）。会话行落在
+   * 项目行的折叠体里——先展开，否则行不在 DOM。
+   */
+  async expectSessionStatus(label: string, slug: string, timeout = 15_000): Promise<void> {
+    await this.expandAllProjects()
+    const dot = this.page
+      .locator('sebas-project-rail li.session-item', { hasText: label })
+      .locator('.session-dot')
+    await expect(dot).toHaveAttribute('data-status', slug, { timeout })
+  }
+
+  /**
    * All conversation bubble bodies (both sides) as text. 折叠体不算气泡：
    * `.body.fold-body`（tool/thinking 过程折叠）与 `.body.item-body`（二级条目）
    * 只在展开时渲染，混进来会让「气泡数」随折叠开合漂移（曾表现为 flaky）。
