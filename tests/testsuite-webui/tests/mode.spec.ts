@@ -75,7 +75,8 @@ test.describe('agent mode 选择', () => {
     const tag = head.locator('[data-testid="session-mode"]')
     await expect(tag).toBeVisible()
     await expect(tag).toHaveAttribute('data-mode', 'allow')
-    await expect(tag).toContainText('allow')
+    // 展示文案走共享词汇 modeBadgeLabel（4.2 模式章合一）：allow = 「放行」。
+    await expect(tag).toContainText('放行')
     expect(collector.clean()).toEqual([])
   })
 

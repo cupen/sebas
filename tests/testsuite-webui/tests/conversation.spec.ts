@@ -58,7 +58,7 @@ test.describe('对话视图（workbench-conversation-view）', () => {
       // Second round via the live composer (never send into a running turn).
       await detail.sendFollowUp(q2)
       await expect(detail.userTurn(q2)).toBeVisible({ timeout: 20_000 })
-      await expect(detail.statusBadge).toHaveAttribute('slug', 'done', { timeout: 20_000 })
+      await detail.expectStatus('done', 20000)
 
       // Alternation: operator turn q1 < agent reply < operator turn q2 in
       // the rendered conversation stream. badge 先到、转录气泡后落——
@@ -112,39 +112,42 @@ test.describe('对话视图（workbench-conversation-view）', () => {
       await expect(cards.all()).toHaveCount(0, { timeout: 15_000 })
 
       // The turn's process entries collect into ONE outer fold — NOT
-      // ordinary prose（workbench-natural-conversation-flow：summary 三段式
+      // ordinary prose（workbench-natural-conversation-flow：折叠行三段式
       // = `process` 标签 + 尾条目结构化 title（实时「进行中工具」）+ 条目
       // 计数；collapsed by default, the invocation payload hidden until
-      // expanded）.
+      // expanded——展开体懒渲染，收起时不在 DOM）.
       const fold = detail.processFold().first()
       await expect(fold).toBeVisible({ timeout: 15_000 })
-      await expect(fold.locator('summary .label')).toHaveText('process')
+      const outerLink = fold.locator('[data-testid="process-fold-link"]')
+      await expect(outerLink.locator('.label')).toHaveText('process')
       // 尾条目 = tool_result（结构化 title 同二级折叠），计数 = 2。
-      await expect(fold.locator('summary .running')).toHaveText('✓ Bash')
-      await expect(fold.locator('summary .fold-count')).toHaveText('2')
-      expect(await fold.getAttribute('open')).toBeNull()
+      await expect(outerLink.locator('.running')).toHaveText('✓ Bash')
+      await expect(outerLink.locator('.fold-count')).toHaveText('2')
+      await expect(outerLink).toHaveAttribute('aria-expanded', 'false')
+      await expect(fold.locator('.fold-body')).toHaveCount(0)
 
-      // Expand the outer fold (the same action a keyboard user's Enter on
-      // the summary triggers — native details/summary): second-level
-      // per-entry folds appear, themselves collapsed by default (2.2),
-      // titled by the backend's structured title. `.first()` — the outer
-      // summary precedes the nested per-entry summaries in DOM order.
-      await fold.locator('summary').first().click()
-      await expect(fold).toHaveAttribute('open', '')
+      // Expand the outer fold（键盘用户对折叠行按 Enter 的同一动作）:
+      // second-level per-entry folds appear, themselves collapsed by default
+      // (2.2), titled by the backend's structured title.
+      await outerLink.click()
+      await expect(outerLink).toHaveAttribute('aria-expanded', 'true')
       const items = detail.processItems()
       await expect(items).toHaveCount(2)
-      await expect(items.nth(0).locator('summary .item-title')).toHaveText('Bash · rm -rf /')
-      await expect(items.nth(1).locator('summary .item-title')).toHaveText('✓ Bash')
+      await expect(items.nth(0).locator('.item-title')).toHaveText('Bash · rm -rf /')
+      await expect(items.nth(1).locator('.item-title')).toHaveText('✓ Bash')
       for (let i = 0; i < 2; i++) {
-        expect(await items.nth(i).getAttribute('open')).toBeNull()
+        await expect(items.nth(i).locator('[data-testid="process-item-link"]')).toHaveAttribute(
+          'aria-expanded',
+          'false',
+        )
+        await expect(items.nth(i).locator('.item-body')).toHaveCount(0)
       }
 
       // Second-level expand reveals the invocation detail (its result text).
-      await items.nth(1).locator('summary').click()
-      await expect(items.nth(1)).toHaveAttribute('open', '')
-      await expect(items.nth(1)).toContainText('perm done')
+      await items.nth(1).locator('[data-testid="process-item-link"]').click()
+      await expect(items.nth(1).locator('.item-body')).toContainText('perm done')
       // The sibling fold stays collapsed — expansion is per entry.
-      expect(await items.nth(0).getAttribute('open')).toBeNull()
+      await expect(items.nth(0).locator('.item-body')).toHaveCount(0)
 
       expect(collector.clean()).toEqual([])
     })

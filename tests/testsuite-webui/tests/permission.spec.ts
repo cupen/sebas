@@ -48,8 +48,10 @@ test.describe('审批卡片旅程', () => {
 
       // Card resolved and removed; the transcript records the denial.
       await expect(cards.all()).toHaveCount(0, { timeout: 15_000 })
-      await expect(detail.turnWith('denied by fake').first()).toBeVisible({ timeout: 15_000 })
-      await expect(detail.statusBadge).toHaveAttribute('slug', 'done', { timeout: 15_000 })
+      // 工具结果文本住在 process 折叠里（默认收起 + 展开体懒渲染 + 定稿会
+      // 重分组）——轮询式展开到文本出现。
+      await detail.expectFoldedText('denied by fake')
+      await detail.expectStatus('done')
 
       expect(collector.clean()).toEqual([])
     })
@@ -63,8 +65,8 @@ test.describe('审批卡片旅程', () => {
       await cards.allowOnce().click()
 
       await expect(cards.all()).toHaveCount(0, { timeout: 15_000 })
-      await expect(detail.turnWith('perm done').first()).toBeVisible({ timeout: 15_000 })
-      await expect(detail.statusBadge).toHaveAttribute('slug', 'done', { timeout: 15_000 })
+      await detail.expectFoldedText('perm done')
+      await detail.expectStatus('done')
 
       expect(collector.clean()).toEqual([])
     })
@@ -83,14 +85,23 @@ test.describe('审批卡片旅程', () => {
       // First call: allow for session.
       await expect(cards.all().first()).toBeVisible({ timeout: 15_000 })
       await cards.allowSession().click()
-      await expect(detail.turnWith('perm done').first()).toBeVisible({ timeout: 15_000 })
-      await expect(detail.statusBadge).toHaveAttribute('slug', 'done', { timeout: 15_000 })
+      await detail.expectFoldedText('perm done')
+      await detail.expectStatus('done')
 
       // Second identical call in the SAME session: auto mode answers the gate
       // driver-side, so the turn completes with NO review card at all.
       await detail.sendFollowUp('perm')
-      await expect(detail.turnWith('perm done')).toHaveCount(2, { timeout: 20_000 })
-      await expect(detail.statusBadge).toHaveAttribute('slug', 'done', { timeout: 20_000 })
+      // 第二回合的折叠也是收起态——两处结果文本都可见才算两回合都落了。
+      await expect
+        .poll(
+          async () => {
+            await detail.expandAllFolds()
+            return detail.turnWith('perm done').count()
+          },
+          { timeout: 20_000 },
+        )
+        .toBe(2)
+      await detail.expectStatus('done', 20000)
       await expect(cards.all()).toHaveCount(0)
 
       expect(collector.clean()).toEqual([])
