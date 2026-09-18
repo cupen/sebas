@@ -526,6 +526,33 @@ async fn project_id_after_add(app: &axum::Router, path: &str) -> String {
         .to_string()
 }
 
+/// 建一个临时目录并注册为项目，返回其稳定 id。「会话必须从属于项目」：
+/// 创建会话的用例先经这里拿目标项目（fixture 已把 workspace root 钉在系统
+/// 临时目录，故注册必定界内）。
+async fn temp_project_id(app: &axum::Router, tag: &str) -> String {
+    let n = PROJECTS_TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("sebas-webui-{tag}-{n}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path_str = dir.to_string_lossy().to_string();
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/projects")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "path": &path_str }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED, "register {path_str}");
+    project_id_after_add(app, &path_str).await
+}
+
 #[tokio::test]
 async fn projects_list_empty() {
     let _env = isolated_projects().await;
@@ -1188,6 +1215,8 @@ async fn create_session_with_project_dir_binds_to_path() {
 #[tokio::test]
 async fn create_session_with_model_threads_spawn_and_mid_session_model_switch_works() {
     let (router, mut rx, app) = fixture().await;
+    let _env = isolated_projects().await;
+    let project_id = temp_project_id(&app, "model").await;
 
     // 1) create-with-model：POST 带 model → 201，且发出的 Out::WebSpawn 携带
     //    该 model（D3：会话建立后、首 prompt 前应用）。
@@ -1199,7 +1228,13 @@ async fn create_session_with_model_threads_spawn_and_mid_session_model_switch_wo
                 .uri("/api/sessions")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"prompt":"hello","model":"pro-model","agent":"opencode"}"#,
+                    serde_json::json!({
+                    "prompt": "hello",
+                    "model": "pro-model",
+                    "agent": "opencode",
+                    "project_id": project_id,
+                })
+                .to_string(),
                 ))
                 .unwrap(),
         )
@@ -1266,6 +1301,8 @@ async fn create_session_with_model_threads_spawn_and_mid_session_model_switch_wo
 #[tokio::test]
 async fn create_session_with_mode_threads_spawn_and_mid_session_mode_switch_works() {
     let (router, mut rx, app) = fixture().await;
+    let _env = isolated_projects().await;
+    let project_id = temp_project_id(&app, "mode").await;
 
     // 1) create-with-mode：POST 带 mode=allow → 201，Out::WebSpawn 携带该
     //    mode（desired 记入映射；argv 映射在 dispatch 侧）。
@@ -1277,7 +1314,13 @@ async fn create_session_with_mode_threads_spawn_and_mid_session_mode_switch_work
                 .uri("/api/sessions")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"prompt":"hello","agent":"opencode","mode":"allow"}"#,
+                    serde_json::json!({
+                    "prompt": "hello",
+                    "agent": "opencode",
+                    "mode": "allow",
+                    "project_id": project_id,
+                })
+                .to_string(),
                 ))
                 .unwrap(),
         )
@@ -1343,7 +1386,13 @@ async fn create_session_with_mode_threads_spawn_and_mid_session_mode_switch_work
                 .uri("/api/sessions")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"prompt":"x","agent":"opencode","mode":"plan"}"#,
+                    serde_json::json!({
+                    "prompt": "x",
+                    "agent": "opencode",
+                    "mode": "plan",
+                    "project_id": project_id,
+                })
+                .to_string(),
                 ))
                 .unwrap(),
         )
@@ -1376,6 +1425,8 @@ async fn create_session_with_mode_threads_spawn_and_mid_session_mode_switch_work
 #[tokio::test]
 async fn create_session_without_mode_reads_back_the_ask_default() {
     let (_router, _rx, app) = fixture().await;
+    let _env = isolated_projects().await;
+    let project_id = temp_project_id(&app, "ask").await;
 
     // POST 不带 mode → 201。
     let resp = app
@@ -1385,7 +1436,12 @@ async fn create_session_without_mode_reads_back_the_ask_default() {
                 .method("POST")
                 .uri("/api/sessions")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"prompt":"hello","agent":"opencode"}"#))
+                .body(Body::from(serde_json::json!({
+                    "prompt": "hello",
+                    "agent": "opencode",
+                    "project_id": project_id,
+                })
+                .to_string()))
                 .unwrap(),
         )
         .await

@@ -75,11 +75,13 @@ describe('api wire shapes', () => {
       model: null,
     })
 
-    await api.createSession({ prompt: 'inbox task', agent: 'claudecode' })
+    // 「会话必须从属于项目」：project_id 必填且恒随 wire 下发——没有
+    // 「省略 = inbox」这条路径（服务端无项目一律 400）。
+    await api.createSession({ prompt: 'another task', projectId: 'proj-9', agent: 'claudecode' })
     const [, init2] = fetchMock.mock.calls[1] as [string, RequestInit]
     expect(JSON.parse(String(init2.body))).toEqual({
-      prompt: 'inbox task',
-      project_id: null,
+      prompt: 'another task',
+      project_id: 'proj-9',
       agent: 'claudecode',
       model: null,
     })

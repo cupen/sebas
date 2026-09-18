@@ -33,14 +33,85 @@ async fn spawn_server() -> (
 /// Bind the router built over an arbitrary backend on an ephemeral port
 /// (add-core-reachability-ws-push 1.3: reachability tests drive a dedicated
 /// flip-controllable backend through the same wire).
+///
+/// add-workspace-root：本机项目注册必须落在 workspace root 内，本文件的
+/// 临时项目都在系统临时目录下，故把根钉到那里。
 async fn spawn_app(backend: Arc<dyn sebas_webui::SessionBackend>) -> String {
-    let app = build_router(backend, RouterInfo::default(), CardConfig::default());
+    let app = sebas_webui::server::build_router_with_workspace_root(
+        backend,
+        RouterInfo::default(),
+        CardConfig::default(),
+        Arc::new(sebas_webui::agent_kinds::ConfigAgentKindProvider::new(
+            Vec::new(),
+        )),
+        Arc::new(sebas_webui::auth::AuthHandle::disabled()),
+        std::env::temp_dir(),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
     format!("http://{addr}")
+}
+
+/// 注册表 env（`SEBAS_PROJECTS_PATH`）的隔离守卫：本文件的旅程要注册项目，
+/// 绝不能碰操作员真实注册表（进程级串行，防并发测试互相改写 env）。
+struct ProjectsEnvGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    prev: Option<String>,
+    path: std::path::PathBuf,
+}
+
+impl Drop for ProjectsEnvGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+        match &self.prev {
+            Some(p) => unsafe { std::env::set_var("SEBAS_PROJECTS_PATH", p) },
+            None => unsafe { std::env::remove_var("SEBAS_PROJECTS_PATH") },
+        }
+    }
+}
+
+static PROJECTS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static PROJECTS_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn isolated_projects() -> ProjectsEnvGuard {
+    let lock = PROJECTS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let n = PROJECTS_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("sebas-ws-projects-{n}.json"));
+    let prev = std::env::var("SEBAS_PROJECTS_PATH").ok();
+    unsafe {
+        std::env::set_var("SEBAS_PROJECTS_PATH", &path);
+    }
+    ProjectsEnvGuard {
+        _lock: lock,
+        prev,
+        path,
+    }
+}
+
+/// 注册一个临时目录为项目并返回稳定 id。「会话必须从属于项目」：经 WebUI
+/// 建立的会话都要带一个已注册的项目，`POST /api/sessions` 缺它一律 400。
+async fn temp_project(http: &reqwest::Client, base: &str) -> String {
+    let n = PROJECTS_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("sebas-ws-project-{n}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let resp = http
+        .post(format!("{base}/api/projects"))
+        .json(&serde_json::json!({ "path": dir.to_string_lossy() }))
+        .send()
+        .await
+        .expect("register project");
+    assert!(
+        resp.status().is_success(),
+        "register project: {}",
+        resp.status()
+    );
+    resp.json::<Value>().await.unwrap()["id"]
+        .as_str()
+        .expect("project id")
+        .to_string()
 }
 
 fn ws_url(base: &str) -> tokio_tungstenite::tungstenite::http::Request<()> {
@@ -107,6 +178,7 @@ async fn send_raw(
 #[tokio::test]
 async fn create_session_broadcasts_over_websocket() {
     let (base, _rx) = spawn_server().await;
+    let _env = isolated_projects();
 
     // Connect a WebSocket client.
     let (ws_stream, _) = tokio_tungstenite::connect_async(ws_url(&base))
@@ -116,9 +188,14 @@ async fn create_session_broadcasts_over_websocket() {
 
     // Create a session over the JSON API; the client must observe it live.
     let http = reqwest::Client::new();
+    let project_id = temp_project(&http, &base).await;
     let resp = http
         .post(format!("{base}/api/sessions"))
-        .json(&serde_json::json!({ "prompt": "hello", "agent": "claude" }))
+        .json(&serde_json::json!({
+            "prompt": "hello",
+            "agent": "claude",
+            "project_id": project_id,
+        }))
         .send()
         .await
         .expect("create request failed");
@@ -144,6 +221,7 @@ async fn create_session_broadcasts_over_websocket() {
 #[tokio::test]
 async fn one_client_disconnecting_does_not_starve_others() {
     let (base, _rx) = spawn_server().await;
+    let _env = isolated_projects();
 
     // Two clients; then the first disconnects.
     let (ws1, _) = tokio_tungstenite::connect_async(ws_url(&base))
@@ -166,9 +244,14 @@ async fn one_client_disconnecting_does_not_starve_others() {
     // A session close must still reach client 2. Seed a dormant session via
     // the API path: create (spawning) then close it.
     let http = reqwest::Client::new();
+    let project_id = temp_project(&http, &base).await;
     let resp = http
         .post(format!("{base}/api/sessions"))
-        .json(&serde_json::json!({ "prompt": "doomed", "agent": "claude" }))
+        .json(&serde_json::json!({
+            "prompt": "doomed",
+            "agent": "claude",
+            "project_id": project_id,
+        }))
         .send()
         .await
         .unwrap();

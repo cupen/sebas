@@ -48,8 +48,71 @@ async fn fixture() -> (
     let backend: Arc<dyn sebas_webui::SessionBackend> = Arc::new(
         sebas_webui::session_backend::InProcessBackend::new(router.clone()),
     );
-    let app = build_router(backend, RouterInfo::default(), CardConfig::default());
+    // add-workspace-root：本机项目注册必须落在 workspace root 内；本文件
+    // 的临时项目都在系统临时目录下，故把根钉到那里（同 session_endpoints_test）。
+    let app = sebas_webui::server::build_router_with_workspace_root(
+        backend,
+        RouterInfo::default(),
+        CardConfig::default(),
+        Arc::new(sebas_webui::agent_kinds::ConfigAgentKindProvider::new(
+            Vec::new(),
+        )),
+        Arc::new(sebas_webui::auth::AuthHandle::disabled()),
+        std::env::temp_dir(),
+    );
     (router, rx, app)
+}
+
+/// 注册表 env 隔离守卫 + 临时项目注册（「会话必须从属于项目」：创建会话的
+/// 用例都要先有一个已注册项目）。
+struct ProjectsEnvGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    prev: Option<String>,
+    path: std::path::PathBuf,
+}
+
+impl Drop for ProjectsEnvGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+        match &self.prev {
+            Some(p) => unsafe { std::env::set_var("SEBAS_PROJECTS_PATH", p) },
+            None => unsafe { std::env::remove_var("SEBAS_PROJECTS_PATH") },
+        }
+    }
+}
+
+static PROJECTS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static PROJECTS_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn isolated_projects() -> ProjectsEnvGuard {
+    let lock = PROJECTS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let n = PROJECTS_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("sebas-api-projects-{n}.json"));
+    let prev = std::env::var("SEBAS_PROJECTS_PATH").ok();
+    unsafe {
+        std::env::set_var("SEBAS_PROJECTS_PATH", &path);
+    }
+    ProjectsEnvGuard {
+        _lock: lock,
+        prev,
+        path,
+    }
+}
+
+/// 注册一个临时目录为项目并返回稳定 id。
+async fn temp_project(app: &axum::Router) -> String {
+    let n = PROJECTS_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("sebas-api-project-{n}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (status, body) = request(
+        app,
+        "POST",
+        "/api/projects",
+        Some(serde_json::json!({ "path": dir.to_string_lossy() }).to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "register project: {body}");
+    body["id"].as_str().expect("project id").to_string()
 }
 
 async fn request(
@@ -246,11 +309,16 @@ async fn settings_router_about_expose_page_data() {
 #[tokio::test]
 async fn create_session_returns_201_with_key() {
     let (_router, _rx, app) = fixture().await;
+    // 「会话必须从属于项目」：project_id 必填，先注册一个项目。
+    let _env = isolated_projects();
+    let project_id = temp_project(&app).await;
     let (status, v) = request(
         &app,
         "POST",
         "/api/sessions",
-        Some(r#"{"prompt": "hello", "agent": "claude"}"#.into()),
+        Some(format!(
+            r#"{{"prompt": "hello", "agent": "claude", "project_id": "{project_id}"}}"#
+        )),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "body: {v}");
@@ -264,6 +332,51 @@ async fn create_session_returns_201_with_key() {
         .map(|r| r["encoded_key"].as_str().unwrap())
         .collect();
     assert!(keys.contains(&key), "created session missing from list");
+}
+
+/// 「会话必须从属于项目」：没有项目就没有归属、没有 rail 行、没有状态面——
+/// 省略 / 空串 / 未知 id 一律 typed 400，绝不静默落一个无项目会话。
+#[tokio::test]
+async fn create_session_without_a_project_is_rejected_400() {
+    let (_router, _rx, app) = fixture().await;
+    let _env = isolated_projects();
+
+    for body in [
+        r#"{"prompt": "hello", "agent": "claude"}"#.to_string(),
+        r#"{"prompt": "hello", "agent": "claude", "project_id": null}"#.to_string(),
+        r#"{"prompt": "hello", "agent": "claude", "project_id": "  "}"#.to_string(),
+    ] {
+        let (status, v) = request(&app, "POST", "/api/sessions", Some(body.clone())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body {body}: {v}");
+        assert!(
+            v["error"].as_str().unwrap_or_default().contains("project_id"),
+            "拒绝文案必须点名 project_id：{v}"
+        );
+    }
+
+    // 未知 id 同样 400（不猜、不落孤儿）。
+    let (status, v) = request(
+        &app,
+        "POST",
+        "/api/sessions",
+        Some(r#"{"prompt": "hello", "agent": "claude", "project_id": "proj-nope"}"#.into()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {v}");
+    assert!(
+        v["error"].as_str().unwrap_or_default().contains("未知 project_id"),
+        "未知 id 的拒绝文案：{v}"
+    );
+
+    // 同一闸门对 0-turn 占位同样生效（不带 prompt 的空占位也必须属于项目）。
+    let (status, _) = request(
+        &app,
+        "POST",
+        "/api/sessions",
+        Some(r#"{"agent": "claude"}"#.into()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

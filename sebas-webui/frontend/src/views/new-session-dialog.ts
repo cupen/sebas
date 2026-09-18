@@ -63,7 +63,11 @@ export interface NewSessionDialogConfirm {
 export class SebasNewSessionDialog extends LitElement {
   /** 开合（rail 持有；项目行「+」打开）。 */
   @property({ type: Boolean }) open = false
-  /** 目标项目的稳定 id（创建请求的 project_id；`null` 不携带）。 */
+  /**
+   * 目标项目的稳定 id（创建请求的 project_id）。**会话必须从属于项目**：
+   * 创建只从项目行的「+」发起，`null` = 还没有目标——确认被拦下（不发请求），
+   * 因为无项目会话在服务端一律 400、在 rail 里也没有可见面。
+   */
   @property({ attribute: false }) projectId: string | null = null
   /** 项目名（对话框标题语境）。 */
   @property({ attribute: false }) projectName: string | null = null
@@ -182,9 +186,12 @@ export class SebasNewSessionDialog extends LitElement {
     }
   }
 
-  /** 确认门禁：agent 必选（spec「dialog requires an explicit agent」）。 */
+  /**
+   * 确认门禁：agent 必选（spec「dialog requires an explicit agent」），且必须
+   * 已有目标项目（无项目 = 无归属，服务端 400）。
+   */
   private get confirmDisabled(): boolean {
-    return !this.agent
+    return !this.agent || this.projectId === null || this.projectId === ''
   }
 
   private confirm(): void {
