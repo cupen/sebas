@@ -3,10 +3,10 @@
 //! terminal Error 立即发 ❌ + 清 mapping；通道关闭 drop_card + 退出。
 //! 不依赖 fake-claude 二进制。
 
-use sebas_acp::claude::session::AcpEvent;
-use sebas_dispatch::engine::{Out, DispatchHandle};
-use sebas_dispatch::state::{Mapping, SessionMap};
 use sebas::run::spawn_acp_pump;
+use sebas_acp::claude::session::AcpEvent;
+use sebas_dispatch::engine::{DispatchHandle, Out};
+use sebas_dispatch::state::{Mapping, SessionMap};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;

@@ -196,7 +196,8 @@ fn sync_conn(conn: Connection) -> Result<(Connection, SyncOutcome), SyncFail> {
             .map_err(|e| SyncFail::Fatal(format!("补列 {}.{} 失败: {e}", table_name, col.name)))?;
     }
     stamp_version(&tx).map_err(SyncFail::Fatal)?;
-    tx.commit().map_err(|e| SyncFail::Fatal(format!("补列事务提交失败: {e}")))?;
+    tx.commit()
+        .map_err(|e| SyncFail::Fatal(format!("补列事务提交失败: {e}")))?;
 
     let added_columns = alters.len();
     Ok((conn, SyncOutcome::Synced { added_columns }))
@@ -210,9 +211,7 @@ fn reset_and_rebuild(db_path: &Path) -> Result<Connection, String> {
         match std::fs::remove_file(&file) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(format!("重置状态库失败: 删除 {} 出错: {e}", file.display()))
-            }
+            Err(e) => return Err(format!("重置状态库失败: 删除 {} 出错: {e}", file.display())),
         }
     }
 
@@ -245,7 +244,10 @@ fn ensure_schema_meta(conn: &Connection) -> Result<(), String> {
 
 /// 写/更新版本键 (upsert)。结构一致时版本值差异仅经此更新, 不触发重置。
 fn stamp_version(conn: &Connection) -> Result<(), String> {
-    for (key, value) in [("version_format", VERSION_FORMAT), ("version", SCHEMA_VERSION)] {
+    for (key, value) in [
+        ("version_format", VERSION_FORMAT),
+        ("version", SCHEMA_VERSION),
+    ] {
         conn.execute(
             "INSERT INTO schema_meta (key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -259,7 +261,10 @@ fn stamp_version(conn: &Connection) -> Result<(), String> {
 /// 拼缺列补齐语句: `ALTER TABLE t ADD COLUMN col AFFINITY [NOT NULL] [DEFAULT d]`。
 /// 列名/默认值都来自编译期派生的常量, 非运行时输入。
 fn add_column_sql(table: &str, col: &SchemaColumn) -> String {
-    let mut sql = format!("ALTER TABLE {table} ADD COLUMN {} {}", col.name, col.affinity);
+    let mut sql = format!(
+        "ALTER TABLE {table} ADD COLUMN {} {}",
+        col.name, col.affinity
+    );
     if col.not_null {
         sql.push_str(" NOT NULL");
     }
@@ -308,8 +313,9 @@ fn type_affinity(decl: &str) -> &'static str {
 }
 
 fn list_user_tables(conn: &Connection) -> rusqlite::Result<Vec<String>> {
-    let mut stmt = conn
-        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")?;
+    let mut stmt = conn.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+    )?;
     let rows = stmt.query_map([], |row| row.get(0))?;
     rows.collect()
 }
@@ -356,14 +362,20 @@ mod tests {
         let mut stmt = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
             .unwrap();
-        stmt.query_map([], |r| r.get(0)).unwrap().flatten().collect()
+        stmt.query_map([], |r| r.get(0))
+            .unwrap()
+            .flatten()
+            .collect()
     }
 
     fn column_names(conn: &Connection, table: &str) -> Vec<String> {
         let mut stmt = conn
             .prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))
             .unwrap();
-        stmt.query_map([], |r| r.get(0)).unwrap().flatten().collect()
+        stmt.query_map([], |r| r.get(0))
+            .unwrap()
+            .flatten()
+            .collect()
     }
 
     /// 手工建一张"旧结构" projects (缺 sort_order 列) + 其余四表按注册 DDL,
@@ -400,10 +412,18 @@ mod tests {
 
         assert_eq!(outcome, SyncOutcome::FreshCreated);
         let tables = table_names(&conn);
-        for expected in
-            ["model_aliases", "projects", "providers", "schema_meta", "session_map", "settings"]
-        {
-            assert!(tables.iter().any(|t| t == expected), "缺表 {expected}: {tables:?}");
+        for expected in [
+            "model_aliases",
+            "projects",
+            "providers",
+            "schema_meta",
+            "session_map",
+            "settings",
+        ] {
+            assert!(
+                tables.iter().any(|t| t == expected),
+                "缺表 {expected}: {tables:?}"
+            );
         }
         assert_eq!(meta_get(&conn, "version_format").as_deref(), Some("date"));
         assert_eq!(meta_get(&conn, "version").as_deref(), Some(SCHEMA_VERSION));
@@ -462,7 +482,8 @@ mod tests {
         let (_dir, path) = temp_db("extracol.db");
         {
             let (conn, _) = open_and_sync(&path).unwrap();
-            conn.execute_batch("ALTER TABLE projects ADD COLUMN stale TEXT;").unwrap();
+            conn.execute_batch("ALTER TABLE projects ADD COLUMN stale TEXT;")
+                .unwrap();
             // 放一行数据证明重置是"删库重建", 不是保留数据
             conn.execute(
                 "INSERT INTO settings (key, value) VALUES ('marker', 'keepme')",
@@ -476,7 +497,10 @@ mod tests {
             SyncOutcome::Reset { reason } => reason,
             other => panic!("多余列应触发重置, 实际 {other:?}"),
         };
-        assert!(reason.contains("stale") && reason.contains("projects"), "日志要点名触发点: {reason}");
+        assert!(
+            reason.contains("stale") && reason.contains("projects"),
+            "日志要点名触发点: {reason}"
+        );
 
         assert!(!column_names(&conn, "projects").iter().any(|c| c == "stale"));
         let count: i64 = conn
@@ -576,7 +600,9 @@ mod tests {
         assert_eq!(meta_get(&conn, "version").as_deref(), Some(SCHEMA_VERSION));
         // 重置后是当前 model 的空 schema, 旧垃圾表不再存在
         assert!(!table_names(&conn).iter().any(|t| t == "legacy_junk"));
-        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
         assert_eq!(version, 0, "user_version 不再承载版本语义");
     }
 
@@ -588,7 +614,10 @@ mod tests {
             meta_set(&conn, "version_format", "semver");
         }
         let (_conn, outcome) = open_and_sync(&path).unwrap();
-        assert!(matches!(outcome, SyncOutcome::Reset { .. }), "未知格式应重置, 实际 {outcome:?}");
+        assert!(
+            matches!(outcome, SyncOutcome::Reset { .. }),
+            "未知格式应重置, 实际 {outcome:?}"
+        );
     }
 
     #[test]
@@ -606,13 +635,23 @@ mod tests {
         }
 
         let (conn, outcome) = open_and_sync(&path).unwrap();
-        assert_eq!(outcome, SyncOutcome::UpToDate, "结构一致时版本值不同绝不重置");
+        assert_eq!(
+            outcome,
+            SyncOutcome::UpToDate,
+            "结构一致时版本值不同绝不重置"
+        );
 
         let value: String = conn
-            .query_row("SELECT value FROM settings WHERE key = 'marker'", [], |r| r.get(0))
+            .query_row("SELECT value FROM settings WHERE key = 'marker'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(value, "keepme", "数据应原样保留");
-        assert_eq!(meta_get(&conn, "version").as_deref(), Some(SCHEMA_VERSION), "版本值随写更新");
+        assert_eq!(
+            meta_get(&conn, "version").as_deref(),
+            Some(SCHEMA_VERSION),
+            "版本值随写更新"
+        );
     }
 
     #[test]
@@ -622,11 +661,20 @@ mod tests {
         std::fs::write(&path, &garbage).unwrap();
 
         let err = open_and_sync(&path).err().expect("损坏库必须拒启");
-        assert!(err.contains("损坏") || err.contains("打开状态库失败"), "报错要说明损坏: {err}");
-        assert!(err.contains(path.file_name().unwrap().to_str().unwrap()), "报错要含路径: {err}");
+        assert!(
+            err.contains("损坏") || err.contains("打开状态库失败"),
+            "报错要说明损坏: {err}"
+        );
+        assert!(
+            err.contains(path.file_name().unwrap().to_str().unwrap()),
+            "报错要含路径: {err}"
+        );
 
         let after = std::fs::read(&path).unwrap();
-        assert_eq!(after, garbage, "损坏库文件一个字节都不能动 (重置不适用于损坏)");
+        assert_eq!(
+            after, garbage,
+            "损坏库文件一个字节都不能动 (重置不适用于损坏)"
+        );
     }
 
     #[test]
@@ -678,7 +726,10 @@ mod tests {
             ),
         ];
         for (table, cols) in want {
-            let reg = repo::REGISTERED_TABLES.iter().find(|t| t.name == *table).unwrap();
+            let reg = repo::REGISTERED_TABLES
+                .iter()
+                .find(|t| t.name == *table)
+                .unwrap();
             assert_eq!(reg.columns.len(), cols.len(), "表 {table} 列数不一致");
             for (col, (name, affinity)) in reg.columns.iter().zip(*cols) {
                 assert_eq!(col.name, *name, "表 {table} 列名不一致");

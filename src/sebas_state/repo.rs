@@ -5,7 +5,7 @@
 
 use crate::sebas_state::migration::TableSchema;
 use crate::sebas_state::writer::StateHandle;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use sebas_schema_derive::SchemaColumns;
 
 // ---- Provider state ----
@@ -14,8 +14,9 @@ use sebas_schema_derive::SchemaColumns;
 ///
 /// 读取 providers 表(含软删) + model_aliases 表, 与 `provider_state.rs` 的
 /// runtime 段合并。
-pub fn load_persisted_state(conn: &mut Connection) -> Result<sebas_dispatch::state_store::PersistedState, String> {
-    
+pub fn load_persisted_state(
+    conn: &mut Connection,
+) -> Result<sebas_dispatch::state_store::PersistedState, String> {
     use sebas_dispatch::state_store::PersistedState;
     use std::collections::BTreeMap;
 
@@ -102,9 +103,11 @@ pub fn load_persisted_state(conn: &mut Connection) -> Result<sebas_dispatch::sta
 /// 从 DB 加载 runtime 状态 (mode + default_selection)。
 fn load_runtime_state(
     conn: &mut Connection,
-) -> (sebas_dispatch::provider_state::ProviderMode, Option<sebas_dispatch::state_store::DefaultSelection>) {
+) -> (
+    sebas_dispatch::provider_state::ProviderMode,
+    Option<sebas_dispatch::state_store::DefaultSelection>,
+) {
     use sebas_dispatch::provider_state::ProviderMode;
-    
 
     let json: Option<String> = conn
         .query_row(
@@ -115,15 +118,13 @@ fn load_runtime_state(
         .ok();
 
     match json {
-        Some(raw) => {
-            match serde_json::from_str::<RuntimeStateRow>(&raw) {
-                Ok(row) => (row.mode, row.default_selection),
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to parse runtime_state, using defaults");
-                    (ProviderMode::default(), None)
-                }
+        Some(raw) => match serde_json::from_str::<RuntimeStateRow>(&raw) {
+            Ok(row) => (row.mode, row.default_selection),
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to parse runtime_state, using defaults");
+                (ProviderMode::default(), None)
             }
-        }
+        },
         None => (ProviderMode::default(), None),
     }
 }
@@ -131,7 +132,10 @@ fn load_runtime_state(
 /// 保存 PersistedState 到 DB。
 ///
 /// 写入 providers 表 (upsert + 软删) + 运行时状态到 settings 表。
-pub fn save_persisted_state(conn: &mut Connection, state: &sebas_dispatch::state_store::PersistedState) -> Result<(), String> {
+pub fn save_persisted_state(
+    conn: &mut Connection,
+    state: &sebas_dispatch::state_store::PersistedState,
+) -> Result<(), String> {
     let tx = conn
         .transaction()
         .map_err(|e| format!("保存状态事务开始失败: {e}"))?;
@@ -146,8 +150,8 @@ pub fn save_persisted_state(conn: &mut Connection, state: &sebas_dispatch::state
     // 写 providers (非软删)
     let now = crate::sebas_state::db::unix_now();
     for (id, item) in &state.providers {
-        let config = serde_json::to_string(item)
-            .map_err(|e| format!("序列化 provider {id} 失败: {e}"))?;
+        let config =
+            serde_json::to_string(item).map_err(|e| format!("序列化 provider {id} 失败: {e}"))?;
         tx.execute(
             "INSERT INTO providers (id, config, deleted, created_at, updated_at) VALUES (?1, ?2, 0, ?3, ?3)",
             params![id, config, now],
@@ -181,8 +185,8 @@ pub fn save_persisted_state(conn: &mut Connection, state: &sebas_dispatch::state
         mode: state.mode.clone(),
         default_selection: state.default_selection.clone(),
     };
-    let runtime_json = serde_json::to_string(&runtime)
-        .map_err(|e| format!("序列化 runtime state 失败: {e}"))?;
+    let runtime_json =
+        serde_json::to_string(&runtime).map_err(|e| format!("序列化 runtime state 失败: {e}"))?;
     tx.execute(
         "INSERT INTO settings (key, value) VALUES ('runtime_state', ?1)
          ON CONFLICT(key) DO UPDATE SET value = ?1",
@@ -265,8 +269,8 @@ pub fn import_defaults_once(
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .unwrap_or_default();
     row.default_selection = Some(selection);
-    let runtime_json = serde_json::to_string(&row)
-        .map_err(|e| format!("序列化 runtime state 失败: {e}"))?;
+    let runtime_json =
+        serde_json::to_string(&row).map_err(|e| format!("序列化 runtime state 失败: {e}"))?;
     tx.execute(
         "INSERT INTO settings (key, value) VALUES ('runtime_state', ?1)
          ON CONFLICT(key) DO UPDATE SET value = ?1",
@@ -279,15 +283,16 @@ pub fn import_defaults_once(
         [],
     )
     .map_err(|e| format!("写入 defaults_imported 标记失败: {e}"))?;
-    tx.commit()
-        .map_err(|e| format!("导入事务提交失败: {e}"))?;
+    tx.commit().map_err(|e| format!("导入事务提交失败: {e}"))?;
     Ok(true)
 }
 
 // ---- Settings ----
 
 /// 加载 settings (CardConfig), 从 `settings` 表 `key = 'card_config'`。
-pub fn load_settings(conn: &mut Connection) -> Result<Option<sebas_feishu::cards::CardConfig>, String> {
+pub fn load_settings(
+    conn: &mut Connection,
+) -> Result<Option<sebas_feishu::cards::CardConfig>, String> {
     let json: Option<String> = conn
         .query_row(
             "SELECT value FROM settings WHERE key = 'card_config'",
@@ -305,9 +310,11 @@ pub fn load_settings(conn: &mut Connection) -> Result<Option<sebas_feishu::cards
 }
 
 /// 保存 settings (CardConfig)。
-pub fn save_settings(conn: &mut Connection, cfg: &sebas_feishu::cards::CardConfig) -> Result<(), String> {
-    let json = serde_json::to_string(cfg)
-        .map_err(|e| format!("序列化 settings 失败: {e}"))?;
+pub fn save_settings(
+    conn: &mut Connection,
+    cfg: &sebas_feishu::cards::CardConfig,
+) -> Result<(), String> {
+    let json = serde_json::to_string(cfg).map_err(|e| format!("序列化 settings 失败: {e}"))?;
     conn.execute(
         "INSERT INTO settings (key, value) VALUES ('card_config', ?1)
          ON CONFLICT(key) DO UPDATE SET value = ?1",
@@ -391,7 +398,12 @@ pub fn save_projects(conn: &mut Connection, projects: &[ProjectRow]) -> Result<(
 }
 
 /// 添加一个项目。
-pub fn add_project(conn: &mut Connection, path: &str, name: &str, added_at: i64) -> Result<(), String> {
+pub fn add_project(
+    conn: &mut Connection,
+    path: &str,
+    name: &str,
+    added_at: i64,
+) -> Result<(), String> {
     conn.execute(
         "INSERT INTO projects (path, name, branch, branch_at, added_at, sort_order) VALUES (?1, ?2, NULL, 0, ?3, 0)
          ON CONFLICT(path) DO NOTHING",
@@ -402,7 +414,11 @@ pub fn add_project(conn: &mut Connection, path: &str, name: &str, added_at: i64)
 }
 
 /// 记录项目级默认 agent（workbench-agent-wire-fix 2.6），按稳定 id 定位。
-pub fn set_project_default_agent(conn: &mut Connection, id: &str, agent: &str) -> Result<(), String> {
+pub fn set_project_default_agent(
+    conn: &mut Connection,
+    id: &str,
+    agent: &str,
+) -> Result<(), String> {
     conn.execute(
         "UPDATE projects SET default_agent = ?2 WHERE id = ?1",
         params![id, agent],
@@ -420,7 +436,12 @@ pub fn remove_project(conn: &mut Connection, path: &str) -> Result<bool, String>
 }
 
 /// 更新项目分支信息。
-pub fn update_project_branch(conn: &mut Connection, path: &str, branch: Option<&str>, branch_at: i64) -> Result<(), String> {
+pub fn update_project_branch(
+    conn: &mut Connection,
+    path: &str,
+    branch: Option<&str>,
+    branch_at: i64,
+) -> Result<(), String> {
     conn.execute(
         "UPDATE projects SET branch = ?1, branch_at = ?2 WHERE path = ?3",
         params![branch, branch_at, path],
@@ -446,7 +467,9 @@ pub struct SessionMapRow {
 /// 加载会话映射 (用于恢复)。
 pub fn load_session_map(conn: &mut Connection) -> Result<Vec<SessionMapRow>, String> {
     let mut stmt = conn
-        .prepare("SELECT chat_id, thread_id, session_id, last_active_unix, project_dir FROM session_map")
+        .prepare(
+            "SELECT chat_id, thread_id, session_id, last_active_unix, project_dir FROM session_map",
+        )
         .map_err(|e| format!("准备 session_map 查询失败: {e}"))?;
 
     let rows = stmt
@@ -469,10 +492,7 @@ pub fn load_session_map(conn: &mut Connection) -> Result<Vec<SessionMapRow>, Str
 }
 
 /// 保存会话映射 (全量替换)。
-pub fn save_session_map(
-    conn: &mut Connection,
-    entries: &[SessionMapRow],
-) -> Result<(), String> {
+pub fn save_session_map(conn: &mut Connection, entries: &[SessionMapRow]) -> Result<(), String> {
     let tx = conn
         .transaction()
         .map_err(|e| format!("保存 session_map 事务开始失败: {e}"))?;
@@ -613,49 +633,60 @@ pub struct Repo;
 
 impl Repo {
     /// 加载 PersistedState。
-    pub async fn load_persisted_state(handle: &StateHandle) -> Result<sebas_dispatch::state_store::PersistedState, String> {
-        handle
-            .exec(load_persisted_state)
-            .await
+    pub async fn load_persisted_state(
+        handle: &StateHandle,
+    ) -> Result<sebas_dispatch::state_store::PersistedState, String> {
+        handle.exec(load_persisted_state).await
     }
 
     /// 加载 settings。
-    pub async fn load_settings(handle: &StateHandle) -> Result<Option<sebas_feishu::cards::CardConfig>, String> {
-        handle
-            .exec(load_settings)
-            .await
+    pub async fn load_settings(
+        handle: &StateHandle,
+    ) -> Result<Option<sebas_feishu::cards::CardConfig>, String> {
+        handle.exec(load_settings).await
     }
 
     /// 保存 settings。
-    pub async fn save_settings(handle: &StateHandle, cfg: &sebas_feishu::cards::CardConfig) -> Result<(), String> {
+    pub async fn save_settings(
+        handle: &StateHandle,
+        cfg: &sebas_feishu::cards::CardConfig,
+    ) -> Result<(), String> {
         let cfg = cfg.clone();
-        handle
-            .exec(move |conn| save_settings(conn, &cfg))
-            .await
+        handle.exec(move |conn| save_settings(conn, &cfg)).await
     }
 
     /// 加载所有项目。
     pub async fn load_projects(handle: &StateHandle) -> Result<Vec<ProjectRow>, String> {
-        handle
-            .exec(load_projects)
-            .await
+        handle.exec(load_projects).await
     }
 
     /// 保存所有项目。
-    pub async fn save_projects(handle: &StateHandle, projects: Vec<ProjectRow>) -> Result<(), String> {
+    pub async fn save_projects(
+        handle: &StateHandle,
+        projects: Vec<ProjectRow>,
+    ) -> Result<(), String> {
         handle
             .exec(move |conn| save_projects(conn, &projects))
             .await
     }
 
     /// 添加项目。
-    pub async fn set_project_default_agent(handle: &StateHandle, id: String, agent: String) -> Result<(), String> {
+    pub async fn set_project_default_agent(
+        handle: &StateHandle,
+        id: String,
+        agent: String,
+    ) -> Result<(), String> {
         handle
             .exec(move |conn| set_project_default_agent(conn, &id, &agent))
             .await
     }
 
-    pub async fn add_project(handle: &StateHandle, path: String, name: String, added_at: i64) -> Result<(), String> {
+    pub async fn add_project(
+        handle: &StateHandle,
+        path: String,
+        name: String,
+        added_at: i64,
+    ) -> Result<(), String> {
         handle
             .exec(move |conn| add_project(conn, &path, &name, added_at))
             .await
@@ -663,13 +694,16 @@ impl Repo {
 
     /// 删除项目。
     pub async fn remove_project(handle: &StateHandle, path: String) -> Result<bool, String> {
-        handle
-            .exec(move |conn| remove_project(conn, &path))
-            .await
+        handle.exec(move |conn| remove_project(conn, &path)).await
     }
 
     /// 更新项目分支。
-    pub async fn update_project_branch(handle: &StateHandle, path: String, branch: Option<String>, branch_at: i64) -> Result<(), String> {
+    pub async fn update_project_branch(
+        handle: &StateHandle,
+        path: String,
+        branch: Option<String>,
+        branch_at: i64,
+    ) -> Result<(), String> {
         handle
             .exec(move |conn| update_project_branch(conn, &path, branch.as_deref(), branch_at))
             .await
@@ -695,7 +729,10 @@ mod tests {
         let state = load_persisted_state(&mut conn).unwrap();
         assert!(state.providers.is_empty());
         assert!(state.deleted.is_empty());
-        assert_eq!(state.mode, sebas_dispatch::provider_state::ProviderMode::Off);
+        assert_eq!(
+            state.mode,
+            sebas_dispatch::provider_state::ProviderMode::Off
+        );
         assert_eq!(state.default_selection, None);
     }
 
@@ -708,13 +745,18 @@ mod tests {
 
         let mut item = serde_json::Map::new();
         item.insert("name".into(), serde_json::Value::String("deepseek".into()));
-        item.insert("preset".into(), serde_json::Value::String("deepseek".into()));
+        item.insert(
+            "preset".into(),
+            serde_json::Value::String("deepseek".into()),
+        );
 
         let original = PersistedState {
             version: 2,
             providers: BTreeMap::from([("deepseek".into(), item)]),
             deleted: vec!["openai".into()],
-            mode: ProviderMode::Direct { provider: "deepseek".into() },
+            mode: ProviderMode::Direct {
+                provider: "deepseek".into(),
+            },
             default_selection: Some(DefaultSelection::with_model("deepseek", "deepseek-chat")),
             model_aliases: BTreeMap::new(),
         };
@@ -725,8 +767,16 @@ mod tests {
         assert_eq!(loaded.providers.len(), 1);
         assert!(loaded.providers.contains_key("deepseek"));
         assert!(loaded.deleted.contains(&"openai".to_string()));
-        assert_eq!(loaded.mode, ProviderMode::Direct { provider: "deepseek".into() });
-        assert_eq!(loaded.default_selection, Some(DefaultSelection::with_model("deepseek", "deepseek-chat")));
+        assert_eq!(
+            loaded.mode,
+            ProviderMode::Direct {
+                provider: "deepseek".into()
+            }
+        );
+        assert_eq!(
+            loaded.default_selection,
+            Some(DefaultSelection::with_model("deepseek", "deepseek-chat"))
+        );
     }
 
     #[test]
@@ -790,7 +840,8 @@ mod tests {
 
         update_persisted_state(&mut conn, |s| {
             s.mode = ProviderMode::Router;
-        }).unwrap();
+        })
+        .unwrap();
 
         let state = load_persisted_state(&mut conn).unwrap();
         assert_eq!(state.mode, ProviderMode::Router);

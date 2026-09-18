@@ -19,8 +19,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
-use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
+use tokio_tungstenite::tungstenite::Message;
 
 /// 默认请求超时。选 30s：够覆盖一次工具调用的往返，又不会让上层等成假死。
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -236,8 +236,9 @@ impl NodeConnection {
         self.waiters.lock().await.insert(id, tx);
 
         let frame = Frame::Request { id, op };
-        let text = serde_json::to_string(&frame)
-            .map_err(|e| NodeLinkError::Transport { cause: format!("无法序列化请求：{e}") })?;
+        let text = serde_json::to_string(&frame).map_err(|e| NodeLinkError::Transport {
+            cause: format!("无法序列化请求：{e}"),
+        })?;
         if self.outbound.send(Message::Text(text.into())).is_err() {
             self.waiters.lock().await.remove(&id);
             let cause = self
@@ -285,9 +286,7 @@ mod tests {
     use super::*;
     use crate::node_link::server::NodeLinkServer;
     use futures_util::{SinkExt, StreamExt};
-    use sebas_node_link::{
-        CapabilityManifest, Hello, HelloOutcome, NodeAuth, PROTOCOL_VERSION,
-    };
+    use sebas_node_link::{CapabilityManifest, Hello, HelloOutcome, NodeAuth, PROTOCOL_VERSION};
     use tokio_tungstenite::tungstenite::Message as ClientMessage;
 
     /// 起服务端 + 一个假节点接入；返回服务端里那条连接句柄。
@@ -408,7 +407,10 @@ mod tests {
 
         // **故意乱序**应答：后到的请求先回。按 id 关联意味着两条都不会串。
         let (first, second) = if matches!(op_a, SessionOp::ListSessions) {
-            ((id_a, SessionResult::Sessions { sessions: vec![] }), (id_b, SessionResult::Pong))
+            (
+                (id_a, SessionResult::Sessions { sessions: vec![] }),
+                (id_b, SessionResult::Pong),
+            )
         } else {
             (
                 (id_b, SessionResult::Sessions { sessions: vec![] }),
@@ -541,7 +543,10 @@ mod tests {
         let (_d, _server, conn, ws) = connected().await;
 
         let c = Arc::clone(&conn);
-        let h = tokio::spawn(async move { c.request_with_timeout(SessionOp::Ping, Duration::from_secs(60)).await });
+        let h = tokio::spawn(async move {
+            c.request_with_timeout(SessionOp::Ping, Duration::from_secs(60))
+                .await
+        });
 
         // 让请求先上路，再断开节点。
         tokio::time::sleep(Duration::from_millis(50)).await;

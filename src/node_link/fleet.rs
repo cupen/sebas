@@ -230,10 +230,9 @@ impl RemoteFleet {
                         tracked.lifecycle = lifecycle;
                     }
                     if terminated {
-                        report.terminated.push((
-                            session_id,
-                            format!("节点上报相位 {}", summary.phase),
-                        ));
+                        report
+                            .terminated
+                            .push((session_id, format!("节点上报相位 {}", summary.phase)));
                     } else {
                         report.resumed.push(session_id);
                     }
@@ -323,7 +322,11 @@ mod tests {
         fleet.track("dev-box", "proj-a:2");
         fleet.track("other-node", "proj-b:1");
 
-        assert_eq!(fleet.on_node_disconnected("dev-box"), 2, "只影响该节点的会话");
+        assert_eq!(
+            fleet.on_node_disconnected("dev-box"),
+            2,
+            "只影响该节点的会话"
+        );
         assert_eq!(
             fleet.lifecycle("proj-a:1"),
             Some(&SessionLifecycle::NodeOffline {

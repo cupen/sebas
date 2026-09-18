@@ -100,8 +100,13 @@ function parseSlashCommandName(text: string): string | null {
   return /^\/(\S+)/.exec(text)?.[1] ?? null
 }
 
-/** 提交控件的五态（design D4 优先级渲染的判别值，测试按 data-state 断言）。 */
-type SubmitState = 'disabled' | 'send' | 'sending' | 'stop' | 'queued'
+/**
+ * 提交控件的六态（design D4 优先级渲染的判别值，测试按 data-state 断言）。
+ * （session-parallel-liveness-and-unread-polish 3.4）新增 starting：子进程
+ * 启动中（spawn 窗口、无在飞 turn）且有字——提交被暂存给正在启动的子进程，
+ * 与「在跑回合的排队」（queued）是两回事，形态必须可分辨。
+ */
+type SubmitState = 'disabled' | 'send' | 'sending' | 'stop' | 'queued' | 'starting'
 
 /**
  * 一次性 composer 对焦请求的事件名（workbench-rail-polish 3.2/D2）：rail
@@ -151,15 +156,21 @@ export class SebasWorkbenchComposer extends LitElement {
    * （workbench-live-conversation-flow 3.2）聚焦会话的子进程正在拉起
    * （0-turn 占位激活中 / Dormant resume 在途）。模型芯片据此显示
    * 「启动中…」而不是误导性的「无可用模型」——后者只在 spawn 完成
-   * 且 agent 确实没报模型时出现。
+   * 且 agent 确实没报模型时出现。（3.4）提交控件据此拆分 starting 形态
+   * （数据源 = WS 帧的 status_slug === 'starting'，D2 帧事实）。
    */
   @property({ type: Boolean }) childStarting = false
   /**
-   * （4.1）mode 切换自会话头迁入底沿左端：当前期望 mode（desired，
-   * 远端会话为节点回报值）。`null` = 会话未记录 mode（创建表单的
-   * 「agent 默认」）。
+   * （3.2，D5b）当前期望 mode（desired，详情真读）。非空 `string`：
+   * 服务端缺省 `'ask'`，composer 不再有「空态选择器」，`?? null` 分支删除。
    */
-  @property({ attribute: false }) currentMode: string | null = null
+  @property({ attribute: false }) currentMode: string = 'ask'
+  /**
+   * （session-parallel-liveness-and-unread-polish 3.4）聚焦会话的 spawn
+   * 失败原因原文（detail/summary 的 `spawn_failure_reason`）。非空时就地
+   * 呈现原因与重试入口（再次发送即重试），不假装会话还在正常启动。
+   */
+  @property({ attribute: false }) failureReason: string | null = null
   /**
    * （polish-workbench-walkthrough-ux 5.2）会话是否已有回合：0-turn 占位
    * 显示语境化占位符「开始对话…」，首轮之后恢复 follow-up 语境。
@@ -294,13 +305,16 @@ export class SebasWorkbenchComposer extends LitElement {
 
   /**
    * 提交控件状态机（design D4，优先级从高到低）：POST 在途（转圈）>
-   * turn 在飞且无字（停止方块）> turn 在飞且有字（排队形态）> 有字
-   * （send）> 禁用。
+   * 启动中且有字（starting 形态，3.4）> turn 在飞且无字（停止方块）>
+   * turn 在飞且有字（排队形态）> 有字（send）> 禁用。turn_engaged 覆盖
+   * spawn 窗口（D2），starting 判定必须排在 queued 之前，否则启动等待会
+   * 伪装成排队提交。
    */
   private submitState(): SubmitState {
     if (this.sending) return 'sending'
     if (this.sessionKey === null || this.unreachable !== null) return 'disabled'
     const hasText = this.text.trim().length > 0
+    if (this.childStarting && hasText) return 'starting'
     if (this.turnInFlight) return hasText ? 'queued' : 'stop'
     return hasText ? 'send' : 'disabled'
   }
@@ -780,12 +794,15 @@ export class SebasWorkbenchComposer extends LitElement {
       },
       stop: { label: '停止回复', icon: icon('stop', 14), disabled: false },
       queued: { label: '排队提交', icon: icon('clock', 14), disabled: false },
+      // （3.4）启动形态：与排队同色系分离（starting token 底色）——
+      // 提交被暂存给正在启动的子进程，不是排在某个在跑回合后面。
+      starting: { label: '启动中', icon: icon('clock', 14), disabled: false },
     }
     const m = meta[state]
     const onClick =
       state === 'stop'
         ? () => void this.cancelTurn()
-        : state === 'send' || state === 'queued'
+        : state === 'send' || state === 'queued' || state === 'starting'
           ? () => void this.submit()
           : () => {}
     return html`
@@ -841,7 +858,7 @@ export class SebasWorkbenchComposer extends LitElement {
                   class="mode-select"
                   size="xs"
                   hoist
-                  value=${this.currentMode ?? ''}
+                  value=${this.currentMode}
                   ?disabled=${this.modeSwitching}
                   aria-label="权限模式"
                   data-testid="mode-switch"
@@ -851,6 +868,10 @@ export class SebasWorkbenchComposer extends LitElement {
                     if (v) void this.switchMode(v)
                   }}
                 >
+                  <!-- （4.1）选项词汇来自共享 MODE_OPTIONS：创建弹窗与本下拉
+                       同源渲染，杜绝「一边裸词一边带解释」的漂移。首项空值 =
+                       历史「agent 默认」条目（currentMode 非空，D5b：服务端
+                       缺省 ask，故它只作旧会话的展示兜底，选中即不切换）。 -->
                   <wa-option value="">${MODE_DEFAULT_LABEL}</wa-option>
                   ${MODE_OPTIONS.map(
                     (m) => html`<wa-option value=${m.value}>${m.label}</wa-option>`,
@@ -881,6 +902,15 @@ export class SebasWorkbenchComposer extends LitElement {
         ? html`
             <div class="callout callout-error" role="alert" data-testid="composer-error">
               ${icon('alert')}<span>${this.error}</span>
+            </div>
+          `
+        : nothing}
+      ${this.failureReason
+        ? html`
+            <div class="callout callout-error" role="alert" data-testid="spawn-failure">
+              ${icon('alert')}<span
+                >会话启动失败：${this.failureReason}——再次发送即可重试（不会排队等待）。</span
+              >
             </div>
           `
         : nothing}
@@ -1024,12 +1054,14 @@ export class SebasWorkbenchComposer extends LitElement {
         color: var(--sebas-text-bright);
       }
       /* Bottom toolbar: locked agent identity LEFT, model chip + submit
-         RIGHT（agent-workbench delta「toolbar composition」）。 */
+         RIGHT（agent-workbench delta「toolbar composition」）。（3.3，D5）
+         稳定两列网格 + 垂直居中：左（mode）右（芯片/提交）两组件本征高度
+         不同也共享一条水平基线，不再靠 margin-left:auto 漂移对不齐。 */
       .composer-bottom {
-        display: flex;
+        display: grid;
+        grid-template-columns: 1fr auto;
         align-items: center;
         gap: var(--sebas-space-2);
-        flex-wrap: wrap;
         font-size: 0.78rem;
         color: var(--sebas-text-dim);
       }
@@ -1043,7 +1075,6 @@ export class SebasWorkbenchComposer extends LitElement {
         display: flex;
         align-items: center;
         gap: var(--sebas-space-2);
-        margin-left: auto;
       }
       .composer-bottom .label {
         font-family: var(--sebas-font-mono);
@@ -1051,6 +1082,12 @@ export class SebasWorkbenchComposer extends LitElement {
       .composer-bottom .label.placeholder {
         color: var(--sebas-text-faint);
         letter-spacing: 0.15em;
+      }
+      /* （3.1，D5）mode 下拉紧凑化：宽度贴合所选词（max-content），封顶
+         110px——不再撑满容器半壁。 */
+      .mode-select {
+        --wa-form-control-width: max-content;
+        max-width: 110px;
       }
       /* ── 模型芯片（design D3）────────────────────────────────────────── */
       .model-wrap {
@@ -1216,6 +1253,13 @@ export class SebasWorkbenchComposer extends LitElement {
       .send-button.queued {
         background: var(--sebas-status-queued);
         color: #062a2e;
+        opacity: 1;
+      }
+      /* （3.4）子进程启动中且有字：starting 形态——starting token 底色，
+         与排队的青色、停止的红、发送的 accent 四态可分辨。 */
+      .send-button.starting {
+        background: var(--sebas-status-starting);
+        color: #1d1d1f;
         opacity: 1;
       }
       /* POST 在途：转圈。 */

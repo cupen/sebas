@@ -5,7 +5,7 @@
 
 use sebas_acp::claude::manager::SessionManager;
 use sebas_channels::{ChannelEvent, ChannelKey};
-use sebas_dispatch::engine::{Out, DispatchHandle};
+use sebas_dispatch::engine::{DispatchHandle, Out};
 use sebas_dispatch::state::SessionMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -60,10 +60,11 @@ async fn fake_claude_stream_merges_five_chunks_then_done() {
         &k,
         &prompt,
         "claude",
-        vec![fake().to_str().unwrap().to_string(), ],
+        vec![fake().to_str().unwrap().to_string()],
         None,
         None,
-        None)
+        None,
+    )
     .await
     .expect("spawn ok");
 

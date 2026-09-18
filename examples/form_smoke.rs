@@ -16,15 +16,15 @@
 //! 前置条件：应用的卡片回传交互（card.action.trigger）已通过长连接订阅
 //! （跑 sebas 的应用通常已具备）；飞书客户端 V6.6+（form 容器要求）。
 
+use open_lark::Config as LarkConfig;
+use open_lark::ws_client::{EventDispatcherHandler, EventHandler, LarkWsClient, WsClientError};
+use sebas::config::Config;
+use sebas::provider::build_form;
+use sebas_dispatch::Out;
+use sebas_dispatch::crud::ProviderForms;
 use sebas_feishu::client::{FeishuClient, TokenManager};
 use sebas_feishu::events::{FeishuEnvelope, FeishuIn, SessionKey};
 use sebas_feishu::messages::{ReceiveIdType, SendCardRequest};
-use open_lark::Config as LarkConfig;
-use open_lark::ws_client::{EventDispatcherHandler, EventHandler, LarkWsClient, WsClientError};
-use sebas_dispatch::Out;
-use sebas_dispatch::crud::ProviderForms;
-use sebas::config::Config;
-use sebas::provider::build_form;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -99,7 +99,14 @@ impl Handler {
                     warn!(form_name, "unwired form callback ignored");
                     return Ok(());
                 };
-                let out = form.handle(sebas_channels::ChannelKey::feishu(&key.chat_id, key.thread_id.as_deref()), &value, &form_value, message_id).await;
+                let out = form
+                    .handle(
+                        sebas_channels::ChannelKey::feishu(&key.chat_id, key.thread_id.as_deref()),
+                        &value,
+                        &form_value,
+                        message_id,
+                    )
+                    .await;
                 self.dispatch(out).await?;
             }
             FeishuIn::ButtonCb { key, action, .. } => {
@@ -141,7 +148,10 @@ impl Handler {
                     info!(?key, ?payload, ?message_id, "button callback received");
                     let out = form
                         .handle(
-                            sebas_channels::ChannelKey::feishu(&key.chat_id, key.thread_id.as_deref()),
+                            sebas_channels::ChannelKey::feishu(
+                                &key.chat_id,
+                                key.thread_id.as_deref(),
+                            ),
                             &payload.unwrap_or(Value::Null),
                             &BTreeMap::new(),
                             message_id,
@@ -164,7 +174,13 @@ impl Handler {
         *target = Some(Target::Chat(key.chat_id.clone()));
         drop(target);
         info!(?key, text = %text, "target resolved from inbound message; sending CRUD card");
-        let out = self.forms.open(sebas_channels::ChannelKey::feishu(&key.chat_id, key.thread_id.as_deref())).await;
+        let out = self
+            .forms
+            .open(sebas_channels::ChannelKey::feishu(
+                &key.chat_id,
+                key.thread_id.as_deref(),
+            ))
+            .await;
         self.dispatch(out).await?;
         Ok(())
     }
@@ -205,9 +221,8 @@ impl Handler {
                 }
             }
             Out::UpdateCardByMsgId { msg_id, card, .. } => {
-                let card_json = serde_json::to_value(
-                    sebas_feishu::adapter::render_standalone_card(&card),
-                )?;
+                let card_json =
+                    serde_json::to_value(sebas_feishu::adapter::render_standalone_card(&card))?;
                 self.client
                     .update_card(&self.http, &self.tokens, &msg_id, card_json)
                     .await?;

@@ -117,7 +117,7 @@ impl NativeSession {
             // 原生内核会话跑在主控本机，没有节点维度。
             remote: None,
             // （add-agent-mode-selection）native 内核不承载 mode：不声称生效。
-            desired_mode: None,
+            desired_mode: sebas_dispatch::engine::ask_mode(),
             effective_mode: None,
             // rail-declutter-unread D1：可见回复段数——派生口径（2.1 随逐
             // delta 落账切换），transcript 是唯一事实。
@@ -129,6 +129,8 @@ impl NativeSession {
             // fix-pending-queue-liveness 2.3：native 内核不产 ACP 卡片相位，
             // 回合占用事实不可得——如实 false（前端回退 slug 判定）。
             turn_engaged: false,
+            spawn_failure_reason: None,
+            parked_approvals: 0,
         }
     }
 }
@@ -957,9 +959,7 @@ impl SessionBackend for DualSessionBackend {
 
     // 回合内容流（fix-webui-streaming-liveness 2.1，D2）：acp 桥与 native
     // pump 两路在此合流（`new()` 里的中继任务），订阅端拿到单一出口。
-    fn subscribe_turn_events(
-        &self,
-    ) -> broadcast::Receiver<sebas_dispatch::TurnStreamEvent> {
+    fn subscribe_turn_events(&self) -> broadcast::Receiver<sebas_dispatch::TurnStreamEvent> {
         self.turn_events.subscribe()
     }
 
@@ -1340,7 +1340,14 @@ mod tests {
         // backend hint = native → key 前缀 agent-；创建时选定的模型随 spawn
         // 生效于会话级 override（4.2：选中生效于快照）。
         let key = dual
-            .spawn_with("go".into(), None, "native", Some("m-spawn".into()), None, None)
+            .spawn_with(
+                "go".into(),
+                None,
+                "native",
+                Some("m-spawn".into()),
+                None,
+                None,
+            )
             .await
             .expect("spawn native");
         assert!(DualSessionBackend::is_native(&key), "{:?}", key.reference);

@@ -76,10 +76,7 @@ fn log_filter_envs(log_filter: &Option<String>) -> Vec<(&'static str, String)> {
     match log_filter {
         Some(f) => {
             let quieted = format!("{f}{}", crate::config::LOG_FILTER_QUIET);
-            vec![
-                ("RUST_LOG", quieted),
-                ("SEBAS_LOG_LEVEL", f.clone()),
-            ]
+            vec![("RUST_LOG", quieted), ("SEBAS_LOG_LEVEL", f.clone())]
         }
         None => Vec::new(),
     }
@@ -340,10 +337,9 @@ fn rollback_hook(
             match rollback_to_previous(&cfg).await {
                 Ok(()) => {
                     info!("auto rollback ok, running previous version");
-                    control
-                        .lock()
-                        .await
-                        .record_observation("rollback completed; restarting previous version".to_string());
+                    control.lock().await.record_observation(
+                        "rollback completed; restarting previous version".to_string(),
+                    );
                 }
                 Err(e) => {
                     let cause = format!("rollback failed: {e}");

@@ -25,6 +25,7 @@ import {
   type NodeInfo,
 } from '../api/client.js'
 import { sharedWs } from '../api/shared-ws.js'
+import type { WsEvent } from '../api/ws.js'
 import { icon } from '../components/icons.js'
 import { guardedHide } from '../components/wa-hide-guard.js'
 import { unreadCount, writeFocusAnchor } from './unread-cursor.js'
@@ -152,6 +153,38 @@ export class SebasProjectRail extends LitElement {
   private nodeTimer: number | undefined = undefined
   private refetchBound = (): void => { void this.refresh() }
 
+  /**
+   * （session-parallel-liveness-and-unread-polish 2.2，design D2）会话相位
+   * 帧 → 行就地补丁：rail 圆点（status_slug）与未读徽标（msg_count）从帧
+   * 字段真读，不等 HTTP 详情轮询、不做任何字符串回退。FSM 每个 flip 的
+   * 帧到达即重渲染（七词圆点 + 徽标免刷新更新）。其余事件维持整表收敛
+   * 刷新（低频）；turn.append 不刷新——徽标口径只数可见段，段数随下一
+   * 条 session.updated 帧或 10s 轮询兜底到达，绝不逐 delta 打 HTTP。
+   */
+  private onWsEvent = (ev: WsEvent): void => {
+    if (ev.type === 'session.updated' || ev.type === 'session.created') {
+      const patch = (row: SessionRow): SessionRow =>
+        row.encoded_key === ev.session_id
+          ? {
+              ...row,
+              status_slug: ev.status_slug as SessionRow['status_slug'],
+              turn_engaged: ev.turn_engaged,
+              msg_count: ev.msg_count,
+              pending_count: ev.pending.length,
+            }
+          : row
+      this.sessions = this.sessions.map(patch)
+      return
+    }
+    if (
+      ev.type === 'session.removed' ||
+      ev.type === 'session.pending_dropped' ||
+      ev.type === 'session.turn_stalled'
+    ) {
+      void this.refresh()
+    }
+  }
+
   static styles = css`
     :host { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
     .section-label {
@@ -265,6 +298,13 @@ export class SebasProjectRail extends LitElement {
       transition: background var(--sebas-dur) var(--sebas-ease), color var(--sebas-dur) var(--sebas-ease);
     }
     li.session-item:hover { background: var(--sebas-surface-2); color: var(--sebas-text-bright); }
+    /* （2.4，D4）未读行强调：accent-soft 族行底 tint + 名字提亮——在读
+       数字之前一行即可分辨（spec「unread rows are prominent」）。:not(.current)
+       让「当前会话」的 accent 选中态不被稀释。 */
+    li.session-item.unread:not(.current) {
+      background: var(--sebas-accent-soft);
+      color: var(--sebas-text-bright);
+    }
     li.session-item.current { background: var(--sebas-accent-soft); color: var(--sebas-accent); }
     .session-dot { width: 6px; height: 6px; border-radius: 50%; flex: 0 0 auto; background: var(--sebas-text-faint); }
     .session-dot[data-status='starting'] { background: var(--sebas-status-starting); }
@@ -278,12 +318,14 @@ export class SebasProjectRail extends LitElement {
     li.session-item.unreachable .session-name { text-decoration: line-through; color: var(--sebas-text-faint); }
     .row.unreachable .name { text-decoration: line-through; color: var(--sebas-text-faint); }
     .empty { padding: 10px 12px; color: var(--sebas-text-faint); font-size: 0.78rem; }
-    /* rail-declutter-unread 2.3：未读徽标——高亮数字（accent 底），99+ 封顶。 */
+    /* rail-declutter-unread 2.3：未读徽标——高亮数字（accent 底），99+ 封顶。
+       （2.4，D4）数字对比度微调：字重加重 + 字号微升，accent-strong 底上的
+       accent-ink 数字一眼可读。 */
     .unread-badge {
       flex: 0 0 auto;
-      font-size: 0.62rem; font-weight: 700; line-height: 1.4;
+      font-size: 0.66rem; font-weight: 800; line-height: 1.4;
       color: var(--sebas-accent-ink); background: var(--sebas-accent-strong);
-      border-radius: var(--sebas-radius-full); padding: 0 6px;
+      border-radius: var(--sebas-radius-full); padding: 0 7px;
       font-variant-numeric: tabular-nums; white-space: nowrap;
     }
     /* 会话行的「…」菜单触发钮：与项目行共用 .row-action 外观，hover/
@@ -333,7 +375,7 @@ export class SebasProjectRail extends LitElement {
   connectedCallback(): void {
     super.connectedCallback()
     void this.refresh()
-    this.unsubscribe = sharedWs.subscribe(this.refetchBound)
+    this.unsubscribe = sharedWs.subscribe((ev) => this.onWsEvent(ev))
     window.addEventListener('sebas:refetch', this.refetchBound)
     // 8.2：节点离线/回归没有对应的会话事件，靠轮询让项目行与「+」的
     // 可用态**免刷新**翻转。
@@ -707,7 +749,12 @@ export class SebasProjectRail extends LitElement {
         ? `执行节点 ${nodeLabel}`
         : ''
     return html`
-      <li class="session-item ${current ? 'current' : ''} ${waiting ? 'waiting' : ''} ${nodeOffline ? 'node-offline' : ''}" title=${fullLabel} aria-current=${current ? 'true' : 'false'} @click=${() => this.openSession(row)}>
+      <li
+        class="session-item ${current ? 'current' : ''} ${waiting ? 'waiting' : ''} ${nodeOffline ? 'node-offline' : ''} ${unread > 0 ? 'unread' : ''}"
+        title=${fullLabel}
+        aria-current=${current ? 'true' : 'false'}
+        @click=${() => this.openSession(row)}
+      >
         <span class="session-dot" data-status=${waiting ? 'waiting' : row.status_slug} aria-hidden="true"></span>
         <span class="session-name">${label}</span>
         ${unread > 0 ? html`<span class="unread-badge" data-testid="session-unread" title="${unread} 条未读回复">${badge}</span>` : nothing}

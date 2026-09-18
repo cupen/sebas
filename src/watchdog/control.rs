@@ -146,9 +146,7 @@ impl ControlService {
     }
 
     pub fn accept(&mut self, actor: Actor, request: ControlRequest) -> ControlResponse {
-        if is_exclusive(&request)
-            && self.running_exclusive.is_some()
-        {
+        if is_exclusive(&request) && self.running_exclusive.is_some() {
             return ControlResponse::Rejected {
                 code: ErrorCode::Busy,
                 message: "another exclusive control operation is running".into(),

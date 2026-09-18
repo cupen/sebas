@@ -2,9 +2,9 @@
 
 use sebas_acp::claude::session::AcpEvent;
 use sebas_channels::card::ChannelElement as CardElement;
-use sebas_dispatch::cards::CardConfig;
 use sebas_dispatch::card_state::{CardState, CardStateMap};
-use sebas_dispatch::engine::{Out, DispatchHandle};
+use sebas_dispatch::cards::CardConfig;
+use sebas_dispatch::engine::{DispatchHandle, Out};
 use sebas_dispatch::state::SessionMap;
 use std::time::Duration;
 
@@ -466,8 +466,8 @@ async fn continue_after_done_flips_reaction_back_to_working() {
 
 // ---- sebas card-flip: permission card click feedback ----
 
-use sebas_dispatch::cards_ui::resolved_permission_card as render_resolved_permission_card;
 use sebas_channels::{ChannelAction, ChannelEvent, ChannelKey};
+use sebas_dispatch::cards_ui::resolved_permission_card as render_resolved_permission_card;
 
 #[tokio::test]
 async fn permission_card_click_emits_resolved_card_flip() {
@@ -478,7 +478,10 @@ async fn permission_card_click_emits_resolved_card_flip() {
     // there's a Claude child process for this chat).
     let _ = router
         .map
-        .insert(key.clone(), sebas_dispatch::state::Mapping::active("sess-flip"))
+        .insert(
+            key.clone(),
+            sebas_dispatch::state::Mapping::active("sess-flip"),
+        )
         .await;
     // Simulate the dispatch_out step that records the Feishu message_id
     // keyed by request_id (production: after `send_card` returns).
@@ -517,7 +520,10 @@ async fn permission_card_click_emits_resolved_card_flip() {
             ..
         } => {
             assert_eq!(request_id, "req-1");
-            assert!(matches!(decision, sebas_acp::claude::session::Decision::AllowOnce));
+            assert!(matches!(
+                decision,
+                sebas_acp::claude::session::Decision::AllowOnce
+            ));
         }
         other => panic!("expected SendAcp PermissionReply, got {other:?}"),
     }
@@ -554,7 +560,10 @@ async fn stale_permission_click_emits_expired_card() {
     // not because the session is dead).
     let _ = router
         .map
-        .insert(key.clone(), sebas_dispatch::state::Mapping::active("sess-stale"))
+        .insert(
+            key.clone(),
+            sebas_dispatch::state::Mapping::active("sess-stale"),
+        )
         .await;
     router
         .dispatch(ChannelEvent::ButtonCb {
@@ -606,7 +615,7 @@ use serde_json::json;
 async fn allow_session_click_replies_then_switches_mode_to_auto() {
     use sebas_acp::claude::session::AcpEvent;
     use sebas_channels::{ChannelAction, ChannelEvent, ChannelKey};
-    use sebas_dispatch::engine::{Out, DispatchHandle};
+    use sebas_dispatch::engine::{DispatchHandle, Out};
     use sebas_dispatch::state::{Mapping, SessionMap};
     use std::time::Duration;
 
@@ -686,7 +695,11 @@ async fn allow_session_click_replies_then_switches_mode_to_auto() {
             }
             Out::SendAcp {
                 session_id,
-                cmd: AcpCommand::SetMode { session_id: sid, mode },
+                cmd:
+                    AcpCommand::SetMode {
+                        session_id: sid,
+                        mode,
+                    },
             } => {
                 assert_eq!(session_id, "s1");
                 assert_eq!(sid, "s1");
@@ -706,11 +719,7 @@ async fn allow_session_click_replies_then_switches_mode_to_auto() {
 
     // ③ mapping desired_mode=auto 落位（ask 会话点击后的「不再弹卡」语义由
     // driver 层 hook 门控保证——dispatch 只负责把 mode 请求送达执行体）。
-    let desired = router
-        .map
-        .get(&key)
-        .await
-        .and_then(|m| m.desired_mode.clone());
+    let desired = router.map.get(&key).await.map(|m| m.desired_mode);
     assert_eq!(desired.as_deref(), Some("auto"));
 
     // 在飞记录已登记（driver 事件回执失败时据实翻卡用）。
@@ -719,13 +728,15 @@ async fn allow_session_click_replies_then_switches_mode_to_auto() {
     // 其后同会话的游离 SetMode 失败 Error 不再误报（记录已被成功消费）。
     // 注：ModeChanged/Error 经 apply_event_to_out 会顺带 flush 会话卡
     // （Out::UpdateCard，既有行为）——只容忍该噪声，断言无失败翻卡。
-    router.apply_event_to_out(
-        "s1".into(),
-        &AcpEvent::ModeChanged {
-            session_id: "s1".into(),
-            mode: "auto".into(),
-        },
-    ).await;
+    router
+        .apply_event_to_out(
+            "s1".into(),
+            &AcpEvent::ModeChanged {
+                session_id: "s1".into(),
+                mode: "auto".into(),
+            },
+        )
+        .await;
     router
         .apply_event_to_out(
             "s1".into(),
@@ -738,7 +749,7 @@ async fn allow_session_click_replies_then_switches_mode_to_auto() {
         .await;
     loop {
         match tokio::time::timeout(Duration::from_millis(100), out_rx.recv()).await {
-            Err(_) => break, // 无更多 Out
+            Err(_) => break,                              // 无更多 Out
             Ok(Some(Out::UpdateCard { .. })) => continue, // 会话卡 flush 噪声
             Ok(Some(other)) => panic!("成功消费后不应有失败翻卡，got {other:?}"),
             Ok(None) => break,
@@ -757,7 +768,7 @@ async fn allow_session_click_replies_then_switches_mode_to_auto() {
 async fn allow_session_click_failure_keeps_allow_and_reports_honestly() {
     use sebas_acp::claude::session::AcpEvent;
     use sebas_channels::{ChannelAction, ChannelEvent, ChannelKey};
-    use sebas_dispatch::engine::{Out, DispatchHandle};
+    use sebas_dispatch::engine::{DispatchHandle, Out};
     use sebas_dispatch::state::{Mapping, SessionMap};
     use std::time::Duration;
 
@@ -873,7 +884,7 @@ async fn later_requests_still_render_cards_after_allow_session() {
     // driver 层 mode 门控在 hook 里执法，根本不产生请求）。
     use sebas_acp::claude::session::AcpEvent;
     use sebas_channels::{ChannelAction, ChannelEvent, ChannelKey};
-    use sebas_dispatch::engine::{Out, DispatchHandle};
+    use sebas_dispatch::engine::{DispatchHandle, Out};
     use sebas_dispatch::state::{Mapping, SessionMap};
     use std::time::Duration;
 
@@ -942,7 +953,6 @@ async fn later_requests_still_render_cards_after_allow_session() {
         "dispatch 侧不再自动放行"
     );
 }
-
 
 // ---- sebas-per-turn: Out::SendCard carries root_id (Task 2) ----
 

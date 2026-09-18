@@ -189,7 +189,6 @@ pub struct CoreArgs {
     /// default, no-op in bare run mode).
     #[arg(long, conflicts_with = "webui")]
     pub no_webui: bool,
-
 }
 
 #[derive(Parser)]

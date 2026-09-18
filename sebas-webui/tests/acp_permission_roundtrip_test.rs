@@ -9,9 +9,7 @@ use sebas_acp::claude::session::{AcpCommand, AcpEvent, Decision};
 use sebas_channels::ChannelKey;
 use sebas_dispatch::engine::Out;
 use sebas_dispatch::state::{Mapping, SessionMap};
-use sebas_webui::session_backend::{
-    InProcessBackend, PermissionDecision, SessionBackend,
-};
+use sebas_webui::session_backend::{InProcessBackend, PermissionDecision, SessionBackend};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,8 +19,7 @@ fn key(chat_id: &str) -> ChannelKey {
 
 /// 与 routes::encode_session_key 同形的 URL-safe 编码（channel\0reference）。
 fn encoded_key(k: &ChannelKey) -> String {
-    urlencoding::encode(&format!("{}\0{}", k.channel.as_str(), k.reference))
-        .into_owned()
+    urlencoding::encode(&format!("{}\0{}", k.channel.as_str(), k.reference)).into_owned()
 }
 
 #[tokio::test]
@@ -55,7 +52,11 @@ async fn acp_permission_round_trips_through_in_process_backend() {
         .expect("notice timeout")
         .expect("notice");
     assert_eq!(notice.request_id, "claude:toolu_1");
-    assert_eq!(notice.session_id, encoded_key(&key), "session_id 必须是 URL-safe encoded key");
+    assert_eq!(
+        notice.session_id,
+        encoded_key(&key),
+        "session_id 必须是 URL-safe encoded key"
+    );
     assert_eq!(notice.tool_name, "Bash");
     assert_eq!(notice.args, serde_json::json!({"cmd": "ls"}));
 
@@ -127,7 +128,10 @@ async fn escalate_decision_downgrades_to_allow_once() {
         Out::SendAcp {
             cmd: AcpCommand::PermissionReply { decision, .. },
             ..
-        } => assert!(matches!(decision, Decision::AllowOnce), "escalate 必须降级为 AllowOnce"),
+        } => assert!(
+            matches!(decision, Decision::AllowOnce),
+            "escalate 必须降级为 AllowOnce"
+        ),
         other => panic!("expected SendAcp PermissionReply, got {other:?}"),
     }
 }
@@ -145,9 +149,7 @@ async fn unknown_request_answers_false() {
 }
 
 /// 排掉权限卡（SendCard）与可能的其它 Out，直到取到 PermissionReply。
-async fn drain_permission_reply(
-    out_rx: &mut tokio::sync::mpsc::Receiver<Out>,
-) -> Out {
+async fn drain_permission_reply(out_rx: &mut tokio::sync::mpsc::Receiver<Out>) -> Out {
     loop {
         let got = tokio::time::timeout(Duration::from_millis(500), out_rx.recv())
             .await
@@ -164,4 +166,3 @@ async fn drain_permission_reply(
 fn _assert_trait_object(b: Arc<dyn SessionBackend>) {
     let _ = b;
 }
-

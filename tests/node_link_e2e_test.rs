@@ -335,7 +335,6 @@ async fn an_unconfigured_agent_kind_is_refused_honestly() {
     assert!(cause.contains("claude"), "{cause}");
 }
 
-
 // ── 放置（3.1 / 3.4）对真链路 ────────────────────────────────────────────────
 
 #[tokio::test]
@@ -359,7 +358,10 @@ async fn placement_uses_the_projects_node_and_namespaces_the_session_id() {
     .unwrap();
 
     assert_eq!(placed.placement.node_id, "itest-node");
-    assert_eq!(placed.placement.project_dir.as_deref(), Some(project.path.as_str()));
+    assert_eq!(
+        placed.placement.project_dir.as_deref(),
+        Some(project.path.as_str())
+    );
     assert_eq!(
         placed.placement.session_id.namespace(),
         "proj-a",
@@ -373,16 +375,10 @@ async fn placement_uses_the_projects_node_and_namespaces_the_session_id() {
 #[tokio::test]
 async fn placement_falls_back_to_the_default_node_for_project_less_sessions() {
     let (_tmp, server, _conn) = paired_node().await;
-    let placed = placement::place_and_spawn(
-        &server,
-        None,
-        Some("itest-node"),
-        Some("echo"),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    let placed =
+        placement::place_and_spawn(&server, None, Some("itest-node"), Some("echo"), None, None)
+            .await
+            .unwrap();
     assert_eq!(placed.placement.node_id, "itest-node");
     assert_eq!(placed.placement.project_dir, None);
     assert_eq!(placed.placement.session_id.namespace(), "(no-project)");
@@ -397,7 +393,8 @@ async fn placement_refuses_an_offline_node_without_creating_a_placeholder() {
         path: "/srv/whatever".into(),
     };
 
-    match placement::place_and_spawn(&server, Some(&project), None, Some("echo"), None, None).await {
+    match placement::place_and_spawn(&server, Some(&project), None, Some("echo"), None, None).await
+    {
         Err(PlacementError::NodeOffline { node_id }) => assert_eq!(node_id, "ghost-node"),
         other => panic!("应如实报节点离线，实际 {other:?}"),
     }
@@ -405,7 +402,10 @@ async fn placement_refuses_an_offline_node_without_creating_a_placeholder() {
     // **不建占位会话**：真节点上一个会话都没有。
     match conn.request(SessionOp::ListSessions).await.unwrap() {
         SessionResult::Sessions { sessions } => {
-            assert!(sessions.is_empty(), "离线失败不应在任何节点上留下占位：{sessions:?}")
+            assert!(
+                sessions.is_empty(),
+                "离线失败不应在任何节点上留下占位：{sessions:?}"
+            )
         }
         other => panic!("{other:?}"),
     }
@@ -430,8 +430,13 @@ async fn placement_maps_a_node_rejection_and_names_the_node() {
         path: missing.to_string_lossy().into_owned(),
     };
 
-    match placement::place_and_spawn(&server, Some(&project), None, Some("echo"), None, None).await {
-        Err(PlacementError::Rejected { node_id, code, cause }) => {
+    match placement::place_and_spawn(&server, Some(&project), None, Some("echo"), None, None).await
+    {
+        Err(PlacementError::Rejected {
+            node_id,
+            code,
+            cause,
+        }) => {
             assert_eq!(node_id, "itest-node", "失败要指名节点");
             assert_eq!(code, sebas_node_link::SessionRejectCode::UnusableProjectDir);
             assert!(cause.contains("no-such-repo"), "{cause}");
@@ -439,7 +444,6 @@ async fn placement_maps_a_node_rejection_and_names_the_node() {
         other => panic!("应给出带节点名的拒绝，实际 {other:?}"),
     }
 }
-
 
 // ── 审批走廊（6.2 / 6.4 / 6.5 / 6.6 / 6.7）对真链路 ──────────────────────────
 
@@ -502,7 +506,9 @@ async fn ask_mode_raises_an_approval_request_that_only_the_control_plane_can_res
     })
     .await
     {
-        SessionEvent::ApprovalRequested { request_id, tool, .. } => {
+        SessionEvent::ApprovalRequested {
+            request_id, tool, ..
+        } => {
             assert_eq!(tool, "bash");
             request_id
         }
@@ -515,11 +521,16 @@ async fn ask_mode_raises_an_approval_request_that_only_the_control_plane_can_res
     assert_eq!(view.parked_approvals()[0].request_id, request_id);
 
     // 只有控制面能决议。
-    assert!(view
-        .answer_approval(&conn, &request_id, ApprovalDecision::AllowOnce)
-        .await
-        .unwrap());
-    assert_eq!(view.reconcile_approvals(&conn).await.unwrap(), 0, "决议后不再悬空");
+    assert!(
+        view.answer_approval(&conn, &request_id, ApprovalDecision::AllowOnce)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        view.reconcile_approvals(&conn).await.unwrap(),
+        0,
+        "决议后不再悬空"
+    );
 
     // 审计落到了节点日志：谁给的结论、什么结论、针对哪个请求。
     match conn
@@ -538,7 +549,9 @@ async fn ask_mode_raises_an_approval_request_that_only_the_control_plane_can_res
             assert!(audit.text.contains(&request_id), "{}", audit.text);
             // 未获批准前不得有执行痕迹。
             assert!(
-                !entries.iter().any(|e| e.text.contains("ls -la") && e.kind == "output"),
+                !entries
+                    .iter()
+                    .any(|e| e.text.contains("ls -la") && e.kind == "output"),
                 "停驻期间不得执行：{entries:?}"
             );
         }
@@ -659,7 +672,6 @@ async fn an_unknown_mode_is_refused_without_downgrading() {
     assert!(cause.contains("yolo"), "{cause}");
 }
 
-
 // ── 会话寿命绑定节点（5.6）────────────────────────────────────────────────────
 
 /// 可控的两进程装配：能停节点、能用同一/不同状态目录重启节点。
@@ -685,10 +697,8 @@ impl Harness {
             NodeLinkServer::bind("127.0.0.1:0", dir.path().join("nodes.json"))
                 .await
                 .unwrap()
-                .with_inbound_handler(
-                    std::sync::Arc::clone(&materials)
-                        as std::sync::Arc<dyn sebas::node_link::client::InboundHandler>,
-                ),
+                .with_inbound_handler(std::sync::Arc::clone(&materials)
+                    as std::sync::Arc<dyn sebas::node_link::client::InboundHandler>),
         );
         let token = server
             .registry()
@@ -726,7 +736,10 @@ impl Harness {
     }
 
     /// 用给定状态目录起一个节点进程并等它接入（返回控制面侧句柄）。
-    async fn start_node(&mut self, state_dir: &std::path::Path) -> Arc<sebas::node_link::NodeConnection> {
+    async fn start_node(
+        &mut self,
+        state_dir: &std::path::Path,
+    ) -> Arc<sebas::node_link::NodeConnection> {
         let store = sebas_node::IdentityStore::new(state_dir.to_path_buf());
         let client = sebas_node::link::LinkClient::new(
             self.url.clone(),
@@ -800,7 +813,10 @@ async fn a_control_plane_rebuild_resumes_sessions_instead_of_recreating_them() {
     let adopted = fleet.adopt_from_node(&conn).await.unwrap();
     assert_eq!(adopted, vec![session_id.clone()], "从节点认领回身份");
     assert!(
-        matches!(fleet.lifecycle(&session_id), Some(SessionLifecycle::Live { .. })),
+        matches!(
+            fleet.lifecycle(&session_id),
+            Some(SessionLifecycle::Live { .. })
+        ),
         "重建后仍是在线会话，不是终止"
     );
 
@@ -894,8 +910,9 @@ async fn a_link_loss_marks_sessions_offline_and_a_restart_terminates_them_with_t
         .unwrap()
     {
         SessionResult::Log { entries, .. } => assert!(
-            entries.iter().any(|e| e.text == "before-restart"
-                || e.text == "echo: before-restart"),
+            entries
+                .iter()
+                .any(|e| e.text == "before-restart" || e.text == "echo: before-restart"),
             "重启后仍应能拉回重启前的条目：{entries:?}"
         ),
         other => panic!("{other:?}"),
@@ -951,7 +968,6 @@ async fn a_reinstalled_node_makes_its_sessions_read_as_gone() {
     }
 }
 
-
 #[tokio::test]
 async fn the_control_plane_sees_the_nodes_capability_manifest() {
     let mut h = Harness::start().await;
@@ -1000,7 +1016,6 @@ async fn the_control_plane_sees_the_nodes_capability_manifest() {
             .any(|e| e.execution_body == "echo" && e.enforces_mode)
     );
 }
-
 
 // ── 材料过河（7.3 / 7.4 / 7.5）──────────────────────────────────────────────
 
@@ -1174,7 +1189,10 @@ async fn a_rebuilt_projection_recovers_the_transcript_from_the_node() {
         .await
         .expect("在节点上建会话");
     let session_id = placed.placement.session_id.as_str().to_string();
-    assert_eq!(key.reference, sebas::node_link::projection::row_reference("itest-node", &session_id));
+    assert_eq!(
+        key.reference,
+        sebas::node_link::projection::row_reference("itest-node", &session_id)
+    );
 
     // 等节点把这一轮写完（事件流到达）。
     let mut got = false;
@@ -1195,10 +1213,7 @@ async fn a_rebuilt_projection_recovers_the_transcript_from_the_node() {
     // 第二代控制面：**全新的空投影**（= 主控进程重启），只拿节点的事实重建。
     let second = RemoteProjection::new();
     second.attach_connection(Arc::clone(&conn)).await;
-    let report = second
-        .observe_node(&conn)
-        .await
-        .expect("对账应当成功");
+    let report = second.observe_node(&conn).await.expect("对账应当成功");
     assert_eq!(
         report.resumed.len(),
         1,

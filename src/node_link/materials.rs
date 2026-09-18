@@ -8,7 +8,7 @@
 //! 影响**（可复现），新会话拿到新版本。
 
 use crate::node_link::client::InboundHandler;
-use sebas_node_link::{MaterialFile, SessionOp, SessionResult, SessionRejectCode};
+use sebas_node_link::{MaterialFile, SessionOp, SessionRejectCode, SessionResult};
 use std::sync::{Arc, RwLock};
 
 /// 一版材料。
@@ -75,7 +75,10 @@ impl MaterialStore {
     }
 
     fn current(&self) -> Option<Bundle> {
-        self.bundle.read().unwrap_or_else(|e| e.into_inner()).clone()
+        self.bundle
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
 
@@ -142,10 +145,7 @@ mod tests {
     async fn a_configured_store_serves_the_current_version_sorted() {
         let store = MaterialStore::new();
         store
-            .set_bundle(
-                "v1",
-                vec![file("z.md", "z"), file("a/skill.md", "a")],
-            )
+            .set_bundle("v1", vec![file("z.md", "z"), file("a/skill.md", "a")])
             .unwrap();
         assert_eq!(store.version().as_deref(), Some("v1"));
         assert_eq!(store.file_count(), 2);

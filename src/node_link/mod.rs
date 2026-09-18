@@ -24,10 +24,10 @@ pub use client::{NodeConnection, NodeLinkError};
 pub use driver::{BatchOutcome, RemoteSession, Segment, Unavailable};
 pub use fleet::{ReconcileReport, RemoteFleet, SessionLifecycle};
 pub use materials::MaterialStore;
-pub use projection::{LOCAL_NODE_ID, Meta0, ProjectionObserver, RemoteProjection};
 pub use placement::{
     NO_PROJECT_NAMESPACE, Placed, Placement, PlacementError, ProjectRef, RemoteSessionId,
 };
+pub use projection::{LOCAL_NODE_ID, Meta0, ProjectionObserver, RemoteProjection};
 pub use registry::{JoinTokenView, NodeEntry, NodeRegistry, NodeStatus, RegistryError};
 pub use runtime::{ArmedNodeLink, arm};
 pub use server::{Handled, NodeLinkServer};

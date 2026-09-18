@@ -7,8 +7,8 @@
 //! transcript（工具轨迹 + 收尾文本）可读 → 权限请求可经 webui 审查卡回填。
 
 use sebas_channels::{ChannelEvent, ChannelKey};
-use sebas_dispatch::state::SessionMap;
 use sebas_dispatch::DispatchHandle;
+use sebas_dispatch::state::SessionMap;
 use sebas_webui::session_backend::{InProcessBackend, PermissionDecision, SessionBackend};
 use std::sync::Arc;
 use std::time::Duration;
@@ -87,7 +87,10 @@ async fn feishu_native_session_appears_in_webui_snapshot() {
     let row = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let snap = backend.snapshot().await;
-            if let Some(info) = snap.into_iter().find(|i| i.channel == key.channel_str() && i.key == key.reference) {
+            if let Some(info) = snap
+                .into_iter()
+                .find(|i| i.channel == key.channel_str() && i.key == key.reference)
+            {
                 return info;
             }
             tokio::time::sleep(Duration::from_millis(30)).await;
@@ -119,7 +122,10 @@ async fn feishu_native_session_appears_in_webui_snapshot() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let joined: String = last.iter().map(|e| e.content.clone()).collect();
-    assert!(joined.contains("bash"), "tool trace in transcript: {joined}");
+    assert!(
+        joined.contains("bash"),
+        "tool trace in transcript: {joined}"
+    );
     assert!(
         joined.contains("native done"),
         "completion text in transcript: {joined}"

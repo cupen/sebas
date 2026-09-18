@@ -14,9 +14,9 @@ use sebas_acp::claude::ClaudeCodeDriver;
 use sebas_acp::claude::manager::SessionManager;
 use sebas_acp::claude::session::{AcpCommand, AcpEvent};
 use sebas_channels::ChannelKey;
-use sebas_router::config::RouterConfig;
 use sebas_dispatch::engine::DispatchHandle;
 use sebas_dispatch::state::SessionMap;
+use sebas_router::config::RouterConfig;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, warn};
@@ -126,18 +126,14 @@ pub async fn acp_spawn_and_activate(
 ) -> anyhow::Result<(
     String,
     Vec<String>,
-    std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<sebas_acp::claude::session::AcpEvent>>>,
+    std::sync::Arc<
+        tokio::sync::Mutex<tokio::sync::mpsc::Receiver<sebas_acp::claude::session::AcpEvent>>,
+    >,
     Option<sebas_acp::AcpModelInfo>,
 )> {
     let (extra_env, full_command) = spawn_overrides(kind, command, router_cfg);
     let session_id = mgr
-        .create_session(
-            kind,
-            full_command,
-            work_dir,
-            extra_env,
-            prompt.to_string(),
-        )
+        .create_session(kind, full_command, work_dir, extra_env, prompt.to_string())
         .await?;
     // Clone the event receiver IMMEDIATELY after create_session returns Ok
     // (entry is in the table, session alive — before any slow I/O or prompt
@@ -183,7 +179,9 @@ pub async fn acp_spawn_and_activate(
     // 模型选择面：spawn outcome 里 driver 上报的 configOptions 解析结果，
     // 一并写入映射供快照暴露（current_model + available_models）。
     let model_info = mgr.get_model_info(&session_id).await;
-    let pending = router.activate(key, session_id.clone(), acp_session_id, model_info.clone()).await;
+    let pending = router
+        .activate(key, session_id.clone(), acp_session_id, model_info.clone())
+        .await;
     Ok((session_id, pending, rx, model_info))
 }
 
@@ -216,7 +214,9 @@ pub async fn acp_resume_and_activate(
 ) -> anyhow::Result<(
     String,
     Vec<String>,
-    std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<sebas_acp::claude::session::AcpEvent>>>,
+    std::sync::Arc<
+        tokio::sync::Mutex<tokio::sync::mpsc::Receiver<sebas_acp::claude::session::AcpEvent>>,
+    >,
     bool,
 )> {
     let (extra_env, full_command) = spawn_overrides(kind, command, router_cfg);

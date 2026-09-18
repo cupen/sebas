@@ -79,10 +79,7 @@ pub fn data_dir(cfg: &WatchdogConfig) -> PathBuf {
 ///
 /// `default_home` 在 `service --install` 时传 `--user` 的 home（而非 installer
 /// root 的），确保服务自升级写入的目录归服务用户所有。
-pub fn data_dir_for_user(
-    data_dir_cfg: &str,
-    default_home: Option<PathBuf>,
-) -> PathBuf {
+pub fn data_dir_for_user(data_dir_cfg: &str, default_home: Option<PathBuf>) -> PathBuf {
     if data_dir_cfg.is_empty() {
         default_home
             .unwrap_or_else(|| PathBuf::from("~/.local/share"))

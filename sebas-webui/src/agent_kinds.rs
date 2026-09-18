@@ -262,11 +262,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_binary_reports_command_not_found() {
-        let info = discover_agent(&source(
-            "gemini",
-            &["sebas-nonexistent-binary-xyz-12345"],
-        ))
-        .await;
+        let info = discover_agent(&source("gemini", &["sebas-nonexistent-binary-xyz-12345"])).await;
         assert!(!info.reachable);
         assert_eq!(info.cause.as_deref(), Some("command not found"));
         assert!(info.version.is_none());
@@ -313,7 +309,10 @@ mod tests {
             eprintln!("opencode not on PATH; skipping opencode probe assertion");
             return;
         }
-        assert!(info.cause.is_none(), "reachable opencode has no cause: {info:?}");
+        assert!(
+            info.cause.is_none(),
+            "reachable opencode has no cause: {info:?}"
+        );
         let v = info.version.as_deref().unwrap_or_default();
         // opencode `--version` prints a bare semver like `1.18.25`.
         assert!(

@@ -26,7 +26,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use futures_util::future::BoxFuture;
 use futures_util::{SinkExt, StreamExt};
-use sebas_dispatch::SessionEvent;
+use sebas_dispatch::{SessionEvent, SessionInfo};
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
@@ -293,7 +293,12 @@ pub async fn session_detail(
         // rail-declutter-unread：会话的可见回复段数——transcript 标记已读时
         // 以它推进浏览器读锚（seam 与徽标共用，D3）。
         "msg_count": info.msg_count,
+        // （session-parallel-liveness-and-unread-polish 1.3）spawn 失败原因
+        // 原文（SessionInfo 透传）。None 不插键——非失败会话的 wire 干净。
     });
+    if let Some(reason) = &info.spawn_failure_reason {
+        data["spawn_failure_reason"] = serde_json::Value::String(reason.clone());
+    }
     // （session-slash-commands 2.2）会话命令表（composer 面板数据源）。空表
     // 不插键——旧前端看到的 detail 形状不变（新 core + 旧前端兼容）。
     if !info.available_commands.is_empty() {
@@ -2271,19 +2276,48 @@ async fn handle_client_frame(
     }
 }
 
+/// （session-parallel-liveness-and-unread-polish 2.1，design D2）`SessionInfo`
+/// → 相位帧载荷：`SessionStatus::derive` 把 (MappingState, phase) 翻成操作者
+/// 词（含泊车投影），与 HTTP 行投影同一函数；五键全部携带，无缺省、无
+/// 「只在 true 时上 wire」的兼容保留。
+fn session_phase_frame(info: &SessionInfo) -> crate::events::SessionPhaseFrame {
+    // （review 3c 补口）泊车维度本地/远端合并：本地会话读 `parked_approvals`
+    // （StallRegistry 投影），远端会话读 remote 视图——二选一，不会同时有值。
+    let parked = info
+        .remote
+        .as_ref()
+        .map_or(info.parked_approvals, |r| r.parked_approvals);
+    let derived = SessionStatus::derive(&info.status, info.phase.as_deref().unwrap_or(""))
+        .with_parked_approvals(parked);
+    crate::events::SessionPhaseFrame {
+        status_slug: derived.slug().to_string(),
+        turn_engaged: info.turn_engaged,
+        msg_count: info.msg_count,
+        pending: info.pending.clone(),
+    }
+}
+
 /// Translate a backend session event into the WS frame vocabulary the SPA
 /// keys off (`session.*`, dotted tags). `Resync` carries no frame: the
 /// client's next fetch converges the view, and the frame contract has no
-/// resync type.
+/// resync type.（2.1，D2）`Created` 与 `Updated` 同形——五键齐全的相位帧，
+/// 旧 `status` 字段删除，每个 FSM flip 都以离散事件到达前端。
 fn session_event_to_frame(ev: SessionEvent) -> Option<WebUiEvent> {
     match ev {
-        SessionEvent::Created { session } => Some(WebUiEvent::SessionCreated {
-            session_id: encode_channel_key(&session.channel, &session.key),
-        }),
-        SessionEvent::Updated { session } => Some(WebUiEvent::SessionUpdated {
-            session_id: encode_channel_key(&session.channel, &session.key),
-            status: session.status,
-        }),
+        SessionEvent::Created { session } => {
+            let phase = session_phase_frame(&session);
+            Some(WebUiEvent::SessionCreated {
+                session_id: encode_channel_key(&session.channel, &session.key),
+                phase,
+            })
+        }
+        SessionEvent::Updated { session } => {
+            let phase = session_phase_frame(&session);
+            Some(WebUiEvent::SessionUpdated {
+                session_id: encode_channel_key(&session.channel, &session.key),
+                phase,
+            })
+        }
         SessionEvent::Removed { channel, key } => Some(WebUiEvent::SessionRemoved {
             session_id: encode_channel_key(&channel, &key),
         }),

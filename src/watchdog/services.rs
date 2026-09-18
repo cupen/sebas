@@ -113,7 +113,10 @@ impl ServiceManager {
             return HashMap::new();
         };
         let Ok(table) = serde_json::from_str::<HashMap<String, String>>(&raw) else {
-            warn!("failed to parse services.json, ignoring: {}", path.display());
+            warn!(
+                "failed to parse services.json, ignoring: {}",
+                path.display()
+            );
             return HashMap::new();
         };
         table
@@ -297,19 +300,15 @@ impl ServiceManager {
         }
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
-            let settled = self
-                .all_snapshots()
-                .await
-                .into_iter()
-                .all(|s| {
-                    matches!(
-                        s.state,
-                        ServiceState::Stopped
-                            | ServiceState::Disabled
-                            | ServiceState::Degraded
-                            | ServiceState::FailedStartup
-                    )
-                });
+            let settled = self.all_snapshots().await.into_iter().all(|s| {
+                matches!(
+                    s.state,
+                    ServiceState::Stopped
+                        | ServiceState::Disabled
+                        | ServiceState::Degraded
+                        | ServiceState::FailedStartup
+                )
+            });
             if settled || std::time::Instant::now() >= deadline {
                 break;
             }

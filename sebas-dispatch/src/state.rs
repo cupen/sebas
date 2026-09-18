@@ -140,8 +140,13 @@ pub struct Mapping {
     /// `None` = agent 默认行为（wire 不携带 mode）。
     pub pending_mode: Option<String>,
     /// （add-agent-mode-selection）操作者期望的会话 mode：创建请求携带、
-    /// 中途切换立即更新。快照暴露给前端；`None` = agent 默认。
-    pub desired_mode: Option<String>,
+    /// 中途切换立即更新，快照暴露给前端。（
+    /// session-parallel-liveness-and-unread-polish 3.2，design D5b）**非空**
+    /// `String`：缺省即 `ask`（`ASK_MODE`），不再有 `None` 路径——state.json、
+    /// 内存、wire、UI 四层对 ask 的表达是同一份字符串；旧数据的 null 在
+    /// `MappingDto` 反序列化点（restore 即启动迁移）一次性落为 ask，迁移是
+    /// null 消失的唯一地点，此后任何投影都读到迁移后的值，无读侧回退。
+    pub desired_mode: String,
     /// （add-agent-mode-selection）执行体回报的**实际生效** mode（本机 =
     /// spawn argv 实际应用值 / `ModeChanged` 事件；远端 = 节点回报）。
     /// `None` = 执行体未声称任何 mode 生效（如实呈现 desired/effective 差异）。
@@ -180,7 +185,7 @@ impl Mapping {
             pending_kind: None,
             pending_model: None,
             pending_mode: None,
-            desired_mode: None,
+            desired_mode: crate::engine::ask_mode(),
             effective_mode: None,
             acp_session_id: None,
             current_model: None,
@@ -201,7 +206,7 @@ impl Mapping {
             pending_kind: None,
             pending_model: None,
             pending_mode: None,
-            desired_mode: None,
+            desired_mode: crate::engine::ask_mode(),
             effective_mode: None,
             acp_session_id,
             current_model: None,
@@ -221,7 +226,7 @@ impl Mapping {
             pending_kind: None,
             pending_model: None,
             pending_mode: None,
-            desired_mode: None,
+            desired_mode: crate::engine::ask_mode(),
             effective_mode: None,
             acp_session_id: None,
             current_model: None,
@@ -256,7 +261,10 @@ impl Mapping {
             pending_kind: kind,
             pending_model: model,
             pending_mode: mode.clone(),
-            desired_mode: mode,
+            // D5b：占位的 desired mode 非空——创建请求未点名时缺省 ask（
+            // spawn argv 是否带 flag 由 pending_mode 决定，与 CLI 默认语义
+            // 等价，快照上永远有确定的控制面词）。
+            desired_mode: mode.unwrap_or_else(crate::engine::ask_mode),
             effective_mode: None,
             acp_session_id: None,
             current_model: None,
@@ -275,7 +283,7 @@ impl Mapping {
             pending_kind: None,
             pending_model: None,
             pending_mode: None,
-            desired_mode: None,
+            desired_mode: crate::engine::ask_mode(),
             effective_mode: None,
             acp_session_id: None,
             current_model: None,
@@ -297,7 +305,7 @@ impl Mapping {
             pending_kind: None,
             pending_model: None,
             pending_mode: None,
-            desired_mode: None,
+            desired_mode: crate::engine::ask_mode(),
             effective_mode: None,
             acp_session_id: None,
             current_model: None,
@@ -634,23 +642,29 @@ impl SessionMap {
             }
             Some(_) => {
                 self.clear_queue(&key).await;
-                g.insert(key, Mapping::spawning_with(kind, model, mode, awaiting_first_prompt));
+                g.insert(
+                    key,
+                    Mapping::spawning_with(kind, model, mode, awaiting_first_prompt),
+                );
                 Ok(BeginSpawn::ReplacedActive)
             }
             None => {
                 if g.len() >= self.capacity {
                     return Err(DispatchError::Capacity(self.capacity));
                 }
-                g.insert(key, Mapping::spawning_with(kind, model, mode, awaiting_first_prompt));
+                g.insert(
+                    key,
+                    Mapping::spawning_with(kind, model, mode, awaiting_first_prompt),
+                );
                 Ok(BeginSpawn::Fresh)
             }
         }
     }
 
-    /// （add-agent-mode-selection）记录操作者期望的 mode（创建请求携带或
-    /// 中途切换）。与 `set_current_model` 同一模式：仅改映射，publish 由
-    /// engine 层调用方完成。
-    pub async fn set_desired_mode(&self, key: &ChannelKey, mode: Option<String>) {
+    /// （add-agent-mode-selection）记录操作者期望的 mode（中途切换）。与
+    /// `set_current_model` 同一模式：仅改映射，publish 由 engine 层调用方
+    /// 完成。（3.2，D5b）desired 非空：切换必须给出四个控制面词之一。
+    pub async fn set_desired_mode(&self, key: &ChannelKey, mode: String) {
         let mut g = self.inner.write().await;
         if let Some(m) = g.get_mut(key) {
             m.desired_mode = mode;
@@ -1247,10 +1261,16 @@ struct MappingDto {
     /// add-agent-mode-selection）。`#[serde(default)]` 兼容旧文件。
     #[serde(default)]
     pending_mode: Option<String>,
-    /// 操作者期望的会话 mode（重启后快照仍可显示）。`#[serde(default)]`
-    /// 兼容旧文件。
-    #[serde(default)]
-    desired_mode: Option<String>,
+    /// 操作者期望的会话 mode（重启后快照仍可显示）。（3.2，D5b）**非空**
+    /// `String`：反序列化即启动迁移点——旧文件缺字段或显式 `null` 一律落为
+    /// `ask`（[`crate::engine::ASK_MODE`]），restore 之后的内存里不再有
+    /// null；下次 `dump_json` 落盘即写回 `"ask"`（幂等）。这是 null 消失的
+    /// 唯一地点，不做任何读侧投影。
+    #[serde(
+        default = "crate::engine::ask_mode",
+        deserialize_with = "deserialize_desired_mode"
+    )]
+    pub desired_mode: String,
     /// 该项目记住的默认会话目录（0-turn 占位的 project_dir，spawn 时用）。
     /// `#[serde(default)]` 兼容旧文件。
     #[serde(default)]
@@ -1260,6 +1280,18 @@ struct MappingDto {
     /// 兼容旧文件（旧记录一律视为非占位）。
     #[serde(default)]
     awaiting_first_prompt: bool,
+}
+
+/// （3.2，design D5b）`desired_mode` 的反序列化迁移点：旧文件该字段可能是
+/// 显式 `null`（Option 时代的落盘形态）。null 与缺字段同罪——一律落为
+/// `ask`。restore 在 core 启动时执行一次，幂等：已是合法词的值原样保留，
+/// 之后每次 dump 都写回普通字符串，null 不会再出现在盘上。
+fn deserialize_desired_mode<'de, D>(d: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<String> = serde::Deserialize::deserialize(d)?;
+    Ok(opt.unwrap_or_else(crate::engine::ask_mode))
 }
 
 #[cfg(test)]
@@ -1647,6 +1679,82 @@ mod tests {
         assert!(
             !view.iter().any(|p| p.text == "over"),
             "rejected text not staged"
+        );
+    }
+}
+
+#[cfg(test)]
+mod desired_mode_migration_tests {
+    use super::*;
+    use crate::engine::ASK_MODE;
+
+    /// （session-parallel-liveness-and-unread-polish 3.2，design D5b）启动
+    /// 迁移：旧 state.json 的 `desired_mode: null`（Option 时代落盘形态）在
+    /// restore 反序列化点一次性落为 `"ask"`；缺字段的更老记录同样落 ask。
+    /// 幂等：restore 后再次 dump 的盘上值是普通字符串，null 不再出现。
+    #[tokio::test]
+    async fn legacy_null_desired_mode_migrates_to_ask_on_restore() {
+        let json = r#"{
+            "{\"channel\":\"web\",\"reference\":\"web-null\"}":
+                {"session_id":"s1","last_active_unix":1,"desired_mode":null},
+            "{\"channel\":\"web\",\"reference\":\"web-missing\"}":
+                {"session_id":"s2","last_active_unix":1},
+            "{\"channel\":\"web\",\"reference\":\"web-explicit\"}":
+                {"session_id":"s3","last_active_unix":1,"desired_mode":"auto"}
+        }"#;
+        let map = SessionMap::restore_json(json).unwrap();
+
+        let k = |r: &str| ChannelKey::new("web", r);
+        assert_eq!(
+            map.get(&k("web-null")).await.unwrap().desired_mode,
+            ASK_MODE,
+            "显式 null → ask（一次性迁移）"
+        );
+        assert_eq!(
+            map.get(&k("web-missing")).await.unwrap().desired_mode,
+            ASK_MODE,
+            "缺字段的老记录 → ask"
+        );
+        assert_eq!(
+            map.get(&k("web-explicit")).await.unwrap().desired_mode,
+            "auto",
+            "已是合法词的值原样保留"
+        );
+
+        // 幂等：迁移后的 dump 的 desired_mode 不再是 null，restore 回来仍是
+        // 迁移后的值。
+        let dumped = map.dump_json().await.unwrap();
+        assert!(
+            !dumped.contains(r#""desired_mode":null"#),
+            "迁移后的盘上 desired_mode 不得再为 null: {dumped}"
+        );
+        let again = SessionMap::restore_json(&dumped).unwrap();
+        assert_eq!(
+            again.get(&k("web-null")).await.unwrap().desired_mode,
+            ASK_MODE
+        );
+        assert_eq!(
+            again.get(&k("web-explicit")).await.unwrap().desired_mode,
+            "auto"
+        );
+    }
+
+    /// 内存构造路径同样非空：`Mapping::active`/`spawning`/`dormant` 的
+    /// desired_mode 都是缺省 ask，绝不出现空路径。
+    #[tokio::test]
+    async fn mapping_constructors_default_to_ask() {
+        assert_eq!(Mapping::active("s").desired_mode, ASK_MODE);
+        assert_eq!(Mapping::dormant("s", 0).desired_mode, ASK_MODE);
+        assert_eq!(Mapping::spawning().desired_mode, ASK_MODE);
+        assert_eq!(Mapping::spawn_failed("boom").desired_mode, ASK_MODE);
+        // 创建请求未点名 mode 的占位同样落 ask（D5b：0-turn 占位行真源即 ask）。
+        assert_eq!(
+            Mapping::spawning_with(None, None, None, true).desired_mode,
+            ASK_MODE
+        );
+        assert_eq!(
+            Mapping::spawning_with(None, None, Some("edit".into()), true).desired_mode,
+            "edit"
         );
     }
 }

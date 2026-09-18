@@ -20,7 +20,11 @@ pub async fn resolve(
     if file_key.is_empty() || message_id.is_empty() {
         return Err("媒体引用不完整（缺 file_key 或 message_id）".into());
     }
-    let cap = if max_file_size == 0 { HARD_SIZE_CAP } else { max_file_size };
+    let cap = if max_file_size == 0 {
+        HARD_SIZE_CAP
+    } else {
+        max_file_size
+    };
     let url = format!(
         "https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/resources/{file_key}?type=file"
     );
@@ -39,9 +43,15 @@ pub async fn resolve(
     {
         return Err(format!("附件超过大小上限（{n} > {cap} 字节），已拒绝"));
     }
-    let bytes = resp.bytes().await.map_err(|e| format!("媒体读取失败：{e}"))?;
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("媒体读取失败：{e}"))?;
     if bytes.len() as u64 > cap {
-        return Err(format!("附件超过大小上限（{} > {cap} 字节），已拒绝", bytes.len()));
+        return Err(format!(
+            "附件超过大小上限（{} > {cap} 字节），已拒绝",
+            bytes.len()
+        ));
     }
     tokio::fs::create_dir_all(dir)
         .await

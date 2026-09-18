@@ -537,7 +537,11 @@ impl RemoteSession {
     /// 宣称"我已经有到 `last_seq` 了"，于是紧接着的增量回拉从末尾开始，一条也拉不
     /// 回来：控制面重启后看到的会是一个**没有任何转写**的会话（而它其实好好躺在
     /// 节点磁盘上）。用 [`Self::note_snapshot`] 当"我有全部内容"的确认才推进游标。
-    pub fn note_state(&mut self, summary: &sebas_node_link::SessionSummary, reclaimed_through: u64) {
+    pub fn note_state(
+        &mut self,
+        summary: &sebas_node_link::SessionSummary,
+        reclaimed_through: u64,
+    ) {
         self.note_epoch(summary.epoch);
         self.phase = summary.phase.clone();
         self.materials_version = summary.materials_version.clone();
@@ -547,7 +551,11 @@ impl RemoteSession {
     /// 用快照校正状态**并**把游标推到节点报告的末序号。
     ///
     /// 只在"手上的条目确实已经覆盖到 `last_seq`"时用（例如回拉之后再校正）。
-    pub fn note_snapshot(&mut self, summary: &sebas_node_link::SessionSummary, reclaimed_through: u64) {
+    pub fn note_snapshot(
+        &mut self,
+        summary: &sebas_node_link::SessionSummary,
+        reclaimed_through: u64,
+    ) {
         self.note_state(summary, reclaimed_through);
         if self.cursor < summary.last_seq {
             self.cursor = summary.last_seq;
@@ -622,7 +630,13 @@ mod tests {
         );
         // 重连后节点可能重发同一段：结果必须与只应用一次相同。
         let outcome = view.note_batch(1, &batch, false);
-        assert_eq!(outcome, BatchOutcome::Overlapped { added: 0, skipped: 2 });
+        assert_eq!(
+            outcome,
+            BatchOutcome::Overlapped {
+                added: 0,
+                skipped: 2
+            }
+        );
         assert_eq!(view.cursor(), 2);
         assert_eq!(view.entries().len(), 2, "重复不应追加");
     }
@@ -632,7 +646,13 @@ mod tests {
         let mut view = RemoteSession::new("s-1");
         view.note_batch(1, &[entry(1, "a"), entry(2, "b")], false);
         let outcome = view.note_batch(2, &[entry(2, "b"), entry(3, "c")], false);
-        assert_eq!(outcome, BatchOutcome::Overlapped { added: 1, skipped: 1 });
+        assert_eq!(
+            outcome,
+            BatchOutcome::Overlapped {
+                added: 1,
+                skipped: 1
+            }
+        );
         assert_eq!(view.cursor(), 3);
         assert_eq!(view.entries().len(), 3);
     }
@@ -809,7 +829,9 @@ mod tests {
         tempfile::TempDir,
         std::sync::Arc<NodeLinkServer>,
         std::sync::Arc<NodeConnection>,
-        tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
     ) {
         use std::sync::Arc;
         let dir = tempfile::tempdir().unwrap();
@@ -874,24 +896,27 @@ mod tests {
         // 假节点：两次回拉都返回同一段 1..=2（模拟重连后的重复投递）。
         for _ in 0..2 {
             match ws.next().await {
-                Some(Ok(ClientMessage::Text(t))) => match serde_json::from_str::<Frame>(&t).unwrap()
-                {
-                    Frame::Request { id, op } => {
-                        assert!(matches!(op, SessionOp::LogFrom { .. }));
-                        let ack = Frame::Response {
-                            id,
-                            result: SessionResult::Log {
-                                epoch: 1,
-                                entries: vec![entry(1, "a"), entry(2, "b")],
-                                last_seq: 2,
-                            },
-                        };
-                        ws.send(ClientMessage::Text(serde_json::to_string(&ack).unwrap().into()))
+                Some(Ok(ClientMessage::Text(t))) => {
+                    match serde_json::from_str::<Frame>(&t).unwrap() {
+                        Frame::Request { id, op } => {
+                            assert!(matches!(op, SessionOp::LogFrom { .. }));
+                            let ack = Frame::Response {
+                                id,
+                                result: SessionResult::Log {
+                                    epoch: 1,
+                                    entries: vec![entry(1, "a"), entry(2, "b")],
+                                    last_seq: 2,
+                                },
+                            };
+                            ws.send(ClientMessage::Text(
+                                serde_json::to_string(&ack).unwrap().into(),
+                            ))
                             .await
                             .unwrap();
+                        }
+                        other => panic!("{other:?}"),
                     }
-                    other => panic!("{other:?}"),
-                },
+                }
                 other => panic!("{other:?}"),
             }
         }
@@ -941,9 +966,11 @@ mod tests {
                             last_seq: 1,
                         },
                     };
-                    ws.send(ClientMessage::Text(serde_json::to_string(&ack).unwrap().into()))
-                        .await
-                        .unwrap();
+                    ws.send(ClientMessage::Text(
+                        serde_json::to_string(&ack).unwrap().into(),
+                    ))
+                    .await
+                    .unwrap();
                 }
                 other => panic!("{other:?}"),
             },
@@ -973,9 +1000,11 @@ mod tests {
                             cause: "会话 ghost 不存在".into(),
                         },
                     };
-                    ws.send(ClientMessage::Text(serde_json::to_string(&ack).unwrap().into()))
-                        .await
-                        .unwrap();
+                    ws.send(ClientMessage::Text(
+                        serde_json::to_string(&ack).unwrap().into(),
+                    ))
+                    .await
+                    .unwrap();
                 }
                 other => panic!("{other:?}"),
             },
@@ -1024,7 +1053,11 @@ mod tests {
             mode: sebas_node_link::SessionMode::Ask,
         }));
         assert_eq!(view.parked_approvals().len(), 2);
-        assert_eq!(view.parked_approvals()[0].request_id, "s-1:req-1", "按 id 有序");
+        assert_eq!(
+            view.parked_approvals()[0].request_id,
+            "s-1:req-1",
+            "按 id 有序"
+        );
 
         assert!(view.note_event(&SessionEvent::GateResolved {
             session_id: "s-1".into(),
@@ -1065,9 +1098,11 @@ mod tests {
                             )],
                         },
                     };
-                    ws.send(ClientMessage::Text(serde_json::to_string(&ack).unwrap().into()))
-                        .await
-                        .unwrap();
+                    ws.send(ClientMessage::Text(
+                        serde_json::to_string(&ack).unwrap().into(),
+                    ))
+                    .await
+                    .unwrap();
                 }
                 other => panic!("{other:?}"),
             },
@@ -1081,9 +1116,11 @@ mod tests {
                         id,
                         result: SessionResult::ParkedApprovals { approvals: vec![] },
                     };
-                    ws.send(ClientMessage::Text(serde_json::to_string(&ack).unwrap().into()))
-                        .await
-                        .unwrap();
+                    ws.send(ClientMessage::Text(
+                        serde_json::to_string(&ack).unwrap().into(),
+                    ))
+                    .await
+                    .unwrap();
                 }
                 other => panic!("{other:?}"),
             },
@@ -1134,9 +1171,11 @@ mod tests {
                         id,
                         result: SessionResult::ApprovalApplied { applied: true },
                     };
-                    ws.send(ClientMessage::Text(serde_json::to_string(&ack).unwrap().into()))
-                        .await
-                        .unwrap();
+                    ws.send(ClientMessage::Text(
+                        serde_json::to_string(&ack).unwrap().into(),
+                    ))
+                    .await
+                    .unwrap();
                 }
                 other => panic!("{other:?}"),
             },
@@ -1150,9 +1189,11 @@ mod tests {
                         id,
                         result: SessionResult::ApprovalApplied { applied: false },
                     };
-                    ws.send(ClientMessage::Text(serde_json::to_string(&ack).unwrap().into()))
-                        .await
-                        .unwrap();
+                    ws.send(ClientMessage::Text(
+                        serde_json::to_string(&ack).unwrap().into(),
+                    ))
+                    .await
+                    .unwrap();
                 }
                 other => panic!("{other:?}"),
             },

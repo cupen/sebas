@@ -168,10 +168,6 @@ impl AdminState {
 
 // ─── Route Handlers ────────────────────────────────────────────────────────
 
-
-
-
-
 // ─── Mutation Endpoints (POST-only) ────────────────────────────────────────
 
 /// POST /admin/update — run a release update.
@@ -505,7 +501,6 @@ pub fn build_api_admin_router(state: AdminState) -> Router {
 
 // ─── Router Builder ─────────────────────────────────────────────────────────
 
-
 /// Health check endpoint.
 pub async fn health() -> &'static str {
     "ok\n"
@@ -514,7 +509,10 @@ pub async fn health() -> &'static str {
 // ─── Standalone Server ─────────────────────────────────────────────────────
 
 /// Run the standalone admin server.
-pub async fn run_standalone(listener: tokio::net::TcpListener, adapter: Option<Arc<dyn AdminAdapter>>) {
+pub async fn run_standalone(
+    listener: tokio::net::TcpListener,
+    adapter: Option<Arc<dyn AdminAdapter>>,
+) {
     let state = AdminState::new(adapter);
     let app = build_api_admin_router(state);
     let addr = listener.local_addr().expect("bound listener");
@@ -530,8 +528,6 @@ pub async fn run_standalone(listener: tokio::net::TcpListener, adapter: Option<A
 }
 
 // ─── Template Helpers ──────────────────────────────────────────────────────
-
-
 
 /// Format a Duration as a human-readable string.
 fn format_uptime(d: std::time::Duration) -> String {
@@ -715,16 +711,6 @@ mod tests {
         AdminState::new(adapter)
     }
 
-
-
-
-
-
-
-
-
-
-
     // ── Adapter contract tests ────────────────────────────────────────────
 
     #[tokio::test]
@@ -823,13 +809,7 @@ mod tests {
     async fn router_stop_rejection_answers_400_with_code_and_count() {
         let adapter = Some(Arc::new(FakeAdapter::rejecting(3)) as Arc<dyn AdminAdapter>);
         let app = build_api_admin_router(test_state(adapter));
-        let (status, v) = api_json(
-            app,
-            "POST",
-            "/api/admin/services/router/disable",
-            None,
-        )
-        .await;
+        let (status, v) = api_json(app, "POST", "/api/admin/services/router/disable", None).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "拒绝必须是 400: {v}");
         assert_eq!(v["code"], "active_routed_sessions");
         assert_eq!(v["count"], 3);
@@ -876,13 +856,7 @@ mod tests {
         let adapter = FakeAdapter::new();
         let adapter: Arc<dyn AdminAdapter> = Arc::new(adapter);
         let app = build_api_admin_router(test_state(Some(adapter)));
-        let (status, _) = api_json(
-            app,
-            "POST",
-            "/api/admin/services/webui/disable",
-            None,
-        )
-        .await;
+        let (status, _) = api_json(app, "POST", "/api/admin/services/webui/disable", None).await;
         assert_eq!(status, StatusCode::OK);
     }
 
@@ -946,13 +920,15 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        assert!(v["error"].as_str().unwrap().contains("control plane not connected"));
+        assert!(
+            v["error"]
+                .as_str()
+                .unwrap()
+                .contains("control plane not connected")
+        );
     }
 
     // ── No-adapter tests ───────────────────────────────────────────────────
-
-
-
 
     #[test]
     fn is_loopback_origin_accepts_localhost() {
@@ -972,11 +948,19 @@ mod tests {
 
     use serde_json::Value;
 
-    async fn api_json(app: Router, method: &str, uri: &str, body: Option<&str>) -> (StatusCode, Value) {
+    async fn api_json(
+        app: Router,
+        method: &str,
+        uri: &str,
+        body: Option<&str>,
+    ) -> (StatusCode, Value) {
         let mut builder = Request::builder()
             .method(method)
             .uri(uri)
-            .extension(ConnectInfo(SocketAddr::new(std::net::IpAddr::from([127, 0, 0, 1]), 12345)));
+            .extension(ConnectInfo(SocketAddr::new(
+                std::net::IpAddr::from([127, 0, 0, 1]),
+                12345,
+            )));
         if body.is_some() {
             builder = builder.header("content-type", "application/json");
         }
@@ -1036,13 +1020,7 @@ mod tests {
         // With adapter: mutation accepted (POST with loopback origin).
         let adapter = Some(Arc::new(FakeAdapter::new()) as Arc<dyn AdminAdapter>);
         let app = build_api_admin_router(test_state(adapter));
-        let (status, v) = api_json(
-            app,
-            "POST",
-            "/api/admin/restart",
-            Some("{}"),
-        )
-        .await;
+        let (status, v) = api_json(app, "POST", "/api/admin/restart", Some("{}")).await;
         assert_eq!(status, StatusCode::OK, "body: {v}");
         assert_eq!(v["operation_id"], "op_restart");
 
@@ -1050,7 +1028,12 @@ mod tests {
         let app = build_api_admin_router(test_state(None));
         let (status, v) = api_json(app, "POST", "/api/admin/update", Some("{}")).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        assert!(v["error"].as_str().unwrap().contains("control plane not connected"));
+        assert!(
+            v["error"]
+                .as_str()
+                .unwrap()
+                .contains("control plane not connected")
+        );
     }
 
     #[tokio::test]
@@ -1088,5 +1071,4 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
-
 }

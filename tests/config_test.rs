@@ -105,7 +105,10 @@ idle_kill_secs = 60
     let err = Config::parse(toml)
         .expect_err("legacy [acp.claude] must be rejected at parse time")
         .to_string();
-    assert!(err.contains("acp.claude"), "error names the offending table: {err}");
+    assert!(
+        err.contains("acp.claude"),
+        "error names the offending table: {err}"
+    );
 }
 
 #[test]
@@ -232,7 +235,8 @@ app_secret = ""
 /// （feishu 凭据空串），作为真实工件兜底，防必填校验回归。
 #[test]
 fn shipped_config_example_parses_without_feishu_required() {
-    let example = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config/config.toml.example");
+    let example =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config/config.toml.example");
     let raw = std::fs::read_to_string(&example).expect("config.toml.example 应随仓库存在");
     let cfg = Config::parse(&raw).expect("仓库自带示例配置必须可解析（feishu 可选）");
     if cfg.feishu.app_id.is_empty() && cfg.feishu.app_secret.is_empty() {
@@ -309,7 +313,10 @@ models = ["sonnet[1m]", "claude-opus-4-20250514"]
     };
     assert_eq!(
         c.resolved_models(),
-        vec!["sonnet[1m]".to_string(), "claude-opus-4-20250514".to_string()]
+        vec![
+            "sonnet[1m]".to_string(),
+            "claude-opus-4-20250514".to_string()
+        ]
     );
 }
 
@@ -354,7 +361,11 @@ models = []
     let AgentConfig::Claude(c) = cfg.acp.agents.get("claude").unwrap() else {
         panic!("claude agent must parse as Claude config");
     };
-    assert_eq!(c.models.as_deref(), Some(&[][..]), "empty list deserializes to Some(empty)");
+    assert_eq!(
+        c.models.as_deref(),
+        Some(&[][..]),
+        "empty list deserializes to Some(empty)"
+    );
     assert_eq!(
         c.resolved_models(),
         vec![

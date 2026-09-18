@@ -53,6 +53,7 @@ vi.mock('../api/client.js', () => ({
     sendMessage: vi.fn(),
     cancelSession: vi.fn(),
     setSessionModel: vi.fn(),
+    setSessionMode: vi.fn(),
     providers: vi.fn(),
     providerDefaults: vi.fn(),
   },
@@ -87,6 +88,7 @@ async function mount(initial: Partial<SebasWorkbenchComposer> = {}) {
   if (initial.sessionCommands !== undefined) el.sessionCommands = initial.sessionCommands
   if (initial.childStarting !== undefined) el.childStarting = initial.childStarting
   if (initial.currentMode !== undefined) el.currentMode = initial.currentMode
+  if (initial.failureReason !== undefined) el.failureReason = initial.failureReason
   if (initial.modeEditable !== undefined) el.modeEditable = initial.modeEditable
   if (initial.hasTurns !== undefined) el.hasTurns = initial.hasTurns
   if (initial.coreReachability !== undefined) el.coreReachability = initial.coreReachability
@@ -516,6 +518,54 @@ describe('model chip (4.2, design D3)', () => {
 
 // ── 4.3 发送状态机 ────────────────────────────────────────────────────────
 
+describe('mode switch compact + desired-mode rendering (3.1/3.2, D5) and toolbar grid (3.3)', () => {
+  it('renders the desired mode from the wire, not the empty legacy entry (3.2, D5b)', async () => {
+    // （3.2，D5b）currentMode 非空（服务端缺省 ask）：选择器真源值渲染，不落
+    // 空态。选项词汇与默认条目由上面 4.1 的同源测试钉住（共享 MODE_OPTIONS）。
+    const el = await mount({ ...focus, modeEditable: true, currentMode: 'ask' })
+    const sel = el.shadowRoot?.querySelector('[data-testid="mode-switch"]') as HTMLElement & {
+      value: string
+    }
+    expect(sel.value).toBe('ask')
+    const auto = await mount({ ...focus, modeEditable: true, currentMode: 'auto' })
+    const autoSel = auto.shadowRoot?.querySelector('[data-testid="mode-switch"]') as HTMLElement & {
+      value: string
+    }
+    expect(autoSel.value).toBe('auto')
+    el.remove()
+    auto.remove()
+  })
+
+  it('switching still sends the lowercase wire value (3.1, D5)', async () => {
+    const el = await mount({ ...focus, modeEditable: true, currentMode: 'ask' })
+    // 选项文案是共享词汇（中文解释），value 属性 = 小写 wire 词汇：change
+    // 事件携带的仍是控制面词（→ 'allow'），词表不变。
+    const sel = el.shadowRoot!.querySelector('[data-testid="mode-switch"]') as unknown as
+      HTMLElement & { value: string }
+    sel.value = 'allow'
+    sel.dispatchEvent(new Event('change'))
+    await new Promise((r) => setTimeout(r, 0))
+    expect(api.setSessionMode).toHaveBeenCalledWith('web%00web-1', 'allow')
+  })
+
+  it('the select hugs its label within the 110px cap (3.1)', async () => {
+    // 样式钉死（happy-dom 无布局，读组件样式源）：max-content + 110px cap。
+    const src = readFileSync(join(here, 'workbench-composer.ts'), 'utf8')
+    expect(src).toMatch(
+      /\.mode-select\s*\{[^}]*--wa-form-control-width:\s*max-content;[^}]*max-width:\s*110px;/,
+    )
+  })
+
+  it('toolbar groups align on a stable grid instead of margin-auto drift (3.3, D5)', async () => {
+    // 样式钉死：两列网格 + 垂直居中，右组不再 margin-left:auto。
+    const src = readFileSync(join(here, 'workbench-composer.ts'), 'utf8')
+    expect(src).toMatch(
+      /\.composer-bottom\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*1fr auto;[^}]*align-items:\s*center;/,
+    )
+    expect(src).not.toMatch(/\.composer-bottom \.right-tools\s*\{[^}]*margin-left:\s*auto/)
+  })
+})
+
 describe('submit control state machine (4.3, design D4)', () => {
   function stateOf(el: SebasWorkbenchComposer): string | null {
     return (
@@ -649,16 +699,40 @@ describe('sebas-workbench-composer (parked / spawn-window submit control)', () =
     expect(el.shadowRoot?.querySelector('[data-testid="parked-hint"]')).toBeNull()
   })
 
-  it('spawn window (starting) with text offers the queued affordance', async () => {
+  it('starting child with text offers the distinct starting affordance, not queued (3.4, D2)', async () => {
     // spawn 窗口经 turn_engaged 折算成 turnInFlight=true（dashboard 供数）；
-    // composer 的形态判定对 starting 与 working 一致——都是「回合占用」。
+    // （3.4）提交被暂存给正在启动的子进程——starting 形态与排队形态必须
+    // 可分辨（spec「starting child stages rather than queues」）。
     const el = await mount({ ...focus, turnInFlight: true, childStarting: true })
     await type(el, 'first message staged')
-    expect(stateOf(el)).toBe('queued')
+    expect(stateOf(el)).toBe('starting')
     expect(el.shadowRoot?.querySelector('[data-testid="parked-hint"]')).toBeNull()
+    // 提交照常发出（staging 语义 = 服务端并入首条消息）。
+    ;(el.shadowRoot?.querySelector('[data-testid="submit-control"]') as HTMLElement).click()
+    await new Promise((r) => setTimeout(r, 0))
+    expect(api.sendMessage).toHaveBeenCalledWith('web%00web-1', 'first message staged')
+  })
+
+  it('starting child without text falls back to the stop affordance (turn_engaged covers the window)', async () => {
+    const el = await mount({ ...focus, turnInFlight: true, childStarting: true })
+    expect(stateOf(el)).toBe('stop')
+    el.childStarting = false
     el.turnInFlight = false
     await el.updateComplete
-    expect(stateOf(el)).toBe('send')
+    expect(stateOf(el)).toBe('disabled')
+  })
+
+  it('a spawn failure is stated inline with a retry path (3.4)', async () => {
+    // 失败会话聚焦时就地呈现原因（session-lifecycle delta「failed spawn
+    // names the cause」的呈现半边）；提交面保持可用 = 再次发送即重试。
+    const el = await mount({ ...focus, failureReason: 'agent binary not found: claude-fake' })
+    const notice = el.shadowRoot?.querySelector('[data-testid="spawn-failure"]')
+    expect(notice).toBeTruthy()
+    expect(notice?.textContent).toContain('agent binary not found: claude-fake')
+    expect(notice?.textContent).toContain('重试')
+    // 无失败事实不渲染。
+    const ok = await mount({ ...focus })
+    expect(ok.shadowRoot?.querySelector('[data-testid="spawn-failure"]')).toBeNull()
   })
 })
 

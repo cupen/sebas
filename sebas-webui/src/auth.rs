@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 
 // 哈希原语与默认库路径实际住在 user_store（存储自管密码材料）；这里
 // 再导出，历史调用点（admin_auth::generate_token 等）继续走 crate::auth。
-pub use crate::user_store::{default_auth_db, pbkdf2_hmac_sha256, random_bytes, PBKDF2_ITERATIONS};
+pub use crate::user_store::{PBKDF2_ITERATIONS, default_auth_db, pbkdf2_hmac_sha256, random_bytes};
 
 /// WebUI 会话 cookie 名（HttpOnly + SameSite=Lax）。
 pub const SESSION_COOKIE_NAME: &str = "sebas_webui_session";
@@ -228,12 +228,10 @@ impl AuthHandle {
         if password.chars().count() < MIN_PASSWORD_LEN {
             return Err(SetupError::WeakPassword);
         }
-        let user_id = users
-            .setup_root(username, password)
-            .map_err(|e| match e {
-                StoreError::AlreadyInitialized => SetupError::AlreadySetup,
-                other => SetupError::Store(other),
-            })?;
+        let user_id = users.setup_root(username, password).map_err(|e| match e {
+            StoreError::AlreadyInitialized => SetupError::AlreadySetup,
+            other => SetupError::Store(other),
+        })?;
         let (session_id, _csrf) = self.session_store.create(user_id).await;
         Ok(session_id)
     }

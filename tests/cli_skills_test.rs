@@ -4,8 +4,10 @@
 //! tempdir 沙箱——投影落点（`~/.claude/skills` 等）与仓目录（config
 //! `[skills] dir`）全部钉在沙箱里，绝不写真实 HOME。
 
-use sebas::skills_cmd::{classify_source, list_lines, run, sync_lines, AddSource, SkillsArgs, SkillsCmd};
 use sebas::skills;
+use sebas::skills_cmd::{
+    AddSource, SkillsArgs, SkillsCmd, classify_source, list_lines, run, sync_lines,
+};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -120,7 +122,10 @@ fn snapshot(root: &Path) -> Vec<(String, Vec<u8>)> {
             if p.is_dir() {
                 walk(&p, &r, out);
             } else {
-                out.push((r.to_string_lossy().replace('\\', "/"), fs::read(&p).unwrap()));
+                out.push((
+                    r.to_string_lossy().replace('\\', "/"),
+                    fs::read(&p).unwrap(),
+                ));
             }
         }
     }
@@ -189,10 +194,19 @@ fn add_local_lands_in_store_and_list_shows_it() {
     .expect("local add 应成功");
 
     let landed = sb.store().join("my-skill");
-    assert_eq!(fs::read_to_string(landed.join("SKILL.md")).unwrap(), SKILL_BODY);
-    assert_eq!(fs::read_to_string(landed.join("extra.txt")).unwrap(), "attachment");
+    assert_eq!(
+        fs::read_to_string(landed.join("SKILL.md")).unwrap(),
+        SKILL_BODY
+    );
+    assert_eq!(
+        fs::read_to_string(landed.join("extra.txt")).unwrap(),
+        "attachment"
+    );
     let lines = list_lines(&sb.store());
-    assert!(lines.iter().any(|l| l.starts_with("my-skill  ")), "{lines:?}");
+    assert!(
+        lines.iter().any(|l| l.starts_with("my-skill  ")),
+        "{lines:?}"
+    );
 }
 
 /// 非法源（无 SKILL.md）报错且不写盘（spec「Add rejects」scenario）。
@@ -271,7 +285,11 @@ fn remove_deletes_store_entry_and_leaves_backend_bytes_untouched() {
     let backend = sb.home().join(".claude").join("skills");
     assert!(backend.join("beads").is_dir(), "前置：投影已发生");
     // 用户私产也放一份——remove 同样不许碰它。
-    let private = make_skill(&backend, "user-byhand", "---\nname: user-byhand\ndescription: 私产\n---\n");
+    let private = make_skill(
+        &backend,
+        "user-byhand",
+        "---\nname: user-byhand\ndescription: 私产\n---\n",
+    );
     fs::write(private.join("secret.txt"), "do not touch").unwrap();
     let before = snapshot(&backend);
 
@@ -303,7 +321,10 @@ fn remove_deletes_store_entry_and_leaves_backend_bytes_untouched() {
     }))
     .expect_err("穿越名必须被拒绝");
     assert!(err.to_string().contains("非法"), "{err}");
-    assert_eq!(fs::read_to_string(escape.join("victim.txt")).unwrap(), "survive");
+    assert_eq!(
+        fs::read_to_string(escape.join("victim.txt")).unwrap(),
+        "survive"
+    );
 }
 
 // ── 4.4 sync ─────────────────────────────────────────────────────────────────
@@ -338,9 +359,7 @@ fn sync_projects_to_placement_and_reports_no_placement() {
         "重跑 sync 同名按覆盖语义如实报告: {lines:?}"
     );
     assert!(
-        lines
-            .iter()
-            .any(|l| l.starts_with("gemini: no placement")),
+        lines.iter().any(|l| l.starts_with("gemini: no placement")),
         "no placement 必须如实报告而不是静默跳过: {lines:?}"
     );
 
@@ -363,7 +382,11 @@ fn sync_leaves_private_entries_and_counts_them() {
     let store = sb.store();
     make_skill(&store, "beads", SKILL_BODY);
     let backend = sb.home().join(".claude").join("skills");
-    let private = make_skill(&backend, "user-byhand", "---\nname: user-byhand\ndescription: 私产\n---\n");
+    let private = make_skill(
+        &backend,
+        "user-byhand",
+        "---\nname: user-byhand\ndescription: 私产\n---\n",
+    );
     fs::write(private.join("secret.txt"), "do not touch").unwrap();
 
     let outcome = skills::sync_all(&store, &["claude".into()], &sb.home()).unwrap();
@@ -377,7 +400,10 @@ fn sync_leaves_private_entries_and_counts_them() {
         "do not touch",
         "私产字节不动"
     );
-    assert!(!lines.iter().any(|l| l.contains("user-byhand")), "私产不得列名: {lines:?}");
+    assert!(
+        !lines.iter().any(|l| l.contains("user-byhand")),
+        "私产不得列名: {lines:?}"
+    );
 }
 
 // ── 补充覆盖（review add-agent-skills）───────────────────────────────────────
@@ -413,7 +439,11 @@ fn sync_lines_render_name_lists_and_no_placement_wrote_nothing() {
     // 预置：updated 已投影过（重跑成覆盖）、stale 只在名册里（→ deleted）、
     // user-byhand 是用户私产（→ 只计数）。
     make_skill(&backend, "updated", SKILL_BODY);
-    let stale = make_skill(&backend, "stale", "---\nname: stale\ndescription: 旧\n---\n");
+    let stale = make_skill(
+        &backend,
+        "stale",
+        "---\nname: stale\ndescription: 旧\n---\n",
+    );
     fs::write(stale.join("old.txt"), "old").unwrap();
     make_skill(&backend, "user-byhand", SKILL_BODY);
     fs::write(
@@ -435,7 +465,10 @@ fn sync_lines_render_name_lists_and_no_placement_wrote_nothing() {
         lines[0].contains("written=1 overwritten=1 deleted=1 private_ignored=1"),
         "{lines:?}"
     );
-    assert!(lines.iter().any(|l| l.trim() == "+ fresh"), "写入名单逐名呈现: {lines:?}");
+    assert!(
+        lines.iter().any(|l| l.trim() == "+ fresh"),
+        "写入名单逐名呈现: {lines:?}"
+    );
     assert!(
         lines.iter().any(|l| l.starts_with("  ~ updated")),
         "覆盖名单带仓 wins 注记: {lines:?}"

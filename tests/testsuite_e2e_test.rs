@@ -38,16 +38,14 @@ async fn wait_bootstrap_token(sb: &Sandbox) -> String {
             Box::pin(async move {
                 let text = std::fs::read_to_string(&log).ok()?;
                 // 形如：… bootstrap 配对 token（只显示这一次，600 秒内有效）：<64hex>
-                text.split("有效）：")
-                    .nth(1)
-                    .and_then(|rest| {
-                        let token: String = rest
-                            .trim_start()
-                            .chars()
-                            .take_while(|c| c.is_ascii_hexdigit())
-                            .collect();
-                        (token.len() == 64).then_some(token)
-                    })
+                text.split("有效）：").nth(1).and_then(|rest| {
+                    let token: String = rest
+                        .trim_start()
+                        .chars()
+                        .take_while(|c| c.is_ascii_hexdigit())
+                        .collect();
+                    (token.len() == 64).then_some(token)
+                })
             })
         },
     )
@@ -55,12 +53,7 @@ async fn wait_bootstrap_token(sb: &Sandbox) -> String {
 }
 
 /// 等某节点在**工作台可见的节点面**上进入给定状态（经 HTTP，不查内部结构）。
-async fn wait_node_status(
-    cli: &reqwest::Client,
-    sb: &Sandbox,
-    node_id: &str,
-    want: &str,
-) {
+async fn wait_node_status(cli: &reqwest::Client, sb: &Sandbox, node_id: &str, want: &str) {
     let url = format!("{}/api/nodes", sb.webui_url());
     let want = want.to_string();
     let want_in_closure = want.clone();
@@ -76,7 +69,14 @@ async fn wait_node_status(
             let want = want_in_closure.clone();
             let node_id = node_id.clone();
             Box::pin(async move {
-                let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+                let v = cli
+                    .get(&url)
+                    .send()
+                    .await
+                    .ok()?
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()?;
                 let nodes = v.get("nodes")?.as_array()?.clone();
                 let found = nodes
                     .iter()
@@ -154,7 +154,14 @@ async fn remote_node_pairs_survives_node_and_core_restarts() {
                 let url = url.clone();
                 let key = key.clone();
                 Box::pin(async move {
-                    let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
                     let rows = v.get("recent_sessions")?.as_array()?.clone();
                     rows.into_iter().find(|r| {
                         r.get("encoded_key").and_then(|k| k.as_str()) == Some(key.as_str())
@@ -183,7 +190,14 @@ async fn remote_node_pairs_survives_node_and_core_restarts() {
                 let cli = cli.clone();
                 let url = url.clone();
                 Box::pin(async move {
-                    let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
                     let text = v
                         .get("entries")?
                         .as_array()?
@@ -215,7 +229,14 @@ async fn remote_node_pairs_survives_node_and_core_restarts() {
                 let cli = cli.clone();
                 let url = url.clone();
                 Box::pin(async move {
-                    let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
                     let text = v
                         .get("entries")?
                         .as_array()?
@@ -258,11 +279,18 @@ async fn remote_node_pairs_survives_node_and_core_restarts() {
                 let url = url.clone();
                 let key = key.clone();
                 Box::pin(async move {
-                    let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
                     let rows = v.get("recent_sessions")?.as_array()?.clone();
-                    let row = rows
-                        .into_iter()
-                        .find(|r| r.get("encoded_key").and_then(|k| k.as_str()) == Some(key.as_str()))?;
+                    let row = rows.into_iter().find(|r| {
+                        r.get("encoded_key").and_then(|k| k.as_str()) == Some(key.as_str())
+                    })?;
                     let parked = row.get("remote")?.get("parked_approvals")?.as_u64()?;
                     (parked > 0).then_some(row)
                 })
@@ -270,7 +298,11 @@ async fn remote_node_pairs_survives_node_and_core_restarts() {
         },
     )
     .await;
-    assert_eq!(waiting["status_slug"].as_str(), Some("waiting"), "{waiting}");
+    assert_eq!(
+        waiting["status_slug"].as_str(),
+        Some("waiting"),
+        "{waiting}"
+    );
 
     // 7) 杀节点：如实离线（不是"已终止"，也不是继续假装在线）。
     node.kill().await.expect("kill node");
@@ -292,7 +324,14 @@ async fn remote_node_pairs_survives_node_and_core_restarts() {
                 let cli = cli.clone();
                 let url = url.clone();
                 Box::pin(async move {
-                    let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
                     let text = v
                         .get("entries")?
                         .as_array()?
@@ -310,7 +349,6 @@ async fn remote_node_pairs_survives_node_and_core_restarts() {
     core.kill().await.ok();
     node.kill().await.ok();
 }
-
 
 /// Startup: core + standalone webui come up, webui reports the core channel
 /// reachable and /health serves.
@@ -418,6 +456,121 @@ async fn session_round_trip_via_webui_http() {
     );
 }
 
+// ---- session-parallel-liveness-and-unread-polish 1.2：双会话并行 spawn ----
+
+/// Two 0-turn placeholder sessions spawn concurrently: while the first
+/// session's child is mid-handshake (fake-claude `--delay-init-ms 2500`),
+/// the second session's spawn instruction SHALL NOT queue behind the first
+/// handshake. The ordering that proves it: B (instant "hello" turn) finishes
+/// BEFORE A (800ms "stream" turn after an identical handshake) — serialized
+/// spawn flips the order (B's handshake only starts after A activates).
+///
+/// Fix basis: `dispatch_out_without_feishu` spawns a dedicated task per
+/// WebSpawn (`src/dispatch.rs`, design D1 candidate A). Before the fix this
+/// journey takes ≥ 2 handshakes serialised; after it the two handshakes
+/// overlap.
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn two_sessions_spawn_and_turn_concurrently() {
+    let sb = Sandbox::new("testsuite_e2e", "parallel-spawn");
+    // Stretch the handshake so the two spawn instructions measurably overlap:
+    // every fake-claude child answers initialize only after 2.5s.
+    sb.append_acp_args(&["--delay-init-ms", "2500"]);
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    // Two first messages back-to-back: both sessions enter the spawn window.
+    let (status_a, body_a) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "prompt": "stream", "agent": "claude" }),
+    )
+    .await
+    .expect("create session A");
+    assert_eq!(status_a, 201, "create A: {body_a}");
+    let key_a = body_a["key"].as_str().expect("key A").to_string();
+
+    let (status_b, body_b) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "prompt": "hello", "agent": "claude" }),
+    )
+    .await
+    .expect("create session B");
+    assert_eq!(status_b, 201, "create B: {body_b}");
+    let key_b = body_b["key"].as_str().expect("key B").to_string();
+
+    // B 完成时（hello 回合零等待）A 必须**还没**完成（stream 含 800ms 拖
+    // 尾）。串行 spawn 下 B 的握手要等 A 激活 → B done ≈ 5s > A done ≈ 3.3s；
+    // 并行 spawn 下两握手重叠 → B done ≈ 2.6s < A done ≈ 3.3s。
+    async fn fetch_detail(cli: &reqwest::Client, url: &str) -> Option<serde_json::Value> {
+        cli.get(url).send().await.ok()?.json().await.ok()
+    }
+    fn is_done(v: &serde_json::Value) -> bool {
+        v["status_slug"].as_str() == Some("done")
+            || v["status"]
+                .as_str()
+                .is_some_and(|s| s.eq_ignore_ascii_case("done"))
+    }
+
+    let url_a = format!("{}/api/sessions/{key_a}", sb.webui_url());
+    let url_b = format!("{}/api/sessions/{key_b}", sb.webui_url());
+    let hint = sb.path.clone();
+    let b_done_before_a = wait_for(
+        "B finishes its turn while A is still working",
+        Duration::from_secs(20),
+        &hint,
+        {
+            let cli = cli.clone();
+            let url_a = url_a.clone();
+            let url_b = url_b.clone();
+            move || {
+                let cli = cli.clone();
+                let url_a = url_a.clone();
+                let url_b = url_b.clone();
+                Box::pin(async move {
+                    let b = fetch_detail(&cli, &url_b).await?;
+                    if !is_done(&b) {
+                        return None;
+                    }
+                    let a = fetch_detail(&cli, &url_a).await?;
+                    // B done 且 A 未 done = 两会话确实并行活着。
+                    (!is_done(&a)).then_some(true)
+                })
+            }
+        },
+    )
+    .await;
+    assert!(
+        b_done_before_a,
+        "B (instant hello turn) must finish before A (2.5s handshake + 800ms \
+         stream); B only finishing after A means the second spawn waited for \
+         the first session — `core.log` in the kept sandbox dir has the \
+         dispatch timeline"
+    );
+
+    // B 完成后 A 也必须顺利完成自己的回合（两个活子进程都走到了 done）。
+    let hint = sb.path.clone();
+    let a_done = wait_for(
+        "A finishes its stream turn",
+        Duration::from_secs(20),
+        &hint,
+        {
+            let cli = cli.clone();
+            let url_a = url_a.clone();
+            move || {
+                let cli = cli.clone();
+                let url_a = url_a.clone();
+                Box::pin(async move { fetch_detail(&cli, &url_a).await.filter(is_done) })
+            }
+        },
+    )
+    .await;
+    assert!(is_done(&a_done), "A must complete its stream turn too");
+}
+
 // ---- workbench-interaction-polish 6.1：cancel 链路（BFF → core channel）----
 
 /// Cancel 链路的类型化拒绝：未知 key 404；已知但空闲（无在飞 turn）的会话
@@ -452,14 +605,26 @@ async fn cancel_typed_rejections_over_webui_http() {
     assert_eq!(status, 201, "create session: {body}");
     let key = body["key"].as_str().expect("key").to_string();
     let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
-    wait_for("session turn to reach Done", Duration::from_secs(25), &sb.path.clone(), || {
-        let cli = cli.clone();
-        let url = detail_url.clone();
-        Box::pin(async move {
-            let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
-            (v["status_slug"].as_str() == Some("done")).then_some(v)
-        })
-    })
+    wait_for(
+        "session turn to reach Done",
+        Duration::from_secs(25),
+        &sb.path.clone(),
+        || {
+            let cli = cli.clone();
+            let url = detail_url.clone();
+            Box::pin(async move {
+                let v = cli
+                    .get(&url)
+                    .send()
+                    .await
+                    .ok()?
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()?;
+                (v["status_slug"].as_str() == Some("done")).then_some(v)
+            })
+        },
+    )
     .await;
 
     let (status, body) = post_json(
@@ -470,7 +635,10 @@ async fn cancel_typed_rejections_over_webui_http() {
     .await
     .expect("cancel idle");
     assert_eq!(status, 409, "idle session must 409: {body}");
-    assert!(body["error"].as_str().unwrap_or("").contains("空闲"), "{body}");
+    assert!(
+        body["error"].as_str().unwrap_or("").contains("空闲"),
+        "{body}"
+    );
 
     // 会话不受拒绝影响：仍然可继续对话（补一条消息也收敛）。
     let (status, body) = post_json(
@@ -511,14 +679,26 @@ async fn cancel_interrupts_in_flight_turn_over_webui_http() {
 
     // 等 turn 开轮（WORKING）再取消。
     let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
-    wait_for("session turn to reach Working", Duration::from_secs(25), &sb.path.clone(), || {
-        let cli = cli.clone();
-        let url = detail_url.clone();
-        Box::pin(async move {
-            let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
-            (v["status_slug"].as_str() == Some("working")).then_some(v)
-        })
-    })
+    wait_for(
+        "session turn to reach Working",
+        Duration::from_secs(25),
+        &sb.path.clone(),
+        || {
+            let cli = cli.clone();
+            let url = detail_url.clone();
+            Box::pin(async move {
+                let v = cli
+                    .get(&url)
+                    .send()
+                    .await
+                    .ok()?
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()?;
+                (v["status_slug"].as_str() == Some("working")).then_some(v)
+            })
+        },
+    )
     .await;
 
     let (status, body) = post_json(
@@ -532,14 +712,26 @@ async fn cancel_interrupts_in_flight_turn_over_webui_http() {
     assert_eq!(body["status"].as_str(), Some("cancelled"), "{body}");
 
     // turn 离开 working；会话保留且可继续（child 退出后驱动 respawn）。
-    wait_for("session turn to leave Working", Duration::from_secs(25), &sb.path.clone(), || {
-        let cli = cli.clone();
-        let url = detail_url.clone();
-        Box::pin(async move {
-            let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
-            (v["status_slug"].as_str() != Some("working")).then_some(v)
-        })
-    })
+    wait_for(
+        "session turn to leave Working",
+        Duration::from_secs(25),
+        &sb.path.clone(),
+        || {
+            let cli = cli.clone();
+            let url = detail_url.clone();
+            Box::pin(async move {
+                let v = cli
+                    .get(&url)
+                    .send()
+                    .await
+                    .ok()?
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()?;
+                (v["status_slug"].as_str() != Some("working")).then_some(v)
+            })
+        },
+    )
     .await;
     let (status, body) = post_json(
         &cli,
@@ -1549,10 +1741,9 @@ async fn turn_queue_timing_and_dropped_accounting() {
                     // 放行，忙中提交就会开新轮而不是排队（turn-queue 既有
                     // 探测的边界收窄，fix-pending-queue-liveness 1.1 复用同
                     // 一文件时顺带钉住）。
-                    let streamed = v["entries"].as_array().is_some_and(|b| {
-                        b.iter()
-                            .any(|e| e["kind"].as_str() == Some("content"))
-                    });
+                    let streamed = v["entries"]
+                        .as_array()
+                        .is_some_and(|b| b.iter().any(|e| e["kind"].as_str() == Some("content")));
                     streamed.then_some(v)
                 })
             }
@@ -1705,9 +1896,9 @@ async fn turn_queue_timing_and_dropped_accounting() {
                     // 时提交才确定性入队（prompt-only 会开新轮——seed 的
                     // prompt 条目在卡片 SEED 阶段就进 transcript）。
                     let working = v["status_slug"].as_str() == Some("working");
-                    let content_seen = v["entries"].as_array().is_some_and(|b| {
-                        b.iter().any(|e| e["kind"].as_str() == Some("content"))
-                    });
+                    let content_seen = v["entries"]
+                        .as_array()
+                        .is_some_and(|b| b.iter().any(|e| e["kind"].as_str() == Some("content")));
                     (working && content_seen).then_some(v)
                 })
             }
@@ -2295,7 +2486,9 @@ async fn slash_commands_advertise_and_reach_stub() {
                     };
                     content
                         .lines()
-                        .any(|l| l.contains("\"dir\":\"in\"") && l.contains("\"/goal some-condition\""))
+                        .any(|l| {
+                            l.contains("\"dir\":\"in\"") && l.contains("\"/goal some-condition\"")
+                        })
                         .then_some(())
                 })
             }
@@ -2487,7 +2680,8 @@ async fn claude_model_surface_reaches_snapshot_and_switch_round_trips() {
 }
 
 /// Poll the session detail until the current turn settles to Done.
-async fn wait_turn_done(cli: &reqwest::Client, sb: &Sandbox, detail_url: &str) {    wait_for(
+async fn wait_turn_done(cli: &reqwest::Client, sb: &Sandbox, detail_url: &str) {
+    wait_for(
         "session turn to reach Done",
         Duration::from_secs(25),
         &sb.path.clone(),
@@ -2604,7 +2798,10 @@ async fn workspace_root_enforcement_after_tightening() {
     )
     .await
     .expect("register out-of-scope nonexistent");
-    assert_eq!(status, 400, "nonexistent out-of-scope must 400: {ghost_body}");
+    assert_eq!(
+        status, 400,
+        "nonexistent out-of-scope must 400: {ghost_body}"
+    );
     assert_eq!(
         ghost_body["error"], oob["error"],
         "越界 + 不存在必须同文案（范围先行于存在性）: {ghost_body} vs {oob}"
@@ -2672,11 +2869,13 @@ async fn workspace_root_enforcement_after_tightening() {
             "{what} must carry the typed rejection: {body}"
         );
     };
-    let (status, body) =
-        get_json_status(&cli, &format!("{}/api/sessions/{key_a}", sb.webui_url()))
-            .await
-            .expect("detail out-of-scope");
-    assert_eq!(status, 400, "detail on out-of-scope session must 400: {body}");
+    let (status, body) = get_json_status(&cli, &format!("{}/api/sessions/{key_a}", sb.webui_url()))
+        .await
+        .expect("detail out-of-scope");
+    assert_eq!(
+        status, 400,
+        "detail on out-of-scope session must 400: {body}"
+    );
     out_of_scope("detail", body);
     let (status, body) = post_json(
         &cli,
@@ -2685,7 +2884,10 @@ async fn workspace_root_enforcement_after_tightening() {
     )
     .await
     .expect("message out-of-scope");
-    assert_eq!(status, 400, "message on out-of-scope session must 400: {body}");
+    assert_eq!(
+        status, 400,
+        "message on out-of-scope session must 400: {body}"
+    );
     out_of_scope("message", body);
     let (status, body) = post_json(
         &cli,
@@ -2694,7 +2896,10 @@ async fn workspace_root_enforcement_after_tightening() {
     )
     .await
     .expect("switch out-of-scope");
-    assert_eq!(status, 400, "switch on out-of-scope session must 400: {body}");
+    assert_eq!(
+        status, 400,
+        "switch on out-of-scope session must 400: {body}"
+    );
     out_of_scope("switch", body);
     let (status, body) = post_json(
         &cli,
@@ -2906,7 +3111,10 @@ async fn turn_appends_stream_over_ws() {
         if v["method"] != "turn.append" {
             continue;
         }
-        let entries = v["params"]["entries"].as_array().cloned().unwrap_or_default();
+        let entries = v["params"]["entries"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
         for e in &entries {
             let kind = e["kind"].as_str().unwrap_or("");
             let content = e["content"].as_str().unwrap_or("");
@@ -3141,7 +3349,10 @@ async fn parked_permission_does_not_trip_the_stall_guard() {
     )
     .await
     .expect("submit while parked");
-    assert_eq!(status, 200, "parked-time submission must be accepted: {resp}");
+    assert_eq!(
+        status, 200,
+        "parked-time submission must be accepted: {resp}"
+    );
 
     // 静置越过阈值（2s ×3 + 扫描间隔余量）：看门狗不得收尾。
     tokio::time::sleep(Duration::from_secs(9)).await;

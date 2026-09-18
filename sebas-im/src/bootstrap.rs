@@ -78,9 +78,7 @@ pub async fn bootstrap(
     } else {
         let tm = TokenManager::new(cfg.app_id.clone(), cfg.app_secret.clone());
         // Startup auth check stays fatal (openspec/specs/acp-driver/spec.md) — 仅在 feishu 启用时。
-        tm.token()
-            .await
-            .map_err(|e| e.to_string())?;
+        tm.token().await.map_err(|e| e.to_string())?;
         tm
     };
 

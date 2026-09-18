@@ -117,9 +117,14 @@ pub struct SessionInfo {
     pub remote: Option<RemoteSessionView>,
     /// （add-agent-mode-selection）操作者期望的会话 mode（控制面词汇
     /// `ask`/`edit`/`allow`/`auto`）：创建请求携带、中途切换立即更新。
-    /// `None` = agent 默认行为。`#[serde(default)]` 兼容旧快照/旧事件。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub desired_mode: Option<String>,
+    /// （session-parallel-liveness-and-unread-polish 3.2，design D5b）**非空**
+    /// `String`，缺省 `ask`；旧 core-channel 报文里的 null 在反序列化点落为
+    /// ask（与 state.json restore 同一迁移语义），wire 上永远携带确定词。
+    #[serde(
+        default = "crate::engine::ask_mode",
+        deserialize_with = "deserialize_desired_mode"
+    )]
+    pub desired_mode: String,
     /// （add-agent-mode-selection）执行体回报的**实际生效** mode（本机 =
     /// spawn argv 应用值 / `ModeChanged`；远端 = 节点回报，见 `remote`）。
     /// `None` = 执行体未声称任何 mode 生效——desired/effective 的差异如实
@@ -149,6 +154,33 @@ pub struct SessionInfo {
     /// `status_slug === 'working'` 回退判定（Migration Plan）。
     #[serde(default)]
     pub turn_engaged: bool,
+    /// （session-parallel-liveness-and-unread-polish 1.3）spawn 失败的原因
+    /// 原文（`MappingState::SpawnFailed { reason }` 的透传，不新造状态机）。
+    /// `None` = 非 spawn-failed 会话。webui 投影层据此在会话行/详情/composer
+    /// 就地呈现失败原因（session-lifecycle delta「failed spawn names the
+    /// cause」）；`skip_serializing_if` 让非失败会话的报文保持干净。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawn_failure_reason: Option<String>,
+    /// （review 3c 补口，session-unread-badge delta「status_slug = (MappingState,
+    /// phase, parked approvals) 的投影」）**本地**会话当前悬停的泊车审批数
+    /// （`StallRegistry.parked_count` 投影）。此前该维度只随 remote 视图下发，
+    /// 本地泊车只进了 `turn_engaged`，`waiting` 投影对本地会话永远不亮。
+    /// 类型与 remote 视图的 `parked_approvals`（u32）对齐。
+    /// `#[serde(default)]` 兼容旧快照/旧事件。
+    #[serde(default)]
+    pub parked_approvals: u32,
+}
+
+/// （3.2，design D5b）`desired_mode` 的反序列化兼容：旧 core-channel 报文
+/// / 旧快照里该字段是显式 `null`（Option 时代形态）或缺失——一律落为
+/// `ask`。与 state.json 的 restore 迁移同一语义（迁移是 null 消失的唯一
+/// 地点），不做读侧投影。
+fn deserialize_desired_mode<'de, D>(d: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<String> = serde::Deserialize::deserialize(d)?;
+    Ok(opt.unwrap_or_else(crate::engine::ask_mode))
 }
 
 /// 可见回复段的计数口径（rail-declutter-unread D2，用户拍板「可见回复段」）：
@@ -457,12 +489,14 @@ mod tests {
                 priority: false,
             }],
             remote: None,
-            desired_mode: None,
+            desired_mode: crate::engine::ask_mode(),
             effective_mode: None,
             // rail-declutter-unread：msg_count 随 SessionInfo 往返。
             msg_count: 0,
             // fix-pending-queue-liveness 2.3：turn_engaged 随 SessionInfo 往返。
             turn_engaged: true,
+            spawn_failure_reason: None,
+            parked_approvals: 0,
             // session-slash-commands：命令表随 SessionInfo 往返。
             available_commands: vec![
                 sebas_acp::AvailableCommand {
@@ -539,11 +573,13 @@ mod tests {
             backend: None,
             pending: Vec::new(),
             remote: None,
-            desired_mode: None,
+            desired_mode: crate::engine::ask_mode(),
             effective_mode: None,
             msg_count: 0,
             // fix-pending-queue-liveness 2.3：turn_engaged 缺省兼容。
             turn_engaged: false,
+            spawn_failure_reason: None,
+            parked_approvals: 0,
             // session-slash-commands：无发现能力会话的命令表恒空。
             available_commands: Vec::new(),
         };
@@ -578,8 +614,11 @@ mod tests {
         assert_eq!(back.element_type, "tool");
 
         // 带 title：完整往返。
-        let titled = TurnEntry::tool(0, "📖 **Read**")
-            .with_title(tool_entry_title(false, "Read", Some(&serde_json::json!({"file_path": "src/main.rs"}))));
+        let titled = TurnEntry::tool(0, "📖 **Read**").with_title(tool_entry_title(
+            false,
+            "Read",
+            Some(&serde_json::json!({"file_path": "src/main.rs"})),
+        ));
         let json = serde_json::to_string(&titled).unwrap();
         assert_eq!(serde_json::from_str::<TurnEntry>(&json).unwrap(), titled);
         assert!(json.contains(r#""title""#), "{json}");
@@ -636,7 +675,10 @@ mod tests {
             "Bash"
         );
         // 非对象 args（null / 数组）同样只有工具名。
-        assert_eq!(tool_entry_title(false, "Bash", Some(&serde_json::Value::Null)), "Bash");
+        assert_eq!(
+            tool_entry_title(false, "Bash", Some(&serde_json::Value::Null)),
+            "Bash"
+        );
         assert_eq!(
             tool_entry_title(false, "Bash", Some(&serde_json::json!(["a", "b"]))),
             "Bash"
@@ -663,7 +705,11 @@ mod tests {
         assert!(title.starts_with("Bash · "));
         // 恰好 200 字符（"Bash · " 占 7 字符 + 193 字符参数）：不截断。
         let exact = "a".repeat(193);
-        let title = tool_entry_title(false, "Bash", Some(&serde_json::json!({ "command": exact })));
+        let title = tool_entry_title(
+            false,
+            "Bash",
+            Some(&serde_json::json!({ "command": exact })),
+        );
         assert_eq!(title.chars().count(), 200);
         assert!(title.ends_with(&exact));
     }
@@ -695,11 +741,13 @@ fn session_info_usage_field_is_additive() {
             total_input: 10,
             total_output: 25,
         }),
-        desired_mode: None,
+        desired_mode: crate::engine::ask_mode(),
         effective_mode: None,
         msg_count: 3,
         // fix-pending-queue-liveness 2.3：usage 段用例顺带覆盖 turn_engaged。
         turn_engaged: false,
+        spawn_failure_reason: None,
+        parked_approvals: 0,
         available_commands: Vec::new(),
     };
     let json = serde_json::to_string(&full).unwrap();
@@ -738,11 +786,13 @@ fn session_info_available_commands_field_is_additive() {
         backend: None,
         pending: Vec::new(),
         remote: None,
-        desired_mode: None,
+        desired_mode: crate::engine::ask_mode(),
         effective_mode: None,
         msg_count: 0,
         // fix-pending-queue-liveness 2.3：turn_engaged 随 SessionInfo 往返。
         turn_engaged: true,
+        spawn_failure_reason: None,
+        parked_approvals: 0,
         available_commands: vec![sebas_acp::AvailableCommand {
             name: "goal".into(),
             description: "Set a goal".into(),
@@ -862,81 +912,83 @@ fn chat_message_count_ignores_noise_and_empty_entries() {
     assert_eq!(count_chat_messages(&[]), 0);
 }
 
-    /// workbench-live-conversation-flow 1.1：TurnStreamEvent serde 往返，
-    /// wire 形状带 channel/key/entries（与 SessionEvent::PendingDropped 同构
-    /// 的寻址字段）。
-    #[test]
-    fn turn_stream_event_round_trips() {
-        let ev = TurnStreamEvent {
-            channel: "web".into(),
-            key: "web-1".into(),
-            entries: vec![
-                TurnEntry::markdown(3, "hello "),
-                TurnEntry::markdown(4, "world"),
-            ],
-        };
-        let json = serde_json::to_string(&ev).unwrap();
-        let back: TurnStreamEvent = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, ev);
-        assert!(json.contains("\"channel\":\"web\""));
-        assert!(json.contains("\"entries\":["));
-    }
+/// workbench-live-conversation-flow 1.1：TurnStreamEvent serde 往返，
+/// wire 形状带 channel/key/entries（与 SessionEvent::PendingDropped 同构
+/// 的寻址字段）。
+#[test]
+fn turn_stream_event_round_trips() {
+    let ev = TurnStreamEvent {
+        channel: "web".into(),
+        key: "web-1".into(),
+        entries: vec![
+            TurnEntry::markdown(3, "hello "),
+            TurnEntry::markdown(4, "world"),
+        ],
+    };
+    let json = serde_json::to_string(&ev).unwrap();
+    let back: TurnStreamEvent = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, ev);
+    assert!(json.contains("\"channel\":\"web\""));
+    assert!(json.contains("\"entries\":["));
+}
 
-    /// fix-pending-queue-liveness 2.3：`turn_engaged` 字段的 serde 兼容。
-    /// 旧 core 报文（无该键）→ 反序列化 false（前端回退 slug 判定）；
-    /// 新 core 完整往返；wire 形状带布尔键。
-    #[test]
-    fn session_info_turn_engaged_field_is_additive() {
-        let legacy = r#"{"channel":"web","key":"engage-1","session_id":"s1","status":"active","phase":null,"user_prompt":null,"last_active_unix":1,"project_dir":null,"current_model":null,"available_models":null,"agent_kind":null}"#;
-        let back: SessionInfo = serde_json::from_str(legacy).unwrap();
-        assert!(
-            !back.turn_engaged,
-            "missing key must deserialize to not-engaged (legacy fallback semantics)"
-        );
+/// fix-pending-queue-liveness 2.3：`turn_engaged` 字段的 serde 兼容。
+/// 旧 core 报文（无该键）→ 反序列化 false（前端回退 slug 判定）；
+/// 新 core 完整往返；wire 形状带布尔键。
+#[test]
+fn session_info_turn_engaged_field_is_additive() {
+    let legacy = r#"{"channel":"web","key":"engage-1","session_id":"s1","status":"active","phase":null,"user_prompt":null,"last_active_unix":1,"project_dir":null,"current_model":null,"available_models":null,"agent_kind":null}"#;
+    let back: SessionInfo = serde_json::from_str(legacy).unwrap();
+    assert!(
+        !back.turn_engaged,
+        "missing key must deserialize to not-engaged (legacy fallback semantics)"
+    );
 
-        let engaged = SessionInfo {
-            channel: "web".into(),
-            key: "engage-2".into(),
-            session_id: Some("s1".into()),
-            status: "active".into(),
-            phase: Some("OnIt".into()),
-            user_prompt: None,
-            last_active_unix: 1,
-            project_dir: None,
-            current_model: None,
-            available_models: None,
-            agent_kind: None,
-            usage: None,
-            backend: None,
-            pending: Vec::new(),
-            remote: None,
-            desired_mode: None,
-            effective_mode: None,
-            msg_count: 0,
-            turn_engaged: true,
-            available_commands: Vec::new(),
-        };
-        let json = serde_json::to_string(&engaged).unwrap();
-        let back: SessionInfo = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, engaged);
-        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(value["turn_engaged"], true);
-    }
+    let engaged = SessionInfo {
+        channel: "web".into(),
+        key: "engage-2".into(),
+        session_id: Some("s1".into()),
+        status: "active".into(),
+        phase: Some("OnIt".into()),
+        user_prompt: None,
+        last_active_unix: 1,
+        project_dir: None,
+        current_model: None,
+        available_models: None,
+        agent_kind: None,
+        usage: None,
+        backend: None,
+        pending: Vec::new(),
+        remote: None,
+        desired_mode: crate::engine::ask_mode(),
+        effective_mode: None,
+        msg_count: 0,
+        turn_engaged: true,
+        spawn_failure_reason: None,
+        parked_approvals: 0,
+        available_commands: Vec::new(),
+    };
+    let json = serde_json::to_string(&engaged).unwrap();
+    let back: SessionInfo = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, engaged);
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(value["turn_engaged"], true);
+}
 
-    /// fix-pending-queue-liveness 2.2：TurnStalled 事件携带会话寻址与释放的
-    /// 搁浅提交数，wire 形状带 snake_case 的 type 标签，serde 完整往返。
-    #[test]
-    fn turn_stalled_event_round_trips() {
-        let ev = SessionEvent::TurnStalled {
-            channel: "web".into(),
-            key: "web-stall".into(),
-            released: 2,
-        };
-        let json = serde_json::to_value(&ev).unwrap();
-        assert_eq!(json["type"], "turn_stalled");
-        assert_eq!(json["channel"], "web");
-        assert_eq!(json["key"], "web-stall");
-        assert_eq!(json["released"], 2);
-        let back: SessionEvent = serde_json::from_value(json).unwrap();
-        assert_eq!(back, ev);
-    }
+/// fix-pending-queue-liveness 2.2：TurnStalled 事件携带会话寻址与释放的
+/// 搁浅提交数，wire 形状带 snake_case 的 type 标签，serde 完整往返。
+#[test]
+fn turn_stalled_event_round_trips() {
+    let ev = SessionEvent::TurnStalled {
+        channel: "web".into(),
+        key: "web-stall".into(),
+        released: 2,
+    };
+    let json = serde_json::to_value(&ev).unwrap();
+    assert_eq!(json["type"], "turn_stalled");
+    assert_eq!(json["channel"], "web");
+    assert_eq!(json["key"], "web-stall");
+    assert_eq!(json["released"], 2);
+    let back: SessionEvent = serde_json::from_value(json).unwrap();
+    assert_eq!(back, ev);
+}

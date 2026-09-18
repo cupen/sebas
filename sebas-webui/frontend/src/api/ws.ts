@@ -25,9 +25,33 @@
 import type { ReactiveController, ReactiveControllerHost } from 'lit'
 import type { PendingSubmission } from './client.js'
 
+/**
+ * （session-parallel-liveness-and-unread-polish 2.1/2.2，design D2）会话相位
+ * 帧载荷：`session.created` 与 `session.updated` 同形，五键每次帧必带——
+ * 旧 `status` 人读字符串已删除，无「只在 true 时上 wire」的兼容保留。rail
+ * 圆点/徽标、composer 提交控件、待执行栈全部从这一份帧事实真读，不做任何
+ * `status_slug === 'working'` 之类的字符串等值回退，也不等 HTTP 详情轮询。
+ */
+export interface SessionPhaseFrame {
+  /** 七词相位 starting|queued|working|done|failed|waiting|dormant。 */
+  status_slug: string
+  /** 回合占用（WORKING ∨ 泊车 ∨ spawn 窗口）的引擎事实，每帧必带。 */
+  turn_engaged: boolean
+  /** 可见回复段数（rail 徽标数据源），每帧必带。 */
+  msg_count: number
+  /** 待生效提交全量（投递序），每帧必带。 */
+  pending: PendingSubmission[]
+}
+
 export interface WsEvents {
-  'session.created': { type: 'session.created'; session_id: string }
-  'session.updated': { type: 'session.updated'; session_id: string; status: string }
+  'session.created': SessionPhaseFrame & {
+    type: 'session.created'
+    session_id: string
+  }
+  'session.updated': SessionPhaseFrame & {
+    type: 'session.updated'
+    session_id: string
+  }
   'session.removed': { type: 'session.removed'; session_id: string }
   /**
    * （workbench-turn-queue 5.2/7.3）会话终结时未执行的待生效提交，逐条

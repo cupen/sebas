@@ -71,7 +71,9 @@ pub async fn serve_registry(
     let materials = crate::node_link::MaterialStore::new();
     let mut server = NodeLinkServer::bind_with(&cfg.listen, Arc::clone(&registry))
         .await?
-        .with_inbound_handler(Arc::clone(&materials) as Arc<dyn crate::node_link::client::InboundHandler>);
+        .with_inbound_handler(
+            Arc::clone(&materials) as Arc<dyn crate::node_link::client::InboundHandler>
+        );
     if let Some(observer) = observer {
         server = server.with_observer(observer);
     }
@@ -160,11 +162,9 @@ mod tests {
             manifest: CapabilityManifest::default(),
         };
         let (mut ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
-        ws.send(Message::Text(
-            serde_json::to_string(&hello).unwrap().into(),
-        ))
-        .await
-        .unwrap();
+        ws.send(Message::Text(serde_json::to_string(&hello).unwrap().into()))
+            .await
+            .unwrap();
         let text = match ws.next().await {
             Some(Ok(Message::Text(t))) => t,
             other => panic!("未收到应答：{other:?}"),
@@ -182,15 +182,14 @@ mod tests {
             .clone()
             .expect("首次装配应签发 bootstrap token");
         assert_eq!(token.len(), 64);
-        assert!(armed.served.listen.starts_with("127.0.0.1:"), "{}", armed.served.listen);
+        assert!(
+            armed.served.listen.starts_with("127.0.0.1:"),
+            "{}",
+            armed.served.listen
+        );
 
         // 用这个 token 真跑一次配对：节点应被登记且被判接受。
-        let ack = pair(
-            &format!("ws://{}", armed.served.listen),
-            "dev-box",
-            &token,
-        )
-        .await;
+        let ack = pair(&format!("ws://{}", armed.served.listen), "dev-box", &token).await;
         match ack.outcome {
             HelloOutcome::Accepted { credential } => {
                 assert!(credential.is_some(), "配对应答必须交付长期凭据");
@@ -224,17 +223,20 @@ mod tests {
         let cfg = config(dir.path());
         let first = arm(&cfg, &dir.path().join("config.toml")).await.unwrap();
         let token = first.bootstrap_token.clone().unwrap();
-        let _ = pair(
-            &format!("ws://{}", first.served.listen),
-            "dev-box",
-            &token,
-        )
-        .await;
+        let _ = pair(&format!("ws://{}", first.served.listen), "dev-box", &token).await;
         first.served.close();
 
         let second = arm(&cfg, &dir.path().join("config.toml")).await.unwrap();
         assert!(second.bootstrap_token.is_none(), "已有节点时不应再签发");
-        assert!(second.served.registry.lock().await.node("dev-box").is_some());
+        assert!(
+            second
+                .served
+                .registry
+                .lock()
+                .await
+                .node("dev-box")
+                .is_some()
+        );
         second.served.close();
     }
 
@@ -276,7 +278,12 @@ mod tests {
         .await
         .unwrap();
         // 再次签发：已有待用 token → 不再签发。
-        assert!(issue_bootstrap_token(&registry, 60).await.unwrap().is_none());
+        assert!(
+            issue_bootstrap_token(&registry, 60)
+                .await
+                .unwrap()
+                .is_none()
+        );
         served.close();
     }
 }

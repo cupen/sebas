@@ -2,13 +2,14 @@ mod cli;
 
 use clap::Parser;
 use cli::{
-    AgentKindsCmd, Cli, Cmd, ControlArgs, ControlCmd, ControlStatusArgs, RouterArgs, OutputFormat,
-    RecordArgs, ReplayArgs, ServiceArgs, WebUiArgs,
+    AgentKindsCmd, Cli, Cmd, ControlArgs, ControlCmd, ControlStatusArgs, OutputFormat, RecordArgs,
+    ReplayArgs, RouterArgs, ServiceArgs, WebUiArgs,
 };
 use std::path::PathBuf;
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {    // reqwest 0.12 链路启用 rustls/aws-lc-rs，openlark(reqwest 0.13) 链路启用
+async fn main() -> anyhow::Result<()> {
+    // reqwest 0.12 链路启用 rustls/aws-lc-rs，openlark(reqwest 0.13) 链路启用
     // rustls/ring；两个 feature 同时存在时 rustls 拒绝自动选择 provider，
     // TLS 初始化即 panic（im 连飞书 WS 必炸）。所有子进程都从本二进制派生，
     // 在入口统一显式选定即可全覆盖。
@@ -161,9 +162,7 @@ async fn main() -> anyhow::Result<()> {    // reqwest 0.12 链路启用 rustls/a
                     cli::FeishuCmd::Text { message } => {
                         sebas::feishu_cmd::FeishuCmd::Text { message }
                     }
-                    cli::FeishuCmd::Image { path } => {
-                        sebas::feishu_cmd::FeishuCmd::Image { path }
-                    }
+                    cli::FeishuCmd::Image { path } => sebas::feishu_cmd::FeishuCmd::Image { path },
                 },
             };
             if let Err(e) = sebas::feishu_cmd::run(args).await {
@@ -178,9 +177,7 @@ async fn main() -> anyhow::Result<()> {    // reqwest 0.12 链路启用 rustls/a
                 config: args.config,
                 cmd: match args.cmd {
                     cli::SkillsCmd::List => sebas::skills_cmd::SkillsCmd::List,
-                    cli::SkillsCmd::Add { source } => {
-                        sebas::skills_cmd::SkillsCmd::Add { source }
-                    }
+                    cli::SkillsCmd::Add { source } => sebas::skills_cmd::SkillsCmd::Add { source },
                     cli::SkillsCmd::Remove { name } => {
                         sebas::skills_cmd::SkillsCmd::Remove { name }
                     }
@@ -195,7 +192,9 @@ async fn main() -> anyhow::Result<()> {    // reqwest 0.12 链路启用 rustls/a
         }
         Cmd::AgentBench(args) => {
             let record = args.record.as_deref().map(std::path::Path::new);
-            let out = sebas_agent::bench::run(args.smoke, &args.tasks, record, args.debug, args.replay).await;
+            let out =
+                sebas_agent::bench::run(args.smoke, &args.tasks, record, args.debug, args.replay)
+                    .await;
             print!("{}", out.dashboard());
             let failed = out.results.iter().any(|r| !r.passed);
             if failed {
@@ -382,22 +381,22 @@ fn render_response(
                 .expect("RpcControlResponse is always serializable");
             println!("{json}");
         }
-            OutputFormat::Human => match response {
-                RpcControlResponse::Accepted {
-                    operation_id,
-                    status,
-                    startup_failure,
-                } => {
-                    println!("accepted operation={operation_id} status={status}");
-                    // fail-fast-on-startup-errors D6 / task 2.4：failed-startup
-                    // 时触发者从单一入口看到失败原因（无失败时字段缺席）。
-                    if let Some(sf) = startup_failure {
-                        println!(
-                            "startup_failure: service={} count={} at={} last_stderr={}",
-                            sf.service, sf.count, sf.at, sf.last_stderr
-                        );
-                    }
+        OutputFormat::Human => match response {
+            RpcControlResponse::Accepted {
+                operation_id,
+                status,
+                startup_failure,
+            } => {
+                println!("accepted operation={operation_id} status={status}");
+                // fail-fast-on-startup-errors D6 / task 2.4：failed-startup
+                // 时触发者从单一入口看到失败原因（无失败时字段缺席）。
+                if let Some(sf) = startup_failure {
+                    println!(
+                        "startup_failure: service={} count={} at={} last_stderr={}",
+                        sf.service, sf.count, sf.at, sf.last_stderr
+                    );
                 }
+            }
             RpcControlResponse::Rejected {
                 code,
                 message,
@@ -861,7 +860,8 @@ mod tests {
     #[test]
     fn run_webui_and_no_webui_conflict() {
         assert!(
-            Cli::try_parse_from(["sebas", "core", "--webui", "--no-webui", "-c", "x.toml"]).is_err(),
+            Cli::try_parse_from(["sebas", "core", "--webui", "--no-webui", "-c", "x.toml"])
+                .is_err(),
             "--webui 与 --no-webui 互斥"
         );
     }
@@ -949,8 +949,8 @@ mod tests {
         };
         assert_eq!(name, "beads");
 
-        let cli =
-            Cli::try_parse_from(["sebas", "skills", "sync"]).expect("`sebas skills sync` must parse");
+        let cli = Cli::try_parse_from(["sebas", "skills", "sync"])
+            .expect("`sebas skills sync` must parse");
         assert!(matches!(cli.cmd, Cmd::Skills(a) if matches!(a.cmd, cli::SkillsCmd::Sync)));
 
         // add/remove 的位置参数必填：缺了就是 clap 解析错误。
@@ -1230,13 +1230,16 @@ mod tests {
             "无失败时 startup_failure 必须省略: {json}"
         );
         // 带 startup_failure 的形状：字段名 + 四元组逐字固定（D6 契约）。
-        let json = serde_json::to_string(
-            &cases[1].1,
-        )
-        .unwrap();
-        assert!(json.contains("\"startup_failure\":{\"service\":\"core\""), "{json}");
+        let json = serde_json::to_string(&cases[1].1).unwrap();
+        assert!(
+            json.contains("\"startup_failure\":{\"service\":\"core\""),
+            "{json}"
+        );
         assert!(json.contains("\"count\":3"), "{json}");
-        assert!(json.contains("\"last_stderr\":\"spawn failed: no such file\""), "{json}");
+        assert!(
+            json.contains("\"last_stderr\":\"spawn failed: no such file\""),
+            "{json}"
+        );
         assert!(json.contains("\"at\":\"2026-09-07T00:00:00Z\""), "{json}");
 
         // rejected-with-count：拒绝携带计数时的确切 wire 形状（2.2 合同，

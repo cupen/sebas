@@ -27,16 +27,15 @@
 //! 需要这三种结论分别可呈现，因此 `remote.node_status` 与 `remote.node_cause` 一起给出。
 
 use crate::node_link::client::{NodeConnection, NodeLinkError};
-use crate::node_link::fleet::{RemoteFleet, SessionLifecycle, ReconcileReport};
+use crate::node_link::fleet::{ReconcileReport, RemoteFleet, SessionLifecycle};
 use crate::node_link::placement::{PlacementError, RemoteSessionId};
 use crate::node_link::server::ConnectionObserver;
 use sebas_channels::ChannelKey;
 use sebas_dispatch::{RemoteSessionView, SessionEvent, SessionInfo, TurnEntry};
-use sebas_webui::session_backend::{PermissionDecision, PermissionNotice};
 use sebas_node_link::{
-    ApprovalDecision, LogEntry, ParkedApproval, SessionEvent as NodeEvent, SessionOp,
-    SessionResult,
+    ApprovalDecision, LogEntry, ParkedApproval, SessionEvent as NodeEvent, SessionOp, SessionResult,
 };
+use sebas_webui::session_backend::{PermissionDecision, PermissionNotice};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast};
@@ -265,7 +264,12 @@ impl RemoteProjection {
             category,
             ..
         } = event
-            && let Some(node_id) = self.fleet.lock().await.node_of(session_id).map(str::to_string)
+            && let Some(node_id) = self
+                .fleet
+                .lock()
+                .await
+                .node_of(session_id)
+                .map(str::to_string)
         {
             let key = ChannelKey::new("web", row_reference(&node_id, session_id));
             let _ = self.notices.send(PermissionNotice {
@@ -545,11 +549,12 @@ impl RemoteProjection {
         mode: Option<&str>,
         prompt: Option<&str>,
     ) -> Result<(ChannelKey, crate::node_link::placement::Placed), PlacementError> {
-        let connection = self.connection_of(node_id).await.ok_or_else(|| {
-            PlacementError::NodeOffline {
-                node_id: node_id.to_string(),
-            }
-        })?;
+        let connection =
+            self.connection_of(node_id)
+                .await
+                .ok_or_else(|| PlacementError::NodeOffline {
+                    node_id: node_id.to_string(),
+                })?;
         let project_id = project.map(|p| p.id.as_str());
         let session_id = RemoteSessionId::issue(project_id);
         let project_dir = project.map(|p| p.path.clone());
@@ -707,11 +712,12 @@ impl RemoteProjection {
             .ok_or_else(|| NodeLinkError::Transport {
                 cause: format!("会话 {session_id} 不在任何节点的跟踪表里"),
             })?;
-        let connection = self.connection_of(&node_id).await.ok_or_else(|| {
-            NodeLinkError::Disconnected {
-                cause: format!("节点 {node_id} 当前离线，操作未送达"),
-            }
-        })?;
+        let connection =
+            self.connection_of(&node_id)
+                .await
+                .ok_or_else(|| NodeLinkError::Disconnected {
+                    cause: format!("节点 {node_id} 当前离线，操作未送达"),
+                })?;
         match connection.request(op).await? {
             SessionResult::Rejected { code, cause } => Err(NodeLinkError::Transport {
                 cause: format!("节点 {node_id} 拒绝（{}）：{cause}", code.as_str()),
@@ -733,11 +739,12 @@ impl RemoteProjection {
         node_id: &str,
         path: &str,
     ) -> Result<(bool, bool, bool), NodeLinkError> {
-        let connection = self.connection_of(node_id).await.ok_or_else(|| {
-            NodeLinkError::Disconnected {
-                cause: format!("节点 {node_id} 当前离线，无法校验路径 {path}"),
-            }
-        })?;
+        let connection =
+            self.connection_of(node_id)
+                .await
+                .ok_or_else(|| NodeLinkError::Disconnected {
+                    cause: format!("节点 {node_id} 当前离线，无法校验路径 {path}"),
+                })?;
         match connection
             .request(SessionOp::CheckPath {
                 path: path.to_string(),
@@ -791,12 +798,12 @@ impl RemoteProjection {
         request_id: &str,
         decision: PermissionDecision,
     ) -> Result<bool, NodeLinkError> {
-        let session_id = self
-            .session_of_request(request_id)
-            .await
-            .ok_or_else(|| NodeLinkError::Transport {
-                cause: format!("没有会话在等审批 {request_id}（已回答、未知，或已被节点丢弃）"),
-            })?;
+        let session_id =
+            self.session_of_request(request_id)
+                .await
+                .ok_or_else(|| NodeLinkError::Transport {
+                    cause: format!("没有会话在等审批 {request_id}（已回答、未知，或已被节点丢弃）"),
+                })?;
         let result = self
             .send_for(
                 &session_id,
@@ -897,12 +904,9 @@ impl RemoteProjection {
             ),
         };
 
-        let last_active_unix = meta.last_active_unix.max(
-            view.entries()
-                .last()
-                .map(|e| e.at_unix)
-                .unwrap_or(0),
-        );
+        let last_active_unix = meta
+            .last_active_unix
+            .max(view.entries().last().map(|e| e.at_unix).unwrap_or(0));
         let channel = if meta.channel.is_empty() {
             "web".to_string()
         } else {
@@ -926,8 +930,12 @@ impl RemoteProjection {
             pending: Vec::new(),
             // （add-agent-mode-selection）远端会话的 desired/effective 也随
             // 顶层字段下发（与 remote 视图同值）——前端对两种放置路径用同
-            // 一个呈现通道；remote 视图保留节点维度。
-            desired_mode: meta.desired_mode.clone(),
+            // 一个呈现通道；remote 视图保留节点维度。（3.2，D5b）顶层
+            // desired 非空：节点侧未点名时落控制面缺省词 ask。
+            desired_mode: meta
+                .desired_mode
+                .clone()
+                .unwrap_or_else(sebas_dispatch::engine::ask_mode),
             effective_mode: meta.effective_mode.clone(),
             remote: Some(RemoteSessionView {
                 node_id,
@@ -940,6 +948,10 @@ impl RemoteProjection {
                 provider: meta.provider.clone(),
                 provider_cause: meta.provider_cause.clone(),
             }),
+            // （session-parallel-liveness-and-unread-polish 1.3）远端会话无
+            // 本机 spawn-failed 概念，恒 None。
+            spawn_failure_reason: None,
+            parked_approvals: 0,
             // rail-declutter-unread：远端会话的段计数不在本路径（节点侧日志
             // 词表与 TurnEntry 不同）——如实记 0，远端行的徽标恒不亮。已知
             // 局限，待节点链路透出统一口径后再接。
@@ -1231,9 +1243,7 @@ mod tests {
     #[tokio::test]
     async fn a_live_session_still_shows_everything_when_the_node_is_gone() {
         let p = RemoteProjection::new();
-        let key = p
-            .track("dev-box", "proj-a:1", Meta0::web(None, None))
-            .await;
+        let key = p.track("dev-box", "proj-a:1", Meta0::web(None, None)).await;
         p.apply_node_event(
             "dev-box",
             &NodeEvent::State {
@@ -1244,7 +1254,9 @@ mod tests {
         )
         .await;
 
-        let affected = p.set_node_offline("dev-box", "链路已断开（对端关闭）").await;
+        let affected = p
+            .set_node_offline("dev-box", "链路已断开（对端关闭）")
+            .await;
         assert_eq!(affected, 1);
         let row = p.row(&key).await.expect("链路断了会话仍要可见");
         let remote = row.remote.unwrap();
@@ -1275,9 +1287,7 @@ mod tests {
     #[tokio::test]
     async fn a_parked_session_reads_as_waiting_not_running() {
         let p = RemoteProjection::new();
-        let key = p
-            .track("dev-box", "proj-a:1", Meta0::web(None, None))
-            .await;
+        let key = p.track("dev-box", "proj-a:1", Meta0::web(None, None)).await;
         p.apply_node_event(
             "dev-box",
             &NodeEvent::State {
@@ -1332,9 +1342,7 @@ mod tests {
     #[tokio::test]
     async fn node_reported_exit_is_a_termination_with_the_nodes_cause() {
         let p = RemoteProjection::new();
-        let key = p
-            .track("dev-box", "proj-a:1", Meta0::web(None, None))
-            .await;
+        let key = p.track("dev-box", "proj-a:1", Meta0::web(None, None)).await;
         p.apply_node_event(
             "dev-box",
             &NodeEvent::Exited {
@@ -1349,7 +1357,11 @@ mod tests {
         // 个会话已经结束了——所以是 terminated，而不是 online。
         assert_eq!(remote.node_status, "terminated");
         assert!(
-            remote.node_cause.as_deref().unwrap_or_default().contains("退出码 1"),
+            remote
+                .node_cause
+                .as_deref()
+                .unwrap_or_default()
+                .contains("退出码 1"),
             "终止成因来自节点：{:?}",
             remote.node_cause
         );
@@ -1369,9 +1381,7 @@ mod tests {
     #[tokio::test]
     async fn batches_become_transcript_entries_with_the_nodes_timestamps() {
         let p = RemoteProjection::new();
-        let key = p
-            .track("dev-box", "proj-a:1", Meta0::web(None, None))
-            .await;
+        let key = p.track("dev-box", "proj-a:1", Meta0::web(None, None)).await;
         let entries = vec![
             log_entry(1, "prompt", "fix the bug", 1_700_000_000),
             log_entry(2, "output", "done", 1_700_000_010),

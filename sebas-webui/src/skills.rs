@@ -22,10 +22,10 @@
 //! 目录穿越。
 
 use crate::server::WebUiState;
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use serde::Serialize;
 
 /// `GET /api/skills` 的一行（spec「list view」形状）。`reason` 只在 invalid
@@ -123,7 +123,9 @@ pub fn is_safe_skill_name(name: &str) -> bool {
         && name != "."
         && name != ".."
         && !name.contains(['/', '\\', '\0'])
-        && std::path::Path::new(name).file_name().is_some_and(|n| n == name)
+        && std::path::Path::new(name)
+            .file_name()
+            .is_some_and(|n| n == name)
 }
 
 /// 统一 JSON 错误体（api.rs 同款形状 `{error}`；api_error 为 crate 内私有，

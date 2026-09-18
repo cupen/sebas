@@ -8,9 +8,9 @@
 //! they just don't traverse HTTP here.
 
 use sebas_acp::claude::manager::SessionManager;
-use sebas_dispatch::cards::CardConfig;
 use sebas_channels::{ChannelEvent, ChannelKey};
-use sebas_dispatch::engine::{Out, DispatchHandle};
+use sebas_dispatch::cards::CardConfig;
+use sebas_dispatch::engine::{DispatchHandle, Out};
 use sebas_dispatch::state::SessionMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -66,10 +66,11 @@ async fn dispatch_text_drives_bridge_to_finished_emoji() {
         &key,
         &prompt,
         "claude",
-        vec![fake.to_str().unwrap().to_string(), ],
+        vec![fake.to_str().unwrap().to_string()],
         Some(work_dir_a.path().to_string_lossy().into_owned()),
         None,
-        None)
+        None,
+    )
     .await
     .expect("spawn fake CLI through production fn");
 
@@ -173,10 +174,15 @@ async fn slow_stream_exposes_full_fsm_via_debounced_pump() {
         // 800ms of mid-turn silence: pump startup (two process spawns) +
         // the 150ms debounce tick must both land before the result frame,
         // or the transient 🚧 flush is preempted by Finished.
-        vec![fake.to_str().unwrap().to_string(), "--slow-ms".into(), "800".into()],
+        vec![
+            fake.to_str().unwrap().to_string(),
+            "--slow-ms".into(),
+            "800".into(),
+        ],
         Some(work_dir_b.path().to_string_lossy().into_owned()),
         None,
-        None)
+        None,
+    )
     .await
     .expect("spawn fake CLI");
     router.seed_card(session_id.clone(), prompt.clone()).await;

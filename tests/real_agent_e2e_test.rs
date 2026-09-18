@@ -325,12 +325,7 @@ usage_file = "{usage}"
         let log = self.open_log(&self.router_log);
         let log_err = log.try_clone().expect("clone router log handle");
         tokio::process::Command::new(env!("CARGO_BIN_EXE_sebas"))
-            .args([
-                "router",
-                "-c",
-                &fs_string(&self.config_path),
-                "--debug",
-            ])
+            .args(["router", "-c", &fs_string(&self.config_path), "--debug"])
             .current_dir(&self.path)
             .envs(self.envs())
             .stdout(Stdio::from(log))

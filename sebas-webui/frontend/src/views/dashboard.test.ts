@@ -124,6 +124,8 @@ function row(overrides: Partial<SessionRow>): SessionRow {
     agent_kind: null,
     pending_count: 0,
     msg_count: 0,
+    turn_engaged: false,
+    desired_mode: 'ask',
     ...overrides,
   }
 }
@@ -163,6 +165,8 @@ function detailFixture(): SessionDetail {
     available_models: null,
     agent_kind: 'claude',
     pending: [],
+    turn_engaged: false,
+    desired_mode: 'ask',
   }
 }
 
@@ -183,6 +187,8 @@ function focusedSummary(): Summary {
       available_models: null,
       agent_kind: 'claude',
       pending: [],
+      turn_engaged: false,
+      desired_mode: 'ask',
     },
     active_session_key: 'oc_live%00',
   }
@@ -279,18 +285,22 @@ describe('sebas-dashboard (workbench main area)', () => {
     el.remove()
   })
 
-  it('renders the project header with branch pill and N sessions · active meta', async () => {
+  it('renders the project header without session-count or active/idle copies (3.6, D6b)', async () => {
     const el = await mount()
     el.selectedPath = '/home/me/sebas'
     await el.updateComplete
     await new Promise((r) => setTimeout(r, 0))
     await el.updateComplete
 
+    // （3.6，D6b）project-header 只保留真导航信息（项目名 + 节点 chip +
+    // 分支 pill）；「X sessions」计数与 active/idle 活跃度徽标下线——会话
+    // 状态只挂 rail 行首圆点一处。
     const header = el.shadowRoot!.querySelector('.project-header')
     expect(header?.textContent).toContain('sebas')
     expect(header?.querySelector('.branch-pill')?.textContent).toBe('feat/webui')
-    expect(header?.textContent).toContain('2 个会话')
-    expect(header?.querySelector('.meta-item.is-active')?.textContent).toContain('有会话在运行')
+    expect(header?.textContent).not.toContain('sessions')
+    expect(header?.querySelector('.active-dot')).toBeNull()
+    expect(header?.querySelector('.meta-item.is-active')).toBeNull()
     el.remove()
   })
 
@@ -311,6 +321,8 @@ describe('sebas-dashboard (workbench main area)', () => {
     const link = el.shadowRoot!.querySelector<HTMLAnchorElement>('a.focused-link')
     expect(link?.getAttribute('href')).toBe('/sessions/oc_live%00')
     expect(link?.textContent).toContain('chat-live')
+    // （3.6，D6b）focused-link 保留 chat_id 锚点，不再复述状态 slug。
+    expect(link?.querySelector('sebas-status-badge')).toBeNull()
     expect(el.shadowRoot!.querySelector('.empty-stream')).toBeNull()
     el.remove()
   })
@@ -380,8 +392,10 @@ describe('sebas-dashboard (workbench main area)', () => {
     await el.updateComplete
     const head = el.shadowRoot!.querySelector<HTMLElement>('.session-head')
     expect(head).toBeTruthy()
-    expect(head!.getAttribute('data-status')).toBe('working')
-    expect(head!.querySelector('sebas-status-badge')).toBeTruthy()
+    // （3.6，D6b）session-head 卡片不再有状态徽标与状态边框属性——会话
+    // 状态只挂 rail 行首圆点；卡片保留 chat / agent / model / mode / actions。
+    expect(head!.getAttribute('data-status')).toBeNull()
+    expect(head!.querySelector('sebas-status-badge')).toBeNull()
     expect(head!.textContent).toContain('chat-live')
     expect(head!.querySelector('[data-testid="agent-lock"]')?.textContent).toContain('claude')
     // 头部去交互化：零按钮、零链接、零 mode/model 切换控件。
@@ -472,6 +486,7 @@ describe('sebas-dashboard (workbench main area)', () => {
       ...detailFixture(),
       available_models: ['m1', 'm2'],
       current_model: 'm1',
+      turn_engaged: true,
     })
     const el = await mount()
     await new Promise((r) => setTimeout(r, 0))
@@ -488,7 +503,7 @@ describe('sebas-dashboard (workbench main area)', () => {
     expect(composer).toBeTruthy()
     // 聚焦会话指针驱动 composer（workbench-interaction-polish 4.1）。
     expect(composer.sessionKey).toBe('oc_live%00')
-    // D4：聚焦会话 working = turnInFlight 下发。
+    // D4 + （2.1）：聚焦会话在飞（turn_engaged=true 随详情下发）。
     expect(composer.turnInFlight).toBe(true)
     // 会话内模型面与当前模型照常透传。
     expect(composer.sessionModels).toEqual(['m1', 'm2'])
@@ -522,9 +537,10 @@ describe('sebas-dashboard (workbench main area)', () => {
     el.remove()
   })
 
-  it('falls back to the working-slug heuristic when the core predates turn_engaged (3.1)', async () => {
-    // 旧 core：键缺省 + slug waiting → 不判定在飞（waiting 呈现词不承担
-    // 状态判定，design D3）；对照 slug working 的既有 D4 断言。
+  it('never derives turn-in-flight from the display slug (2.1, D2)', async () => {
+    // （2.1，D2）waiting 呈现词不承担状态判定，且 `status_slug === 'working'`
+    // 的字符串回退分支已删除：turn_engaged=false（哪怕 slug 是 working）
+    // 一律如实读作空闲——状态只来自引擎事实帧/详情。
     apiMocks.summary.mockResolvedValue(focusedSummary())
     apiMocks.session.mockResolvedValue({
       ...detailFixture(),
@@ -594,6 +610,27 @@ describe('sebas-dashboard (workbench main area)', () => {
     expect(styleText).toMatch(/wa-split-panel\.vsplit\s*\{[^}]*--max:\s*50%/)
     // 舞台浮岛（D6）：stage 列内圆角卡片。
     expect(el.shadowRoot!.querySelector('.stage-island')).toBeTruthy()
+    el.remove()
+  })
+
+  it('converges the island spacing on the compact space-2 token (3.5, D6)', async () => {
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    const el = await mount()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    const styleText = [...el.shadowRoot!.querySelectorAll('style')]
+      .map((s) => s.textContent ?? '')
+      .join('\n')
+    // 舞台列与输入框列共享同一水平内边距 token（stage|composer 内容边缘
+    // 对齐，D6「两列同一 inset」），竖向留缝同收 space-2。
+    expect(styleText).toMatch(
+      /\.stage-col\s*\{[^}]*padding:\s*0\s+var\(--sebas-space-2\)\s+0\s+var\(--sebas-space-2\)/,
+    )
+    expect(styleText).toMatch(
+      /\.composer-col\s*\{[^}]*padding:\s*0\s+var\(--sebas-space-2\)\s+var\(--sebas-space-2\)/,
+    )
+    // 收敛不消除拖拽边界：stage|composer 分割缝保持 6px 可达把手。
+    expect(styleText).toMatch(/wa-split-panel\.vsplit\s*\{[^}]*--divider-width:\s*6px/)
     el.remove()
   })
 
@@ -688,8 +725,9 @@ describe('remote session presentation (add-remote-execution-node 8.3-8.5)', () =
       effective_mode: 'ask',
       parked_approvals: 2,
     })
+    // （3.6，D6b）会话头不再渲染状态属性；泊车事实由横幅与 rail 圆点表达。
     const head = el.shadowRoot!.querySelector<HTMLElement>('.session-head')
-    expect(head!.getAttribute('data-status')).toBe('waiting')
+    expect(head!.getAttribute('data-status')).toBeNull()
     const banner = el.shadowRoot!.querySelector<HTMLElement>('[data-testid="parked-approvals"]')
     expect(banner).toBeTruthy()
     expect(banner!.textContent).toContain('2')
@@ -774,8 +812,10 @@ describe('conversation incremental sync (conversation-incremental-sync 2.1/2.2)'
     const transcript = transcriptOf(el)!
     expect(transcript.entries.map((e) => e.position)).toEqual([0, 1, 2, 3])
     expect(transcript.entries[3].content).toBe('third entry')
-    // D2：status 变化随增量响应同行（会话头状态翻转，entries 只增不重拉）。
-    expect(el.shadowRoot!.querySelector('.session-head')?.getAttribute('data-status')).toBe('done')
+    // D2：status 变化随增量响应同行（聚焦详情 slug 翻转，entries 只增不重拉）。
+    expect(
+      (el as unknown as { focusedDetail: { status_slug: string } }).focusedDetail.status_slug,
+    ).toBe('done')
     el.remove()
   })
 
@@ -1037,8 +1077,9 @@ describe('creation focus chain (workbench-rail-polish 3.2)', () => {
  * 实时 summary/detail）能否把引擎事实 turn_engaged 送进 composer 的五态机
  * ——送达即呈 stop/queued，静默窗全程不回退 disabled。
  *
- * mock 数据形状对齐 wire 契约：turn_engaged 只在 true 时上 wire（键缺省 =
- * false），所以消费面的回退链（detail ?? summary ?? slug）用「键缺省」表达。
+ * mock 数据形状对齐 wire 契约：（2.1，D2）五键帧每次必带，turn_engaged
+ * 不再有「只在 true 时上 wire」的缺省形态，消费面无字符串回退链——帧事实
+ * 即时就地补丁（onWsEvent），refetch 只是收敛兜底。
  */
 describe('sebas-dashboard (silent working window refetch chain)', () => {
   async function settle(el: SebasDashboard): Promise<void> {
@@ -1049,9 +1090,15 @@ describe('sebas-dashboard (silent working window refetch chain)', () => {
 
   function composerOf(el: SebasDashboard): StubWorkbenchComposer & {
     waitingApproval?: boolean
+    turnInFlight?: boolean
+    sessionKey?: string | null
   } {
     return el.shadowRoot!.querySelector('sebas-workbench-composer') as unknown as
-      StubWorkbenchComposer & { waitingApproval?: boolean }
+      StubWorkbenchComposer & {
+        waitingApproval?: boolean
+        turnInFlight?: boolean
+        sessionKey?: string | null
+      }
   }
 
   function stackOf(el: SebasDashboard): HTMLElement & { turnEngaged?: boolean } {
@@ -1069,14 +1116,22 @@ describe('sebas-dashboard (silent working window refetch chain)', () => {
     const el = await mount()
     expect(composerOf(el).turnInFlight).toBe(false)
 
-    // 引擎在首个内容帧翻 WORKING 并发布 Updated；WS 帧触发 refetch，
-    // 实时读回 working + turn_engaged=true（stall 场景静默窗的稳态）。
+    // 引擎在首个内容帧翻 WORKING 并发布 Updated：帧（2.1，D2 五键）携带
+    // turn_engaged=true，refetch 链实时读回一致事实（stall 场景静默窗的
+    // 稳态）——composer/pending-stack 翻转。
     apiMocks.summary.mockResolvedValue({
       ...focusedSummary(),
       active_session: { ...focusedSummary().active_session!, turn_engaged: true },
     })
     apiMocks.session.mockResolvedValue({ ...detailFixture(), turn_engaged: true })
-    wsMocks.emit({ type: 'session.updated', session_id: 'oc_live%00', status: 'working' })
+    wsMocks.emit({
+      type: 'session.updated',
+      session_id: 'oc_live%00',
+      status_slug: 'working',
+      turn_engaged: true,
+      msg_count: 2,
+      pending: [],
+    })
     await settle(el)
 
     expect(composerOf(el).turnInFlight).toBe(true)
@@ -1115,23 +1170,29 @@ describe('sebas-dashboard (silent working window refetch chain)', () => {
     el.remove()
   })
 
-  it('a stale detail payload without the key does not mask a fresh summary fact (fallback chain)', async () => {
-    // detail 在途/滞回（无键，旧形状）不应遮蔽 summary 已到的新事实——
-    // 消费链 detail ?? summary ?? slug 的 `??` 半边。
+  it('the frame alone patches the focused detail synchronously (2.2, D2)', async () => {
+    // 帧真源（2.2）：session.updated 五键帧到达的**同步**时刻，focusedDetail
+    // 已被就地补丁（slug/turn_engaged/msg_count/pending）——composer 等表面
+    // 的实时翻转不等下一次 HTTP 详情取回；随后的 refetch 只做收敛兜底。
     apiMocks.summary.mockResolvedValue(focusedSummary())
     apiMocks.session.mockResolvedValue({ ...detailFixture(), status_slug: 'queued' })
     const el = await mount()
     expect(composerOf(el).turnInFlight).toBe(false)
 
-    apiMocks.summary.mockResolvedValue({
-      ...focusedSummary(),
-      active_session: { ...focusedSummary().active_session!, turn_engaged: true },
+    wsMocks.emit({
+      type: 'session.updated',
+      session_id: 'oc_live%00',
+      status_slug: 'working',
+      turn_engaged: true,
+      msg_count: 3,
+      pending: [{ id: 1, text: 'x', position: 0, disposition: 'turn', priority: false }],
     })
-    // detail 故意停在旧形状（无 turn_engaged 键）。
-    wsMocks.emit({ type: 'session.updated', session_id: 'oc_live%00', status: 'working' })
-    await settle(el)
 
-    expect(composerOf(el).turnInFlight).toBe(true)
+    const detail = (el as unknown as { focusedDetail: { status_slug: string; turn_engaged: boolean; msg_count: number; pending: unknown[] } }).focusedDetail
+    expect(detail.status_slug).toBe('working')
+    expect(detail.turn_engaged).toBe(true)
+    expect(detail.msg_count).toBe(3)
+    expect(detail.pending).toHaveLength(1)
     el.remove()
   })
 
@@ -1178,14 +1239,42 @@ describe('ws event dispatch, throttling and resync (fix-webui-streaming-liveness
     const el = await mount()
     await settle(el)
     const base = apiMocks.summary.mock.calls.length
-    // 节流窗内的三个会话事件：只产生一轮刷新。
-    wsMocks.emit({ type: 'session.updated', session_id: 'oc_live%00', status: 'working' })
-    wsMocks.emit({ type: 'session.updated', session_id: 'oc_live%00', status: 'working' })
-    wsMocks.emit({ type: 'session.created', session_id: 'oc_new%00' })
+    // 节流窗内的三个会话事件：只产生一轮刷新。（2.1，D2）相位帧五键必带。
+    wsMocks.emit({
+      type: 'session.updated',
+      session_id: 'oc_live%00',
+      status_slug: 'working',
+      turn_engaged: true,
+      msg_count: 1,
+      pending: [],
+    })
+    wsMocks.emit({
+      type: 'session.updated',
+      session_id: 'oc_live%00',
+      status_slug: 'working',
+      turn_engaged: true,
+      msg_count: 1,
+      pending: [],
+    })
+    wsMocks.emit({
+      type: 'session.created',
+      session_id: 'oc_new%00',
+      status_slug: 'starting',
+      turn_engaged: true,
+      msg_count: 0,
+      pending: [],
+    })
     await settle(el)
     expect(apiMocks.summary.mock.calls.length).toBe(base + 1)
     // 窗口过后的下一事件触发新一轮（尾沿计时器已排定，≥500ms 后落地）。
-    wsMocks.emit({ type: 'session.updated', session_id: 'oc_live%00', status: 'done' })
+    wsMocks.emit({
+      type: 'session.updated',
+      session_id: 'oc_live%00',
+      status_slug: 'done',
+      turn_engaged: false,
+      msg_count: 1,
+      pending: [],
+    })
     await new Promise((r) => setTimeout(r, 650))
     await settle(el)
     expect(apiMocks.summary.mock.calls.length).toBe(base + 2)
