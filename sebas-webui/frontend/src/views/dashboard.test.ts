@@ -28,6 +28,9 @@ const apiMocks = vi.hoisted(() => ({
   activateSession: vi.fn(async () => ({ status: 'already-running' })),
   nodes: vi.fn(),
   agents: vi.fn(),
+  archiveDetail: vi.fn(),
+  restoreSession: vi.fn(),
+  switchSession: vi.fn(),
 }))
 
 vi.mock('../api/client.js', () => ({
@@ -42,6 +45,9 @@ vi.mock('../api/client.js', () => ({
     activateSession: apiMocks.activateSession,
     nodes: apiMocks.nodes,
     agents: apiMocks.agents,
+    archiveDetail: apiMocks.archiveDetail,
+    restoreSession: apiMocks.restoreSession,
+    switchSession: apiMocks.switchSession,
   },
 }))
 
@@ -95,6 +101,7 @@ if (!customElements.get('sebas-workbench-composer')) {
 
 import './dashboard.js'
 import type { SebasDashboard } from './dashboard.js'
+import { SebasDashboard as DashboardImpl } from './dashboard.js'
 
 function row(overrides: Partial<SessionRow>): SessionRow {
   return {
@@ -282,8 +289,8 @@ describe('sebas-dashboard (workbench main area)', () => {
     const header = el.shadowRoot!.querySelector('.project-header')
     expect(header?.textContent).toContain('sebas')
     expect(header?.querySelector('.branch-pill')?.textContent).toBe('feat/webui')
-    expect(header?.textContent).toContain('2 sessions')
-    expect(header?.querySelector('.meta-item.is-active')?.textContent).toContain('active')
+    expect(header?.textContent).toContain('2 个会话')
+    expect(header?.querySelector('.meta-item.is-active')?.textContent).toContain('有会话在运行')
     el.remove()
   })
 
@@ -291,8 +298,8 @@ describe('sebas-dashboard (workbench main area)', () => {
     const el = await mount()
     const empty = el.shadowRoot!.querySelector('.empty-stream')
     expect(empty?.querySelector('.glyph')).toBeTruthy()
-    expect(empty?.textContent).toContain('No session focused')
-    expect(empty?.textContent).toContain('sidebar')
+    expect(empty?.textContent).toContain('未聚焦任何会话')
+    expect(empty?.textContent).toContain('项目树')
     el.remove()
   })
 
@@ -433,7 +440,7 @@ describe('sebas-dashboard (workbench main area)', () => {
     await new Promise((r) => setTimeout(r, 0))
     await el.updateComplete
     const area = el.shadowRoot!.querySelector('div.turn-stream-area')
-    expect(area?.textContent).toContain('Nothing yet')
+    expect(area?.textContent).toContain('还没有对话')
     expect(area!.querySelector('sebas-transcript-view')).toBeNull()
     el.remove()
   })
@@ -445,7 +452,7 @@ describe('sebas-dashboard (workbench main area)', () => {
     await new Promise((r) => setTimeout(r, 0))
     await el.updateComplete
     const area = el.shadowRoot!.querySelector('div.turn-stream-area')
-    expect(area?.textContent).toContain('Session unavailable')
+    expect(area?.textContent).toContain('会话不可得')
     expect(area!.querySelector('sebas-transcript-view')).toBeNull()
     el.remove()
   })
@@ -635,10 +642,10 @@ describe('remote session presentation (add-remote-execution-node 8.3-8.5)', () =
     })
     const mismatch = el.shadowRoot!.querySelector<HTMLElement>('[data-testid="mode-mismatch"]')
     expect(mismatch).toBeTruthy()
-    // 两个值都要显示，且必须说明「没生效」——只显示期望值就是撒谎。
-    expect(mismatch!.textContent).toContain('ask')
-    expect(mismatch!.textContent).toContain('edit')
-    expect(mismatch!.textContent).toContain('无法强制')
+    // （polish-workbench-walkthrough-ux 4.2）过渡态 = 中性灰「模式切换中…」，
+    // 不再有红色「无法强制」/ UNKNOWN 措辞。
+    expect(mismatch!.textContent).toContain('模式切换中…')
+    expect(mismatch!.textContent).not.toContain('无法强制')
     el.remove()
   })
 
@@ -652,7 +659,7 @@ describe('remote session presentation (add-remote-execution-node 8.3-8.5)', () =
     })
     expect(el.shadowRoot!.querySelector('[data-testid="mode-mismatch"]')).toBeNull()
     const mode = el.shadowRoot!.querySelector<HTMLElement>('[data-testid="session-mode"]')
-    expect(mode!.textContent).toContain('ask')
+    expect(mode!.textContent).toContain('逐次询问')
     el.remove()
   })
 
@@ -664,9 +671,11 @@ describe('remote session presentation (add-remote-execution-node 8.3-8.5)', () =
       effective_mode: 'auto',
       parked_approvals: 0,
     })
+    // （4.2）auto 与 ungated 章合一：mode 章显示「自动执行」，英文 UNGATED 章删除。
     const ungated = el.shadowRoot!.querySelector<HTMLElement>('[data-testid="session-ungated"]')
-    expect(ungated).toBeTruthy()
-    expect(ungated!.textContent).toContain('ungated')
+    expect(ungated).toBeNull()
+    const mode = el.shadowRoot!.querySelector<HTMLElement>('[data-testid="session-mode"]')
+    expect(mode!.textContent).toContain('自动执行')
     el.remove()
   })
 
@@ -825,10 +834,10 @@ describe('conversation incremental sync (conversation-incremental-sync 2.1/2.2)'
     await settle(el)
     let calls = apiMocks.session.mock.calls
     expect(calls[calls.length - 1]).toEqual(['oc_live%00', 2])
-    // 序列与游标原样保留：transcript 还在、内容完整，不落「Session unavailable」。
+    // 序列与游标原样保留：transcript 还在、内容完整，不落「会话不可得」。
     const transcript = transcriptOf(el)!
     expect(transcript.entries.map((e) => e.position)).toEqual([0, 1, 2])
-    expect(el.shadowRoot!.textContent).not.toContain('Session unavailable')
+    expect(el.shadowRoot!.textContent).not.toContain('会话不可得')
     // 下次成功：仍从同一游标重试（未推进），新条目 append 无缺口。
     apiMocks.session.mockResolvedValue({
       ...detailFixture(),
@@ -1284,5 +1293,168 @@ describe('ws event dispatch, throttling and resync (fix-webui-streaming-liveness
     await settle(el)
     expect(apiMocks.session).not.toHaveBeenCalled()
     el.remove()
+  })
+})
+
+// ── polish-workbench-walkthrough-ux：归档只读视图 / 恢复反馈 / 崩溃一致性 ──
+
+import { resetNotices, subscribeNotices, type NoticeItem } from '../notify.js'
+import type { ArchiveDetail } from '../api/client.js'
+
+describe('archived view + restore semantics (polish-workbench-walkthrough-ux 2.1–2.4)', () => {
+  /** 收敛一轮 refetch 链（与既有 describe 内 helper 同款）。 */
+  async function settle(el: SebasDashboard): Promise<void> {
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+  }
+
+  const archiveEntry = {
+    session_key: 'oc_arch%00',
+    project_path: '/home/me/archived-proj',
+    label: 'archived chat',
+    archived_at: 1_700_000_000,
+    retention_deadline: 1_900_000_000,
+    transcript: [],
+  }
+  const archiveDetail: ArchiveDetail = {
+    entry: archiveEntry,
+    entries: [
+      { position: 0, kind: 'prompt', element_type: 'markdown', content: 'old question', created_at_unix: 1 },
+      { position: 1, kind: 'content', element_type: 'markdown', content: 'old answer', created_at_unix: 2 },
+    ],
+  }
+
+  async function mountArchived(): Promise<SebasDashboard> {
+    apiMocks.archiveDetail.mockResolvedValue(archiveDetail)
+    apiMocks.summary.mockResolvedValue(summaryBase)
+    const el = await mount()
+    // app-shell 接线（恢复成功派发 archive-view-close → shell 清 archivedEntry）：
+    // 单测无 shell，这里用监听器还原同一契约。
+    el.addEventListener('archive-view-close', () => {
+      el.archivedEntry = null
+    })
+    el.archivedEntry = archiveEntry
+    await settle(el)
+    return el
+  }
+
+  it('renders a read-only archived view: restore button, project path, transcript, no composer', async () => {
+    const el = await mountArchived()
+    expect(el.shadowRoot!.querySelector('[data-testid="archived-view"]')).toBeTruthy()
+    expect(el.shadowRoot!.querySelector('[data-testid="archived-restore"]')).toBeTruthy()
+    expect(el.shadowRoot!.querySelector('[data-testid="archived-project"]')?.textContent).toContain(
+      '/home/me/archived-proj',
+    )
+    // 对话快照可见（只读回看）：transcript-view 在自身 shadow root 内渲染，
+    // 直接读组件的 entries 属性断言快照内容（与既有 transcriptOf 同款）。
+    const t = el.shadowRoot!.querySelector<HTMLElement & { entries: ConversationEntryView[] }>(
+      'sebas-transcript-view',
+    )
+    expect(t?.entries.map((e) => e.content)).toEqual(['old question', 'old answer'])
+    // 只读态：composer 不在场（后端 400 消息门兜底不变）。
+    expect(el.shadowRoot!.querySelector('sebas-workbench-composer')).toBeNull()
+    el.remove()
+  })
+
+  it('restore goes through a confirm dialog stating the project path, then succeeds with a toast', async () => {
+    apiMocks.restoreSession.mockResolvedValue({ status: 'restored', entry: archiveEntry })
+    const notices: NoticeItem[] = []
+    const unsubscribe = subscribeNotices((st) => {
+      notices.splice(0, notices.length, ...st.items)
+    })
+    const el = await mountArchived()
+    // 点击 = 只读查看；未确认前绝不触发 restore。
+    expect(apiMocks.restoreSession).not.toHaveBeenCalled()
+    ;(el.shadowRoot!.querySelector('[data-testid="archived-restore"]') as HTMLElement).click()
+    await el.updateComplete
+    const dialog = el.shadowRoot!.querySelector('[data-testid="restore-dialog"]')
+    expect(dialog).toBeTruthy()
+    expect(dialog!.textContent).toContain('/home/me/archived-proj')
+    ;(el.shadowRoot!.querySelector('[data-testid="restore-confirm"]') as HTMLElement).click()
+    await new Promise((r) => setTimeout(r, 0))
+    await settle(el)
+    expect(apiMocks.restoreSession).toHaveBeenCalledWith('oc_arch%00')
+    // 成功 toast 携带落点 project_path（未注册项目也不静默，2.3）。
+    const toast = notices.find((n) => n.message.includes('已恢复到'))
+    expect(toast?.message).toContain('/home/me/archived-proj')
+    // 恢复成功 = 只读视图退出。
+    expect(el.shadowRoot!.querySelector('[data-testid="archived-view"]')).toBeNull()
+    unsubscribe()
+    resetNotices()
+    el.remove()
+  })
+
+  it('a failed restore surfaces an error toast and keeps the entry archived in place', async () => {
+    apiMocks.restoreSession.mockRejectedValue(new Error('HTTP 500: boom'))
+    const notices: NoticeItem[] = []
+    const unsubscribe = subscribeNotices((st) => {
+      notices.splice(0, notices.length, ...st.items)
+    })
+    const el = await mountArchived()
+    ;(el.shadowRoot!.querySelector('[data-testid="archived-restore"]') as HTMLElement).click()
+    await el.updateComplete
+    ;(el.shadowRoot!.querySelector('[data-testid="restore-confirm"]') as HTMLElement).click()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    // 失败通知点名会话与成因；条目仍在（归档视图不退场）。
+    const toast = notices.find((n) => n.message.includes('恢复会话'))
+    expect(toast?.message).toContain('archived chat')
+    expect(toast?.message).toContain('boom')
+    expect(el.shadowRoot!.querySelector('[data-testid="archived-view"]')).toBeTruthy()
+    expect(el.shadowRoot!.querySelector('[data-testid="restore-error"]')).toBeTruthy()
+    unsubscribe()
+    resetNotices()
+    el.remove()
+  })
+})
+
+describe('focused session termination consistency (polish-workbench-walkthrough-ux 3.5)', () => {
+  /** 收敛一轮 refetch 链（与既有 describe 内 helper 同款）。 */
+  async function settle(el: SebasDashboard): Promise<void> {
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+  }
+
+  it('a session.removed for the focused session exits Working, notifies, keeps the transcript', async () => {
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    const el = await mount()
+    await settle(el)
+    expect(el.shadowRoot!.querySelector('sebas-workbench-composer')).toBeTruthy()
+    const notices: NoticeItem[] = []
+    const unsubscribe = subscribeNotices((st) => {
+      notices.splice(0, notices.length, ...st.items)
+    })
+    wsMocks.emit({ type: 'session.removed', session_id: 'oc_live%00' })
+    await settle(el)
+    // Working 幽灵退出：composer（含停止控件）让位给终止说明。
+    expect(el.shadowRoot!.querySelector('sebas-workbench-composer')).toBeNull()
+    expect(el.shadowRoot!.querySelector('[data-testid="composer-terminated"]')).toBeTruthy()
+    // 通知点名会话与成因；已收对话保持只读可见（transcript-view 的 shadow
+    // 内渲染，读组件 entries 断言快照仍在）。
+    const toast = notices.find((n) => n.message.includes('chat-live'))
+    expect(toast?.message).toContain('已终止')
+    const t = el.shadowRoot!.querySelector<HTMLElement & { entries: ConversationEntryView[] }>(
+      'sebas-transcript-view',
+    )
+    expect(t?.entries.some((e) => e.content === 'first entry')).toBe(true)
+    unsubscribe()
+    resetNotices()
+    el.remove()
+  })
+})
+
+describe('slash command palette stacking (polish-workbench-walkthrough-ux 2.5)', () => {
+  it('composer-area does not clip the palette: overflow is visible, not auto', () => {
+    // 根因：面板 DOM 与 sessionCommands 数据都在，但 .composer-area 的
+    // overflow-y:auto 把越出 composer 壳顶的面板裁到仅剩 ~2px 缝。CSS 修复
+    // = 列级 overflow 可见（浮层探出），审批卡/堆叠区各自限高。断言样式表
+    // 里对应规则，防回归。
+    const styles = DashboardImpl.styles
+    const css = (Array.isArray(styles) ? styles : [styles])
+      .map((s) => (s as unknown as { cssText: string }).cssText)
+      .join('\n')
+    const areaRule = css.match(/\.composer-area\s*\{[^}]*\}/)?.[0] ?? ''
+    expect(areaRule).toContain('overflow: visible')
+    expect(areaRule).not.toContain('overflow-y: auto')
   })
 })

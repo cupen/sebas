@@ -537,6 +537,10 @@ describe('history group (archived sessions)', () => {
     const historyHead = heads.find((h) => h.textContent?.includes('History'))
     expect(historyHead).toBeTruthy()
     expect(historyHead!.querySelector('.group-count')?.textContent).toBe('3')
+    // （5.5）组头是原生 <button>：role=button 语义来自元素本身（保留
+    // Enter/Space 键盘行为），不再是 div[role=button]。
+    expect(historyHead!.tagName.toLowerCase()).toBe('button')
+    expect(historyHead!.getAttribute('role')).toBeNull()
     ;(historyHead as HTMLElement).click()
     await el.updateComplete
     const labels = [...el.shadowRoot!.querySelectorAll('.group-section li.session-item.archived .session-name')].map(
@@ -633,8 +637,10 @@ describe('project node dimension (add-remote-execution-node 8.1/8.2)', () => {
       added_at: 0,
     } as any)
     const el = await mount()
+    ;(el as any).addDialogOpen = true
     ;(el as any).addPath = '/srv/repo'
     ;(el as any).addNodeId = 'dev-box'
+    await el.updateComplete
     await (el as any).submitAddProject()
     await el.updateComplete
     expect(apiMock.projects.add).toHaveBeenCalledWith('/srv/repo', 'dev-box')
@@ -681,8 +687,10 @@ describe('project node dimension (add-remote-execution-node 8.1/8.2)', () => {
       new Error('节点 dev-box 上路径不存在: /srv/repo'),
     )
     const el = await mount()
+    ;(el as any).addDialogOpen = true
     ;(el as any).addPath = '/srv/repo'
     ;(el as any).addNodeId = 'dev-box'
+    await el.updateComplete
     await (el as any).submitAddProject()
     await el.updateComplete
     expect(el.shadowRoot!.textContent).toContain('节点 dev-box')
@@ -715,11 +723,8 @@ describe('project node dimension (add-remote-execution-node 8.1/8.2)', () => {
     plus!.click()
     await el.updateComplete
     expect(apiMock.createSession).not.toHaveBeenCalled()
-    expect(
-      (el.shadowRoot!.querySelector('sebas-new-session-dialog') as HTMLElement & {
-        open: boolean
-      }).open,
-    ).toBe(false)
+    // 「+」禁用即拦截：对话框根本没有打开（5.3 起关闭 = 不渲染）。
+    expect(el.shadowRoot!.querySelector('sebas-new-session-dialog')).toBeNull()
     expect(el.shadowRoot!.textContent).toContain('dev-box')
     el.remove()
   })
@@ -779,6 +784,26 @@ describe('project node dimension (add-remote-execution-node 8.1/8.2)', () => {
       d.getAttribute('data-status'),
     )
     expect(dots).toContain('waiting')
+    el.remove()
+  })
+
+  it('a fresh placeholder session does not light the project wait-dot (3.6 regression)', async () => {
+    // 全新占位/排队会话没有待审批——「需介入」橙点不得误报（区分审批挂起
+    // 与占位/排队态；perm 挂起才亮橙点，既有 waiting 用例已覆盖）。
+    const placeholder = row({
+      project_id: 'proj-alpha',
+      prompt_preview: null,
+      session_id_short: 'aaaa0009',
+      status: 'queued',
+      status_slug: 'queued',
+      status_label: 'Queued',
+      remote: null,
+    })
+    mockOf(apiMock.sessions).mockResolvedValue(sessionList([placeholder]))
+    mockOf(apiMock.nodes).mockResolvedValue({ nodes: [localNode], remote_available: true })
+    const el = await mount()
+    expect(el.shadowRoot!.querySelector('.wait-dot')).toBeNull()
+    expect(el.shadowRoot!.querySelector('[data-testid="session-waiting"]')).toBeNull()
     el.remove()
   })
 })
@@ -852,8 +877,8 @@ describe('creation dialog wiring (workbench-interaction-polish 3.2)', () => {
       model: 'deepseek-chat',
       mode: 'allow',
     })
-    // 成功后对话框收起、无错误。
-    expect((await dialogOf(el)).open).toBe(false)
+    // 成功后对话框收起、无错误。（5.3）关闭即整棵移出 DOM，不留 ARIA 残影。
+    expect(el.shadowRoot!.querySelector('sebas-new-session-dialog')).toBeNull()
     el.remove()
   })
 
@@ -887,6 +912,32 @@ describe('creation dialog wiring (workbench-interaction-polish 3.2)', () => {
     el.remove()
   })
 
+  it('a confirm with no bound project is not silent: inline error, no request (3.4)', async () => {
+    // polish-workbench-walkthrough-ux 3.4：分派条件不成立（目标项目不可用）
+    // 时绝不假装创建成功——就地 inline 错误、不派发任何创建请求（守卫层
+    // 断言；后端拒绝时对话框保持打开的就地呈现由上一个用例覆盖）。
+    mockOf(apiMock.createSession).mockClear()
+    mockOf(apiMock.nodes).mockResolvedValue({
+      nodes: [{ id: 'local', status: 'online', local: true }],
+      remote_available: true,
+    })
+    const el = await mount()
+    ;(el as unknown as { newSessionTarget: null }).newSessionTarget = null
+    await el.updateComplete
+    await (el as unknown as { confirmNewSession: (e: CustomEvent) => Promise<void> }).confirmNewSession(
+      new CustomEvent('dialog-confirm', {
+        detail: { agent: 'claude', model: null, mode: null },
+      }),
+    )
+    await el.updateComplete
+    // 没有静默：无请求、inline 错误状态写入（对话框重开即呈现）。
+    expect(mockOf(apiMock.createSession)).not.toHaveBeenCalled()
+    expect((el as unknown as { newSessionError: string | null }).newSessionError).toContain(
+      '无法创建会话',
+    )
+    el.remove()
+  })
+
   it('cancel closes the dialog and creates nothing', async () => {
     mockOf(apiMock.nodes).mockResolvedValue({
       nodes: [{ id: 'local', status: 'online', local: true }],
@@ -900,7 +951,8 @@ describe('creation dialog wiring (workbench-interaction-polish 3.2)', () => {
     const dialog = await dialogOf(el)
     dialog.dispatchEvent(new CustomEvent('dialog-cancel', { bubbles: true, composed: true }))
     await el.updateComplete
-    expect((await dialogOf(el)).open).toBe(false)
+    // （5.3）关闭即整棵移出 DOM。
+    expect(el.shadowRoot!.querySelector('sebas-new-session-dialog')).toBeNull()
     expect(mockOf(apiMock.createSession)).not.toHaveBeenCalled()
     el.remove()
   })

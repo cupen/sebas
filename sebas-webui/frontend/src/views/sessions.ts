@@ -11,6 +11,7 @@ import { navigate } from '../router.js'
 import { icon } from '../components/icons.js'
 import { viewStyles } from '../styles/shared.js'
 import { fullSessionLabel } from './project-rail.js'
+import { agentUnavailableLabel } from './new-session-dialog.js'
 import { guardedHide } from '../components/wa-hide-guard.js'
 import '../components/status-badge.js'
 import '@awesome.me/webawesome/dist/components/button/button.js'
@@ -314,9 +315,12 @@ export class SebasSessions extends LitElement {
             }}
           >
             ${this.kinds.map(
-              (k) => html`<wa-option value=${k.id} ?disabled=${!k.reachable}
-                >${k.reachable ? k.display : `${k.display}（unavailable: ${k.cause ?? 'unreachable'}）`}</wa-option
-              >`,
+              (k) =>
+                k.reachable
+                  ? html`<wa-option value=${k.id}>${k.display}</wa-option>`
+                  : html`<wa-option value=${k.id} disabled title=${k.cause ?? 'unreachable'}
+                      >${agentUnavailableLabel(k)}</wa-option
+                    >`,
             )}
           </wa-select>
           <wa-button variant="brand" appearance="accent" ?loading=${this.creating} type="submit"

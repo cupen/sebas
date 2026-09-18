@@ -144,16 +144,16 @@ const NAV_BREAKS: ReadonlySet<SettingsSection> = new Set(['services', 'env-vars'
 
 const SECTION_DESC: Record<SettingsSection, string> = {
   generic:
-    'General preferences will live here (language switching and more) — nothing to configure yet.',
-  appearance: 'How the console looks. Your choice is saved in this browser.',
-  services: 'Background services that run alongside sebas.',
-  users: 'Operator accounts for this instance. Root only — changes take effect immediately.',
-  models: 'Manage model providers. Preset-derived values follow the app code; you own the API key.',
+    '通用偏好将在这里提供（语言切换等）——当前还没有需要配置的项。',
+  appearance: '控制台外观。你的选择保存在当前浏览器里。',
+  services: '与 sebas 并行运行的后台服务。',
+  users: '本实例的操作员账户。仅 root 可管理——改动即时生效。',
+  models: '管理模型 provider。预设派生值跟随应用代码；API key 由你自己保管。',
   skills:
-    'Agent skills stored on this machine. Browse and remove entries, then Sync to project the store onto your agents. This page never creates or edits skills — use the CLI, git or npx, then Refresh.',
+    '本机存储的 agent 技能。可浏览与移除条目，然后 Sync 把技能仓投影到你的 agent。本页从不创建或编辑技能——请使用 CLI、git 或 npx，然后 Refresh。',
   'env-vars':
-    'Read-only reference: the environment variables this sebas instance reads. Sensitive ones only show whether they are set.',
-  about: 'What this instance is — its workspace, the default agent kind, and the build it runs on.',
+    '只读参考：本 sebas 实例读取的环境变量。敏感项只显示是否已设置。',
+  about: '本实例是什么——工作区、默认 agent 种类，以及所运行的构建版本。',
 }
 
 /** 读取上次停留分区；缺值/非法值（含旧值 `settings`/`env`）一律回退 null
@@ -496,6 +496,14 @@ export class SebasSettingsModal extends LitElement {
       min-width: 0;
       padding: var(--sebas-space-5) var(--sebas-space-6);
       overflow-y: auto;
+      /* （polish-workbench-walkthrough-ux 5.4）长文案/长词不再撑出横向滚动
+         条（关闭按钮曾被裁切）：内容区内长词断行，横向溢出就地消化。 */
+      overflow-x: hidden;
+      overflow-wrap: anywhere;
+    }
+    /* 分区内表格/代码等固定下限的块也允许收缩，min-width 下限交给内容自身。 */
+    .content :is(table, pre, code) {
+      max-width: 100%;
     }
     .content h2 {
       margin: 0 0 var(--sebas-space-1);
@@ -663,7 +671,8 @@ export class SebasSettingsModal extends LitElement {
       display: flex;
       flex-direction: column;
       gap: var(--sebas-space-3);
-      min-width: 420px;
+      min-width: 0;
+      max-width: 420px;
     }
     .readonly-urls {
       padding: var(--sebas-space-2) var(--sebas-space-3);
@@ -3100,9 +3109,9 @@ export class SebasSettingsModal extends LitElement {
           ? nothing
           : html`
               <p class="dialog-text" data-testid="skill-delete-text">
-                Delete skill <strong>${this.skillDelete.name}</strong> from the store? The copies
-                in backend skill directories are left in place — they will be cleaned up the next
-                time you press <strong>Sync</strong>.
+                从技能仓删除 <strong>${this.skillDelete.name}</strong>？各 agent
+                技能目录里的副本保持不动——它们会在下次按 <strong>Sync</strong>
+                时被清理。
               </p>
               ${this.skillDelete.error
                 ? html`<div class="callout callout-error" role="alert" data-testid="skill-delete-error">

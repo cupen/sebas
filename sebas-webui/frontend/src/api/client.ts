@@ -1090,6 +1090,9 @@ export const api = {
 
   // Archive
   archiveList: () => get<ArchiveList>('/api/archive'),
+  /** 归档会话的只读详情（对话快照；polish-workbench-walkthrough-ux 2.1）。 */
+  archiveDetail: (encodedKey: string) =>
+    get<ArchiveDetail>(`/api/archive/${encodedKey}`),
   archiveSession: (encodedKey: string) =>
     post<{ status: string; entry: ArchiveEntry }>(`/api/sessions/${encodedKey}/archive`),
   restoreSession: (encodedKey: string) =>
@@ -1146,6 +1149,14 @@ export interface ArchiveEntry {
 /** Response from GET /api/archive. */
 export interface ArchiveList {
   archived_sessions: ArchiveEntry[]
+  /** 启动迁移提示（polish-workbench-walkthrough-ux 1.2）：仅迁移发生时出现，前端转 toast。 */
+  migration?: string
+}
+
+/** GET /api/archive/{key} 的响应：归档条目 + 归档时刻的对话快照（只读回看）。 */
+export interface ArchiveDetail {
+  entry: ArchiveEntry
+  entries: ConversationEntryView[]
 }
 
 /** Response from GET /api/fs/browse-dirs. */

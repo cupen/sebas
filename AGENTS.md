@@ -89,14 +89,18 @@ both live in tasks.py — the old `scripts/*sandbox*.sh` harnesses were removed
      boundary for project register/list, session detail/message/switch, and
      browse-dirs; left unset it falls back to the process cwd with a startup
      warn, and sandbox journeys break in confusing ways;
-   - env: four files that would otherwise default into the real `~/.sebas`
+   - env: five files that would otherwise default into the real `~/.sebas`
      — all mandatory: `SEBAS_STATE_DB` (SQLite, default `~/.sebas/sebas.db`
      — the easy one to miss: without it the sandbox opens the real DB even
      with everything else sandboxed), `SEBAS_STATE_FILE` (default
      `~/.sebas/state.json`), `SEBAS_ROUTER_PROVIDER_OVERLAY` (default
-     `~/.sebas/providers.json`), and `SEBAS_WEBUI_AUTH_DB` (WebUI user
+     `~/.sebas/providers.json`), `SEBAS_WEBUI_AUTH_DB` (WebUI user
      store, default `~/.sebas/auth.db`; nothing opens it while
-     `auth = false`, pin it anyway so any provisioning stays sandbox-local).
+     `auth = false`, pin it anyway so any provisioning stays sandbox-local),
+     and `SEBAS_ARCHIVE_PATH` (WebUI 归档文件, default
+     `<SEBAS_STATE_DB 目录>/archive.json` — 钉了 state DB 即随迁，仍建议
+     显式钉进 `<SB>` 作防御纵深；旧 `~/.sebas/archive.json` 只作迁移源,
+     显式设置后不再触碰).
      Do **not** set `SEBAS_CORE_SECRET`: the core
      auto-arms (generates a key, writes it to `<config dir>/core.secret`,
      0600) and clients discover it from that file on every connect attempt —
@@ -115,10 +119,10 @@ both live in tasks.py — the old `scripts/*sandbox*.sh` harnesses were removed
 
    ```bash
    SEBAS_STATE_DB=… SEBAS_STATE_FILE=… \
-     SEBAS_ROUTER_PROVIDER_OVERLAY=… \
+     SEBAS_ROUTER_PROVIDER_OVERLAY=… SEBAS_ARCHIVE_PATH=… \
      target/debug/sebas core -c /tmp/sebas-itest/config.toml         # core
    SEBAS_STATE_DB=… SEBAS_STATE_FILE=… \
-     SEBAS_ROUTER_PROVIDER_OVERLAY=… \
+     SEBAS_ROUTER_PROVIDER_OVERLAY=… SEBAS_ARCHIVE_PATH=… \
      target/debug/sebas webui -c /tmp/sebas-itest/config.toml        # webui
    ```
 
@@ -206,11 +210,13 @@ credentials. Let `<SB>` be the throwaway dir (e.g. `/tmp/sebas-debug`).
    SEBAS_STATE_DB="<SB>/sebas.db" \
      SEBAS_STATE_FILE="<SB>/state.json" \
      SEBAS_ROUTER_PROVIDER_OVERLAY="<SB>/providers.json" \
+     SEBAS_ARCHIVE_PATH="<SB>/archive.json" \
      target/debug/sebas core -c "<SB>/config.toml" \
      --webui --webui-port 9877 > "<SB>/core.log" 2>&1
    SEBAS_STATE_DB="<SB>/sebas.db" \
      SEBAS_STATE_FILE="<SB>/state.json" \
      SEBAS_ROUTER_PROVIDER_OVERLAY="<SB>/providers.json" \
+     SEBAS_ARCHIVE_PATH="<SB>/archive.json" \
      target/debug/sebas router -c "<SB>/config.toml" \
      --debug > "<SB>/router.log" 2>&1 &
    ```

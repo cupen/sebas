@@ -18,7 +18,7 @@
 import { LitElement, css, html, nothing } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
 import { matchRoute, navigate, redirectFor, type RouteDef } from './router.js'
-import { api, setUnauthorizedHandler, type Role } from './api/client.js'
+import { api, setUnauthorizedHandler, type ArchiveEntry, type Role } from './api/client.js'
 import { sharedWs } from './api/shared-ws.js'
 import type { CoreReachabilityState } from './api/ws.js'
 import { notify, setFatal, setWsDown } from './notify.js'
@@ -102,6 +102,12 @@ export class SebasApp extends LitElement {
    * （get 未应答/连接未立）——不渲染横幅不锁定。
    */
   @state() private coreReachability: CoreReachabilityState | null = null
+  /**
+   * （polish-workbench-walkthrough-ux 2.1）正在查看的只读归档条目（rail
+   * History 点击上报，本处接力给 dashboard 渲染）。`null` = 无归档视图。
+   * 选项目 / 恢复成功 / 显式关闭都会清空。
+   */
+  @state() private archivedEntry: ArchiveEntry | null = null
 
   private params: Record<string, string> = {}
   private onNavigateBound: () => void = () => {}
@@ -594,7 +600,23 @@ export class SebasApp extends LitElement {
   /** 侧栏项目树选中项目 → 记录并回到 workbench（其它路由上点树也要生效）。 */
   private onRailSelect = (e: Event): void => {
     this.selectedPath = (e as CustomEvent<{ path: string | null }>).detail.path
+    // 切项目 = 离开归档只读视图（归档视图只由恢复/关闭动作退出自身）。
+    this.archivedEntry = null
     if (location.pathname !== '/') navigate('/')
+  }
+
+  /**
+   * （2.1）rail History 条目点击上报的只读归档条目：接力给 dashboard。
+   * 点击本身绝不触发 restore（误触陷阱拆除后的语义）。
+   */
+  private onArchiveView = (e: Event): void => {
+    this.archivedEntry = (e as CustomEvent<ArchiveEntry>).detail
+    if (location.pathname !== '/') navigate('/')
+  }
+
+  /** 归档视图关闭（恢复成功 / 显式退出）：清空只读态。 */
+  private onArchiveViewClose = (): void => {
+    this.archivedEntry = null
   }
 
   private renderOutlet() {
@@ -603,6 +625,8 @@ export class SebasApp extends LitElement {
         return html`<sebas-dashboard
           .selectedPath=${this.selectedPath}
           .coreReachability=${this.coreReachability}
+          .archivedEntry=${this.archivedEntry}
+          @archive-view-close=${this.onArchiveViewClose}
         ></sebas-dashboard>`
       case 'sessions':
         return html`<sebas-sessions></sebas-sessions>`
@@ -613,11 +637,15 @@ export class SebasApp extends LitElement {
           .selectedPath=${this.selectedPath}
           .coreReachability=${this.coreReachability}
           .deepLinkKey=${this.params['key'] ?? null}
+          .archivedEntry=${this.archivedEntry}
+          @archive-view-close=${this.onArchiveViewClose}
         ></sebas-dashboard>`
       default:
         return html`<sebas-dashboard
           .selectedPath=${this.selectedPath}
           .coreReachability=${this.coreReachability}
+          .archivedEntry=${this.archivedEntry}
+          @archive-view-close=${this.onArchiveViewClose}
         ></sebas-dashboard>`
     }
   }
@@ -652,6 +680,7 @@ export class SebasApp extends LitElement {
           <sebas-project-rail
             .activePath=${this.selectedPath}
             @rail-select=${this.onRailSelect}
+            @rail-archive-view=${this.onArchiveView}
           ></sebas-project-rail>
           <div class="spacer" aria-hidden="true"></div>
           <div class="sidebar-footer">

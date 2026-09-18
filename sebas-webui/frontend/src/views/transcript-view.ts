@@ -83,6 +83,14 @@ const NEAR_BOTTOM_PX = 80
 const MARK_SEEN_DEBOUNCE_MS = 250
 
 /**
+ * 曾以「空流」（0 回合）渲染过的会话 key（polish-workbench-walkthrough-ux 3.1）：
+ * 这些会话的首个回合若在聚焦 + 可见 + 贴底时到达，算「亲眼看着到达」的首交换，
+ * 锚从空流建立。模块级而非实例字段——秒回场景下 dashboard 可能重建组件实例。
+ * 一旦某 key 以非空回合渲染过即出表（一次性消费），所以表里只剩仍为空的会话。
+ */
+const emptyStreamSessions = new Set<string>()
+
+/**
  * 展开条目的截断阈值（fix-webui-streaming-liveness 4.5，D5.5）：行数或
  * 字符数任一超限即截断显示（取先到）。实现侧常量，后续可调。
  */
@@ -378,14 +386,34 @@ export function middleTruncate(
 }
 
 /**
+ * 工具条目被拒绝/失败的判定（polish-workbench-walkthrough-ux 5.6，纯函数）：
+ * 审批被拒（fake-claude 的 deny → is_error 结果）与明确的拒绝措辞都不该
+ * 再挂 ✓ 成功标记。词表按内容/标题里的显式拒绝记号判定（中文「已拒绝」、
+ * ❌、英文 denied / rejected），不猜工具语义。
+ */
+export function toolResultDenied(content: string, title?: string | null): boolean {
+  const marker = /已拒绝|denied|rejected|❌/i
+  return marker.test(content) || (typeof title === 'string' && marker.test(title))
+}
+
+/** 拒绝态标签：去掉成功 ✓ 前缀，改 ✗（5.6「改 ✗ 或已拒绝」）。 */
+export function deniedLabel(label: string): string {
+  return '✗ ' + label.replace(/^✓\s*/, '')
+}
+
+/**
  * Second-level fold label fallback（2.2）: entries without the structured
  * `title` (legacy persisted data) show a generic stable label derived from
- * the element type instead.
+ * the element type instead. （5.6）被拒条目去 ✓ 挂 ✗。
  */
 export function processItemLabel(item: ProcessItem): { label: string; full: string | null } {
   const title = item.title?.trim() ? item.title : null
-  if (title) return { label: middleTruncate(title), full: title }
-  return { label: item.elementType, full: null }
+  const denied = toolResultDenied(item.content, title)
+  if (title) {
+    const full = denied ? title.replace(/^✓\s*/, '') : title
+    return { label: denied ? deniedLabel(middleTruncate(title)) : middleTruncate(title), full }
+  }
+  return { label: denied ? deniedLabel(item.elementType) : item.elementType, full: null }
 }
 
 /**
@@ -399,6 +427,14 @@ export function processRunSummary(run: ProcessRun): { label: string; full: strin
   const last = run.items[run.items.length - 1]
   if (!last) return { label: 'process', full: null }
   return processItemLabel(last)
+}
+
+/**
+ * （5.6）摘要行的拒绝角标：run 内任一条目被拒即整行不显示成功语义——
+ * 摘要行是「最近条目」的标签，挂 ✓ 的拒绝结果属于误报。
+ */
+export function processRunDenied(run: ProcessRun): boolean {
+  return run.items.some((it) => toolResultDenied(it.content, it.title))
 }
 
 // ---- agent identity + receipt（3.1/3.2）---------------------------------
@@ -544,6 +580,8 @@ export class SebasTranscriptView extends LitElement {
   private streamMsgBonus = 0
   /** turn.append 订阅的退订句柄（connectedCallback 挂，disconnected 摘）。 */
   private unsubscribeTurn: (() => void) | null = null
+  /** 文档可见性翻转监听（3.2）：hidden 期间不推进锚，翻回 visible 恢复。 */
+  private boundOnVisibility = (): void => this.onVisibilityChange()
   /** Debounce timer for mark-as-seen writes. */
   private markSeenTimer: number | null = null
   /** Bound scroll handler so we can detach on disconnect. */
@@ -945,6 +983,10 @@ export class SebasTranscriptView extends LitElement {
     super.connectedCallback()
     this.recomputeSeam()
     window.addEventListener('resize', this.boundOnResize)
+    // （3.2）后台 tab 到达不推进锚：可见性翻转只影响后续 arrivals 的判定，
+    // 翻回 visible 不追溯清账（隐藏期间的到达保持 unseen，回到页面后由
+    // seam/徽章如实呈现）。
+    document.addEventListener('visibilitychange', this.boundOnVisibility)
     // 流式订阅（workbench-live-conversation-flow 2.2）：按聚焦会话过滤，
     // position 去重后并入渲染管线。
     this.unsubscribeTurn = sharedWs.subscribe((event) => {
@@ -956,6 +998,7 @@ export class SebasTranscriptView extends LitElement {
   disconnectedCallback(): void {
     super.disconnectedCallback()
     window.removeEventListener('resize', this.boundOnResize)
+    document.removeEventListener('visibilitychange', this.boundOnVisibility)
     this.unsubscribeTurn?.()
     this.unsubscribeTurn = null
     if (this.markSeenTimer !== null) {
@@ -983,6 +1026,14 @@ export class SebasTranscriptView extends LitElement {
       this.streamEntries = this.streamEntries.filter((e) => e.position > snapMax)
       this.rebuildUnits()
       this.recomputeSeam()
+      // （3.1）空流建立锚点：占位会话从 0 回合转出首回合、且操作员聚焦、
+      // 文档可见、贴底时，这是「亲眼看着到达」的首交换——锚从空流状态建立，
+      // 不画 seam、不闪徽章（session-unread-badge「first focused exchange of a
+      // fresh placeholder」）。秒回场景下回复经快照而非 turn.append 到达，
+      // 且 dashboard 可能连同 sessionKey 一起重渲染（组件实例被重建），
+      // 所以判据用模块级「该会话曾以空流渲染过」而非实例内的回合数差值。
+      // 打开既有会话不在此列：那种会话从没以空流出现过，seam 必须保留。
+      this.settleEmptyStreamAnchor()
     }
   }
 
@@ -1009,7 +1060,9 @@ export class SebasTranscriptView extends LitElement {
     this.streamEntries.push(...fresh)
     this.rebuildUnits()
     this.recomputeSeam()
-    if (this.sticky) {
+    // （3.1/3.2）聚焦 + 文档可见 + 贴底：到达即推进共享游标（亲眼看着到的
+    // 内容不再挂未读）；文档隐藏（后台 tab）时不推进——回来看 seam/徽章。
+    if (this.sticky && this.docVisible()) {
       if (this.msgCount != null) {
         this.streamMsgBonus += fresh.filter(
           (e) => e.element_type === 'markdown' || e.element_type === 'error',
@@ -1044,6 +1097,50 @@ export class SebasTranscriptView extends LitElement {
       // Wait one frame for layout to settle, then scroll. Without the
       // rAF, scrollHeight can lag the freshly-inserted entries.
       requestAnimationFrame(() => this.applyAutoScroll())
+    }
+  }
+
+  /** 文档可见性（3.2）：后台 tab 中的到达不算「看着到达」。 */
+  private docVisible(): boolean {
+    return document.visibilityState === 'visible'
+  }
+
+  /**
+   * 空流锚点（3.1）：一个会话若曾以 0 回合在本浏览器渲染过（新建占位），
+   * 它随后的首个回合到达且操作员聚焦、可见、贴底时，就是「亲眼看着到达」
+   * 的首交换——锚从空流状态建立，seam 与 rail 徽章都不该出现
+   * （session-unread-badge「first focused exchange of a fresh placeholder」）。
+   *
+   * 登记与消费用模块级表而非实例字段：秒回场景下回复经快照到达，dashboard
+   * 可能连同 sessionKey 一起重渲染（组件实例重建、实例内的回合数差值作废），
+   * 模块表跨实例仍有效。消费是一次性的——某个 key 一旦以非空回合渲染过，
+   * 就从此出表，所以表里残留的必然是「仍为空」的会话，切回一个既有会话
+   * 不会误推进它的锚（那种 seam 必须保留）。
+   */
+  private settleEmptyStreamAnchor(): void {
+    const key = this.sessionKey
+    if (!key) return
+    if (this.turnUnits.length === 0) {
+      emptyStreamSessions.add(key)
+      return
+    }
+    if (!emptyStreamSessions.delete(key)) return
+    if (!this.sticky || !this.docVisible()) return
+    const max = this.turnUnits.reduce((m, u) => Math.max(m, unitMaxTs(u)), 0)
+    if (max > this.readSeen()) {
+      this.writeSeen(max)
+      // 同一更新周期内重算：seam 不闪现（写锚后紧接着 render）。
+      this.recomputeSeam()
+    }
+  }
+
+  private onVisibilityChange(): void {
+    // 翻回 visible 不追溯标记已读（spec：隐藏期到达保持 unseen，回去后被
+    // 如实标记）；仅当翻离时取消待写的标记——那一刻之后的 arrival 不该被
+    // 旧的贴底状态误清。
+    if (!this.docVisible() && this.markSeenTimer !== null) {
+      clearTimeout(this.markSeenTimer)
+      this.markSeenTimer = null
     }
   }
 
@@ -1126,7 +1223,7 @@ export class SebasTranscriptView extends LitElement {
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
     if (distanceFromBottom <= NEAR_BOTTOM_PX) {
       if (!this.sticky) this.sticky = true
-      this.scheduleMarkSeen()
+      if (this.docVisible()) this.scheduleMarkSeen()
     } else if (this.sticky) {
       this.sticky = false
     }
@@ -1272,7 +1369,7 @@ export class SebasTranscriptView extends LitElement {
         <div class="avatar user">你</div>
         <div class="msg-block">
           <div class="meta">
-            <span class="author you">you</span>
+            <span class="author you">你</span>
             ${receipt
               ? html`<span class="receipt" data-receipt title="服务端已接受，等待 agent 开始输出"
                   >已收到</span
