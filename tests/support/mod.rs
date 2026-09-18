@@ -130,7 +130,16 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 pub struct SandboxDir {
+    /// Path the test uses for every sandbox file and env var. Normally the
+    /// real directory; on a deep checkout it is a short symlink to it (see
+    /// `shorten_socket_host`) so that unix socket paths stay under
+    /// `sun_path`'s 108-byte ceiling.
     path: PathBuf,
+    /// The real directory (`target/tests/...`), where logs and state stay
+    /// for postmortem inspection regardless of which path is in use.
+    real_path: PathBuf,
+    /// The short symlink to remove on drop, when one was created.
+    short_link: Option<PathBuf>,
     keep: AtomicBool,
     /// PIDs spawned as their own process-group leaders (unix). Teardown
     /// killpg's each group so test-spawned routers and watchdog-respawned
@@ -139,20 +148,65 @@ pub struct SandboxDir {
     group_leaders: Mutex<Vec<u32>>,
 }
 
+/// `sun_path` 上限（108 字节，含结尾 NUL）下的可用字符数。
+#[cfg(unix)]
+const SUN_PATH_MAX_CHARS: usize = 107;
+
+/// 沙箱路径长到 socket 放不下时，改为经由一个短符号链接使用沙箱。
+///
+/// 为什么需要：`target/tests/sebas/<test>/<stamp>-<sub>/core-channel.sock`
+/// 在深 checkout（如 `/data/workbench/repos-ai/<repo>`）下会超过
+/// `sun_path` 的 108 字节上限，core 的 channel bind 与测试侧的 connect 都
+/// 会以 "local socket name length exceeds capacity of sun_path" 失败。
+/// 内核检查的是**传入字符串**的长度，符号链接的解析发生在检查之后，所以
+/// 让测试用短链接路径即可，真实目录（含日志）仍留在 `target/tests/` 下便于
+/// 事后诊断。
+///
+/// 非 unix 平台（named pipe 无此上限）以及链接创建失败时，原样返回真实
+/// 路径——最坏情况与今日行为一致，不会更糟。
+#[cfg(unix)]
+fn shorten_socket_host(real: PathBuf, stamp: u128) -> (PathBuf, Option<PathBuf>) {
+    const SOCK_NAME: &str = "core-channel.sock";
+    if real.join(SOCK_NAME).as_os_str().as_encoded_bytes().len() <= SUN_PATH_MAX_CHARS {
+        return (real, None);
+    }
+    let link = std::env::temp_dir().join(format!("sebas-sb-{stamp:x}"));
+    let _ = std::fs::remove_file(&link);
+    match std::os::unix::fs::symlink(&real, &link) {
+        Ok(()) => (link.clone(), Some(link)),
+        Err(e) => {
+            eprintln!(
+                "[sandbox] could not shorten sandbox path via {}: {e}; \
+                 unix socket paths may exceed sun_path and fail",
+                link.display()
+            );
+            (real, None)
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn shorten_socket_host(real: PathBuf, _stamp: u128) -> (PathBuf, Option<PathBuf>) {
+    (real, None)
+}
+
 impl SandboxDir {
     fn new(test_name: &str, sub: &str) -> Arc<Self> {
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let stamp = unique_stamp();
-        let path = manifest
+        let real_path = manifest
             .join("target")
             .join("tests")
             .join("sebas")
             .join(test_name)
             .join(format!("{stamp}-{sub}"));
-        std::fs::create_dir_all(&path)
-            .unwrap_or_else(|e| panic!("create sandbox dir {}: {e}", path.display()));
+        std::fs::create_dir_all(&real_path)
+            .unwrap_or_else(|e| panic!("create sandbox dir {}: {e}", real_path.display()));
+        let (path, short_link) = shorten_socket_host(real_path.clone(), stamp);
         Arc::new(Self {
             path,
+            real_path,
+            short_link,
             keep: AtomicBool::new(false),
             group_leaders: Mutex::new(Vec::new()),
         })
@@ -214,16 +268,21 @@ impl Drop for SandboxDir {
         if self.keep.load(Ordering::Relaxed) || std::thread::panicking() {
             eprintln!(
                 "[sandbox] kept for diagnosis (logs inside): {}",
-                self.path.display()
+                self.real_path.display()
             );
             return;
         }
         // Children may still be releasing file handles; retry a few times.
+        // Remove the real directory (never the link, which `remove_dir_all`
+        // would refuse to follow) and then the link itself.
         for _ in 0..3 {
-            if std::fs::remove_dir_all(&self.path).is_ok() {
-                return;
+            if std::fs::remove_dir_all(&self.real_path).is_ok() {
+                break;
             }
             std::thread::sleep(Duration::from_millis(200));
+        }
+        if let Some(link) = &self.short_link {
+            let _ = std::fs::remove_file(link);
         }
     }
 }

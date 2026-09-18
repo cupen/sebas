@@ -158,6 +158,7 @@ vi.mock('../api/client.js', () => ({
 
 import './settings-modal.js'
 import type { SebasSettingsModal } from './settings-modal.js'
+import { SebasSettingsModal as SettingsModalImpl } from './settings-modal.js'
 // mocked 模块里的 ApiError 类——与组件内 instanceof 同一构造器。
 import { ApiError } from '../api/client.js'
 import { applyThemeMode } from '../theme.js'
@@ -2101,5 +2102,23 @@ describe('add-webui-multiuser-rbac 5.3/5.4：Users 分区与角色裁剪', () =>
     // 失败保持打开，操作者可取消。
     expect(draftState(el, 'userDelete')).not.toBeNull()
     el.remove()
+  })
+})
+
+describe('no horizontal overflow in the settings modal (polish-workbench-walkthrough-ux 5.4)', () => {
+  function styleCssText(): string {
+    const styles = SettingsModalImpl.styles
+    return (Array.isArray(styles) ? styles : [styles])
+      .map((s) => (s as unknown as { cssText: string }).cssText)
+      .join('\n')
+  }
+
+  it('content area kills horizontal overflow and lets long words wrap', () => {
+    const css = styleCssText()
+    // 内容区横向溢出就地消化（关闭按钮曾被裁切），长词断行。
+    expect(css).toContain('overflow-x: hidden')
+    expect(css).toContain('overflow-wrap: anywhere')
+    // 表单/内嵌块允许收缩，min-width 下限交给内容自身。
+    expect(css).toContain('min-width: 0')
   })
 })

@@ -45,12 +45,16 @@ import {
   TRUNCATE_CHARS,
   TRUNCATE_LINES,
   awaitingReceipt,
+  deniedLabel,
   groupConversation,
   mergeSpawnErrors,
   middleTruncate,
+  processItemLabel,
+  processRunDenied,
   processRunSummary,
   resolveAgentDisplay,
   splitAgentRuns,
+  toolResultDenied,
   truncateHtml,
 } from './transcript-view.js'
 import type { ProcessItem, ProcessRun } from './transcript-view.js'
@@ -440,6 +444,57 @@ describe('processRunSummary (D3)', () => {
   })
 })
 
+describe('process honesty for denied tool results (polish-workbench-walkthrough-ux 5.6)', () => {
+  const run = (items: ProcessItem[]): ProcessRun => ({ type: 'process', items, position: items[0]?.position ?? 0 })
+
+  it('toolResultDenied: 明确拒绝记号判定（denied / 已拒绝 / ❌），不猜工具语义', () => {
+    expect(toolResultDenied('Bash command rejected by user', 'bash')).toBe(true)
+    expect(toolResultDenied('已拒绝执行 rm -rf /', null)).toBe(true)
+    expect(toolResultDenied('❌ **bash**', 'bash')).toBe(true)
+    // 正常成功结果不带拒绝记号。
+    expect(toolResultDenied('✓ **bash**', 'bash')).toBe(false)
+    expect(toolResultDenied('done in 1.2s', null)).toBe(false)
+    // title 里的拒绝记号同样命中。
+    expect(toolResultDenied('whatever', 'read · denied')).toBe(true)
+  })
+
+  it('deniedLabel: 去掉成功 ✓ 前缀，改 ✗', () => {
+    expect(deniedLabel('✓ bash')).toBe('✗ bash')
+    expect(deniedLabel('✓ **bash**')).toBe('✗ **bash**')
+    // 无 ✓ 前缀的标签原样挂 ✗。
+    expect(deniedLabel('bash')).toBe('✗ bash')
+  })
+
+  it('processItemLabel: 拒绝条目不再挂 ✓', () => {
+    const denied = processItemLabel({
+      elementType: 'tool',
+      content: 'denied by operator',
+      title: '✓ bash',
+      position: 1,
+    })
+    expect(denied.label).toBe('✗ bash')
+    expect(denied.full).toBe('bash')
+    const ok = processItemLabel({
+      elementType: 'tool',
+      content: '✓ **bash**',
+      title: 'bash · build',
+      position: 2,
+    })
+    expect(ok.label).toBe('bash · build')
+  })
+
+  it('processRunDenied: run 内任一条目被拒即整行不显示成功语义', () => {
+    const r = run([
+      { elementType: 'tool', content: 'ok', title: 'bash · one', position: 1 },
+      { elementType: 'tool', content: '已拒绝', title: 'bash · two', position: 2 },
+    ])
+    expect(processRunDenied(r)).toBe(true)
+    expect(
+      processRunDenied(run([{ elementType: 'tool', content: '✓ **bash**', title: null, position: 1 }])),
+    ).toBe(false)
+  })
+})
+
 describe('mergeSpawnErrors', () => {
   const SPAWN_ERR = '**spawn failed**: agent binary missing'
   const errEntry = (at: number, content = SPAWN_ERR): ConversationEntryView =>
@@ -570,9 +625,9 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     const firstUser = blocks?.[0]?.querySelector<HTMLElement>('.body p')
     expect(firstUser?.textContent).toBe('first question')
     expect(blocks?.[2]?.querySelector<HTMLElement>('.body p')?.textContent).toBe('second question')
-    // 「你」头像与 you 作者标注（既有 is-user 样式族）。
+    // 「你」头像与「你」作者标注（5.1 统一 zh-CN，双语混排移除）。
     expect(blocks?.[0]?.querySelector('.avatar.user')?.textContent).toBe('你')
-    expect(blocks?.[0]?.querySelector('.author.you')?.textContent).toBe('you')
+    expect(blocks?.[0]?.querySelector('.author.you')?.textContent).toBe('你')
   })
 
   it('mixed turn renders one fold PER process run, each at its arrival position (2.1)', async () => {
@@ -1321,6 +1376,142 @@ describe('scroll following (fix-webui-streaming-liveness 4.1)', () => {
     await nextFrame()
     await el.updateComplete
     expect(box.scrollTop).toBe(2000)
+  })
+})
+
+describe('unread boundary advances while focused+visible (polish-workbench-walkthrough-ux 3.1/3.2)', () => {
+  const debounceWait = (): Promise<void> =>
+    new Promise((r) => setTimeout(r, 300)) // 盖过 MARK_SEEN_DEBOUNCE_MS=250
+
+  const scrollBox = (el: SebasTranscriptView): HTMLElement =>
+    el.shadowRoot!.querySelector<HTMLElement>('.scroll')!
+
+  function storedAnchor(key = 'oc_test'): { seen_ts: number; anchor_count: number | null } | null {
+    const raw = store.get(`sebas:seen:${key}`)
+    if (!raw) return null
+    try {
+      const v = JSON.parse(raw) as { seen_ts?: number; anchor_count?: number | null }
+      return { seen_ts: v.seen_ts ?? 0, anchor_count: v.anchor_count ?? null }
+    } catch {
+      return null
+    }
+  }
+
+  it('聚焦 + 可见 + 贴底时到达的回合推进共享游标——重开不再出 seam（3.1）', async () => {
+    // 初始：T1 回合已读（锚 = T1）；贴底观看。
+    store.set('sebas:seen:oc_test', JSON.stringify({ seen_ts: FIXED_DATES.T1, anchor_count: 2 }))
+    const el = await mount({ entries: streamedTurn('q', ['a'], FIXED_DATES.T1), msgCount: 2 })
+    const box = scrollBox(el)
+    fakeScrollLayout(box, 2000, 500)
+    box.scrollTop = 1500
+    box.dispatchEvent(new Event('scroll'))
+    expect(el.sticky).toBe(true)
+    expect(el.shadowRoot!.querySelector('.seam')?.hasAttribute('hidden')).toBe(true)
+    // 新回合在眼前到达（position 90 > 游标）。
+    emitTurnAppend('oc_test', [
+      entry({ position: 90, kind: 'content', content: 'watched arrive', created_at_unix: FIXED_DATES.T3 }),
+    ])
+    await el.updateComplete
+    await debounceWait()
+    await el.updateComplete
+    // 锚推进到 T3；seam 保持隐藏（看着到达的内容不算未读）。
+    expect(storedAnchor()!.seen_ts).toBe(FIXED_DATES.T3)
+    expect(el.shadowRoot!.querySelector('.seam')?.hasAttribute('hidden')).toBe(true)
+    el.remove()
+  })
+
+  it('后台 tab（visibilityState=hidden）到达不推进锚——回来看 seam/徽章（3.2）', async () => {
+    const orig = Object.getOwnPropertyDescriptor(Document.prototype, 'visibilityState')
+    try {
+      Object.defineProperty(Document.prototype, 'visibilityState', {
+        configurable: true,
+        get: () => 'hidden',
+      })
+      store.set('sebas:seen:oc_test', JSON.stringify({ seen_ts: FIXED_DATES.T1, anchor_count: 2 }))
+      const el = await mount({ entries: streamedTurn('q', ['a'], FIXED_DATES.T1), msgCount: 2 })
+      const box = scrollBox(el)
+      fakeScrollLayout(box, 2000, 500)
+      box.scrollTop = 1500
+      box.dispatchEvent(new Event('scroll'))
+      // 隐藏期间到达。
+      emitTurnAppend('oc_test', [
+        entry({ position: 90, kind: 'content', content: 'arrived hidden', created_at_unix: FIXED_DATES.T3 }),
+      ])
+      await el.updateComplete
+      await debounceWait()
+      await el.updateComplete
+      // 锚不动：T3 保持 unseen。
+      expect(storedAnchor()!.seen_ts).toBe(FIXED_DATES.T1)
+      expect(el.shadowRoot!.querySelector('.seam')?.hasAttribute('hidden')).toBe(false)
+      el.remove()
+    } finally {
+      if (orig) {
+        Object.defineProperty(Document.prototype, 'visibilityState', orig)
+      } else {
+        delete (Document.prototype as { visibilityState?: unknown }).visibilityState
+      }
+    }
+  })
+  it('占位会话首交换经快照到达也推进锚——空流建立锚点，不画 seam（3.1）', async () => {
+    // 新占位会话：0 回合、无历史锚（浏览器里没这个 key 的游标）。
+    store.delete('sebas:seen:oc_test')
+    const el = await mount({ entries: [], msgCount: 0 })
+    const box = scrollBox(el)
+    fakeScrollLayout(box, 2000, 500)
+    box.scrollTop = 1500
+    box.dispatchEvent(new Event('scroll'))
+    expect(el.sticky).toBe(true)
+    // 首条消息与回复经快照到达（秒回子进程：不走 turn.append）。
+    el.entries = streamedTurn('hello', ['hello world'], FIXED_DATES.T1)
+    el.msgCount = 2
+    await el.updateComplete
+    await debounceWait()
+    await el.updateComplete
+    // 锚从空流建立：不再有无边框的「~N new since you last viewed」。
+    expect(storedAnchor()!.seen_ts).toBe(FIXED_DATES.T1)
+    expect(el.shadowRoot!.querySelector('.seam')?.hasAttribute('hidden')).toBe(true)
+    el.remove()
+  })
+
+  it('组件实例被重建（sessionKey 与首回合同帧到达）仍从空流建立锚（3.1）', async () => {
+    // dashboard 在首条消息到达时重建 transcript-view 是常态：登记必须是
+    // 模块级的，实例内的回合数差值不足以覆盖这个时序。
+    store.delete('sebas:seen:oc_rebuild')
+    const placeholder = await mount({ entries: [], sessionKey: 'oc_rebuild', msgCount: 0 })
+    placeholder.remove()
+    const el = await mount({
+      entries: streamedTurn('hello', ['hi'], FIXED_DATES.T1),
+      sessionKey: 'oc_rebuild',
+      msgCount: 2,
+    })
+    await el.updateComplete
+    await debounceWait()
+    await el.updateComplete
+    // 首交换仍算「看着到达」：锚已建立，seam 不出现。
+    expect(storedAnchor('oc_rebuild')!.seen_ts).toBe(FIXED_DATES.T1)
+    expect(el.shadowRoot!.querySelector('.seam')?.hasAttribute('hidden')).toBe(true)
+    el.remove()
+  })
+
+  it('打开既有未读会话的首帧快照不推进锚——seam 必须保留（3.1）', async () => {
+    // 浏览器里的锚停在 T1，会话在离场期间攒了 T3 的回合。
+    store.set('sebas:seen:oc_test', JSON.stringify({ seen_ts: FIXED_DATES.T1, anchor_count: 2 }))
+    const el = await mount({
+      entries: [
+        ...streamedTurn('q', ['a'], FIXED_DATES.T1),
+        ...streamedTurn('q2', ['b'], FIXED_DATES.T3).map((e) => ({
+          ...e,
+          position: e.position + 10,
+        })),
+      ],
+      msgCount: 4,
+    })
+    await debounceWait()
+    await el.updateComplete
+    // 打开动作本身不是「看着到达」：锚留在 T1，T3 回合仍标未读。
+    expect(storedAnchor()!.seen_ts).toBe(FIXED_DATES.T1)
+    expect(el.shadowRoot!.querySelector('.seam')?.hasAttribute('hidden')).toBe(false)
+    el.remove()
   })
 })
 

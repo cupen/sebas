@@ -30,10 +30,23 @@ import {
   saveLastUsedPair,
   type ModelCatalog,
 } from '../api/model-catalog.js'
+import { MODE_OPTIONS } from './mode-vocabulary.js'
 import '@awesome.me/webawesome/dist/components/dialog/dialog.js'
 import '@awesome.me/webawesome/dist/components/button/button.js'
 import '@awesome.me/webawesome/dist/components/select/select.js'
 import '@awesome.me/webawesome/dist/components/option/option.js'
+
+/**
+ * 不可用 agent 的操作者措辞（polish-workbench-walkthrough-ux 4.3）：默认
+ * 可见文案只给成因归类与补救入口（Settings → Models），内部 env 名等实现
+ * 标识一律移入 tooltip（title 属性）——spec「unavailable cause speaks
+ * operator language」。native 专项点名「未配置模型凭据」。
+ */
+export function agentUnavailableLabel(a: { id: string; display: string }): string {
+  return a.id === 'native'
+    ? `${a.display}（未配置模型凭据 — 到 Settings → Models 配置）`
+    : `${a.display}（不可用 — 到 Settings → Models 检查配置）`
+}
 
 /** 创建对话框确认事件 detail：与 POST /api/sessions 的创建面同词汇。 */
 export interface NewSessionDialogConfirm {
@@ -197,11 +210,13 @@ export class SebasNewSessionDialog extends LitElement {
   render() {
     const providers = this.catalogProviders
     const providerModels = this.selectedProvider ? this.modelsFor(this.selectedProvider) : []
+    // （5.3）关闭即整棵移出 ARIA 树（条件渲染），不留残影。
+    if (!this.open) return nothing
     return html`
       <wa-dialog
         label=${this.projectName ? `New session in ${this.projectName}` : 'New session'}
         style="--width: 460px;"
-        ?open=${this.open}
+        .open=${true}
         @wa-hide=${guardedHide(() => this.cancel())}
         data-testid="new-session-dialog"
       >
@@ -222,12 +237,10 @@ export class SebasNewSessionDialog extends LitElement {
               ? html`<wa-option value="" disabled>agent catalog 不可用</wa-option>`
               : nothing}
             ${this.agents.map((a) =>
-              a.id === 'native' && !a.reachable
-                ? html`<wa-option value=${a.id} disabled
-                    >${a.display} (unavailable: ${a.cause ?? 'unreachable'})</wa-option
-                  >`
-                : html`<wa-option value=${a.id} ?disabled=${!a.reachable}
-                    >${a.reachable ? a.display : `${a.display} (unavailable: ${a.cause ?? ''})`}</wa-option
+              a.reachable
+                ? html`<wa-option value=${a.id}>${a.display}</wa-option>`
+                : html`<wa-option value=${a.id} disabled title=${a.cause ?? 'unreachable'}
+                    >${agentUnavailableLabel(a)}</wa-option
                   >`,
             )}
           </wa-select>
@@ -236,7 +249,9 @@ export class SebasNewSessionDialog extends LitElement {
                Models，绝不渲染空列表。 -->
           ${this.catalogUnavailable
             ? html`<p class="hint" data-testid="dialog-catalog-unavailable" role="status">
-                尚未配置任何模型：请到 Settings → Models 添加 provider 后再选
+                尚未配置 provider 模型——仍可创建会话，将使用 agent
+                内置的默认模型；需要指定模型时到 Settings → Models 添加
+                provider。
               </p>`
             : html`
                 <wa-select
@@ -282,10 +297,7 @@ export class SebasNewSessionDialog extends LitElement {
             }}
           >
             <wa-option value="">默认（逐次询问）</wa-option>
-            <wa-option value="ask">ask（逐次询问）</wa-option>
-            <wa-option value="edit">edit（自动接受编辑）</wa-option>
-            <wa-option value="allow">allow（放行并留审计）</wa-option>
-            <wa-option value="auto">auto（不门控，留审计）</wa-option>
+            ${MODE_OPTIONS.map((m) => html`<wa-option value=${m.value}>${m.label}</wa-option>`)}
           </wa-select>
           ${this.error
             ? html`<p class="error" data-testid="dialog-error" role="alert">${this.error}</p>`
