@@ -19,9 +19,6 @@ export type StatusSlug =
   | 'done'
   | 'failed'
   | 'dormant'
-  // （session-parallel-liveness-and-unread-polish 1.3）行上的派生 slug：
-  // spawn 失败不再被吞进 spawning，行如实带 `spawn-failed`。
-  | 'spawn-failed'
 
 export interface SessionRow {
   encoded_key: string
