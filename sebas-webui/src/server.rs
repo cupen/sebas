@@ -281,6 +281,7 @@ fn build_router_full(
         )
         .route("/api/fs/browse-dirs", get(api::browse_dirs))
         .route("/api/archive", get(api::archive_list))
+        .route("/api/archive/{key}", get(api::archive_detail))
         .route("/api/sessions/{key}/archive", post(api::archive_session))
         .route("/api/sessions/{key}/restore", post(api::restore_session))
         .route("/api/projects/reorder", post(api::projects_reorder))

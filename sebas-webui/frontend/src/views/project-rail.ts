@@ -299,6 +299,12 @@ export class SebasProjectRail extends LitElement {
     .archive-meta { font-size: 0.66rem; color: var(--sebas-text-faint); font-family: var(--sebas-font-mono); }
     .group-section { margin-top: var(--sebas-space-3); }
     .group-head {
+      /* （5.5）原生 <button>：语义与键盘行为来自元素本身；重置外观回原 div 视觉。 */
+      width: 100%;
+      text-align: left;
+      background: none;
+      border: none;
+      font: inherit;
       display: flex; align-items: center; gap: 6px; padding: 4px 8px;
       font-size: 0.66rem; font-weight: 600; text-transform: uppercase;
       letter-spacing: 0.08em; color: var(--sebas-text-faint); cursor: pointer;
@@ -472,7 +478,13 @@ export class SebasProjectRail extends LitElement {
 
   private async confirmNewSession(e: CustomEvent<NewSessionDialogConfirm>): Promise<void> {
     const p = this.newSessionTarget
-    if (!p || this.creatingSession) return
+    // （3.4）提交不得静默蒸发：分派条件不成立（项目不可用/请求已在途）时
+    // 留在对话框内给 inline 错误——绝不假装创建成功地关闭。
+    if (!p) {
+      this.newSessionError = '无法创建会话：目标项目不可用，请关闭对话框后重试'
+      return
+    }
+    if (this.creatingSession) return
     this.creatingSession = true
     this.newSessionError = null
     try {
@@ -569,16 +581,21 @@ export class SebasProjectRail extends LitElement {
     }
   }
 
-  private async restoreSession(e: Event, encodedKey: string) {
+  /**
+   * （polish-workbench-walkthrough-ux 2.1）点 History 条目 = 打开只读归档
+   * 视图——绝不触发 restore（误触陷阱已拆除）：归档行点击只上报条目，
+   * app-shell 接力给 dashboard 渲染只读视图；「恢复」是归档视图里的显式
+   * 按钮 + 确认弹窗（confirm 流程与 toast 反馈都在那边）。
+   */
+  private viewArchivedSession(e: Event, entry: ArchiveEntry) {
     e.stopPropagation()
-    try {
-      await api.restoreSession(encodedKey)
-      // 恢复后就地聚焦该会话（与点会话同一条 switch 路径），停在工作台。
-      await api.switchSession(encodedKey).catch(() => undefined)
-      this.focusedKey = encodedKey
-      void this.refresh()
-      if (location.pathname !== '/') navigate('/')
-    } catch (err) { this.error = err instanceof Error ? err.message : String(err) }
+    this.dispatchEvent(
+      new CustomEvent<ArchiveEntry>('rail-archive-view', {
+        detail: entry,
+        bubbles: true,
+        composed: true,
+      }),
+    )
   }
 
   // ─── Drag & drop ────────────────────────────────────────────────
@@ -646,14 +663,12 @@ export class SebasProjectRail extends LitElement {
     for (const r of this.sessions) {
       if (r.project_id !== id) continue
       count += 1
-      // 8.4：等待（含悬空审批）也需要操作员介入，与 queued/failed 同类。
-      if (
-        r.status_slug === 'queued' ||
-        r.status_slug === 'failed' ||
-        r.status_slug === 'starting' ||
-        r.status_slug === 'waiting' ||
-        (r.remote?.parked_approvals ?? 0) > 0
-      ) { waiting = true }
+      // 8.4 + polish-workbench-walkthrough-ux 3.6：橙点只标「在等操作员
+      // 决定」（悬空审批 > 0 / waiting）——queued/starting/failed 的占位与
+      // 排队不属于「需介入」，全新占位会话不再误亮橙点。
+      if (r.status_slug === 'waiting' || (r.remote?.parked_approvals ?? 0) > 0) {
+        waiting = true
+      }
     }
     return { count, waiting }
   }
@@ -717,7 +732,12 @@ export class SebasProjectRail extends LitElement {
 
   private renderArchivedSessionRow(a: ArchiveEntry) {
     return html`
-      <li class="session-item archived" title=${a.session_key} @click=${(e: Event) => this.restoreSession(e, a.session_key)}>
+      <li
+        class="session-item archived"
+        title=${a.label}
+        data-testid="archived-row"
+        @click=${(e: Event) => this.viewArchivedSession(e, a)}
+      >
         <span class="session-dot done" aria-hidden="true"></span>
         <span class="session-name">${a.label}</span>
         <span class="archive-meta">${a.project_path.split('/').filter(Boolean).pop() ?? ''}</span>
@@ -790,9 +810,9 @@ export class SebasProjectRail extends LitElement {
     if (waiting.length === 0) return nothing
     return html`
       <div class="group-section waiting-group">
-        <div class="group-head" role="button" tabindex="0" aria-expanded=${this.waitingOpen ? 'true' : 'false'} @click=${() => (this.waitingOpen = !this.waitingOpen)} @keydown=${(e: KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this.waitingOpen = !this.waitingOpen } }}>
+        <button type="button" class="group-head" aria-expanded=${this.waitingOpen ? 'true' : 'false'} @click=${() => (this.waitingOpen = !this.waitingOpen)}>
           <span class="chevron ${this.waitingOpen ? 'open' : ''}" aria-hidden="true">▶</span><span>Waiting on you</span><span class="group-count">${waiting.length}</span>
-        </div>
+        </button>
         ${this.waitingOpen ? html`<ul class="sessions">${waiting.map((r) => this.renderSessionRow(r))}</ul>` : nothing}
       </div>`
   }
@@ -804,9 +824,9 @@ export class SebasProjectRail extends LitElement {
     if (archived.length === 0) return nothing
     return html`
       <div class="group-section">
-        <div class="group-head" role="button" tabindex="0" aria-expanded=${this.historyOpen ? 'true' : 'false'} @click=${() => (this.historyOpen = !this.historyOpen)} @keydown=${(e: KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this.historyOpen = !this.historyOpen } }}>
+        <button type="button" class="group-head" data-testid="history-group-head" aria-expanded=${this.historyOpen ? 'true' : 'false'} @click=${() => (this.historyOpen = !this.historyOpen)}>
           <span class="chevron ${this.historyOpen ? 'open' : ''}" aria-hidden="true">▶</span><span>History</span><span class="group-count">${archived.length}</span>
-        </div>
+        </button>
         ${this.historyOpen ? html`<ul class="sessions">${archived.map((a) => this.renderArchivedSessionRow(a))}</ul>` : nothing}
       </div>`
   }
@@ -825,7 +845,8 @@ export class SebasProjectRail extends LitElement {
       ${this.renderWaiting()}
       ${this.renderHistory()}
 
-      <wa-dialog label="Add project" style="--width: 480px;" .open=${this.addDialogOpen} @wa-hide=${guardedHide(() => this.closeAddDialog())}>
+      ${this.addDialogOpen ? html`
+      <wa-dialog label="Add project" style="--width: 480px;" .open=${true} @wa-hide=${guardedHide(() => this.closeAddDialog())}>
         <div class="wa-stack" style="gap:var(--sebas-space-4);">
           <p style="font-size:0.85rem;color:var(--sebas-text);margin:0;">Choose a directory to add as a project:</p>
           <sebas-folder-picker class="folder-picker" @folder-selected=${this.onFolderSelected}></sebas-folder-picker>
@@ -854,9 +875,10 @@ export class SebasProjectRail extends LitElement {
         </div>
         <wa-button slot="footer" variant="brand" @click=${() => void this.submitAddProject()} ?disabled=${!this.addPath.trim()}>Add project</wa-button>
         <wa-button slot="footer" appearance="plain" @click=${() => this.closeAddDialog()}>Cancel</wa-button>
-      </wa-dialog>
+      </wa-dialog>` : nothing}
 
-      <wa-dialog label="Remove project" style="--width: 440px;" .open=${this.removeTarget !== null} @wa-hide=${guardedHide(() => this.closeRemoveDialog())}>
+      ${this.removeTarget !== null ? html`
+      <wa-dialog label="Remove project" style="--width: 440px;" .open=${true} @wa-hide=${guardedHide(() => this.closeRemoveDialog())}>
         <div class="wa-stack" style="gap:var(--sebas-space-3);">
           <p style="font-size:0.88rem;color:var(--sebas-text);margin:0;">
             移除项目 <b>${this.removeTarget?.name ?? ''}</b>？
@@ -877,9 +899,10 @@ export class SebasProjectRail extends LitElement {
         </div>
         <wa-button slot="footer" variant="danger" ?loading=${this.removing} @click=${() => void this.confirmRemoveProject()}>移除</wa-button>
         <wa-button slot="footer" appearance="plain" @click=${() => this.closeRemoveDialog()}>取消</wa-button>
-      </wa-dialog>
+      </wa-dialog>` : nothing}
 
-      <wa-dialog label="归档会话" style="--width: 440px;" .open=${this.closeTarget !== null} @wa-hide=${guardedHide(() => this.closeConfirmDialog())}>
+      ${this.closeTarget !== null ? html`
+      <wa-dialog label="归档会话" style="--width: 440px;" .open=${true} @wa-hide=${guardedHide(() => this.closeConfirmDialog())}>
         <div class="wa-stack" style="gap:var(--sebas-space-3);">
           <p style="font-size:0.88rem;color:var(--sebas-text);margin:0;">
             归档会话 <b>${this.closeTarget ? truncateName(fullSessionLabel(this.closeTarget)) : ''}</b>？
@@ -899,13 +922,15 @@ export class SebasProjectRail extends LitElement {
         </div>
         <wa-button slot="footer" variant="danger" @click=${() => void this.confirmArchiveSession()}>归档</wa-button>
         <wa-button slot="footer" appearance="plain" @click=${() => this.closeConfirmDialog()}>取消</wa-button>
-      </wa-dialog>
+      </wa-dialog>` : nothing}
 
       <!-- 创建会话对话框（workbench-interaction-polish D2）：唯一可选 agent
-           的地方；项目行「+」打开，确认后由 rail 落 POST /api/sessions。 -->
+           的地方；项目行「+」打开，确认后由 rail 落 POST /api/sessions。
+           （5.3）关闭即整棵移出 ARIA 树，不留残影。 -->
+      ${this.newSessionTarget !== null ? html`
       <sebas-new-session-dialog
         data-testid="new-session-dialog"
-        .open=${this.newSessionTarget !== null}
+        .open=${true}
         .projectId=${this.newSessionTarget?.id ?? null}
         .projectName=${this.newSessionTarget?.name ?? null}
         .defaultAgent=${this.newSessionTarget?.default_agent ?? null}
@@ -913,7 +938,7 @@ export class SebasProjectRail extends LitElement {
         @dialog-confirm=${(e: CustomEvent<NewSessionDialogConfirm>) =>
           void this.confirmNewSession(e)}
         @dialog-cancel=${() => this.closeNewSessionDialog()}
-      ></sebas-new-session-dialog>`
+      ></sebas-new-session-dialog>` : nothing}`
   }
 }
 

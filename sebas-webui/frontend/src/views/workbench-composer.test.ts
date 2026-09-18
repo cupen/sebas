@@ -88,6 +88,7 @@ async function mount(initial: Partial<SebasWorkbenchComposer> = {}) {
   if (initial.childStarting !== undefined) el.childStarting = initial.childStarting
   if (initial.currentMode !== undefined) el.currentMode = initial.currentMode
   if (initial.modeEditable !== undefined) el.modeEditable = initial.modeEditable
+  if (initial.hasTurns !== undefined) el.hasTurns = initial.hasTurns
   if (initial.coreReachability !== undefined) el.coreReachability = initial.coreReachability
   document.body.appendChild(el)
   // LitElement schedules its first update asynchronously; then the
@@ -250,6 +251,27 @@ describe('composer is pure follow-up (4.1)', () => {
     editable.remove()
   })
 
+  it('composer mode dropdown shares the MODE_OPTIONS vocabulary with the creation dialog (4.1)', async () => {
+    // polish-workbench-walkthrough-ux 4.1：composer 权限模式下拉与创建弹窗
+    // 同源渲染——选项文案来自共享 MODE_OPTIONS，且带 aria-label「权限模式」，
+    // 默认态显示「默认（ask）」而非空白。
+    const { MODE_OPTIONS, MODE_DEFAULT_LABEL } = await import('./mode-vocabulary.js')
+    const el = await mount({ ...focus, modeEditable: true, currentMode: 'ask' })
+    const sel = el.shadowRoot?.querySelector('[data-testid="mode-switch"]')
+    expect(sel?.getAttribute('aria-label')).toBe('权限模式')
+    const options = Array.from(sel?.querySelectorAll('wa-option') ?? []).map(
+      (o) => o.getAttribute('value'),
+    )
+    // 空值默认项 + 四个共享模式（顺序一致）。
+    expect(options).toEqual(['', ...MODE_OPTIONS.map((m) => m.value)])
+    const labels = Array.from(sel?.querySelectorAll('wa-option') ?? []).map(
+      (o) => o.textContent ?? '',
+    )
+    expect(labels[0]).toBe(MODE_DEFAULT_LABEL)
+    expect(labels.slice(1)).toEqual(MODE_OPTIONS.map((m) => m.label))
+    el.remove()
+  })
+
   it('plain Enter sends; Shift+Enter does not; empty text is a no-op', async () => {
     const el = await mount(focus)
     const ta = el.shadowRoot?.querySelector('wa-textarea') as unknown as HTMLElement & { value: string }
@@ -334,6 +356,26 @@ describe('composer is pure follow-up (4.1)', () => {
     expect(src).not.toContain('WORKBENCH_REACHABILITY_POLL_MS')
     expect(src).not.toContain('api.summary')
     expect(src).not.toContain('setInterval')
+  })
+})
+
+// ── 5.2 语境化占位符 ────────────────────────────────────────────────────
+
+describe('contextual input placeholder (polish-workbench-walkthrough-ux 5.2)', () => {
+  it('0-turn 占位会话显示「开始对话…」，首轮后恢复 follow-up 语境', async () => {
+    const el = await mount(focus) // hasTurns 缺省 false（占位会话）
+    const ta = el.shadowRoot?.querySelector('wa-textarea') as unknown as HTMLElement & {
+      placeholder?: string
+    }
+    expect(ta?.getAttribute('placeholder')).toBe('开始对话…')
+    el.remove()
+
+    const afterFirstTurn = await mount({ ...focus, hasTurns: true })
+    const ta2 = afterFirstTurn.shadowRoot?.querySelector('wa-textarea') as unknown as HTMLElement & {
+      placeholder?: string
+    }
+    expect(ta2?.getAttribute('placeholder')).toBe('Ask for follow-up changes…')
+    afterFirstTurn.remove()
   })
 })
 

@@ -167,6 +167,24 @@ describe('sebas-new-session-dialog', () => {
     })
   })
 
+  it('mode dropdown renders the shared MODE_OPTIONS vocabulary (4.1)', async () => {
+    // polish-workbench-walkthrough-ux 4.1：创建弹窗与 composer 下拉同源——
+    // 选项来自共享 MODE_OPTIONS（值 + 中文解释一致），杜绝「一边裸词一边
+    // 带解释」的漂移。
+    const { MODE_OPTIONS } = await import('./mode-vocabulary.js')
+    const el = await mount({ open: true, defaultAgent: 'claude' })
+    const modeSel = el.shadowRoot!.querySelector('[data-testid="dialog-mode-select"]')
+    const options = Array.from(modeSel?.querySelectorAll('wa-option') ?? []).map((o) => ({
+      value: o.getAttribute('value'),
+      label: o.textContent ?? '',
+    }))
+    // 缺省项（agent 默认，wire 省略 mode）+ 四个共享模式。
+    expect(options[0]!.value).toBe('')
+    expect(options.slice(1).map((o) => o.value)).toEqual(MODE_OPTIONS.map((m) => m.value))
+    expect(options.slice(1).map((o) => o.label)).toEqual(MODE_OPTIONS.map((m) => m.label))
+    el.remove()
+  })
+
   it('preselects the project default agent; first reachable agent with no record', async () => {
     const el = await mount({ open: true, defaultAgent: null })
     // 无记录 → 首个可达 agent 兜底（spec「first visit falls back honestly」）。
@@ -288,9 +306,15 @@ describe('sebas-new-session-dialog', () => {
     expect(el.shadowRoot?.querySelector('[data-testid="dialog-provider-select"]')).toBeNull()
     expect(el.shadowRoot?.querySelector('[data-testid="dialog-model-select"]')).toBeNull()
     const hint = el.shadowRoot?.querySelector('[data-testid="dialog-catalog-unavailable"]')
-    // 显式引导：说明没有模型 + 指路 Settings → Models。
-    expect(hint?.textContent).toContain('尚未配置任何模型')
+    // 显式引导 + （4.4）不暗示创建被禁：说明仍可用 agent 默认模型创建。
+    expect(hint?.textContent).toContain('尚未配置 provider 模型')
     expect(hint?.textContent).toContain('Settings → Models')
+    expect(hint?.textContent).toContain('默认模型')
+    // 创建按钮不因目录为空而禁用（仅 agent 必选门禁）。
+    const confirm = el.shadowRoot?.querySelector(
+      '[data-testid="dialog-confirm"]',
+    ) as HTMLElement | null
+    expect(confirm?.hasAttribute('disabled')).toBe(false)
     // agent 选择不受目录影响。
     expect(agentSelect(el).value).toBe('claude')
   })
@@ -314,8 +338,10 @@ describe('sebas-new-session-dialog', () => {
     ) as HTMLElement | null
     expect(codex).toBeTruthy()
     expect(codex!.hasAttribute('disabled')).toBe(true)
-    expect(codex?.textContent ?? '').toContain('unavailable')
-    expect(codex?.textContent ?? '').toContain('command not found')
+    // （polish-workbench-walkthrough-ux 4.3）默认可见文案 = 操作者语言 +
+    // 补救入口；实现性成因（cause）只进 tooltip。
+    expect(codex?.textContent ?? '').toContain('不可用 — 到 Settings → Models 检查配置')
+    expect((codex as unknown as { title: string }).title).toContain('command not found')
   })
 
   it('reopen resets the mode to the agent-default default', async () => {

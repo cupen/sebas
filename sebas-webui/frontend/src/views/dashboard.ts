@@ -15,10 +15,13 @@
 
 import { LitElement, css, html, nothing, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { api, type AgentKindInfo, type ConversationEntryView, type NodeInfo, type NodesResponse, type PendingSubmission, type Project, type SessionDetail, type SessionRow, type Summary } from '../api/client.js'
+import { api, type AgentKindInfo, type ArchiveDetail, type ArchiveEntry, type ConversationEntryView, type NodeInfo, type NodesResponse, type PendingSubmission, type Project, type SessionDetail, type SessionRow, type Summary } from '../api/client.js'
 import type { WsEvent, CoreReachabilityState } from '../api/ws.js'
 import { sharedWs } from '../api/shared-ws.js'
 import { icon } from '../components/icons.js'
+import { guardedHide } from '../components/wa-hide-guard.js'
+import { notify } from '../notify.js'
+import { modeBadgeLabel } from './mode-vocabulary.js'
 import { viewStyles } from '../styles/shared.js'
 import {
   clampComposerHeight,
@@ -125,6 +128,26 @@ export class SebasDashboard extends LitElement {
    */
   @property({ attribute: false }) coreReachability: CoreReachabilityState | null = null
   /**
+   * （polish-workbench-walkthrough-ux 2.1）shell 接力的只读归档条目（rail
+   * History 点击）。非空时主区渲染只读归档视图：对话快照可见、composer 隐
+   * （消息门 400 兜底不变）、「恢复到原项目」是唯一的显式恢复入口。
+   */
+  @property({ attribute: false }) archivedEntry: ArchiveEntry | null = null
+  /** 归档条目的对话快照（GET /api/archive/{key}）。 */
+  @state() private archivedDetail: ArchiveDetail | null = null
+  /** 归档快照取数失败（条目恰好被清理等）：如实说明，不渲染空流。 */
+  @state() private archivedUnavailable = false
+  /** 恢复确认弹窗开合 + 在途标记 + 就地错误。 */
+  @state() private restoreDialogOpen = false
+  @state() private restoring = false
+  @state() private restoreError: string | null = null
+  /**
+   * （3.5）聚焦会话被后端移除（崩溃/回收等）：记下 key，聚焦视图同帧退出
+   * Working——停止控件消失、transcript 保持只读可见、通知通道点名会话。
+   * 焦点切到别的会话即清除。
+   */
+  @state() private terminatedFor: string | null = null
+  /**
    * Branch of the selected project, fetched lazily for the project header
    * pill. Cleared on every selection change so a slow response can never
    * paint the previous project's branch; left null (pill hidden) when
@@ -220,8 +243,15 @@ export class SebasDashboard extends LitElement {
         return
       case 'session.created':
       case 'session.updated':
-      case 'session.removed':
       case 'session.turn_stalled':
+        this.scheduleListRefresh()
+        return
+      case 'session.removed':
+        // （3.5）聚焦会话被后端移除：同帧退出 Working、通知点名会话，
+        // 已收 transcript 保持只读可见；rail 随既有刷新链对账。
+        if (ev.session_id === this.effectiveFocusKey()) {
+          this.announceFocusedRemoval(ev.session_id)
+        }
         this.scheduleListRefresh()
         return
       case 'session.resync':
@@ -283,6 +313,102 @@ export class SebasDashboard extends LitElement {
   private handleResync(): void {
     this.sessionEntries.clear()
     this.loadFocused(this.effectiveFocusKey())
+  }
+
+  /**
+   * （3.5）聚焦会话终止通知（webui「Focused session termination is reflected
+   * consistently」）：wire 的 session.removed 不带成因，成因按移除瞬间的
+   * 引擎事实如实推断——回合仍在飞即「agent 进程异常退出」（崩溃场景的下
+   * 限承诺），否则是常规关闭/回收。已收对话保持在下方只读可见。
+   */
+  private announceFocusedRemoval(key: string): void {
+    const label =
+      this.focusedDetail?.chat_id ??
+      this.data?.active_session?.chat_id ??
+      decodeURIComponent(key.split('%00').pop() ?? key)
+    const wasEngaged = this.turnEngagedNow()
+    const cause = wasEngaged ? 'agent 进程异常退出' : '会话已关闭'
+    this.terminatedFor = key
+    notify({
+      level: 'warn',
+      message: `会话「${label}」已终止（${cause}），对话记录保留在下方（只读）。`,
+      dedupeKey: `session.terminated:${key}`,
+    })
+  }
+
+  /** 移除瞬间的回合占用事实（崩溃措辞的判据；取最后已知值）。 */
+  private turnEngagedNow(): boolean {
+    return (
+      this.focusedDetail?.turn_engaged ??
+      this.data?.active_session?.turn_engaged ??
+      (this.focusedDetail?.status_slug ?? this.data?.active_session?.status_slug ?? null) ===
+        'working'
+    )
+  }
+
+  /** （2.1）归档条目的对话快照取数；条目换档/清空时作废在途响应。 */
+  private async loadArchivedDetail(): Promise<void> {
+    const entry = this.archivedEntry
+    if (!entry) {
+      this.archivedDetail = null
+      this.archivedUnavailable = false
+      return
+    }
+    try {
+      const d = await api.archiveDetail(entry.session_key)
+      if (this.archivedEntry?.session_key !== entry.session_key) return
+      this.archivedDetail = d
+      this.archivedUnavailable = false
+    } catch {
+      if (this.archivedEntry?.session_key !== entry.session_key) return
+      this.archivedDetail = null
+      this.archivedUnavailable = true
+    }
+  }
+
+  /** （2.2）恢复确认弹窗打开：说明恢复落点，等待确认。 */
+  private openRestoreDialog(): void {
+    this.restoreDialogOpen = true
+    this.restoreError = null
+  }
+  private closeRestoreDialog(): void {
+    this.restoreDialogOpen = false
+    this.restoreError = null
+  }
+
+  /**
+   * （2.2/2.3）确认恢复：走既有 restore API，成功/失败都以 toast 呈现
+   * （复用 notify 通道）；成功文案携带 project_path——恢复到未注册项目的
+   * 会话绝不静默隐身（「条目消失必有 outcome 通知」）。成功后结束只读视
+   * 图并广播刷新。
+   */
+  private async confirmRestoreArchived(): Promise<void> {
+    const entry = this.archivedEntry
+    if (!entry || this.restoring) return
+    this.restoring = true
+    this.restoreError = null
+    try {
+      const res = await api.restoreSession(entry.session_key)
+      const path = res.entry?.project_path || entry.project_path
+      notify({
+        level: 'info',
+        message: `会话「${entry.label}」已恢复到 ${path || '（无项目）'}，可在该项目下继续使用。`,
+      })
+      this.dispatchEvent(new CustomEvent('archive-view-close', { bubbles: true, composed: true }))
+      // 恢复后就地激活（与点会话同一条 switch 路径）；会话映射不在场时
+      // switch 失败不致命——outcome 通知已给出落点。
+      await api.switchSession(entry.session_key).catch(() => undefined)
+      window.dispatchEvent(new Event('sebas:refetch'))
+    } catch (err) {
+      const cause = err instanceof Error ? err.message : String(err)
+      this.restoreError = cause
+      notify({
+        level: 'error',
+        message: `恢复会话「${entry.label}」失败：${cause}。该条目仍在 History 中。`,
+      })
+    } finally {
+      this.restoring = false
+    }
   }
 
   static styles = [
@@ -409,20 +535,11 @@ export class SebasDashboard extends LitElement {
         border-radius: var(--sebas-radius-full);
         padding: 0 7px;
       }
-      .mode-tag b {
-        color: var(--sebas-status-failed);
-        font-weight: 600;
-      }
-      .ungated {
-        font-size: 0.68rem;
-        font-weight: 600;
-        letter-spacing: 0.03em;
-        text-transform: uppercase;
-        color: var(--sebas-status-failed);
-        background: var(--sebas-status-failed-bg);
-        border: 1px solid var(--sebas-status-failed-border);
-        border-radius: var(--sebas-radius-full);
-        padding: 0 7px;
+      /* （4.2）过渡态「模式切换中…」= 中性灰章；不再有红色英文 UNKNOWN/
+         UNGATED。琥珀语义色只留在需要警惕的 ungated（auto）章本身。 */
+      .mode-tag[data-mode='auto'] {
+        color: var(--sebas-status-waiting);
+        background: var(--sebas-status-waiting-bg);
       }
       .parked-banner {
         margin: var(--sebas-space-2) var(--sebas-space-5) 0;
@@ -624,12 +741,15 @@ export class SebasDashboard extends LitElement {
         margin: 0;
       }
       /* Composer 列：分割面 end 侧的浮岛留白区（D6 去通高 border-top
-         硬线），内壳 18px 圆角 shell 由 workbench-composer 自绘。内容超出
-         （审批卡 + 堆叠区高）时列内滚动。 */
+         硬线），内壳 18px 圆角 shell 由 workbench-composer 自绘。
+         （polish-workbench-walkthrough-ux 2.5）slash 命令面板贴输入框上方
+         弹出、越出 composer 壳顶——此前的 overflow-y: auto 把越出部分裁到
+         仅剩 ~2px 缝（面板 DOM 与数据都在，视觉上像没渲染）。改 overflow
+         可见让浮层探出；审批卡/堆叠区各自限高，子内容不再依赖列级滚动。 */
       .composer-area {
         flex: 1;
         min-height: 0;
-        overflow-y: auto;
+        overflow: visible;
         display: flex;
         flex-direction: column;
         justify-content: flex-end;
@@ -702,6 +822,12 @@ export class SebasDashboard extends LitElement {
   protected willUpdate(changed: PropertyValues): void {
     // 侧栏选中项目切换 → 重取分支（面板 pill 用）。
     if (changed.has('selectedPath')) this.loadSelectedBranch()
+    // （2.1）归档条目接力进来：取对话快照渲染只读视图。
+    if (changed.has('archivedEntry')) {
+      this.restoreDialogOpen = false
+      this.restoreError = null
+      void this.loadArchivedDetail()
+    }
     // 深链参数变化（/sessions/A → /sessions/B 复用同一元素）：立即按新 key
     // 取 detail（读即设服务端焦点）。
     if (changed.has('deepLinkKey')) this.loadFocused(this.effectiveFocusKey())
@@ -713,6 +839,10 @@ export class SebasDashboard extends LitElement {
     if (focusKey !== null && focusKey !== this.activatedFocusKey) {
       this.activatedFocusKey = focusKey
       void api.activateSession(focusKey).catch(() => undefined)
+    }
+    // （3.5）焦点换了：上一个会话的终止残影不再有意义。
+    if (this.terminatedFor !== null && this.terminatedFor !== focusKey) {
+      this.terminatedFor = null
     }
   }
 
@@ -987,6 +1117,9 @@ export class SebasDashboard extends LitElement {
       `
     if (!this.data) return this.renderLoading()
     const d = this.data
+    // （2.1）只读归档视图在场：主区整体让位——turn-stream 与 composer 都
+    // 换成归档形态（对话快照只读 + 显式恢复按钮）。
+    if (this.archivedEntry) return this.renderArchivedWorkbench()
     const rows = this.rowsForSelected()
     const hasActive = rows.some((r) => r.status_slug === 'working')
     const focusKey = this.effectiveFocusKey()
@@ -1029,14 +1162,14 @@ export class SebasDashboard extends LitElement {
                       ? html`<span class="branch-pill">${this.selectedBranch}</span>`
                       : nothing}
                   `
-                : html`<span class="path muted">No project selected</span>`}
+                : html`<span class="path muted">未选择项目</span>`}
               <span class="project-meta">
                 ${projectName
                   ? html`
-                      <span class="meta-item">${rows.length} sessions</span>
+                      <span class="meta-item">${rows.length} 个会话</span>
                       <span class="meta-sep" aria-hidden="true">·</span>
                       <span class="meta-item ${hasActive ? 'is-active' : ''}">
-                        <span class="active-dot"></span>${hasActive ? 'active' : 'idle'}
+                        <span class="active-dot"></span>${hasActive ? '有会话在运行' : '空闲'}
                       </span>
                     `
                   : nothing}
@@ -1065,16 +1198,22 @@ export class SebasDashboard extends LitElement {
               : html`
                   <div class="empty-stream">
                     <span class="glyph">${icon('message', 20)}</span>
-                    <span class="title">No session focused</span>
-                    <p class="hint">
-                      Pick a session from the sidebar tree — or start a new one from a project's
-                      + button.
-                    </p>
+                    <span class="title">未聚焦任何会话</span>
+                    <p class="hint">从左侧项目树选择一个会话——或用项目行的 + 新建。</p>
                   </div>
                 `}
           </div>
         </div>
         <div slot="end" class="composer-col">
+          ${this.terminatedFor !== null
+            ? html`<div class="composer-area">
+                <div class="composer no-focus" data-testid="composer-terminated">
+                  <span class="no-focus-hint">
+                    该会话已被终止（${this.terminatedRemovalCause()}），对话记录在上方只读可见。
+                  </span>
+                </div>
+              </div>`
+            : html`
           <div class="composer-area">
             <sebas-review-cards
               .sessionKey=${focusKey}
@@ -1099,12 +1238,152 @@ export class SebasDashboard extends LitElement {
               .childStarting=${(this.focusedDetail?.status_slug ?? '') === 'starting'}
               .currentMode=${this.focusedDetail?.desired_mode ?? null}
               .modeEditable=${this.focusedDetail?.session_id != null}
+              .hasTurns=${(this.focusedDetail?.entries.length ?? 0) > 0}
               .coreReachability=${this.coreReachability}
               @composer-sent=${this.onComposerSent}
             ></sebas-workbench-composer>
-          </div>
+          </div>`
+          }
         </div>
       </wa-split-panel>
+    `
+  }
+
+  /** 终止残影的成因措辞（与通知同一判定，横幅复述用）。 */
+  private terminatedRemovalCause(): string {
+    return this.turnEngagedNow() ? 'agent 进程异常退出' : '会话已关闭'
+  }
+
+  /**
+   * （2.1/2.4）只读归档视图：会话头（条目元信息 + 显式恢复按钮）+ 对话
+   * 快照（复用 transcript-view，turnLive=false 纯历史姿态）。composer 区
+   * 整体让位给只读说明——归档会话的发送本就被消息门 400 拒绝（后端兜底
+   * 不变），前端不再给可误触的输入面。
+   */
+  private renderArchivedWorkbench() {
+    const arch = this.archivedEntry!
+    const detail = this.archivedDetail
+    const archivedDate = new Date(arch.archived_at * 1000).toLocaleString()
+    return html`
+      <div class="stage-col">
+        <div class="stage-island" data-testid="archived-view">
+          <div
+            class="session-head"
+            data-status="dormant"
+            aria-label="Archived session (read-only)"
+          >
+            <sebas-status-badge slug="dormant" label="Archived" glyph="🗂"></sebas-status-badge>
+            <div class="ident">
+              <span class="chat">${arch.label}</span>
+              <span class="meta">
+                <span
+                  class="mono"
+                  data-testid="archived-project"
+                  title="归档时的原项目路径"
+                  >🗂 ${arch.project_path || '（无项目）'}</span
+                >
+                <span>归档于 ${archivedDate}</span>
+              </span>
+            </div>
+            <span class="actions">
+              <wa-button
+                size="s"
+                variant="brand"
+                data-testid="archived-restore"
+                @click=${() => this.openRestoreDialog()}
+                >恢复到原项目</wa-button
+              >
+            </span>
+          </div>
+          <div class="turn-stream-area">
+            ${detail && detail.entry.session_key === arch.session_key
+              ? detail.entries.length > 0
+                ? html`<sebas-transcript-view
+                    fill
+                    .entries=${detail.entries}
+                    sessionKey=${detail.entry.session_key}
+                    .msgCount=${null}
+                    .agentDisplay=${null}
+                    .turnLive=${false}
+                  ></sebas-transcript-view>`
+                : html`
+                    <div class="empty-stream">
+                      <span class="glyph">${icon('message', 20)}</span>
+                      <span class="title">归档时没有可回放的对话</span>
+                      <p class="hint">这条归档记录创建时没有留下对话内容。</p>
+                    </div>
+                  `
+              : this.archivedUnavailable
+                ? html`
+                    <div class="empty-stream">
+                      <span class="glyph">${icon('message', 20)}</span>
+                      <span class="title">归档内容不可得</span>
+                      <p class="hint">这条归档记录创建于对话快照功能之前，或已被清理。</p>
+                    </div>
+                  `
+                : html`
+                    ${[0, 1, 2].map(
+                      () => html`
+                        <div class="skel-row">
+                          <div class="skel skel-line" style="width:24%"></div>
+                          <div class="skel skel-line" style="width:52%"></div>
+                        </div>
+                      `,
+                    )}
+                  `}
+          </div>
+        </div>
+      </div>
+      <div class="composer-col">
+        <div class="composer-area">
+          <div class="composer no-focus" data-testid="composer-archived-readonly">
+            <span class="no-focus-hint">
+              这是归档会话的只读视图——如需继续对话，用上方的「恢复到原项目」。
+            </span>
+          </div>
+        </div>
+      </div>
+      ${this.restoreDialogOpen
+        ? html`
+            <wa-dialog
+              label="恢复归档会话"
+              style="--width: 460px;"
+              .open=${true}
+              data-testid="restore-dialog"
+              @wa-hide=${guardedHide(() => this.closeRestoreDialog())}
+            >
+              <div class="wa-stack" style="gap:var(--sebas-space-3);">
+                <p class="dialog-body">
+                  将把会话 <b>${arch.label}</b> 恢复到
+                  <b>${arch.project_path || '（无项目）'}</b> 并结束只读。
+                </p>
+                <p class="dialog-body" style="font-size:0.8rem;color:var(--sebas-text-faint);">
+                  若该项目当前未注册，恢复后仍会从对应项目路径再次可达。
+                </p>
+                ${this.restoreError
+                  ? html`<p
+                      class="dialog-body"
+                      style="color:var(--sebas-status-failed);font-size:0.8rem;"
+                      data-testid="restore-error"
+                    >
+                      ${this.restoreError}
+                    </p>`
+                  : nothing}
+              </div>
+              <wa-button
+                slot="footer"
+                variant="brand"
+                data-testid="restore-confirm"
+                ?loading=${this.restoring}
+                @click=${() => void this.confirmRestoreArchived()}
+                >恢复</wa-button
+              >
+              <wa-button slot="footer" appearance="plain" @click=${() => this.closeRestoreDialog()}
+                >取消</wa-button
+              >
+            </wa-dialog>
+          `
+        : nothing}
     `
   }
 
@@ -1213,10 +1492,8 @@ export class SebasDashboard extends LitElement {
                 ? html`
                     <div class="empty-stream">
                       <span class="glyph">${icon('message', 20)}</span>
-                      <span class="title">Nothing yet</span>
-                      <p class="hint">
-                        The conversation starts when the next turn begins — say hello below.
-                      </p>
+                      <span class="title">还没有对话</span>
+                      <p class="hint">下一个回合开始时对话就会出现——在下方打个招呼吧。</p>
                     </div>
                   `
                 : html`<sebas-transcript-view
@@ -1232,8 +1509,8 @@ export class SebasDashboard extends LitElement {
             ? html`
                 <div class="empty-stream">
                   <span class="glyph">${icon('message', 20)}</span>
-                  <span class="title">Session unavailable</span>
-                  <p class="hint">The focused session could not be loaded.</p>
+                  <span class="title">会话不可得</span>
+                  <p class="hint">聚焦的会话加载失败。</p>
                 </div>
               `
             : html`
@@ -1269,7 +1546,9 @@ export class SebasDashboard extends LitElement {
     const waiting = parked > 0
     // 执行体强制不了时两个值都显示并说明；绝不只显示期望值假装已生效。
     const modeDiffers = !!desired && !!effective && desired !== effective
-    const ungated = effective === 'auto' || (desired === 'auto' && effective === null)
+    // （4.2）模式章合一：auto 即「自动执行」（原 UNGATED 语义不再另挂英文
+    // 红章）；desired/effective 过渡态显示中性灰「模式切换中…」；未知值
+    // 如实显示原词，不造红色 UNKNOWN。
     return html`
       <div class="session-head" data-status=${waiting ? 'waiting' : d.status_slug}>
         <sebas-status-badge
@@ -1311,16 +1590,11 @@ export class SebasDashboard extends LitElement {
                   data-testid=${modeDiffers ? 'mode-mismatch' : 'session-mode'}
                   data-mode=${effective ?? desired}
                   title=${modeDiffers
-                    ? `期望 mode ${desired}，执行体实际强制 ${effective}`
-                    : `mode ${effective ?? desired}`}
+                    ? `期望 ${modeBadgeLabel(desired!)}，执行体实际强制 ${modeBadgeLabel(effective!)}`
+                    : `权限模式：${modeBadgeLabel(effective ?? desired ?? '')}`}
                 >
-                  ${modeDiffers
-                    ? html`mode ${desired} → 实际 ${effective}<b>（执行体无法强制）</b>`
-                    : html`mode ${effective ?? desired}`}
+                  ${modeDiffers ? '模式切换中…' : modeBadgeLabel(effective ?? desired ?? '')}
                 </span>`
-              : nothing}
-            ${ungated
-              ? html`<span class="ungated" data-testid="session-ungated" title="auto：该机器交给 agent 自主执行，不产生审批">ungated</span>`
               : nothing}
             <!-- （workbench-live-conversation-flow 4.2）头部去交互化：mode
                  切换迁至输入框底沿、模型切换归 composer 芯片、归档是

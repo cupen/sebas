@@ -77,6 +77,7 @@ import {
   type ModelCatalog,
 } from '../api/model-catalog.js'
 import { renderMarkdown } from '../components/markdown.js'
+import { MODE_OPTIONS, MODE_DEFAULT_LABEL } from './mode-vocabulary.js'
 import { icon } from '../components/icons.js'
 import { viewStyles } from '../styles/shared.js'
 import '@awesome.me/webawesome/dist/components/textarea/textarea.js'
@@ -159,6 +160,15 @@ export class SebasWorkbenchComposer extends LitElement {
    * 「agent 默认」）。
    */
   @property({ attribute: false }) currentMode: string | null = null
+  /**
+   * （polish-workbench-walkthrough-ux 5.2）会话是否已有回合：0-turn 占位
+   * 显示语境化占位符「开始对话…」，首轮之后恢复 follow-up 语境。
+   */
+  @property({ type: Boolean }) hasTurns = false
+  /** 输入占位符（5.2）：两态切换的单一出处。 */
+  private get inputPlaceholder(): string {
+    return this.hasTurns ? 'Ask for follow-up changes…' : '开始对话…'
+  }
   /** mode 切换可用性：0-turn 占位（无 session_id）不可切——mode 由创建表单决定。 */
   @property({ type: Boolean }) modeEditable = false
   /**
@@ -680,7 +690,7 @@ export class SebasWorkbenchComposer extends LitElement {
           data-testid="model-chip"
           aria-haspopup="listbox"
           aria-expanded=${this.modelMenuOpen ? 'true' : 'false'}
-          title="会话模型（切换走 session/set_config_option）"
+          title="模型选项来自会话执行体（切换走 session/set_config_option）"
           @click=${() =>
             this.modelMenuOpen ? this.closeModelMenu() : this.openModelMenu()}
         >
@@ -814,7 +824,8 @@ export class SebasWorkbenchComposer extends LitElement {
           ${this.renderCommandPalette()}
           ${this.renderCommandBubble()}
           <wa-textarea
-            placeholder="Ask for follow-up changes…"
+            placeholder=${this.inputPlaceholder}
+            data-testid="composer-input"
             aria-label="Message"
             resize="none"
             ?disabled=${this.inputDisabled()}
@@ -832,17 +843,18 @@ export class SebasWorkbenchComposer extends LitElement {
                   hoist
                   value=${this.currentMode ?? ''}
                   ?disabled=${this.modeSwitching}
-                  aria-label="Session mode"
+                  aria-label="权限模式"
                   data-testid="mode-switch"
+                  title="权限模式"
                   @change=${(e: Event) => {
                     const v = (e as unknown as { target: { value: string } }).target.value
                     if (v) void this.switchMode(v)
                   }}
                 >
-                  <wa-option value="ask">ask</wa-option>
-                  <wa-option value="edit">edit</wa-option>
-                  <wa-option value="allow">allow</wa-option>
-                  <wa-option value="auto">auto</wa-option>
+                  <wa-option value="">${MODE_DEFAULT_LABEL}</wa-option>
+                  ${MODE_OPTIONS.map(
+                    (m) => html`<wa-option value=${m.value}>${m.label}</wa-option>`,
+                  )}
                 </wa-select>`
               : nothing}
           </div>

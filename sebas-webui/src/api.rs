@@ -2063,10 +2063,43 @@ pub async fn projects_branch(State(state): State<WebUiState>, Path(id): Path<Str
 // ---- Archive API endpoints ----
 
 /// GET /api/archive — list archived sessions. Runs cleanup before returning.
+/// 成功的启动迁移经 `migration` 字段转达前端（toast 通知既有通道）。
 pub async fn archive_list(State(_state): State<WebUiState>) -> Response {
     crate::archive::cleanup_expired();
     let entries = crate::archive::list();
-    Json(json!({ "archived_sessions": entries })).into_response()
+    let mut data = json!({ "archived_sessions": entries });
+    if let Some(notice) = crate::archive::take_migration_notice() {
+        data["migration"] = json!(notice);
+    }
+    Json(data).into_response()
+}
+
+/// GET /api/archive/{key} — one archived session with its conversation
+/// snapshot（polish-workbench-walkthrough-ux 2.1）：归档视图只读回看的
+/// 数据源（close 已丢弃内存 transcript，快照在归档时刻落进条目）。
+pub async fn archive_detail(State(_state): State<WebUiState>, Path(key): Path<String>) -> Response {
+    crate::archive::cleanup_expired();
+    match crate::archive::entry(&key) {
+        Some(entry) => {
+            let entries: Vec<ConversationEntryView> = entry
+                .transcript
+                .iter()
+                .map(|e| ConversationEntryView {
+                    position: e.position,
+                    kind: e.kind.clone(),
+                    element_type: match e.element_type.as_str() {
+                        "thinking" | "tool" | "error" => e.element_type.clone(),
+                        _ => "markdown".to_string(),
+                    },
+                    content: e.content.clone(),
+                    created_at_unix: e.created_at_unix,
+                    title: e.title.clone(),
+                })
+                .collect();
+            Json(json!({ "entry": entry, "entries": entries })).into_response()
+        }
+        None => api_error(StatusCode::NOT_FOUND, "Archived session not found"),
+    }
 }
 
 /// POST /api/sessions/{key}/archive — archive a session.
@@ -2095,13 +2128,26 @@ pub async fn archive_session(State(state): State<WebUiState>, Path(key): Path<St
             .unwrap_or_else(|| "unnamed".to_string())
     });
 
+    // polish-workbench-walkthrough-ux 2.1：close 会丢弃内存 transcript，
+    // 归档视图的只读回看要在 close 前把对话快照进归档条目。
+    let transcript = state
+        .backend
+        .turns(session_key.clone(), 0)
+        .await
+        .unwrap_or_default();
+
     // Close the session first (kills child if active).
     if let Err(_rej) = state.backend.close(session_key).await {
         // If close fails (unknown, unavailable), we still proceed with the archive.
     }
 
-    match crate::archive::archive_session(&key, &project_path, &label, state.archive_retention_days)
-    {
+    match crate::archive::archive_session(
+        &key,
+        &project_path,
+        &label,
+        state.archive_retention_days,
+        transcript,
+    ) {
         Ok(entry) => (
             StatusCode::OK,
             Json(json!({ "status": "archived", "entry": entry })),
