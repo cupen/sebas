@@ -292,28 +292,6 @@ impl Mapping {
         }
     }
 
-    /// spawn 失败的映射：保留为可见的 spawn-failed 行，并带一条 transcript
-    /// 错误的合成寻址 id（fail-fast-on-startup-errors 3.1）。
-    pub fn spawn_failed(reason: impl Into<String>) -> Self {
-        Self {
-            state: MappingState::SpawnFailed {
-                session_id: next_failed_id(),
-                reason: reason.into(),
-            },
-            last_active_unix: crate::engine::now_unix(),
-            project_dir: None,
-            pending_kind: None,
-            pending_model: None,
-            pending_mode: None,
-            desired_mode: crate::engine::ask_mode(),
-            effective_mode: None,
-            acp_session_id: None,
-            current_model: None,
-            available_models: None,
-            available_commands: Vec::new(),
-        }
-    }
-
     /// Live routing id — `Some` only for `Active` (a child process exists).
     /// `Dormant` deliberately returns `None` so liveness checks
     /// (`session_alive`, button-callback routing) treat it as dead.
@@ -753,13 +731,19 @@ impl SessionMap {
         if !is_spawning {
             return None;
         }
-        let failed = Mapping::spawn_failed(reason);
-        let transcript_id = match &failed.state {
-            MappingState::SpawnFailed { session_id, .. } => session_id.clone(),
-            _ => unreachable!("spawn_failed constructs SpawnFailed"),
+        // 就地翻状态，**不重建映射**：会话身份（project_dir / pending_kind /
+        // pending_model / pending_mode / desired_mode …）在 spawn 之前就已记账，
+        // 失败不改变「它属于哪个项目、由哪个 agent 服务」。此前整体替换会把这些
+        // 一并抹掉——会话因此从项目里消失、agent 展示名回退通用标签，等于把
+        // 「启动失败」谎报成「这个会话没有归属」。
+        let Some(m) = g.get_mut(key) else { return None };
+        let session_id = next_failed_id();
+        m.state = MappingState::SpawnFailed {
+            session_id: session_id.clone(),
+            reason: reason.to_string(),
         };
-        g.insert(key.clone(), failed);
-        Some(transcript_id)
+        m.last_active_unix = crate::engine::now_unix();
+        Some(session_id)
     }
 
     pub async fn insert(&self, key: ChannelKey, mapping: Mapping) -> Result<(), DispatchError> {
@@ -827,7 +811,16 @@ impl SessionMap {
     /// `closed-*` chat can never collide with a web/feishu key, and the WebUI
     /// session list already renders Dormant rows). Idempotent: the same
     /// session id reuses the same archive key instead of duplicating rows.
-    pub async fn preserve_closed_mapping(&self, session_id: &str, acp_session_id: Option<String>) {
+    ///
+    /// `source` 是原映射的键：归档记录**连身份一起保留**（project_dir / agent
+    /// kind / mode 等）——「会话必须从属于项目」的不变量下，归档记录若是无项目
+    /// 的孤儿就会被持久化层清退，等于把原映射抹掉，正是 D4 要防的事。
+    pub async fn preserve_closed_mapping(
+        &self,
+        source: &ChannelKey,
+        session_id: &str,
+        acp_session_id: Option<String>,
+    ) {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
         let mut h = DefaultHasher::new();
@@ -842,6 +835,15 @@ impl SessionMap {
             None => {
                 let mut m = Mapping::dormant(session_id.to_string(), crate::engine::now_unix());
                 m.acp_session_id = acp_session_id;
+                // 身份随记录一起留存（源映射可能已经被替换/移除，取到就带上）。
+                if let Some(src) = g.get(source) {
+                    m.project_dir = src.project_dir.clone();
+                    m.pending_kind = src.pending_kind.clone();
+                    m.pending_model = src.pending_model.clone();
+                    m.pending_mode = src.pending_mode.clone();
+                    m.desired_mode = src.desired_mode.clone();
+                    m.current_model = src.current_model.clone();
+                }
                 if g.len() < self.capacity {
                     g.insert(archive_key, m);
                 } else {
@@ -1118,6 +1120,19 @@ impl SessionMap {
                 }
             );
             if let Some(sid) = m.persisted_id().or(is_placeholder.then_some("")) {
+                // 「会话必须从属于项目」（同 restore 的判据，双向兜底）：内存里
+                // 若出现无项目归属的非飞书会话，绝不落盘——它不该存在，落盘只会
+                // 把幽灵行喂给下一轮 restore。warn 留痕，不静默。
+                if !is_internal_archive_key(k.reference.as_str())
+                    && !mapping_may_lack_project(k.channel.as_str(), m.project_dir.as_deref())
+                {
+                    tracing::warn!(
+                        channel = %k.channel,
+                        reference = %k.reference,
+                        "dump: 跳过无项目归属的会话（非飞书通道必须属于项目）"
+                    );
+                    continue;
+                }
                 // `serde_json::Map` keys are strings; the ChannelKey's own
                 // serde produces an object, so we stringify that object as the
                 // map key (self-consistent with `restore_json`'s parser).
@@ -1166,6 +1181,19 @@ impl SessionMap {
             let dto: MappingDto = serde_json::from_value(v).map_err(|e| {
                 serde_json::Error::custom(format!("bad entry for {key_str:?}: {e}"))
             })?;
+            // 「会话必须从属于项目」：非飞书通道的持久化行必须带 project_dir，
+            // 缺项目的旧行直接**丢弃**（操作者拍板：历史数据可整片删）——
+            // 不迁移、不猜归属、不留一个没有可见面的幽灵会话。
+            if !is_internal_archive_key(key.reference.as_str())
+                && !mapping_may_lack_project(key.channel.as_str(), dto.project_dir.as_deref())
+            {
+                tracing::warn!(
+                    channel = %key.channel,
+                    reference = %key.reference,
+                    "restore: 丢弃无项目归属的会话（非飞书通道必须属于项目）"
+                );
+                continue;
+            }
             let mut m = if dto.awaiting_first_prompt && dto.session_id.is_empty() {
                 // 0-turn 占位（workbench-agent-wire-fix D1）：重启后仍是等待
                 // 首条消息的占位，首条消息照常触发 spawn。
@@ -1202,6 +1230,22 @@ impl SessionMap {
             capacity,
         })
     }
+}
+
+/// 「会话必须从属于项目」的唯一判据（dump / restore 双向共用）：飞书会话是
+/// 例外——它们由聊天发起，本就没有项目目录，只在飞书面呈现；其余通道
+/// （web 等）必须带非空 `project_dir`。
+fn mapping_may_lack_project(channel: &str, project_dir: Option<&str>) -> bool {
+    if channel == "feishu" {
+        return true;
+    }
+    !project_dir.map(str::trim).unwrap_or("").is_empty()
+}
+
+/// 内部归档记录键（`closed-<hash>`）：不是会话，是「原映射保留在存储」的
+/// 存储记录（acp-session-mapping D4），因此不受「会话必须从属于项目」约束。
+fn is_internal_archive_key(reference: &str) -> bool {
+    reference.starts_with("closed-")
 }
 
 /// Parse one session-state map key into a [`ChannelKey`]:
@@ -1305,11 +1349,14 @@ mod tests {
         let map = SessionMap::new();
         let mut m = Mapping::dormant("s1", 1);
         m.pending_kind = Some("claude".into());
+        // web 会话必须从属于项目（否则 dump 按不变量跳过它）。
+        m.project_dir = Some("/tmp/proj-kind".into());
         map.insert(ChannelKey::new("web", "web-kind"), m)
             .await
             .unwrap();
         let mut bare = Mapping::dormant("s2", 2);
         bare.pending_kind = None;
+        bare.project_dir = Some("/tmp/proj-bare".into());
         map.insert(ChannelKey::new("web", "web-bare"), bare)
             .await
             .unwrap();
@@ -1694,13 +1741,15 @@ mod desired_mode_migration_tests {
     /// 幂等：restore 后再次 dump 的盘上值是普通字符串，null 不再出现。
     #[tokio::test]
     async fn legacy_null_desired_mode_migrates_to_ask_on_restore() {
+        // 盘上旧行同样带 project_dir——新不变量下无项目的 web 行会被清退，
+        // 本用例钉的是 desired_mode 迁移，故给足项目归属。
         let json = r#"{
             "{\"channel\":\"web\",\"reference\":\"web-null\"}":
-                {"session_id":"s1","last_active_unix":1,"desired_mode":null},
+                {"session_id":"s1","last_active_unix":1,"project_dir":"/tmp/p1","desired_mode":null},
             "{\"channel\":\"web\",\"reference\":\"web-missing\"}":
-                {"session_id":"s2","last_active_unix":1},
+                {"session_id":"s2","last_active_unix":1,"project_dir":"/tmp/p2"},
             "{\"channel\":\"web\",\"reference\":\"web-explicit\"}":
-                {"session_id":"s3","last_active_unix":1,"desired_mode":"auto"}
+                {"session_id":"s3","last_active_unix":1,"project_dir":"/tmp/p3","desired_mode":"auto"}
         }"#;
         let map = SessionMap::restore_json(json).unwrap();
 
@@ -1746,7 +1795,6 @@ mod desired_mode_migration_tests {
         assert_eq!(Mapping::active("s").desired_mode, ASK_MODE);
         assert_eq!(Mapping::dormant("s", 0).desired_mode, ASK_MODE);
         assert_eq!(Mapping::spawning().desired_mode, ASK_MODE);
-        assert_eq!(Mapping::spawn_failed("boom").desired_mode, ASK_MODE);
         // 创建请求未点名 mode 的占位同样落 ask（D5b：0-turn 占位行真源即 ask）。
         assert_eq!(
             Mapping::spawning_with(None, None, None, true).desired_mode,
