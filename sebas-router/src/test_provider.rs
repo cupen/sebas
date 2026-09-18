@@ -12,6 +12,7 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use serde_json::Value;
 
+use crate::anthropic_wire::{AnthropicMessage, AnthropicUsage};
 use crate::proto::WireProtocol;
 
 /// 回显文案：`I'm test provider. I received your message "<echo>".`
@@ -94,42 +95,31 @@ pub fn test_response(proto: WireProtocol, echoed: &str, stream: bool) -> Respons
     }
 }
 
+/// debug provider 的固定 id / model；Anthropic 形状由
+/// [`crate::anthropic_wire`] 生成（与 fake_provider 共用同一事实源）。
+const DEBUG_MSG_ID: &str = "msg_test_debug";
+const DEBUG_MODEL: &str = "test";
+
 fn anthropic_json(text: &str) -> String {
-    serde_json::json!({
-        "id": "msg_test_debug",
-        "type": "message",
-        "role": "assistant",
-        "model": "test",
-        "content": [{"type": "text", "text": text}],
-        "stop_reason": "end_turn",
-        "stop_sequence": null,
-        "usage": {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
-    })
-    .to_string()
+    AnthropicMessage::text(
+        DEBUG_MSG_ID,
+        DEBUG_MODEL,
+        text,
+        "end_turn",
+        AnthropicUsage::default(),
+    )
+    .json()
 }
 
 fn anthropic_sse(text: &str) -> String {
-    let escaped = serde_json::to_string(text).expect("string serializes");
-    format!(
-        "event: message_start\n\
-data: {{\"type\":\"message_start\",\"message\":{{\"id\":\"msg_test_debug\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"test\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{{\"input_tokens\":0,\"output_tokens\":0}}}}}}\n\
-\n\
-event: content_block_start\n\
-data: {{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{{\"type\":\"text\",\"text\":\"\"}}}}\n\
-\n\
-event: content_block_delta\n\
-data: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":{escaped}}}}}\n\
-\n\
-event: content_block_stop\n\
-data: {{\"type\":\"content_block_stop\",\"index\":0}}\n\
-\n\
-event: message_delta\n\
-data: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"end_turn\",\"stop_sequence\":null}},\"usage\":{{\"output_tokens\":0}}}}\n\
-\n\
-event: message_stop\n\
-data: {{\"type\":\"message_stop\"}}\n\
-\n"
+    AnthropicMessage::text(
+        DEBUG_MSG_ID,
+        DEBUG_MODEL,
+        text,
+        "end_turn",
+        AnthropicUsage::default(),
     )
+    .sse()
 }
 
 fn openai_json(text: &str) -> String {

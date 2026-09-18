@@ -149,6 +149,18 @@ pointing `[acp.claude] path` at the `tests/bin` fake-claude stub (built by
 `cargo build`) lets ACP sessions complete full turns with zero real
 credentials. Let `<SB>` be the throwaway dir (e.g. `/tmp/sebas-debug`).
 
+需要「可拨的真上游」来压透传链路时，用 `sebas fake-provider --listen
+127.0.0.1:0 --journal <SB>/fake-journal.jsonl`（独立子命令，与 debug `test`
+provider 是两回事：test 在 router 内部自答、从不经过拨号路径）。它只服务
+Anthropic `/v1/messages`，bind 后 stdout 打 `fake-provider listening
+addr=127.0.0.1:<port>`，router 侧用自定义 provider（`[provider.fake]` 哑 key +
+`base_url_anthropic` 指向它）零改动接入；报文与 `[provider.*]` 用法无关，照抄
+即可。journal 逐行 NDJSON 记 method/path/headers/body，透传断言（上游 key 注入、
+下游 key 与 hop-by-hop 不泄漏）全部离线读它完成。**journal 明文记 header——只应
+指向 dummy key 的 fake 上游，绝不可把生产凭据指过去。** 内置规则可零剧本驱动标准
+工具环（带 tools 无 tool_result → tool_use；有 tool_result → 终文本），fake 秒回
+也让限流用例确定性复现。
+
 1. `mkdir -p` every dir the config references — `work_dir` must **exist on
    disk before any ACP session spawns** — then write `<SB>/config.toml`:
 
