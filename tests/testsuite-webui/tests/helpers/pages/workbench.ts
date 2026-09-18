@@ -116,7 +116,10 @@ export class FocusedSession {
     this.page = page
     this.host = page.locator('sebas-dashboard')
     this.sessionHead = page.locator('sebas-dashboard .session-head')
-    this.statusBadge = page.locator('sebas-dashboard .session-head sebas-status-badge')
+    // （session-parallel-liveness-and-unread-polish 3.6/D6b）会话状态只挂 rail
+    // 行首彩色圆点一处：session-head 的 status-badge 与状态边框已下线，焦点
+    // 会话的状态面改由 rail 当前行（`li.session-item.current`）的圆点承载。
+    this.statusBadge = page.locator('sebas-project-rail li.session-item.current .session-dot')
     this.chatId = page.locator('sebas-dashboard .session-head .ident .chat')
     this.transcript = page.locator('sebas-dashboard .turn-stream-area')
     this.emptyConversation = page
@@ -132,14 +135,44 @@ export class FocusedSession {
     this.modelPick = page.locator('sebas-workbench-composer [data-testid="model-chip"]')
   }
 
-  /** Status badge's current slug (`data`-driven attribute on the element). */
+  /** 状态圆点的当前 slug（rail 行 `data-status` = 七词相位）。 */
   async statusSlug(): Promise<string> {
-    return (await this.statusBadge.getAttribute('slug')) ?? ''
+    return (await this.statusBadge.getAttribute('data-status')) ?? ''
   }
 
-  /** All conversation bubble bodies (both sides) as text. */
+  /**
+   * 焦点会话的相位断言（D6b：会话状态只挂 rail 行首彩色圆点一处）。会话行落在
+   * 项目行的折叠体里——先展开项目行，否则行不在 DOM。展开是幂等的（行本身即
+   * 展开开关，重复点会收起，故先读 `aria-expanded`）。
+   *
+   * ⚠ 展开 = 点项目行 = 同时**选中**该项目（工作台随 rail-select 重绘一次）。
+   * 断言之后再读工作台 DOM（如数气泡）的用例，要先等它落回稳定值。
+   */
+  async expectStatus(slug: string, timeout = 15_000): Promise<void> {
+    await this.expandAllProjects()
+    await expect(this.statusBadge).toHaveAttribute('data-status', slug, { timeout })
+  }
+
+  /** 展开 rail 里所有收起（`aria-expanded=false`）的项目行。 */
+  private async expandAllProjects(): Promise<void> {
+    const collapsed = this.page.locator(
+      'sebas-project-rail li > div.row[aria-expanded="false"]',
+    )
+    for (let guard = 0; guard < 10; guard++) {
+      if ((await collapsed.count()) === 0) return
+      await collapsed.first().click()
+    }
+  }
+
+  /**
+   * All conversation bubble bodies (both sides) as text. 折叠体不算气泡：
+   * `.body.fold-body`（tool/thinking 过程折叠）与 `.body.item-body`（二级条目）
+   * 只在展开时渲染，混进来会让「气泡数」随折叠开合漂移（曾表现为 flaky）。
+   */
   bubbles(): Locator {
-    return this.page.locator('sebas-dashboard sebas-transcript-view .turn-block .body')
+    return this.page.locator(
+      'sebas-dashboard sebas-transcript-view .turn-block .body:not(.fold-body):not(.item-body)',
+    )
   }
 
   /** The conversation turn block containing `text` (either side). */
@@ -165,11 +198,11 @@ export class FocusedSession {
 
   /**
    * The agent turn's single process fold（workbench-agent-identity-and-
-   * process-folds 2.1/2.2: one collapsed `<details class="process-fold">`
-   * per turn, summary `process · N`）.
+   * process-folds 2.1/2.2: one collapsed fold per turn, link label
+   * `process + 尾条目 title + 计数`）. 折叠体是懒渲染的（收起时不在 DOM）。
    */
   processFold(): Locator {
-    return this.page.locator('sebas-dashboard sebas-transcript-view details.process-fold')
+    return this.page.locator('sebas-dashboard sebas-transcript-view div.process-fold')
   }
 
   /**
@@ -178,7 +211,39 @@ export class FocusedSession {
    * structured `title`）.
    */
   processItems(): Locator {
-    return this.page.locator('sebas-dashboard sebas-transcript-view details.process-item')
+    return this.page.locator('sebas-dashboard sebas-transcript-view div.process-item')
+  }
+
+  /**
+   * 展开转写里所有收起的折叠（外层 process 折叠 + 二级条目）。折叠体**懒渲染**
+   * ——不展开就不在 DOM 里，所以任何「工具/结果文本可见」的断言都必须先展开。
+   */
+  async expandAllFolds(): Promise<void> {
+    const collapsed = this.page.locator(
+      'sebas-dashboard sebas-transcript-view button.fold-link[aria-expanded="false"]',
+    )
+    // 逐次点击（展开会往 DOM 里塞新的折叠），带上限防死循环。
+    for (let guard = 0; guard < 20; guard++) {
+      if ((await collapsed.count()) === 0) return
+      await collapsed.first().click()
+    }
+  }
+
+  /**
+   * 折叠体内文本的断言（工具结果等）：定稿重分组会把条目折回收起态，且折叠
+   * 体懒渲染——一次展开不足以把它留在 DOM，所以「展开 → 数一下 → 不够再
+   * 展开」轮询到出现为止。
+   */
+  async expectFoldedText(text: string, timeout = 20_000): Promise<void> {
+    await expect
+      .poll(
+        async () => {
+          await this.expandAllFolds()
+          return this.turnWith(text).count()
+        },
+        { timeout },
+      )
+      .toBeGreaterThan(0)
   }
 
   /**

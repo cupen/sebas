@@ -53,9 +53,11 @@ test.describe('工作台首屏', () => {
       await expect(rail.host.locator('.empty', { hasText: '尚未注册项目' })).toBeVisible()
       // Workbench header states the no-project truth.
       await expect(workbench.noProjectSelected).toBeVisible()
-      // Nothing focused → empty-stream stage with the rail-entry hint.
+      // Nothing focused → empty-stream stage with the rail-entry hint
+      // （polish-workbench-walkthrough-ux 已把提示改为操作者中文措辞）。
       await expect(workbench.emptyStream).toBeVisible()
-      await expect(workbench.emptyStream).toContainText('sidebar')
+      await expect(workbench.emptyStream).toContainText('未聚焦任何会话')
+      await expect(workbench.emptyStream).toContainText('从左侧项目树选择一个会话')
 
       // Reachability, honest form: core connected (no warning banner).
       await expect(workbench.reachabilityWarning).toBeHidden()
@@ -83,8 +85,12 @@ test.describe('工作台首屏', () => {
         .newSessionDialog()
         .locator('wa-option[value="native"]')
       await expect(nativeOption).toBeDisabled()
-      await expect(nativeOption).toContainText('native')
-      await expect(nativeOption).toContainText('unavailable')
+      // polish-workbench-walkthrough-ux 4.3：可见文案只给成因归类与补救入口
+      // （Settings → Models），实现标识移入 title；native 专项点名「未配置
+      // 模型凭据」。展示名走 catalog 的 display（native = "Native Kernel"）。
+      await expect(nativeOption).toContainText('Native Kernel')
+      await expect(nativeOption).toContainText('未配置模型凭据')
+      await expect(nativeOption).toContainText('Settings → Models')
 
       // 目录不可得（沙箱无 provider 目录）→ 显式说明，不渲染空下拉。
       await expect(

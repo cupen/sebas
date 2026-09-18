@@ -44,7 +44,7 @@ test.describe('会话管理', () => {
   ): Promise<void> {
     await expect(detail.host).toBeVisible()
     await expect(detail.userTurn(prompt)).toBeVisible({ timeout: 15_000 })
-    await expect(detail.statusBadge).toHaveAttribute('slug', 'done', { timeout: 15_000 })
+    await detail.expectStatus('done')
   }
 
   test.describe('多会话切换', () => {
@@ -76,7 +76,7 @@ test.describe('会话管理', () => {
       await expect
         .poll(async () => detail.bubbles().count(), { timeout: 20_000, intervals: [250] })
         .toBeGreaterThan(countA1)
-      await expect(detail.statusBadge).toHaveAttribute('slug', 'done', { timeout: 15_000 })
+      await detail.expectStatus('done')
       const lenAfterA = (await getSession(page.request, keyA)).detail!.entries.length
       const lenBBefore = (await getSession(page.request, keyB)).detail!.entries.length
 
@@ -95,7 +95,7 @@ test.describe('会话管理', () => {
       await expect
         .poll(async () => detail.bubbles().count(), { timeout: 20_000, intervals: [250] })
         .toBeGreaterThan(countB1)
-      await expect(detail.statusBadge).toHaveAttribute('slug', 'done', { timeout: 15_000 })
+      await detail.expectStatus('done')
       expect((await getSession(page.request, keyB)).detail!.entries.length).toBeGreaterThan(
         lenBBefore,
       )
@@ -163,6 +163,9 @@ test.describe('会话管理', () => {
       // entry (api.rs restore_session) — it does NOT resurrect the session.
       // The rail's restore stays on the workbench (the switch 404s silently —
       // the session is gone); no fabricated success, no dead deep link.
+      //
+      // polish-workbench-walkthrough-ux 2.1/2.2：归档行点击打开的是**只读
+      // 归档视图**，不再是即点即恢复——恢复是视图内的显式按钮 + 确认弹窗。
       await page.goto('/')
       await expect(rail.host).toBeVisible()
       await rail.expandHistory()
@@ -174,6 +177,16 @@ test.describe('会话管理', () => {
       // workbench stays up (workbench-conversation-view 3.1/3.4).
       await expect(rail.host).toBeVisible({ timeout: 10_000 })
       expect(page.url()).not.toContain('/sessions/')
+      const archivedView = page.locator('sebas-dashboard [data-testid="archived-view"]')
+      await expect(archivedView).toBeVisible({ timeout: 10_000 })
+      await archivedView.locator('[data-testid="archived-restore"]').click()
+      // wa-dialog 宿主在 top layer 读作 hidden——断言弹窗内的实际控件
+      // （与 pending-stack.spec 同款写法）。
+      const restoreConfirm = page.locator('sebas-dashboard [data-testid="restore-confirm"]')
+      await expect(restoreConfirm).toBeVisible({ timeout: 10_000 })
+      await restoreConfirm.click()
+      // 恢复后只读视图退场（archive-view-close）。
+      await expect(archivedView).toHaveCount(0, { timeout: 10_000 })
 
       // Archive list no longer carries the entry; the session stays gone from
       // the live list (it was closed at archive time, restore resurrects nothing).

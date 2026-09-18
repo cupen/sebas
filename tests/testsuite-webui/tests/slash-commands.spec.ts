@@ -121,7 +121,12 @@ test.describe('slash 命令面板（session-slash-commands）', () => {
           { timeout: 20_000 },
         )
         .toBe(true)
-      await expect(detail.statusBadge).toHaveAttribute('slug', 'done', { timeout: 20_000 })
+      await detail.expectStatus('done', 20000)
+      // 相位断言会展开项目行（= 同时选中项目，工作台随 rail-select 重绘）——
+      // 这一瞬气泡数可能读成 0；基线要等它落回再取。
+      await expect
+        .poll(async () => detail.bubbles().count(), { timeout: 10_000, intervals: [250] })
+        .toBeGreaterThan(0)
 
       // `/goal …` passthrough (3.3): whitespace keeps the palette closed, so
       // Enter submits directly and the RAW text renders as the operator's
@@ -129,8 +134,11 @@ test.describe('slash 命令面板（session-slash-commands）', () => {
       const bubblesBefore = await detail.bubbles().count()
       await detail.sendFollowUp('/goal some-condition')
       await expect(detail.userTurn('/goal some-condition')).toBeVisible({ timeout: 20_000 })
-      await expect(detail.bubbles()).toHaveCount(bubblesBefore + 2)
-      await expect(detail.statusBadge).toHaveAttribute('slug', 'done', { timeout: 20_000 })
+      // 回复气泡落盘耗时随负载波动——轮询到「+2」而不是一次 toHaveCount。
+      await expect
+        .poll(async () => detail.bubbles().count(), { timeout: 20_000, intervals: [250] })
+        .toBe(bubblesBefore + 2)
+      await detail.expectStatus('done', 20000)
 
       expect(collector.clean()).toEqual([])
     })

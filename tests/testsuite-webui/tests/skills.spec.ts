@@ -159,9 +159,12 @@ test.describe('Skills 仓', () => {
       const confirm = page.locator('sebas-settings-modal wa-dialog[label="Delete skill"]')
       const text = confirm.locator('[data-testid="skill-delete-text"]')
       await expect(text).toBeVisible()
-      await expect(text).toContainText('Delete skill')
+      // polish-workbench-walkthrough-ux 把正文换成操作者中文措辞：「从技能仓
+      // 删除 X？各 agent 技能目录里的副本保持不动——它们会在下次按 Sync 时被
+      // 清理。」（弹窗 label 与确认按钮仍是 Delete skill / Delete）
+      await expect(text).toContainText('从技能仓删除')
       await expect(text).toContainText('broken')
-      await expect(text).toContainText('cleaned up the next')
+      await expect(text).toContainText('保持不动')
       await expect(text).toContainText('Sync')
 
       await confirm.locator('wa-button').filter({ hasText: 'Delete' }).click()

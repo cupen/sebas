@@ -100,12 +100,10 @@ test.describe('审批卡片旅程', () => {
       // Card resolved; the transcript records the ALLOWED tool result and
       // the turn completes — all the way through the ACP child on the core.
       await expect(cards.all()).toHaveCount(0, { timeout: 20_000 })
-      await expect(detail.turnWith('perm done').first()).toBeVisible({
-        timeout: 20_000,
-      })
-      await expect(detail.statusBadge).toHaveAttribute('slug', 'done', {
-        timeout: 20_000,
-      })
+      // 工具结果文本住在 process 折叠里（默认收起 + 展开体懒渲染 + 定稿会
+      // 重分组）——轮询式展开到文本出现。
+      await detail.expectFoldedText('perm done')
+      await detail.expectStatus('done', 20000)
 
       expect(collector.clean()).toEqual([])
     })
@@ -119,12 +117,8 @@ test.describe('审批卡片旅程', () => {
       await cards.deny().click()
 
       await expect(cards.all()).toHaveCount(0, { timeout: 20_000 })
-      await expect(detail.turnWith('denied by fake').first()).toBeVisible({
-        timeout: 20_000,
-      })
-      await expect(detail.statusBadge).toHaveAttribute('slug', 'done', {
-        timeout: 20_000,
-      })
+      await detail.expectFoldedText('denied by fake')
+      await detail.expectStatus('done', 20000)
 
       expect(collector.clean()).toEqual([])
     })

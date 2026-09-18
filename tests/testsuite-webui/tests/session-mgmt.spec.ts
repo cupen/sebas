@@ -163,7 +163,7 @@ test.describe('会话管理', () => {
         timeout: 15_000,
       })
       await expect(detail.bubbles().filter({ hasText: 'world' }).first()).toBeVisible()
-      await expect(detail.statusBadge).toHaveAttribute('slug', 'done', { timeout: 15_000 })
+      await detail.expectStatus('done')
 
       // Retired /settings route canonically lands on the dashboard.
       await page.goto('/settings')

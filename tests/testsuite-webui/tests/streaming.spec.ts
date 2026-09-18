@@ -72,7 +72,7 @@ test.describe('agent 对话覆盖', () => {
       await expect(detail.userTurn('stream')).toBeVisible()
 
       // Final convergence: Done, honestly.
-      await expect(detail.statusBadge).toHaveAttribute('slug', 'done', { timeout: 15_000 })
+      await detail.expectStatus('done')
 
       expect(collector.clean()).toEqual([])
     })
