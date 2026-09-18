@@ -223,9 +223,7 @@ fn validate_user(user: &str) -> anyhow::Result<()> {
     if !user_exists(user) {
         return Err(exit_err(
             4,
-            format!(
-                "--user {user} does not exist on this system; create it first"
-            ),
+            format!("--user {user} does not exist on this system; create it first"),
         ));
     }
     Ok(())
@@ -515,7 +513,10 @@ mod tests {
     #[test]
     fn unit_runs_run_daemon_not_core() {
         let s = render_unit(std_inputs("cupen"));
-        assert!(s.contains("run --config"), "ExecStart must run the run (watchdog) entrypoint, not the bare core");
+        assert!(
+            s.contains("run --config"),
+            "ExecStart must run the run (watchdog) entrypoint, not the bare core"
+        );
         assert!(!s.contains(" core --config"), "must not run the bare core");
     }
 
@@ -526,7 +527,10 @@ mod tests {
         assert!(s.contains("ProtectSystem=full"));
         assert!(s.contains("ProtectHome=read-only"));
         assert!(s.contains("PrivateTmp=true"));
-        assert!(!s.contains("ProtectSystem=strict"), "self-upgrade needs /data writable");
+        assert!(
+            !s.contains("ProtectSystem=strict"),
+            "self-upgrade needs /data writable"
+        );
     }
 
     #[test]
@@ -539,7 +543,9 @@ mod tests {
         };
         let s = render_unit(inputs);
         // Both args wrapped in a single quoted token.
-        assert!(s.contains("ExecStart=\"/opt/my sebas/bin/sebas\" run --config \"/etc/sebas cfg/sebas.toml\""));
+        assert!(s.contains(
+            "ExecStart=\"/opt/my sebas/bin/sebas\" run --config \"/etc/sebas cfg/sebas.toml\""
+        ));
     }
 
     #[test]

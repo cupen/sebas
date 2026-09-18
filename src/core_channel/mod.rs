@@ -10,7 +10,9 @@ pub mod protocol;
 pub mod secret;
 pub mod server;
 
-pub use secret::{ChannelSecret, ChannelSecret as SecretSource, generate as generate_secret, write_secret_file};
+pub use secret::{
+    ChannelSecret, ChannelSecret as SecretSource, generate as generate_secret, write_secret_file,
+};
 pub use server::{default_socket_path, socket_path};
 
 #[cfg(test)]

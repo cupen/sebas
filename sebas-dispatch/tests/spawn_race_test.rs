@@ -195,7 +195,13 @@ async fn placeholder_first_message_spawns_with_pending_kind_and_model() {
     let key = web_key("zero-turn");
 
     let outcome = map
-        .begin_spawn_with(key.clone(), Some("opencode".into()), Some("m-free".into()), None, true)
+        .begin_spawn_with(
+            key.clone(),
+            Some("opencode".into()),
+            Some("m-free".into()),
+            None,
+            true,
+        )
         .await
         .unwrap();
     assert!(matches!(outcome, sebas_dispatch::state::BeginSpawn::Fresh));
@@ -216,9 +222,15 @@ async fn placeholder_first_message_spawns_with_pending_kind_and_model() {
     // 相 2：生产发射路径 —— 全新占位 + web_send_message（内部一次
     // route_text）必须发出 WebSpawn 且携带记住的 kind/model。
     let key2 = web_key("zero-turn-emit");
-    map.begin_spawn_with(key2.clone(), Some("opencode".into()), Some("m-free".into()), None, true)
-        .await
-        .unwrap();
+    map.begin_spawn_with(
+        key2.clone(),
+        Some("opencode".into()),
+        Some("m-free".into()),
+        None,
+        true,
+    )
+    .await
+    .unwrap();
     let _ = router.web_send_message(key2.clone(), "hello".into()).await;
     let out = tokio::time::timeout(Duration::from_millis(300), out_rx.recv())
         .await
@@ -289,7 +301,9 @@ async fn fail_spawn_surfaces_error_inline_and_keeps_session_visible() {
     let (router, _out_rx) = DispatchHandle::new(map.clone());
 
     // webui 建会话：占位插入（Created）。
-    let key = router.web_spawn("hello".into(), None, None, None, None).await;
+    let key = router
+        .web_spawn("hello".into(), None, None, None, None)
+        .await;
 
     // spawn 失败：dispatch 以失败原因回调。
     router.fail_spawn(&key, "agent binary missing").await;
@@ -363,9 +377,15 @@ async fn placeholder_marker_survives_dump_restore_round_trip() {
     let active_key = ChannelKey::feishu("oc_rt", None);
 
     // 占位（带 kind/model/project_dir 的完整形状）。
-    map.begin_spawn_with(ph.clone(), Some("codex".into()), Some("m1".into()), None, true)
-        .await
-        .unwrap();
+    map.begin_spawn_with(
+        ph.clone(),
+        Some("codex".into()),
+        Some("m1".into()),
+        None,
+        true,
+    )
+    .await
+    .unwrap();
     map.set_project_dir(&ph, Some("/tmp/wf".into())).await;
     // 普通 spawn-in-flight（首条消息已触发 spawn）——不入盘。
     map.route_text(in_flight.clone(), "go".into())
@@ -445,7 +465,7 @@ async fn web_spawn_with_kind_exposes_agent_kind_in_session_info() {
         .find(|i| i.key == key.reference)
         .expect("spawning session listed");
     assert_eq!(info.agent_kind.as_deref(), Some("opencode"));
-    assert_eq!(info.desired_mode.as_deref(), Some("edit"));
+    assert_eq!(info.desired_mode, "edit");
     assert_eq!(info.status, "spawning");
 
     // spawn 后不清除（SessionInfo.agent_kind 的既有语义）：激活后仍可展示。
@@ -460,7 +480,8 @@ async fn web_spawn_with_kind_exposes_agent_kind_in_session_info() {
 }
 
 /// 不带 kind 的 web_spawn 保持 agent_kind = None（= 配置的默认 kind，
-/// 展示层解析），mode 缺省时 desired_mode 亦为 None。
+/// 展示层解析）。（3.2，D5b）mode 缺省时 desired_mode 落缺省词 ask——
+/// desired 非空，wire 上永远有确定的控制面词。
 #[tokio::test]
 async fn web_spawn_without_kind_keeps_agent_kind_none() {
     let map = SessionMap::new();
@@ -476,7 +497,7 @@ async fn web_spawn_without_kind_keeps_agent_kind_none() {
         .find(|i| i.key == key.reference)
         .expect("spawning session listed");
     assert_eq!(info.agent_kind, None);
-    assert_eq!(info.desired_mode, None);
+    assert_eq!(info.desired_mode, sebas_dispatch::engine::ASK_MODE);
 }
 
 /// 真实 spawn 不是 0-turn 占位（D1）：prompt 已随 Out::WebSpawn 直达，
@@ -489,13 +510,7 @@ async fn web_spawn_followup_during_spawn_window_queues_not_double_spawns() {
     let (router, mut out_rx) = DispatchHandle::new(map.clone());
 
     let key = router
-        .web_spawn(
-            "hello".into(),
-            None,
-            Some("opencode".into()),
-            None,
-            None,
-        )
+        .web_spawn("hello".into(), None, Some("opencode".into()), None, None)
         .await;
 
     // 先消费掉 web_spawn 自身发出的首个 WebSpawn。

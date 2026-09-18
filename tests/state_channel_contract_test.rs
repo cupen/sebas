@@ -14,10 +14,10 @@
 use sebas::core_channel::client::CoreChannelBackend;
 use sebas::core_channel::protocol::{ChannelHandshake, CoreChannelRequest, CoreChannelResponse};
 use sebas::core_channel::server;
-use sebas_dispatch::state::SessionMap;
 use sebas_dispatch::DispatchHandle;
-use sebas_webui::session_backend::SessionRejection;
+use sebas_dispatch::state::SessionMap;
 use sebas_webui::SessionBackend;
+use sebas_webui::session_backend::SessionRejection;
 use std::collections::BTreeMap;
 use std::path::Path as StdPath;
 use std::sync::Arc;
@@ -74,10 +74,7 @@ async fn start_core(dir: &StdPath) -> TestCore {
 }
 
 /// Raw one-shot request helper (same shape as the lib tests').
-async fn raw_request(
-    path: &StdPath,
-    req: &CoreChannelRequest,
-) -> std::io::Result<Option<String>> {
+async fn raw_request(path: &StdPath, req: &CoreChannelRequest) -> std::io::Result<Option<String>> {
     let stream = sebas_ipc::connect(path).await?;
     let (r, mut w) = sebas_ipc::split(stream);
     let mut reader = BufReader::new(r);
@@ -161,7 +158,9 @@ impl sebas_dispatch::state_store::StateStoreEngine for FakeStateEngineImpl {
     }
     async fn add_project(&self, path: &str, name: &str, added_at: i64) -> Result<(), String> {
         let mut g = self.inner.projects.lock().unwrap();
-        if g.iter().any(|p| p.get("path").and_then(|v| v.as_str()) == Some(path)) {
+        if g.iter()
+            .any(|p| p.get("path").and_then(|v| v.as_str()) == Some(path))
+        {
             return Err(format!("add: project '{path}' 已存在"));
         }
         g.push(serde_json::json!({"path": path, "name": name, "added_at": added_at}));
@@ -436,7 +435,10 @@ async fn provider_mutation_rejects_unknown_field() {
         CoreChannelResponse::Rejected { rejection } => match rejection {
             SessionRejection::Unavailable { cause } => {
                 assert!(cause.contains("evil"), "cause names the provider: {cause}");
-                assert!(cause.contains("not_a_field"), "cause names the field: {cause}");
+                assert!(
+                    cause.contains("not_a_field"),
+                    "cause names the field: {cause}"
+                );
             }
             other => panic!("expected Unavailable rejection, got {other:?}"),
         },
@@ -571,7 +573,10 @@ async fn settings_defaults_mutation_requires_provider() {
 static PROVIDERS_STORE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// 本地 mock 上游：按场景回固定 `/models` 响应，并记录收到的 Authorization。
-async fn start_models_mock(status: u16, body: &'static str) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+async fn start_models_mock(
+    status: u16,
+    body: &'static str,
+) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
     let authz: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
     let authz_clone = authz.clone();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -583,7 +588,10 @@ async fn start_models_mock(status: u16, body: &'static str) -> (String, Arc<std:
             let mut buf = [0u8; 4096];
             let _ = s.read(&mut buf);
             let req = String::from_utf8_lossy(&buf).to_string();
-            if let Some(line) = req.lines().find(|l| l.to_ascii_lowercase().starts_with("authorization")) {
+            if let Some(line) = req
+                .lines()
+                .find(|l| l.to_ascii_lowercase().starts_with("authorization"))
+            {
                 authz_clone.lock().unwrap().push(line.to_string());
             }
             let resp = format!(
@@ -628,10 +636,15 @@ async fn fetch_models_op_returns_ids_and_injects_key_upstream() {
     let dir = tempfile::tempdir().unwrap();
     let core = start_core(dir.path()).await;
 
-    let resp = raw_request(&core.path, &CoreChannelRequest::FetchModels { provider: "mocko".into() })
-        .await
-        .unwrap()
-        .expect("answered");
+    let resp = raw_request(
+        &core.path,
+        &CoreChannelRequest::FetchModels {
+            provider: "mocko".into(),
+        },
+    )
+    .await
+    .unwrap()
+    .expect("answered");
     let resp: CoreChannelResponse = serde_json::from_str(&resp).unwrap();
     match resp {
         CoreChannelResponse::Models { provider, models } => {
@@ -643,7 +656,8 @@ async fn fetch_models_op_returns_ids_and_injects_key_upstream() {
     // 上游请求带 Bearer key；响应里绝无 key 材料。
     let last = authz.lock().unwrap().last().cloned().unwrap_or_default();
     assert_eq!(
-        last.split_once(':').map(|(h, v)| (h.trim().to_ascii_lowercase(), v.trim().to_string())),
+        last.split_once(':')
+            .map(|(h, v)| (h.trim().to_ascii_lowercase(), v.trim().to_string())),
         Some(("authorization".into(), "Bearer sk-upstream-key-42".into())),
         "resolved key must authenticate the upstream call"
     );
@@ -654,7 +668,10 @@ async fn fetch_models_op_returns_ids_and_injects_key_upstream() {
         .await
         .expect("trait-level seam delivers the same op");
     let wire = serde_json::to_string(&models).unwrap();
-    assert!(!wire.contains("sk-upstream-key-42"), "no key in ids: {wire}");
+    assert!(
+        !wire.contains("sk-upstream-key-42"),
+        "no key in ids: {wire}"
+    );
 }
 
 /// 1.2 验收「无 base url 回 typed rejection」：条目无任何槽位、也无 preset →
@@ -667,15 +684,23 @@ async fn fetch_models_op_rejects_provider_without_base_url() {
     let dir = tempfile::tempdir().unwrap();
     let core = start_core(dir.path()).await;
 
-    let resp = raw_request(&core.path, &CoreChannelRequest::FetchModels { provider: "urlless".into() })
-        .await
-        .unwrap()
-        .expect("answered");
+    let resp = raw_request(
+        &core.path,
+        &CoreChannelRequest::FetchModels {
+            provider: "urlless".into(),
+        },
+    )
+    .await
+    .unwrap()
+    .expect("answered");
     let resp: CoreChannelResponse = serde_json::from_str(&resp).unwrap();
     match resp {
         CoreChannelResponse::Rejected { rejection } => match rejection {
             SessionRejection::Unavailable { cause } => {
-                assert!(cause.contains("urlless"), "cause names the provider: {cause}");
+                assert!(
+                    cause.contains("urlless"),
+                    "cause names the provider: {cause}"
+                );
                 assert!(
                     cause.contains("base URL"),
                     "cause names the reason (no usable base url): {cause}"
@@ -716,7 +741,10 @@ async fn fetch_models_op_sanitizes_upstream_failure() {
         .await
         .expect_err("upstream 401 must be a typed failure");
     assert!(err.contains("401"), "cause names the status: {err}");
-    assert!(!err.contains("sk-upstream-key-99"), "no key material: {err}");
+    assert!(
+        !err.contains("sk-upstream-key-99"),
+        "no key material: {err}"
+    );
     assert!(
         !err.contains("invalid api key"),
         "no upstream body echo: {err}"
@@ -749,7 +777,8 @@ async fn fetch_models_op_persists_nothing() {
     let core = start_core(dir.path()).await;
     let backend = CoreChannelBackend::new(core.path.clone(), SECRET.into());
 
-    let before = serde_json::to_string(&backend.state_snapshot("providers").await.unwrap()).unwrap();
+    let before =
+        serde_json::to_string(&backend.state_snapshot("providers").await.unwrap()).unwrap();
     let saves_before = inner.save_calls.load(std::sync::atomic::Ordering::SeqCst);
 
     let models = backend

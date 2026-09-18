@@ -371,7 +371,12 @@ impl UserStore {
     }
 
     /// 创建用户（指定角色与初始密码，随机盐 + 默认迭代次数）。
-    pub fn create(&self, username: &str, password: &str, role: Role) -> Result<UserInfo, StoreError> {
+    pub fn create(
+        &self,
+        username: &str,
+        password: &str,
+        role: Role,
+    ) -> Result<UserInfo, StoreError> {
         self.create_with_iterations(username, password, role, self.default_iterations)
     }
 
@@ -500,10 +505,7 @@ impl UserStore {
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(StoreError::Sql)?;
             let target = fetch_record(&tx, user_id)?;
-            if target.role == Role::Root
-                && role != Role::Root
-                && enabled_root_count(&tx)? <= 1
-            {
+            if target.role == Role::Root && role != Role::Root && enabled_root_count(&tx)? <= 1 {
                 return Err(StoreError::LastRoot);
             }
             tx.execute(
@@ -523,10 +525,7 @@ impl UserStore {
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(StoreError::Sql)?;
             let target = fetch_record(&tx, user_id)?;
-            if !enabled
-                && target.role == Role::Root
-                && enabled_root_count(&tx)? <= 1
-            {
+            if !enabled && target.role == Role::Root && enabled_root_count(&tx)? <= 1 {
                 return Err(StoreError::LastRoot);
             }
             tx.execute(
@@ -781,10 +780,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = open_test_store(dir.path(), "lastroot.db");
         let root_id = store.setup_root("root", "password8").unwrap();
-        let admin_id = store
-            .create("admin", "password8", Role::Admin)
-            .unwrap()
-            .id;
+        let admin_id = store.create("admin", "password8", Role::Admin).unwrap().id;
 
         // 删除 / 禁用 / 降级 → LastRoot，root 保持原状。
         assert!(matches!(store.delete(root_id), Err(StoreError::LastRoot)));
@@ -835,10 +831,22 @@ mod tests {
         assert_eq!(users.len(), 2);
         for user in users {
             let json = serde_json::to_value(&user).unwrap();
-            let keys: Vec<&str> = json.as_object().unwrap().keys().map(String::as_str).collect();
+            let keys: Vec<&str> = json
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
             assert_eq!(
                 keys,
-                ["id", "username", "role", "enabled", "created_at_unix", "updated_at_unix"],
+                [
+                    "id",
+                    "username",
+                    "role",
+                    "enabled",
+                    "created_at_unix",
+                    "updated_at_unix"
+                ],
                 "list 字段集被改动：{json}"
             );
             let raw = serde_json::to_string(&user).unwrap();
@@ -871,14 +879,23 @@ mod tests {
         store.set_password(id, new_secret).unwrap();
         let raw = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).to_string();
         assert!(!raw.contains(secret), "旧密码明文也不应在库");
-        assert!(!raw.contains(new_secret), "auth.db 不得包含明文密码（改密）");
+        assert!(
+            !raw.contains(new_secret),
+            "auth.db 不得包含明文密码（改密）"
+        );
         let record = store.get(id).unwrap();
         assert!(!record.verify_password(secret));
         assert!(record.verify_password(new_secret));
 
         // 随机盐：同密码两次建户哈希不同。
-        let a = store.create("u1", "same-password", Role::Viewer).unwrap().id;
-        let b = store.create("u2", "same-password", Role::Viewer).unwrap().id;
+        let a = store
+            .create("u1", "same-password", Role::Viewer)
+            .unwrap()
+            .id;
+        let b = store
+            .create("u2", "same-password", Role::Viewer)
+            .unwrap()
+            .id;
         assert_ne!(store.get(a).unwrap().hash, store.get(b).unwrap().hash);
     }
 
@@ -896,10 +913,7 @@ mod tests {
         let record = store.get(info.id).unwrap();
         assert_eq!(record.username, "carol");
         assert!(record.verify_password("password8"));
-        assert_eq!(
-            store.get_by_username("carol").unwrap().unwrap().id,
-            info.id
-        );
+        assert_eq!(store.get_by_username("carol").unwrap().unwrap().id, info.id);
 
         // set_role。
         store.set_role(info.id, Role::Viewer).unwrap();

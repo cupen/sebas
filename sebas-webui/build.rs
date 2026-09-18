@@ -66,9 +66,8 @@ fn main() {
     ];
     let newest_input = newest_mtime(&inputs);
     let stale = marker.exists()
-        || newest_input.is_none_or(|newest| {
-            !index.exists() || mtime(&index).is_some_and(|t| t < newest)
-        });
+        || newest_input
+            .is_none_or(|newest| !index.exists() || mtime(&index).is_some_and(|t| t < newest));
 
     if stale && !build_frontend(&frontend, &dist) && !index.exists() {
         // No usable bundle and no toolchain (or the build failed): embed a
@@ -102,7 +101,14 @@ fn build_frontend(frontend: &Path, dist: &Path) -> bool {
         || mtime(&lock).is_some_and(|lock_t| mtime(&modules).is_none_or(|m_t| lock_t > m_t));
 
     let _ = fs::remove_dir_all(dist);
-    if need_install && !run(&pnpm, frontend, &["install", "--frozen-lockfile"], "pnpm install") {
+    if need_install
+        && !run(
+            &pnpm,
+            frontend,
+            &["install", "--frozen-lockfile"],
+            "pnpm install",
+        )
+    {
         return false;
     }
     run(&pnpm, frontend, &["build"], "pnpm build")
@@ -162,8 +168,7 @@ fn write_placeholder(dist: &Path) {
          frontend is built automatically.</p></body></html>\n",
     )
     .expect("write placeholder index.html");
-    fs::write(dist.join(".sebas-placeholder"), "placeholder\n")
-        .expect("write placeholder marker");
+    fs::write(dist.join(".sebas-placeholder"), "placeholder\n").expect("write placeholder marker");
 }
 
 /// Newest mtime across the given paths, recursing into directories.

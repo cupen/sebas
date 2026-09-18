@@ -1,11 +1,13 @@
-use sebas_dispatch::cards::ThinkingDisplay;
 use sebas_channels::ChannelKey;
-use sebas_dispatch::engine::{Out, DispatchHandle};
+use sebas_dispatch::cards::ThinkingDisplay;
+use sebas_dispatch::engine::{DispatchHandle, Out};
 use sebas_dispatch::settings::load_settings;
 use sebas_dispatch::state::SessionMap;
 use std::path::PathBuf;
 
-fn key() -> ChannelKey { ChannelKey::feishu("oc_test", None) }
+fn key() -> ChannelKey {
+    ChannelKey::feishu("oc_test", None)
+}
 
 async fn next_out(rx: &mut tokio::sync::mpsc::Receiver<Out>) -> Out {
     rx.recv().await.expect("expected Out")

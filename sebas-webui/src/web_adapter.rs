@@ -63,10 +63,11 @@ mod tests {
         assert!(registry.contains(&web));
         // Render is a documented no-op: web sessions have no channel card.
         let key = ChannelKey::web_new();
-        let rendered = registry
-            .get(&web)
-            .unwrap()
-            .render(&key, None, &ChannelCard::new("t", "blue"));
+        let rendered =
+            registry
+                .get(&web)
+                .unwrap()
+                .render(&key, None, &ChannelCard::new("t", "blue"));
         assert!(matches!(rendered, Ok(None)));
     }
 }

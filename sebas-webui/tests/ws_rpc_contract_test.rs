@@ -125,13 +125,27 @@ fn swapped_codec_tolerance_matrix_matches_the_json_implementation() {
 /// 只是搬运：params == 裸 JSON 剥掉 type。
 #[test]
 fn all_seven_events_travel_as_notifications_with_params_verbatim() {
+    // （session-parallel-liveness-and-unread-polish 2.1）session.created /
+    // updated 为五键相位帧（phase flatten 进 params）。
+    let phase = sebas_webui::events::SessionPhaseFrame {
+        status_slug: "working".into(),
+        turn_engaged: true,
+        msg_count: 2,
+        pending: Vec::new(),
+    };
     let events: Vec<WebUiEvent> = vec![
         WebUiEvent::SessionCreated {
             session_id: "oc_a".into(),
+            phase: sebas_webui::events::SessionPhaseFrame {
+                status_slug: "starting".into(),
+                turn_engaged: true,
+                msg_count: 0,
+                pending: Vec::new(),
+            },
         },
         WebUiEvent::SessionUpdated {
             session_id: "oc_a".into(),
-            status: "active".into(),
+            phase,
         },
         WebUiEvent::SessionRemoved {
             session_id: "oc_b".into(),

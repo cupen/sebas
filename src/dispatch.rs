@@ -9,8 +9,8 @@ use crate::session_boot::{
 };
 use sebas_acp::claude::manager::SessionManager;
 use sebas_channels::ChannelKey;
+use sebas_dispatch::engine::{DispatchHandle, Out};
 use sebas_router::config::RouterConfig;
-use sebas_dispatch::engine::{Out, DispatchHandle};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, info, warn};
@@ -38,6 +38,12 @@ pub(crate) async fn dispatch_out_without_feishu(
     out: Out,
 ) -> anyhow::Result<()> {
     match out {
+        // （session-parallel-liveness-and-unread-polish 1.1）spawn/resume 不再
+        // 在出站泵任务内同步 await——握手最长 startup_timeout，泵内等待会把
+        // 其他会话的 SendAcp/WebSpawn 串行在这一次握手后面（第二个会话的
+        // spawn 永远等第一个激活）。投递独立的 per-spawn 任务，泵立即 Ok(())
+        // 继续消费队列；任务内保持 spawn → activate/fail 串行（失败经
+        // fail_spawn 走既有事件通道）。
         Out::WebSpawn {
             key,
             prompt,
@@ -46,19 +52,26 @@ pub(crate) async fn dispatch_out_without_feishu(
             model,
             mode,
         } => {
-            handle_web_spawn(
-                cfg,
-                router,
-                mgr,
-                router_cfg,
-                key,
-                prompt,
-                project_dir,
-                kind,
-                model,
-                mode,
-            )
-            .await
+            let cfg = cfg.clone();
+            let router = router.clone();
+            let mgr = mgr.clone();
+            let router_cfg = router_cfg.cloned();
+            tokio::spawn(async move {
+                handle_web_spawn(
+                    &cfg,
+                    &router,
+                    &mgr,
+                    router_cfg.as_ref(),
+                    key,
+                    prompt,
+                    project_dir,
+                    kind,
+                    model,
+                    mode,
+                )
+                .await
+            });
+            Ok(())
         }
         Out::SpawnResume {
             key,
@@ -66,8 +79,23 @@ pub(crate) async fn dispatch_out_without_feishu(
             prompt,
             ..
         } => {
-            handle_spawn_resume_without_feishu(cfg, router, mgr, router_cfg, key, old_sid, prompt)
+            let cfg = cfg.clone();
+            let router = router.clone();
+            let mgr = mgr.clone();
+            let router_cfg = router_cfg.cloned();
+            tokio::spawn(async move {
+                handle_spawn_resume_without_feishu(
+                    &cfg,
+                    &router,
+                    &mgr,
+                    router_cfg.as_ref(),
+                    key,
+                    old_sid,
+                    prompt,
+                )
                 .await
+            });
+            Ok(())
         }
         Out::SendAcp { session_id, cmd } => Ok(mgr.send(&session_id, cmd).await?),
         other => {
@@ -134,9 +162,15 @@ async fn handle_web_spawn(
     // = 请求的控制面词汇；其它执行体不声称任何 mode 生效（effective 保持
     // None，与 desired 的差异如实可见）。
     if kind == "claude"
-        && mode.as_deref().map(mode_to_permission_flag).flatten().is_some()
+        && mode
+            .as_deref()
+            .map(mode_to_permission_flag)
+            .flatten()
+            .is_some()
     {
-        router.apply_mode_changed(session_id.as_str(), mode.as_deref()).await;
+        router
+            .apply_mode_changed(session_id.as_str(), mode.as_deref())
+            .await;
     }
     // Seed card state and wire the pump (no Feishu card operations).
     // 激活路径（空 prompt）不开轮：无 seed（卡片/transcript 的 prompt 条目
@@ -203,7 +237,7 @@ async fn handle_spawn_resume_without_feishu(
     // （add-agent-mode-selection）resume 读取映射里的 desired mode：子进程
     // 是新建的，`--permission-mode` 必须随 argv 重新下发，否则恢复出来的
     // 会话回退到 CLI 默认（映射字段随 state.json 持久化）。
-    let resume_mode = router.map.get(&key).await.and_then(|m| m.desired_mode.clone());
+    let resume_mode = router.map.get(&key).await.map(|m| m.desired_mode);
     let command = resume_command_with_mode(&kind, command, resume_mode.as_deref());
     let (session_id, pending, rx, resumed) = match acp_resume_and_activate(
         mgr,
@@ -245,7 +279,9 @@ async fn handle_spawn_resume_without_feishu(
             .flatten()
             .is_some()
     {
-        router.apply_mode_changed(session_id.as_str(), resume_mode.as_deref()).await;
+        router
+            .apply_mode_changed(session_id.as_str(), resume_mode.as_deref())
+            .await;
     }
     router.seed_card(session_id.clone(), prompt.clone()).await;
     let idle_timeout = idle_timeout_from(cfg, &kind);
@@ -265,6 +301,73 @@ async fn handle_spawn_resume_without_feishu(
 mod tests {
     use sebas_dispatch::commands::RouterAction;
 
+    /// （session-parallel-liveness-and-unread-polish 1.1/1.4）回归：出站泵
+    /// 不得被一个僵住的握手串行——`WebSpawn`/`SpawnResume` 指令投递独立
+    /// 任务后立即返回 Ok(())（fix 前：泵内同步 await，直到 startup_timeout
+    /// 才轮到下一条指令）。用 fake-claude `--hang-on-init`（初始化永不回
+    /// 答）+ 短 startup_timeout 构造「spawn 会僵住」的执行体，断言派发
+    /// 两条 WebSpawn 指令的总耗时远小于一个 timeout。
+    #[tokio::test]
+    async fn web_spawn_instruction_is_not_blocked_by_a_stalled_handshake() {
+        use sebas_acp::claude::manager::SessionManager;
+        use sebas_channels::ChannelKey;
+        use sebas_dispatch::engine::{DispatchHandle, Out};
+        use sebas_dispatch::state::SessionMap;
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        const STARTUP_TIMEOUT_SECS: u64 = 5;
+        let fake = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/debug")
+            .join(format!("fake-claude{}", std::env::consts::EXE_SUFFIX))
+            .to_string_lossy()
+            .to_string();
+        let cfg: crate::config::Config = toml::from_str(&format!(
+            r#"
+            [acp.agents.claude]
+            driver = "claude"
+            path = "{fake}"
+            args = ["--hang-on-init"]
+            startup_timeout_secs = {STARTUP_TIMEOUT_SECS}
+            sessions_dir = "/tmp/sebas-dispatch-test-sessions"
+            "#
+        ))
+        .expect("test config must parse");
+        let map = SessionMap::new();
+        let (router, _out_rx) = DispatchHandle::new(map);
+        let mgr = Arc::new(SessionManager::claude_only(Duration::from_secs(
+            STARTUP_TIMEOUT_SECS,
+        )));
+
+        let begin = Instant::now();
+        for _ in 0..2 {
+            super::dispatch_out_without_feishu(
+                &cfg,
+                &router,
+                &mgr,
+                None,
+                Out::WebSpawn {
+                    key: ChannelKey::web_new(),
+                    prompt: "hello".into(),
+                    project_dir: None,
+                    kind: Some("claude".into()),
+                    model: None,
+                    mode: None,
+                },
+            )
+            .await
+            .expect("dispatching a WebSpawn must not fail");
+        }
+        let elapsed = begin.elapsed();
+        // fix 前：两条串行 await 握手 → ≥ 2×STARTUP_TIMEOUT_SECS。fix 后：
+        // 仅投递任务，亚秒级返回。留足调度裕量仍远小于一个 timeout。
+        assert!(
+            elapsed < Duration::from_secs(STARTUP_TIMEOUT_SECS),
+            "dispatch must not wait for the handshake: took {elapsed:?} \
+             (>= {STARTUP_TIMEOUT_SECS}s means the pump is serialised on spawn)"
+        );
+    }
+
     /// （permission-mode-auto-gate 4.1）resume 装配点单测：映射的
     /// `desired_mode` 必须翻译成 spawn argv 末尾的 `--permission-mode` 对。
     /// spec 场景「resume re-issues the session mode」的 argv 半边（driver
@@ -272,13 +375,20 @@ mod tests {
     /// sebas-acp 的 resume 集成测试锁定）。
     #[test]
     fn resume_command_carries_desired_mode_as_permission_mode_flag() {
-        let base = vec!["claude".to_string(), "--model".to_string(), "sonnet".to_string()];
+        let base = vec![
+            "claude".to_string(),
+            "--model".to_string(),
+            "sonnet".to_string(),
+        ];
         // desired_mode=auto（及 allow，同档）→ bypassPermissions 进 argv。
         for mode in ["auto", "allow"] {
             let argv = super::resume_command_with_mode("claude", base.clone(), Some(mode));
             assert_eq!(
                 argv[argv.len() - 2..],
-                ["--permission-mode".to_string(), "bypassPermissions".to_string()],
+                [
+                    "--permission-mode".to_string(),
+                    "bypassPermissions".to_string()
+                ],
                 "desired_mode={mode} must re-issue bypassPermissions on resume argv"
             );
         }

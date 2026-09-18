@@ -7,7 +7,7 @@
 //! routes survive deep links and reloads.
 
 use axum::extract::Path;
-use axum::http::{header, StatusCode};
+use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use rust_embed::RustEmbed;
 
@@ -28,8 +28,10 @@ fn lookup(path: &str) -> Option<Response> {
 pub async fn asset(Path(path): Path<String>) -> Response {
     match lookup(&format!("assets/{path}")) {
         Some(mut resp) => {
-            resp.headers_mut()
-                .insert(header::CACHE_CONTROL, "public, max-age=31536000, immutable".parse().unwrap());
+            resp.headers_mut().insert(
+                header::CACHE_CONTROL,
+                "public, max-age=31536000, immutable".parse().unwrap(),
+            );
             resp
         }
         None => (StatusCode::NOT_FOUND, "asset not found").into_response(),

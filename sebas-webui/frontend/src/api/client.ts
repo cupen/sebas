@@ -124,10 +124,21 @@ export interface SessionRow {
   available_commands?: AvailableCommandInfo[]
   /**
    * （fix-pending-queue-liveness 2.3）「回合占用」的引擎事实（WORKING ∨
-   * 泊车 ∨ spawn 窗口）。只在 true 时上 wire：键缺省 = 旧 core 组合，消费
-   * 方回退 `status_slug === 'working'` 判定。
+   * 泊车 ∨ spawn 窗口）。（session-parallel-liveness-and-unread-polish 2.1，
+   * D2）每帧/每行必带（无「只在 true 时上 wire」的兼容保留），消费方不再
+   * 做 `status_slug === 'working'` 字符串回退。
    */
-  turn_engaged?: boolean
+  turn_engaged: boolean
+  /**
+   * （session-parallel-liveness-and-unread-polish 1.3）spawn 失败原因原文。
+   * 缺省/null = 非 spawn-failed 会话；失败会话行就地呈现原因。
+   */
+  spawn_failure_reason?: string | null
+  /**
+   * （3.2，D5b）操作者期望的 mode（控制面词汇）。非空 `string`，缺省
+   * `'ask'`——wire/内存/UI 四层同一份字符串，无 null 路径。
+   */
+  desired_mode: string
 }
 
 export interface SessionSummary {
@@ -158,13 +169,20 @@ export interface SessionSummary {
   available_commands?: AvailableCommandInfo[]
   /**
    * （fix-pending-queue-liveness 2.3）「回合占用」的引擎事实（WORKING ∨
-   * 泊车 ∨ spawn 窗口）。只在 true 时上 wire：键缺省 = 旧 core 组合，消费
-   * 方回退 `status_slug === 'working'` 判定。
+   * 泊车 ∨ spawn 窗口）。（2.1，D2）每行必带，无字符串回退。
    */
   turn_engaged?: boolean
   // （fix-webui-streaming-liveness 3.3，D3 BREAKING）`entries` 已随 summary
   // 拆分退役：聚焦会话正文一律走 detail 游标路径
   // （`/api/sessions/{key}?entries_after=<n>`）。
+  /**
+   * （3.2，D5b）操作者期望的 mode（控制面词汇）。非空 `string`，缺省
+   * `'ask'`；detail/行同形状真源。
+   *
+   * summary 投影按旧 core 兼容只在有值时透出（同 `turn_engaged`），消费端
+   * 一律带 `?? 'ask'` 回退。
+   */
+  desired_mode?: string
 }
 
 export interface CardConfig {
@@ -331,8 +349,11 @@ export interface SessionDetail {
   pending: PendingSubmission[]
   /** （add-remote-execution-node 8.x）远端节点/mode/悬空审批呈现；null = 本机。 */
   remote?: RemoteSessionView | null
-  /** 操作者期望的 mode（add-agent-mode-selection，控制面词汇）；null = agent 默认。 */
-  desired_mode?: string | null
+  /**
+   * 操作者期望的 mode（add-agent-mode-selection，控制面词汇）。（3.2，D5b）
+   * 非空 `string`，缺省 `'ask'`；composer 真源渲染，无空态选择器。
+   */
+  desired_mode: string
   /** 执行体回报的实际生效 mode；null = 未声称生效（与 desired 差异如实可见）。 */
   effective_mode?: string | null
   /**
@@ -342,10 +363,15 @@ export interface SessionDetail {
   available_commands?: AvailableCommandInfo[]
   /**
    * （fix-pending-queue-liveness 2.3）「回合占用」的引擎事实（WORKING ∨
-   * 泊车 ∨ spawn 窗口）。只在 true 时上 wire：键缺省 = 旧 core 组合，消费
-   * 方回退 `status_slug === 'working'` 判定。
+   * 泊车 ∨ spawn 窗口）。（2.1，D2）每响应必带，无字符串回退。
    */
-  turn_engaged?: boolean
+  turn_engaged: boolean
+  /**
+   * （session-parallel-liveness-and-unread-polish 1.3）spawn 失败原因原文
+   * （与列表行同形状）。缺省/null = 非 spawn-failed；composer 就地呈现
+   * 原因与重试入口。
+   */
+  spawn_failure_reason?: string | null
 }
 
 /**

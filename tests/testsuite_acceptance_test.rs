@@ -602,16 +602,14 @@ async fn wait_bootstrap_token(sb: &Sandbox) -> String {
             let log = log.clone();
             Box::pin(async move {
                 let text = std::fs::read_to_string(&log).ok()?;
-                text.split("有效）：")
-                    .nth(1)
-                    .and_then(|rest| {
-                        let token: String = rest
-                            .trim_start()
-                            .chars()
-                            .take_while(|c| c.is_ascii_hexdigit())
-                            .collect();
-                        (token.len() == 64).then_some(token)
-                    })
+                text.split("有效）：").nth(1).and_then(|rest| {
+                    let token: String = rest
+                        .trim_start()
+                        .chars()
+                        .take_while(|c| c.is_ascii_hexdigit())
+                        .collect();
+                    (token.len() == 64).then_some(token)
+                })
             })
         },
     )
@@ -634,7 +632,14 @@ async fn wait_node_status(cli: &reqwest::Client, sb: &Sandbox, node_id: &str, wa
             let want = want_s.clone();
             let node = node_s.clone();
             Box::pin(async move {
-                let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+                let v = cli
+                    .get(&url)
+                    .send()
+                    .await
+                    .ok()?
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()?;
                 let nodes = v.get("nodes")?.as_array()?.clone();
                 let found = nodes
                     .iter()
@@ -665,7 +670,14 @@ async fn wait_session_row(
         let url = url.clone();
         let pred = pred.clone();
         Box::pin(async move {
-            let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+            let v = cli
+                .get(&url)
+                .send()
+                .await
+                .ok()?
+                .json::<serde_json::Value>()
+                .await
+                .ok()?;
             v.get("recent_sessions")?
                 .as_array()?
                 .iter()
@@ -761,7 +773,8 @@ async fn remote_node_workbench_journey() {
         serde_json::json!({ "prompt": "warmup", "agent": "echo", "project_id": project_id }),
     )
     .await;
-    let expect_pid = sebas_webui::projects::project_id_for_on("itest-node", &node_work.to_string_lossy());
+    let expect_pid =
+        sebas_webui::projects::project_id_for_on("itest-node", &node_work.to_string_lossy());
     let key_for_row = key.clone();
     let row = wait_session_row(&cli, &sb, "远端会话行带节点与项目", move |r| {
         r["encoded_key"].as_str() == Some(key_for_row.as_str())
@@ -815,26 +828,39 @@ async fn remote_node_workbench_journey() {
     wait_node_status(&cli, &sb, "itest-node", "offline").await;
 
     let key_for_offline = key.clone();
-    let offline_row = wait_session_row(&cli, &sb, "远端会话行标出节点离线与成因", move |r| {
-        r["encoded_key"].as_str() == Some(key_for_offline.as_str())
-            && r["remote"]["node_status"].as_str() == Some("offline")
-    })
+    let offline_row = wait_session_row(
+        &cli,
+        &sb,
+        "远端会话行标出节点离线与成因",
+        move |r| {
+            r["encoded_key"].as_str() == Some(key_for_offline.as_str())
+                && r["remote"]["node_status"].as_str() == Some("offline")
+        },
+    )
     .await;
     assert!(
-        offline_row["remote"]["node_cause"].as_str().is_some_and(|c| !c.is_empty()),
+        offline_row["remote"]["node_cause"]
+            .as_str()
+            .is_some_and(|c| !c.is_empty()),
         "离线必须给出成因，不能只写『不可用』: {offline_row}"
     );
 
     // 远端项目的"可用"等于节点在线（主控不做本地 stat）。
     let branch = cli
-        .get(format!("{}/api/projects/{project_id}/branch", sb.webui_url()))
+        .get(format!(
+            "{}/api/projects/{project_id}/branch",
+            sb.webui_url()
+        ))
         .send()
         .await
         .expect("branch")
         .json::<serde_json::Value>()
         .await
         .expect("branch json");
-    assert_eq!(branch["accessible"], false, "节点离线 ⇒ 项目不可用: {branch}");
+    assert_eq!(
+        branch["accessible"], false,
+        "节点离线 ⇒ 项目不可用: {branch}"
+    );
     assert_eq!(branch["node_id"], "itest-node");
 
     // composer 门禁的服务端对应行为：提交被如实拒绝，且点名节点与原因。
@@ -861,7 +887,6 @@ async fn remote_node_workbench_journey() {
     core.kill().await.ok();
     webui.kill().await.ok();
 }
-
 
 /// （add-agent-mode-selection）远端节点 mode 旅程（真 sebas-node + EchoBody，
 /// 零真模型调用）：
@@ -921,7 +946,10 @@ async fn remote_node_mode_journey() {
             && r["remote"]["desired_mode"].as_str() == Some("allow")
     })
     .await;
-    assert_eq!(row["remote"]["node_id"], "itest-node", "会话归属节点: {row}");
+    assert_eq!(
+        row["remote"]["node_id"], "itest-node",
+        "会话归属节点: {row}"
+    );
 
     // 2) allow 下受门控动作直接执行：`run:` 投递成功且**不产生**悬空审批
     //    （ask 下同输入会停在 waiting——见 remote_node_workbench_journey）。

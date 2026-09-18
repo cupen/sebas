@@ -306,10 +306,7 @@ fn build_router_full(
             "/api/providers/{name}",
             axum::routing::put(routes::provider_update).delete(routes::provider_delete),
         )
-        .route(
-            "/api/providers/{name}/probe",
-            post(routes::provider_probe),
-        )
+        .route("/api/providers/{name}/probe", post(routes::provider_probe))
         .route("/api/model-aliases", post(routes::alias_create))
         .route(
             "/api/model-aliases/{alias}",
@@ -1246,9 +1243,9 @@ mod auth_guard_tests {
             .header("content-type", "application/json")
             .header("host", "127.0.0.1:12345")
             .extension(ConnectInfo(test_addr()))
-            .body(Body::from(
-                format!(r#"{{"username":"{username}","password":"{password}"}}"#),
-            ))
+            .body(Body::from(format!(
+                r#"{{"username":"{username}","password":"{password}"}}"#
+            )))
             .unwrap();
         let resp = app.clone().oneshot(login_req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK, "login as {username}");
@@ -1319,15 +1316,8 @@ mod auth_guard_tests {
         let alice = login_cookie(&app, "alice", "password8").await;
 
         for (who, cookie) in [("member", &bob), ("admin", &ada)] {
-            let (status, body) = req(
-                app.clone(),
-                "GET",
-                "/api/users",
-                Some(cookie),
-                None,
-                None,
-            )
-            .await;
+            let (status, body) =
+                req(app.clone(), "GET", "/api/users", Some(cookie), None, None).await;
             assert_eq!(status, StatusCode::FORBIDDEN, "{who} 列表必须 403: {body}");
             let (status, body) = req(
                 app.clone(),
@@ -1437,7 +1427,11 @@ mod auth_guard_tests {
 
         // viewer 读（列表）：认证即可，与 provider 管理面读同档。
         let (status, body) = req(app.clone(), "GET", "/api/skills", Some(&vic), None, None).await;
-        assert_eq!(status, StatusCode::OK, "viewer 读 skills 不得被角色拦: {body}");
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "viewer 读 skills 不得被角色拦: {body}"
+        );
 
         // member 写（删 / sync）：穿过角色执法到达 handler。
         let (status, body) = req(
@@ -1491,7 +1485,11 @@ mod auth_guard_tests {
         auth.user_store().unwrap().set_enabled(uid, false).unwrap();
 
         let (status, _) = req(app, "GET", "/api/summary", Some(&bob), None, None).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED, "禁用用户的既有会话必须 401");
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "禁用用户的既有会话必须 401"
+        );
     }
 }
 
@@ -1597,15 +1595,11 @@ mod workspace_root_tests {
             let dir = t.allowed.path().join("proj");
             std::fs::create_dir_all(&dir).unwrap();
             // 回显的是 canonicalize_plain 的普通形（Windows 无 \\?\ 前缀）。
-            let canonical =
-                crate::fs::canonicalize_plain(&dir).expect("canonicalize proj dir");
+            let canonical = crate::fs::canonicalize_plain(&dir).expect("canonicalize proj dir");
             let body = serde_json::json!({ "path": dir.to_str().unwrap() });
             let (status, resp) = req(app, "POST", "/api/projects", Some(body.to_string())).await;
             assert_eq!(status, StatusCode::CREATED, "resp: {resp}");
-            assert_eq!(
-                resp["path"].as_str(),
-                Some(canonical.as_str())
-            );
+            assert_eq!(resp["path"].as_str(), Some(canonical.as_str()));
         })
         .await;
     }
@@ -1656,8 +1650,8 @@ mod workspace_root_tests {
                 t.outside.path().to_str().unwrap(),
             )
             .expect("seed legacy out-of-scope entry");
-            let remote = crate::projects::add_on("dev-box", "/srv/repo")
-                .expect("seed remote entry");
+            let remote =
+                crate::projects::add_on("dev-box", "/srv/repo").expect("seed remote entry");
 
             let (_, list) = req(app, "GET", "/api/projects", None).await;
             let ids: Vec<&str> = list["projects"]
@@ -1701,13 +1695,14 @@ mod workspace_root_tests {
             let projects = list["projects"].as_array().unwrap();
             assert!(
                 projects.iter().all(|p| {
-                    p["node_id"].as_str().unwrap_or(crate::projects::LOCAL_NODE_ID)
+                    p["node_id"]
+                        .as_str()
+                        .unwrap_or(crate::projects::LOCAL_NODE_ID)
                         != crate::projects::LOCAL_NODE_ID
                 }),
                 "root 不可解析时本机项目必须全部隐藏: {list}"
             );
-            let ids: Vec<&str> =
-                projects.iter().filter_map(|p| p["id"].as_str()).collect();
+            let ids: Vec<&str> = projects.iter().filter_map(|p| p["id"].as_str()).collect();
             assert_eq!(ids, [remote.id.as_str()], "只剩远端项目: {ids:?}");
         })
         .await;
@@ -1715,9 +1710,7 @@ mod workspace_root_tests {
 
     // ── 2.3 会话面执法 ────────────────────────────────────────────────────
 
-    fn app_and_backend_with_workspace_root(
-        root: std::path::PathBuf,
-    ) -> (Router, Arc<FakeBackend>) {
+    fn app_and_backend_with_workspace_root(root: std::path::PathBuf) -> (Router, Arc<FakeBackend>) {
         let backend = Arc::new(FakeBackend::new());
         let app = build_router_with_workspace_root(
             backend.clone(),
@@ -1748,16 +1741,63 @@ mod workspace_root_tests {
             backend: None,
             pending: Vec::new(),
             remote: None,
-            desired_mode: None,
+            desired_mode: sebas_dispatch::engine::ask_mode(),
             effective_mode: None,
             msg_count: 0,
             available_commands: Vec::new(),
             turn_engaged: false,
+            spawn_failure_reason: None,
+            parked_approvals: 0,
         }
     }
 
     fn enc_key(reference: &str) -> String {
         urlencoding::encode(&format!("web\0{reference}")).into_owned()
+    }
+
+    /// （session-parallel-liveness-and-unread-polish 1.3）spawn 失败 wire 透传：
+    /// 失败会话行（/api/sessions）与详情（/api/sessions/{key}）都携带失败态
+    /// （status_slug = failed）与原因原文（spawn_failure_reason）——操作者在
+    /// 列表/详情就地看到「为什么失败」，不再滞留成永远排队的幽灵（
+    /// session-lifecycle delta「failed spawn names the cause」的投影半边）。
+    #[tokio::test]
+    async fn spawn_failed_session_row_and_detail_carry_the_reason() {
+        let t = two_trees();
+        let (app, backend) = app_and_backend_with_workspace_root(t.allowed.path().to_path_buf());
+        let mut failed = local_session("web-failed-1", None);
+        failed.status = "spawn-failed".into();
+        failed.spawn_failure_reason = Some("agent binary not found: claude-fake".into());
+        backend.set_sessions(vec![failed]).await;
+        let key = enc_key("web-failed-1");
+
+        // 列表行：slug 投影为 failed，原因随行可见。
+        let (_, list) = req(app.clone(), "GET", "/api/sessions", None).await;
+        let row = &list["recent_sessions"][0];
+        assert_eq!(row["status_slug"], "failed", "row: {row}");
+        assert_eq!(
+            row["spawn_failure_reason"], "agent binary not found: claude-fake",
+            "row must name the cause: {row}"
+        );
+
+        // 详情：同一份原因原文透传（composer 就地呈现的数据源）。
+        let (_, detail) = req(app, "GET", &format!("/api/sessions/{key}"), None).await;
+        assert_eq!(detail["status_slug"], "failed", "detail: {detail}");
+        assert_eq!(
+            detail["spawn_failure_reason"], "agent binary not found: claude-fake",
+            "detail must name the cause: {detail}"
+        );
+
+        // 非失败会话不得携带该键（skip_serializing_if：wire 干净）。
+        let (app, backend) = app_and_backend_with_workspace_root(t.allowed.path().to_path_buf());
+        backend
+            .set_sessions(vec![local_session("web-ok", None)])
+            .await;
+        let (_, list) = req(app, "GET", "/api/sessions", None).await;
+        let row = &list["recent_sessions"][0];
+        assert!(
+            row.get("spawn_failure_reason").is_none(),
+            "healthy row must not carry the key: {row}"
+        );
     }
 
     #[tokio::test]
@@ -1772,13 +1812,21 @@ mod workspace_root_tests {
 
         // detail / message / switch 一律 400 typed 拒绝，文案点名越界。
         let cases = [
-            (axum::http::Method::GET, format!("/api/sessions/{key}"), None),
+            (
+                axum::http::Method::GET,
+                format!("/api/sessions/{key}"),
+                None,
+            ),
             (
                 axum::http::Method::POST,
                 format!("/api/sessions/{key}/message"),
                 Some(r#"{"message":"hi"}"#.to_string()),
             ),
-            (axum::http::Method::POST, format!("/api/sessions/{key}/switch"), None),
+            (
+                axum::http::Method::POST,
+                format!("/api/sessions/{key}/switch"),
+                None,
+            ),
         ];
         for (method, uri, body) in cases {
             let (status, resp) = req(app.clone(), method.as_str(), &uri, body).await;
@@ -1788,7 +1836,10 @@ mod workspace_root_tests {
         }
 
         // switch 被拒后 focus 指针不动（拒绝不留痕迹）。
-        assert!(backend.focused().await.is_none(), "拒绝的 switch 不得改 focus");
+        assert!(
+            backend.focused().await.is_none(),
+            "拒绝的 switch 不得改 focus"
+        );
     }
 
     #[tokio::test]
@@ -1802,7 +1853,7 @@ mod workspace_root_tests {
             node_id: "dev-box".into(),
             node_status: "online".into(),
             node_cause: None,
-            desired_mode: None,
+            desired_mode: Some(sebas_dispatch::engine::ask_mode()),
             effective_mode: None,
             parked_approvals: 0,
             desired_provider: None,
@@ -1815,7 +1866,13 @@ mod workspace_root_tests {
 
         for reference in ["inbox", "rem"] {
             let key = enc_key(reference);
-            let (status, resp) = req(app.clone(), axum::http::Method::GET.as_str(), &format!("/api/sessions/{key}"), None).await;
+            let (status, resp) = req(
+                app.clone(),
+                axum::http::Method::GET.as_str(),
+                &format!("/api/sessions/{key}"),
+                None,
+            )
+            .await;
             assert_eq!(status, StatusCode::OK, "{reference}: {resp}");
             let (status, _) = req(
                 app.clone(),
@@ -1902,7 +1959,10 @@ mod workspace_root_tests {
                 req(app.clone(), "POST", "/api/sessions", Some(body.to_string())).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{resp}");
             assert!(
-                resp["error"].as_str().unwrap_or_default().contains("超出允许范围"),
+                resp["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("超出允许范围"),
                 "{resp}"
             );
             assert!(
@@ -1913,14 +1973,11 @@ mod workspace_root_tests {
             // 反例：界内项目照常创建 0-turn 占位。
             let dir = t.allowed.path().join("in-scope");
             std::fs::create_dir_all(&dir).unwrap();
-            let inside = crate::projects::add_on(
-                crate::projects::LOCAL_NODE_ID,
-                dir.to_str().unwrap(),
-            )
-            .unwrap();
+            let inside =
+                crate::projects::add_on(crate::projects::LOCAL_NODE_ID, dir.to_str().unwrap())
+                    .unwrap();
             let body = serde_json::json!({ "project_id": inside.id, "agent": "claude" });
-            let (status, resp) =
-                req(app, "POST", "/api/sessions", Some(body.to_string())).await;
+            let (status, resp) = req(app, "POST", "/api/sessions", Some(body.to_string())).await;
             assert_eq!(status, StatusCode::CREATED, "{resp}");
         })
         .await;
@@ -1935,11 +1992,9 @@ mod workspace_root_tests {
             let inside = t.allowed.path().join("repo");
             std::fs::create_dir_all(inside.join(".git")).unwrap();
             std::fs::write(inside.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
-            let in_scope = crate::projects::add_on(
-                crate::projects::LOCAL_NODE_ID,
-                inside.to_str().unwrap(),
-            )
-            .unwrap();
+            let in_scope =
+                crate::projects::add_on(crate::projects::LOCAL_NODE_ID, inside.to_str().unwrap())
+                    .unwrap();
             // 越界遗留项目：目录真实存在，但探测必须按不可达处理（不暴露存在性）。
             let out_scope = crate::projects::add_on(
                 crate::projects::LOCAL_NODE_ID,
@@ -1956,10 +2011,7 @@ mod workspace_root_tests {
             assert_eq!(body["accessible"], false, "越界项目按不可达处理: {body}");
             assert_eq!(body["branch"], serde_json::Value::Null, "{body}");
 
-            let uri = format!(
-                "/api/projects/{}/branch",
-                urlencoding::encode(&in_scope.id)
-            );
+            let uri = format!("/api/projects/{}/branch", urlencoding::encode(&in_scope.id));
             let (status, body) = req(app, "GET", &uri, None).await;
             assert_eq!(status, StatusCode::OK, "{body}");
             assert_eq!(body["accessible"], true, "{body}");
@@ -2162,7 +2214,8 @@ mod system_dir_denylist_tests {
         with_registry_env(|| async {
             let app = app_with_workspace_root(std::path::PathBuf::from("/"));
             let body = serde_json::json!({ "path": "/usr" });
-            let (status, resp) = req(app.clone(), "POST", "/api/projects", Some(body.to_string())).await;
+            let (status, resp) =
+                req(app.clone(), "POST", "/api/projects", Some(body.to_string())).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "resp: {resp}");
             let msg = resp["error"].as_str().unwrap_or_default();
             assert!(msg.contains("系统目录不可注册"), "got: {msg}");
@@ -2171,7 +2224,11 @@ mod system_dir_denylist_tests {
             let legit = tempfile::tempdir().unwrap();
             let body = serde_json::json!({ "path": legit.path().to_str().unwrap() });
             let (status, _) = req(app, "POST", "/api/projects", Some(body.to_string())).await;
-            assert_eq!(status, StatusCode::CREATED, "subtree of /tmp registers fine");
+            assert_eq!(
+                status,
+                StatusCode::CREATED,
+                "subtree of /tmp registers fine"
+            );
         })
         .await;
     }
@@ -2187,7 +2244,10 @@ mod system_dir_denylist_tests {
         let (status, resp) = req(app, "POST", "/api/projects", Some(body.to_string())).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let msg = resp["error"].as_str().unwrap_or_default();
-        assert!(msg.contains("超出允许范围"), "containment first, got: {msg}");
+        assert!(
+            msg.contains("超出允许范围"),
+            "containment first, got: {msg}"
+        );
     }
 
     /// 2.1/1.3 联动：browse-dirs 树内隐藏——root=`/` 时顶层条目不含名单
@@ -2264,4 +2324,3 @@ mod system_dir_denylist_tests {
         assert_eq!(status2, StatusCode::OK, "echoed root must round-trip");
     }
 }
-

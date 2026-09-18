@@ -173,8 +173,10 @@ async fn api_router_endpoint_is_retired() {
 
     // 旧 /router/api/* 命名空间同样退役：GET 走 fallback 404；POST 不落入
     // mutation 子 router（守卫的 405/403 不该再出现），也不落 RBAC 豁免分支。
-    for (method, uri) in [("GET", "/router/api/providers"), ("POST", "/router/api/providers")]
-    {
+    for (method, uri) in [
+        ("GET", "/router/api/providers"),
+        ("POST", "/router/api/providers"),
+    ] {
         let resp = app
             .clone()
             .oneshot(
@@ -386,8 +388,7 @@ async fn provider_probe_fetches_models_without_persisting() {
 
     let before = serde_json::to_string(&mem.state.lock().unwrap().clone()).unwrap();
 
-    let (status, body) =
-        json_request(&app, "POST", "/api/providers/mocko/probe", None).await;
+    let (status, body) = json_request(&app, "POST", "/api/providers/mocko/probe", None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["provider"], "mocko");
@@ -417,8 +418,7 @@ async fn provider_probe_fetches_models_without_persisting() {
 async fn provider_probe_unknown_provider_answers_404() {
     let _g = reset_store().await;
     let (app, _mem) = app_with_core_store().await;
-    let (status, body) =
-        json_request(&app, "POST", "/api/providers/ghost/probe", None).await;
+    let (status, body) = json_request(&app, "POST", "/api/providers/ghost/probe", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert!(body.contains("不存在"), "{body}");
 }
@@ -437,8 +437,7 @@ async fn provider_probe_without_base_url_answers_400() {
     .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
 
-    let (status, body) =
-        json_request(&app, "POST", "/api/providers/urlless/probe", None).await;
+    let (status, body) = json_request(&app, "POST", "/api/providers/urlless/probe", None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(body.contains("base URL"), "{body}");
 }
@@ -448,8 +447,7 @@ async fn provider_probe_without_base_url_answers_400() {
 async fn provider_probe_unreachable_core_answers_503() {
     let app = app_with_unreachable_core().await;
     let _g = ENV_LOCK.lock().await;
-    let (status, body) =
-        json_request(&app, "POST", "/api/providers/alpha/probe", None).await;
+    let (status, body) = json_request(&app, "POST", "/api/providers/alpha/probe", None).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
 }
 
@@ -581,8 +579,7 @@ impl sebas_webui::admin::AdminAdapter for RecordingAdapter {
         service: &str,
         desired: &str,
         force: bool,
-    ) -> Result<sebas_webui::admin::AdminMutationResult, sebas_webui::admin::AdminActionError>
-    {
+    ) -> Result<sebas_webui::admin::AdminMutationResult, sebas_webui::admin::AdminActionError> {
         self.seen_force.lock().unwrap().push(force);
         if let Some(count) = self.reject_count.filter(|_| !force) {
             return Err(sebas_webui::admin::AdminActionError {
@@ -618,13 +615,8 @@ async fn admin_app_with(adapter: Arc<RecordingAdapter>) -> axum::Router {
 async fn admin_bff_router_stop_rejection_answers_400_with_code_and_count() {
     let adapter = RecordingAdapter::rejecting(4);
     let app = admin_app_with(adapter).await;
-    let (status, body) = json_request(
-        &app,
-        "POST",
-        "/api/admin/services/router/disable",
-        None,
-    )
-    .await;
+    let (status, body) =
+        json_request(&app, "POST", "/api/admin/services/router/disable", None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["code"], "active_routed_sessions", "{body}");
@@ -639,13 +631,8 @@ async fn admin_bff_router_stop_force_is_forwarded_and_accepted() {
     let app = admin_app_with(adapter.clone()).await;
 
     // 无 force：被拒。
-    let (status, body) = json_request(
-        &app,
-        "POST",
-        "/api/admin/services/router/disable",
-        None,
-    )
-    .await;
+    let (status, body) =
+        json_request(&app, "POST", "/api/admin/services/router/disable", None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 
     // force 重发：放行。

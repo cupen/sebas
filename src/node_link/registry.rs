@@ -260,7 +260,8 @@ impl NodeRegistry {
                         ),
                     ));
                 }
-                NodeStatus::Offline => { /* 允许重新配对：凭据轮换、旧凭据立即失效 */ }
+                NodeStatus::Offline => { /* 允许重新配对：凭据轮换、旧凭据立即失效 */
+                }
             }
         }
 
@@ -352,9 +353,8 @@ impl NodeRegistry {
         if let Some(parent) = self.path.parent()
             && !parent.as_os_str().is_empty()
         {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                RegistryError::io(format!("无法创建 {}：{e}", parent.display()))
-            })?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| RegistryError::io(format!("无法创建 {}：{e}", parent.display())))?;
         }
         let text = serde_json::to_string_pretty(&self.data)
             .map_err(|e| RegistryError::io(format!("无法序列化注册表：{e}")))?;
@@ -372,10 +372,7 @@ impl NodeRegistry {
 }
 
 fn invalid_credential() -> Rejection {
-    Rejection::new(
-        RejectCode::CredentialInvalid,
-        "凭据不正确或该节点未注册",
-    )
+    Rejection::new(RejectCode::CredentialInvalid, "凭据不正确或该节点未注册")
 }
 
 /// 主控侧落盘失败 → 节点侧应把它当作**瞬时**问题退避重试，而不是把令牌/凭据判死。
@@ -443,7 +440,9 @@ mod tests {
         assert!(text.contains(&hash_hex(&raw)), "应存哈希");
 
         reg.consume_join_token(&raw, "dev-box", T0 + 1).unwrap();
-        let err = reg.consume_join_token(&raw, "dev-box-2", T0 + 2).unwrap_err();
+        let err = reg
+            .consume_join_token(&raw, "dev-box-2", T0 + 2)
+            .unwrap_err();
         assert_eq!(err.code, RejectCode::JoinTokenConsumed);
     }
 
@@ -484,13 +483,19 @@ mod tests {
         assert_eq!(status, NodeStatus::Offline, "配对后仍需一次握手才算在线");
 
         reg.mark_online("dev-box", T0 + 5).unwrap();
-        assert_eq!(reg.authenticate("dev-box", &secret).unwrap(), NodeStatus::Online);
+        assert_eq!(
+            reg.authenticate("dev-box", &secret).unwrap(),
+            NodeStatus::Online
+        );
         let entry = reg.node("dev-box").unwrap();
         assert_eq!(entry.last_seen_unix(), Some(T0 + 5));
         assert_eq!(entry.created_unix(), T0);
 
         reg.mark_offline("dev-box").unwrap();
-        assert_eq!(reg.authenticate("dev-box", &secret).unwrap(), NodeStatus::Offline);
+        assert_eq!(
+            reg.authenticate("dev-box", &secret).unwrap(),
+            NodeStatus::Offline
+        );
     }
 
     #[test]
@@ -533,7 +538,10 @@ mod tests {
         let err = reg.pair("dev-box", T0 + 1).unwrap_err();
         assert_eq!(err.code, RejectCode::NodeIdConflict);
         // 原凭据仍然有效（拒绝没有破坏现状）。
-        assert_eq!(reg.authenticate("dev-box", &first).unwrap(), NodeStatus::Online);
+        assert_eq!(
+            reg.authenticate("dev-box", &first).unwrap(),
+            NodeStatus::Online
+        );
     }
 
     #[test]
@@ -569,7 +577,10 @@ mod tests {
         };
         let reg = NodeRegistry::open(&path).unwrap();
         assert_eq!(reg.nodes().len(), 1);
-        assert_eq!(reg.authenticate("dev-box", &secret).unwrap(), NodeStatus::Online);
+        assert_eq!(
+            reg.authenticate("dev-box", &secret).unwrap(),
+            NodeStatus::Online
+        );
         assert_eq!(reg.pending_join_tokens(T0).len(), 0, "消费状态也应持久");
     }
 

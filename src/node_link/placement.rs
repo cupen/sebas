@@ -17,7 +17,7 @@
 
 use crate::node_link::client::{NodeConnection, NodeLinkError};
 use crate::node_link::server::NodeLinkServer;
-use sebas_node_link::{SessionOp, SessionResult, SessionRejectCode};
+use sebas_node_link::{SessionOp, SessionRejectCode, SessionResult};
 
 /// 无项目会话的命名空间标签。
 pub const NO_PROJECT_NAMESPACE: &str = "(no-project)";
@@ -176,12 +176,13 @@ pub async fn place_and_spawn(
         session_id,
     };
 
-    let connection = server
-        .live_connection(&node_id)
-        .await
-        .ok_or_else(|| PlacementError::NodeOffline {
-            node_id: node_id.clone(),
-        })?;
+    let connection =
+        server
+            .live_connection(&node_id)
+            .await
+            .ok_or_else(|| PlacementError::NodeOffline {
+                node_id: node_id.clone(),
+            })?;
 
     let result = connection
         .request(SessionOp::Spawn {

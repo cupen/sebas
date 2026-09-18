@@ -226,7 +226,9 @@ pub fn add_from_local(src: &Path, store: &Path) -> Result<String> {
 /// [`add_from_local`] 语义落仓。返回落仓名列表。
 pub fn add_from_git(url: &str, store: &Path) -> Result<Vec<String>> {
     let git = resolve_command("git").ok_or_else(|| {
-        SebasError::Skills("本机 PATH 上找不到 git：git 形态的 skills add 依赖 git，请先安装".into())
+        SebasError::Skills(
+            "本机 PATH 上找不到 git：git 形态的 skills add 依赖 git，请先安装".into(),
+        )
     })?;
     let tmp = tempfile::tempdir()?;
     let repo_dir = tmp.path().join(repo_dir_name(url));
@@ -981,7 +983,13 @@ exit 0
             assert!(!reason.is_empty(), "{} 必须带成因", s.name);
         }
         let no_skill_md = skills.iter().find(|s| s.name == "no-skill-md").unwrap();
-        assert!(no_skill_md.invalid_reason.as_deref().unwrap().contains("SKILL.md"));
+        assert!(
+            no_skill_md
+                .invalid_reason
+                .as_deref()
+                .unwrap()
+                .contains("SKILL.md")
+        );
     }
 
     #[test]
@@ -1008,12 +1016,17 @@ exit 0
 
     #[test]
     fn frontmatter_parses_crlf_and_quoted_values() {
-        let fm = parse_frontmatter("---\r\nname: \"my-skill\"\r\ndescription: 'does things'\r\n---\r\nbody")
-            .unwrap();
+        let fm = parse_frontmatter(
+            "---\r\nname: \"my-skill\"\r\ndescription: 'does things'\r\n---\r\nbody",
+        )
+        .unwrap();
         assert_eq!(fm.name.as_deref(), Some("my-skill"));
         assert_eq!(fm.description.as_deref(), Some("does things"));
         assert!(parse_frontmatter("no fence at all").is_err());
-        assert!(parse_frontmatter("---\nname: x\n").is_err(), "围栏未闭合必须报错");
+        assert!(
+            parse_frontmatter("---\nname: x\n").is_err(),
+            "围栏未闭合必须报错"
+        );
     }
 
     // ── add_from_local ──────────────────────────────────────────────────────
@@ -1032,8 +1045,14 @@ exit 0
             SKILL_BODY,
             "整目录逐字拷贝"
         );
-        assert_eq!(fs::read_to_string(store.join("my-skill").join("extra.txt")).unwrap(), "attachment");
-        assert_eq!(scan_store(&store)[0].attachments, vec!["extra.txt".to_string()]);
+        assert_eq!(
+            fs::read_to_string(store.join("my-skill").join("extra.txt")).unwrap(),
+            "attachment"
+        );
+        assert_eq!(
+            scan_store(&store)[0].attachments,
+            vec!["extra.txt".to_string()]
+        );
     }
 
     #[test]
@@ -1045,7 +1064,10 @@ exit 0
         let store = tmp.path().join("store");
 
         let err = add_from_local(&src, &store).unwrap_err();
-        assert!(err.to_string().contains("SKILL.md"), "报错指名缺 SKILL.md：{err}");
+        assert!(
+            err.to_string().contains("SKILL.md"),
+            "报错指名缺 SKILL.md：{err}"
+        );
         assert!(!store.exists(), "非法源不得写盘");
     }
 
@@ -1057,7 +1079,11 @@ exit 0
         add_from_local(&first, &store).unwrap();
 
         let second_dir = tmp.path().join("srcs2");
-        let second = make_skill(&second_dir, "dup", "---\nname: dup\ndescription: 另一份\n---\n");
+        let second = make_skill(
+            &second_dir,
+            "dup",
+            "---\nname: dup\ndescription: 另一份\n---\n",
+        );
         let err = add_from_local(&second, &store).unwrap_err();
         assert!(err.to_string().contains("dup"), "撞名报错指名条目：{err}");
         assert_eq!(
@@ -1073,7 +1099,8 @@ exit 0
     fn add_git_reports_missing_git() {
         let tmp = tempfile::tempdir().unwrap();
         let store = tmp.path().join("store");
-        let err = with_path_cleared(|| add_from_git("https://example.com/x.git", &store)).unwrap_err();
+        let err =
+            with_path_cleared(|| add_from_git("https://example.com/x.git", &store)).unwrap_err();
         assert!(err.to_string().contains("git"), "报错须明说缺 git：{err}");
         assert!(!store.exists());
     }
@@ -1087,7 +1114,11 @@ exit 0
             add_from_git("https://example.com/stub-repo.git", &store)
         })
         .unwrap();
-        assert_eq!(added, vec!["stub-repo".to_string()], "单技能仓以 URL 末段落仓");
+        assert_eq!(
+            added,
+            vec!["stub-repo".to_string()],
+            "单技能仓以 URL 末段落仓"
+        );
         let landed = store.join("stub-repo").join(SKILL_FILE);
         assert!(landed.is_file());
         let text = fs::read_to_string(landed).unwrap();
@@ -1205,7 +1236,11 @@ exit 0
         let backend = tmp.path().join("backend");
         make_skill(&store, "beads", SKILL_BODY);
         // 用户手放的私产（仓里没有）。
-        let private = make_skill(&backend, "user-byhand", "---\nname: user-byhand\ndescription: 私产\n---\n");
+        let private = make_skill(
+            &backend,
+            "user-byhand",
+            "---\nname: user-byhand\ndescription: 私产\n---\n",
+        );
         fs::write(private.join("secret.txt"), "do not touch").unwrap();
 
         let report = reconcile(&store, &backend).unwrap();
@@ -1225,7 +1260,11 @@ exit 0
         let store = tmp.path().join("store");
         let backend = tmp.path().join("backend");
         make_skill(&store, "beads", SKILL_BODY);
-        make_skill(&store, "old-skill", "---\nname: old-skill\ndescription: 旧\n---\n");
+        make_skill(
+            &store,
+            "old-skill",
+            "---\nname: old-skill\ndescription: 旧\n---\n",
+        );
         reconcile(&store, &backend).unwrap();
         assert!(backend.join("old-skill").is_dir());
 
@@ -1243,7 +1282,11 @@ exit 0
         let store = tmp.path().join("store");
         let backend = tmp.path().join("backend");
         // 模拟「上次投影过但名册丢了」：backend 里有一份旧投影拷贝，名册不存在。
-        make_skill(&backend, "stale", "---\nname: stale\ndescription: 旧投影\n---\n");
+        make_skill(
+            &backend,
+            "stale",
+            "---\nname: stale\ndescription: 旧投影\n---\n",
+        );
         make_skill(&store, "beads", SKILL_BODY);
 
         let report = reconcile(&store, &backend).unwrap();
@@ -1306,7 +1349,10 @@ exit 0
 
         let report = reconcile(&store, &backend).unwrap();
         assert_eq!(report.written, vec!["beads".to_string()]);
-        assert!(!backend.join("broken").exists(), "invalid 条目不往 backend 传播");
+        assert!(
+            !backend.join("broken").exists(),
+            "invalid 条目不往 backend 传播"
+        );
     }
 
     #[test]
@@ -1353,7 +1399,11 @@ exit 0
     #[test]
     fn placement_unknown_kinds_report_none() {
         let home = tempfile::tempdir().unwrap();
-        assert_eq!(placement_for("gemini", home.path()), None, "gemini 本期不加表行");
+        assert_eq!(
+            placement_for("gemini", home.path()),
+            None,
+            "gemini 本期不加表行"
+        );
         assert_eq!(placement_for("no-such-backend", home.path()), None);
     }
 
@@ -1442,7 +1492,10 @@ exit 0
 
         let explicit_default =
             crate::config::Config::parse("[acp]\ndefault = \"gemini\"\n").unwrap();
-        assert_eq!(configured_kinds(&explicit_default), vec!["gemini".to_string()]);
+        assert_eq!(
+            configured_kinds(&explicit_default),
+            vec!["gemini".to_string()]
+        );
     }
 
     /// skill_detail（webui GET /api/skills/{name} 的取材）：SKILL.md 文件缺失
@@ -1477,7 +1530,10 @@ exit 0
         );
 
         assert!(skill_detail(&store, "no-such").is_none());
-        assert!(skill_detail(&store, "../escape").is_none(), "非法名不出详情");
+        assert!(
+            skill_detail(&store, "../escape").is_none(),
+            "非法名不出详情"
+        );
     }
 
     /// 多技能仓撞名预检（add_from_git）：任一候选与仓内同名 → 整体报错不写
@@ -1497,7 +1553,10 @@ exit 0
         })
         .unwrap_err();
         assert!(err.to_string().contains("\"a\""), "撞名报错指名条目：{err}");
-        assert!(!store.join("b").exists(), "预检失败后不得写任何候选（不收一半）");
+        assert!(
+            !store.join("b").exists(),
+            "预检失败后不得写任何候选（不收一半）"
+        );
         assert_eq!(
             fs::read_to_string(store.join("a").join(SKILL_FILE)).unwrap(),
             before,
@@ -1509,7 +1568,10 @@ exit 0
     /// 斜杠、scp 形态（`git@host:owner/repo.git`）、推不出末段时 `repo` 兜底。
     #[test]
     fn repo_dir_name_handles_url_shapes() {
-        assert_eq!(repo_dir_name("https://example.com/my-skill.git"), "my-skill");
+        assert_eq!(
+            repo_dir_name("https://example.com/my-skill.git"),
+            "my-skill"
+        );
         assert_eq!(
             repo_dir_name("https://example.com/my-skill.git/"),
             "my-skill",
@@ -1520,7 +1582,10 @@ exit 0
             "repo",
             "scp 形态取冒号后末段"
         );
-        assert_eq!(repo_dir_name("https://example.com/a/b/my-deploy"), "my-deploy");
+        assert_eq!(
+            repo_dir_name("https://example.com/a/b/my-deploy"),
+            "my-deploy"
+        );
         assert_eq!(repo_dir_name(""), "repo", "推不出末段时兜底");
     }
 }

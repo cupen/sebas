@@ -8,11 +8,11 @@
 //! - the offline replay (`replay::run` / `replay_frame`): neutral
 //!   `ChannelEvent` JSON frames dispatched straight into the router.
 
-use sebas_channels::{ChannelEvent, ChannelKey};
-use sebas_dispatch::engine::{Out, DispatchHandle};
-use sebas_dispatch::state::SessionMap;
 use sebas::replay::replay_frame;
 use sebas::run::{DispatchEventHandler, ingest_feishu_frame};
+use sebas_channels::{ChannelEvent, ChannelKey};
+use sebas_dispatch::engine::{DispatchHandle, Out};
+use sebas_dispatch::state::SessionMap;
 use tokio::sync::mpsc::Receiver;
 
 /// Build a fresh `DispatchEventHandler` with an empty `SessionMap` and a

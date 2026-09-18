@@ -40,9 +40,8 @@ impl StateHandle {
         f: impl FnOnce(&mut Connection) -> Result<R, String> + Send + 'static,
     ) -> Result<R, String> {
         let (tx, rx) = oneshot::channel();
-        let cmd: Cmd = Box::new(move |conn| {
-            f(conn).map(|v| Box::new(v) as Box<dyn std::any::Any + Send>)
-        });
+        let cmd: Cmd =
+            Box::new(move |conn| f(conn).map(|v| Box::new(v) as Box<dyn std::any::Any + Send>));
         self.tx
             .send((cmd, tx))
             .await
@@ -51,7 +50,10 @@ impl StateHandle {
             .await
             .map_err(|_| "state writer 响应通道已关闭".to_string())?;
         // 把 Box<dyn Any> 转回 R
-        result.map(|any| *any.downcast::<R>().expect("type mismatch in StateHandle::exec"))
+        result.map(|any| {
+            *any.downcast::<R>()
+                .expect("type mismatch in StateHandle::exec")
+        })
     }
 
     /// 提交一个返回 `()` 的命令 (不关心返回值)。
@@ -78,7 +80,10 @@ impl StateWriter {
     /// 会自动打开/创建数据库并同步 schema (sqlite-auto-schema-sync)。
     /// 在同步完成前阻塞, 返回后 DB 已就绪。
     pub fn start(db_path: PathBuf) -> Result<Self, String> {
-        let (tx, mut rx) = mpsc::channel::<(Cmd, oneshot::Sender<Result<Box<dyn std::any::Any + Send>, String>>)>(128);
+        let (tx, mut rx) = mpsc::channel::<(
+            Cmd,
+            oneshot::Sender<Result<Box<dyn std::any::Any + Send>, String>>,
+        )>(128);
         let (ready_tx, ready_rx) = std_mpsc::channel::<Result<(), String>>();
 
         let join_handle = std::thread::Builder::new()
@@ -114,7 +119,8 @@ impl StateWriter {
             .map_err(|e| format!("创建 state writer 线程失败: {e}"))?;
 
         // 等待打开 + schema 同步完成
-        ready_rx.recv()
+        ready_rx
+            .recv()
             .map_err(|_| "state writer 启动失败: 通道关闭".to_string())??;
 
         Ok(Self {
@@ -166,7 +172,9 @@ mod tests {
         let garbage = b"not a sqlite database at all".to_vec();
         std::fs::write(&path, &garbage).unwrap();
 
-        let err = StateWriter::start(path.clone()).err().expect("corrupt db must abort startup");
+        let err = StateWriter::start(path.clone())
+            .err()
+            .expect("corrupt db must abort startup");
         assert!(
             err.contains("初始化失败") || err.contains("损坏"),
             "unexpected error: {err}"
@@ -174,7 +182,9 @@ mod tests {
 
         // 跨重启同样拒启, 文件始终原样
         for _ in 0..2 {
-            let err = StateWriter::start(path.clone()).err().expect("corrupt db must abort startup");
+            let err = StateWriter::start(path.clone())
+                .err()
+                .expect("corrupt db must abort startup");
             assert!(err.contains("初始化失败") || err.contains("损坏"));
             assert_eq!(std::fs::read(&path).unwrap(), garbage, "损坏文件不得被改动");
         }
@@ -278,17 +288,19 @@ mod tests {
 
         // 验证五张领域表 + schema_meta 都存在
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table'", [], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert!(count >= 6, "expected at least 6 tables, got {count}");
     }
 
     #[tokio::test]
     async fn writer_serializes_concurrent_commands() {
-        use std::sync::atomic::{AtomicU64, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
 
         let dir = tempdir().unwrap();
         let path = dir.path().join("concurrent.db");

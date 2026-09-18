@@ -95,8 +95,7 @@ async fn stalled_turn_force_settles_drains_and_notifies() {
         match out {
             Some(Out::SendCard { .. }) => saw_card = true,
             Some(Out::SendAcp {
-                cmd:
-                    sebas_acp::claude::session::AcpCommand::ContinueSession { prompt, .. },
+                cmd: sebas_acp::claude::session::AcpCommand::ContinueSession { prompt, .. },
                 ..
             }) => {
                 continue_prompt = Some(prompt);
@@ -116,7 +115,9 @@ async fn stalled_turn_force_settles_drains_and_notifies() {
     let mut notified: Option<(String, usize)> = None;
     for _ in 0..16 {
         match events.try_recv() {
-            Ok(SessionEvent::TurnStalled { key: k, released, .. }) => {
+            Ok(SessionEvent::TurnStalled {
+                key: k, released, ..
+            }) => {
                 notified = Some((k, released));
                 break;
             }
@@ -381,7 +382,9 @@ async fn seed_phase_stall_is_also_force_settled_and_drains() {
     let mut notified: Option<usize> = None;
     for _ in 0..16 {
         match events.try_recv() {
-            Ok(SessionEvent::TurnStalled { key: k, released, .. }) if k == key.reference => {
+            Ok(SessionEvent::TurnStalled {
+                key: k, released, ..
+            }) if k == key.reference => {
                 notified = Some(released);
                 break;
             }
@@ -389,7 +392,11 @@ async fn seed_phase_stall_is_also_force_settled_and_drains() {
             Err(_) => break,
         }
     }
-    assert_eq!(notified, Some(1), "the notice must fire for a SEED stall too");
+    assert_eq!(
+        notified,
+        Some(1),
+        "the notice must fire for a SEED stall too"
+    );
 }
 
 /// 状态迁移的 wire 面（前端 refetch 链的引擎半边）：开轮发布的 Updated 携带
@@ -408,9 +415,7 @@ async fn seed_to_working_transition_publishes_updated_with_turn_engaged() {
         .insert(key.clone(), Mapping::active("s-wire"))
         .await
         .unwrap();
-    router
-        .seed_card("s-wire".to_string(), "run".into())
-        .await;
+    router.seed_card("s-wire".to_string(), "run".into()).await;
     router
         .dispatch_acp_event(AcpEvent::TextDelta {
             session_id: "s-wire".into(),
@@ -476,3 +481,73 @@ impl StatusProbe for DispatchHandle {
 // 引用 ChannelEvent 以免未使用告警（相位驱动走 dispatch_acp_event）。
 #[allow(unused)]
 fn _touch(_: Option<ChannelEvent>) {}
+
+/// （review 3c 补口，session-unread-badge delta「parked-approval entry/exit
+/// emits a frame」）泊车登记与批复解除都是生命周期 flip：登记即刻广播
+/// Updated（SessionInfo.parked_approvals=1），批复出站（emit 单点）即刻再
+/// 广播（parked_approvals 归 0）。呈现层据此把本地会话投影成 waiting /
+/// 翻回原相位，rail 圆点与徽标不等轮询。
+#[tokio::test]
+async fn parked_entry_and_exit_each_publish_updated_with_parked_count() {
+    let map = SessionMap::new();
+    let key = web_key("parked-flip");
+    let (router, _out_rx) = DispatchHandle::new(map);
+    let mut events = router.subscribe_session_events();
+
+    seed_working_session(&router, &key, "s-parked-flip").await;
+
+    // 排空 seed/TextDelta 阶段的既有 Updated（parked=0 的旧帧）——后续断言
+    // 只认泊车登记/解除引发的帧。
+    while events.try_recv().is_ok() {}
+
+    // 泊车登记 → 一条 Updated，且 parked_approvals = 1。
+    router
+        .dispatch_acp_event(AcpEvent::PermissionRequest {
+            session_id: "s-parked-flip".into(),
+            request_id: "req-flip-1".into(),
+            tool_name: "Bash".into(),
+            args: serde_json::json!({"command": "rm -rf /"}),
+        })
+        .await;
+    let mut saw_parked_entry = false;
+    while let Ok(ev) = events.try_recv() {
+        if let SessionEvent::Updated { session } = ev {
+            if session.key == key.reference {
+                assert_eq!(
+                    session.parked_approvals, 1,
+                    "the entry flip must carry the parked count"
+                );
+                saw_parked_entry = true;
+            }
+        }
+    }
+    assert!(saw_parked_entry, "permission entry must emit an Updated frame");
+
+    // 批复出站（emit 单点漏斗）→ 一条 Updated，parked_approvals 归 0。
+    router
+        .emit(Out::SendAcp {
+            session_id: "s-parked-flip".into(),
+            cmd: sebas_acp::claude::session::AcpCommand::PermissionReply {
+                session_id: "s-parked-flip".into(),
+                request_id: "req-flip-1".into(),
+                decision: sebas_acp::Decision::AllowOnce,
+            },
+        })
+        .await;
+    let mut saw_parked_exit = false;
+    while let Ok(ev) = events.try_recv() {
+        if let SessionEvent::Updated { session } = ev {
+            if session.key == key.reference {
+                assert_eq!(
+                    session.parked_approvals, 0,
+                    "the exit flip must carry the cleared count"
+                );
+                saw_parked_exit = true;
+            }
+        }
+    }
+    assert!(
+        saw_parked_exit,
+        "permission resolution must emit an Updated frame"
+    );
+}

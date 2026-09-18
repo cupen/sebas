@@ -26,9 +26,7 @@
 //!    than delivered a gap; the client re-snapshots on reconnect.
 
 use sebas_channels::ChannelKey;
-use sebas_dispatch::{
-    PendingSubmission, SessionEvent, SessionInfo, TurnEntry, TurnStreamEvent,
-};
+use sebas_dispatch::{PendingSubmission, SessionEvent, SessionInfo, TurnEntry, TurnStreamEvent};
 use sebas_webui::session_backend::{PermissionDecision, PermissionNotice};
 use serde::{Deserialize, Serialize};
 
@@ -129,9 +127,7 @@ pub enum CoreChannelRequest {
     /// 聚焦即拉起（workbench-live-conversation-flow 3.1）：无 prompt 拉起
     /// 会话子进程（占位 fresh / Dormant resume），幂等（已活/在途 → started
     /// = false）。
-    Activate {
-        key: ChannelKey,
-    },
+    Activate { key: ChannelKey },
     /// （extract-im-service 2.1）IM 前端 ensure 语义的消息投递：未知 key 按
     /// 入站文本历史语义自动建会话、dormant 会话懒复活；已知 active key 等
     /// 价 `Message`。与 `Message` 的差别仅在服务端跳过存在性预检——webui
@@ -570,10 +566,12 @@ mod tests {
             backend: Some("native".into()),
             pending: Vec::new(),
             remote: None,
-            desired_mode: None,
+            desired_mode: sebas_dispatch::engine::ask_mode(),
             effective_mode: None,
             msg_count: 0,
             turn_engaged: false,
+            spawn_failure_reason: None,
+            parked_approvals: 0,
             available_commands: Vec::new(),
         };
         let frames = vec![

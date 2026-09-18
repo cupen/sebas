@@ -80,6 +80,7 @@ spawn-fail 进程级注入，见豁免清单）；requirement 级「未命中且
 | session-lifecycle | 身份按会话/线程 | ✅ | `full_e2e_test`（ChannelKey 语义）|
 | | 首条消息懒 spawn | ✅ | `full_e2e_test`；J: `session_lifecycle_journey`；`state_test::dormant_first_text_claims_resume_then_queues`（映射激活排空队列）|
 | | 双 spawn 竞争保护 | ✅ | `spawn_race_test`（`second_text_during_spawn_is_queued_not_spawned`、`rapid_double_new_emits_single_spawn`、`pending_queue_capped_at_16`）；`state_test::overflow_rejects`（溢出丢最新）|
+| | 会话并行 spawn 活性（session-parallel-liveness-and-unread-polish 新增）| ✅ | sebas（core 层）`dispatch::tests::web_spawn_instruction_is_not_blocked_by_a_stalled_handshake`（出站泵不再同步 await 握手：WebSpawn/SpawnResume 投递独立任务，第一会话僵住时第二 spawn 指令照发不阻塞）；spawn 失败 wire 透传 `server::workspace_root_tests::spawn_failed_session_row_and_detail_carry_the_reason`（失败行/详情带 status_slug=failed + spawn_failure_reason 原文）；E `two_sessions_spawn_and_turn_concurrently`（testsuite_e2e_test，--ignored，fake-claude 双会话握手重叠）|
 | | Dormant 懒恢复 | ✅ | `restart_recovery_test`；J: lifecycle（unix 段）|
 | | 终态错误拆除 | ✅ | `error_test`、sebas-router 内联测试；`turn_card_test::terminal_error_clears/abandons_queued_turns`（终态清队列）|
 | | 正常回合完成保活 | ✅ | `full_e2e_test`；J: lifecycle |
@@ -129,6 +130,7 @@ spawn-fail 进程级注入，见豁免清单）；requirement 级「未命中且
 | | 会话归属 | ✅ | sebas-webui `session_endpoints_test` |
 | | 并发项目 | ✅ | state-store 并发测试；`session_endpoints_test::concurrent_project_sessions_run_simultaneously_and_leave_a_untouched` |
 | | 未读 turn 接缝 | ✅ | sebas-webui `ws_test`（事件流）；前端 `transcript-view.test.ts`（多 chunk 未读回合计一次、seam 不切开回合、mark-all-seen 写入并消隐、msg_count 随 payload 推进共享锚）；`unread-cursor.test.ts`（rail-declutter-unread D3：seam 与徽标共用游标、首访/清缓存不冒红点、单调写）；browser `unread-badge.spec.ts`（跨层旅程：fake-claude 完整回复 → API `msg_count` 投影 +1 → 离焦会话徽标免刷新亮起「1」→ 聚焦清零且 localStorage `anchor_count` 推进到服务端当前值）|
+| | 徽标与相位帧驱动（session-parallel-liveness-and-unread-polish 新增）| ✅ | `ws_rpc_contract_test::events_serialize_with_dotted_type_tag` + `all_seven_events_travel_as_notifications_with_params_verbatim`（session.created/updated 五键相位帧：status_slug/turn_engaged/msg_count/pending 每帧必带、旧 `status` 字段删除）；前端 `project-rail.test.ts`（session.updated 帧免 HTTP 刷新推进未读徽标 + 圆点翻转；未读行 accent-soft 强调与已读行可分辨）；`dashboard.test.ts`（帧同步补丁 focusedDetail、turn_engaged 真读无 slug 回退链）；`transcript-view.test.ts`（单字段 `{anchor_count}` 段锚：流式推进=聚焦推进=手动读到底同字段，旧 seen_ts 数据读为 fully-read 并被覆写）|
 | | composer 只承诺进程能力 | ✅ | sebas-webui `agent_kinds_test`；J: workbench（agent-kinds）|
 | | 会话来源可见 | ✅ | sebas-webui 内联测试 |
 | | 项目视图真实工作副本上下文 | ✅ | browser `projects.spec.ts` 1.2（rail-declutter-unread D8 改写：分支探测链路 + 30s TTL 过期后 API 刷新仍断言；rail 不再显示分支名，可达性标记仍由探测驱动）|

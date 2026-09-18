@@ -13,9 +13,7 @@
 use async_trait::async_trait;
 use sebas_channels::key::ChannelKey;
 use sebas_dispatch::engine::CancelOutcome;
-use sebas_dispatch::{
-    PendingSubmission, SessionEvent, SessionInfo, TurnEntry, TurnStreamEvent,
-};
+use sebas_dispatch::{PendingSubmission, SessionEvent, SessionInfo, TurnEntry, TurnStreamEvent};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -456,7 +454,11 @@ pub trait SessionBackend: Send + Sync {
     /// 接受与否经事件流反馈（`ModeChanged` = 成功，非终态 `Error` = 拒绝、
     /// mode 不变）——与 [`SessionBackend::set_session_model`] 同一契约。
     /// 默认实现诚实不可用。
-    async fn set_session_mode(&self, _key: ChannelKey, _mode: String) -> Result<(), SessionRejection> {
+    async fn set_session_mode(
+        &self,
+        _key: ChannelKey,
+        _mode: String,
+    ) -> Result<(), SessionRejection> {
         Err(SessionRejection::Unavailable {
             cause: "此后端不支持会话级模式切换".into(),
         })
@@ -691,9 +693,7 @@ impl SessionBackend for InProcessBackend {
     ) -> Result<ChannelKey, SessionRejection> {
         if let Some(remote) = remote_node_of(node.as_deref()) {
             return Err(SessionRejection::Unavailable {
-                cause: format!(
-                    "远端会话不能建 0-turn 占位（节点 {remote}）：请直接发送第一条输入"
-                ),
+                cause: format!("远端会话不能建 0-turn 占位（节点 {remote}）：请直接发送第一条输入"),
             });
         }
         let kind = agent_kind_of(agent);
@@ -754,7 +754,8 @@ impl SessionBackend for InProcessBackend {
         };
         // 期望值先记在映射上（快照立即反映操作者意图）；effective 由
         // `ModeChanged` 事件落定（engine 的 apply_event 处理）。
-        self.router.map.set_desired_mode(&key, Some(mode.clone())).await;
+        // （3.2，D5b）desired 非空：切换必须给出控制面词之一。
+        self.router.map.set_desired_mode(&key, mode.clone()).await;
         self.router
             .emit(sebas_dispatch::Out::SendAcp {
                 session_id: sid.clone(),
@@ -946,7 +947,9 @@ impl SessionBackend for InProcessBackend {
         if matches!(decision, sebas_acp::Decision::AllowSession)
             && let Some(key) = self.router.map.lookup_key_by_session(&session_id).await
         {
-            let _ = self.set_session_mode(key, sebas_dispatch::engine::AUTO_MODE.to_string()).await;
+            let _ = self
+                .set_session_mode(key, sebas_dispatch::engine::AUTO_MODE.to_string())
+                .await;
         }
         true
     }
@@ -1092,12 +1095,7 @@ impl FakeBackend {
     }
 
     /// add-remote-execution-node 8.1：注入节点侧路径判定结果（route 层测试用）。
-    pub fn set_path_check(
-        &self,
-        node_id: &str,
-        path: &str,
-        result: Result<PathCheck, String>,
-    ) {
+    pub fn set_path_check(&self, node_id: &str, path: &str, result: Result<PathCheck, String>) {
         self.path_checks
             .lock()
             .expect("path checks lock")
@@ -1182,7 +1180,7 @@ impl SessionBackend for FakeBackend {
             backend: None,
             pending: Vec::new(),
             remote: None,
-            desired_mode: None,
+            desired_mode: sebas_dispatch::engine::ask_mode(),
             effective_mode: None,
             // rail-declutter-unread：fake 会话不产 transcript，段数为 0。
             msg_count: 0,
@@ -1191,6 +1189,8 @@ impl SessionBackend for FakeBackend {
             // fix-pending-queue-liveness 2.3：fake 会话（spawning 占位）恒
             // 占用（spawn 窗口）。
             turn_engaged: true,
+            spawn_failure_reason: None,
+            parked_approvals: 0,
         };
         let ev = SessionEvent::Created { session };
         if let SessionEvent::Created { session } = &ev {
@@ -1365,9 +1365,7 @@ impl SessionBackend for FakeBackend {
         *self.last_spawn_node.lock().expect("last spawn node lock") = Some(node.clone());
         if let Some(remote) = remote_node_of(node.as_deref()) {
             return Err(SessionRejection::Unavailable {
-                cause: format!(
-                    "远端会话不能建 0-turn 占位（节点 {remote}）：请直接发送第一条输入"
-                ),
+                cause: format!("远端会话不能建 0-turn 占位（节点 {remote}）：请直接发送第一条输入"),
             });
         }
         self.spawn(String::new(), project_dir).await
@@ -1456,11 +1454,13 @@ mod tests {
                 backend: None,
                 pending: Vec::new(),
                 remote: None,
-                desired_mode: None,
+                desired_mode: sebas_dispatch::engine::ask_mode(),
                 effective_mode: None,
                 msg_count: 0,
                 available_commands: Vec::new(),
                 turn_engaged: false,
+                spawn_failure_reason: None,
+                parked_approvals: 0,
             }])
             .await;
         backend.push_turn("s9", "prompt", "p1").await;
@@ -1610,7 +1610,11 @@ mod tests {
         match recv_out(&mut out_rx).await {
             sebas_dispatch::Out::SendAcp {
                 session_id,
-                cmd: sebas_acp::AcpCommand::SetMode { session_id: sid, mode },
+                cmd:
+                    sebas_acp::AcpCommand::SetMode {
+                        session_id: sid,
+                        mode,
+                    },
             } => {
                 assert_eq!(session_id, "s-mode");
                 assert_eq!(sid, "s-mode");
@@ -1619,7 +1623,7 @@ mod tests {
             other => panic!("expected SetMode after reply, got {other:?}"),
         }
         // desired_mode 落位（成败的最终回执走 engine 的事件流处理）。
-        let desired = router.map.get(&key).await.and_then(|m| m.desired_mode.clone());
+        let desired = router.map.get(&key).await.map(|m| m.desired_mode);
         assert_eq!(desired.as_deref(), Some("auto"));
     }
 
@@ -1672,7 +1676,12 @@ mod tests {
                 .is_err(),
             "AllowOnce/Deny 不得触发 SetMode"
         );
-        let desired = router.map.get(&key).await.and_then(|m| m.desired_mode.clone());
-        assert_eq!(desired, None, "AllowOnce/Deny 不得改写 desired_mode");
+        // （3.2，D5b）desired 非空：未被触碰 = 仍是构造时的缺省词 ask。
+        let desired = router.map.get(&key).await.map(|m| m.desired_mode);
+        assert_eq!(
+            desired.as_deref(),
+            Some(sebas_dispatch::engine::ASK_MODE),
+            "AllowOnce/Deny 不得改写 desired_mode"
+        );
     }
 }

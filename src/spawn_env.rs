@@ -22,8 +22,8 @@
 //! 自己环境的问题。新行为把错误直接喂给用户。
 
 use sebas_acp::claude::{ClaudeCodeDriver, ProviderResolution};
-use sebas_router::config::RouterConfig;
 use sebas_dispatch::provider_state::{ProviderMode, ProviderRuntimeState};
+use sebas_router::config::RouterConfig;
 use serde_json::{Map, Value};
 
 /// Claude Code 模型 env 覆盖集的 4 个 `ANTHROPIC_MODEL` 键 + 1 个
@@ -33,7 +33,6 @@ use serde_json::{Map, Value};
 /// 映射成 OPUS/SONNET/HAIKU 三档；`CLAUDE_CODE_SUBAGENT_MODEL` 回退到最弱档
 /// （= HAIKU 值）。provider 未配 models → 不强制覆盖，claude 用自己发现。
 const CLAUDE_SUBAGENT_MODEL_ENV: &str = "CLAUDE_CODE_SUBAGENT_MODEL";
-
 
 /// 读单个 provider 的原始 Item（含 `default_model`）。make-core-own-provider-data
 /// 4.1：状态库是权威——`state_store::load()` 优先走 core 的 state store
@@ -86,24 +85,27 @@ fn direct_resolution_from_overlay(
     item: &Map<String, Value>,
 ) -> (ProviderResolution, Option<String>) {
     // preset 物化源：条目带 `preset` 字段时从代码表取连接数据。
-    let preset = item
-        .get("preset")
-        .and_then(Value::as_str)
-        .and_then(|pn| {
-            sebas_router::config::presets()
-                .iter()
-                .find(|p| p.name == pn)
-        });
+    let preset = item.get("preset").and_then(Value::as_str).and_then(|pn| {
+        sebas_router::config::presets()
+            .iter()
+            .find(|p| p.name == pn)
+    });
     let item_url = |key: &str| -> Option<String> {
         item.get(key)
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
             .map(str::to_string)
     };
-    let base_url_anthropic = item_url("base_url_anthropic")
-        .or_else(|| preset.and_then(|p| p.base_url_anthropic).map(str::to_string));
-    let base_url_openai_chat = item_url("base_url_openai_chat")
-        .or_else(|| preset.and_then(|p| p.base_url_openai_chat).map(str::to_string));
+    let base_url_anthropic = item_url("base_url_anthropic").or_else(|| {
+        preset
+            .and_then(|p| p.base_url_anthropic)
+            .map(str::to_string)
+    });
+    let base_url_openai_chat = item_url("base_url_openai_chat").or_else(|| {
+        preset
+            .and_then(|p| p.base_url_openai_chat)
+            .map(str::to_string)
+    });
     let default_model = item_url("default_model");
     // 协议选择：UI 在详情面板的 radio。缺省 = "auto" = anthropic 优先。
     let protocol = item
@@ -453,10 +455,8 @@ fn effective_provider_models(
     // overlay 缺项时回退到 router config seed 的 `ProviderConfig.models`。
     // 两者都没有 → 不盖。
     if let Some(item) = read_overlay_item(&provider) {
-        let preset_models: Option<Vec<ModelEntry>> = item
-            .get("preset")
-            .and_then(Value::as_str)
-            .and_then(|pn| {
+        let preset_models: Option<Vec<ModelEntry>> =
+            item.get("preset").and_then(Value::as_str).and_then(|pn| {
                 sebas_router::config::presets()
                     .iter()
                     .find(|p| p.name == pn)
@@ -527,9 +527,9 @@ pub fn resolve_spawn_overrides(
 mod tests {
     use super::*;
     use sebas_acp::claude::{AgentProtocol, ClaudeCodeDriver};
-    use sebas_router::config::RouterConfig;
     use sebas_dispatch::provider_state::{ProviderMode, ProviderRuntimeState};
     use sebas_dispatch::state_store::DefaultSelection;
+    use sebas_router::config::RouterConfig;
     use std::sync::Mutex;
 
     // 串行化所有 env 访问：`SEBAS_ROUTER_PROVIDER_OVERLAY` 是全局变量，
@@ -1609,7 +1609,9 @@ api_key_env = "ANTHROPIC_API_KEY"
                     "reason must explain which URL field is missing; got: {reason}"
                 );
             }
-            other => panic!("显式 protocol=openai 缺 base_url_openai_chat → 必须 Error；got {other:?}"),
+            other => {
+                panic!("显式 protocol=openai 缺 base_url_openai_chat → 必须 Error；got {other:?}")
+            }
         }
         unsafe {
             std::env::remove_var("SEBAS_ROUTER_PROVIDER_OVERLAY");
@@ -1697,7 +1699,9 @@ base_url_anthropic = "https://api.anthropic.com"
 
     #[test]
     fn model_cover_env_single_model_flattens_all_tiers() {
-        let env = model_cover_env(&[sebas_router::models::ModelEntry::text_only("deepseek-v4-pro[1m]")]);
+        let env = model_cover_env(&[sebas_router::models::ModelEntry::text_only(
+            "deepseek-v4-pro[1m]",
+        )]);
         let map: std::collections::HashMap<String, String> = env.into_iter().collect();
         assert_eq!(map["ANTHROPIC_MODEL"], "deepseek-v4-pro[1m]");
         assert_eq!(map["ANTHROPIC_DEFAULT_OPUS_MODEL"], "deepseek-v4-pro[1m]");
@@ -1726,7 +1730,10 @@ base_url_anthropic = "https://api.anthropic.com"
     #[test]
     fn model_cover_env_empty_yields_no_injection() {
         let env = model_cover_env(&[]);
-        assert!(env.is_empty(), "无 models 时不应强制覆盖，child 走自己的发现");
+        assert!(
+            env.is_empty(),
+            "无 models 时不应强制覆盖，child 走自己的发现"
+        );
     }
 
     #[test]
@@ -1765,11 +1772,21 @@ base_url_anthropic = "https://api.anthropic.com"
                 }
             }"#,
         );
-        unsafe { std::env::set_var("DEEPSEEK_API_KEY", "sk-ds-test"); }
+        unsafe {
+            std::env::set_var("DEEPSEEK_API_KEY", "sk-ds-test");
+        }
         let state = direct_state("deepseek");
         let models = effective_provider_models(&state, None);
-        unsafe { std::env::remove_var("DEEPSEEK_API_KEY"); }
-        assert_eq!(models.map(|m| m.iter().map(|e| e.id.clone()).collect::<Vec<_>>()), Some(vec!["deepseek-chat".to_string(), "deepseek-reasoner".to_string()]));
+        unsafe {
+            std::env::remove_var("DEEPSEEK_API_KEY");
+        }
+        assert_eq!(
+            models.map(|m| m.iter().map(|e| e.id.clone()).collect::<Vec<_>>()),
+            Some(vec![
+                "deepseek-chat".to_string(),
+                "deepseek-reasoner".to_string()
+            ])
+        );
     }
 
     #[test]
@@ -1790,7 +1807,10 @@ base_url_anthropic = "https://api.anthropic.com"
         );
         let state = direct_state("weird");
         let models = effective_provider_models(&state, None);
-        assert_eq!(models.map(|m| m.iter().map(|e| e.id.clone()).collect::<Vec<_>>()), Some(vec!["fast".to_string(), "slow".to_string()]));
+        assert_eq!(
+            models.map(|m| m.iter().map(|e| e.id.clone()).collect::<Vec<_>>()),
+            Some(vec!["fast".to_string(), "slow".to_string()])
+        );
     }
 
     #[test]
@@ -1817,7 +1837,10 @@ base_url_anthropic = "https://api.anthropic.com"
         clear_overlay_env();
         let state = off_state();
         let (env, _args) = resolve_spawn_overrides(&driver(), &state, None);
-        assert!(env.is_empty(), "裸 Off 不注入任何 env（含模型 cover）；got env = {env:?}");
+        assert!(
+            env.is_empty(),
+            "裸 Off 不注入任何 env（含模型 cover）；got env = {env:?}"
+        );
     }
 
     /// acp-claude-model-env-cover 端到端：Direct + overlay 含 preset →
@@ -1838,16 +1861,35 @@ base_url_anthropic = "https://api.anthropic.com"
                 }
             }"#,
         );
-        unsafe { std::env::set_var("DEEPSEEK_API_KEY", "sk-ds-test"); }
+        unsafe {
+            std::env::set_var("DEEPSEEK_API_KEY", "sk-ds-test");
+        }
         let state = direct_state("deepseek");
         let (env, _args) = resolve_spawn_overrides(&driver(), &state, None);
-        unsafe { std::env::remove_var("DEEPSEEK_API_KEY"); }
+        unsafe {
+            std::env::remove_var("DEEPSEEK_API_KEY");
+        }
         // preset deepseek = ["deepseek-chat", "deepseek-reasoner"]
-        assert!(env.iter().any(|(k, v)| k == "ANTHROPIC_MODEL" && v == "deepseek-chat"));
-        assert!(env.iter().any(|(k, v)| k == "ANTHROPIC_DEFAULT_OPUS_MODEL" && v == "deepseek-chat"));
-        assert!(env.iter().any(|(k, v)| k == "ANTHROPIC_DEFAULT_SONNET_MODEL" && v == "deepseek-reasoner"));
-        assert!(env.iter().any(|(k, v)| k == "ANTHROPIC_DEFAULT_HAIKU_MODEL" && v == "deepseek-reasoner"));
-        assert!(env.iter().any(|(k, v)| k == "CLAUDE_CODE_SUBAGENT_MODEL" && v == "deepseek-reasoner"));
+        assert!(
+            env.iter()
+                .any(|(k, v)| k == "ANTHROPIC_MODEL" && v == "deepseek-chat")
+        );
+        assert!(
+            env.iter()
+                .any(|(k, v)| k == "ANTHROPIC_DEFAULT_OPUS_MODEL" && v == "deepseek-chat")
+        );
+        assert!(
+            env.iter()
+                .any(|(k, v)| k == "ANTHROPIC_DEFAULT_SONNET_MODEL" && v == "deepseek-reasoner")
+        );
+        assert!(
+            env.iter()
+                .any(|(k, v)| k == "ANTHROPIC_DEFAULT_HAIKU_MODEL" && v == "deepseek-reasoner")
+        );
+        assert!(
+            env.iter()
+                .any(|(k, v)| k == "CLAUDE_CODE_SUBAGENT_MODEL" && v == "deepseek-reasoner")
+        );
         // 端点 env 不受影响。
         assert!(env.iter().any(|(k, _)| k == "ANTHROPIC_BASE_URL"));
         assert!(env.iter().any(|(k, _)| k == "ANTHROPIC_AUTH_TOKEN"));
@@ -1856,13 +1898,21 @@ base_url_anthropic = "https://api.anthropic.com"
     /// OS env 里有残留 `ANTHROPIC_MODEL` 时，extra_env 里值覆盖（SDK .envs 语义）。
     #[test]
     fn model_cover_overrides_inherited_value_semantics() {
-        let env = model_cover_env(&[sebas_router::models::ModelEntry::text_only("deepseek-v4-pro[1m]")]);
+        let env = model_cover_env(&[sebas_router::models::ModelEntry::text_only(
+            "deepseek-v4-pro[1m]",
+        )]);
         // 模拟 SDK `.envs(&env)` 在残留 env 之上合并：残留的 `ANTHROPIC_MODEL=stale`
         // 必须由 extra_env 里的 `ANTHROPIC_MODEL=deepseek-v4-pro[1m]` 覆盖。这里
         // 断言：extra_env 里至少存在一个 `ANTHROPIC_MODEL` 键且其值是推导值。
         let stale = ("ANTHROPIC_MODEL".to_string(), "stale".to_string());
         assert!(env.iter().any(|(k, _)| *k == stale.0));
-        assert!(env.iter().any(|(k, v)| k == "ANTHROPIC_MODEL" && v == "deepseek-v4-pro[1m]"));
-        assert!(!env.iter().any(|(k, v)| k == "ANTHROPIC_MODEL" && v == &stale.1));
+        assert!(
+            env.iter()
+                .any(|(k, v)| k == "ANTHROPIC_MODEL" && v == "deepseek-v4-pro[1m]")
+        );
+        assert!(
+            !env.iter()
+                .any(|(k, v)| k == "ANTHROPIC_MODEL" && v == &stale.1)
+        );
     }
 }

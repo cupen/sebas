@@ -99,7 +99,10 @@ fn explicit_role_overrides_creation_default() {
     // 词表外角色：命令失败且不建户。
     let err = run_passwd(passwd_args("boss", "password8", Some("superadmin")))
         .expect_err("非法角色必须报错");
-    assert!(err.to_string().contains("root/admin/member/viewer"), "{err}");
+    assert!(
+        err.to_string().contains("root/admin/member/viewer"),
+        "{err}"
+    );
     assert!(store.get_by_username("boss").unwrap().is_none());
 }
 

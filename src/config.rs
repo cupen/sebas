@@ -549,7 +549,10 @@ pub struct ServiceCoreConfig {
 /// `[service.core] secret_file` 显式键优先（`~` 由 with_expanded_paths 展开）；
 /// 缺省推导为 `<config 文件所在目录>/core.secret`。双进程（core 与客户端）
 /// 读同一份 `-c` config，路径天然一致；沙箱用自己的 config，隔离天然成立。
-pub fn core_secret_file_path(secret_file: Option<&str>, config_path: &std::path::Path) -> std::path::PathBuf {
+pub fn core_secret_file_path(
+    secret_file: Option<&str>,
+    config_path: &std::path::Path,
+) -> std::path::PathBuf {
     match secret_file {
         Some(p) if !p.trim().is_empty() => std::path::PathBuf::from(expand_tilde(p)),
         _ => {
@@ -905,7 +908,11 @@ impl Config {
         // 节点链路：开着就必须是一个可 bind 的 IP:PORT —— 启动期就报错，
         // 而不是等到 ready 之后由 arm 失败（那时已经在服务中了）。
         if self.node_link.enabled
-            && self.node_link.listen.parse::<std::net::SocketAddr>().is_err()
+            && self
+                .node_link
+                .listen
+                .parse::<std::net::SocketAddr>()
+                .is_err()
         {
             return Err(crate::error::SebasError::Config(format!(
                 "[node_link] listen {:?} 不是 IP:PORT（不接受域名）",
@@ -928,7 +935,8 @@ impl Config {
         {
             return Err(SebasError::Config(
                 "feishu.enabled = true 但 app_id/app_secret 未完整配置；\
-                 请同时填写凭据，或设 enabled = false（显式停用）".into(),
+                 请同时填写凭据，或设 enabled = false（显式停用）"
+                    .into(),
             ));
         }
         // owner_id 决策（sebas-nya）：维持**可选**，偏离 openspec/specs/cli-service/spec.md 的必填。
@@ -1085,10 +1093,7 @@ mod tests {
         // 为正斜杠。
         let cfg = Config::parse("").expect("空配置应可解析");
         let default_dir = cfg.skills_dir();
-        assert!(
-            !default_dir.starts_with("~"),
-            "~ 必须已展开: {default_dir}"
-        );
+        assert!(!default_dir.starts_with("~"), "~ 必须已展开: {default_dir}");
         assert!(
             default_dir.replace('\\', "/").ends_with(".agents/skills"),
             "缺省必须是 ~/.agents/skills: {default_dir}"
@@ -1130,16 +1135,16 @@ mod tests {
     fn deprecated_watchdog_service_tables_are_warned_and_ignored() {
         // enable-core-by-default + simplify-service-config：`[watchdog.core]`
         // 整节废弃（先 enabled 键、后整节更名），警告忽略、serde 静默跳过。
-        let cfg = Config::parse("[watchdog.core]\nenabled = false\n")
-            .expect("旧节应被忽略而非报错");
+        let cfg =
+            Config::parse("[watchdog.core]\nenabled = false\n").expect("旧节应被忽略而非报错");
         assert_eq!(
             deprecated_watchdog_service_tables("[watchdog.core]\nenabled = false\n"),
             vec!["core"]
         );
-        assert!(deprecated_watchdog_service_tables(
-            "[service.core]\nchannel_path = \"/x\"\n"
-        )
-        .is_empty());
+        assert!(
+            deprecated_watchdog_service_tables("[service.core]\nchannel_path = \"/x\"\n")
+                .is_empty()
+        );
         // 旧键不再能关掉 core：结构里没有 enabled 字段可读，恒启动由 watchdog 保证。
         let _ = cfg;
     }
@@ -1228,11 +1233,8 @@ allowed_roots = ["~/work", "/srv/projects"]
         // 回退 cwd 并置回退 flag（装配点据此打告警）。
         let cwd = std::path::Path::new("/process/cwd");
 
-        let (root, fell_back) = resolve_workspace_root(
-            Some("/env/root"),
-            Some("/config/root"),
-            cwd,
-        );
+        let (root, fell_back) =
+            resolve_workspace_root(Some("/env/root"), Some("/config/root"), cwd);
         assert_eq!(root, std::path::PathBuf::from("/env/root"), "env 优先");
         assert!(!fell_back, "env 生效时不算回退");
 
@@ -1315,7 +1317,10 @@ app_secret = "s"
 "#,
         )
         .expect("enabled=false + 凭据应可解析");
-        assert!(!off_with_creds.feishu.is_enabled(), "显式 false 应优先于凭据");
+        assert!(
+            !off_with_creds.feishu.is_enabled(),
+            "显式 false 应优先于凭据"
+        );
 
         // 态 2：enabled = true + 凭据缺失 → 配置错误拒绝启动。
         let on_no_creds = Config::parse(
@@ -1347,7 +1352,10 @@ app_secret = "s"
 "#,
         )
         .expect("缺省+凭据可解析");
-        assert!(default_with_creds.feishu.is_enabled(), "缺省回退隐式判定应接入");
+        assert!(
+            default_with_creds.feishu.is_enabled(),
+            "缺省回退隐式判定应接入"
+        );
     }
 
     #[test]
@@ -1376,10 +1384,7 @@ enabled = false
 auth = false
 "#;
         let cfg = Config::parse(raw).expect("显式关鉴权应可解析");
-        assert!(
-            !cfg.service.webui.auth,
-            "显式 false 应优先于默认值"
-        );
+        assert!(!cfg.service.webui.auth, "显式 false 应优先于默认值");
     }
 
     #[test]
@@ -1390,7 +1395,10 @@ auth = false
         assert_eq!(unknown_webui_keys(raw), vec!["auht".to_string()]);
         // 已退役的 allowed_roots 同样被点名（静默忽略 → 启动期可见）。
         let legacy = "[service.webui]\nallowed_roots = [\"/tmp\"]\n";
-        assert_eq!(unknown_webui_keys(legacy), vec!["allowed_roots".to_string()]);
+        assert_eq!(
+            unknown_webui_keys(legacy),
+            vec!["allowed_roots".to_string()]
+        );
         // 干净配置零误报：全字段 + 缺节都不在名单上。
         let clean = "[service.webui]\nenabled = true\nhost = \"127.0.0.1\"\nport = 9797\nauth = false\narchive_retention_days = 30\n";
         assert!(unknown_webui_keys(clean).is_empty());
@@ -1501,7 +1509,8 @@ bootstrap_token_ttl_secs = 120
         assert_eq!(cfg.node_link.listen, "0.0.0.0:9999");
         assert_eq!(cfg.node_link.bootstrap_token_ttl_secs, 120);
         assert_eq!(
-            cfg.node_link.registry_path(std::path::Path::new("/etc/sebas/config.toml")),
+            cfg.node_link
+                .registry_path(std::path::Path::new("/etc/sebas/config.toml")),
             std::path::PathBuf::from("/var/lib/sebas/nodes.json")
         );
     }

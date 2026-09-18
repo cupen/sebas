@@ -19,12 +19,12 @@
 //! 官方 `/models` 接口（详情面板的「🔍 探测 model 列表」按钮），静态
 //! preset 表里的型号很快就会过时；探测不可用时手填兜底。
 
+use sebas_dispatch::crud::{CrudForm, FileStore, Item};
 use sebas_feishu::cards::{
     CardElement, CardText, CollapsiblePanel, CollapsiblePanelHeader, StandardIcon,
 };
 use sebas_feishu::forms::{FormField, FormSpec, SelectOption};
 use sebas_router::config::RouterConfig;
-use sebas_dispatch::crud::{CrudForm, FileStore, Item};
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -298,19 +298,13 @@ pub fn item_from_provider(name: &str, p: &sebas_router::config::ProviderConfig) 
             m.insert("base_url_openai_chat".into(), Value::String(u.clone()));
         }
         if let Some(u) = &p.base_url_openai_responses {
-            m.insert(
-                "base_url_openai_responses".into(),
-                Value::String(u.clone()),
-            );
+            m.insert("base_url_openai_responses".into(), Value::String(u.clone()));
         }
         if !p.models.is_empty() {
             // 卡片表单的 models 字段是逗号分隔文本（条目 id 视图）；真正
             // 落库经 store 归一化为条目对象（redesign-provider-models-settings
             // 1.1）。
-            m.insert(
-                "models".into(),
-                Value::String(p.model_ids().join(",")),
-            );
+            m.insert("models".into(), Value::String(p.model_ids().join(",")));
         }
     }
     if let Some(key) = &p.api_key {

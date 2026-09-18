@@ -125,7 +125,9 @@ impl DispatchHandle {
         let routed = match &self.provider_forms {
             Some(forms) => {
                 if let Some(form) = forms.dispatch(form_name) {
-                    let out = form.handle(key.clone(), &value, &form_value, message_id).await;
+                    let out = form
+                        .handle(key.clone(), &value, &form_value, message_id)
+                        .await;
                     self.emit(out).await;
                     true
                 } else {
@@ -143,7 +145,10 @@ impl DispatchHandle {
             let acp_button_payload =
                 value.get("session_id").is_some() || value.get("request_id").is_some();
             if acp_button_payload {
-                tracing::warn!(?value, "form-routed callback carries ACP button payload; retrying as button");
+                tracing::warn!(
+                    ?value,
+                    "form-routed callback carries ACP button payload; retrying as button"
+                );
                 let action = ChannelAction {
                     session_id: value
                         .get("session_id")
@@ -719,7 +724,7 @@ impl DispatchHandle {
             return Err("会话不可达".into());
         };
         self.map
-            .set_desired_mode(&entry.key, Some(super::AUTO_MODE.to_string()))
+            .set_desired_mode(&entry.key, super::AUTO_MODE.to_string())
             .await;
         self.auto_mode_switches
             .record(

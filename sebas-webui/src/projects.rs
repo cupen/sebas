@@ -196,8 +196,7 @@ fn save(projects: &[ProjectEntry]) -> Result<(), String> {
     let body = serde_json::to_string_pretty(&file)
         .map_err(|e| format!("序列化 projects.json 失败: {e}"))?;
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, &body)
-        .map_err(|e| format!("写入临时文件 {} 失败: {e}", tmp.display()))?;
+    std::fs::write(&tmp, &body).map_err(|e| format!("写入临时文件 {} 失败: {e}", tmp.display()))?;
     if let Ok(file) = std::fs::OpenOptions::new().write(true).open(&tmp) {
         file.sync_all().ok();
     }
@@ -378,9 +377,7 @@ pub fn is_accessible(path: &str) -> bool {
 /// the tmp+rename atomicity.
 pub fn read_branch(path: &str) -> Option<String> {
     let mut projects = load();
-    let entry = projects
-        .iter_mut()
-        .find(|p| p.path == path)?;
+    let entry = projects.iter_mut().find(|p| p.path == path)?;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -445,9 +442,8 @@ mod tests {
 
     static TEST_MUTEX: LazyLock<std::sync::Mutex<()>> = LazyLock::new(|| std::sync::Mutex::new(()));
     static TEST_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    static TEST_DIR: LazyLock<tempfile::TempDir> = LazyLock::new(|| {
-        tempfile::tempdir().expect("create temp dir for tests")
-    });
+    static TEST_DIR: LazyLock<tempfile::TempDir> =
+        LazyLock::new(|| tempfile::tempdir().expect("create temp dir for tests"));
 
     /// 进程级注册表 env（SEBAS_PROJECTS_PATH）的测试串行锁。server.rs 的
     /// workspace_root_tests 也走文件注册表降级路径，必须与本模块共用一把
@@ -465,7 +461,9 @@ mod tests {
         let _guard = TEST_MUTEX.lock().unwrap();
         let path = test_registry_path();
         let prev = std::env::var("SEBAS_PROJECTS_PATH").ok();
-        unsafe { std::env::set_var("SEBAS_PROJECTS_PATH", &path); }
+        unsafe {
+            std::env::set_var("SEBAS_PROJECTS_PATH", &path);
+        }
         f();
         let _ = std::fs::remove_file(&path);
         match prev {
@@ -474,17 +472,57 @@ mod tests {
         }
     }
 
-    #[test] fn absent_file_returns_empty() { with_test_env(|| { assert!(list().is_empty()); }); }
-    #[test] fn unparseable_file_returns_empty() { with_test_env(|| { std::fs::write(test_registry_path(), "bad").unwrap(); assert!(list().is_empty()); }); }
-    #[test] fn add_and_list() { with_test_env(|| { let dir = TEST_DIR.path().join("p"); std::fs::create_dir_all(&dir).unwrap(); let e = add(&dir.to_string_lossy()).unwrap(); assert_eq!(e.name, "p"); assert_eq!(list().len(), 1); }); }
-    #[test] fn duplicate_add_rejected() { with_test_env(|| { let dir = TEST_DIR.path().join("d"); std::fs::create_dir_all(&dir).unwrap(); let s = dir.to_string_lossy(); add(&s).unwrap(); assert!(add(&s).is_err()); }); }
-    #[test] fn remove_project() { with_test_env(|| { let dir = TEST_DIR.path().join("r"); std::fs::create_dir_all(&dir).unwrap(); let s = dir.to_string_lossy(); let added = add(&s).unwrap(); assert!(remove_by_id(&added.id).unwrap()); assert!(list().is_empty()); }); }
+    #[test]
+    fn absent_file_returns_empty() {
+        with_test_env(|| {
+            assert!(list().is_empty());
+        });
+    }
+    #[test]
+    fn unparseable_file_returns_empty() {
+        with_test_env(|| {
+            std::fs::write(test_registry_path(), "bad").unwrap();
+            assert!(list().is_empty());
+        });
+    }
+    #[test]
+    fn add_and_list() {
+        with_test_env(|| {
+            let dir = TEST_DIR.path().join("p");
+            std::fs::create_dir_all(&dir).unwrap();
+            let e = add(&dir.to_string_lossy()).unwrap();
+            assert_eq!(e.name, "p");
+            assert_eq!(list().len(), 1);
+        });
+    }
+    #[test]
+    fn duplicate_add_rejected() {
+        with_test_env(|| {
+            let dir = TEST_DIR.path().join("d");
+            std::fs::create_dir_all(&dir).unwrap();
+            let s = dir.to_string_lossy();
+            add(&s).unwrap();
+            assert!(add(&s).is_err());
+        });
+    }
+    #[test]
+    fn remove_project() {
+        with_test_env(|| {
+            let dir = TEST_DIR.path().join("r");
+            std::fs::create_dir_all(&dir).unwrap();
+            let s = dir.to_string_lossy();
+            let added = add(&s).unwrap();
+            assert!(remove_by_id(&added.id).unwrap());
+            assert!(list().is_empty());
+        });
+    }
     // ── (节点, 路径) 项目身份（add-remote-execution-node 3.2）──────────────
 
     #[test]
     fn legacy_entry_without_node_id_is_read_back_as_local() {
         // 迁移就靠 serde default：旧注册表里没有 node_id 的条目自动成为本机项目。
-        let legacy = r#"{"projects":[{"id":"proj-abc123","path":"/srv/repo","name":"repo","added_at":1}]}"#;
+        let legacy =
+            r#"{"projects":[{"id":"proj-abc123","path":"/srv/repo","name":"repo","added_at":1}]}"#;
         let file: RegistryFile = serde_json::from_str(legacy).unwrap();
         let entry = &file.projects[0];
         assert_eq!(entry.node_id, LOCAL_NODE_ID, "旧条目回填为本机节点");
@@ -557,7 +595,11 @@ mod tests {
         let missing = validate_remote_path(
             "dev-box",
             "/srv/repo",
-            NodePathCheck { exists: false, is_dir: false, within_workspace: true },
+            NodePathCheck {
+                exists: false,
+                is_dir: false,
+                within_workspace: true,
+            },
         )
         .unwrap_err();
         assert!(missing.contains("dev-box"), "未点名节点: {missing}");
@@ -568,7 +610,11 @@ mod tests {
         let not_dir = validate_remote_path(
             "dev-box",
             "/srv/file.txt",
-            NodePathCheck { exists: true, is_dir: false, within_workspace: true },
+            NodePathCheck {
+                exists: true,
+                is_dir: false,
+                within_workspace: true,
+            },
         )
         .unwrap_err();
         assert!(not_dir.contains("dev-box"));
@@ -581,7 +627,11 @@ mod tests {
             validate_remote_path(
                 "dev-box",
                 "/srv/repo",
-                NodePathCheck { exists: true, is_dir: true, within_workspace: true },
+                NodePathCheck {
+                    exists: true,
+                    is_dir: true,
+                    within_workspace: true
+                },
             )
             .is_ok()
         );
@@ -596,7 +646,11 @@ mod tests {
         let msg = validate_remote_path(
             "dev-box",
             "/srv/secret",
-            NodePathCheck { exists: false, is_dir: false, within_workspace: false },
+            NodePathCheck {
+                exists: false,
+                is_dir: false,
+                within_workspace: false,
+            },
         )
         .unwrap_err();
         assert!(msg.contains("dev-box"), "未点名节点: {msg}");
@@ -645,13 +699,35 @@ mod tests {
         });
     }
 
-    #[test] fn add_nonexistent_rejected() { with_test_env(|| { assert!(add("/bogus").is_err()); }); }
-    #[test] fn add_file_rejected() { with_test_env(|| { let f = TEST_DIR.path().join("f.txt"); std::fs::write(&f, "x").unwrap(); assert!(add(&f.to_string_lossy()).is_err()); }); }
-    #[test] fn persists_across_reload() { with_test_env(|| { let dir = TEST_DIR.path().join("p2"); std::fs::create_dir_all(&dir).unwrap(); add(&dir.to_string_lossy()).unwrap(); drop(list()); assert_eq!(list().len(), 1); }); }
-
-    #[test] fn reorder_persists_user_order() {
+    #[test]
+    fn add_nonexistent_rejected() {
         with_test_env(|| {
-            for n in ["a","b","c"] {
+            assert!(add("/bogus").is_err());
+        });
+    }
+    #[test]
+    fn add_file_rejected() {
+        with_test_env(|| {
+            let f = TEST_DIR.path().join("f.txt");
+            std::fs::write(&f, "x").unwrap();
+            assert!(add(&f.to_string_lossy()).is_err());
+        });
+    }
+    #[test]
+    fn persists_across_reload() {
+        with_test_env(|| {
+            let dir = TEST_DIR.path().join("p2");
+            std::fs::create_dir_all(&dir).unwrap();
+            add(&dir.to_string_lossy()).unwrap();
+            drop(list());
+            assert_eq!(list().len(), 1);
+        });
+    }
+
+    #[test]
+    fn reorder_persists_user_order() {
+        with_test_env(|| {
+            for n in ["a", "b", "c"] {
                 let d = TEST_DIR.path().join(n);
                 std::fs::create_dir_all(&d).unwrap();
                 add(&d.to_string_lossy()).unwrap();
@@ -660,15 +736,22 @@ mod tests {
             // Reverse: c, b, a.
             let paths: Vec<String> = before.iter().rev().map(|p| p.path.clone()).collect();
             let after = reorder(&paths).unwrap();
-            assert_eq!(after.iter().map(|p| &p.path).collect::<Vec<_>>(), paths.iter().collect::<Vec<_>>());
+            assert_eq!(
+                after.iter().map(|p| &p.path).collect::<Vec<_>>(),
+                paths.iter().collect::<Vec<_>>()
+            );
 
             // Persists across re-load.
             let again = list();
-            assert_eq!(again.iter().map(|p| &p.path).collect::<Vec<_>>(), paths.iter().collect::<Vec<_>>());
+            assert_eq!(
+                again.iter().map(|p| &p.path).collect::<Vec<_>>(),
+                paths.iter().collect::<Vec<_>>()
+            );
         });
     }
 
-    #[test] fn reorder_ignores_unknown_paths() {
+    #[test]
+    fn reorder_ignores_unknown_paths() {
         with_test_env(|| {
             let d = TEST_DIR.path().join("a");
             std::fs::create_dir_all(&d).unwrap();
@@ -681,7 +764,8 @@ mod tests {
         });
     }
 
-    #[test] fn read_branch_finds_git_head() {
+    #[test]
+    fn read_branch_finds_git_head() {
         with_test_env(|| {
             let d = TEST_DIR.path().join("g");
             std::fs::create_dir_all(d.join(".git")).unwrap();
@@ -692,7 +776,8 @@ mod tests {
         });
     }
 
-    #[test] fn read_branch_returns_none_for_non_git_dir() {
+    #[test]
+    fn read_branch_returns_none_for_non_git_dir() {
         with_test_env(|| {
             let d = TEST_DIR.path().join("n");
             std::fs::create_dir_all(&d).unwrap();
@@ -702,18 +787,24 @@ mod tests {
         });
     }
 
-    #[test] fn read_branch_returns_none_for_detached_head() {
+    #[test]
+    fn read_branch_returns_none_for_detached_head() {
         with_test_env(|| {
             let d = TEST_DIR.path().join("d");
             std::fs::create_dir_all(d.join(".git")).unwrap();
-            std::fs::write(d.join(".git/HEAD"), "9dce8c9d4f3b1e2a0b8c0d1e2f3a4b5c6d7e8f90\n").unwrap();
+            std::fs::write(
+                d.join(".git/HEAD"),
+                "9dce8c9d4f3b1e2a0b8c0d1e2f3a4b5c6d7e8f90\n",
+            )
+            .unwrap();
             add(&d.to_string_lossy()).unwrap();
             let path = list()[0].path.clone();
             assert_eq!(read_branch(&path), None);
         });
     }
 
-    #[test] fn is_accessible_reflects_filesystem() {
+    #[test]
+    fn is_accessible_reflects_filesystem() {
         with_test_env(|| {
             let d = TEST_DIR.path().join("alive");
             std::fs::create_dir_all(&d).unwrap();

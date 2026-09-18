@@ -33,6 +33,26 @@ const ls = {
 }
 Object.defineProperty(globalThis, 'localStorage', { value: ls, configurable: true })
 
+/**
+ * 共享 WS 客户端 mock（session-parallel-liveness-and-unread-polish 2.2）：
+ * subscribe 捕获 handler 供用例派发相位帧（emit），验证 rail 圆点与未读
+ * 徽标从帧字段真读、不依赖 HTTP 列表刷新。
+ */
+const wsMocks = vi.hoisted(() => {
+  const handlers = new Set<(ev: unknown) => void>()
+  return {
+    subscribe: vi.fn((h: (ev: unknown) => void) => {
+      handlers.add(h)
+      return () => handlers.delete(h)
+    }),
+    emit: (ev: unknown): void => {
+      for (const h of handlers) h(ev)
+    },
+    clearHandlers: (): void => handlers.clear(),
+  }
+})
+vi.mock('../api/shared-ws.js', () => ({ sharedWs: wsMocks }))
+
 vi.mock('../api/client.js')
 
 // vi.auto-mock 把方法变成了 vi.fn，但类型仍是真实 client 的形状——
@@ -50,7 +70,7 @@ const projects: Project[] = [
 let seq = 0
 function row(overrides: Partial<SessionRow>): SessionRow {
   seq += 1
-  return {
+  const base: SessionRow = {
     encoded_key: `oc_${seq}%00`,
     chat_id: `chat-${seq}`,
     thread_id: null,
@@ -70,8 +90,10 @@ function row(overrides: Partial<SessionRow>): SessionRow {
     agent_kind: null,
     pending_count: 0,
     msg_count: 0,
-    ...overrides,
+    turn_engaged: false,
+    desired_mode: 'ask',
   }
+  return { ...base, ...overrides }
 }
 
 const sessionRows: SessionRow[] = [
@@ -118,6 +140,10 @@ beforeEach(() => {
   })
 })
 
+beforeEach(() => {
+  wsMocks.clearHandlers()
+})
+
 afterEach(() => {
   document.body.innerHTML = ''
   window.history.replaceState({}, '', '/')
@@ -156,6 +182,64 @@ describe('sebas-project-rail (sidebar tree)', () => {
     expect(el.shadowRoot!.textContent).toContain('aaaa0001')
     expect(items[0]!.querySelector('.session-dot')?.getAttribute('data-status')).toBe('working')
     expect(items[1]!.querySelector('.session-dot')?.getAttribute('data-status')).toBe('done')
+    el.remove()
+  })
+
+  it('a session.updated frame alone advances the unread badge without any list refresh (2.2)', async () => {
+    // 读锚先落在 0：帧带来的 3 段全部未读（无锚 = fully read，不冒未读）。
+    writeFocusAnchor('oc_1%00', 0)
+    const el = await mount()
+    ;(el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).click()
+    await el.updateComplete
+    const items = () => [...el.shadowRoot!.querySelectorAll('li.session-item')]
+    expect(items()[0]!.querySelector('[data-testid="session-unread"]')).toBeNull()
+    const listCallsBefore = mockOf(apiMock.sessions).mock.calls.length
+
+    // 引擎 flip：可见回复段 +3。五键帧到达即打补丁——不刷新列表（徽标
+    // 从帧字段真读，2.2），圆点同步翻 working。
+    wsMocks.emit({
+      type: 'session.updated',
+      session_id: 'oc_1%00',
+      status_slug: 'working',
+      turn_engaged: true,
+      msg_count: 3,
+      pending: [],
+    })
+    await el.updateComplete
+
+    const badge = items()[0]!.querySelector('[data-testid="session-unread"]')
+    expect(badge).toBeTruthy()
+    expect(badge!.textContent).toBe('3')
+    expect(mockOf(apiMock.sessions).mock.calls.length).toBe(listCallsBefore)
+    // 圆点状态同帧翻转到 working（避免「读数新了、圆点还是旧的」的错位）。
+    expect(items()[0]!.querySelector('.session-dot')?.getAttribute('data-status')).toBe('working')
+    el.remove()
+  })
+
+  it('unread rows carry the emphasis tint and read rows do not (2.4, D4)', async () => {
+    // 先写读锚再让计数超过它：第一行有 2 条未读，第二行无未读。
+    const unreadRow = row({ project_id: 'proj-alpha', msg_count: 3 })
+    const readRow = row({ project_id: 'proj-alpha', status_slug: 'done', msg_count: 3 })
+    writeFocusAnchor(unreadRow.encoded_key, 1)
+    writeFocusAnchor(readRow.encoded_key, 3)
+    mockOf(apiMock.sessions).mockResolvedValue(sessionList([unreadRow, readRow]))
+    const el = await mount()
+    ;(el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).click()
+    await el.updateComplete
+    const items = [...el.shadowRoot!.querySelectorAll('li.session-item')]
+    expect(items[0]!.className).toContain('unread')
+    expect(items[0]!.querySelector('[data-testid="session-unread"]')).toBeTruthy()
+    expect(items[1]!.className).not.toContain('unread')
+    expect(items[1]!.querySelector('[data-testid="session-unread"]')).toBeNull()
+    // 样式钉死：未读行用 accent-soft 族 tint（在读数字之前可分辨）。
+    // happy-dom 下 Lit 走 adoptedStyleSheets，样式文本从 cssResult 取。
+    const cssText = [SebasProjectRail.styles]
+      .flat()
+      .map((c) => (c as unknown as { cssText?: string }).cssText ?? '')
+      .join('\n')
+    expect(cssText).toMatch(
+      /\.session-item\.unread:not\(\.current\)\s*\{[^}]*background:\s*var\(--sebas-accent-soft\)/,
+    )
     el.remove()
   })
 

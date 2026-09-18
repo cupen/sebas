@@ -18,8 +18,8 @@ use super::protocol::{
 use crate::agent_backend::DualSessionBackend;
 use crate::error::{Result, SebasError};
 use sebas_channels::ChannelKey;
-use sebas_dispatch::provider_state::ProviderMode;
 use sebas_dispatch::SessionInfo;
+use sebas_dispatch::provider_state::ProviderMode;
 use sebas_dispatch::{DispatchHandle, SessionEvent, TurnEntry, TurnStreamEvent};
 use sebas_ipc::{IpcListener, IpcStream, ReadHalf, WriteHalf};
 use sebas_webui::session_backend::{PermissionNotice, SessionBackend, SessionRejection};
@@ -104,7 +104,10 @@ pub async fn serve(
     let listener = bind_channel_socket(&path)?;
     // 兼容入口不带节点管理面（测试与既有调用方）。生产路径（core）走带句柄的
     // `serve_bound`，让节点管理入口与监听共享同一份注册表写者。
-    serve_bound(backend, router, path, secret, listener, None, None, shutdown).await
+    serve_bound(
+        backend, router, path, secret, listener, None, None, shutdown,
+    )
+    .await
 }
 
 /// Serve over a **pre-bound** listener: the caller (run.rs auto-arm path) owns
@@ -445,7 +448,10 @@ async fn recv_remote_event(
             // 投影落后于事件量：如实关掉这一路，客户端会在重连时重新快照
             // （与本地订阅的 Lagged 处置一致——绝不给一个带缺口的流）。
             Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                warn!(skipped, "core channel: remote projection lagged; dropping connection");
+                warn!(
+                    skipped,
+                    "core channel: remote projection lagged; dropping connection"
+                );
                 None
             }
             Err(broadcast::error::RecvError::Closed) => None,
@@ -809,9 +815,20 @@ async fn dispatch(
             // 远端项目（add-remote-execution-node 5.1/8.2）：路径可用性由**节点**
             // 判定，主控不做本地 stat——在别人的机器上 stat 本机路径毫无意义，
             // 而"本机没有这个目录"会被误报成"项目不存在"。
-            if let Some(node_id) = node.as_deref().filter(|n| *n != crate::node_link::LOCAL_NODE_ID) {
-                return spawn_remote(projection, node_id, prompt, project_dir, model, mode, &agent)
-                    .await;
+            if let Some(node_id) = node
+                .as_deref()
+                .filter(|n| *n != crate::node_link::LOCAL_NODE_ID)
+            {
+                return spawn_remote(
+                    projection,
+                    node_id,
+                    prompt,
+                    project_dir,
+                    model,
+                    mode,
+                    &agent,
+                )
+                .await;
             }
             // 5.5: canonicalize + stat BEFORE any spawn; no existence
             // disclosure in the rejection message.
@@ -827,10 +844,8 @@ async fn dispatch(
             // `std::fs::canonicalize` 产出 `\\?\` verbatim 形——与注册表里
             // `canonicalize_plain` 落库的 plain 形判等恒假（所有项目会话被误判
             // 越界），工作台头部还会泄漏 verbatim 前缀。与注册同用 plain 形。
-            let project_dir =
-                project_dir.map(|dir| {
-                    sebas_webui::fs::canonicalize_plain(Path::new(&dir)).unwrap_or(dir)
-                });
+            let project_dir = project_dir
+                .map(|dir| sebas_webui::fs::canonicalize_plain(Path::new(&dir)).unwrap_or(dir));
             match backend
                 .spawn_with(prompt, project_dir, &agent, model, mode, None)
                 .await
@@ -846,7 +861,10 @@ async fn dispatch(
             agent,
             node,
         } => {
-            if let Some(node_id) = node.as_deref().filter(|n| *n != crate::node_link::LOCAL_NODE_ID) {
+            if let Some(node_id) = node
+                .as_deref()
+                .filter(|n| *n != crate::node_link::LOCAL_NODE_ID)
+            {
                 // 占位会话在远端没有意义：占位的价值是"先建行、首条消息才 spawn"，
                 // 而远端行的建立本身就要在节点上建会话。如实拒绝而不是悄悄建一个
                 // 真的会话（那会让"还没发消息"变成"已经在跑了"）。
@@ -872,10 +890,8 @@ async fn dispatch(
             }
             // 与 Spawn 同款：project_dir 落 plain 形 canonical（Windows verbatim
             // 前缀还原），理由见上方 Spawn 分支注释。
-            let project_dir =
-                project_dir.map(|dir| {
-                    sebas_webui::fs::canonicalize_plain(Path::new(&dir)).unwrap_or(dir)
-                });
+            let project_dir = project_dir
+                .map(|dir| sebas_webui::fs::canonicalize_plain(Path::new(&dir)).unwrap_or(dir));
             match backend
                 .create_placeholder(project_dir, &agent, model, mode, None)
                 .await
@@ -1247,7 +1263,9 @@ async fn spawn_remote(
     let Some(projection) = projection else {
         return CoreChannelResponse::Rejected {
             rejection: SessionRejection::Unavailable {
-                cause: format!("节点链路未启用（[node_link] enabled = false），无法在节点 {node_id} 上建立会话"),
+                cause: format!(
+                    "节点链路未启用（[node_link] enabled = false），无法在节点 {node_id} 上建立会话"
+                ),
             },
         };
     };
@@ -1261,13 +1279,13 @@ async fn spawn_remote(
     }
     // 项目身份 `(节点, 路径)` 的 id 与工作台用**同一个**派生函数，所以两边算出的
     // 项目 id 一致——否则同一个项目在两个进程里会变成两个。
-    let project = project_dir.as_deref().map(|path| {
-        crate::node_link::placement::ProjectRef {
+    let project = project_dir
+        .as_deref()
+        .map(|path| crate::node_link::placement::ProjectRef {
             id: sebas_webui::projects::project_id_for_on(node_id, path),
             node_id: node_id.to_string(),
             path: path.to_string(),
-        }
-    });
+        });
     match projection
         .spawn_on(
             node_id,
@@ -1316,7 +1334,9 @@ async fn dispatch_node_link(
                     token,
                     expires_unix: now + ttl,
                 },
-                Err(e) => NodeLinkOutcome::Failed { cause: e.to_string() },
+                Err(e) => NodeLinkOutcome::Failed {
+                    cause: e.to_string(),
+                },
             }
         }
         NodeLinkOp::ListNodes => NodeLinkOutcome::Nodes {
@@ -1337,7 +1357,9 @@ async fn dispatch_node_link(
         },
         NodeLinkOp::RevokeNode { node_id } => match reg.revoke(&node_id) {
             Ok(found) => NodeLinkOutcome::Revoked { node_id, found },
-            Err(e) => NodeLinkOutcome::Failed { cause: e.to_string() },
+            Err(e) => NodeLinkOutcome::Failed {
+                cause: e.to_string(),
+            },
         },
     }
 }
@@ -1414,7 +1436,11 @@ mod tests {
         };
         assert_eq!(first.channel, "web");
         assert_eq!(first.key, "k");
-        assert_eq!(first.entries.len(), 2, "same-window appends batch into one frame");
+        assert_eq!(
+            first.entries.len(),
+            2,
+            "same-window appends batch into one frame"
+        );
 
         // 超限单条立即冲刷（不与下一窗合并）。
         tx.send(TurnStreamEvent {
@@ -1520,10 +1546,12 @@ mod tests {
             backend: None,
             pending: Vec::new(),
             remote: None,
-            desired_mode: None,
+            desired_mode: sebas_dispatch::engine::ask_mode(),
             effective_mode: None,
             msg_count: 0,
             turn_engaged: false,
+            parked_approvals: 0,
+            spawn_failure_reason: None,
             available_commands: Vec::new(),
         }
     }
@@ -1734,7 +1762,9 @@ mod tests {
         // 签发：拿到的 token 能换到长期凭据（一次性消费 + 配对）。
         let token = match dispatch_node_link(
             &admin,
-            NodeLinkOp::IssueJoinToken { ttl_secs: Some(600) },
+            NodeLinkOp::IssueJoinToken {
+                ttl_secs: Some(600),
+            },
         )
         .await
         {
@@ -1750,7 +1780,8 @@ mod tests {
         {
             let registry = admin.as_ref().expect("已启用");
             let mut reg = registry.lock().await;
-            reg.consume_join_token(&token, "dev-box", now_unix()).unwrap();
+            reg.consume_join_token(&token, "dev-box", now_unix())
+                .unwrap();
             let secret = reg.pair("dev-box", now_unix()).unwrap();
             assert!(reg.authenticate("dev-box", &secret).is_ok());
         }

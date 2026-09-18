@@ -24,8 +24,8 @@ use crate::ws_loop::spawn_test_session;
 use sebas_acp::claude::manager::{AgentEntry, SessionManager};
 use sebas_acp::{AcpDriver, AgentDriver, ClaudeDriver};
 use sebas_channels::AdapterRegistry;
-use sebas_router::config::RouterConfig;
 use sebas_dispatch::engine::DispatchHandle;
+use sebas_router::config::RouterConfig;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -108,15 +108,17 @@ pub async fn run(
         );
     }
 
-    let map = restore_session_map(&cfg.dispatch.state_file, cfg.dispatch.max_concurrent_sessions);
+    let map = restore_session_map(
+        &cfg.dispatch.state_file,
+        cfg.dispatch.max_concurrent_sessions,
+    );
 
     // 5.5: 初始化状态库 DB (add-state-store)。
     // fail-fast-on-startup-errors 任务 1.3：DB 不可写是启动失败（spec
     // core-session-channel delta 明列），不再静默退回文件存储假装能跑——
     // 那会把重启丢状态的问题推迟到第一次崩溃之后才暴露。
     {
-        let raw = std::env::var("SEBAS_STATE_DB")
-            .unwrap_or_else(|_| "~/.sebas/sebas.db".into());
+        let raw = std::env::var("SEBAS_STATE_DB").unwrap_or_else(|_| "~/.sebas/sebas.db".into());
         let expanded = sebas_dispatch::state_store::expand_tilde(&raw);
         let path = std::path::PathBuf::from(&expanded);
         match crate::sebas_state::writer::StateWriter::start(path.clone()) {
@@ -127,8 +129,10 @@ pub async fn run(
                 // make-core-own-provider-data 1.4：legacy defaults.json 一次性
                 // 导入 settings 域（标记在场即永不读该文件）。放在 init_engine
                 // 之前——经同一 writer 句柄串行提交，不与后续引擎写并发。
-                if let Err(e) =
-                    crate::sebas_state::defaults_import::import_legacy_defaults_once(writer.handle()).await
+                if let Err(e) = crate::sebas_state::defaults_import::import_legacy_defaults_once(
+                    writer.handle(),
+                )
+                .await
                 {
                     tracing::warn!(error = %e, "legacy defaults 导入阶段失败（不阻断启动）");
                 }
@@ -186,9 +190,10 @@ pub async fn run(
     let provider_forms = crate::provider::build_form(&raw_config);
     // WebUI 设置页的快照配置是 feishu 渲染配置（`[card]`），与 router 镜像
     // 同形；从已合并的 router 镜像转回 feishu 类型。
-    let webui_card_cfg: sebas_feishu::cards::CardConfig =
-        serde_json::from_value(serde_json::to_value(&merged_card_cfg).expect("card config serializes"))
-            .expect("card config round-trips between mirror shapes");
+    let webui_card_cfg: sebas_feishu::cards::CardConfig = serde_json::from_value(
+        serde_json::to_value(&merged_card_cfg).expect("card config serializes"),
+    )
+    .expect("card config round-trips between mirror shapes");
     // 原生内核 manager（make-feishu-optional-webui-primary）：webui、核心通道
     // server 与飞书原生桥共享同一个执行面（LLM 通道/工具注册表/审批 hub）。
     // 凭据缺失时 manager 仍可建，spawn 时按 cause 拒绝并诚实降级（cause 由下方
@@ -253,8 +258,7 @@ pub async fn run(
     if stall_timeout > 0 {
         let stall_router = router.clone();
         tokio::spawn(async move {
-            let mut ticker =
-                tokio::time::interval(Duration::from_secs(stall_timeout.clamp(1, 15)));
+            let mut ticker = tokio::time::interval(Duration::from_secs(stall_timeout.clamp(1, 15)));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 ticker.tick().await;
@@ -339,7 +343,9 @@ pub async fn run(
         let webui_auth = if cfg.service.webui.auth {
             crate::webui_cmd::bootstrap_auth()
         } else {
-            tracing::warn!("webui auth disabled via [service.webui] auth = false: all routes are public");
+            tracing::warn!(
+                "webui auth disabled via [service.webui] auth = false: all routes are public"
+            );
             std::sync::Arc::new(sebas_webui::auth::AuthHandle::disabled())
         };
         // 非 loopback 安全门与独立 webui 进程同一裁决（webui_cmd::
@@ -347,7 +353,10 @@ pub async fn run(
         // 公网地址，开关关闭 / 用户库无启用用户时在 bind 前硬失败——不给
         // 公网留裸奔端口或抢注 root 的窗口。默认 127.0.0.1 时门不触发。
         if !webui_host_is_loopback(&webui_host) {
-            crate::webui_cmd::ensure_non_loopback_bind_allowed(cfg.service.webui.auth, &webui_auth)?;
+            crate::webui_cmd::ensure_non_loopback_bind_allowed(
+                cfg.service.webui.auth,
+                &webui_auth,
+            )?;
         }
         let listener = tokio::net::TcpListener::bind(format!("{webui_host}:{webui_port}"))
             .await
@@ -361,10 +370,12 @@ pub async fn run(
         // preselect-last-used-model 3.2：default agent kind 与 agent 目录
         // 同一装配点注入（About INSTANCE 段经 /api/about 下发运行时真值）。
         let agent_kinds_provider: std::sync::Arc<dyn sebas_webui::agent_kinds::AgentKindProvider> =
-            std::sync::Arc::new(sebas_webui::agent_kinds::ConfigAgentKindProvider::with_default_kind(
-                agent_kinds,
-                default_kind,
-            ));
+            std::sync::Arc::new(
+                sebas_webui::agent_kinds::ConfigAgentKindProvider::with_default_kind(
+                    agent_kinds,
+                    default_kind,
+                ),
+            );
         tokio::spawn(async move {
             sebas_webui::run_with_admin_adapter_and_auth(
                 backend,
@@ -438,9 +449,7 @@ pub async fn run(
             // 没启用内置 router 时是 None：节点配了 control-plane-router 会如实拒绝，
             // 而不是猜一个地址去撞。
             let router_endpoint = crate::node_link::server::RouterEndpoint {
-                url: router_cfg
-                    .as_ref()
-                    .map(|c| format!("http://{}", c.listen)),
+                url: router_cfg.as_ref().map(|c| format!("http://{}", c.listen)),
                 token: router_cfg
                     .as_ref()
                     .and_then(|c| c.auth_token.first().cloned()),
@@ -452,9 +461,7 @@ pub async fn run(
                 router_endpoint,
             )
             .await
-            .map_err(|e| {
-                crate::error::SebasError::Config(format!("节点链路监听失败：{e}"))
-            })?;
+            .map_err(|e| crate::error::SebasError::Config(format!("节点链路监听失败：{e}")))?;
             // 首配 token 在**通道与监听都已 bind 之后**才签发：否则通道 bind 失败时
             // 操作者会先看到日志里的 token、却因启动失败而作废。签发不出来说明注册表
             // 写不动，那是与 bind 失败同级的问题——如实启动失败，不静默降级。
@@ -578,8 +585,12 @@ pub async fn run(
 
 fn init_tracing(cfg: &Config) {
     use tracing_subscriber::{EnvFilter, fmt};
-    let filter = EnvFilter::try_new(format!("{}{}", cfg.log.level, crate::config::LOG_FILTER_QUIET))
-        .unwrap_or_else(|_| EnvFilter::new(crate::config::DEFAULT_LOG_FILTER));
+    let filter = EnvFilter::try_new(format!(
+        "{}{}",
+        cfg.log.level,
+        crate::config::LOG_FILTER_QUIET
+    ))
+    .unwrap_or_else(|_| EnvFilter::new(crate::config::DEFAULT_LOG_FILTER));
     let subscriber = fmt().with_env_filter(filter);
     if let Some(ref path) = cfg.log.file
         && let Ok(file) = std::fs::File::create(path)
@@ -694,12 +705,13 @@ pub(crate) async fn arm_core_channel(
     let channel_path = crate::core_channel::socket_path(cfg);
     // bind 先行（1.3/D4）：路径被存活进程占用 → 硬错误，调用方在 ready 之前
     // 拿到 Err，进程以 75 退出而不是顶着无通道继续跑。
-    let listener = crate::core_channel::server::bind_channel_socket(&channel_path).map_err(|e| {
-        crate::error::SebasError::Config(format!(
-            "core session channel bind 失败 ({}): {e}",
-            channel_path.display()
-        ))
-    })?;
+    let listener =
+        crate::core_channel::server::bind_channel_socket(&channel_path).map_err(|e| {
+            crate::error::SebasError::Config(format!(
+                "core session channel bind 失败 ({}): {e}",
+                channel_path.display()
+            ))
+        })?;
     let (secret, secret_source) = match std::env::var("SEBAS_CORE_SECRET") {
         Ok(s) if !s.is_empty() => (s, "env"),
         _ => (crate::core_channel::generate_secret(), "generated"),
@@ -746,7 +758,7 @@ pub(crate) async fn arm_core_channel(
 #[cfg(test)]
 mod router_info_tests {
     use super::build_router_info;
-    use sebas_router::config::{RouterConfig, ProviderConfig};
+    use sebas_router::config::{ProviderConfig, RouterConfig};
     use std::collections::HashMap;
 
     // fix-webui-detached-status 2.1：detached webui 与 in-process 共用同一

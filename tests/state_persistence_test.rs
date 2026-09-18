@@ -150,10 +150,7 @@ fn defaults_round_trip_with_provider_data_and_no_defaults_file() {
     std::fs::write(&overlay, r#"{"providers": {}, "deleted": []}"#).unwrap();
     // SAFETY: OVERLAY_LOCK 全程持有。
     unsafe {
-        std::env::set_var(
-            "SEBAS_ROUTER_PROVIDER_OVERLAY",
-            overlay.to_str().unwrap(),
-        );
+        std::env::set_var("SEBAS_ROUTER_PROVIDER_OVERLAY", overlay.to_str().unwrap());
     }
 
     let path = dir.path().join("defaults-domain.db");
@@ -190,7 +187,10 @@ fn defaults_round_trip_with_provider_data_and_no_defaults_file() {
     let engine = sebas::sebas_state::engine::DbStateEngine::new(writer.handle().clone());
     rt.block_on(async {
         let state = engine.load_persisted_state().await;
-        assert!(state.providers.contains_key("deepseek"), "provider must survive");
+        assert!(
+            state.providers.contains_key("deepseek"),
+            "provider must survive"
+        );
         assert_eq!(
             state.default_selection,
             Some(sebas_dispatch::state_store::DefaultSelection::with_model(
@@ -222,13 +222,14 @@ fn legacy_defaults_json_imports_exactly_once() {
     let overlay = dir.path().join("providers.json");
     std::fs::write(&overlay, r#"{"providers": {}, "deleted": []}"#).unwrap();
     let defaults = dir.path().join("defaults.json");
-    std::fs::write(&defaults, r#"{"provider": "legacy", "model": "legacy-model"}"#).unwrap();
+    std::fs::write(
+        &defaults,
+        r#"{"provider": "legacy", "model": "legacy-model"}"#,
+    )
+    .unwrap();
     // SAFETY: OVERLAY_LOCK 全程持有。
     unsafe {
-        std::env::set_var(
-            "SEBAS_ROUTER_PROVIDER_OVERLAY",
-            overlay.to_str().unwrap(),
-        );
+        std::env::set_var("SEBAS_ROUTER_PROVIDER_OVERLAY", overlay.to_str().unwrap());
     }
 
     let path = dir.path().join("import-once.db");
@@ -237,9 +238,11 @@ fn legacy_defaults_json_imports_exactly_once() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         // 第一次启动：导入。
-        assert!(sebas::sebas_state::defaults_import::import_legacy_defaults_once(writer.handle())
-            .await
-            .unwrap());
+        assert!(
+            sebas::sebas_state::defaults_import::import_legacy_defaults_once(writer.handle())
+                .await
+                .unwrap()
+        );
         let state = engine.load_persisted_state().await;
         assert_eq!(
             state.default_selection,
@@ -259,15 +262,17 @@ fn legacy_defaults_json_imports_exactly_once() {
 
         // legacy 文件被改写（模拟旧二进制又写了一次）→ 再次启动不得回灌。
         std::fs::write(&defaults, r#"{"provider": "rewritten", "model": null}"#).unwrap();
-        assert!(!sebas::sebas_state::defaults_import::import_legacy_defaults_once(
-            writer.handle()
-        )
-        .await
-        .unwrap());
+        assert!(
+            !sebas::sebas_state::defaults_import::import_legacy_defaults_once(writer.handle())
+                .await
+                .unwrap()
+        );
         let state = engine.load_persisted_state().await;
         assert_eq!(
             state.default_selection,
-            Some(sebas_dispatch::state_store::DefaultSelection::new("newpick")),
+            Some(sebas_dispatch::state_store::DefaultSelection::new(
+                "newpick"
+            )),
             "标记在场后 legacy 文件不得覆盖库内选择"
         );
     });

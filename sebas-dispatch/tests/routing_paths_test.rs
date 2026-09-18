@@ -4,7 +4,7 @@
 
 use sebas_acp::claude::session::{AcpCommand, AcpEvent, Decision};
 use sebas_channels::{ChannelAction, ChannelEvent, ChannelKey};
-use sebas_dispatch::engine::{Out, DispatchHandle, compose_media_prompt};
+use sebas_dispatch::engine::{DispatchHandle, Out, compose_media_prompt};
 use sebas_dispatch::state::{Mapping, SessionMap};
 use std::time::Duration;
 
@@ -77,12 +77,15 @@ async fn button_cb_dead_session_gets_dead_card() {
     let map = SessionMap::new();
     let (router, mut out_rx) = DispatchHandle::new(map);
     router
-        .dispatch(ChannelEvent::ButtonCb { key: key(), action: ChannelAction {
+        .dispatch(ChannelEvent::ButtonCb {
+            key: key(),
+            action: ChannelAction {
                 session_id: "ghost".into(),
                 request_id: Some("r1".into()),
                 decision: Some("allow_once".into()),
                 value: serde_json::Value::Null,
-            }, })
+            },
+        })
         .await;
     match next_out(&mut out_rx).await {
         Out::SendCard { card, .. } => {
@@ -99,12 +102,15 @@ async fn button_cb_missing_request_id_gets_help() {
     map.insert(key(), Mapping::active("s1")).await.unwrap();
     let (router, mut out_rx) = DispatchHandle::new(map);
     router
-        .dispatch(ChannelEvent::ButtonCb { key: key(), action: ChannelAction {
+        .dispatch(ChannelEvent::ButtonCb {
+            key: key(),
+            action: ChannelAction {
                 session_id: "s1".into(),
                 request_id: None,
                 decision: Some("allow_once".into()),
                 value: serde_json::Value::Null,
-            }, })
+            },
+        })
         .await;
     assert!(matches!(next_out(&mut out_rx).await, Out::HelpText { .. }));
 }
@@ -126,12 +132,15 @@ async fn button_cb_unknown_decision_fails_closed_to_deny() {
         )
         .await;
     router
-        .dispatch(ChannelEvent::ButtonCb { key: key(), action: ChannelAction {
+        .dispatch(ChannelEvent::ButtonCb {
+            key: key(),
+            action: ChannelAction {
                 session_id: "s1".into(),
                 request_id: Some("r9".into()),
                 decision: Some("yolo".into()),
                 value: serde_json::Value::Null,
-            }, })
+            },
+        })
         .await;
     // First Out is the in-place flip (UpdateCardByMsgId); drain until SendAcp.
     let out = loop {
@@ -165,9 +174,7 @@ async fn slash_compact_cost_cancel_forward_to_live_session() {
     let (router, mut out_rx) = DispatchHandle::new(map);
 
     for (cmd_text, expect) in [("/compact", "/compact"), ("/cost", "/cost")] {
-        router
-            .dispatch(text(key(), cmd_text, None))
-            .await;
+        router.dispatch(text(key(), cmd_text, None)).await;
 
         if cmd_text == "/compact" {
             // /compact now sends a progress card first, then the command
@@ -189,9 +196,7 @@ async fn slash_compact_cost_cancel_forward_to_live_session() {
         }
     }
 
-    router
-        .dispatch(text(key(), "/cancel", None))
-        .await;
+    router.dispatch(text(key(), "/cancel", None)).await;
     match next_out(&mut out_rx).await {
         Out::SendAcp {
             cmd: AcpCommand::Cancel { session_id },
@@ -207,9 +212,7 @@ async fn slash_compact_without_session_gets_plain_error() {
     // no-op），改为 PlainText 明确报错。
     let map = SessionMap::new();
     let (router, mut out_rx) = DispatchHandle::new(map);
-    router
-        .dispatch(text(key(), "/compact", None))
-        .await;
+    router.dispatch(text(key(), "/compact", None)).await;
     match next_out(&mut out_rx).await {
         Out::PlainText { content, .. } => {
             assert!(content.contains("没有活跃会话"), "content: {content}");
@@ -224,9 +227,7 @@ async fn slash_status_cancel_without_session_get_plain_error() {
     // sebas-ixv：/status /cancel 无会话同样明确报错（与 /compact 同约定）。
     for cmd_text in ["/status", "/cancel"] {
         let (router, mut out_rx) = DispatchHandle::new(SessionMap::new());
-        router
-            .dispatch(text(key(), cmd_text, None))
-            .await;
+        router.dispatch(text(key(), cmd_text, None)).await;
         match next_out(&mut out_rx).await {
             Out::PlainText { content, .. } => {
                 assert!(content.contains("没有活跃会话"), "{cmd_text}: {content}");
@@ -243,9 +244,7 @@ async fn switch_resume_cd_get_unsupported_reply() {
     // 「暂未支持」，不得静默丢弃。
     for cmd_text in ["/switch 1", "/resume s1", "/cd /tmp"] {
         let (router, mut out_rx) = DispatchHandle::new(SessionMap::new());
-        router
-            .dispatch(text(key(), cmd_text, None))
-            .await;
+        router.dispatch(text(key(), cmd_text, None)).await;
         match next_out(&mut out_rx).await {
             Out::PlainText { content, .. } => {
                 let cmd = cmd_text.split_whitespace().next().unwrap();
@@ -262,9 +261,7 @@ async fn slash_status_forwards_continue_session() {
     let map = SessionMap::new();
     map.insert(key(), Mapping::active("s1")).await.unwrap();
     let (router, mut out_rx) = DispatchHandle::new(map);
-    router
-        .dispatch(text(key(), "/status", None))
-        .await;
+    router.dispatch(text(key(), "/status", None)).await;
 
     match next_out(&mut out_rx).await {
         Out::SendAcp {
@@ -282,9 +279,7 @@ async fn slash_status_forwards_continue_session() {
 async fn slash_sessions_lists_empty() {
     let map = SessionMap::new();
     let (router, mut out_rx) = DispatchHandle::new(map);
-    router
-        .dispatch(text(key(), "/sessions", None))
-        .await;
+    router.dispatch(text(key(), "/sessions", None)).await;
 
     match next_out(&mut out_rx).await {
         Out::PlainText { content, .. } => {
@@ -299,9 +294,7 @@ async fn slash_sessions_lists_active() {
     let map = SessionMap::new();
     map.insert(key(), Mapping::active("s1")).await.unwrap();
     let (router, mut out_rx) = DispatchHandle::new(map);
-    router
-        .dispatch(text(key(), "/sessions", None))
-        .await;
+    router.dispatch(text(key(), "/sessions", None)).await;
 
     match next_out(&mut out_rx).await {
         Out::PlainText { content, .. } => {
@@ -319,7 +312,12 @@ async fn media_message_composes_prompt_and_spawns() {
     let map = SessionMap::new();
     let (router, mut out_rx) = DispatchHandle::new(map);
     router
-        .dispatch(ChannelEvent::Media { key: key(), files: vec!["/tmp/a.png".into(), "/tmp/b.pdf".into()], caption: Some("看这两张".into()), reply_target: None })
+        .dispatch(ChannelEvent::Media {
+            key: key(),
+            files: vec!["/tmp/a.png".into(), "/tmp/b.pdf".into()],
+            caption: Some("看这两张".into()),
+            reply_target: None,
+        })
         .await;
     match next_out(&mut out_rx).await {
         Out::SpawnAcp { prompt, .. } => {
@@ -465,9 +463,7 @@ async fn insert_mapping_marks_alive_and_routes() {
     assert!(!router.session_alive(&key()).await);
     router.insert_mapping(key(), "s7".into()).await;
     assert!(router.session_alive(&key()).await);
-    router
-        .dispatch(text(key(), "yo", None))
-        .await;
+    router.dispatch(text(key(), "yo", None)).await;
     // Per-turn flow: a fresh card is posted first, then the prompt is
     // forwarded to the session.
     match next_out(&mut out_rx).await {
@@ -504,9 +500,7 @@ async fn fail_spawn_ignores_active_and_missing_entries() {
 async fn help_command_emits_help_card() {
     let map = SessionMap::new();
     let (router, mut out_rx) = DispatchHandle::new(map);
-    router
-        .dispatch(text(key(), "/help", None))
-        .await;
+    router.dispatch(text(key(), "/help", None)).await;
     let out = next_out(&mut out_rx).await;
     match out {
         Out::SendCard { msg_id, card, .. } => {
@@ -557,7 +551,10 @@ impl NativeSessionBridge for FakeNativeBridge {
         self.default_native
     }
     fn prompt(self: Arc<Self>, key: ChannelKey, text: String) {
-        self.prompted.lock().unwrap().push(format!("{}|{}", key.reference, text));
+        self.prompted
+            .lock()
+            .unwrap()
+            .push(format!("{}|{}", key.reference, text));
     }
     fn answer_permission(&self, _rid: &str, _d: NativeApprovalDecision) -> bool {
         false
@@ -572,9 +569,7 @@ async fn feishu_text_without_bridge_stays_acp() {
     let key = ChannelKey::feishu("oc_no_bridge", None);
     let (router, mut out_rx) = DispatchHandle::new(map);
 
-    router
-        .dispatch(text(key.clone(), "hi", None))
-        .await;
+    router.dispatch(text(key.clone(), "hi", None)).await;
 
     let out = next_out(&mut out_rx).await;
     assert!(
@@ -594,9 +589,7 @@ async fn feishu_text_with_native_default_routes_to_bridge() {
     let bridge: Arc<dyn NativeSessionBridge> = fake.clone();
     router.set_native_bridge(Some(bridge)).await;
 
-    router
-        .dispatch(text(key.clone(), "build it", None))
-        .await;
+    router.dispatch(text(key.clone(), "build it", None)).await;
 
     // 走桥：prompt 收到该 chat + 消息。
     assert_eq!(fake.prompts(), vec!["oc_native|build it".to_string()]);
@@ -619,10 +612,14 @@ async fn feishu_native_session_continues_via_bridge() {
     router.set_native_bridge(Some(bridge)).await;
 
     for cmd_text in ["first", "second"] {
-        router
-            .dispatch(text(key.clone(), cmd_text, None))
-            .await;
+        router.dispatch(text(key.clone(), cmd_text, None)).await;
     }
-    assert_eq!(fake.prompts(), vec!["oc_native2|first".to_string(), "oc_native2|second".to_string()]);
+    assert_eq!(
+        fake.prompts(),
+        vec![
+            "oc_native2|first".to_string(),
+            "oc_native2|second".to_string()
+        ]
+    );
     let _ = drain(&mut out_rx).await;
 }

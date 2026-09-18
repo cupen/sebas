@@ -198,8 +198,7 @@ fn save(entries: &[ArchiveEntry]) -> Result<(), String> {
     let body = serde_json::to_string_pretty(&file)
         .map_err(|e| format!("序列化 archive.json 失败: {e}"))?;
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, &body)
-        .map_err(|e| format!("写入临时文件 {} 失败: {e}", tmp.display()))?;
+    std::fs::write(&tmp, &body).map_err(|e| format!("写入临时文件 {} 失败: {e}", tmp.display()))?;
     if let Ok(file) = std::fs::OpenOptions::new().write(true).open(&tmp) {
         file.sync_all().ok();
     }
@@ -322,7 +321,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         // SAFETY: test-only, serialized by ARCHIVE_TEST_LOCK.
-        unsafe { std::env::set_var("SEBAS_ARCHIVE_PATH", dir.join("archive.json")); }
+        unsafe {
+            std::env::set_var("SEBAS_ARCHIVE_PATH", dir.join("archive.json"));
+        }
         dir.join("archive.json")
     }
 
@@ -418,7 +419,10 @@ mod tests {
         // Write garbage to the file.
         std::fs::write(&p, "not json").unwrap();
         let entries = list();
-        assert!(entries.is_empty(), "unparseable file should return empty list");
+        assert!(
+            entries.is_empty(),
+            "unparseable file should return empty list"
+        );
     }
 
     // ── polish-workbench-walkthrough-ux 1.1/1.2：路径三级解析 + 迁移 ─────

@@ -125,8 +125,8 @@ fn unique_stamp() -> u128 {
 
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 pub struct SandboxDir {
@@ -298,7 +298,11 @@ pub fn forward_slash(p: &Path) -> String {
 /// "No such file"。
 pub fn sebas_node_bin() -> PathBuf {
     let sebas = PathBuf::from(env!("CARGO_BIN_EXE_sebas"));
-    let name = if cfg!(windows) { "sebas-node.exe" } else { "sebas-node" };
+    let name = if cfg!(windows) {
+        "sebas-node.exe"
+    } else {
+        "sebas-node"
+    };
     let node = sebas.with_file_name(name);
     assert!(
         node.exists(),
@@ -486,10 +490,7 @@ usage_file = "{}"
             // add-workspace-root：env 优先于 config 的 `[workspace] root`——
             // 钉住它，宿主 shell 里 stray 的同名变量就不会把沙箱边界改道
             // （测试需要更窄根时用 spawn 的 extra env 显式覆盖）。
-            (
-                "SEBAS_WORKSPACE_ROOT",
-                forward_slash(&self.path),
-            ),
+            ("SEBAS_WORKSPACE_ROOT", forward_slash(&self.path)),
             // Keep log files plain ASCII so assertions can match them.
             ("NO_COLOR", "1".to_string()),
         ];
@@ -581,12 +582,33 @@ usage_file = "{}"
         self.path.join("node-state")
     }
 
+    /// （session-parallel-liveness-and-unread-polish 1.2）给 fake-claude agent
+    /// 追加 argv（如 `--delay-init-ms 2500` 拉长握手，让两个 spawn 指令的重叠
+    /// 可测量）。在 `spawn_core` 之前调用；按文本把 args 写进既有的
+    /// `[acp.agents.claude]` 段（该段由 `new` 写出且当前不带 args 键）。
+    pub fn append_acp_args(&self, extra: &[&str]) {
+        let config = std::fs::read_to_string(&self.config_path)
+            .unwrap_or_else(|e| panic!("read config {}: {e}", self.config_path.display()));
+        let quoted = extra
+            .iter()
+            .map(|a| format!("\"{a}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let anchor = "driver = \"claude\"\n";
+        assert!(
+            config.contains(anchor) && !config.contains("args ="),
+            "sandbox claude section must exist and carry no args yet"
+        );
+        let rewritten = config.replacen(anchor, &format!("{anchor}args = [{quoted}]\n"), 1);
+        std::fs::write(&self.config_path, rewritten)
+            .unwrap_or_else(|e| panic!("write config {}: {e}", self.config_path.display()));
+    }
+
     /// 节点进程的默认工作目录（远端项目的路径；`enable_node_link` 的用例里
     /// 必须真实存在，因为路径可用性由**节点**判定）。
     pub fn node_work_dir(&self) -> PathBuf {
         let dir = self.path.join("node-work");
-        std::fs::create_dir_all(&dir)
-            .unwrap_or_else(|e| panic!("mkdir {}: {e}", dir.display()));
+        std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("mkdir {}: {e}", dir.display()));
         dir
     }
 
@@ -647,9 +669,7 @@ usage_file = "{}"
                 in_node_link = trimmed == "[node_link]";
                 continue;
             }
-            if in_node_link
-                && let Some(rest) = trimmed.strip_prefix("listen = \"127.0.0.1:")
-            {
+            if in_node_link && let Some(rest) = trimmed.strip_prefix("listen = \"127.0.0.1:") {
                 return rest
                     .trim_end_matches('"')
                     .parse()
@@ -693,12 +713,7 @@ usage_file = "{}"
     /// Child（kill_on_drop）里，SandboxDir Drop 再 killpg 兜底。
     pub fn spawn_router_debug(&self) -> tokio::process::Child {
         self.spawn(
-            &[
-                "router",
-                "-c",
-                &forward_slash(&self.config_path),
-                "--debug",
-            ],
+            &["router", "-c", &forward_slash(&self.config_path), "--debug"],
             &self.core_secret,
             &[],
             &self.router_log,
@@ -780,10 +795,7 @@ usage_file = "{}"
             toml.contains(needle),
             "[dispatch] section not found in config"
         );
-        let patched = toml.replace(
-            needle,
-            &format!("{needle}turn_stall_timeout = {secs}\n"),
-        );
+        let patched = toml.replace(needle, &format!("{needle}turn_stall_timeout = {secs}\n"));
         assert_ne!(toml, patched, "turn_stall_timeout patch did not apply");
         std::fs::write(&self.config_path, patched).expect("write config");
     }

@@ -12,7 +12,7 @@
 
 use sebas_acp::claude::manager::SessionManager;
 use sebas_channels::{ChannelEvent, ChannelKey};
-use sebas_dispatch::engine::{Out, DispatchHandle};
+use sebas_dispatch::engine::{DispatchHandle, Out};
 use sebas_dispatch::state::{MappingState, SessionMap};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -67,7 +67,8 @@ async fn spawn_fresh(
         vec![fake_acp().to_string_lossy().into_owned(), scenario.into()],
         None,
         None,
-        None)
+        None,
+    )
     .await
     .expect("fresh acp spawn must succeed");
     assert_eq!(
@@ -96,7 +97,8 @@ async fn resume(
         vec![fake_acp().to_string_lossy().into_owned(), scenario.into()],
         None,
         None,
-        None)
+        None,
+    )
     .await
     .expect("resume/fallback must not error");
     (sid, resumed)
@@ -109,7 +111,10 @@ async fn acp_spawn_persists_real_session_id_mapping() {
     let mgr = Arc::new(acp_manager());
 
     let sid = spawn_fresh(&mgr, &router, &map, "load-ok").await;
-    let real = mgr.get_acp_session_id(&sid).await.expect("driver reports id");
+    let real = mgr
+        .get_acp_session_id(&sid)
+        .await
+        .expect("driver reports id");
     assert!(
         real.starts_with("acp-new-"),
         "fresh spawn reports the real session/new id, got {real:?}"
@@ -144,7 +149,10 @@ async fn resume_without_mapped_session_id_falls_back_to_fresh() {
 
     assert!(!resumed, "no mapping + rejected load → resumed=false");
     assert_ne!(sid, "s-gone", "fallback mints a fresh routing id");
-    let fresh_real = mgr.get_acp_session_id(&sid).await.expect("driver reports id");
+    let fresh_real = mgr
+        .get_acp_session_id(&sid)
+        .await
+        .expect("driver reports id");
     assert!(
         fresh_real.starts_with("acp-new-"),
         "fallback-fresh records a new session/new id, got {fresh_real:?}"
@@ -215,7 +223,8 @@ async fn acp_resume_uses_mapped_real_id_after_restart() {
         vec![fake_acp().to_string_lossy().into_owned(), "load-ok".into()],
         None,
         None,
-        None)
+        None,
+    )
     .await
     .expect("resume ok");
     assert!(resumed, "resume with mapped real id succeeds");

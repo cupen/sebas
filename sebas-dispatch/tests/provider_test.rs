@@ -7,8 +7,8 @@
 // std 锁只会让其它测试等待，不构成死锁——这是刻意的。
 #![allow(clippy::await_holding_lock)]
 
-use sebas_channels::{ChannelAction, ChannelEvent, ChannelKey};
 use sebas_channels::card::{FormField, FormSpec};
+use sebas_channels::{ChannelAction, ChannelEvent, ChannelKey};
 use sebas_dispatch::CrudStore;
 use sebas_dispatch::Out;
 use sebas_dispatch::crud::{CrudForm, FileStore, Item};
@@ -30,7 +30,10 @@ fn isolate(dir: &tempfile::TempDir) {
     // 都要隔离，避免读到开发机真实文件。
     // SAFETY: ENV_LOCK held by caller.
     unsafe {
-        std::env::set_var("SEBAS_STATE_FILE", dir.path().join("state.json").to_str().unwrap());
+        std::env::set_var(
+            "SEBAS_STATE_FILE",
+            dir.path().join("state.json").to_str().unwrap(),
+        );
         std::env::set_var(
             "SEBAS_ROUTER_PROVIDER_OVERLAY",
             dir.path().join("providers.json").to_str().unwrap(),
@@ -79,7 +82,9 @@ fn spec() -> FormSpec {
     )
 }
 
-fn key() -> ChannelKey { ChannelKey::feishu("oc_provider", None) }
+fn key() -> ChannelKey {
+    ChannelKey::feishu("oc_provider", None)
+}
 
 fn item(name: &str) -> Item {
     let mut m = Map::new();
@@ -145,7 +150,11 @@ async fn provider_command_opens_main_card_with_seed() {
     let (router, mut rx) = provider_router(&dir);
 
     router
-        .dispatch(ChannelEvent::Text { key: key(), text: "/provider".into(), reply_target: None })
+        .dispatch(ChannelEvent::Text {
+            key: key(),
+            text: "/provider".into(),
+            reply_target: None,
+        })
         .await;
 
     let out = rx.recv().await.unwrap();
@@ -188,7 +197,7 @@ async fn provider_create_submit_delete_round_trip() {
         .dispatch(ChannelEvent::ButtonCb {
             key: key(),
             action: card_action(json!({"form": "provider-custom", "op": "create"}), "om_1"),
-                    })
+        })
         .await;
     let out = rx.recv().await.unwrap();
     let Out::UpdateCardByMsgId { msg_id, card, .. } = out else {
@@ -202,7 +211,12 @@ async fn provider_create_submit_delete_round_trip() {
     fv.insert("name".into(), json!("openai"));
     fv.insert("base_url".into(), json!("https://api.openai.com"));
     router
-        .dispatch(ChannelEvent::FormCb { key: key(), value: json!({"form": "provider-custom", "op": "submit"}), form_value: fv, card_ref: Some("om_1".into()) })
+        .dispatch(ChannelEvent::FormCb {
+            key: key(),
+            value: json!({"form": "provider-custom", "op": "submit"}),
+            form_value: fv,
+            card_ref: Some("om_1".into()),
+        })
         .await;
     let out = rx.recv().await.unwrap();
     let Out::UpdateCardByMsgId { card, .. } = out else {
@@ -218,7 +232,7 @@ async fn provider_create_submit_delete_round_trip() {
                 json!({"form": "provider-custom", "op": "delete", "id": "deepseek"}),
                 "om_2",
             ),
-                    })
+        })
         .await;
     let out = rx.recv().await.unwrap();
     assert!(matches!(out, Out::UpdateCardByMsgId { .. }), "{out:?}");
@@ -283,7 +297,7 @@ async fn cancel_button_returns_to_list_not_to_dead_session_card() {
                 json!({"form": "provider-custom", "op": "cancel"}),
                 "om_cancel",
             ),
-                    })
+        })
         .await;
 
     let out = rx.recv().await.unwrap();
@@ -335,7 +349,11 @@ async fn secret_key_is_never_displayed_in_plaintext_in_main_card() {
     // 主卡：deepseek 的折叠面板里 API Key 行应是「已配置」，且永远不
     // 出现明文密钥（无论新旧设计）。
     router
-        .dispatch(ChannelEvent::Text { key: key(), text: "/provider".into(), reply_target: None })
+        .dispatch(ChannelEvent::Text {
+            key: key(),
+            text: "/provider".into(),
+            reply_target: None,
+        })
         .await;
     let out = rx.recv().await.unwrap();
     let Out::SendCard { card, .. } = out else {
@@ -389,7 +407,7 @@ async fn edit_form_does_not_prefill_secret() {
                 json!({"form": "provider-custom", "op": "edit", "id": "deepseek"}),
                 "om_e",
             ),
-                    })
+        })
         .await;
     let out = rx.recv().await.unwrap();
     let Out::UpdateCardByMsgId { card, .. } = out else {
@@ -436,7 +454,12 @@ async fn empty_secret_submit_preserves_existing_key() {
     fv.insert("name".into(), json!("deepseek"));
     fv.insert("base_url".into(), json!("https://new.example"));
     router
-        .dispatch(ChannelEvent::FormCb { key: key(), value: json!({"form": "provider-custom", "op": "submit", "id": "deepseek"}), form_value: fv, card_ref: Some("om_s".into()) })
+        .dispatch(ChannelEvent::FormCb {
+            key: key(),
+            value: json!({"form": "provider-custom", "op": "submit", "id": "deepseek"}),
+            form_value: fv,
+            card_ref: Some("om_s".into()),
+        })
         .await;
     let _ = rx.recv().await.unwrap();
 

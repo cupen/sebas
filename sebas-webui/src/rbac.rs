@@ -92,7 +92,11 @@ pub struct UnknownRole(pub String);
 
 impl fmt::Display for UnknownRole {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "未知角色 {:?}（合法词表 root/admin/member/viewer）", self.0)
+        write!(
+            f,
+            "未知角色 {:?}（合法词表 root/admin/member/viewer）",
+            self.0
+        )
     }
 }
 

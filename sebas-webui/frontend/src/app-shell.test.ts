@@ -210,6 +210,23 @@ describe('sidebar IA v2', () => {
     el.remove()
   })
 
+  it('converges the island spacing on the compact space-2 token (3.5, D6)', async () => {
+    const el = await mountShell()
+    const root = el.shadowRoot!
+    // jsdom 不解析 shadow 计算样式，改断言样式表 token（实机几何由浏览器
+    // 验收覆盖）：nav 与 main 的浮岛外边距收敛为 space-2，不再 space-3。
+    const styleText = [...root.querySelectorAll('style')]
+      .map((s) => s.textContent ?? '')
+      .join('\n')
+    expect(styleText).toMatch(/nav\s*\{[^}]*margin:\s*var\(--sebas-space-2\)/)
+    expect(styleText).toMatch(
+      /main\s*\{[^}]*margin:\s*var\(--sebas-space-2\)\s+var\(--sebas-space-2\)\s+var\(--sebas-space-2\)\s+0/,
+    )
+    // 收敛不消除拖拽边界：rail|主区分割缝保持 6px（把手 hover 可达）。
+    expect(styleText).toMatch(/wa-split-panel\.frame\s*\{[^}]*--divider-width:\s*6px/)
+    el.remove()
+  })
+
   it('remembers and restores the rail width from storage (5.1/D1)', async () => {
     // 组件初始化读 localStorage（此环境不可用 → 退默认 280px，5.2），拖拽回调
     // 持久化走 split-persist（其单测覆盖假 storage 路径）；这里断言绑定

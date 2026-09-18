@@ -946,33 +946,61 @@ describe('sebas-transcript-view (conversation rendering)', () => {
         created_at_unix: FIXED_DATES.T4,
       })),
     ]
-    store.set('sebas:seen:oc_test', String(FIXED_DATES.T1))
+    // （2.3，D3）段锚：读锚 = 「old」回合的 1 个可见段（7 条 chunk 无论如何
+    // 合并只计 1 段——徽标与 seam 同一口径）。未读内容从第二个 agent 回合起。
+    store.set('sebas:seen:oc_test', JSON.stringify({ anchor_count: 1 }))
     const el = await mount({ entries })
-    // 边界下方是两个回合（new 提交 + 七条 chunk 的 agent 回合），但
-    // agent 回合无论多少条 chunk 只计 1。
-    expect((el as unknown as { unseenCount: number }).unseenCount).toBe(2)
+    // 边界下方只有 1 个回合（new 的 agent 回合）：操作者自己的 prompt 不是
+    // 未读内容（段口径不计 prompt）；agent 回合无论多少条 chunk 只计 1。
+    expect((el as unknown as { unseenCount: number }).unseenCount).toBe(1)
     const seam = el.shadowRoot?.querySelector<HTMLElement>('.seam')
     expect(seam?.hasAttribute('hidden')).toBe(false)
-    expect(seam?.textContent).toContain('~2 new')
-    // 边界落在未读第一个回合（operator 块）上方，不切开任何回合。
+    expect(seam?.textContent).toContain('~1 new')
+    // 边界落在第一个「可见段累计超过锚」的回合（new 的 agent 回合）上方，
+    // 不切开任何回合；seam 与徽标读同一条段锚（2.3，D3）。
     const seamNext = seam?.nextElementSibling
-    expect(seamNext?.classList.contains('is-user')).toBe(true)
+    expect(seamNext?.classList.contains('is-assistant')).toBe(true)
     const agentBlocks = el.shadowRoot?.querySelectorAll<HTMLElement>('.turn-block.is-assistant')
     expect(agentBlocks?.length).toBe(2)
     expect(agentBlocks?.[1]?.textContent).toContain('a')
     expect(agentBlocks?.[1]?.textContent).toContain('g')
   })
 
+  it('a legacy seen_ts-shaped cursor reads as fully read and is overwritten by a pure anchor on first write (2.3)', async () => {
+    // 旧 localStorage 形态（含 seen_ts）：首次读取按「无 anchor」对待（读为
+    // fully-read、不迁移），随后一次 mark-seen 覆写成纯 {anchor_count}。
+    const entries = streamedTurn('do it', ['a', 'b'], FIXED_DATES.T1)
+    store.set(
+      'sebas:seen:oc_test',
+      JSON.stringify({ seen_ts: FIXED_DATES.T1, anchor_count: null }),
+    )
+    const el = await mount({ entries })
+    await el.updateComplete
+    // 旧数据 = fully read：无 seam、无未读计数。
+    expect(el.shadowRoot?.querySelector<HTMLElement>('.seam')?.hasAttribute('hidden')).toBe(true)
+    // 首次写入（贴底 mark-seen 路径）→ 纯单字段形状覆写。
+    const scroll = el.shadowRoot?.querySelector<HTMLElement>('.scroll')!
+    scroll.scrollTop = scroll.scrollHeight
+    scroll.dispatchEvent(new Event('scroll'))
+    await el.updateComplete
+    await new Promise((r) => setTimeout(r, 300))
+    const raw = store.get('sebas:seen:oc_test')!
+    const stored = JSON.parse(raw) as Record<string, unknown>
+    expect(Object.keys(stored).sort()).toEqual(['anchor_count'])
+    expect(stored.anchor_count).toBe(1)
+  })
+
   it('no seam when everything is seen; mark-all-seen writes and hides', async () => {
     const entries = streamedTurn('do it', ['a', 'b'], FIXED_DATES.T1)
-    store.set('sebas:seen:oc_test', String(FIXED_DATES.T2))
+    // 两个相邻 md chunk 合并为一段：锚=1 = 全部已读，无 seam。
+    store.set('sebas:seen:oc_test', JSON.stringify({ anchor_count: 1 }))
     const el = await mount({ entries })
     // 4.2：seam 节点恒渲染（hidden 属性切换显隐）——全部已读时 hidden。
     let seam = el.shadowRoot?.querySelector<HTMLElement>('.seam')
     expect(seam?.hasAttribute('hidden')).toBe(true)
 
-    // 未读态 → mark all seen → 游标写入最大时间戳、seam 隐藏。
-    store.set('sebas:seen:oc_test', String(FIXED_DATES.T1 - 10))
+    // 未读态（锚=0）→ mark all seen → 游标写入当前段数、seam 消失。
+    store.set('sebas:seen:oc_test', JSON.stringify({ anchor_count: 0 }))
     el.entries = [...entries]
     await el.updateComplete
     await new Promise((r) => requestAnimationFrame(() => r(null)))
@@ -981,23 +1009,23 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     expect(seam?.hasAttribute('hidden')).toBe(false)
     seam!.querySelector<HTMLButtonElement>('button.link')!.click()
     await el.updateComplete
-    // rail-declutter-unread 2.2：存储迁到共享游标模块（JSON 形状），时间戳
-    // 语义不变；无 msgCount payload 时段数锚保持 null（按已读）。
+    // （2.3，D3）单字段段锚：存储只有 anchor_count；无 msgCount payload 时
+    // 写本地已渲染段数（相邻 md 合并 = 1）。
     const stored = JSON.parse(store.get('sebas:seen:oc_test')!) as {
-      seen_ts: number
-      anchor_count: number | null
+      anchor_count: number
     }
-    expect(stored.seen_ts).toBe(FIXED_DATES.T1)
-    expect(stored.anchor_count).toBeNull()
+    expect(Object.keys(stored)).toEqual(['anchor_count'])
+    expect(stored.anchor_count).toBe(1)
     expect(el.shadowRoot?.querySelector<HTMLElement>('.seam')?.hasAttribute('hidden')).toBe(true)
   })
 
   it('mark-all-seen advances the shared badge anchor when msgCount rides the payload (D3)', async () => {
     // rail-declutter-unread：payload 带 msg_count 时，标记已读把共享游标的
-    // 段数锚推进到当前值——读到底部 = seam 清零 + 徽标清零（两者同锚）。
+    // 段数锚推进到 max(服务端段数, 本地已渲染段数)——读到底部 = seam 清零 +
+    // 徽标清零（两者同锚）。
     const entries = streamedTurn('do it', ['a', 'b'], FIXED_DATES.T1)
     const el = await mount({ entries, msgCount: 3 })
-    store.set('sebas:seen:oc_test', String(FIXED_DATES.T1 - 10))
+    store.set('sebas:seen:oc_test', JSON.stringify({ anchor_count: 0 }))
     el.entries = [...entries]
     await el.updateComplete
     await new Promise((r) => requestAnimationFrame(() => r(null)))
@@ -1007,10 +1035,8 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     seam!.querySelector<HTMLButtonElement>('button.link')!.click()
     await el.updateComplete
     const stored = JSON.parse(store.get('sebas:seen:oc_test')!) as {
-      seen_ts: number
-      anchor_count: number | null
+      anchor_count: number
     }
-    expect(stored.seen_ts).toBe(FIXED_DATES.T1)
     expect(stored.anchor_count).toBe(3)
   })
 
@@ -1386,36 +1412,38 @@ describe('unread boundary advances while focused+visible (polish-workbench-walkt
   const scrollBox = (el: SebasTranscriptView): HTMLElement =>
     el.shadowRoot!.querySelector<HTMLElement>('.scroll')!
 
-  function storedAnchor(key = 'oc_test'): { seen_ts: number; anchor_count: number | null } | null {
+  /** 共享游标读回（2.3，D3）：段计数单字段；无键/旧格式（含 seen_ts）= null。 */
+  function storedAnchor(key = 'oc_test'): number | null {
     const raw = store.get(`sebas:seen:${key}`)
     if (!raw) return null
     try {
-      const v = JSON.parse(raw) as { seen_ts?: number; anchor_count?: number | null }
-      return { seen_ts: v.seen_ts ?? 0, anchor_count: v.anchor_count ?? null }
+      const v = JSON.parse(raw) as { anchor_count?: unknown }
+      return typeof v.anchor_count === 'number' ? v.anchor_count : null
     } catch {
       return null
     }
   }
 
   it('聚焦 + 可见 + 贴底时到达的回合推进共享游标——重开不再出 seam（3.1）', async () => {
-    // 初始：T1 回合已读（锚 = T1）；贴底观看。
-    store.set('sebas:seen:oc_test', JSON.stringify({ seen_ts: FIXED_DATES.T1, anchor_count: 2 }))
-    const el = await mount({ entries: streamedTurn('q', ['a'], FIXED_DATES.T1), msgCount: 2 })
+    // 初始：首回合已读（段锚 = 1）；贴底观看。
+    store.set('sebas:seen:oc_test', JSON.stringify({ anchor_count: 1 }))
+    const el = await mount({ entries: streamedTurn('q', ['a'], FIXED_DATES.T1), msgCount: 1 })
     const box = scrollBox(el)
     fakeScrollLayout(box, 2000, 500)
     box.scrollTop = 1500
     box.dispatchEvent(new Event('scroll'))
     expect(el.sticky).toBe(true)
     expect(el.shadowRoot!.querySelector('.seam')?.hasAttribute('hidden')).toBe(true)
-    // 新回合在眼前到达（position 90 > 游标）。
+    // 新回合在眼前到达（position 90/91 > 游标）。
     emitTurnAppend('oc_test', [
-      entry({ position: 90, kind: 'content', content: 'watched arrive', created_at_unix: FIXED_DATES.T3 }),
+      entry({ position: 90, kind: 'prompt', content: 'again', created_at_unix: FIXED_DATES.T3 }),
+      entry({ position: 91, kind: 'content', content: 'watched arrive', created_at_unix: FIXED_DATES.T3 }),
     ])
     await el.updateComplete
     await debounceWait()
     await el.updateComplete
-    // 锚推进到 T3；seam 保持隐藏（看着到达的内容不算未读）。
-    expect(storedAnchor()!.seen_ts).toBe(FIXED_DATES.T3)
+    // 段锚推进到已渲染的两段；seam 保持隐藏（看着到达的内容不算未读）。
+    expect(storedAnchor()).toBe(2)
     expect(el.shadowRoot!.querySelector('.seam')?.hasAttribute('hidden')).toBe(true)
     el.remove()
   })
@@ -1427,21 +1455,22 @@ describe('unread boundary advances while focused+visible (polish-workbench-walkt
         configurable: true,
         get: () => 'hidden',
       })
-      store.set('sebas:seen:oc_test', JSON.stringify({ seen_ts: FIXED_DATES.T1, anchor_count: 2 }))
-      const el = await mount({ entries: streamedTurn('q', ['a'], FIXED_DATES.T1), msgCount: 2 })
+      store.set('sebas:seen:oc_test', JSON.stringify({ anchor_count: 1 }))
+      const el = await mount({ entries: streamedTurn('q', ['a'], FIXED_DATES.T1), msgCount: 1 })
       const box = scrollBox(el)
       fakeScrollLayout(box, 2000, 500)
       box.scrollTop = 1500
       box.dispatchEvent(new Event('scroll'))
       // 隐藏期间到达。
       emitTurnAppend('oc_test', [
-        entry({ position: 90, kind: 'content', content: 'arrived hidden', created_at_unix: FIXED_DATES.T3 }),
+        entry({ position: 90, kind: 'prompt', content: 'again', created_at_unix: FIXED_DATES.T3 }),
+        entry({ position: 91, kind: 'content', content: 'arrived hidden', created_at_unix: FIXED_DATES.T3 }),
       ])
       await el.updateComplete
       await debounceWait()
       await el.updateComplete
-      // 锚不动：T3 保持 unseen。
-      expect(storedAnchor()!.seen_ts).toBe(FIXED_DATES.T1)
+      // 锚不动：新达的一段保持 unseen。
+      expect(storedAnchor()).toBe(1)
       expect(el.shadowRoot!.querySelector('.seam')?.hasAttribute('hidden')).toBe(false)
       el.remove()
     } finally {
@@ -1467,8 +1496,9 @@ describe('unread boundary advances while focused+visible (polish-workbench-walkt
     await el.updateComplete
     await debounceWait()
     await el.updateComplete
-    // 锚从空流建立：不再有无边框的「~N new since you last viewed」。
-    expect(storedAnchor()!.seen_ts).toBe(FIXED_DATES.T1)
+    // 锚从空流建立：写锚 = max(服务端段数 2, 本地已渲染 1) = 2，不再有无
+    // 边框的「~N new since you last viewed」。
+    expect(storedAnchor()).toBe(2)
     expect(el.shadowRoot!.querySelector('.seam')?.hasAttribute('hidden')).toBe(true)
     el.remove()
   })
@@ -1487,15 +1517,15 @@ describe('unread boundary advances while focused+visible (polish-workbench-walkt
     await el.updateComplete
     await debounceWait()
     await el.updateComplete
-    // 首交换仍算「看着到达」：锚已建立，seam 不出现。
-    expect(storedAnchor('oc_rebuild')!.seen_ts).toBe(FIXED_DATES.T1)
+    // 首交换仍算「看着到达」：锚已建立（段计数 2），seam 不出现。
+    expect(storedAnchor('oc_rebuild')).toBe(2)
     expect(el.shadowRoot!.querySelector('.seam')?.hasAttribute('hidden')).toBe(true)
     el.remove()
   })
 
   it('打开既有未读会话的首帧快照不推进锚——seam 必须保留（3.1）', async () => {
-    // 浏览器里的锚停在 T1，会话在离场期间攒了 T3 的回合。
-    store.set('sebas:seen:oc_test', JSON.stringify({ seen_ts: FIXED_DATES.T1, anchor_count: 2 }))
+    // 浏览器里的段锚停在首回合（1 段），会话在离场期间攒了第二个回合。
+    store.set('sebas:seen:oc_test', JSON.stringify({ anchor_count: 1 }))
     const el = await mount({
       entries: [
         ...streamedTurn('q', ['a'], FIXED_DATES.T1),
@@ -1508,8 +1538,8 @@ describe('unread boundary advances while focused+visible (polish-workbench-walkt
     })
     await debounceWait()
     await el.updateComplete
-    // 打开动作本身不是「看着到达」：锚留在 T1，T3 回合仍标未读。
-    expect(storedAnchor()!.seen_ts).toBe(FIXED_DATES.T1)
+    // 打开动作本身不是「看着到达」：锚留在 1 段，第二回合仍标未读。
+    expect(storedAnchor()).toBe(1)
     expect(el.shadowRoot!.querySelector('.seam')?.hasAttribute('hidden')).toBe(false)
     el.remove()
   })
@@ -1517,8 +1547,8 @@ describe('unread boundary advances while focused+visible (polish-workbench-walkt
 
 describe('seam template identity (fix-webui-streaming-liveness 4.2)', () => {
   it('seam toggling preserves unit DOM identity and fold open state', async () => {
-    // 初始全部已读（seam hidden），展开一个过程折叠。
-    store.set('sebas:seen:oc_test', String(FIXED_DATES.T5))
+    // 初始全部已读（段锚 = mixedTurn 的 3 段），展开一个过程折叠。
+    store.set('sebas:seen:oc_test', JSON.stringify({ anchor_count: 3 }))
     const el = await mount({ entries: mixedTurnEntries() })
     const link = el.shadowRoot!.querySelector<HTMLButtonElement>('.process-fold button.fold-link')!
     link.click()
@@ -1526,10 +1556,16 @@ describe('seam template identity (fix-webui-streaming-liveness 4.2)', () => {
     expect(link.getAttribute('aria-expanded')).toBe('true')
     const firstBlock = el.shadowRoot!.querySelector('.turn-block.is-assistant')!
 
-    // 流式追加新回合（时间戳越过读锚）→ seam 出现。
+    // 流式追加新回合（段数越过读锚）→ seam 出现。
     emitTurnAppend('oc_test', [
       entry({
         position: 99,
+        kind: 'prompt',
+        content: 'again',
+        created_at_unix: FIXED_DATES.T5 + 100,
+      }),
+      entry({
+        position: 100,
         kind: 'content',
         content: 'new turn',
         created_at_unix: FIXED_DATES.T5 + 100,

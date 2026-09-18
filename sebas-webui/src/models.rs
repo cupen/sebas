@@ -187,9 +187,11 @@ pub struct SessionRow {
     /// 直接透传 core 的 [`sebas_dispatch::RemoteSessionView`]：`None` = 主控本机
     /// 会话（节点维度对它不存在），**不伪造**一个 `online`。
     pub remote: Option<sebas_dispatch::RemoteSessionView>,
-    /// （add-agent-mode-selection）操作者期望的 mode（控制面词汇）；`None` =
-    /// agent 默认行为。远端会话与投影 desired 同值。
-    pub desired_mode: Option<String>,
+    /// （add-agent-mode-selection）操作者期望的 mode（控制面词汇）。
+    /// （session-parallel-liveness-and-unread-polish 3.2，design D5b）**非空**
+    /// `String`（缺省 `'ask'`）：wire/内存/UI 四层同一份字符串，无 null 路径
+    /// 也无「null 读成 ask」的读侧投影——迁移在 core restore 点完成。
+    pub desired_mode: String,
     /// （add-agent-mode-selection）执行体回报的实际生效 mode；`None` = 未声称
     /// 生效（与 desired 的差异如实可见）。
     pub effective_mode: Option<String>,
@@ -197,6 +199,12 @@ pub struct SessionRow {
     /// 未读徽标 = `msg_count − 浏览器读锚`。随 `session.updated` 广播 +
     /// rail 10s 轮询兜底。
     pub msg_count: u64,
+    /// （session-parallel-liveness-and-unread-polish 1.3）spawn 失败原因原文
+    /// （`SessionInfo` 同名字段透传）。`None`/缺键 = 非 spawn-failed 会话；
+    /// 失败会话行/详情据此就地呈现原因（session-lifecycle delta「failed
+    /// spawn names the cause」）。非失败会话键不上 wire。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spawn_failure_reason: Option<String>,
     /// （session-slash-commands 2.2）agent 自广告的会话命令表（composer
     /// 命令面板数据源）。空 = 无命令面板（native 等诚实退化）。`#[serde(
     /// default, skip_serializing_if)]`：旧 core 报文无键 → 空表；本侧表空 →
