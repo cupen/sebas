@@ -867,6 +867,111 @@ usage_file = "{}"
         std::fs::write(&self.config_path, patched).expect("write config");
     }
 
+    /// fake-provider-upstream 3.2：给 sandbox config 追加 `[provider.fake]` 段
+    /// （哑 key + `base_url_anthropic` 指向 fake 上游 + models 列表），让 router
+    /// 以**真透传**形态路由到本地假上游（namespace `fake/<model>` 直达）。
+    ///
+    /// **不改默认配置**（同 [`Self::enable_node_link`] 的取舍）：既有旅程的配置
+    /// 逐字不变——尤其 router 的「唯一 provider 隐式默认」语义不被新增 provider
+    /// 打断。必须在 spawn router/core **之前**调用；`base_url` 来自
+    /// [`Self::spawn_fake_provider`]（端口是 probed 随机值）。
+    pub fn enable_fake_provider(&self, base_url: &str) {
+        let config = std::fs::read_to_string(&self.config_path)
+            .unwrap_or_else(|e| panic!("read config {}: {e}", self.config_path.display()));
+        assert!(
+            !config.contains("[provider.fake]"),
+            "enable_fake_provider called twice"
+        );
+        let patched = format!(
+            "{config}\n# fake-provider-upstream：本地 Anthropic 线协议假上游（可拨，\n\
+             # 零外呼）。哑上游 key——journal 会明文记 header，绝不可指向生产。\n\
+             [provider.fake]\napi_key = \"sk-fake-upstream-dummy\"\n\
+             base_url_anthropic = \"{base_url}\"\nmodels = [\"fake-model\"]\n"
+        );
+        assert_ne!(patched, config);
+        std::fs::write(&self.config_path, patched).expect("write config");
+    }
+
+    /// fake-provider-upstream 3.4：钉 `[router.rate_limit]`（token bucket）。
+    /// 必须在 spawn router 之前调用。
+    pub fn set_router_rate_limit(&self, capacity: u32, refill_per_sec: f64) {
+        let mut config = std::fs::read_to_string(&self.config_path)
+            .unwrap_or_else(|e| panic!("read config {}: {e}", self.config_path.display()));
+        config.push_str(&format!(
+            "\n[router.rate_limit]\ncapacity = {capacity}\nrefill_per_sec = {refill_per_sec}\n"
+        ));
+        std::fs::write(&self.config_path, config).expect("write config");
+    }
+
+    /// fake-provider-upstream 3.5：把 `[acp.agents.claude]` 的 `path` 换成
+    /// **真 claude-code 二进制**（并丢掉 fake-claude 专属 `args`），让
+    /// agent-loop 旅程跑真实 ACP 执行体。必须在 spawn core 之前调用。
+    pub fn set_agent_claude_path(&self, path: &str) {
+        let toml = std::fs::read_to_string(&self.config_path)
+            .unwrap_or_else(|e| panic!("read config {}: {e}", self.config_path.display()));
+        let mut lines: Vec<String> = toml.lines().map(str::to_string).collect();
+        let start = lines
+            .iter()
+            .position(|l| l.trim() == "[acp.agents.claude]")
+            .unwrap_or_else(|| panic!("[acp.agents.claude] section not found"));
+        let end = lines[start + 1..]
+            .iter()
+            .position(|l| l.trim_start().starts_with('['))
+            .map(|i| i + start + 1)
+            .unwrap_or(lines.len());
+        let mut section: Vec<String> = vec![lines[start].clone()];
+        for line in &lines[start + 1..end] {
+            let key = line.split('=').next().unwrap_or("").trim();
+            if key == "path" || key == "args" {
+                continue;
+            }
+            section.push(line.clone());
+        }
+        section.push(format!("path = \"{}\"", forward_slash(Path::new(path))));
+        let mut rebuilt: Vec<String> = lines[..start].to_vec();
+        rebuilt.extend(section);
+        rebuilt.extend(lines[end..].to_vec());
+        lines = rebuilt;
+        std::fs::write(&self.config_path, lines.join("\n") + "\n").expect("write config");
+    }
+
+    /// fake-provider-upstream 3.1：spawn 一个**真 `sebas fake-provider` 子进程**
+    /// （CARGO_BIN_EXE_sebas + 动词 + 随机端口 + journal 落在 sandbox 内），
+    /// 解析 ready 行拿到实际地址；拆卸由 `kill_on_drop` + SandboxDir 的进程组
+    /// 收割（[`kill_tree`]）负责。
+    pub async fn spawn_fake_provider(&self, scenario: Option<&Path>) -> FakeUpstream {
+        let log = self.path.join("fake-provider.log");
+        let journal = self.path.join("fake-provider-journal.jsonl");
+        let listen = "127.0.0.1:0".to_string();
+        let journal_arg = forward_slash(&journal);
+        let scenario_arg = scenario.map(forward_slash);
+        let mut args: Vec<&str> = vec![
+            "fake-provider",
+            "--listen",
+            &listen,
+            "--journal",
+            &journal_arg,
+        ];
+        if let Some(s) = &scenario_arg {
+            args.push("--scenario");
+            args.push(s);
+        }
+        let child = self.spawn(&args, &self.core_secret, &[], &log);
+        let base_url = wait_fake_provider_addr(&log, &self.path).await;
+        let port = base_url
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or_else(|| panic!("unparseable fake-provider base url: {base_url}"));
+        FakeUpstream {
+            child,
+            base_url,
+            port,
+            journal,
+            log,
+        }
+    }
+
     /// In-process webui form: `sebas core -c <config> --webui --webui-port
     /// <p>`（无 router 旗标——router 只以独立进程运行，见
     /// [`Self::spawn_router_debug`]）。Returns the child and the dashboard port.
@@ -907,6 +1012,18 @@ usage_file = "{}"
             .register_group_leader(child.id().expect("freshly spawned child has a pid"));
         (child, dashboard_port)
     }
+}
+
+/// 一个运行中的 `sebas fake-provider` 子进程（fake-provider-upstream 3.1）。
+/// `child` 保活（drop 即 kill_on_drop 拆卸）；`journal` 是离线断言透传行为的
+/// 数据源（method/path/headers/body 逐行 NDJSON）。
+pub struct FakeUpstream {
+    pub child: tokio::process::Child,
+    /// `http://127.0.0.1:<port>`（ready 行解析出的实际绑定地址）。
+    pub base_url: String,
+    pub port: u16,
+    pub journal: PathBuf,
+    pub log: PathBuf,
 }
 
 pub fn free_port() -> u16 {
@@ -1044,6 +1161,36 @@ pub async fn wait_router_addr(sb: &Sandbox) -> String {
                         if addr.parse::<std::net::SocketAddr>().is_ok() {
                             return Some(format!("http://{addr}"));
                         }
+                    }
+                }
+                None
+            })
+        },
+    )
+    .await
+}
+
+/// Parse the fake upstream's bind address from its stdout log
+/// (`fake-provider listening addr=127.0.0.1:<port>`；ready 行契约见
+/// `sebas_router::fake_provider::announce`）。返回 `http://…` 基址。
+pub async fn wait_fake_provider_addr(log: &Path, hint: &Path) -> String {
+    let log_path = log.to_path_buf();
+    let hint = hint.to_path_buf();
+    wait_for(
+        "fake-provider addr in log",
+        Duration::from_secs(15),
+        &hint,
+        move || {
+            let log_path = log_path.clone();
+            Box::pin(async move {
+                let log = std::fs::read_to_string(&log_path).ok()?;
+                for line in log.lines().rev() {
+                    let line = strip_ansi(line);
+                    let marker = "fake-provider listening addr=";
+                    let idx = line.find(marker)?;
+                    let addr = line[idx + marker.len()..].split_whitespace().next()?;
+                    if addr.parse::<std::net::SocketAddr>().is_ok() {
+                        return Some(format!("http://{addr}"));
                     }
                 }
                 None
@@ -1353,6 +1500,51 @@ mod tests {
         assert!(p.exists(), "keep() must prevent cleanup");
         // Tidy up so the test itself is hermetic.
         std::fs::remove_dir_all(&p).unwrap();
+    }
+
+    #[test]
+    fn enable_fake_provider_and_rate_limit_patch_config() {
+        // fake-provider-upstream 3.2：模板追加 `[provider.fake]`（哑 key + 指向
+        // fake 的 base_url + models）与 `[router.rate_limit]`；既有段不动。
+        let sb = Sandbox::new("self", "fake-provider-patch");
+        let before = std::fs::read_to_string(&sb.config_path).expect("base config");
+        sb.enable_fake_provider("http://127.0.0.1:12345");
+        sb.set_router_rate_limit(2, 0.0001);
+        let after = std::fs::read_to_string(&sb.config_path).expect("patched config");
+
+        assert!(after.starts_with(&before), "既有配置只能追加，不能改写");
+        assert!(after.contains("[provider.fake]"));
+        assert!(after.contains("api_key = \"sk-fake-upstream-dummy\""));
+        assert!(after.contains("base_url_anthropic = \"http://127.0.0.1:12345\""));
+        assert!(after.contains("models = [\"fake-model\"]"));
+        assert!(after.contains("[router.rate_limit]"));
+        assert!(after.contains("capacity = 2"));
+        assert!(after.contains("refill_per_sec = 0.0001"));
+        // TOML 可解析（追加段没有破坏语法）——用 toml crate 通过测试二进制
+        // 的依赖树不可用，故只做结构断言行（段头 + key）。
+        assert_eq!(
+            after.matches("[provider.fake]").count(),
+            1,
+            "stanza must appear exactly once"
+        );
+    }
+
+    #[test]
+    fn set_agent_claude_path_rewrites_only_that_section() {
+        // fake-provider-upstream 3.5：真 claude-code 取代 fake-claude 桩，
+        // 同段的 sessions_dir/work_dir 保留，树里不留 fake-claude 路径。
+        let sb = Sandbox::new("self", "claude-path");
+        sb.set_agent_claude_path("/opt/bin/claude");
+        let cfg = std::fs::read_to_string(&sb.config_path).expect("config");
+        assert!(cfg.contains("[acp.agents.claude]"));
+        assert!(cfg.contains("path = \"/opt/bin/claude\""));
+        assert!(
+            !cfg.contains("fake-claude"),
+            "fake-claude path must be gone: {cfg}"
+        );
+        assert!(cfg.contains("sessions_dir ="));
+        assert!(cfg.contains("work_dir ="));
+        assert!(cfg.contains("driver = \"claude\""));
     }
 
     #[test]

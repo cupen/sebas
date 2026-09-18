@@ -12,12 +12,19 @@ mod support;
 
 use std::time::Duration;
 
-use support::start_router;
+use sebas_router::proto::WireProtocol;
+use support::{start_mock_upstream, start_router};
 
 /// capacity=2 + 极慢 refill，保证测试窗口内不自动补充（避免时序抖动）。
-/// `__USAGE__` 由 `start_router` 替换。provider 用 test 上游 key
-/// （`SEBAS_ROUTER_TEST_UPSTREAM_KEY`，start_router 自动 set）。
-const CFG: &str = r#"
+/// `__USAGE__` 由 `start_router` 替换。
+///
+/// sebas-vm9p：上游 base_url **必须**指向本地 mock —— 自定义 provider 名 +
+/// `base_url_anthropic`（不能叫 `anthropic`，那是 preset 名、连接数据跟随代码
+/// 会拨真实 api.anthropic.com）。网络慢时该真实外呼曾让 5s 客户端超时假失败；
+/// 本地 mock 秒回即确定性行为，超时窗口内不依赖任何外部网络。
+fn cfg(upstream: &str) -> String {
+    format!(
+        r#"
 [router]
 listen = "127.0.0.1:0"
 usage_file = "__USAGE__"
@@ -28,10 +35,35 @@ auth_token = "sk-gw-test"
 capacity = 2
 refill_per_sec = 0.0001
 
-[provider.anthropic]
-api_key_env = "SEBAS_ROUTER_TEST_UPSTREAM_KEY"
+[provider.rate-limit-upstream]
+base_url_anthropic = "{upstream}"
+api_key = "sk-upstream-test"
 
-"#;
+"#
+    )
+}
+
+/// `cfg(upstream)` 的另一形态：两个已批准 token、capacity=1。
+fn cfg_two_tokens(upstream: &str) -> String {
+    format!(
+        r#"
+[router]
+listen = "127.0.0.1:0"
+usage_file = "__USAGE__"
+
+auth_token = ["sk-a", "sk-b"]
+
+[router.rate_limit]
+capacity = 1
+refill_per_sec = 0.0001
+
+[provider.rate-limit-upstream]
+base_url_anthropic = "{upstream}"
+api_key = "sk-upstream-test"
+
+"#
+    )
+}
 
 fn client() -> reqwest::Client {
     reqwest::Client::builder()
@@ -44,7 +76,8 @@ const AUTH: (&str, &str) = ("authorization", "Bearer sk-gw-test");
 
 #[tokio::test]
 async fn over_capacity_returns_429() {
-    let gw = start_router(CFG).await;
+    let upstream = start_mock_upstream(WireProtocol::Anthropic).await;
+    let gw = start_router(&cfg(&upstream.url)).await;
     let client = client();
     let url = format!("http://{}/v1/messages", gw.addr);
 
@@ -90,7 +123,8 @@ async fn over_capacity_returns_429() {
 
 #[tokio::test]
 async fn healthz_exempt_from_rate_limit() {
-    let gw = start_router(CFG).await;
+    let upstream = start_mock_upstream(WireProtocol::Anthropic).await;
+    let gw = start_router(&cfg(&upstream.url)).await;
     let client = client();
     // healthz 不计费、不占令牌：连打多次恒 200。
     for _ in 0..10 {
@@ -106,22 +140,8 @@ async fn healthz_exempt_from_rate_limit() {
 #[tokio::test]
 async fn distinct_tokens_have_independent_buckets() {
     // 两个已批准 token，各配 capacity=1：sk-a 打爆不影响 sk-b。
-    const CFG_TWO: &str = r#"
-[router]
-listen = "127.0.0.1:0"
-usage_file = "__USAGE__"
-
-auth_token = ["sk-a", "sk-b"]
-
-[router.rate_limit]
-capacity = 1
-refill_per_sec = 0.0001
-
-[provider.anthropic]
-api_key_env = "SEBAS_ROUTER_TEST_UPSTREAM_KEY"
-
-"#;
-    let gw = start_router(CFG_TWO).await;
+    let upstream = start_mock_upstream(WireProtocol::Anthropic).await;
+    let gw = start_router(&cfg_two_tokens(&upstream.url)).await;
     let client = client();
     let url = format!("http://{}/v1/messages", gw.addr);
 

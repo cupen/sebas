@@ -230,6 +230,30 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:8787 ANTHROPIC_API_KEY=sk-gw-local-dev claud
 
 配置优先级：CLI 参数 > 环境变量 > TOML 文件 > 默认值。完整配置说明见 [`config/config.toml.example`](config/config.toml.example)（逐项注释）与 `openspec/specs/`。
 
+### 本地假上游（`sebas fake-provider`，测试与演示用）
+
+零 token 的 Anthropic `/v1/messages` 假上游：确定性应答、可编排剧本、请求留痕。用于
+本地演示与进程级 e2e——router 以自定义 provider（`base_url_anthropic` 指向它）零改动
+接入即可压测透传链路（header 过滤 / key 注入 / SSE 透传 / usage 结算）。
+
+```bash
+# 随机端口启动，stdout 打可解析的 ready 行：fake-provider listening addr=127.0.0.1:<port>
+sebas fake-provider --listen 127.0.0.1:0 --journal /tmp/fake-journal.jsonl
+
+# 可选剧本（JSON，按序消费，耗尽回落内置规则）
+sebas fake-provider --listen 127.0.0.1:0 --scenario /tmp/scenario.json
+```
+
+- **内置确定性规则**（无剧本）：请求带非空 `tools` 且消息历史无 `tool_result` → 首个
+  （优先只读类）tool 的 `tool_use`；已含 `tool_result` → 终文本；无 `tools` → 纯文本。
+  相同请求恒相同应答，usage 恒定非零（12/7）。
+- **scenario 文件**：`{"responses":[{"text":"…"}|{"tool":"Bash","input":{…}}|
+  {"status":429,"retry_after":3}]}`（也接受顶层数组）。文件缺失/非法 JSON = 启动失败
+  （退出码 75 + `startup-failure:` 末行）。
+- **`--journal <file>`**：NDJSON 逐行追加收到的请求（method / path / headers / body），
+  供离线断言「上游 key 已注入、下游 key 未泄漏」。
+  **journal 明文记录 header——只应把 dummy key 的测试上游指向它，绝不可指向生产。**
+
 ---
 
 ## 架构

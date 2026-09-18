@@ -616,6 +616,452 @@ async fn router_debug_provider_serves_messages() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// fake-provider-upstream：本地 Anthropic 线协议假上游（零 token）接线
+// ---------------------------------------------------------------------------
+
+/// 假上游内置规则的确定性文案（`sebas_router::fake_provider` 常量；测试侧
+/// 独立钉死字面量，避免断言随实现漂移而静默放宽）。
+const FAKE_PLAIN_TEXT: &str = "fake-provider: no tools requested";
+const FAKE_FINAL_TEXT: &str = "fake-provider: tool loop complete";
+/// `[provider.fake]` 的上游哑 key（sandbox 模板）——透传断言的期望值。
+const FAKE_UPSTREAM_KEY: &str = "sk-fake-upstream-dummy";
+/// 下游 key：绝不能出现在 fake 的 journal 里。
+const DOWNSTREAM_KEY: &str = "sk-downstream-must-not-leak";
+
+/// 读 NDJSON 行（journal / usage），空行跳过。
+fn read_jsonl(path: &std::path::Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect()
+}
+
+/// fake-provider-upstream 3.1：`spawn_fake_provider` helper 冒烟——spawn →
+/// 拨号 200 → journal 落一条 → 拆卸后端口释放。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn fake_provider_spawn_helper_smoke() {
+    let sb = Sandbox::new("testsuite_e2e", "fake-provider-helper");
+    let cli = http_client();
+    let mut fake = sb.spawn_fake_provider(None).await;
+    assert!(fake.port > 0, "probed random port must be non-zero");
+    assert!(
+        fake.base_url.starts_with("http://127.0.0.1:"),
+        "loopback base url: {}",
+        fake.base_url
+    );
+
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/v1/messages", fake.base_url),
+        serde_json::json!({"model": "m", "messages": [{"role": "user", "content": "hi"}]}),
+    )
+    .await
+    .expect("dial fake provider");
+    assert_eq!(status, 200, "fake /v1/messages: {body}");
+    assert_eq!(body["content"][0]["text"], FAKE_PLAIN_TEXT);
+    assert_eq!(
+        read_jsonl(&fake.journal).len(),
+        1,
+        "one dial → exactly one journal line"
+    );
+
+    // 拆卸（等价 SandboxDir Drop 的进程收割）：端口必须释放。
+    fake.child.kill().await.expect("kill fake provider");
+    let _ = fake.child.wait().await;
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{}", fake.port)
+        .parse()
+        .expect("addr");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(_) => break,
+            Err(_) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(e) => panic!("port {} not released after teardown: {e}", fake.port),
+        }
+    }
+}
+
+/// fake-provider-upstream 3.3：provider 透传全链路 journey。
+///
+/// 本地 fake 上游 + sandbox `[provider.fake]`（namespace `fake/fake-model`）+
+/// **非 debug** 独立 router → 非流式（应答 + usage 落账）/ 流式（SSE 逐事件
+/// 透传）/ journal 离线断言（上游 key 注入、下游 key 与 hop-by-hop 不泄漏）。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn fake_provider_passthrough_journey() {
+    let sb = Sandbox::new("testsuite_e2e", "fake-passthrough");
+    let cli = http_client();
+    let fake = sb.spawn_fake_provider(None).await;
+    sb.enable_fake_provider(&fake.base_url);
+    let _core = sb.spawn_core();
+    let _router = sb.spawn_router(); // 非 debug：走真透传面（无内置 test provider）
+    let router = wait_router_addr(&sb).await;
+    let url = format!("{router}/v1/messages");
+    let payload = serde_json::json!({
+        "model": "fake/fake-model",
+        "max_tokens": 32,
+        "messages": [{ "role": "user", "content": "hello" }]
+    });
+
+    // --- 非流式：fake 的确定性内容 + router usage 落账 ---
+    let resp = cli
+        .post(&url)
+        .header("content-type", "application/json")
+        .header("anthropic-version", "2023-06-01")
+        .header("x-api-key", DOWNSTREAM_KEY)
+        .body(payload.to_string())
+        .send()
+        .await
+        .expect("non-stream passthrough");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = resp.json().await.expect("json body");
+    assert_eq!(body["id"], "msg_fake_builtin", "fake reply: {body}");
+    assert_eq!(body["content"][0]["text"], FAKE_PLAIN_TEXT);
+    assert_eq!(body["stop_reason"], "end_turn");
+    assert!(body["usage"]["input_tokens"].as_u64().unwrap_or(0) > 0);
+
+    // usage 结算：非零 input/output + provider 名 + model rename 记录。
+    let usage_path = sb.path.join("router-usage.jsonl");
+    let hint = sb.path.clone();
+    let fake_usage = {
+        let usage_path = usage_path.clone();
+        wait_for(
+            "router usage record for provider fake",
+            Duration::from_secs(15),
+            &hint,
+            move || {
+                let usage_path = usage_path.clone();
+                Box::pin(async move {
+                    read_jsonl(&usage_path)
+                        .into_iter()
+                        .find(|r| r["provider"] == "fake" && r["status"] == 200)
+                })
+            },
+        )
+        .await
+    };
+    assert_eq!(fake_usage["model"], "fake/fake-model");
+    assert_eq!(fake_usage["upstream_model"], "fake-model");
+    assert!(
+        fake_usage["input_tokens"].as_u64().unwrap_or(0) > 0
+            && fake_usage["output_tokens"].as_u64().unwrap_or(0) > 0,
+        "non-zero usage must settle: {fake_usage}"
+    );
+
+    // --- 流式：SSE 完整事件序列透传，文本与非流式一致 ---
+    let mut streaming = payload.clone();
+    streaming["stream"] = serde_json::json!(true);
+    let resp = cli
+        .post(&url)
+        .header("content-type", "application/json")
+        .body(streaming.to_string())
+        .send()
+        .await
+        .expect("stream passthrough");
+    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(
+        resp.headers().get("content-type").map(|v| v.to_str().unwrap()),
+        Some("text/event-stream")
+    );
+    let sse = resp.text().await.expect("sse body");
+    for event in [
+        "event: message_start",
+        "event: content_block_start",
+        "event: content_block_delta",
+        "event: content_block_stop",
+        "event: message_delta",
+        "event: message_stop",
+    ] {
+        assert!(sse.contains(event), "missing {event} in SSE:\n{sse}");
+    }
+    assert!(
+        sse.contains(FAKE_PLAIN_TEXT),
+        "SSE text must match the non-stream reply:\n{sse}"
+    );
+
+    // 流式也落账（SseUsageParser 从 message_start/message_delta 取 usage）。
+    let usage_path2 = usage_path.clone();
+    let hint2 = sb.path.clone();
+    wait_for(
+        "second usage record (stream settled)",
+        Duration::from_secs(15),
+        &hint2,
+        move || {
+            let usage_path2 = usage_path2.clone();
+            Box::pin(async move {
+                let fake_records = read_jsonl(&usage_path2)
+                    .into_iter()
+                    .filter(|r| r["provider"] == "fake")
+                    .count();
+                (fake_records >= 2).then_some(())
+            })
+        },
+    )
+    .await;
+
+    // --- journal 离线断言：上游 key 注入 / 下游 key 与 hop-by-hop 不泄漏 ---
+    let journal = read_jsonl(&fake.journal);
+    assert_eq!(
+        journal.len(),
+        2,
+        "router forwarded exactly two requests: {journal:?}"
+    );
+    let raw = std::fs::read_to_string(&fake.journal).expect("journal text");
+    assert!(
+        !raw.contains(DOWNSTREAM_KEY),
+        "downstream key must never reach the upstream:\n{raw}"
+    );
+    let non_stream = journal
+        .iter()
+        .find(|l| l["body"]["stream"].as_bool() != Some(true))
+        .expect("non-stream journal line");
+    let headers = non_stream["headers"]
+        .as_object()
+        .expect("journal headers object");
+    assert_eq!(
+        headers.get("x-api-key").and_then(|v| v.as_str()),
+        Some(FAKE_UPSTREAM_KEY),
+        "upstream key must be injected: {headers:?}"
+    );
+    assert!(
+        !headers.contains_key("authorization"),
+        "downstream auth header must be stripped: {headers:?}"
+    );
+    for hop in [
+        "connection",
+        "transfer-encoding",
+        "keep-alive",
+        "te",
+        "trailer",
+        "upgrade",
+    ] {
+        assert!(
+            !headers.contains_key(hop),
+            "{hop} is hop-by-hop and must not be forwarded: {headers:?}"
+        );
+    }
+    assert_eq!(
+        non_stream["body"]["model"], "fake-model",
+        "namespace rest + rename lands upstream: {non_stream}"
+    );
+    assert_eq!(non_stream["body"]["messages"][0]["content"], "hello");
+}
+
+/// fake-provider-upstream 3.4：确定性限流/用量——fake 秒回消除真实上游网络
+/// 延迟抖动，token bucket 的越界 429 精确可复现，且越界请求不外呼。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn fake_provider_deterministic_rate_limit() {
+    let sb = Sandbox::new("testsuite_e2e", "fake-rate-limit");
+    let cli = http_client();
+    let fake = sb.spawn_fake_provider(None).await;
+    sb.enable_fake_provider(&fake.base_url);
+    // capacity=2 + 极慢 refill：测试窗口内不自动补充（消除时序抖动）。
+    sb.set_router_rate_limit(2, 0.0001);
+    let _router = sb.spawn_router();
+    let router = wait_router_addr(&sb).await;
+    let url = format!("{router}/v1/messages");
+    let payload = serde_json::json!({
+        "model": "fake/fake-model",
+        "max_tokens": 16,
+        "messages": [{ "role": "user", "content": "hi" }]
+    })
+    .to_string();
+
+    let mut statuses = Vec::new();
+    let mut over_body = serde_json::Value::Null;
+    for _ in 0..3 {
+        let resp = cli
+            .post(&url)
+            .header("content-type", "application/json")
+            .body(payload.clone())
+            .send()
+            .await
+            .expect("POST /v1/messages");
+        let status = resp.status().as_u16();
+        if status == 429 {
+            over_body = resp.json().await.expect("429 body");
+        } else {
+            let _ = resp.text().await;
+        }
+        statuses.push(status);
+    }
+    assert_eq!(
+        statuses,
+        vec![200, 200, 429],
+        "bucket capacity 2 drained deterministically (fake answers instantly)"
+    );
+    assert_eq!(over_body["type"], "error");
+    assert_eq!(over_body["error"]["type"], "rate_limit_error");
+
+    // 无外呼浪费：只有桶内两个请求到达 fake。
+    let journal = read_jsonl(&fake.journal);
+    assert_eq!(
+        journal.len(),
+        2,
+        "over-capacity request must not reach the upstream: {journal:?}"
+    );
+}
+
+/// 真 claude-code 二进制：`SEBAS_TEST_CLAUDE_BIN` 优先，PATH 兜底；缺席 → None。
+fn find_claude_bin() -> Option<String> {
+    if let Ok(p) = std::env::var("SEBAS_TEST_CLAUDE_BIN")
+        && !p.trim().is_empty()
+    {
+        let path = std::path::PathBuf::from(&p);
+        if path.is_file() {
+            return Some(p);
+        }
+        eprintln!(
+            "[skip] SEBAS_TEST_CLAUDE_BIN={p} is not an existing file — ignoring it"
+        );
+    }
+    let exe = if cfg!(windows) { "claude.exe" } else { "claude" };
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join(exe))
+        .find(|p| p.is_file())
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// fake-provider-upstream 3.5：agent-loop journey（零 token）。
+///
+/// 真 claude-code 作 ACP 执行体、模型请求打到本地 fake 上游：消息 →
+/// tool_use → 工具执行 → tool_result → 终文本 → 会话 Done。claude-code
+/// 缺席（`SEBAS_TEST_CLAUDE_BIN` / PATH 都没有）时输出原因并跳过，不判失败。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn agent_loop_journey_claude_over_fake_upstream() {
+    let Some(claude_bin) = find_claude_bin() else {
+        eprintln!(
+            "[skip] agent_loop_journey_claude_over_fake_upstream: no claude-code binary \
+             (set SEBAS_TEST_CLAUDE_BIN or put `claude` on PATH); journey ready"
+        );
+        return;
+    };
+
+    let sb = Sandbox::new("testsuite_e2e", "agent-loop");
+    let cli = http_client();
+    let fake = sb.spawn_fake_provider(None).await;
+    sb.set_agent_claude_path(&claude_bin);
+    // claude-code 子进程继承 core 的 env：ProviderResolution::Off 不注入任何
+    // provider env，这里直接把假上游地址+哑 token 塞给它（零登录、零 token；
+    // 真实的 claude 登录态与真实上游完全不参与）。
+    let _core = sb.spawn_core_extra(&[
+        ("ANTHROPIC_BASE_URL", fake.base_url.as_str()),
+        ("ANTHROPIC_AUTH_TOKEN", "sk-fake-agent-loop"),
+    ]);
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({
+            "prompt": "Use the Read tool on the file SEBAS_FAKE_TOOL_LOOP, then report what happened.",
+            "agent": "claude",
+            "mode": "allow"
+        }),
+    )
+    .await
+    .expect("create ACP session");
+    assert_eq!(status, 201, "session create: {body}");
+    let key = body["key"].as_str().expect("session key").to_string();
+    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+
+    // 真 claude-code 冷启动 + 两轮假上游应答；预算放宽但有界。
+    let hint = sb.path.clone();
+    let detail = wait_for(
+        "agent-loop turn to reach Done",
+        Duration::from_secs(180),
+        &hint,
+        {
+            let cli = cli.clone();
+            let url = detail_url.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    (v["status_slug"].as_str() == Some("done")).then_some(v)
+                })
+            }
+        },
+    )
+    .await;
+
+    let entries = detail["entries"].as_array().cloned().unwrap_or_default();
+    let transcript: String = entries
+        .iter()
+        .filter_map(|e| e["content"].as_str())
+        .collect::<Vec<_>>()
+        .join("");
+    assert!(
+        transcript.contains(FAKE_FINAL_TEXT),
+        "turn must carry the fake upstream's final text, got: {transcript:?}"
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|e| e["element_type"].as_str() == Some("tool")),
+        "tool execution trace must be visible in the turn: {transcript:?}"
+    );
+
+    // agent 工具环确实闭合：带工具表的回合 ≥2 —— 首轮无 tool_result（要求
+    // tool_use），次轮带 tool_result（要求终文本）。claude-code 在会话创建时
+    // 还会先打一轮无 tools 的标题生成请求（也是 fake 的活体证据）。
+    let journal = read_jsonl(&fake.journal);
+    let loop_turns: Vec<&serde_json::Value> = journal
+        .iter()
+        .filter(|l| {
+            l["body"]["tools"]
+                .as_array()
+                .is_some_and(|t| !t.is_empty())
+        })
+        .collect();
+    assert!(
+        loop_turns.len() >= 2,
+        "tool loop needs ≥2 tool-carrying upstream turns, got {journal:?}"
+    );
+    let first = loop_turns[0];
+    assert!(
+        first["body"]["model"].is_string(),
+        "real claude-code sends a model id: {first}"
+    );
+    let has_tool_result = |l: &serde_json::Value| {
+        l["body"]["messages"].as_array().is_some_and(|msgs| {
+            msgs.iter().any(|m| {
+                m["content"].as_array().is_some_and(|blocks| {
+                    blocks
+                        .iter()
+                        .any(|b| b["type"].as_str() == Some("tool_result"))
+                })
+            })
+        })
+    };
+    assert!(
+        !has_tool_result(first),
+        "the first tool-carrying turn has no tool_result yet: {first}"
+    );
+    let last = loop_turns.last().expect("non-empty loop turns");
+    assert!(
+        has_tool_result(last),
+        "the closing turn must carry a tool_result: {last}"
+    );
+}
+
 /// A webui presenting a wrong SEBAS_CORE_SECRET must never fake a connected
 /// state: /health still serves, reachability stays false with a cause.
 #[tokio::test]

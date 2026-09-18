@@ -11,11 +11,15 @@
 
 pub mod access_log;
 pub mod admin;
+/// Anthropic `/v1/messages` 响应形状构造（test_provider 与 fake_provider 共用）。
+pub mod anthropic_wire;
 pub mod auth;
 pub mod config;
 pub mod core_channel;
 pub mod debug;
 pub mod error;
+/// `sebas fake-provider`：本地 Anthropic 线协议假上游（fake-provider-upstream）。
+pub mod fake_provider;
 pub mod hot_reload;
 pub mod key_resolver;
 pub mod metrics;

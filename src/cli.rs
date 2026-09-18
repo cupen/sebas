@@ -23,6 +23,12 @@ pub enum Cmd {
     /// Run the LLM provider router (Anthropic/OpenAI dual-protocol
     /// transparent proxy). See openspec/specs/router-core/spec.md.
     Router(RouterArgs),
+    /// 本地 Anthropic 线协议假上游（测试与演示用，零 token、确定性应答）。
+    /// 只实现 `/v1/messages`；auth header 不校验；`--journal` 落请求留痕。
+    /// 仅供 dummy key 的测试上游使用，绝不可指向生产。
+    /// See openspec/specs/fake-provider-upstream/spec.md.
+    #[command(name = "fake-provider")]
+    FakeProvider(FakeProviderArgs),
     /// Start the standalone WebUI dashboard server.
     /// Spawned by the watchdog when `[service.webui] enabled = true`.
     #[command(name = "webui")]
@@ -254,6 +260,26 @@ pub struct RouterArgs {
     /// （固定文字 + 回显输入），不转发外部上游。
     #[arg(long)]
     pub debug: bool,
+}
+
+/// `sebas fake-provider` — 本地 Anthropic 线协议假上游（fake-provider-upstream）。
+#[derive(Parser)]
+pub struct FakeProviderArgs {
+    /// 监听地址。缺省 `127.0.0.1:0`（系统分配随机端口；实际绑定地址以
+    /// stdout 单行 `fake-provider listening addr=…` 为准）。
+    #[arg(long, default_value = "127.0.0.1:0")]
+    pub listen: String,
+
+    /// 可选 JSON 剧本文件：条目按序消费（文本 / tool_use / 错误注入），
+    /// 耗尽后回落内置确定性规则。文件缺失或非法 JSON = 启动失败（退出码 75）。
+    #[arg(long)]
+    pub scenario: Option<String>,
+
+    /// 可选 NDJSON 请求留痕文件（method / path / headers / body 逐行追加）。
+    /// 套件离线断言透传行为（上游 key 注入、下游 key 不泄漏）的数据源。
+    /// 明文含 header——只应指向 dummy key 的测试上游。
+    #[arg(long)]
+    pub journal: Option<String>,
 }
 
 /// `sebas webui` — start the standalone WebUI dashboard server.
