@@ -4,7 +4,8 @@
  * 预选语义改自 preselect-last-used-model 1.2）。
  *
  * Covered:
- *   - 禁用：无 agent 可选（catalog 为空）→ 确认禁用；未选 agent → 确认禁用
+ *   - 禁用：无 agent 可选（catalog 为空）→ 确认禁用；未选 agent → 确认禁用；
+ *     无目标项目（projectId 为空）→ 确认禁用（会话必须从属于项目）
  *   - 预选级联：上次确认的 (provider, model) 对仍在目录 → 该对；无记忆/
  *     stale 记忆 → 目录第一对（不伪造选项）；配置 defaults 不再参与
  *   - 确认写记忆：dialog-confirm 时 saveLastUsedPair（唯一写入点）
@@ -50,7 +51,10 @@ import { api } from '../api/client.js'
 async function mount(initial: Partial<SebasNewSessionDialog> = {}) {
   const el = document.createElement('sebas-new-session-dialog') as SebasNewSessionDialog
   if (initial.open !== undefined) el.open = initial.open
-  if (initial.projectId !== undefined) el.projectId = initial.projectId
+  // 会话必须从属于项目：创建只从项目行的「+」发起，弹窗恒带目标项目——
+  // mount 缺省补一个（个别用例显式传 `null` 来钉「无项目 = 确认被拦」）。
+  el.projectId = initial.projectId !== undefined ? initial.projectId : 'proj-test000000'
+  if (initial.projectName !== undefined) el.projectName = initial.projectName
   if (initial.projectName !== undefined) el.projectName = initial.projectName
   if (initial.defaultAgent !== undefined) el.defaultAgent = initial.defaultAgent
   document.body.appendChild(el)
@@ -203,6 +207,19 @@ describe('sebas-new-session-dialog', () => {
     const el = await mount({ open: true })
     expect(confirmButton(el).disabled).toBe(true)
     expect(agentSelect(el).disabled).toBe(true)
+  })
+
+  it('disables confirm without a target project — a session must belong to a project', async () => {
+    // 「会话必须从属于项目」：弹窗只从项目行的「+」打开，没有目标项目就
+    // 不该发生创建（无项目会话在服务端 400、在 rail 里也没有可见面）。
+    ;(api.agents as ReturnType<typeof vi.fn>).mockResolvedValue({
+      agents: [{ id: 'claude', display: 'Claude Code', reachable: true }],
+    })
+    const el = await mount({ open: true, projectId: null })
+    expect(agentSelect(el).value).not.toBe('')
+    // 无项目 → 确认禁用（`toBe` 的说明参数在 expect 类型里不允许，注释承载）。
+    expect(confirmButton(el).disabled).toBe(true)
+    el.remove()
   })
 
   it('two-level selection: switching provider moves the model list to that provider', async () => {

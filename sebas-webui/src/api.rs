@@ -980,12 +980,10 @@ pub struct CreateSessionRequest {
     /// first message is sent).
     #[serde(default)]
     pub prompt: Option<String>,
-    /// Optional project directory for the new session's working dir. When
-    /// omitted (or null), the session is bound to the workbench inbox
-    /// Project to bind, referenced by its stable id (`proj-<12hex>`,
-    /// workbench-agent-wire-fix D2). `None` = inbox (no project). The raw
-    /// directory path is resolved server-side from the registry — the path
-    /// is never a wire identifier.
+    /// 必填：目标项目，按稳定 id（`proj-<12hex>`，workbench-agent-wire-fix
+    /// D2）。**会话必须从属于项目**——省略/空值/未知 id 一律 400，不存在
+    /// 「无项目会话」这条路径（rail 只渲染项目下的会话行，无项目会话没有任何
+    /// 可见面）。原始目录路径由服务端从注册表解析，path 从不是 wire 标识。
     #[serde(default)]
     pub project_id: Option<String>,
     /// 必填：目标 agent id——`[acp.agents.*]` 配置键名（如 `claudecode`、
@@ -1054,47 +1052,52 @@ pub async fn create_session(
         );
     }
     // project_id → 内部工作目录路径 + 所属执行节点（path/node 都不是 wire
-    // 标识，解析发生在服务端）。8.1：项目决定节点——选项目即选节点，本机项目
-    // 带 `"local"`（行为与今日逐字一致）；无项目会话 node = None，由核心落到
-    // 配置的默认执行节点。
-    let (project_dir, node) = match &req.project_id {
-        Some(id) => {
-            let entry = projects_from_backend(&state)
-                .await
-                .into_iter()
-                .find(|p| p.get("id").and_then(|v| v.as_str()) == Some(id.as_str()));
-            match entry {
-                Some(p) => {
-                    let Some(dir) = p.get("path").and_then(|v| v.as_str()).map(str::to_string)
-                    else {
-                        return api_error(
-                            StatusCode::BAD_REQUEST,
-                            format!("未知 project_id: {id}"),
-                        );
-                    };
-                    let node = p
-                        .get("node_id")
-                        .and_then(|v| v.as_str())
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or(crate::projects::LOCAL_NODE_ID)
-                        .to_string();
-                    // add-workspace-root 2.3：携越界本机项目的 create 一律 400，
-                    // 先于 spawn/占位（不产生任何执行事实）。远端项目由那台
-                    // 节点自己的 root 裁决，注册时已判。
-                    if node == crate::projects::LOCAL_NODE_ID
-                        && crate::fs::stored_path_in_workspace_root(&dir, &state.workspace_root)
-                            != Some(true)
-                    {
-                        return api_error(StatusCode::BAD_REQUEST, OUT_OF_WORKSPACE_MSG);
-                    }
-                    (Some(dir), Some(node))
-                }
-                None => {
-                    return api_error(StatusCode::BAD_REQUEST, format!("未知 project_id: {id}"));
-                }
-            }
+    // 标识，解析发生在服务端）。**必填**：会话必须从属于项目，没有项目就
+    // 没有归属、没有 rail 行、没有状态面——省略/空值/未知 id 一律 400，
+    // 绝不静默落一个无项目会话。8.1：项目决定节点——选项目即选节点，本机
+    // 项目带 `"local"`。
+    let project_id = req
+        .project_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "project_id 必填：会话必须从属于项目".to_string());
+    let project_id = match project_id {
+        Ok(id) => id,
+        Err(msg) => return api_error(StatusCode::BAD_REQUEST, msg),
+    };
+    let (project_dir, node) = {
+        let entry = projects_from_backend(&state)
+            .await
+            .into_iter()
+            .find(|p| p.get("id").and_then(|v| v.as_str()) == Some(project_id));
+        let Some(p) = entry else {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                format!("未知 project_id: {project_id}"),
+            );
+        };
+        let Some(dir) = p.get("path").and_then(|v| v.as_str()).map(str::to_string) else {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                format!("未知 project_id: {project_id}"),
+            );
+        };
+        let node = p
+            .get("node_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(crate::projects::LOCAL_NODE_ID)
+            .to_string();
+        // add-workspace-root 2.3：携越界本机项目的 create 一律 400，先于
+        // spawn/占位（不产生任何执行事实）。远端项目由那台节点自己的 root
+        // 裁决，注册时已判。
+        if node == crate::projects::LOCAL_NODE_ID
+            && crate::fs::stored_path_in_workspace_root(&dir, &state.workspace_root) != Some(true)
+        {
+            return api_error(StatusCode::BAD_REQUEST, OUT_OF_WORKSPACE_MSG);
         }
-        None => (None, None),
+        (dir, node)
     };
     // （add-agent-mode-selection）mode 词汇校验：未知值 400 如实拒绝，不
     // 静默降级（同"agent 必填"的 wire 严格性）。
@@ -1118,11 +1121,11 @@ pub async fn create_session(
         match state
             .backend
             .create_placeholder(
-                project_dir.clone(),
+                Some(project_dir.clone()),
                 &req.agent,
                 req.model.clone(),
                 req.mode.clone(),
-                node.clone(),
+                Some(node.clone()),
             )
             .await
         {
@@ -1134,11 +1137,11 @@ pub async fn create_session(
             .backend
             .spawn_with(
                 prompt,
-                project_dir.clone(),
+                Some(project_dir.clone()),
                 &req.agent,
                 req.model,
                 req.mode,
-                node.clone(),
+                Some(node.clone()),
             )
             .await
         {
@@ -1149,16 +1152,15 @@ pub async fn create_session(
     state.backend.set_focus(Some(key.clone())).await;
     // 2.6：项目级默认 agent——该项目下最近一次创建会话所用的 agent，
     // 下次在该项目创建会话时 composer 预选它。状态库优先，文件注册表回退。
-    if let Some(id) = &req.project_id {
-        let payload = json!({ "op": "set_default_agent", "id": id, "agent": req.agent });
-        if state
-            .backend
-            .state_mutate("projects", payload)
-            .await
-            .is_err()
-        {
-            crate::projects::set_default_agent(id, &req.agent);
-        }
+    // （项目必填，故这里无条件落。）
+    let payload = json!({ "op": "set_default_agent", "id": project_id, "agent": req.agent });
+    if state
+        .backend
+        .state_mutate("projects", payload)
+        .await
+        .is_err()
+    {
+        crate::projects::set_default_agent(project_id, &req.agent);
     }
     let encoded = encode_session_key(&key);
     (StatusCode::CREATED, Json(json!({ "key": encoded }))).into_response()

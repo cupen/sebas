@@ -17,10 +17,6 @@ export type StatusSlug =
   | 'done'
   | 'failed'
   | 'dormant'
-  // （session-parallel-liveness-and-unread-polish 1.3）行投影的失败态 slug：
-  // spawn 失败不再被吞进 spawning——会话行的圆点如实读作 `spawn-failed`
-  // （与 detail 的 `failed` 同源，取词服从行投影）。
-  | 'spawn-failed'
 
 /**
  * 待生效提交的处置（workbench-turn-queue D1）：`staging` = 并入首条消息
@@ -948,8 +944,10 @@ export const api = {
    */
   createSession: (opts: {
     agent: string
+    /** **必填**：会话必须从属于项目（无项目 = 无归属、无 rail 行、无状态面，
+     * 服务端一律 400）。 */
+    projectId: string
     prompt?: string | null
-    projectId?: string | null
     model?: string | null
     /** 权限模式（add-agent-mode-selection）：`ask`/`edit`/`allow`/`auto`；
      * `null` = agent 默认行为（不发送 mode 字段）。 */
@@ -957,7 +955,7 @@ export const api = {
   }) =>
     post<{ key: string }>('/api/sessions', {
       prompt: opts.prompt ?? null,
-      project_id: opts.projectId ?? null,
+      project_id: opts.projectId,
       agent: opts.agent,
       model: opts.model ?? null,
       // undefined = 未选 mode：JSON 序列化时整个键省略（服务端 serde default
