@@ -131,6 +131,33 @@ export class SebasApp extends LitElement {
     saveRailWidth(px)
   }
 
+  /**
+   * 布局自愈（走查发现）：`wa-split-panel` 的 `pixelsToPercentage` 是
+   * `px / size * 100`，而首次渲染把 `position-in-pixels` 灌进去时容器尺寸可能
+   * 还没定（`size` 为 0/NaN）——换算出的 `position` 成了 `NaN`/`Infinity`，
+   * 生成的 `grid-template-columns` 里就带上非法的 `NaN%`/`Infinity%`，整条
+   * 声明失效、grid 退化成单轨道：rail 铺满整宽、行内操作按钮被推到可视区外
+   * 点不到，刷新也照样崩（组件自带的 ResizeObserver 修复分支只认 `Infinity`，
+   * 漏了 `NaN`）。
+   *
+   * 每次更新后校验一次：`position` 非有限就把宽度重新灌回去触发重算。重算延到
+   * 下一帧，因为首帧里容器可能仍未定尺寸、立刻重算会再得到非有限值；而下一帧
+   * 布局已稳定，重算即得正确百分比。正常情形 `position` 有限，此处不做任何事。
+   */
+  protected updated(): void {
+    const panel = this.renderRoot.querySelector<
+      HTMLElement & { position: number; positionInPixels: number }
+    >('wa-split-panel.frame')
+    // 只在「已是数字但非有限」时介入：组件未升级（position 未定义）或换算
+    // 正常（有限数字）都不打扰。
+    if (!panel || typeof panel.position !== 'number' || Number.isFinite(panel.position)) return
+    requestAnimationFrame(() => {
+      if (typeof panel.position === 'number' && !Number.isFinite(panel.position)) {
+        panel.positionInPixels = this.railWidth
+      }
+    })
+  }
+
   static styles = css`
     :host {
       /* 应用框架（预览原型同款）：100vh 固定高度 + overflow hidden。

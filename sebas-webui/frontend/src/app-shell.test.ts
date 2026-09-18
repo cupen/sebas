@@ -233,6 +233,50 @@ describe('sidebar IA v2', () => {
     el.remove()
   })
 
+  it('布局自愈：split-panel 的 position 非有限时重灌 rail 宽度（走查发现）', async () => {
+    // wa-split-panel 的 pixelsToPercentage 是 px/size*100；首帧容器尺寸未定时
+    // 会算出 NaN/Infinity，grid columns 随之崩坏（rail 铺满、行内按钮点不到）
+    // 且组件自带的 ResizeObserver 修复分支只认 Infinity、漏了 NaN。这里断言
+    // app-shell 的自愈：非有限 position → 下一帧重灌宽度触发重算。
+    // 直接调 updated() 而非 requestUpdate()，免得 Lit 重渲染的绑定把测试值冲掉。
+    const el = await mountShell()
+    const frame = el.shadowRoot!.querySelector('wa-split-panel.frame') as HTMLElement & {
+      position: number
+      positionInPixels: number
+    }
+    Object.defineProperty(frame, 'position', { value: NaN, writable: true, configurable: true })
+    frame.positionInPixels = 0
+    const railWidth = (el as unknown as { railWidth: number }).railWidth
+    ;(el as unknown as { updated: () => void }).updated()
+    await new Promise((r) => requestAnimationFrame(() => r(null)))
+    // 重灌的是组件当前的合法宽度（同文件内其他用例会往 storage 写宽度，
+    // 所以不断言具体数值，只断言它与 state 一致且在 clamp 区间内）。
+    expect(railWidth).toBeGreaterThanOrEqual(180)
+    expect(railWidth).toBeLessThanOrEqual(520)
+    expect(frame.positionInPixels).toBe(railWidth)
+    el.remove()
+  })
+
+  it('布局自愈不打扰正常的换算结果与未升级的组件', async () => {
+    const el = await mountShell()
+    const frame = el.shadowRoot!.querySelector('wa-split-panel.frame') as HTMLElement & {
+      position: number
+      positionInPixels: number
+    }
+    // 正常的有限百分比：不动。
+    Object.defineProperty(frame, 'position', { value: 19.44, writable: true, configurable: true })
+    frame.positionInPixels = 321
+    ;(el as unknown as { updated: () => void }).updated()
+    await new Promise((r) => requestAnimationFrame(() => r(null)))
+    expect(frame.positionInPixels).toBe(321)
+    // 组件未升级（position 未定义）：同样不动。
+    Object.defineProperty(frame, 'position', { value: undefined, writable: true, configurable: true })
+    ;(el as unknown as { updated: () => void }).updated()
+    await new Promise((r) => requestAnimationFrame(() => r(null)))
+    expect(frame.positionInPixels).toBe(321)
+    el.remove()
+  })
+
   it('settings entry opens the centered modal stub; the close event shuts it', async () => {
     const el = await mountShell()
     const modal = el.shadowRoot!.querySelector('sebas-settings-modal')! as HTMLElement & {
