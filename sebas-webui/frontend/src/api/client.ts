@@ -17,6 +17,10 @@ export type StatusSlug =
   | 'done'
   | 'failed'
   | 'dormant'
+  // （session-parallel-liveness-and-unread-polish 1.3）行投影的失败态 slug：
+  // spawn 失败不再被吞进 spawning——会话行的圆点如实读作 `spawn-failed`
+  // （与 detail 的 `failed` 同源，取词服从行投影）。
+  | 'spawn-failed'
 
 /**
  * 待生效提交的处置（workbench-turn-queue D1）：`staging` = 并入首条消息
