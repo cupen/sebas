@@ -61,7 +61,7 @@ test.describe('agent 对话覆盖', () => {
         timeout: 20_000,
       })
       await expect(detail.bubbles().filter({ hasText: 'world' }).first()).toBeVisible()
-      await expect(detail.statusBadge).toHaveAttribute('slug', 'done', { timeout: 15_000 })
+      await detail.expectStatus('done')
 
       expect(collector.clean()).toEqual([])
     })
@@ -154,8 +154,14 @@ test.describe('agent 对话覆盖', () => {
         timeout: 10_000,
       })
       await expect(transcript.turnWith('missing-agent').first()).toBeVisible()
-      await expect(detail.statusBadge).not.toHaveAttribute('slug', 'done')
-      await expect(detail.statusBadge).not.toHaveAttribute('slug', 'working')
+      // （1.3）行相位如实是失败态：`spawn-failed`（映射停在 SpawnFailed）或
+      // `failed`（已收敛到 Failed）——绝不是 spawning/queued/working，绝不
+      // 假装在跑。这条断言走本轮已取的 API 真源而非 rail 圆点：spawn 失败
+      // 会话的项目路径没落定，行归不到任何项目，rail 里没有它的行——这类会话
+      // 的可见面就是工作台内显（本用例上文已钉）。
+      expect(['spawn-failed', 'failed']).toContain(
+        rows.find((r) => r.encoded_key === key)?.status_slug,
+      )
 
       expect(collector.clean()).toEqual([])
     })

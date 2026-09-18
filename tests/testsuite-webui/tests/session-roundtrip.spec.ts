@@ -86,7 +86,7 @@ test.describe('agent 对话覆盖', () => {
       expect(worldIdx).toBeGreaterThanOrEqual(helloIdx)
 
       // Turn converges to Done (badge slug flips on the session head).
-      await expect(detail.statusBadge).toHaveAttribute('slug', 'done', { timeout: 15_000 })
+      await detail.expectStatus('done')
 
       // Reload: focus pointer + conversation + status recover from persisted
       // state — the workbench still renders the same focused session.
@@ -95,7 +95,7 @@ test.describe('agent 对话覆盖', () => {
       await expect(detail.userTurn('hello')).toBeVisible()
       await expect(detail.bubbles().filter({ hasText: 'hello' }).first()).toBeVisible()
       await expect(detail.bubbles().filter({ hasText: 'world' }).first()).toBeVisible()
-      await expect(detail.statusBadge).toHaveAttribute('slug', 'done')
+      await detail.expectStatus('done')
 
       expect(collector.clean()).toEqual([])
     })

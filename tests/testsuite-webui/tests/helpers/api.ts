@@ -12,7 +12,16 @@
 import type { APIRequestContext } from '@playwright/test'
 import { sceneDir } from './scene.js'
 
-export type StatusSlug = 'starting' | 'queued' | 'working' | 'done' | 'failed' | 'dormant'
+export type StatusSlug =
+  | 'starting'
+  | 'queued'
+  | 'working'
+  | 'done'
+  | 'failed'
+  | 'dormant'
+  // （session-parallel-liveness-and-unread-polish 1.3）行上的派生 slug：
+  // spawn 失败不再被吞进 spawning，行如实带 `spawn-failed`。
+  | 'spawn-failed'
 
 export interface SessionRow {
   encoded_key: string
@@ -114,10 +123,16 @@ export async function createSession(
     mode?: string
   } = { prompt: 'hello' },
 ): Promise<string> {
+  // （session-parallel-liveness-and-unread-polish 3.6/D6b）缺省把会话绑到沙箱
+  // 场景项目：会话状态只挂 rail 行首圆点，而无项目会话不进 rail——不绑项目
+  // 就没有可断言的状态面，也不符操作者的真实用法（在项目下开会话）。
+  // 显式传 `projectId`（含 `null`）时不覆盖。
+  const projectId =
+    opts.projectId === undefined ? (await ensureSceneProject(request)).id : opts.projectId
   const resp = await request.post('/api/sessions', {
     data: {
       prompt: opts.prompt ?? null,
-      project_id: opts.projectId ?? null,
+      project_id: projectId ?? null,
       // agent 必填（workbench-agent-wire-fix D2）：沙箱默认 agent 是
       // `claude`（fake-claude）；fail-fast journeys 传未知 id 强制内显失败。
       agent: opts.agent ?? 'claude',

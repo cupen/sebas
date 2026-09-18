@@ -49,9 +49,7 @@ test.describe('agent 对话覆盖', () => {
       timeout: opts.bubblesTimeout ?? 20_000,
     })
     await expect(detail.bubbles().filter({ hasText: 'world' }).first()).toBeVisible()
-    await expect(detail.statusBadge).toHaveAttribute('slug', 'done', {
-      timeout: opts.doneTimeout ?? 15_000,
-    })
+    await detail.expectStatus('done', opts.doneTimeout ?? 15_000)
   }
 
   test.describe('多轮连续', () => {
@@ -77,7 +75,7 @@ test.describe('agent 对话覆盖', () => {
       await expect
         .poll(async () => detail.bubbles().count(), { timeout: 20_000, intervals: [250] })
         .toBeGreaterThan(round1Count)
-      await expect(detail.statusBadge).toHaveAttribute('slug', 'done', { timeout: 15_000 })
+      await detail.expectStatus('done')
 
       // Order (workbench-conversation-view 2.1/2.3): each round's hello and
       // world live in the SAME agent turn bubble; the operator's q2 turn
@@ -110,7 +108,7 @@ test.describe('agent 对话覆盖', () => {
       await expect
         .poll(async () => detail.bubbles().count(), { timeout: 10_000, intervals: [250] })
         .toBeGreaterThan(round1Count)
-      await expect(detail.statusBadge).toHaveAttribute('slug', 'done')
+      await detail.expectStatus('done')
 
       expect(collector.clean()).toEqual([])
     })
@@ -122,6 +120,11 @@ test.describe('agent 对话覆盖', () => {
     }) => {
       const t = Date.now()
       const { detail } = await openIdle(page, `guard-${t}`)
+      // 首轮气泡可能还在渲染——先等它落盘再取基线（抓早了会把 0 当基线，
+      // 之后气泡出现就误判成「空提交产生了回合」）。
+      await expect
+        .poll(async () => detail.bubbles().count(), { timeout: 10_000, intervals: [250] })
+        .toBeGreaterThan(0)
       const before = await detail.bubbles().count()
 
       // workbench-interaction-polish 4.3：空输入 = 提交控件禁用（状态机的
@@ -136,7 +139,7 @@ test.describe('agent 对话覆盖', () => {
       await expect
         .poll(async () => detail.bubbles().count(), { timeout: 5_000, intervals: [250] })
         .toBe(before)
-      await expect(detail.statusBadge).toHaveAttribute('slug', 'done')
+      await detail.expectStatus('done')
       await expect(detail.unavailableNote).toHaveCount(0)
 
       // The session is still usable afterwards (count growth + Done prove the
@@ -146,7 +149,7 @@ test.describe('agent 对话覆盖', () => {
       await expect
         .poll(async () => detail.bubbles().count(), { timeout: 20_000, intervals: [250] })
         .toBeGreaterThan(before)
-      await expect(detail.statusBadge).toHaveAttribute('slug', 'done', { timeout: 15_000 })
+      await detail.expectStatus('done')
 
       expect(collector.clean()).toEqual([])
     })
@@ -179,7 +182,7 @@ test.describe('agent 对话覆盖', () => {
       await expect
         .poll(async () => detail.bubbles().count(), { timeout: 20_000, intervals: [250] })
         .toBeGreaterThan(before)
-      await expect(detail.statusBadge).toHaveAttribute('slug', 'done', { timeout: 15_000 })
+      await detail.expectStatus('done')
 
       // API snapshot agrees the transcript grew; assistant side still the fixture.
       const { detail: snap } = await getSession(page.request, key)
@@ -191,7 +194,7 @@ test.describe('agent 对话覆盖', () => {
       await page.reload()
       await expect(detail.host).toBeVisible()
       await expect(detail.userTurn(`中文问候🎉🔧 ${t}`)).toBeVisible()
-      await expect(detail.statusBadge).toHaveAttribute('slug', 'done')
+      await detail.expectStatus('done')
 
       expect(collector.clean()).toEqual([])
     })
