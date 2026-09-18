@@ -6,7 +6,7 @@
 
 use sebas_acp::claude::manager::SessionManager;
 use sebas_channels::{ChannelEvent, ChannelKey};
-use sebas_dispatch::engine::{Out, DispatchHandle};
+use sebas_dispatch::engine::{DispatchHandle, Out};
 use sebas_dispatch::state::SessionMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -65,10 +65,11 @@ async fn restored_mapping_lazily_resumes_with_load_capable_agent() {
         &old,
         &prompt,
         "claude",
-        vec![fake().to_str().unwrap().to_string(), ],
+        vec![fake().to_str().unwrap().to_string()],
         None,
         None,
-        None)
+        None,
+    )
     .await
     .expect("resume ok");
     assert!(resumed, "load-capable agent must resume the old session");
@@ -137,10 +138,14 @@ async fn restored_mapping_resume_rejected_falls_back_to_fresh() {
             &old,
             &prompt,
             "claude",
-            vec![fake().to_str().unwrap().to_string(), "--resume-fails".into()],
+            vec![
+                fake().to_str().unwrap().to_string(),
+                "--resume-fails".into(),
+            ],
             None,
             None,
-        None),
+            None,
+        ),
     )
     .await
     .expect("fallback must be fast, not a startup-timeout hang")

@@ -97,10 +97,12 @@ test.describe('未读徽标', () => {
     await expect(badgeRow).toHaveCount(0, { timeout: 10_000 })
     const anchor = await page.evaluate((k) => {
       const raw = localStorage.getItem(`sebas:seen:${k}`)
-      return raw ? (JSON.parse(raw) as { seen_ts: number; anchor_count: number | null }) : null
+      return raw ? (JSON.parse(raw) as { anchor_count?: unknown }) : null
     }, keyA)
     expect(anchor?.anchor_count).toBe(2)
-    expect(anchor?.seen_ts).toBeGreaterThan(0)
+    // （2.3，D3）单字段段锚：存储只有 anchor_count，时间戳锚 seen_ts 已退役
+    // （含 seen_ts 的旧 JSON 读为无锚 = fully read，下次写入被纯段锚覆写）。
+    expect(Object.keys(anchor ?? {}).sort()).toEqual(['anchor_count'])
 
     expect(collector.clean()).toEqual([])
   })

@@ -22,7 +22,13 @@ async fn events_follow_create_status_change_remove() {
 
     // create: web_spawn inserts a Spawning placeholder.
     let key = router
-        .web_spawn("hello world".into(), Some("/tmp/p".into()), None, None, None)
+        .web_spawn(
+            "hello world".into(),
+            Some("/tmp/p".into()),
+            None,
+            None,
+            None,
+        )
         .await;
     // status change: Spawning → Active.
     router.activate(&key, "s1".into(), None, None).await;
@@ -132,7 +138,9 @@ async fn applying_events_to_snapshot_reproduces_router_state() {
         .insert(ka.clone(), Mapping::dormant("s-a", 42))
         .await
         .unwrap();
-    let kb_key = router.web_spawn("spawn me".into(), None, None, None, None).await;
+    let kb_key = router
+        .web_spawn("spawn me".into(), None, None, None, None)
+        .await;
     router.activate(&kb_key, "s-b".into(), None, None).await;
     let _ = router.web_close_session(ka).await;
 
@@ -251,7 +259,11 @@ async fn session_info_projects_visible_reply_segment_count() {
     router.apply_event("s-cnt", &delta("one ")).await;
     router.apply_event("s-cnt", &delta("two ")).await;
     router.apply_event("s-cnt", &delta("three.")).await;
-    assert_eq!(count_of().await, 1, "adjacent deltas merge into one segment");
+    assert_eq!(
+        count_of().await,
+        1,
+        "adjacent deltas merge into one segment"
+    );
 
     // 工具噪声不计数。
     router
@@ -369,8 +381,8 @@ async fn tool_events_are_labelled_tool_in_turn_content() {
 /// 通知（重新广告）**覆盖**旧表而非追加；空表同样覆盖（撤回广告如实呈现）。
 #[tokio::test]
 async fn available_commands_materializes_into_snapshot_and_reread_overwrites() {
-    use sebas_acp::claude::session::AcpEvent;
     use sebas_acp::AvailableCommand;
+    use sebas_acp::claude::session::AcpEvent;
 
     let map = SessionMap::new();
     let (router, _rx) = DispatchHandle::new(map);

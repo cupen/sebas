@@ -207,7 +207,9 @@ export class SebasApp extends LitElement {
       box-sizing: border-box; /* 高度吃进 padding，否则 100vh+padding 撑破框架 */
       min-height: 0; /* flex/grid 项默认 min-height:auto 会撑破 100vh 框架 */
       min-width: 0;
-      margin: var(--sebas-space-3);
+      /* （3.5，design D6）nav 浮岛外边距 space-3 → space-2：rail|主区间距
+         收敛为紧凑 token，拖拽分割缝可达性不变。 */
+      margin: var(--sebas-space-2);
       overflow-y: auto;
       background: var(--sebas-surface);
       border: 1px solid var(--sebas-border);
@@ -302,8 +304,9 @@ export class SebasApp extends LitElement {
       flex: 1;
       min-width: 0;
       min-height: 0;
-      /* 浮岛间距（D6）：左侧留给分割缝，其余三边自己留白。 */
-      margin: var(--sebas-space-3) var(--sebas-space-3) var(--sebas-space-3) 0;
+      /* 浮岛间距（D6）：左侧留给分割缝，其余三边自己留白。（3.5）三边
+         margin space-3 → space-2——浮岛间距收敛为紧凑 token。 */
+      margin: var(--sebas-space-2) var(--sebas-space-2) var(--sebas-space-2) 0;
       display: flex;
       flex-direction: column;
       position: relative; /* 子视图定位上下文 */

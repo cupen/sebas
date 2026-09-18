@@ -14,9 +14,9 @@ use sebas_dispatch::state::SessionMap;
 use sebas_dispatch::{RemoteSessionView, SessionInfo};
 use sebas_feishu::cards::CardConfig;
 use sebas_webui::models::RouterInfo;
+use sebas_webui::server::build_router_with_workspace_root;
 use sebas_webui::session_backend::{NodeInfo, PathCheck};
 use sebas_webui::{SessionBackend, build_router, session_backend::FakeBackend};
-use sebas_webui::server::build_router_with_workspace_root;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
@@ -75,7 +75,9 @@ async fn app_with_root(
             dyn_backend,
             RouterInfo::default(),
             CardConfig::default(),
-            Arc::new(sebas_webui::agent_kinds::ConfigAgentKindProvider::new(Vec::new())),
+            Arc::new(sebas_webui::agent_kinds::ConfigAgentKindProvider::new(
+                Vec::new(),
+            )),
             Arc::new(sebas_webui::auth::AuthHandle::disabled()),
             root.to_path_buf(),
         ),
@@ -89,7 +91,12 @@ fn cleanup_projects_env() {
     unsafe { std::env::remove_var("SEBAS_PROJECTS_PATH") };
 }
 
-async fn send(app: &axum::Router, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
+async fn send(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
     let mut req = Request::builder().method(method).uri(uri);
     let body = match body {
         Some(v) => {
@@ -133,7 +140,10 @@ async fn nodes_reports_registry_unavailable_instead_of_no_nodes() {
     let (app, _backend) = app_with(None, None).await;
     let (status, body) = send(&app, "GET", "/api/nodes", None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["remote_available"], false, "不可得必须如实上报: {body}");
+    assert_eq!(
+        body["remote_available"], false,
+        "不可得必须如实上报: {body}"
+    );
     assert!(body["cause"].as_str().is_some_and(|c| !c.is_empty()));
     assert_eq!(body["nodes"].as_array().unwrap().len(), 1, "本机仍在列");
     cleanup_projects_env();
@@ -160,7 +170,11 @@ async fn registering_on_a_named_node_is_validated_by_that_node() {
     let _g = guard();
     let dir = tempfile::tempdir().unwrap();
     let registry = dir.path().join("projects.json");
-    let (app, backend) = app_with(Some(vec![local_node(), node("dev-box", "online")]), Some(registry)).await;
+    let (app, backend) = app_with(
+        Some(vec![local_node(), node("dev-box", "online")]),
+        Some(registry),
+    )
+    .await;
     backend.set_path_check(
         "dev-box",
         "/srv/repo",
@@ -195,7 +209,11 @@ async fn node_side_rejection_names_the_node_path_and_problem() {
     let _g = guard();
     let dir = tempfile::tempdir().unwrap();
     let registry = dir.path().join("projects.json");
-    let (app, backend) = app_with(Some(vec![local_node(), node("dev-box", "online")]), Some(registry)).await;
+    let (app, backend) = app_with(
+        Some(vec![local_node(), node("dev-box", "online")]),
+        Some(registry),
+    )
+    .await;
     // 节点说路径不存在（界内）——本用例专测「不存在」文案，containment 判定
     // 置 true；越界拒绝另有专测（node_judged_out_of_workspace_...）。
     backend.set_path_check(
@@ -234,7 +252,11 @@ async fn node_judged_out_of_workspace_rejects_registration() {
     let _g = guard();
     let dir = tempfile::tempdir().unwrap();
     let registry = dir.path().join("projects.json");
-    let (app, backend) = app_with(Some(vec![local_node(), node("dev-box", "online")]), Some(registry)).await;
+    let (app, backend) = app_with(
+        Some(vec![local_node(), node("dev-box", "online")]),
+        Some(registry),
+    )
+    .await;
     // 节点自判：路径存在、是目录，但越出**该节点**的 workspace root。
     backend.set_path_check(
         "dev-box",
@@ -270,14 +292,21 @@ async fn legacy_node_answer_without_within_workspace_field_still_admits() {
     let _g = guard();
     let dir = tempfile::tempdir().unwrap();
     let registry = dir.path().join("projects.json");
-    let (app, backend) = app_with(Some(vec![local_node(), node("dev-box", "online")]), Some(registry)).await;
+    let (app, backend) = app_with(
+        Some(vec![local_node(), node("dev-box", "online")]),
+        Some(registry),
+    )
+    .await;
     // 老节点应答没有 within_workspace 字段：serde 缺省 true → 放行。
     let check: PathCheck = serde_json::from_value(serde_json::json!({
         "exists": true,
         "is_dir": true,
     }))
     .expect("old-node answer deserializes");
-    assert!(check.within_workspace, "缺字段必须缺省为 true（兼容旧应答）");
+    assert!(
+        check.within_workspace,
+        "缺字段必须缺省为 true（兼容旧应答）"
+    );
     backend.set_path_check("dev-box", "/srv/repo", Ok(check));
 
     let (status, body) = send(
@@ -296,7 +325,11 @@ async fn registering_on_an_offline_node_is_refused_with_the_node_named() {
     let _g = guard();
     let dir = tempfile::tempdir().unwrap();
     let registry = dir.path().join("projects.json");
-    let (app, _backend) = app_with(Some(vec![local_node(), node("dev-box", "offline")]), Some(registry)).await;
+    let (app, _backend) = app_with(
+        Some(vec![local_node(), node("dev-box", "offline")]),
+        Some(registry),
+    )
+    .await;
     let (status, body) = send(
         &app,
         "POST",
@@ -332,7 +365,11 @@ async fn node_check_unavailable_is_not_reported_as_a_bad_path() {
     let _g = guard();
     let dir = tempfile::tempdir().unwrap();
     let registry = dir.path().join("projects.json");
-    let (app, _backend) = app_with(Some(vec![local_node(), node("dev-box", "online")]), Some(registry)).await;
+    let (app, _backend) = app_with(
+        Some(vec![local_node(), node("dev-box", "online")]),
+        Some(registry),
+    )
+    .await;
     // 未注入 path check → 后端默认「不能向节点发起路径校验」。
     let (status, body) = send(
         &app,
@@ -402,12 +439,14 @@ fn remote_session() -> SessionInfo {
             provider: None,
             provider_cause: Some("节点上没有名为 work 的 provider profile".into()),
         }),
-        desired_mode: Some("ask".into()),
+        desired_mode: "ask".into(),
         effective_mode: Some("edit".into()),
         msg_count: 0,
         available_commands: Vec::new(),
         // fix-pending-queue-liveness 2.3：远端泊车中的会话同样是回合占用。
         turn_engaged: true,
+        spawn_failure_reason: None,
+        parked_approvals: 0,
     }
 }
 

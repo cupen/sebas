@@ -199,7 +199,10 @@ pub fn browse_dirs(
             }
             // Check if this subdirectory itself has any subdirectories.
             let has_subdirs = entry.path().read_dir().ok().is_some_and(|mut rd| {
-                rd.any(|e| e.ok().is_some_and(|e| e.file_type().ok().is_some_and(|t| t.is_dir())))
+                rd.any(|e| {
+                    e.ok()
+                        .is_some_and(|e| e.file_type().ok().is_some_and(|t| t.is_dir()))
+                })
             });
             entries.push(FsEntry {
                 name,
@@ -221,24 +224,8 @@ pub fn browse_dirs(
 /// 刻意不含 `/opt` `/srv` `/mnt` `/media`——它们是合法项目位置。
 #[cfg(not(windows))]
 const SYSTEM_DIR_DENYLIST: &[&str] = &[
-    "/",
-    "/bin",
-    "/sbin",
-    "/boot",
-    "/dev",
-    "/etc",
-    "/lib",
-    "/lib32",
-    "/lib64",
-    "/libx32",
-    "/proc",
-    "/sys",
-    "/usr",
-    "/var",
-    "/run",
-    "/root",
-    "/home",
-    "/tmp",
+    "/", "/bin", "/sbin", "/boot", "/dev", "/etc", "/lib", "/lib32", "/lib64", "/libx32", "/proc",
+    "/sys", "/usr", "/var", "/run", "/root", "/home", "/tmp",
 ];
 
 /// Windows 名单（spec）：盘符根不进名单（[`is_drive_root`] 按模式判定）；
@@ -420,10 +407,7 @@ mod tests {
 
         let child_request = format!("{}/sub", first.path);
         let second = browse_dirs(&child_request, None, dir.path()).unwrap();
-        assert_eq!(
-            second.path,
-            dunce::simplified(&sub).to_string_lossy()
-        );
+        assert_eq!(second.path, dunce::simplified(&sub).to_string_lossy());
         assert!(second.entries.iter().any(|e| e.name == "deep"));
     }
 
@@ -469,7 +453,10 @@ mod tests {
         let (dir, _sub) = dir_with_sub();
         let err = browse_dirs("..", None, dir.path()).unwrap_err();
         assert_eq!(err, "路径超出根目录范围");
-        assert!(browse_dirs("sub/..", None, dir.path()).is_ok(), "mid-path .. back inside root is legitimate");
+        assert!(
+            browse_dirs("sub/..", None, dir.path()).is_ok(),
+            "mid-path .. back inside root is legitimate"
+        );
     }
 
     #[test]
@@ -538,7 +525,10 @@ mod tests {
         );
 
         // 候选不可解析 → 越界（fail-closed）。
-        assert!(!within_workspace_root(&dir.path().join("__ghost__"), dir.path()));
+        assert!(!within_workspace_root(
+            &dir.path().join("__ghost__"),
+            dir.path()
+        ));
     }
 
     /// symlink 逃逸：根内链接指向根外 → 越界；root 自身经 symlink 给出 →
@@ -551,11 +541,17 @@ mod tests {
 
         let link = dir.path().join("link");
         std::os::unix::fs::symlink(outside.path(), &link).unwrap();
-        assert!(!within_workspace_root(&link, dir.path()), "symlink 逃逸必须越界");
+        assert!(
+            !within_workspace_root(&link, dir.path()),
+            "symlink 逃逸必须越界"
+        );
 
         let root_link = dir.path().join("root_link");
         std::os::unix::fs::symlink(dir.path(), &root_link).unwrap();
-        assert!(within_workspace_root(&sub, &root_link), "root symlink 解析真实根");
+        assert!(
+            within_workspace_root(&sub, &root_link),
+            "root symlink 解析真实根"
+        );
     }
 
     #[test]
@@ -571,12 +567,7 @@ mod tests {
         let (dir, _sub) = dir_with_sub();
         let (other, _o) = dir_with_sub();
         // 显式 root 指向 workspace root 之外 → 范围错误（而非列出内容）。
-        let err = browse_dirs(
-            "",
-            Some(other.path().to_str().unwrap()),
-            dir.path(),
-        )
-        .unwrap_err();
+        let err = browse_dirs("", Some(other.path().to_str().unwrap()), dir.path()).unwrap_err();
         assert_eq!(err, "路径超出允许范围: root 不在 workspace root 内");
     }
 
@@ -608,7 +599,6 @@ mod tests {
         assert_eq!(err, "路径超出根目录范围");
     }
 
-
     #[cfg(windows)]
     #[test]
     fn verbatim_explicit_root_is_accepted() {
@@ -624,7 +614,10 @@ mod tests {
         assert_eq!(normalize_windows(r"\\?\D:\/bin"), r"D:\bin");
         assert_eq!(normalize_windows("D:/x//y"), r"D:\x\y");
         assert_eq!(normalize_windows(r"\\server\share/x"), r"\\server\share\x");
-        assert_eq!(normalize_windows(r"\\?\UNC\server\share/x"), r"\\server\share\x");
+        assert_eq!(
+            normalize_windows(r"\\?\UNC\server\share/x"),
+            r"\\server\share\x"
+        );
         assert_eq!(normalize_windows("/bin"), r"\bin");
         assert_eq!(normalize_windows("."), ".");
     }
@@ -633,7 +626,10 @@ mod tests {
     fn canonicalize_plain_strips_verbatim_and_round_trips() {
         let (dir, _sub) = dir_with_sub();
         let plain = canonicalize_plain(dir.path()).expect("canonicalize");
-        assert!(!plain.starts_with(r"\\?\"), "verbatim prefix leaked: {plain}");
+        assert!(
+            !plain.starts_with(r"\\?\"),
+            "verbatim prefix leaked: {plain}"
+        );
         assert!(Path::new(&plain).is_dir());
         // 注册后再 canonicalize 同一普通路径必须得到同一普通形（分隔符不漂移）。
         let again = canonicalize_plain(Path::new(&plain)).expect("re-canonicalize");
@@ -664,7 +660,10 @@ mod tests {
 
         // root 缺失 → None（fail-closed 交调用方），即使存储路径真实存在。
         let ghost_root = dir.path().join("__ghost_root__");
-        assert_eq!(stored_path_in_workspace_root(&stored_sub, &ghost_root), None);
+        assert_eq!(
+            stored_path_in_workspace_root(&stored_sub, &ghost_root),
+            None
+        );
     }
 
     #[test]
@@ -706,13 +705,18 @@ mod tests {
         // symlink 指向名单目录：解析真实目标后命中。
         let link = dir.path().join("to_tmp");
         symlink("/tmp", &link).unwrap();
-        assert!(is_system_dir(&link), "symlink onto denylist resolves to hit");
+        assert!(
+            is_system_dir(&link),
+            "symlink onto denylist resolves to hit"
+        );
 
         // 不存在路径：fail 路径返回 false（不在此拒，交给调用方存在分支）。
         assert!(!is_system_dir(&dir.path().join("__ghost__")));
 
         // tempdir 子树（/tmp 下）恒不误伤：browse 语义的既有测试形态依赖它。
-        assert!(!is_system_dir(dir.path().join("sub").join("deep").as_path()));
+        assert!(!is_system_dir(
+            dir.path().join("sub").join("deep").as_path()
+        ));
     }
 
     #[cfg(unix)]
@@ -740,7 +744,10 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn system_dir_denylist_windows_case_insensitive_and_drive_root() {
-        assert!(is_system_dir(Path::new(r"c:\WINDOWS")), "case-insensitive hit");
+        assert!(
+            is_system_dir(Path::new(r"c:\WINDOWS")),
+            "case-insensitive hit"
+        );
         assert!(is_system_dir(Path::new(r"C:\windows")));
         assert!(is_system_dir(Path::new(r"C:\Program Files")));
         assert!(is_system_dir(Path::new(r"c:\PROGRAM FILES")));
@@ -777,7 +784,10 @@ mod tests {
         assert!(names.contains(&"sub") && names.contains(&"zeta"));
         let child = format!("{}/sub", resp.path);
         let second = browse_dirs(&child, None, dir.path()).unwrap();
-        assert!(second.entries.iter().any(|e| e.name == "deep"), "round-trip holds");
+        assert!(
+            second.entries.iter().any(|e| e.name == "deep"),
+            "round-trip holds"
+        );
     }
 
     #[test]
@@ -786,7 +796,10 @@ mod tests {
         let (dir, _sub) = dir_with_sub();
         let resp = browse_dirs("", None, dir.path()).unwrap();
         let names: Vec<&str> = resp.entries.iter().map(|e| e.name.as_str()).collect();
-        assert!(names.contains(&"sub") && names.contains(&"zeta"), "{names:?}");
+        assert!(
+            names.contains(&"sub") && names.contains(&"zeta"),
+            "{names:?}"
+        );
     }
 
     // ---- 名单补强（review 轮新增：内容钉死 / 全条目命中 / 文件候选 / 显式 root）----
@@ -797,24 +810,8 @@ mod tests {
         // 钉死名单内容 = spec 逐条枚举（防静默增删：删条目会让对应系统目录
         // 可注册，加条目会误伤合法位置）。顺序也按 spec，diff 可读。
         let expected: &[&str] = &[
-            "/",
-            "/bin",
-            "/sbin",
-            "/boot",
-            "/dev",
-            "/etc",
-            "/lib",
-            "/lib32",
-            "/lib64",
-            "/libx32",
-            "/proc",
-            "/sys",
-            "/usr",
-            "/var",
-            "/run",
-            "/root",
-            "/home",
-            "/tmp",
+            "/", "/bin", "/sbin", "/boot", "/dev", "/etc", "/lib", "/lib32", "/lib64", "/libx32",
+            "/proc", "/sys", "/usr", "/var", "/run", "/root", "/home", "/tmp",
         ];
         assert_eq!(SYSTEM_DIR_DENYLIST, expected);
     }
@@ -834,8 +831,14 @@ mod tests {
         }
         // 尾随斜杠与 `..` 归位后仍命中：`/tmp/` 归位 `/tmp`；`/tmp/..` 归位
         // `/`（root 条目经遍历形命中）。
-        assert!(is_system_dir(Path::new("/tmp/")), "trailing slash normalizes");
-        assert!(is_system_dir(Path::new("/tmp/..")), "/tmp/.. resolves onto /");
+        assert!(
+            is_system_dir(Path::new("/tmp/")),
+            "trailing slash normalizes"
+        );
+        assert!(
+            is_system_dir(Path::new("/tmp/..")),
+            "/tmp/.. resolves onto /"
+        );
     }
 
     #[cfg(unix)]

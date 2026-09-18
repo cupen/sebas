@@ -1,6 +1,6 @@
 use sebas_acp::claude::session::AcpEvent;
 use sebas_channels::{ChannelEvent, ChannelKey};
-use sebas_dispatch::engine::{Out, DispatchHandle};
+use sebas_dispatch::engine::{DispatchHandle, Out};
 use sebas_dispatch::state::SessionMap;
 use std::time::Duration;
 
@@ -16,7 +16,11 @@ async fn full_round_trip_text_to_events() {
     // the dispatcher (after create_session mints the real session_id), not the
     // router, so it does not appear on this channel.
     handle
-        .dispatch(ChannelEvent::Text { key: key.clone(), text: "hello".into(), reply_target: None })
+        .dispatch(ChannelEvent::Text {
+            key: key.clone(),
+            text: "hello".into(),
+            reply_target: None,
+        })
         .await;
 
     let first = tokio::time::timeout(WAIT, out_rx.recv())

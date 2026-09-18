@@ -41,7 +41,9 @@ async fn app_with(map: SessionMap) -> axum::Router {
         backend,
         RouterInfo::default(),
         CardConfig::default(),
-        Arc::new(sebas_webui::agent_kinds::ConfigAgentKindProvider::new(Vec::new())),
+        Arc::new(sebas_webui::agent_kinds::ConfigAgentKindProvider::new(
+            Vec::new(),
+        )),
         Arc::new(sebas_webui::auth::AuthHandle::disabled()),
         std::env::temp_dir(),
     )
@@ -77,7 +79,9 @@ fn goal_command() -> sebas_acp::AvailableCommand {
 async fn advertised_commands_surface_on_row_and_detail_payloads() {
     let map = SessionMap::new();
     let k = key("advertised");
-    map.insert(k.clone(), Mapping::active("s-adv")).await.unwrap();
+    map.insert(k.clone(), Mapping::active("s-adv"))
+        .await
+        .unwrap();
     let app = app_with(map).await;
 
     // 未广告过命令表的会话（native、旧 agent 同形态）：两种载荷都不出现
@@ -112,7 +116,9 @@ async fn advertised_commands_surface_on_row_and_detail_payloads() {
 async fn available_commands_event_reaches_http_payloads() {
     let map = SessionMap::new();
     let k = key("live");
-    map.insert(k.clone(), Mapping::active("s-live")).await.unwrap();
+    map.insert(k.clone(), Mapping::active("s-live"))
+        .await
+        .unwrap();
     let (router, _rx) = DispatchHandle::new(map);
     let backend: Arc<dyn sebas_webui::SessionBackend> = Arc::new(
         sebas_webui::session_backend::InProcessBackend::new(router.clone()),
@@ -121,7 +127,9 @@ async fn available_commands_event_reaches_http_payloads() {
         backend,
         RouterInfo::default(),
         CardConfig::default(),
-        Arc::new(sebas_webui::agent_kinds::ConfigAgentKindProvider::new(Vec::new())),
+        Arc::new(sebas_webui::agent_kinds::ConfigAgentKindProvider::new(
+            Vec::new(),
+        )),
         Arc::new(sebas_webui::auth::AuthHandle::disabled()),
         std::env::temp_dir(),
     );

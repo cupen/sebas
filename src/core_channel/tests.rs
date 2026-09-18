@@ -382,7 +382,13 @@ async fn create_placeholder_wires_a_zero_turn_session() {
     let backend = CoreChannelBackend::new(core.path.clone(), SECRET.into());
 
     let key = backend
-        .create_placeholder(Some("/tmp".into()), "opencode", Some("m-free".into()), None, None)
+        .create_placeholder(
+            Some("/tmp".into()),
+            "opencode",
+            Some("m-free".into()),
+            None,
+            None,
+        )
         .await
         .expect("placeholder created");
 
@@ -417,7 +423,13 @@ async fn create_placeholder_wires_a_zero_turn_session() {
     // 不可用 project_dir → 与 Spawn 同款校验拒绝。
     assert_eq!(
         backend
-            .create_placeholder(Some("/nonexistent-sebas-p2".into()), "opencode", None, None, None)
+            .create_placeholder(
+                Some("/nonexistent-sebas-p2".into()),
+                "opencode",
+                None,
+                None,
+                None
+            )
             .await,
         Err(SessionRejection::UnusableProjectDir)
     );
@@ -1089,11 +1101,12 @@ fn arm_config(dir: &StdPath) -> (crate::config::Config, std::path::PathBuf) {
     let config_path = dir.join("config.toml");
     // TOML basic string 不能裸写反斜杠（`\U` 是 unicode 转义），Windows
     // 路径归一为正斜杠——std::path 在 Windows 上同样接受。
-    let channel_path_toml = dir.join("core.sock").display().to_string().replace('\\', "/");
-    let raw = format!(
-        "[service.core]\nchannel_path = \"{}\"\n",
-        channel_path_toml
-    );
+    let channel_path_toml = dir
+        .join("core.sock")
+        .display()
+        .to_string()
+        .replace('\\', "/");
+    let raw = format!("[service.core]\nchannel_path = \"{}\"\n", channel_path_toml);
     let cfg = crate::config::Config::parse(&raw).expect("sandbox arm config parses");
     (cfg, config_path)
 }
@@ -1178,8 +1191,9 @@ async fn auto_arm_with_env_uses_env_value_and_writes_matching_file() {
 
 /// 1.3 bind 失败硬失败：路径被存活 listener 占用 → arm 返回特定错误
 /// （run.rs 据此在 ready 之前以 75 退出，不产生无通道的“健康”进程）。
-#[cfg(unix)] // 「存活探测→already served」是 unix 专属路径；Windows 走 bind 的
-             // Access denied（语义等价，报错文案不同），探测缺口如实留白。
+#[cfg(unix)]
+// 「存活探测→already served」是 unix 专属路径；Windows 走 bind 的
+// Access denied（语义等价，报错文案不同），探测缺口如实留白。
 #[tokio::test]
 async fn arm_fails_hard_when_socket_path_is_taken_by_live_listener() {
     let _env = CoreSecretEnv::unset();
@@ -1992,9 +2006,7 @@ use crate::core_channel::client;
 /// 等到 forwarder 首次失败的确定性翻转（初始 `尚未连接 core` → socket 缺失
 /// 的带路径 cause），此后 forwarder 的重试永远 latch 同一状态、不再发布——
 /// 后续受控的 `set_status` 序列就能钉死帧序。
-async fn await_first_flip(
-    rx: &mut tokio::sync::broadcast::Receiver<Reachability>,
-) -> Reachability {
+async fn await_first_flip(rx: &mut tokio::sync::broadcast::Receiver<Reachability>) -> Reachability {
     tokio::time::timeout(Duration::from_secs(2), rx.recv())
         .await
         .expect("forwarder's first failed connect must publish its flip")
@@ -2046,7 +2058,10 @@ async fn set_status_publishes_every_true_flip_in_order() {
     backend.set_status(client::ConnStatus::Connected);
     assert_eq!(rx.recv().await.unwrap(), Reachability::Reachable);
 
-    backend.set_status(fail_status(client::FailKind::AuthRejected, "handshake refused"));
+    backend.set_status(fail_status(
+        client::FailKind::AuthRejected,
+        "handshake refused",
+    ));
     assert_eq!(
         rx.recv().await.unwrap(),
         Reachability::AuthRejected {
@@ -2057,7 +2072,10 @@ async fn set_status_publishes_every_true_flip_in_order() {
     backend.set_status(client::ConnStatus::Connected);
     assert_eq!(rx.recv().await.unwrap(), Reachability::Reachable);
 
-    backend.set_status(fail_status(client::FailKind::Disconnected, "connection dropped"));
+    backend.set_status(fail_status(
+        client::FailKind::Disconnected,
+        "connection dropped",
+    ));
     assert_eq!(
         rx.recv().await.unwrap(),
         Reachability::Disconnected {
@@ -2087,7 +2105,10 @@ async fn set_status_frames_carry_startup_summary_enrichment() {
 
     // 同 kind、不同 cause 的后续翻转照常发布且同样富化（广播与读端同一
     // 映射：读端此刻对同一状态给出同一 enriched cause）。
-    backend.set_status(fail_status(client::FailKind::StartupFailed, "socket absent"));
+    backend.set_status(fail_status(
+        client::FailKind::StartupFailed,
+        "socket absent",
+    ));
     assert_eq!(
         rx.recv().await.unwrap(),
         Reachability::StartupFailed {

@@ -35,16 +35,12 @@ pub fn open(path: &Path) -> SqlResult<Connection> {
 
 /// 只读打开 (不创建, 非 WAL 模式, 用于存在性检查/诊断)。
 pub fn open_readonly(path: &Path) -> SqlResult<Connection> {
-    Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
+    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
 }
 
 /// 检查数据库是否已打开且可用 (简单 ping)。
 pub fn ping(conn: &Connection) -> bool {
-    conn.query_row("SELECT 1", [], |_| Ok(()))
-        .is_ok()
+    conn.query_row("SELECT 1", [], |_| Ok(())).is_ok()
 }
 
 /// 当前 Unix 时间戳 (秒)。
@@ -65,7 +61,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.db");
         let conn = open(&path).expect("open");
-        let journal: String = conn.pragma_query_value(None, "journal_mode", |row| row.get(0)).unwrap();
+        let journal: String = conn
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .unwrap();
         assert_eq!(journal, "wal", "expected WAL mode, got {journal}");
     }
 
@@ -75,7 +73,9 @@ mod tests {
         let path = dir.path().join("busy.db");
         let conn = open(&path).expect("open");
         // Check that busy_timeout is roughly 5000ms
-        let timeout: i64 = conn.pragma_query_value(None, "busy_timeout", |row| row.get(0)).unwrap();
+        let timeout: i64 = conn
+            .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+            .unwrap();
         assert!(timeout >= 4000, "busy_timeout too low: {timeout}");
     }
 
@@ -99,7 +99,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("fk.db");
         let conn = open(&path).expect("open");
-        let fk: i64 = conn.pragma_query_value(None, "foreign_keys", |row| row.get(0)).unwrap();
+        let fk: i64 = conn
+            .pragma_query_value(None, "foreign_keys", |row| row.get(0))
+            .unwrap();
         assert_eq!(fk, 1, "foreign_keys should be ON");
     }
 }

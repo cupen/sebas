@@ -18,8 +18,8 @@ use sebas_webui::session_backend::{PermissionDecision, PermissionNotice};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 #[cfg(test)]
 use tokio::sync::Mutex;
@@ -175,7 +175,9 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
     async fn on_channel_event(&self, evt: ChannelEvent) {
         let key = evt.key().clone();
         match evt {
-            ChannelEvent::Text { text, reply_target, .. } => {
+            ChannelEvent::Text {
+                text, reply_target, ..
+            } => {
                 // 飞书交互可见性（feishu-interaction-logging）：入站事件逐条
                 // INFO——量级是人的操作频率，默认级别即可追踪每一次点击/消息。
                 info!(chat = %key.reference, text = %text, "feishu 入站文本");
@@ -218,9 +220,12 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
                 // 到达性自检（feishu-card-callback-observability）：card.action.
                 // trigger 帧到达即 +1，无论后续能否识别（design D1）。
                 self.note_card_callback_received();
-                self.on_button(&key, action.session_id, action.request_id, action.value).await;
+                self.on_button(&key, action.session_id, action.request_id, action.value)
+                    .await;
             }
-            ChannelEvent::FormCb { value, form_value, .. } => {
+            ChannelEvent::FormCb {
+                value, form_value, ..
+            } => {
                 info!(chat = %key.reference, op = %value.get("op").and_then(|v| v.as_str()).unwrap_or(""), "feishu 入站表单提交");
                 self.on_form(value, form_value).await;
             }
@@ -417,7 +422,10 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
             .map(str::to_owned)
             .unwrap_or_default();
         let Some(request_id) = request_id.or_else(|| {
-            value.get("request_id").and_then(|v| v.as_str()).map(str::to_owned)
+            value
+                .get("request_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
         }) else {
             info!(chat = %key.reference, decision = %raw, "feishu 按钮点击缺 request_id，忽略");
             // 可见反馈（feishu-card-callback-observability）：点击不许无痕
@@ -462,7 +470,9 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
                 let card = ChannelCard {
                     title: title.into(),
                     theme: theme.into(),
-                    elements: vec![ChannelElement::Markdown { content: note.clone() }],
+                    elements: vec![ChannelElement::Markdown {
+                        content: note.clone(),
+                    }],
                     turn: None,
                 };
                 self.update_card(msg_id, &card).await;
@@ -767,7 +777,9 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
                 let card = ChannelCard {
                     title: title.into(),
                     theme: theme.into(),
-                    elements: vec![ChannelElement::Markdown { content: note.clone() }],
+                    elements: vec![ChannelElement::Markdown {
+                        content: note.clone(),
+                    }],
                     turn: None,
                 };
                 self.update_card(msg_id, &card).await;
@@ -1131,7 +1143,10 @@ fn abbreviate(s: &str, max_chars: usize) -> String {
 /// 为「放行 + 切自动模式」，点击即翻「✅ 已切换自动模式」；SetMode 的最终
 /// 成败由 dispatch 经 turn 流事件回执，失败态见 [`mode_failure_flip`]）。
 /// `accepted=false` = 无待决请求（fail-closed 置灰）。
-fn click_flip_state(decision: &PermissionDecision, accepted: bool) -> (&'static str, &'static str, String) {
+fn click_flip_state(
+    decision: &PermissionDecision,
+    accepted: bool,
+) -> (&'static str, &'static str, String) {
     if !accepted {
         return (
             "请求已过期",
@@ -1140,15 +1155,14 @@ fn click_flip_state(decision: &PermissionDecision, accepted: bool) -> (&'static 
         );
     }
     match decision {
-        PermissionDecision::AllowOnce => {
-            ("已允许（本次）", "green", "本次调用已放行。".into())
-        }
+        PermissionDecision::AllowOnce => ("已允许（本次）", "green", "本次调用已放行。".into()),
         // 按钮文案维持「本会话不再询问」（卡面由 dispatch 的 permission_card
         // 定义）；点击后的翻面即 mode 语义的 audit trail。
         PermissionDecision::AllowSession => (
             "✅ 已切换自动模式",
             "green",
-            "本会话已切换为自动模式（auto），后续工具调用不再询问；/new 或会话结束后回到默认档。".into(),
+            "本会话已切换为自动模式（auto），后续工具调用不再询问；/new 或会话结束后回到默认档。"
+                .into(),
         ),
         PermissionDecision::Deny => ("已拒绝", "red", "该工具调用已被拒绝。".into()),
         PermissionDecision::Escalate { reason } => ("已升级", "orange", reason.clone()),
@@ -1183,9 +1197,7 @@ fn mode_failure_flip(detail: &str) -> (&'static str, &'static str, String) {
     (
         "⚠️ 已放行本次调用，但自动模式切换失败",
         "orange",
-        format!(
-            "当前调用已放行；自动模式切换失败：{detail}\n本会话仍会在工具调用时询问。"
-        ),
+        format!("当前调用已放行；自动模式切换失败：{detail}\n本会话仍会在工具调用时询问。"),
     )
 }
 
@@ -1381,11 +1393,13 @@ mod tests {
             usage: None,
             pending: Vec::new(),
             remote: None,
-            desired_mode: None,
+            desired_mode: sebas_dispatch::engine::ask_mode(),
             effective_mode: None,
             msg_count: 0,
             // fix-pending-queue-liveness 2.3：turn_engaged 缺省（不占用）。
             turn_engaged: false,
+            spawn_failure_reason: None,
+            parked_approvals: 0,
             available_commands: Vec::new(),
         };
         fe.on_session_info(info.clone()).await;
@@ -1465,7 +1479,10 @@ mod tests {
         let (title, theme, note) = click_flip_state(&PermissionDecision::AllowSession, true);
         assert_eq!(title, "✅ 已切换自动模式");
         assert_eq!(theme, "green");
-        assert!(note.contains("自动模式（auto）"), "audit trail note: {note}");
+        assert!(
+            note.contains("自动模式（auto）"),
+            "audit trail note: {note}"
+        );
         assert!(
             note.contains("不再询问"),
             "翻面注记应说明后续不再询问: {note}"
@@ -1476,12 +1493,18 @@ mod tests {
     #[test]
     fn mode_switch_failure_flip_is_honest() {
         let (title, theme, note) = mode_failure_flip("set mode \"auto\" 被拒绝（boom）");
-        assert!(title.contains("已放行本次调用"), "放行不回滚须可见: {title}");
+        assert!(
+            title.contains("已放行本次调用"),
+            "放行不回滚须可见: {title}"
+        );
         assert!(title.contains("切换失败"), "失败须可见: {title}");
         assert_eq!(theme, "orange");
         assert!(note.contains("当前调用已放行"), "{note}");
         assert!(note.contains("被拒绝"), "原因须透传: {note}");
-        assert!(!note.contains("已切换自动模式"), "失败态不得伪装成功: {note}");
+        assert!(
+            !note.contains("已切换自动模式"),
+            "失败态不得伪装成功: {note}"
+        );
     }
 
     /// 事件契约解析：只有 `ok=false` 的 permission_mode_result 载荷触发翻面。
@@ -1542,11 +1565,13 @@ mod tests {
             usage: None,
             pending: Vec::new(),
             remote: None,
-            desired_mode: None,
+            desired_mode: sebas_dispatch::engine::ask_mode(),
             effective_mode: None,
             msg_count: 0,
             // fix-pending-queue-liveness 2.3：turn_engaged 缺省（不占用）。
             turn_engaged: false,
+            spawn_failure_reason: None,
+            parked_approvals: 0,
             available_commands: Vec::new(),
         })
         .await;
@@ -1575,7 +1600,9 @@ mod tests {
         );
         // 载荷不进正文（不影响会话卡渲染）。
         let views = fe.views.read().await;
-        let v = views.get(&view_id(&ChannelKey::feishu("oc_t", None))).unwrap();
+        let v = views
+            .get(&view_id(&ChannelKey::feishu("oc_t", None)))
+            .unwrap();
         let body = serde_json::to_string(&v.card.body).unwrap();
         assert!(!body.contains("permission_mode_result"), "{body}");
         assert!(!body.contains("rejected"), "{body}");
@@ -1597,7 +1624,10 @@ mod tests {
 
         // 第 3 发 0 收：发送出口内的评估触发 WARN 并置闩。
         fe.note_interactive_card_sent();
-        assert!(fe.callback_warn_latched.load(Ordering::Relaxed), "3 发 0 收应触发");
+        assert!(
+            fe.callback_warn_latched.load(Ordering::Relaxed),
+            "3 发 0 收应触发"
+        );
 
         // 闩锁后继续发（评估仍满足条件）：不再重复触发。
         assert!(!fe.maybe_warn_card_callback_unreachable(), "闩锁后不重复");
@@ -1637,7 +1667,11 @@ mod tests {
         };
         fe.on_channel_event(evt).await;
         assert_eq!(fe.callbacks_received.load(Ordering::Relaxed), 1);
-        assert_eq!(port.approvals.lock().await.len(), 0, "缺 request_id 不回传审批");
+        assert_eq!(
+            port.approvals.lock().await.len(),
+            0,
+            "缺 request_id 不回传审批"
+        );
     }
 
     // ── 不可识别点击可见反馈（feishu-card-callback-observability 2.1）──────
@@ -1661,7 +1695,11 @@ mod tests {
         .await;
 
         let ensures = port.ensures.lock().await;
-        assert_eq!(ensures.len(), 2, "两类不可识别点击各产生一条回执: {ensures:?}");
+        assert_eq!(
+            ensures.len(),
+            2,
+            "两类不可识别点击各产生一条回执: {ensures:?}"
+        );
         assert!(
             ensures[0].1.contains("点击未识别") && ensures[0].1.contains("request_id"),
             "缺 request_id 回执应说明原因: {}",
@@ -1724,11 +1762,13 @@ mod tests {
             usage: None,
             pending: Vec::new(),
             remote: None,
-            desired_mode: None,
+            desired_mode: sebas_dispatch::engine::ask_mode(),
             effective_mode: None,
             msg_count: 0,
             // fix-pending-queue-liveness 2.3：turn_engaged 缺省（不占用）。
             turn_engaged: false,
+            spawn_failure_reason: None,
+            parked_approvals: 0,
             available_commands: Vec::new(),
         }
     }

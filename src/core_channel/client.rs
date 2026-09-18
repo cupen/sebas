@@ -15,10 +15,10 @@
 use super::protocol::{
     ChannelHandshake, CoreChannelRequest, CoreChannelResponse, SessionStreamFrame,
 };
-use sebas_dispatch::TurnStreamEvent;
 use super::secret::ChannelSecret;
 use async_trait::async_trait;
 use sebas_channels::ChannelKey;
+use sebas_dispatch::TurnStreamEvent;
 use sebas_dispatch::{PendingSubmission, SessionEvent, SessionInfo, TurnEntry};
 use sebas_ipc::{ReadHalf, WriteHalf};
 use sebas_webui::session_backend::{
@@ -444,7 +444,9 @@ pub async fn snapshot_domain_once(
     domain: &str,
 ) -> Option<serde_json::Value> {
     let (mut writer, mut reader) = connect(path).await.ok()?;
-    handshake(&mut writer, &mut reader, &secret.current()).await.ok()?;
+    handshake(&mut writer, &mut reader, &secret.current())
+        .await
+        .ok()?;
     let req = serde_json::to_string(&CoreChannelRequest::StateSnapshot {
         domain: domain.to_string(),
     })
@@ -605,7 +607,8 @@ impl SessionBackend for CoreChannelBackend {
         // 通道帧的 agent 必填（workbench-agent-wire-fix D2）：无 agent 的
         // 调用方（feishu 默认路径）语义是「配置的默认 kind」，此处无法解析
         // 配置——由服务端按空 agent 拒绝，调用方应改用 spawn_with 显式传。
-        self.spawn_with(prompt, project_dir, "", None, None, None).await
+        self.spawn_with(prompt, project_dir, "", None, None, None)
+            .await
     }
 
     /// 节点清单（8.2）：经 core 的节点注册表拿——只有 core 有写者句柄。
@@ -631,13 +634,17 @@ impl SessionBackend for CoreChannelBackend {
                     created_unix: 0,
                     local: true,
                 }];
-                out.extend(nodes.into_iter().map(|n| sebas_webui::session_backend::NodeInfo {
-                    id: n.id,
-                    status: n.status,
-                    last_seen_unix: n.last_seen_unix,
-                    created_unix: n.created_unix,
-                    local: false,
-                }));
+                out.extend(
+                    nodes
+                        .into_iter()
+                        .map(|n| sebas_webui::session_backend::NodeInfo {
+                            id: n.id,
+                            status: n.status,
+                            last_seen_unix: n.last_seen_unix,
+                            created_unix: n.created_unix,
+                            local: false,
+                        }),
+                );
                 Ok(out)
             }
             Ok(CoreChannelResponse::NodeLink(NodeLinkOutcome::Disabled { cause })) => Err(cause),

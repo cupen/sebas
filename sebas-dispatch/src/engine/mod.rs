@@ -16,7 +16,9 @@ pub mod stall;
 pub use events::{
     RemoteSessionView, SessionEvent, SessionInfo, TurnEntry, TurnStreamEvent, count_chat_messages,
 };
-pub use maps::{AutoModeSwitch, AutoModeSwitchMap, MsgIdMap, PermCardEntry, PermCardMap, ReplyTargetMap};
+pub use maps::{
+    AutoModeSwitch, AutoModeSwitchMap, MsgIdMap, PermCardEntry, PermCardMap, ReplyTargetMap,
+};
 
 use crate::card_events::{
     apply_event_to_card, card_needs_rotation, count_folded_items, update_parent_title,
@@ -204,6 +206,18 @@ pub enum CloseOutcome {
 /// 控制面「自动」mode 词汇（permission-mode-auto-gate）。「本会话不再询问」
 /// 的 mode 语义固定切到该值。
 pub const AUTO_MODE: &str = "auto";
+/// （session-parallel-liveness-and-unread-polish 3.2，design D5b）控制面
+/// 缺省 mode：ask 是「每个受门控动作都要问」的确定性模式，不是「留给
+/// agent 自己猜」。desired_mode 在内存/wire 模型中非空（`String`），旧
+/// 数据（state.json 的 null）在 restore 反序列化点一次性落为 ask——
+/// 迁移是 null 消失的唯一地点，之后任何投影都读到这个值，无读侧回退。
+pub const ASK_MODE: &str = "ask";
+
+/// [`ASK_MODE`] 的 serde 缺省构造器（`#[serde(default = …)]` 形态要求
+/// 同签名的函数）。
+pub fn ask_mode() -> String {
+    ASK_MODE.to_string()
+}
 
 /// claude 驱动 SetMode 失败时非终态 `Error` 消息的稳定后缀（「…模式未变」，
 /// 见 `sebas-acp/src/claude/driver.rs` 的 SetMode 臂）。dispatch 据此把
@@ -500,9 +514,7 @@ impl DispatchHandle {
         let msg_count = match m.transcript_id() {
             Some(tid) => {
                 let g = self.turn_log.read().await;
-                g.get(tid)
-                    .map(|log| count_chat_messages(log))
-                    .unwrap_or(0)
+                g.get(tid).map(|log| count_chat_messages(log)).unwrap_or(0)
             }
             None => 0,
         };
@@ -517,6 +529,15 @@ impl DispatchHandle {
                     || self.stall.parked_count(session_id).await > 0
             }
             _ => false,
+        };
+        // （review 3c 补口）本地泊车审批数——`waiting` 投影的数据源；在
+        // `turn_engaged` 判定处已读过一次 parked_count，这里复用同一借用点，
+        // 避免第二次上锁。u32 与 remote 视图字段对齐。
+        let parked_approvals = match &m.state {
+            crate::state::MappingState::Active { session_id } => {
+                self.stall.parked_count(session_id).await as u32
+            }
+            _ => 0,
         };
         Some(SessionInfo {
             channel: key.channel_str().to_string(),
@@ -536,9 +557,14 @@ impl DispatchHandle {
             pending: self.map.pending_submissions(key).await,
             // （add-agent-mode-selection）desired/effective mode 随快照下发
             // （本机 claude 的 effective 在 spawn argv 应用/ModeChanged 时
-            // 落定；远端会话的 mode 走 remote 视图，此处不留）。
+            // 落定；远端会话的 mode 走 remote 视图，此处不留）。D5b：desired
+            // 非空（缺省 ask），wire 上永远携带确定词。
             desired_mode: m.desired_mode.clone(),
             effective_mode: m.effective_mode.clone(),
+            // （session-parallel-liveness-and-unread-polish 1.3）spawn 失败
+            // 原因随快照/事件透传（SpawnFailed { reason }），呈现层据此就地
+            // 呈现失败原因；非失败会话为 None（不上 wire）。
+            spawn_failure_reason: m.spawn_failed_reason().map(str::to_string),
             // 执行体归属由复合后端在快照/事件出口统一打标（D4）；router 自身
             // 只跟踪 ACP 侧映射，留 None 交给上游。
             backend: None,
@@ -552,6 +578,10 @@ impl DispatchHandle {
             available_commands: m.available_commands.clone(),
             // fix-pending-queue-liveness 2.3：回合占用事实随快照下发。
             turn_engaged,
+            // （review 3c 补口）本地泊车审批数——`waiting` 投影的数据源；
+            // remote 会话的泊车走 remote 视图，此处照填无妨（上游合并时
+            // remote 值优先）。
+            parked_approvals,
         })
     }
 
@@ -616,11 +646,13 @@ impl DispatchHandle {
         // Lagged 由消费端按快照收敛，绝不为此阻塞入账路径。无 key（如
         // spawn-failed 合成 id）时静默跳过：没有可寻址的会话面。
         if let Some(key) = self.map.lookup_key_by_session(session_id).await {
-            let _ = self.turn_events.send(crate::engine::events::TurnStreamEvent {
-                channel: key.channel_str().to_string(),
-                key: key.reference.clone(),
-                entries: vec![entry],
-            });
+            let _ = self
+                .turn_events
+                .send(crate::engine::events::TurnStreamEvent {
+                    channel: key.channel_str().to_string(),
+                    key: key.reference.clone(),
+                    entries: vec![entry],
+                });
         }
     }
 
@@ -645,7 +677,9 @@ impl DispatchHandle {
     /// Subscribe to live turn-content events（workbench-live-conversation-flow
     /// 1.1）。Lagged 是建议性的：内容可从 transcript 快照恢复，消费端不因
     /// 落后断链。
-    pub fn subscribe_turn_events(&self) -> broadcast::Receiver<crate::engine::events::TurnStreamEvent> {
+    pub fn subscribe_turn_events(
+        &self,
+    ) -> broadcast::Receiver<crate::engine::events::TurnStreamEvent> {
         self.turn_events.subscribe()
     }
 
@@ -654,7 +688,10 @@ impl DispatchHandle {
     /// prompt**（不跑首轮；通用 ACP driver 的 session/new 与模型广告在握手
     /// 期完成，无需 prompt）。幂等：Active/Spawning 是无操作。失败经既有
     /// fail_spawn 路径如实进 transcript，占位保留。
-    pub async fn web_activate_session(&self, key: ChannelKey) -> Result<bool, crate::error::DispatchError> {
+    pub async fn web_activate_session(
+        &self,
+        key: ChannelKey,
+    ) -> Result<bool, crate::error::DispatchError> {
         use crate::state::ActivateRoute;
         match self.map.route_activate(&key).await {
             None => Ok(false),
@@ -816,7 +853,14 @@ impl DispatchHandle {
             ..
         } = &out
         {
-            self.stall.note_permission_resolved(request_id).await;
+            // （review 3c 补口，session-unread-badge delta「parked-approval
+            // exit emits a frame」）批复离开引擎即解除泊车——解除的会话从
+            // waiting 翻回原相位，是生命周期 flip，即刻广播。
+            if let Some(session_id) = self.stall.note_permission_resolved(request_id).await
+                && let Some(key) = self.map.lookup_key_by_session(&session_id).await
+            {
+                self.publish_updated(&key).await;
+            }
         }
         if let Err(e) = self.tx.send(out).await {
             tracing::error!(?e, "router→outbound channel closed; dropping message");
@@ -1114,11 +1158,8 @@ impl DispatchHandle {
             "mode": AUTO_MODE,
             "detail": cause,
         });
-        self.transcript_push(
-            session_id,
-            TurnEntry::permission_mode_result(0, payload),
-        )
-        .await;
+        self.transcript_push(session_id, TurnEntry::permission_mode_result(0, payload))
+            .await;
         if let Some(msg_id) = &sw.msg_id {
             let label = format!(
                 "✅ 当前调用已放行；⚠️ 自动模式切换失败：{cause}\n本会话仍会在工具调用时询问（可用 /new 结束会话）。"
@@ -1405,7 +1446,13 @@ impl DispatchHandle {
         // mode，无需再调 set_desired_mode（中途切换仍走该 setter）。
         match self
             .map
-            .begin_spawn_with(key.clone(), kind.clone(), model.clone(), mode.clone(), false)
+            .begin_spawn_with(
+                key.clone(),
+                kind.clone(),
+                model.clone(),
+                mode.clone(),
+                false,
+            )
             .await
         {
             Ok(outcome) => {

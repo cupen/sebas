@@ -115,7 +115,10 @@ fn direct_spawn_model(provider: &str) -> Option<String> {
     };
     let (resolution, model) = sebas::spawn_env::compute_provider_resolution(&state, None);
     assert!(
-        matches!(resolution, sebas_acp::claude::ProviderResolution::Direct { .. }),
+        matches!(
+            resolution,
+            sebas_acp::claude::ProviderResolution::Direct { .. }
+        ),
         "expected Direct resolution, got {resolution:?}"
     );
     model

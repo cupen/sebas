@@ -314,9 +314,7 @@ impl sebas_webui::SessionBackend for FlipBackend {
 
     async fn set_focus(&self, _key: Option<sebas_channels::ChannelKey>) {}
 
-    fn subscribe(
-        &self,
-    ) -> tokio::sync::broadcast::Receiver<sebas_dispatch::SessionEvent> {
+    fn subscribe(&self) -> tokio::sync::broadcast::Receiver<sebas_dispatch::SessionEvent> {
         self.events.subscribe()
     }
 
@@ -363,9 +361,7 @@ impl sebas_webui::SessionBackend for FlipBackend {
         self.status.lock().unwrap().clone()
     }
 
-    fn reachability_updates(
-        &self,
-    ) -> tokio::sync::broadcast::Receiver<sebas_webui::Reachability> {
+    fn reachability_updates(&self) -> tokio::sync::broadcast::Receiver<sebas_webui::Reachability> {
         self.flips.subscribe()
     }
 }
@@ -381,7 +377,13 @@ async fn reachability_get_returns_current_state() {
         .unwrap();
     let (mut writer, mut reader) = ws_stream.split();
 
-    send_request(&mut writer, 1, "core.reachability.get", serde_json::json!({})).await;
+    send_request(
+        &mut writer,
+        1,
+        "core.reachability.get",
+        serde_json::json!({}),
+    )
+    .await;
     let reply = next_event(&mut reader).await;
     assert_eq!(reply["id"], 1, "reply must echo the request id: {reply}");
     assert_eq!(reply["result"], serde_json::json!({ "ok": true }));
@@ -393,7 +395,13 @@ async fn reachability_get_returns_current_state() {
     // 再读 get 应答，避免交错。
     let flip = next_event(&mut reader).await;
     assert_eq!(flip["method"], "core.reachability", "event: {flip}");
-    send_request(&mut writer, 2, "core.reachability.get", serde_json::json!({})).await;
+    send_request(
+        &mut writer,
+        2,
+        "core.reachability.get",
+        serde_json::json!({}),
+    )
+    .await;
     let reply = next_event(&mut reader).await;
     assert_eq!(reply["id"], 2, "reply must echo the request id: {reply}");
     assert_eq!(

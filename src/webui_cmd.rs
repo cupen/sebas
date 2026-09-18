@@ -17,22 +17,22 @@
 
 use crate::config::Config;
 use crate::error::{Result, SebasError};
+use crate::watchdog::EXIT_BIND_FAILED;
 use crate::watchdog::control_rpc::{
     self, ControlEnvelope, RpcActor, RpcControlRequest, RpcControlResponse,
 };
 use crate::watchdog::services::WebUiEndpoint;
-use crate::watchdog::EXIT_BIND_FAILED;
 use async_trait::async_trait;
+use sebas_webui::admin::{
+    AdminActionError, AdminAdapter, AdminEvent, AdminMutationResult, AdminOperation, AdminService,
+    AdminStatus,
+};
 use sebas_webui::auth::{self, AuthHandle};
 use sebas_webui::rbac::Role;
 use sebas_webui::user_store::{StoreError, UserStore};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{info, warn};
-use sebas_webui::admin::{
-    AdminActionError, AdminAdapter, AdminEvent, AdminMutationResult, AdminOperation, AdminService,
-    AdminStatus,
-};
 
 /// Arguments for `sebas webui --config <path>`.
 pub struct WebUiArgs {
@@ -74,7 +74,7 @@ pub fn run_passwd(args: WebUiPasswdArgs) -> Result<()> {
         _ => {
             return Err(SebasError::Config(
                 "缺少用户名：请用 --user <name> 指定要创建或改密的账户".into(),
-            ))
+            ));
         }
     };
 
@@ -84,9 +84,8 @@ pub fn run_passwd(args: WebUiPasswdArgs) -> Result<()> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(|word| {
-            word.parse::<Role>().map_err(|e| {
-                SebasError::Config(format!("--role 非法: {e}"))
-            })
+            word.parse::<Role>()
+                .map_err(|e| SebasError::Config(format!("--role 非法: {e}")))
         })
         .transpose()?;
 
@@ -101,8 +100,7 @@ pub fn run_passwd(args: WebUiPasswdArgs) -> Result<()> {
     } else {
         args.password.ok_or_else(|| {
             SebasError::Config(
-                "缺少密码：用 --password-stdin（推荐，避免进 shell history）或 --password"
-                    .into(),
+                "缺少密码：用 --password-stdin（推荐，避免进 shell history）或 --password".into(),
             )
         })?
     };
@@ -112,7 +110,9 @@ pub fn run_passwd(args: WebUiPasswdArgs) -> Result<()> {
     if password.chars().count() < 8 {
         // 不做硬性拦截：测试环境统一用 admin/admin 这类短密码；公网部署
         // 由部署者自己权衡强度（与首启 setup 页的 ≥8 硬门槛不同）。
-        warn!("webui password is shorter than 8 chars, weak; use a strong password for public deploys");
+        warn!(
+            "webui password is shorter than 8 chars, weak; use a strong password for public deploys"
+        );
     }
 
     let existing = store
@@ -139,13 +139,11 @@ pub fn run_passwd(args: WebUiPasswdArgs) -> Result<()> {
         }
         None => {
             // 首个用户默认 root，其后默认 member；`--role` 显式覆盖（design D7）。
-            let role = explicit_role.unwrap_or(
-                if store.count().unwrap_or(0) == 0 {
-                    Role::Root
-                } else {
-                    Role::Member
-                },
-            );
+            let role = explicit_role.unwrap_or(if store.count().unwrap_or(0) == 0 {
+                Role::Root
+            } else {
+                Role::Member
+            });
             store
                 .create(&username, &password, role)
                 .map_err(|e| match e {
@@ -192,7 +190,9 @@ pub fn bootstrap_auth() -> Arc<AuthHandle> {
         && !pass.is_empty()
     {
         if pass.chars().count() < 8 {
-            warn!("SEBAS_WEBUI_PASSWORD shorter than 8 chars (ok for test env admin/admin), use a strong password for public deploys");
+            warn!(
+                "SEBAS_WEBUI_PASSWORD shorter than 8 chars (ok for test env admin/admin), use a strong password for public deploys"
+            );
         }
         match handle.user_store() {
             Some(store) => match store.setup_root(user.trim(), &pass) {
@@ -236,10 +236,7 @@ pub(crate) fn has_enabled_user(auth: &AuthHandle) -> bool {
 ///
 /// （spec 原文按「存在至少一个启用用户」判定；比只看 `needs_setup()`
 /// （= 零用户）更紧：全禁用/坏库同样拒绝，fail-closed。）
-pub(crate) fn ensure_non_loopback_bind_allowed(
-    auth_on: bool,
-    auth: &AuthHandle,
-) -> Result<()> {
+pub(crate) fn ensure_non_loopback_bind_allowed(auth_on: bool, auth: &AuthHandle) -> Result<()> {
     if !auth_on {
         return Err(SebasError::Config(
             "service.webui.host 非 loopback：auth 开关必须保持打开（误关开关叠加公网暴露 = 误配）；\
@@ -278,9 +275,7 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
     let auth = if cfg.service.webui.auth {
         bootstrap_auth()
     } else {
-        warn!(
-            "webui auth disabled via [service.webui] auth = false: all routes are public"
-        );
+        warn!("webui auth disabled via [service.webui] auth = false: all routes are public");
         Arc::new(AuthHandle::disabled())
     };
 
@@ -369,12 +364,11 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
     // add-workspace-root：恒有值的单一机器级边界，env（SEBAS_WORKSPACE_ROOT）
     // > config（[workspace] root）> cwd 回退；回退生效时打一条启动告警
     // （D5：告警在装配处打——判定函数被高频调用，回退是启动期事实）。
-    let (webui_workspace_root, workspace_root_fell_back) =
-        crate::config::resolve_workspace_root(
-            std::env::var("SEBAS_WORKSPACE_ROOT").ok().as_deref(),
-            cfg.workspace.root.as_deref(),
-            &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-        );
+    let (webui_workspace_root, workspace_root_fell_back) = crate::config::resolve_workspace_root(
+        std::env::var("SEBAS_WORKSPACE_ROOT").ok().as_deref(),
+        cfg.workspace.root.as_deref(),
+        &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+    );
     if workspace_root_fell_back {
         warn!(
             "workspace root 未显式配置，回退进程当前工作目录 {}；建议显式配置 workspace root（[workspace] root 或 SEBAS_WORKSPACE_ROOT）",
@@ -390,7 +384,9 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
     // `RouterInfo::default()` 占位——那会让 composer 恒显
     // "no provider configured"。
     let router_info = crate::run::build_router_info(
-        sebas_router::config::RouterConfig::parse(&raw).ok().as_ref(),
+        sebas_router::config::RouterConfig::parse(&raw)
+            .ok()
+            .as_ref(),
     );
     let backend_dyn: Arc<dyn sebas_webui::SessionBackend> = backend;
     // add-agent-skills 5.1：skills 管理面的仓操作接缝——仓目录与
@@ -471,9 +467,9 @@ impl ControlRpcAdminAdapter {
                 status,
                 message: message.into(),
             }),
-            Ok(RpcControlResponse::Rejected {
-                code, message, ..
-            }) => Err(format!("rejected [{code}]: {message}")),
+            Ok(RpcControlResponse::Rejected { code, message, .. }) => {
+                Err(format!("rejected [{code}]: {message}"))
+            }
             Ok(other) => Err(format!("unexpected response: {other:?}")),
             Err(e) => Err(format!("control RPC failed: {e}")),
         }
@@ -504,7 +500,11 @@ fn service_set_response(
             code,
             message,
             count,
-        }) => Err(AdminActionError { code, message, count }),
+        }) => Err(AdminActionError {
+            code,
+            message,
+            count,
+        }),
         Ok(other) => Err(AdminActionError::other(format!(
             "unexpected response: {other:?}"
         ))),
@@ -584,7 +584,10 @@ impl AdminAdapter for ControlRpcAdminAdapter {
         service_set_response(response, service, desired)
     }
 
-    async fn service_restart(&self, service: &str) -> std::result::Result<AdminMutationResult, String> {
+    async fn service_restart(
+        &self,
+        service: &str,
+    ) -> std::result::Result<AdminMutationResult, String> {
         // 走 watchdog 监督循环既有的 ServiceRestart（/router restart 同源）；
         // core 在 RPC 层被拒（升级/回滚语义归 RestartCore），前端对 core
         // 直接走 /api/admin/restart，不会发到这里。
@@ -655,8 +658,10 @@ fn current_uid() -> u32 {
 /// Load card config from settings.json, falling back to the TOML `[card]` section.
 fn load_card_config(cfg: &Config) -> sebas_feishu::cards::CardConfig {
     match sebas_dispatch::settings::load_settings(&sebas_dispatch::settings::settings_path()) {
-        Ok(Some(s)) => serde_json::from_value(serde_json::to_value(&s).expect("card config serializes"))
-            .expect("card config round-trips between mirror shapes"),
+        Ok(Some(s)) => {
+            serde_json::from_value(serde_json::to_value(&s).expect("card config serializes"))
+                .expect("card config round-trips between mirror shapes")
+        }
         Ok(None) => cfg.card.clone(),
         Err(e) => {
             warn!(error = %e, "settings.json parse failed; using config defaults");
@@ -680,8 +685,7 @@ mod service_set_tests {
             message: "router 有 3 个活跃 routed 会话".into(),
             count: Some(3),
         });
-        let err = service_set_response(resp, "router", "off")
-            .expect_err("保护拒绝必须映射为错误");
+        let err = service_set_response(resp, "router", "off").expect_err("保护拒绝必须映射为错误");
         assert_eq!(err.code, "active_routed_sessions");
         assert_eq!(err.count, Some(3));
         assert!(err.is_active_routed_sessions(), "前端据此弹强制出口");
@@ -698,8 +702,7 @@ mod service_set_tests {
             message: "未知服务: nope".into(),
             count: None,
         });
-        let err =
-            service_set_response(resp, "nope", "off").expect_err("非法服务必须映射为错误");
+        let err = service_set_response(resp, "nope", "off").expect_err("非法服务必须映射为错误");
         assert_eq!(err.code, "invalid_request");
         assert_eq!(err.count, None);
         // count 缺席时 wire 上省略字段（旧形状不变）。
@@ -863,10 +866,7 @@ auth = {auth}
             .expect_err("零用户 + 非 loopback 必须配置错误退出");
         let msg = err.to_string();
         assert!(msg.contains("非 loopback"), "{msg}");
-        assert!(
-            msg.contains("启用用户"),
-            "错误信息应指引用先建 root: {msg}"
-        );
+        assert!(msg.contains("启用用户"), "错误信息应指引用先建 root: {msg}");
     }
 
     #[test]
@@ -880,7 +880,11 @@ auth = {auth}
         let raw = std::fs::read_to_string(&config).unwrap();
         let cfg = crate::config::Config::parse(&raw).unwrap();
         assert!(!cfg.service.webui.auth);
-        assert!(WebUiEndpoint::from_config(&cfg.service.webui).unwrap().is_loopback());
+        assert!(
+            WebUiEndpoint::from_config(&cfg.service.webui)
+                .unwrap()
+                .is_loopback()
+        );
     }
 
     /// 安全门的三态判定（纯函数，不真 bind）：零用户拒、env 引导后放行、
@@ -984,7 +988,11 @@ auth = {auth}
         let store = handle.user_store().expect("用户库在场");
         assert_eq!(store.count().unwrap(), 1, "已有用户时 env 引导必须让位");
         assert!(
-            store.get_by_username("admin").unwrap().unwrap().verify_password("password8"),
+            store
+                .get_by_username("admin")
+                .unwrap()
+                .unwrap()
+                .verify_password("password8"),
             "重复引导不得覆盖既有 root 的密码"
         );
 

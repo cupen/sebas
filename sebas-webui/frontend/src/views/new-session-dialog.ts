@@ -8,7 +8,9 @@
  * 共用 loadModelCatalog；预选三级：上次确认的 (provider, model) 对（浏览器
  * localStorage 全局记忆，确认动作写入）仍在目录内 → 该对，否则目录第一对；
  * 目录空/不可得显式引导去 Settings → Models，不渲染空选择器）+ 权限 mode
- * 下拉（ask | edit | allow | auto，缺省「agent 默认」= wire 上省略 mode 字段）。
+ * 下拉（ask | edit | allow | auto）。（session-parallel-liveness-and-unread-
+ * polish 3.2，design D5b）控制面缺省显式 ask：对话框预填 Ask、wire 无条件
+ * 发送 mode 字段——不再有「agent 默认 = 省略字段」的空路径。
  *
  * Confirm dispatches `dialog-confirm` with { agent, model, mode }; the rail
  * performs the POST /api/sessions call and the post-create focus flow.
@@ -53,8 +55,8 @@ export interface NewSessionDialogConfirm {
   agent: string
   /** 目录选定的模型 id；`null` = 目录不可得或未选（创建请求省略）。 */
   model: string | null
-  /** `null` = agent 默认（wire 上省略 mode 字段）。 */
-  mode: string | null
+  /** （3.2，D5b）控制面 mode，非空：预填 'ask'，wire 无条件发送。 */
+  mode: string
 }
 
 @customElement('sebas-new-session-dialog')
@@ -82,8 +84,8 @@ export class SebasNewSessionDialog extends LitElement {
   @state() private catalog: ModelCatalog | null = null
   /** 目录显式不可得（空目录或读取失败）：就地说明，不渲染空下拉。 */
   @state() private catalogUnavailable = false
-  /** 选定的权限模式；`null` = agent 默认（缺省项，不发送 mode 字段）。 */
-  @state() private mode: string | null = null
+  /** 选定的权限模式。（3.2，D5b）非空：打开即预填 'ask'（真源如此）。 */
+  @state() private mode: string = 'ask'
 
   /** 一级选定的 provider 下的模型 id 列表（保持 payload 顺序）。 */
   private modelsFor(provider: string): string[] {
@@ -119,12 +121,13 @@ export class SebasNewSessionDialog extends LitElement {
 
   protected willUpdate(changed: PropertyValues): void {
     // 打开时重置表单：agent 预选项目 default_agent（无记录兜底首个可达），
-    // 模型预选 last-used（缺失/失效兜底目录第一对）；mode 回到「agent 默认」。
+    // 模型预选 last-used（缺失/失效兜底目录第一对）；mode 回到显式缺省 ask。
     // 重取数据源（管理页可能刚改过目录/defaults）。
     if (changed.has('open') && this.open) {
       void this.loadAgents()
       void this.loadCatalog()
-      this.mode = null
+      // （3.2，D5b）mode 回到显式缺省 ask——不再有「agent 默认」空路径。
+      this.mode = 'ask'
       this.agent = ''
       if (this.defaultAgent) this.agent = this.defaultAgent
       this.applyCatalogPreselect()
@@ -284,16 +287,18 @@ export class SebasNewSessionDialog extends LitElement {
                 </wa-select>
               `}
 
-          <!-- 权限 mode（可选）：缺省「agent 默认」= wire 上省略 mode 字段。 -->
+          <!-- 权限 mode（3.2，D5b）：预填 Ask，wire 无条件发送——四个控制面
+               词都是一等值。（4.1）选项词汇来自共享 MODE_OPTIONS，与 composer
+               面板同源渲染；首项空值 = 历史「agent 默认」条目，选中即落显式
+               ask（this.mode 非空）。 -->
           <wa-select
             label="Permission mode"
             aria-label="Permission mode"
             data-testid="dialog-mode-select"
-            value=${this.mode ?? ''}
+            value=${this.mode}
             hoist
             @change=${(e: Event) => {
-              // 缺省项（空值）= agent 默认：不发送 mode 字段。
-              this.mode = (e.target as HTMLSelectElement).value || null
+              this.mode = (e.target as HTMLSelectElement).value || 'ask'
             }}
           >
             <wa-option value="">默认（逐次询问）</wa-option>

@@ -1,7 +1,7 @@
 use sebas_acp::claude::session::AcpEvent;
 use sebas_channels::card::ChannelElement as CardElement;
-use sebas_dispatch::cards::{CardConfig, ThinkingDisplay};
 use sebas_dispatch::card_events::apply_event_to_card;
+use sebas_dispatch::cards::{CardConfig, ThinkingDisplay};
 
 fn cfg() -> CardConfig {
     CardConfig::default()

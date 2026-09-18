@@ -121,13 +121,21 @@ mod tests {
             let lock = super::secret_env_test_lock().lock().unwrap();
             let prev = std::env::var(name).err();
             unsafe { std::env::set_var(name, value) };
-            Self { name, prev, _lock: lock }
+            Self {
+                name,
+                prev,
+                _lock: lock,
+            }
         }
         fn unset(name: &'static str) -> Self {
             let lock = super::secret_env_test_lock().lock().unwrap();
             let prev = std::env::var(name).err();
             unsafe { std::env::remove_var(name) };
-            Self { name, prev, _lock: lock }
+            Self {
+                name,
+                prev,
+                _lock: lock,
+            }
         }
     }
     impl Drop for EnvGuard {

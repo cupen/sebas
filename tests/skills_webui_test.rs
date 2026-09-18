@@ -10,9 +10,9 @@ use sebas::skills::FsSkillsService;
 use sebas_feishu::cards::CardConfig;
 use sebas_webui::agent_kinds::ConfigAgentKindProvider;
 use sebas_webui::auth::AuthHandle;
+use sebas_webui::build_router_with_skills;
 use sebas_webui::models::RouterInfo;
 use sebas_webui::session_backend::FakeBackend;
-use sebas_webui::build_router_with_skills;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -71,9 +71,7 @@ impl Harness {
         if body.is_some() {
             builder = builder.header("content-type", "application/json");
         }
-        let req = builder
-            .body(Body::from(body.unwrap_or_default()))
-            .unwrap();
+        let req = builder.body(Body::from(body.unwrap_or_default())).unwrap();
         let resp = self.app.clone().oneshot(req).await.unwrap();
         let status = resp.status();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
@@ -110,7 +108,10 @@ async fn list_reports_entries_with_attachments_and_invalid_reason() {
     assert_eq!(beads["description"], "beads 工作流");
     assert_eq!(beads["valid"], true);
     assert!(beads["attachments"].as_array().unwrap().is_empty());
-    assert!(beads.get("reason").is_none(), "valid 条目不带 reason: {beads}");
+    assert!(
+        beads.get("reason").is_none(),
+        "valid 条目不带 reason: {beads}"
+    );
 
     let deploy = skills.iter().find(|s| s["name"] == "my-deploy").unwrap();
     assert_eq!(
@@ -150,7 +151,10 @@ async fn detail_returns_skill_md_text_and_attachments() {
     let (status, body) = h.req("GET", "/api/skills/my-deploy", None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["name"], "my-deploy");
-    assert_eq!(body["text"], SKILL_MD_BODY, "text 是 SKILL.md 原文（不渲染）");
+    assert_eq!(
+        body["text"], SKILL_MD_BODY,
+        "text 是 SKILL.md 原文（不渲染）"
+    );
     assert_eq!(body["attachments"][0], "ref.md");
 }
 
@@ -161,7 +165,13 @@ async fn detail_unknown_name_is_404() {
     let h = Harness::new();
     let (status, body) = h.req("GET", "/api/skills/definitely-absent", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
-    assert!(body["error"].as_str().unwrap().contains("definitely-absent"), "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("definitely-absent"),
+        "{body}"
+    );
 }
 
 /// 目录穿越拒绝：`/`、`\`、`..` 一律 400（先安全后存在性），仓外文件无恙。
@@ -256,10 +266,16 @@ async fn sync_writes_placements_and_reports_no_placement() {
     )
     .unwrap();
     let (_, body) = h.req("POST", "/api/skills/sync", Some("{}".into())).await;
-    assert_eq!(body["reports"][0]["overwritten"], serde_json::json!(["beads"]), "{body}");
-    assert!(std::fs::read_to_string(h.backend.join("beads").join("SKILL.md"))
-        .unwrap()
-        .ends_with("new version"));
+    assert_eq!(
+        body["reports"][0]["overwritten"],
+        serde_json::json!(["beads"]),
+        "{body}"
+    );
+    assert!(
+        std::fs::read_to_string(h.backend.join("beads").join("SKILL.md"))
+            .unwrap()
+            .ends_with("new version")
+    );
 }
 
 /// invalid 条目的详情（add-agent-skills 5.1 wire 语义）：条目在仓但缺

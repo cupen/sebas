@@ -46,11 +46,12 @@
  *     (display → slug → assistant, D1) with a first-grapheme text avatar.
  *
  * The seen-boundary seam counts TURNS, never entries: it sits above the
- * first turn with an entry newer than the stored seen-timestamp and never
- * splits a turn (D5). The stored boundary is still the per-browser
- * `created_at_unix` timestamp in localStorage — anchoring by timestamp, not
- * array index, keeps the seam pinned to the same logical turn even when an
- * older card refreshes in place.
+ * first turn whose visible content extends beyond the stored read anchor and
+ * never splits a turn (D5). The anchor is the SAME per-browser segment count
+ * the rail's unread badge uses (unread-cursor, single `{anchor_count}`
+ * field — session-parallel-liveness-and-unread-polish 2.3, design D3): the
+ * seam is derived from the cumulative visible-segment total at each turn, so
+ * the seam and the badge can never disagree about what has been read.
  *
  * Scroll behaviour (fix-webui-streaming-liveness 4.1, rewritten):
  *   - `sticky` means "the reader never deliberately scrolled up": any
@@ -72,7 +73,7 @@ import { unsafeHTML } from 'lit/directives/unsafe-html.js'
 import type { ConversationEntryView } from '../api/client.js'
 import { icon } from '../components/icons.js'
 import { renderMarkdown } from '../components/markdown.js'
-import { readAnchor, writeSeen as writeCursor } from './unread-cursor.js'
+import { readAnchorCount, writeSeen as writeCursor } from './unread-cursor.js'
 import { sharedWs } from '../api/shared-ws.js'
 // 4.5：「查看全部」隔离弹层（独立于会话滚动容器的 wa-dialog）。
 import '@awesome.me/webawesome/dist/components/dialog/dialog.js'
@@ -346,6 +347,18 @@ export function unitMaxTs(unit: TurnUnit): number {
   return unit.maxTs
 }
 
+/**
+ * One turn's visible-segment contribution（2.3，与后端 `count_chat_messages`
+ * 同口径）：agent 回合里每个 text run（相邻 markdown 合并）计 1；error 气泡
+ * 按合并计数计（每条 error 后端各计 1）；operator 提交与 process 条目不计。
+ * 累加即得「读到此回合为止已见的段数」，seam 与徽标共用同一份段锚。
+ */
+export function unitSegmentCount(unit: TurnUnit): number {
+  if (unit.kind === 'operator') return 0
+  if (unit.kind === 'error') return unit.entry.count ?? 1
+  return unit.runs.filter((r) => r.type === 'text').length
+}
+
 // ---- fold title helpers（2.3，D5）---------------------------------------
 
 /** Titles longer than this many characters are middle-truncated. */
@@ -504,10 +517,10 @@ export class SebasTranscriptView extends LitElement {
   /** Encoded session key; namespaces the seen-boundary in localStorage. */
   @property() sessionKey = ''
   /**
-   * rail-declutter-unread D3：会话当前的服务端可见回复段数（detail/summary
-   * payload 的 `msg_count`）。标记已读时以它推进共享游标的 `anchor_count`，
-   * 让 rail 徽标与 seam 同步清零；`null`（旧 payload / 测试）= 只推进
-   * seen 时间戳、不动段数锚。
+   * rail-declutter-unread D3 / （2.3）：会话当前的服务端可见回复段数
+   * （detail/summary payload 的 `msg_count`）。标记已读时写入共享游标的
+   * `anchor_count` = max(服务端段数, 本地已渲染段数)，让 rail 徽标与 seam
+   * 同步清零；`null`（旧 payload / 测试）= 只用本地渲染段数推进锚。
    */
   @property({ attribute: false }) msgCount: number | null = null
   /**
@@ -572,12 +585,6 @@ export class SebasTranscriptView extends LitElement {
    * 后，缓冲里被覆盖的部分即被裁掉。
    */
   private streamEntries: ConversationEntryView[] = []
-  /**
-   * （6.1）流式期间已标记已读的可见回复段数（markdown/error）：快照的
-   * `msg_count` 尚未赶上流式进度时，把这段增量补进段数锚，rail 徽标与
-   * seam 才不闪现。msg_count 属性每次到达（快照收敛）即清零。
-   */
-  private streamMsgBonus = 0
   /** turn.append 订阅的退订句柄（connectedCallback 挂，disconnected 摘）。 */
   private unsubscribeTurn: (() => void) | null = null
   /** 文档可见性翻转监听（3.2）：hidden 期间不推进锚，翻回 visible 恢复。 */
@@ -1012,12 +1019,7 @@ export class SebasTranscriptView extends LitElement {
       // 换会话：上一个会话的流式残留全部作废（快照是新会话的真源），
       // 折叠展开状态同样作废（run id 只在会话内有意义，D2）。
       this.streamEntries = []
-      this.streamMsgBonus = 0
       this.foldOpen.clear()
-    }
-    if (changed.has('msgCount')) {
-      // 快照的段数到了（含流式期间产生的段）：增量补丁清零。
-      this.streamMsgBonus = 0
     }
     if (changed.has('entries') || changed.has('sessionKey')) {
       // 快照收敛：position 已被属性覆盖的流式条目裁掉，只留快照还没
@@ -1063,11 +1065,8 @@ export class SebasTranscriptView extends LitElement {
     // （3.1/3.2）聚焦 + 文档可见 + 贴底：到达即推进共享游标（亲眼看着到的
     // 内容不再挂未读）；文档隐藏（后台 tab）时不推进——回来看 seam/徽章。
     if (this.sticky && this.docVisible()) {
-      if (this.msgCount != null) {
-        this.streamMsgBonus += fresh.filter(
-          (e) => e.element_type === 'markdown' || e.element_type === 'error',
-        ).length
-      }
+      // 贴底读流：段锚随渲染推进（写的是与徽标同一个 anchor_count 字段，
+      // 2.3）——本地已渲染段数已含流式尾巴，无需另设增量补丁。
       this.scheduleMarkSeen()
     }
   }
@@ -1126,12 +1125,12 @@ export class SebasTranscriptView extends LitElement {
     }
     if (!emptyStreamSessions.delete(key)) return
     if (!this.sticky || !this.docVisible()) return
-    const max = this.turnUnits.reduce((m, u) => Math.max(m, unitMaxTs(u)), 0)
-    if (max > this.readSeen()) {
-      this.writeSeen(max)
-      // 同一更新周期内重算：seam 不闪现（写锚后紧接着 render）。
-      this.recomputeSeam()
-    }
+    // （2.3，D3）锚已统一为段计数：写锚 = 当前已渲染段数（含流式尾巴），
+    // 与 seam/rail 徽标同一条锚线；游标模块保证单调不回退，已在这里看到
+    // 的首交换不再挂未读。
+    this.writeSeen()
+    // 同一更新周期内重算：seam 不闪现（写锚后紧接着 render）。
+    this.recomputeSeam()
   }
 
   private onVisibilityChange(): void {
@@ -1149,21 +1148,36 @@ export class SebasTranscriptView extends LitElement {
 
   // ---- localStorage helpers --------------------------------------------
 
-  // rail-declutter-unread 2.2：seen 存储迁移到共享游标模块 unread-cursor
-  // （与 rail 徽标同一锚，`sebas:seen:<key>` 键与旧实现相同，旧数据原地
-  // 迁移）。seam 的读写语义不变：无锚读 0，写入取单调 max。
+  // （2.3，D3）锚统一为段计数单字段：读写都走共享游标模块 unread-cursor
+  // （`sebas:seen:<key>` 键不变；含 seen_ts 的旧 JSON 读为无锚 = fully
+  // read，下次写入被纯 {anchor_count} 覆写）。seam 与徽标共用同一水位。
 
-  private readSeen(): number {
-    return readAnchor(this.sessionKey)?.seenTs ?? 0
+  private readSeen(): number | null {
+    return readAnchorCount(this.sessionKey)
   }
 
-  private writeSeen(value: number): void {
-    // 段数锚只在 payload 带来 msg_count 时推进（单调 max 由游标模块保证）。
-    // 流式期间快照还没追上的可见段（6.1）以增量补丁一并计入，rail 徽标
-    // 与 seam 才不会在流式会话上闪现。
-    const anchor =
-      this.msgCount != null ? this.msgCount + this.streamMsgBonus : undefined
-    writeCursor(this.sessionKey, value, anchor)
+  /**
+   * 已渲染回合序列的可见段数累计（`unitSegmentCount` 前缀和）：第 i 项 =
+   * 读到第 i 个回合为止已见的段数，seam 判定与 mark-seen 写入共用。
+   */
+  private segmentTotals(): number[] {
+    const totals: number[] = []
+    let acc = 0
+    for (const unit of this.turnUnits) {
+      acc += unitSegmentCount(unit)
+      totals.push(acc)
+    }
+    return totals
+  }
+
+  private writeSeen(): void {
+    // 写入锚 = max(服务端段数, 本地已渲染段数)——流式期间快照未追上的
+    // 可见段（6.1）已含在本地渲染里，rail 徽标与 seam 不闪现；单调 max
+    // 由游标模块保证。
+    const totals = this.segmentTotals()
+    const local = totals.length > 0 ? totals[totals.length - 1]! : 0
+    const anchor = this.msgCount != null ? Math.max(this.msgCount, local) : local
+    writeCursor(this.sessionKey, anchor)
   }
 
   // ---- seam logic -------------------------------------------------------
@@ -1179,20 +1193,18 @@ export class SebasTranscriptView extends LitElement {
    * neighbour.
    */
   private recomputeSeam(): void {
-    const seen = this.readSeen()
-    if (this.turnUnits.length === 0) {
+    const anchor = this.readSeen()
+    if (anchor === null || this.turnUnits.length === 0) {
+      // 无锚 = fully read（首次访问 / 清缓存 / 旧 seen_ts 数据）：历史不
+      // 因换浏览器集体冒缝（2.3，spec「first visit shows no unread」）。
       this.seamIndex = null
       this.unseenCount = 0
       return
     }
-    const maxTs = this.turnUnits.reduce((m, u) => Math.max(m, unitMaxTs(u)), 0)
-    if (seen > 0 && seen >= maxTs) {
-      // Everything is at or below the stored boundary.
-      this.seamIndex = null
-      this.unseenCount = 0
-      return
-    }
-    const idx = this.turnUnits.findIndex((u) => unitMaxTs(u) > seen)
+    // seam 落在第一个「可见段累计超过锚」的回合上方——按回合计数、绝不
+    // 切开回合（D5），且与徽标读的是同一条段锚。
+    const totals = this.segmentTotals()
+    const idx = totals.findIndex((total) => total > anchor)
     if (idx === -1) {
       this.seamIndex = null
       this.unseenCount = 0
@@ -1205,8 +1217,7 @@ export class SebasTranscriptView extends LitElement {
   // ---- mark-all-seen ----------------------------------------------------
 
   private markAllSeen = (): void => {
-    const max = this.turnUnits.reduce((m, u) => Math.max(m, unitMaxTs(u)), 0)
-    this.writeSeen(max)
+    this.writeSeen()
     this.seamIndex = null
     this.unseenCount = 0
   }
@@ -1239,9 +1250,11 @@ export class SebasTranscriptView extends LitElement {
 
   /** Push the seen-boundary forward to the newest rendered turn. */
   private commitMarkSeen(): void {
-    const max = this.turnUnits.reduce((m, u) => Math.max(m, unitMaxTs(u)), 0)
-    if (this.turnUnits.length > 0 && max > this.readSeen()) {
-      this.writeSeen(max)
+    const totals = this.segmentTotals()
+    const local = totals.length > 0 ? totals[totals.length - 1]! : 0
+    const anchor = this.readSeen() ?? 0
+    if (this.turnUnits.length > 0 && local > anchor) {
+      this.writeSeen()
       // The seam may have moved or disappeared; update internal state
       // and re-render without scheduling another auto-scroll — the user
       // is already where they want to be.

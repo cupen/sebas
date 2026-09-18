@@ -15,27 +15,27 @@ pub const RUN_SUBCOMMAND: &str = "run";
 /// The model-router subcommand (`sebas router`; hidden alias `gateway`).
 pub const ROUTER_SUBCOMMAND: &str = "router";
 
-pub mod config;
 pub mod agent_backend;
 pub mod agent_kinds;
+pub mod config;
 pub mod core_channel;
 mod dispatch;
 pub mod error;
 pub mod fake_provider_cmd;
 pub mod feishu_cmd;
-pub mod router_cmd;
 pub mod im_cmd;
 pub mod ipc;
 pub mod native_dispatch_bridge;
 pub mod node_link;
 pub mod node_link_cmd;
 pub mod provider;
+pub mod router_cmd;
+pub mod service;
 /// 操作者级 skill 仓 + 多 backend 方言投影（add-agent-skills）。
 pub mod skills;
 /// `sebas skills` 命令行面（add-agent-skills 4.1–4.4；core 逻辑在
 /// [`skills`]，这里是薄壳）。
 pub mod skills_cmd;
-pub mod service;
 // `provider_state` 已迁到 router crate（sebas-63f.5 解决 sebas→router 反向依赖）；
 // sebas 内部用 `sebas_dispatch::provider_state`。
 pub mod record;
@@ -43,8 +43,8 @@ pub mod replay;
 pub mod run;
 pub mod sebas_state;
 mod session_boot;
-pub mod startup_failure;
 pub mod spawn_env;
+pub mod startup_failure;
 pub mod update;
 pub mod upgrade;
 pub mod watchdog;

@@ -8,11 +8,11 @@
 //! 形状，replay 侧零飞书引用）。
 
 use crate::config::Config;
+use open_lark::ws_client::EventHandler;
 use sebas_acp::claude::manager::SessionManager;
 use sebas_acp::claude::session::AcpCommand;
-use sebas_feishu::events::{FeishuEnvelope, FeishuIn};
-use open_lark::ws_client::EventHandler;
 use sebas_dispatch::engine::DispatchHandle;
+use sebas_feishu::events::{FeishuEnvelope, FeishuIn};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -174,8 +174,7 @@ pub fn ingest_feishu_frame(handler: &DispatchEventHandler, raw: &[u8]) -> bool {
     }
 
     // 中立化：飞书入站事件 → ChannelEvent 再进 router（decouple-feishu-channel）。
-    let channel_evt =
-        sebas_feishu::adapter::feishu_in_to_channel_event(in_ev);
+    let channel_evt = sebas_feishu::adapter::feishu_in_to_channel_event(in_ev);
 
     // Dump the **translated** neutral event so `sebas replay` consumes the
     // same shape offline (post-gates, post-translation).
@@ -213,7 +212,11 @@ pub fn ingest_feishu_frame(handler: &DispatchEventHandler, raw: &[u8]) -> bool {
 /// the router, so a child process is alive as a descendant of the sebas
 /// pid by the time SIGTERM arrives. Production callers never set
 /// `SEBAS_TEST_SPAWN_SESSION`, so this path is dormant.
-pub(crate) async fn spawn_test_session(cfg: &Config, router: &DispatchHandle, mgr: &SessionManager) {
+pub(crate) async fn spawn_test_session(
+    cfg: &Config,
+    router: &DispatchHandle,
+    mgr: &SessionManager,
+) {
     let kind = cfg.acp.default_kind().to_string();
     let command = cfg.acp.command_for(&kind).unwrap_or_default();
     let session_id = match mgr
@@ -250,10 +253,8 @@ pub(crate) async fn spawn_test_session(cfg: &Config, router: &DispatchHandle, mg
     }
     // Synthetic SessionKey — the test never sends a real Feishu message,
     // so the key content doesn't matter; it just needs to be unique.
-    let key = sebas_channels::ChannelKey::feishu(
-        &format!("test-sigterm-{}", std::process::id()),
-        None,
-    );
+    let key =
+        sebas_channels::ChannelKey::feishu(&format!("test-sigterm-{}", std::process::id()), None);
     router.insert_mapping(key, session_id.clone()).await;
     info!(%session_id, "SEBAS_TEST_SPAWN_SESSION: spawned child session");
 }

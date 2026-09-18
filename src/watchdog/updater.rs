@@ -123,7 +123,10 @@ pub async fn run_one_shot(plan: UpdatePlan) -> Result<UpdateOutcome> {
     run_one_shot_with_config(plan, &cfg.watchdog).await
 }
 
-pub async fn run_one_shot_with_config(plan: UpdatePlan, watchdog: &WatchdogConfig) -> Result<UpdateOutcome> {
+pub async fn run_one_shot_with_config(
+    plan: UpdatePlan,
+    watchdog: &WatchdogConfig,
+) -> Result<UpdateOutcome> {
     let data_dir = upgrade::data_dir(watchdog);
     if plan.rollback {
         if plan.dry_run {
@@ -148,7 +151,11 @@ pub async fn run_one_shot_with_config(plan: UpdatePlan, watchdog: &WatchdogConfi
     result
 }
 
-async fn update_release(watchdog: &WatchdogConfig, data_dir: &Path, dry_run: bool) -> Result<UpdateOutcome> {
+async fn update_release(
+    watchdog: &WatchdogConfig,
+    data_dir: &Path,
+    dry_run: bool,
+) -> Result<UpdateOutcome> {
     let repo = &watchdog.upgrade.github_repo;
     let current = upgrade::current_version_raw();
     println!("checking latest release from {repo} (current {current})");
@@ -172,7 +179,11 @@ async fn update_release(watchdog: &WatchdogConfig, data_dir: &Path, dry_run: boo
     Ok(UpdateOutcome::Installed)
 }
 
-async fn update_dev(data_dir: &Path, project_dir: Option<&PathBuf>, dry_run: bool) -> Result<UpdateOutcome> {
+async fn update_dev(
+    data_dir: &Path,
+    project_dir: Option<&PathBuf>,
+    dry_run: bool,
+) -> Result<UpdateOutcome> {
     let project_dir = project_dir.cloned().unwrap_or(
         std::env::current_dir()
             .map_err(|e| SebasError::Upgrade(format!("获取当前目录失败: {e}")))?,

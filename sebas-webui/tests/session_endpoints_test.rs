@@ -55,7 +55,9 @@ async fn fixture() -> (
         backend,
         RouterInfo::default(),
         CardConfig::default(),
-        Arc::new(sebas_webui::agent_kinds::ConfigAgentKindProvider::new(Vec::new())),
+        Arc::new(sebas_webui::agent_kinds::ConfigAgentKindProvider::new(
+            Vec::new(),
+        )),
         Arc::new(sebas_webui::auth::AuthHandle::disabled()),
         std::env::temp_dir(),
     );
@@ -643,8 +645,7 @@ async fn project_default_agent_follows_last_use() {
                     .uri("/api/sessions")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        serde_json::json!({ "project_id": project_id, "agent": agent })
-                            .to_string(),
+                        serde_json::json!({ "project_id": project_id, "agent": agent }).to_string(),
                     ))
                     .unwrap(),
             )
@@ -1341,7 +1342,9 @@ async fn create_session_with_mode_threads_spawn_and_mid_session_mode_switch_work
                 .method("POST")
                 .uri("/api/sessions")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"prompt":"x","agent":"opencode","mode":"plan"}"#))
+                .body(Body::from(
+                    r#"{"prompt":"x","agent":"opencode","mode":"plan"}"#,
+                ))
                 .unwrap(),
         )
         .await
@@ -1361,6 +1364,78 @@ async fn create_session_with_mode_threads_spawn_and_mid_session_mode_switch_work
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+/// （session-parallel-liveness-and-unread-polish 3.2，design D5b）创建不带
+/// mode：会话的 desired_mode 存储即控制面缺省词 ask——后续任何读取（列表/
+/// 详情/composer 绑定）一律读回 "ask"，无 null、无空态（spec 场景
+/// 「unset mode is stored and rendered as Ask」）。落词点在映射层
+/// （`Mapping::spawning_with` 的 `unwrap_or_else(ask_mode)`）；spawn 请求
+/// 维度（Out::WebSpawn.mode）保持 Option，None 不带 argv flag = CLI 默认，
+/// 与 ask 语义等价（design D5b），这里不断言该实现维度。
+#[tokio::test]
+async fn create_session_without_mode_reads_back_the_ask_default() {
+    let (_router, _rx, app) = fixture().await;
+
+    // POST 不带 mode → 201。
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"prompt":"hello","agent":"opencode"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let v: serde_json::Value = serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+    let key_str = v["key"].as_str().expect("key string").to_string();
+
+    // 详情读回 "ask"。
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/sessions/{key_str}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let d: serde_json::Value = serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+    assert_eq!(
+        d["desired_mode"], "ask",
+        "detail must read back the ask default, got: {d}"
+    );
+
+    // 列表行同读数。
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/sessions")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let l: serde_json::Value = serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+    let row = l["recent_sessions"]
+        .as_array()
+        .expect("recent_sessions array")
+        .iter()
+        .find(|r| r["encoded_key"] == key_str)
+        .expect("created session must be listed");
+    assert_eq!(
+        row["desired_mode"], "ask",
+        "row must read back the ask default, got: {row}"
+    );
 }
 
 // ---- Concurrency across projects (task 6.1) and remove-project semantics (task 6.2) ----
@@ -1940,7 +2015,9 @@ fn projects_app(backend: Arc<dyn sebas_webui::SessionBackend>) -> axum::Router {
         backend,
         RouterInfo::default(),
         CardConfig::default(),
-        Arc::new(sebas_webui::agent_kinds::ConfigAgentKindProvider::new(Vec::new())),
+        Arc::new(sebas_webui::agent_kinds::ConfigAgentKindProvider::new(
+            Vec::new(),
+        )),
         Arc::new(sebas_webui::auth::AuthHandle::disabled()),
         std::env::temp_dir(),
     )
@@ -2715,7 +2792,11 @@ async fn detail_without_entries_after_returns_full_sequence() {
     let (status, detail) = get_json(&app, &format!("/api/sessions/{encoded}")).await;
     assert_eq!(status, StatusCode::OK);
     let entries = detail["entries"].as_array().expect("entries array");
-    assert_eq!(entries.len(), 2, "prompt + content, full sequence: {detail}");
+    assert_eq!(
+        entries.len(),
+        2,
+        "prompt + content, full sequence: {detail}"
+    );
     assert_eq!(entries[0]["position"], 0);
     assert_eq!(entries[0]["kind"], "prompt");
     assert_eq!(entries[0]["content"], "full prompt");
@@ -2737,7 +2818,11 @@ async fn detail_entries_after_returns_only_newer_entries_with_intact_fields() {
     assert_eq!(status, StatusCode::OK);
 
     let entries = inc["entries"].as_array().expect("entries array");
-    assert_eq!(entries.len(), 1, "entries_after=0 keeps only position 1: {inc}");
+    assert_eq!(
+        entries.len(),
+        1,
+        "entries_after=0 keeps only position 1: {inc}"
+    );
     assert_eq!(entries[0]["position"], 1);
     assert_eq!(entries[0]["kind"], "content");
     assert_eq!(entries[0]["content"], "inc-content");
@@ -2816,7 +2901,8 @@ async fn detail_entries_after_beyond_max_position_returns_empty_entries() {
     let (router, _rx, app) = fixture().await;
     let encoded = driven_two_entry_session(&app, &router, "past").await;
 
-    let (status, detail) = get_json(&app, &format!("/api/sessions/{encoded}?entries_after=99")).await;
+    let (status, detail) =
+        get_json(&app, &format!("/api/sessions/{encoded}?entries_after=99")).await;
     assert_eq!(status, StatusCode::OK);
     let entries = detail["entries"].as_array().expect("entries array");
     assert!(

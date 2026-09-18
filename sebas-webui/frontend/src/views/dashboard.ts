@@ -15,7 +15,7 @@
 
 import { LitElement, css, html, nothing, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { api, type AgentKindInfo, type ArchiveDetail, type ArchiveEntry, type ConversationEntryView, type NodeInfo, type NodesResponse, type PendingSubmission, type Project, type SessionDetail, type SessionRow, type Summary } from '../api/client.js'
+import { api, type AgentKindInfo, type ArchiveDetail, type ArchiveEntry, type ConversationEntryView, type NodeInfo, type NodesResponse, type PendingSubmission, type Project, type SessionDetail, type Summary } from '../api/client.js'
 import type { WsEvent, CoreReachabilityState } from '../api/ws.js'
 import { sharedWs } from '../api/shared-ws.js'
 import { icon } from '../components/icons.js'
@@ -31,7 +31,6 @@ import {
   onNarrowChange,
   saveComposerHeight,
 } from './split-persist.js'
-import '../components/status-badge.js'
 import '../components/review-card.js'
 import '../components/pending-stack.js'
 import './transcript-view.js'
@@ -83,7 +82,6 @@ const COMPOSER_FOCUS_TICK_MS = 100
 @customElement('sebas-dashboard')
 export class SebasDashboard extends LitElement {
   @state() private data: Summary | null = null
-  @state() private allRows: SessionRow[] = []
   @state() private error = ''
   /**
    * Focused session's full detail (conversation entries + encoded key) for
@@ -235,6 +233,10 @@ export class SebasDashboard extends LitElement {
    * （created/updated/removed/stalled）节流合并后刷新 summary/sessions；
    * resync 清游标全量重取；其余事件不触发请求（审批卡归 review-cards 自己
    * 的订阅局部更新，可达性归 shell）。
+   *
+   * （session-parallel-liveness-and-unread-polish 2.2，D2）created/updated
+   * 是五键相位帧：除节流刷新外，还先对聚焦详情做**就地补丁**——帧事实即
+   * 刻翻转 composer/待执行栈的形态，刷新只作收敛兜底。
    */
   private onWsEvent = (ev: WsEvent): void => {
     switch (ev.type) {
@@ -243,6 +245,21 @@ export class SebasDashboard extends LitElement {
         return
       case 'session.created':
       case 'session.updated':
+        // （2.2，design D2）相位帧就地补丁：composer 提交控件、pending-stack、
+        // childStarting 形态从帧字段真读、即时翻转——不等下一次 HTTP 详情
+        // 取回，也不做任何 status_slug 字符串回退。五键帧每次必带；随后的
+        // 节流刷新只作收敛兜底（静默窗里帧就是唯一真源）。
+        if (this.focusedDetail !== null && ev.session_id === this.effectiveFocusKey()) {
+          this.focusedDetail = {
+            ...this.focusedDetail,
+            status_slug: ev.status_slug as SessionDetail['status_slug'],
+            turn_engaged: ev.turn_engaged,
+            msg_count: ev.msg_count,
+            pending: ev.pending,
+          }
+        }
+        this.scheduleListRefresh()
+        return
       case 'session.turn_stalled':
         this.scheduleListRefresh()
         return
@@ -470,11 +487,12 @@ export class SebasDashboard extends LitElement {
         border-radius: var(--sebas-radius-xl);
         overflow: hidden;
       }
-      /* 输入框列：吃满分割面，底部留边（D6）。 */
+      /* 输入框列：吃满分割面。（3.5，design D6）间距收敛：与舞台列同一
+         space-2 水平内边距，底部留边同收 space-2——浮岛间距不再三层叠加。 */
       .composer-col {
         display: flex;
         min-height: 0;
-        padding: 0 var(--sebas-space-2) var(--sebas-space-3);
+        padding: 0 var(--sebas-space-2) var(--sebas-space-2);
       }
       /* 项目头部：舞台浮岛内的通栏条（去 border-bottom 硬线，浮岛内以
          既有 border-left 状态条 + 间距分区）。 */
@@ -567,19 +585,6 @@ export class SebasDashboard extends LitElement {
         align-items: center;
         gap: 5px;
       }
-      .project-meta .meta-sep {
-        color: var(--sebas-text-faint);
-      }
-      .project-meta .active-dot {
-        width: 6px;
-        height: 6px;
-        border-radius: 50%;
-        display: inline-block;
-        background: var(--sebas-status-dormant);
-      }
-      .project-meta .meta-item.is-active .active-dot {
-        background: var(--sebas-status-working);
-      }
       /* 聚焦会话深链（原 spotlight 卡片折叠进 header 的右段）：mono
          chat id + 状态徽章 + 前箭头，低调、悬停转 accent。 */
       .focused-link {
@@ -616,6 +621,8 @@ export class SebasDashboard extends LitElement {
       /* ── 聚焦会话头（session-detail 迁移，3.3）──状态色左缘条 + 徽章 +
          身份 + 只读 agent 锁 + 会话内模型选择 + Close/归档动作。D6：去
          border-bottom 硬线（浮岛内以左缘状态条分区）。 */
+      /* （3.6，design D6b）session-head 不再有状态色左边框——同一份状态
+         的第三次视觉重画撤除，卡片只保留身份/动作信息。 */
       .session-head {
         display: flex;
         align-items: center;
@@ -623,27 +630,8 @@ export class SebasDashboard extends LitElement {
         flex-wrap: wrap;
         flex-shrink: 0;
         padding: var(--sebas-space-2) var(--sebas-space-5);
-        border-left: 3px solid var(--sebas-status-dormant);
         border-bottom: none;
         background: none;
-      }
-      .session-head[data-status='starting'] {
-        border-left-color: var(--sebas-status-starting);
-      }
-      .session-head[data-status='queued'] {
-        border-left-color: var(--sebas-status-queued);
-      }
-      .session-head[data-status='working'] {
-        border-left-color: var(--sebas-status-working);
-      }
-      .session-head[data-status='done'] {
-        border-left-color: var(--sebas-status-done);
-      }
-      .session-head[data-status='failed'] {
-        border-left-color: var(--sebas-status-failed);
-      }
-      .session-head[data-status='dormant'] {
-        border-left-color: var(--sebas-status-dormant);
       }
       .session-head .ident {
         display: flex;
@@ -960,14 +948,6 @@ export class SebasDashboard extends LitElement {
       .catch((e) => {
         this.error = String(e)
       })
-    api
-      .sessions()
-      .then((list) => {
-        this.allRows = list.recent_sessions
-      })
-      .catch(() => {
-        /* summary already surfaces failures */
-      })
   }
 
   /**
@@ -1002,14 +982,6 @@ export class SebasDashboard extends LitElement {
       })
       .catch((e) => {
         this.error = String(e)
-      })
-    api
-      .sessions()
-      .then((list) => {
-        this.allRows = list.recent_sessions
-      })
-      .catch(() => {
-        /* summary already surfaces failures */
       })
   }
 
@@ -1120,8 +1092,6 @@ export class SebasDashboard extends LitElement {
     // （2.1）只读归档视图在场：主区整体让位——turn-stream 与 composer 都
     // 换成归档形态（对话快照只读 + 显式恢复按钮）。
     if (this.archivedEntry) return this.renderArchivedWorkbench()
-    const rows = this.rowsForSelected()
-    const hasActive = rows.some((r) => r.status_slug === 'working')
     const focusKey = this.effectiveFocusKey()
     const nodeGate = this.selectedNodeGate()
     const selectedNodeId = this.projects.find((x) => x.path === this.selectedPath)?.node_id || LOCAL_NODE
@@ -1130,14 +1100,13 @@ export class SebasDashboard extends LitElement {
     const projectName = this.selectedPath
       ? (this.selectedPath.split(/[\\/]/).filter(Boolean).pop() ?? this.selectedPath)
       : null
-    // fix-pending-queue-liveness 3.1（design D3）：「turn 在飞」优先消费引擎
-    // 的结构化事实 `turn_engaged`（WORKING ∨ 泊车 ∨ spawn 窗口），不再猜展
-    // 示词 slug；键缺省（旧 core 组合）回退 `status_slug === 'working'` 旧判
-    // 定。深链/摘要两个数据源兜底取值。
+    // fix-pending-queue-liveness 3.1 + （2.1，design D2）：「turn 在飞」只
+    // 消费引擎的结构化事实 `turn_engaged`（WORKING ∨ 泊车 ∨ spawn 窗口）。
+    // （session-parallel-liveness-and-unread-polish 2.1）帧/详情五键必带，
+    // `?? status_slug === 'working'` 的字符串回退链删除——「帧 / 详情」同
+    // 形状真源，缺数据时如实按空闲（false）渲染，不猜。
     const turnEngaged =
-      this.focusedDetail?.turn_engaged ??
-      d.active_session?.turn_engaged ??
-      (this.focusedDetail?.status_slug ?? d.active_session?.status_slug ?? null) === 'working'
+      this.focusedDetail?.turn_engaged ?? d.active_session?.turn_engaged ?? false
     // fix-pending-queue-liveness 3.2：泊车事实——远端看 remote 视图的悬空
     // 审批数，本机看聚焦会话的待决审查卡（review-cards 上报）。「在等你的
     // 审批」指示据此呈现，提交读作「排在一次可回答的提问后面」。
@@ -1163,16 +1132,10 @@ export class SebasDashboard extends LitElement {
                       : nothing}
                   `
                 : html`<span class="path muted">未选择项目</span>`}
+              <!-- （3.6，design D6b）会话状态只挂 rail 行首圆点一处：
+                   project-header 不再复述「X sessions · active/idle」，也不再
+                   内嵌第二枚 status-badge——focused-link 只留 chat_id 锚点。 -->
               <span class="project-meta">
-                ${projectName
-                  ? html`
-                      <span class="meta-item">${rows.length} 个会话</span>
-                      <span class="meta-sep" aria-hidden="true">·</span>
-                      <span class="meta-item ${hasActive ? 'is-active' : ''}">
-                        <span class="active-dot"></span>${hasActive ? '有会话在运行' : '空闲'}
-                      </span>
-                    `
-                  : nothing}
                 ${d.active_session
                   ? html`
                       <a
@@ -1181,11 +1144,6 @@ export class SebasDashboard extends LitElement {
                         title="Focused session"
                       >
                         <span class="fkey">${d.active_session.chat_id}</span>
-                        <sebas-status-badge
-                          slug=${d.active_session.status_slug}
-                          label=${d.active_session.status_label}
-                          glyph=${d.active_session.status_glyph}
-                        ></sebas-status-badge>
                         <span class="arrow">${icon('forward', 13)}</span>
                       </a>
                     `
@@ -1227,6 +1185,12 @@ export class SebasDashboard extends LitElement {
               .waitingApproval=${waitingApproval}
               @pending-changed=${this.onComposerSent}
             ></sebas-pending-stack>
+            <!-- （3.4）starting 形态与失败就地呈现：slug/原因真读自详情，slug
+                 随相位帧即时补丁（onWsEvent）；（3.2，D5b）desired 非空，
+                 composer 无空态选择器。
+                 ⚠ 注释不得写进标签的属性列表：浏览器在该处就结束标签，其后
+                 的属性绑定会退化成文本节点（本行曾因此丢掉 modeEditable /
+                 currentMode / composer-sent）。 -->
             <sebas-workbench-composer
               .sessionKey=${focusKey}
               .turnInFlight=${turnEngaged}
@@ -1235,8 +1199,9 @@ export class SebasDashboard extends LitElement {
               .sessionModels=${this.focusedDetail?.available_models ?? d.active_session?.available_models ?? []}
               .currentModel=${this.focusedDetail?.current_model ?? d.active_session?.current_model ?? null}
               .sessionCommands=${this.focusedDetail?.available_commands ?? d.active_session?.available_commands ?? []}
-              .childStarting=${(this.focusedDetail?.status_slug ?? '') === 'starting'}
-              .currentMode=${this.focusedDetail?.desired_mode ?? null}
+              .childStarting=${(this.focusedDetail?.status_slug ?? d.active_session?.status_slug) === 'starting'}
+              .failureReason=${this.focusedDetail?.spawn_failure_reason ?? null}
+              .currentMode=${this.focusedDetail?.desired_mode ?? d.active_session?.desired_mode ?? 'ask'}
               .modeEditable=${this.focusedDetail?.session_id != null}
               .hasTurns=${(this.focusedDetail?.entries.length ?? 0) > 0}
               .coreReachability=${this.coreReachability}
@@ -1385,11 +1350,6 @@ export class SebasDashboard extends LitElement {
           `
         : nothing}
     `
-  }
-
-  private rowsForSelected(): SessionRow[] {
-    if (this.selectedPath === null) return []
-    return this.allRows.filter((r) => r.project_id === this.selectedProjectId)
   }
 
   /** 选中项目的稳定 id（workbench-agent-wire-fix 2.5）：会话行以它分组。 */
@@ -1542,20 +1502,16 @@ export class SebasDashboard extends LitElement {
     // ModeChanged）——两处同源（core 侧投影/映射）。
     const desired = remote?.desired_mode ?? d.desired_mode ?? null
     const effective = remote?.effective_mode ?? d.effective_mode ?? null
-    const parked = remote?.parked_approvals ?? 0
-    const waiting = parked > 0
     // 执行体强制不了时两个值都显示并说明；绝不只显示期望值假装已生效。
     const modeDiffers = !!desired && !!effective && desired !== effective
     // （4.2）模式章合一：auto 即「自动执行」（原 UNGATED 语义不再另挂英文
     // 红章）；desired/effective 过渡态显示中性灰「模式切换中…」；未知值
     // 如实显示原词，不造红色 UNKNOWN。
+    // （3.6，design D6b）session-head 卡片只承载身份与操作信息（chat /
+    // node-tag / model / mode / actions）：状态徽标与状态边框撤出——会话
+    // 状态只挂 rail 行首圆点一处；「排队」只属于 pending-stack（消息维度）。
     return html`
-      <div class="session-head" data-status=${waiting ? 'waiting' : d.status_slug}>
-        <sebas-status-badge
-          slug=${waiting ? 'waiting' : d.status_slug}
-          label=${waiting ? 'Waiting' : d.status_label}
-          glyph=${waiting ? '⏸' : d.status_glyph}
-        ></sebas-status-badge>
+      <div class="session-head">
         <div class="ident">
           <span class="chat"
             >${d.chat_id}${d.thread_id

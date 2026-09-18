@@ -31,6 +31,15 @@ pub(crate) fn build_session_rows(
                     dormant += 1;
                     "dormant"
                 }
+                // （session-parallel-liveness-and-unread-polish 1.3）spawn-failed
+                // 不再被吞进 spawning：行上的 raw status 与派生 slug 都必须如实
+                // 呈现失败态（SessionStatus::derive 有专门的 spawn-failed 分支），
+                // 否则失败会话在列表里永远读成 starting——正是「看起来在排队」
+                // 的谎。计数桶沿用 spawning（DashboardData 形状不变）。
+                "spawn-failed" => {
+                    spawning += 1;
+                    "spawn-failed"
+                }
                 _ => {
                     spawning += 1;
                     "spawning"
@@ -41,13 +50,12 @@ pub(crate) fn build_session_rows(
                 .unwrap_or(false);
             let derived = SessionStatus::derive(status, info.phase.as_deref().unwrap_or(""))
                 // 8.4：有悬空审批的会话**在等**，不是在跑——底层 status 仍是
-                // active，呈现必须是 Waiting。
-                .with_parked_approvals(
-                    info.remote
-                        .as_ref()
-                        .map(|r| r.parked_approvals)
-                        .unwrap_or(0),
-                );
+                // active，呈现必须是 Waiting。（review 3c 补口）泊车维度本地/
+                // 远端合并：本地读 parked_approvals，远端读 remote 视图。
+                .with_parked_approvals(match info.remote.as_ref() {
+                    Some(r) => r.parked_approvals,
+                    None => info.parked_approvals,
+                });
             SessionRow {
                 // 8.1 会话归属项目按 `(节点, 路径)`：远端会话的 project_dir 若按
                 // 本机公式算 id，会挂到「本机同路径项目」下（或一个不存在的 id）。
@@ -56,6 +64,9 @@ pub(crate) fn build_session_rows(
                 current_model: info.current_model.clone(),
                 desired_mode: info.desired_mode.clone(),
                 effective_mode: info.effective_mode.clone(),
+                // （session-parallel-liveness-and-unread-polish 1.3）spawn 失败
+                // 原因随行透传（SessionInfo 同名字段透传；None 不上 wire）。
+                spawn_failure_reason: info.spawn_failure_reason.clone(),
                 available_models: info.available_models.clone(),
                 agent_kind: info.agent_kind.clone(),
                 backend: info.backend.clone(),
@@ -109,12 +120,11 @@ pub(crate) fn build_session_rows(
 /// 拆分后单响应回到 KB 级。会话元信息（状态/模型/pending/段计数等）原样保留。
 pub(crate) fn session_summary(info: &SessionInfo) -> serde_json::Value {
     let derived = SessionStatus::derive(&info.status, info.phase.as_deref().unwrap_or(""))
-        .with_parked_approvals(
-            info.remote
-                .as_ref()
-                .map(|r| r.parked_approvals)
-                .unwrap_or(0),
-        );
+        // （review 3c 补口）泊车维度本地/远端合并（与会话行投影同一规则）。
+        .with_parked_approvals(match info.remote.as_ref() {
+            Some(r) => r.parked_approvals,
+            None => info.parked_approvals,
+        });
     let mut summary = serde_json::json!({
         "channel": info.channel,
         "reference": info.key,
@@ -332,9 +342,7 @@ fn admin_provider_row(
 /// GET /api/providers：provider 列表（core 状态库快照投影，管理页
 /// 数据源）。墓碑不出现；config 种子 provider 不在此列（store 是唯一事实
 /// 来源，种子-only 机器如实显示空表）。core 不可达 → 503。
-pub async fn providers_list(
-    State(state): State<WebUiState>,
-) -> axum::response::Response {
+pub async fn providers_list(State(state): State<WebUiState>) -> axum::response::Response {
     let Some(snapshot) = providers_snapshot(&state).await else {
         return err_503_core_unreachable();
     };

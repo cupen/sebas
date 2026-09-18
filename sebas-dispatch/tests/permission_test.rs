@@ -1,6 +1,6 @@
 use sebas_acp::claude::session::{AcpCommand, AcpEvent, Decision};
 use sebas_channels::{ChannelAction, ChannelEvent, ChannelKey};
-use sebas_dispatch::engine::{Out, DispatchHandle};
+use sebas_dispatch::engine::{DispatchHandle, Out};
 use sebas_dispatch::state::Mapping;
 use sebas_dispatch::state::SessionMap;
 use std::time::Duration;
@@ -52,7 +52,11 @@ async fn permission_card_in_topic_leaves_root_id_none() {
 
     // 入站话题消息写入 reply target（话题根消息 message_id，events 层归一化）。
     router
-        .dispatch(ChannelEvent::Text { key: key.clone(), text: "hello".into(), reply_target: Some("om_topic_root".into()) })
+        .dispatch(ChannelEvent::Text {
+            key: key.clone(),
+            text: "hello".into(),
+            reply_target: Some("om_topic_root".into()),
+        })
         .await;
 
     let event = AcpEvent::PermissionRequest {
@@ -98,7 +102,11 @@ async fn permission_card_mainline_keeps_root_id_none() {
     let (router, mut out_rx) = DispatchHandle::new(map.clone());
 
     router
-        .dispatch(ChannelEvent::Text { key: key.clone(), text: "hello".into(), reply_target: Some("om_msg".into()) })
+        .dispatch(ChannelEvent::Text {
+            key: key.clone(),
+            text: "hello".into(),
+            reply_target: Some("om_msg".into()),
+        })
         .await;
 
     let event = AcpEvent::PermissionRequest {
@@ -156,10 +164,7 @@ async fn button_callback_emits_permission_reply() {
     };
 
     router
-        .dispatch(ChannelEvent::ButtonCb {
-            key,
-            action,
-                    })
+        .dispatch(ChannelEvent::ButtonCb { key, action })
         .await;
 
     // First Out is the in-place flip (UpdateCardByMsgId); drain until SendAcp.
@@ -237,7 +242,12 @@ async fn unwired_form_callback_with_acp_markers_falls_back_to_button_path() {
     match out {
         Out::SendAcp {
             session_id,
-            cmd: AcpCommand::PermissionReply { request_id: rid, decision, .. },
+            cmd:
+                AcpCommand::PermissionReply {
+                    request_id: rid,
+                    decision,
+                    ..
+                },
         } => {
             assert_eq!(session_id, "s1");
             assert_eq!(rid, "r1");
@@ -260,10 +270,7 @@ async fn button_callback_on_dead_session_emits_help_card() {
     };
 
     router
-        .dispatch(ChannelEvent::ButtonCb {
-            key,
-            action,
-                    })
+        .dispatch(ChannelEvent::ButtonCb { key, action })
         .await;
 
     let out = tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
@@ -306,10 +313,7 @@ async fn button_callback_unknown_decision_defaults_to_deny() {
         value: serde_json::json!({}),
     };
     router
-        .dispatch(ChannelEvent::ButtonCb {
-            key,
-            action,
-                    })
+        .dispatch(ChannelEvent::ButtonCb { key, action })
         .await;
     // Drain the in-place flip (UpdateCardByMsgId) before SendAcp.
     let out = loop {

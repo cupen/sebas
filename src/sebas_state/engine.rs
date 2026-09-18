@@ -61,8 +61,11 @@ impl StateStoreEngine for DbStateEngine {
     async fn load_projects(&self) -> Result<Vec<Value>, String> {
         self.handle
             .exec(|conn| {
-                crate::sebas_state::repo::load_projects(conn)
-                    .map(|rows| rows.into_iter().map(|r| serde_json::to_value(&r).unwrap_or_default()).collect())
+                crate::sebas_state::repo::load_projects(conn).map(|rows| {
+                    rows.into_iter()
+                        .map(|r| serde_json::to_value(&r).unwrap_or_default())
+                        .collect()
+                })
             })
             .await
     }
@@ -83,7 +86,9 @@ impl StateStoreEngine for DbStateEngine {
         let id = id.to_string();
         let agent = agent.to_string();
         self.handle
-            .exec(move |conn| crate::sebas_state::repo::set_project_default_agent(conn, &id, &agent))
+            .exec(move |conn| {
+                crate::sebas_state::repo::set_project_default_agent(conn, &id, &agent)
+            })
             .await?;
         sebas_dispatch::state_store::notify_change("projects");
         Ok(())

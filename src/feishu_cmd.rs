@@ -56,8 +56,7 @@ pub async fn run(args: FeishuArgs) -> anyhow::Result<()> {
             println!("已发送文本到 {}: {}", key.chat_id, text);
         }
         FeishuCmd::Image { path } => {
-            let bytes = std::fs::read(path)
-                .with_context(|| format!("读取图片失败: {path}"))?;
+            let bytes = std::fs::read(path).with_context(|| format!("读取图片失败: {path}"))?;
             let file_name = std::path::Path::new(path)
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
@@ -66,7 +65,10 @@ pub async fn run(args: FeishuArgs) -> anyhow::Result<()> {
                 .upload_image(&http, &tokens, &file_name, bytes)
                 .await?;
             client.send_image(&http, &tokens, &key, &image_key).await?;
-            println!("已发送图片 {path} 到 {}（image_key={image_key}）", key.chat_id);
+            println!(
+                "已发送图片 {path} 到 {}（image_key={image_key}）",
+                key.chat_id
+            );
         }
     }
     Ok(())

@@ -5,9 +5,9 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use sebas_feishu::cards::CardConfig;
 use sebas_dispatch::engine::DispatchHandle;
 use sebas_dispatch::state::SessionMap;
+use sebas_feishu::cards::CardConfig;
 use sebas_webui::agent_kinds::{AgentKindInfo, AgentKindProvider};
 use sebas_webui::build_router_with_agent_kind_provider;
 use sebas_webui::models::RouterInfo;
@@ -70,8 +70,8 @@ async fn get_json(app: &axum::Router, uri: &str) -> (StatusCode, Value) {
         .unwrap();
     let status = resp.status();
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let v: Value = serde_json::from_slice(&bytes)
-        .unwrap_or_else(|e| panic!("non-JSON body from {uri}: {e}"));
+    let v: Value =
+        serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("non-JSON body from {uri}: {e}"));
     (status, v)
 }
 
@@ -88,18 +88,30 @@ async fn agents_catalog_returns_canned_agents_with_optional_fields() {
     let agents = v["agents"].as_array().expect("agents array missing");
     // 2 个配置 agent + 1 行内置 native（catalog 是唯一真源，3.2）。
     assert_eq!(agents.len(), 3);
-    let native = agents.iter().find(|a| a["id"] == "native").expect("native row");
+    let native = agents
+        .iter()
+        .find(|a| a["id"] == "native")
+        .expect("native row");
     assert_eq!(native["display"], "Native Kernel");
 
-    let claude = agents.iter().find(|a| a["id"] == "claude").expect("claude row");
-    let gemini = agents.iter().find(|a| a["id"] == "gemini").expect("gemini row");
+    let claude = agents
+        .iter()
+        .find(|a| a["id"] == "claude")
+        .expect("claude row");
+    let gemini = agents
+        .iter()
+        .find(|a| a["id"] == "gemini")
+        .expect("gemini row");
     let (claude, gemini) = (claude, gemini);
 
     assert_eq!(claude["id"], "claude");
     assert_eq!(claude["display"], "claude");
     assert_eq!(claude["reachable"], true);
     assert_eq!(claude["version"], "claude v2.1.0");
-    assert!(claude.get("cause").is_none(), "reachable agent must omit cause");
+    assert!(
+        claude.get("cause").is_none(),
+        "reachable agent must omit cause"
+    );
     // driver 是配置层概念，不上 wire（workbench-agent-wire-fix D3）。
     assert!(claude.get("driver").is_none(), "driver must not leak");
     assert!(claude.get("slug").is_none(), "slug is retired vocabulary");
@@ -107,7 +119,10 @@ async fn agents_catalog_returns_canned_agents_with_optional_fields() {
     assert_eq!(gemini["id"], "gemini");
     assert_eq!(gemini["reachable"], false);
     assert_eq!(gemini["cause"], "command not found");
-    assert!(gemini.get("version").is_none(), "unreachable agent must omit version");
+    assert!(
+        gemini.get("version").is_none(),
+        "unreachable agent must omit version"
+    );
 }
 
 #[tokio::test]

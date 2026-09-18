@@ -6,8 +6,8 @@ use crate::watchdog::control::{
 use crate::watchdog::executor::ControlExecutor;
 use crate::watchdog::services::service_from_str;
 use crate::watchdog::supervisor::ServiceName;
-use serde::{Deserialize, Serialize};
 use sebas_ipc::{IpcListener, IpcStream};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -242,11 +242,7 @@ pub async fn request(path: &Path, envelope: &ControlEnvelope) -> Result<RpcContr
         .map_err(|e| SebasError::Upgrade(format!("control RPC parse response failed: {e}")))
 }
 
-async fn handle_stream(
-    stream: IpcStream,
-    executor: ControlExecutor,
-    secret: String,
-) -> Result<()> {
+async fn handle_stream(stream: IpcStream, executor: ControlExecutor, secret: String) -> Result<()> {
     let (reader, mut writer) = sebas_ipc::split(stream);
     let mut reader = BufReader::new(reader);
     let mut line = String::new();
@@ -352,16 +348,16 @@ async fn handle_envelope(
             None => RpcControlResponse::Rejected {
                 code: "unauthorized".into(),
                 message: "only Feishu actors may confirm a confirmation".into(),
-            count: None,
-        },
+                count: None,
+            },
         },
         RpcControlRequest::Cancel { token } => match feishu_principal_channel(envelope.actor) {
             Some((principal, channel)) => executor.cancel(&token, &principal, &channel).await,
             None => RpcControlResponse::Rejected {
                 code: "unauthorized".into(),
                 message: "only Feishu actors may cancel a confirmation".into(),
-            count: None,
-        },
+                count: None,
+            },
         },
         RpcControlRequest::ServiceStatus => executor.service_status().await,
         RpcControlRequest::ServiceStatusFor { service } => {
@@ -399,8 +395,8 @@ async fn handle_envelope(
             Some(ServiceName::Core) => RpcControlResponse::Rejected {
                 code: "invalid_request".into(),
                 message: "core 使用 restart_core（升级/回滚语义），不接受 service restart".into(),
-            count: None,
-        },
+                count: None,
+            },
             Some(name) => {
                 let actor = crate::watchdog::control::Actor::from(envelope.actor);
                 executor
@@ -415,8 +411,8 @@ async fn handle_envelope(
             None => RpcControlResponse::Rejected {
                 code: "invalid_request".into(),
                 message: format!("未知服务: {service}"),
-            count: None,
-        },
+                count: None,
+            },
         },
     }
 }
@@ -514,8 +510,8 @@ impl From<ControlResponse> for RpcControlResponse {
             ControlResponse::Rejected { code, message } => RpcControlResponse::Rejected {
                 code: format!("{code:?}"),
                 message,
-            count: None,
-        },
+                count: None,
+            },
         }
     }
 }
@@ -566,7 +562,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl UpdaterRunner for NoopRunner {
-        async fn run(&self, _plan: &UpdatePlan, _watchdog: &WatchdogConfig) -> Result<crate::watchdog::updater::UpdateOutcome> {
+        async fn run(
+            &self,
+            _plan: &UpdatePlan,
+            _watchdog: &WatchdogConfig,
+        ) -> Result<crate::watchdog::updater::UpdateOutcome> {
             Ok(crate::watchdog::updater::UpdateOutcome::Installed)
         }
     }

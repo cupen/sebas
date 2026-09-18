@@ -509,9 +509,7 @@ mod multiuser_rbac {
         if body.is_some() {
             builder = builder.header("content-type", "application/json");
         }
-        let req = builder
-            .body(Body::from(body.unwrap_or_default()))
-            .unwrap();
+        let req = builder.body(Body::from(body.unwrap_or_default())).unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
         let status = resp.status();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
@@ -592,7 +590,9 @@ mod multiuser_rbac {
             .header("host", "127.0.0.1:12345")
             .extension(ConnectInfo(test_addr()))
             .header("content-type", "application/json")
-            .body(Body::from(r#"{"username":"cupen","password":"long-enough"}"#))
+            .body(Body::from(
+                r#"{"username":"cupen","password":"long-enough"}"#,
+            ))
             .unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -923,8 +923,14 @@ mod multiuser_rbac {
         let bob_id = store.get_by_username("bob").unwrap().unwrap().id;
 
         // 不能删自己 → 400。
-        let (status, v) =
-            request(&app, "DELETE", &format!("/api/users/{alice_id}"), Some(&alice), None).await;
+        let (status, v) = request(
+            &app,
+            "DELETE",
+            &format!("/api/users/{alice_id}"),
+            Some(&alice),
+            None,
+        )
+        .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
 
         // 最后启用的 root：降级 / 禁用 / 删除全 400，root 原状。
@@ -946,15 +952,27 @@ mod multiuser_rbac {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
-        let (status, v) =
-            request(&app, "DELETE", &format!("/api/users/{alice_id}"), Some(&alice), None).await;
+        let (status, v) = request(
+            &app,
+            "DELETE",
+            &format!("/api/users/{alice_id}"),
+            Some(&alice),
+            None,
+        )
+        .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
         let (_, v) = request(&app, "GET", "/api/auth/me", Some(&alice), None).await;
         assert_eq!(v["role"], "root", "最后 root 必须保持原状: {v}");
 
         // 删除普通成员：200；其既有会话失效；重放登录被拒（用户没了）。
-        let (status, v) =
-            request(&app, "DELETE", &format!("/api/users/{bob_id}"), Some(&alice), None).await;
+        let (status, v) = request(
+            &app,
+            "DELETE",
+            &format!("/api/users/{bob_id}"),
+            Some(&alice),
+            None,
+        )
+        .await;
         assert_eq!(status, StatusCode::OK, "{v}");
         let (status, _) = request(&app, "GET", "/api/summary", Some(&bob_cookie), None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "删号后旧会话必须失效");
@@ -969,8 +987,14 @@ mod multiuser_rbac {
         assert_eq!(status, StatusCode::UNAUTHORIZED, "已删用户登录必须拒绝");
 
         // ada（admin）不受最后 root 保护，可删；不存在的 id → 404。
-        let (status, _) =
-            request(&app, "DELETE", &format!("/api/users/{ada_id}"), Some(&alice), None).await;
+        let (status, _) = request(
+            &app,
+            "DELETE",
+            &format!("/api/users/{ada_id}"),
+            Some(&alice),
+            None,
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         let (status, _) = request(&app, "DELETE", "/api/users/424242", Some(&alice), None).await;
         assert_eq!(status, StatusCode::NOT_FOUND);

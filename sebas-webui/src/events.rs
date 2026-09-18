@@ -13,6 +13,24 @@ pub struct PendingSubmissionView {
     pub priority: bool,
 }
 
+/// （session-parallel-liveness-and-unread-polish 2.1，design D2）会话相位帧
+/// 的载荷：`session.updated` 与 `session.created` 同形，**五个键每次帧必带**
+/// ——旧 `status` 人读字段删除，无 serde 缺省、无「只在 true 时上 wire」的
+/// 兼容保留（core/webui/frontend 同 binary 发布，wire 无独立版本号）。
+/// 前端所有「这个会话当前状态」的路径只消费这一份帧事实，不做字符串回退。
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionPhaseFrame {
+    /// 七词相位 `starting|queued|working|done|failed|waiting|dormant`
+    /// （`SessionStatus::derive` 对 (MappingState, phase, 泊车) 的投影）。
+    pub status_slug: String,
+    /// 回合占用（WORKING ∨ 泊车 ∨ spawn 窗口）的引擎事实，总是携带。
+    pub turn_engaged: bool,
+    /// 可见回复段数（rail 徽标数据源），总是携带。
+    pub msg_count: u64,
+    /// 待生效提交全量（投递序，原石 `PendingSubmission`），总是携带。
+    pub pending: Vec<sebas_dispatch::PendingSubmission>,
+}
+
 /// Events that the WebUI can push to connected clients.
 ///
 /// Each event serializes to a JSON object with a `type` tag. On the wire
@@ -24,12 +42,21 @@ pub struct PendingSubmissionView {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
 pub enum WebUiEvent {
-    /// A new session was created.
+    /// A new session was created.（2.1，D2）与 updated 同形的完整相位帧，
+    /// 初值 = Spawning 占位（starting / turn_engaged=true / 0 段 / 空栈）。
     #[serde(rename = "session.created")]
-    SessionCreated { session_id: String },
-    /// A session's state was updated.
+    SessionCreated {
+        session_id: String,
+        #[serde(flatten)]
+        phase: SessionPhaseFrame,
+    },
+    /// A session's state was updated.（2.1，D2）五键齐全的相位事实帧。
     #[serde(rename = "session.updated")]
-    SessionUpdated { session_id: String, status: String },
+    SessionUpdated {
+        session_id: String,
+        #[serde(flatten)]
+        phase: SessionPhaseFrame,
+    },
     /// A session was removed.
     #[serde(rename = "session.removed")]
     SessionRemoved { session_id: String },
@@ -113,21 +140,82 @@ mod tests {
 
     /// Every event serializes to a JSON object tagged with its dotted
     /// `type`; this shape is the WS contract clients key off.
+    ///
+    /// （session-parallel-liveness-and-unread-polish 2.1，design D2）
+    /// `session.created` / `session.updated` 是五键齐全的相位帧——
+    /// `status_slug`/`turn_engaged`/`msg_count`/`pending` 每帧必带，旧
+    /// `status` 字段不再出现（无兼容保留）。
     #[test]
     fn events_serialize_with_dotted_type_tag() {
+        let phase = crate::events::SessionPhaseFrame {
+            status_slug: "working".into(),
+            turn_engaged: true,
+            msg_count: 3,
+            pending: vec![sebas_dispatch::PendingSubmission {
+                id: 9,
+                text: "queued behind the live turn".into(),
+                position: 0,
+                disposition: sebas_dispatch::PendingDisposition::Turn,
+                priority: false,
+            }],
+        };
         let cases: Vec<(WebUiEvent, serde_json::Value)> = vec![
             (
                 WebUiEvent::SessionCreated {
                     session_id: "oc_a".into(),
+                    phase: crate::events::SessionPhaseFrame {
+                        status_slug: "starting".into(),
+                        turn_engaged: true,
+                        msg_count: 0,
+                        pending: Vec::new(),
+                    },
                 },
-                json!({"type": "session.created", "session_id": "oc_a"}),
+                json!({
+                    "type": "session.created",
+                    "session_id": "oc_a",
+                    "status_slug": "starting",
+                    "turn_engaged": true,
+                    "msg_count": 0,
+                    "pending": []
+                }),
             ),
             (
                 WebUiEvent::SessionUpdated {
                     session_id: "oc_a".into(),
-                    status: "active".into(),
+                    phase,
                 },
-                json!({"type": "session.updated", "session_id": "oc_a", "status": "active"}),
+                json!({
+                    "type": "session.updated",
+                    "session_id": "oc_a",
+                    "status_slug": "working",
+                    "turn_engaged": true,
+                    "msg_count": 3,
+                    "pending": [
+                        {"id": 9, "text": "queued behind the live turn", "position": 0,
+                         "disposition": "turn", "priority": false}
+                    ]
+                }),
+            ),
+            // 非占用相位同样五键齐全：turn_engaged=false 显式上 wire（D2：
+            // 不再「只在 true 时上 wire」——键缺省即旧世界的回退分支）。
+            (
+                WebUiEvent::SessionUpdated {
+                    session_id: "oc_idle".into(),
+                    phase: crate::events::SessionPhaseFrame {
+                        status_slug: "dormant".into(),
+                        turn_engaged: false,
+                        msg_count: 0,
+                        pending: Vec::new(),
+                    },
+                },
+                json!({
+                    "type": "session.updated",
+                    "session_id": "oc_idle",
+                    "status_slug": "dormant",
+                    "turn_engaged": false,
+                    "msg_count": 0,
+                    "pending": []
+                }),
             ),
             (
                 WebUiEvent::SessionRemoved {

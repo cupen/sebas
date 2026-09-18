@@ -52,6 +52,11 @@ impl DispatchHandle {
                     tracing::warn!(%session_id, "no ChannelKey for permission request; dropping card");
                     return;
                 };
+                // （review 3c 补口，session-unread-badge delta「parked-approval
+                // entry emits a frame」）泊车登记改变 (phase, parked) 投影——
+                // 状态从 working/queued 翻 waiting——这是一个生命周期 flip，
+                // 必须即刻广播，rail 圆点与徽标才不用等轮询。
+                self.publish_updated(&key).await;
                 // permission-mode-auto-gate：不再有 dispatch 侧自动放行（聊天级
                 // allowlist 已退役）。「不再询问」由会话 mode 门控在 driver 的
                 // hook 层执法——bypass 档根本不产生 PermissionRequest；走到这里

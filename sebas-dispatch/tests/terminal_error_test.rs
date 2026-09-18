@@ -2,9 +2,9 @@
 //! emit an ❌ UpdateCard. Non-terminal errors keep the existing behaviour.
 
 use sebas_acp::claude::session::AcpEvent;
-use sebas_dispatch::cards::CardConfig;
 use sebas_channels::ChannelKey;
-use sebas_dispatch::engine::{Out, DispatchHandle};
+use sebas_dispatch::cards::CardConfig;
+use sebas_dispatch::engine::{DispatchHandle, Out};
 use sebas_dispatch::state::{Mapping, SessionMap};
 use std::time::Duration;
 

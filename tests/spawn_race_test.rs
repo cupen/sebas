@@ -5,7 +5,7 @@
 use sebas_acp::claude::manager::SessionManager;
 use sebas_acp::claude::session::{AcpCommand, AcpEvent};
 use sebas_channels::{ChannelEvent, ChannelKey};
-use sebas_dispatch::engine::{Out, DispatchHandle};
+use sebas_dispatch::engine::{DispatchHandle, Out};
 use sebas_dispatch::state::SessionMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -59,7 +59,8 @@ async fn racing_texts_yield_one_spawn_and_joined_pending() {
             &k,
             &prompt,
             "claude",
-            vec![fake().to_str().unwrap().to_string(), 
+            vec![
+                fake().to_str().unwrap().to_string(),
                 "--journal".into(),
                 journal_arg,
                 "--delay-new-ms".into(),
@@ -67,7 +68,8 @@ async fn racing_texts_yield_one_spawn_and_joined_pending() {
             ],
             None,
             None,
-            None)
+            None,
+        )
         .await
     });
 
@@ -160,10 +162,11 @@ async fn crash_on_first_prompt_reaches_pump_despite_slow_sendcard() {
         &k,
         &prompt,
         "claude",
-        vec![fake().to_str().unwrap().to_string(), ],
+        vec![fake().to_str().unwrap().to_string()],
         None,
         None,
-        None)
+        None,
+    )
     .await
     .expect("spawn ok");
 

@@ -11,8 +11,8 @@
 //! 网络读写（那会让一个慢节点卡住所有节点）。
 
 use crate::node_link::Rejection;
-use futures_util::SinkExt;
 use crate::node_link::registry::{NodeRegistry, RegistryError};
+use futures_util::SinkExt;
 use sebas_node_link::{Hello, NodeAuth, PROTOCOL_VERSION, RejectCode, validate_node_id};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -150,7 +150,10 @@ impl NodeLinkServer {
     }
 
     /// 取某节点的在线连接（不在线 → `None`）。
-    pub async fn live_connection(&self, node_id: &str) -> Option<Arc<crate::node_link::NodeConnection>> {
+    pub async fn live_connection(
+        &self,
+        node_id: &str,
+    ) -> Option<Arc<crate::node_link::NodeConnection>> {
         self.live.lock().await.get(node_id).cloned()
     }
 
@@ -266,7 +269,8 @@ pub async fn handle_connection(
     router_endpoint: RouterEndpoint,
     timeout: Duration,
 ) -> Result<Handled, RegistryError> {
-    let mut ws = match tokio::time::timeout(timeout, tokio_tungstenite::accept_async(stream)).await {
+    let mut ws = match tokio::time::timeout(timeout, tokio_tungstenite::accept_async(stream)).await
+    {
         Ok(Ok(ws)) => ws,
         Ok(Err(e)) => {
             return Ok(Handled::Malformed {
@@ -381,9 +385,7 @@ pub async fn handle_connection(
     );
     if let Err(e) = ws
         .send(Message::Text(
-            serde_json::to_string(&ack)
-                .unwrap_or_default()
-                .into(),
+            serde_json::to_string(&ack).unwrap_or_default().into(),
         ))
         .await
     {
@@ -406,12 +408,12 @@ pub async fn handle_connection(
         stream,
         sink,
     );
-    live.lock().await.insert(node_id.clone(), Arc::clone(&connection));
+    live.lock()
+        .await
+        .insert(node_id.clone(), Arc::clone(&connection));
     // 先登记再通知：观察者拿到的句柄必须已经能用（它要立刻 ListSessions/订阅）。
     if let Some(observer) = &observer {
-        observer
-            .connected(&node_id, Arc::clone(&connection))
-            .await;
+        observer.connected(&node_id, Arc::clone(&connection)).await;
     }
     // 等这条链路自然结束（节点离开 / 网络断 / 被关闭）。
     connection.wait_closed().await;
@@ -463,7 +465,12 @@ mod tests {
     /// 关键：准备数据（签发 token / 配对 / 吊销）与断言都必须走同一个句柄。
     /// 另开一个 `NodeRegistry` 实例会各持一份内存副本 —— 既看不到对方的写入，
     /// 一写还会互相覆盖（这正是本模块要守住单写者约定的原因）。
-    async fn server() -> (tempfile::TempDir, String, Arc<Mutex<NodeRegistry>>, NodeLinkServer) {
+    async fn server() -> (
+        tempfile::TempDir,
+        String,
+        Arc<Mutex<NodeRegistry>>,
+        NodeLinkServer,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let srv = NodeLinkServer::bind("127.0.0.1:0", dir.path().join("nodes.json"))
             .await
@@ -484,9 +491,11 @@ mod tests {
 
     async fn send_hello(url: &str, hello: &Hello) -> HelloAck {
         let (mut ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
-        ws.send(ClientMessage::Text(serde_json::to_string(hello).unwrap().into()))
-            .await
-            .unwrap();
+        ws.send(ClientMessage::Text(
+            serde_json::to_string(hello).unwrap().into(),
+        ))
+        .await
+        .unwrap();
         let text = match ws.next().await {
             Some(Ok(ClientMessage::Text(t))) => t,
             other => panic!("未收到应答：{other:?}"),
@@ -504,7 +513,16 @@ mod tests {
             .unwrap();
 
         let handle = tokio::spawn(async move { srv.accept_one().await });
-        let ack = send_hello(&url, &hello("dev-box", NodeAuth::JoinToken { token: token.clone() })).await;
+        let ack = send_hello(
+            &url,
+            &hello(
+                "dev-box",
+                NodeAuth::JoinToken {
+                    token: token.clone(),
+                },
+            ),
+        )
+        .await;
 
         let secret = match ack.outcome {
             HelloOutcome::Accepted { credential } => credential.expect("配对必须交付新凭据"),
@@ -513,7 +531,10 @@ mod tests {
         assert_eq!(secret.len(), 64);
         assert_eq!(
             handle.await.unwrap().unwrap(),
-            Handled::Accepted { node_id: "dev-box".into(), paired: true }
+            Handled::Accepted {
+                node_id: "dev-box".into(),
+                paired: true
+            }
         );
 
         // 断开后：新凭据有效、节点回到离线、token 已被消费。
@@ -522,7 +543,9 @@ mod tests {
         assert_eq!(reg.node("dev-box").unwrap().status(), NodeStatus::Offline);
         assert!(reg.node("dev-box").unwrap().last_seen_unix().is_some());
         assert_eq!(
-            reg.consume_join_token(&token, "dev-box", now_unix()).unwrap_err().code,
+            reg.consume_join_token(&token, "dev-box", now_unix())
+                .unwrap_err()
+                .code,
             RejectCode::JoinTokenConsumed
         );
     }
@@ -535,7 +558,12 @@ mod tests {
         let handle = tokio::spawn(async move { srv.accept_one().await });
         let ack = send_hello(
             &url,
-            &hello("dev-box", NodeAuth::Credential { secret: secret.clone() }),
+            &hello(
+                "dev-box",
+                NodeAuth::Credential {
+                    secret: secret.clone(),
+                },
+            ),
         )
         .await;
         assert!(
@@ -544,11 +572,17 @@ mod tests {
         );
         assert_eq!(
             handle.await.unwrap().unwrap(),
-            Handled::Accepted { node_id: "dev-box".into(), paired: false }
+            Handled::Accepted {
+                node_id: "dev-box".into(),
+                paired: false
+            }
         );
         // 连接结束后回到离线态，凭据仍然有效。
         let reg = registry.lock().await;
-        assert_eq!(reg.authenticate("dev-box", &secret).unwrap(), NodeStatus::Offline);
+        assert_eq!(
+            reg.authenticate("dev-box", &secret).unwrap(),
+            NodeStatus::Offline
+        );
     }
 
     #[tokio::test]
@@ -559,12 +593,20 @@ mod tests {
         let handle = tokio::spawn(async move { srv.accept_one().await });
         let ack = send_hello(
             &url,
-            &hello("dev-box", NodeAuth::Credential { secret: "wrong".into() }),
+            &hello(
+                "dev-box",
+                NodeAuth::Credential {
+                    secret: "wrong".into(),
+                },
+            ),
         )
         .await;
         let (code, cause) = sebas_node_link::rejection_of(&ack).unwrap();
         assert_eq!(code, RejectCode::CredentialInvalid);
-        assert!(cause.contains("未注册") || cause.contains("不正确"), "{cause}");
+        assert!(
+            cause.contains("未注册") || cause.contains("不正确"),
+            "{cause}"
+        );
         let _ = handle.await;
         // 拒绝不影响既有凭据。
         assert!(registry.lock().await.node("dev-box").is_some());
@@ -596,7 +638,10 @@ mod tests {
         let (code, cause) = sebas_node_link::rejection_of(&ack).unwrap();
         assert_eq!(code, RejectCode::ProtocolVersionUnsupported);
         assert!(cause.contains(&PROTOCOL_VERSION.to_string()), "{cause}");
-        assert!(cause.contains(&(PROTOCOL_VERSION + 3).to_string()), "{cause}");
+        assert!(
+            cause.contains(&(PROTOCOL_VERSION + 3).to_string()),
+            "{cause}"
+        );
         let _ = handle.await;
     }
 
@@ -606,7 +651,12 @@ mod tests {
         let handle = tokio::spawn(async move { srv.accept_one().await });
         let ack = send_hello(
             &url,
-            &hello("bad id", NodeAuth::JoinToken { token: "whatever".into() }),
+            &hello(
+                "bad id",
+                NodeAuth::JoinToken {
+                    token: "whatever".into(),
+                },
+            ),
         )
         .await;
         let (code, cause) = sebas_node_link::rejection_of(&ack).unwrap();
@@ -621,7 +671,12 @@ mod tests {
         let handle = tokio::spawn(async move { srv.accept_one().await });
         let ack = send_hello(
             &url,
-            &hello("dev-box", NodeAuth::JoinToken { token: "not-issued".into() }),
+            &hello(
+                "dev-box",
+                NodeAuth::JoinToken {
+                    token: "not-issued".into(),
+                },
+            ),
         )
         .await;
         assert_eq!(
@@ -657,7 +712,10 @@ mod tests {
             other => panic!("未收到应答：{other:?}"),
         };
         assert!(matches!(ack.outcome, HelloOutcome::Accepted { .. }));
-        assert_eq!(registry.lock().await.node("dev-box").unwrap().status(), NodeStatus::Online);
+        assert_eq!(
+            registry.lock().await.node("dev-box").unwrap().status(),
+            NodeStatus::Online
+        );
 
         // 第二台机器用同一个 id 配对 → 必须被拒。
         let second = registry
@@ -667,7 +725,11 @@ mod tests {
             .unwrap();
         let s2 = Arc::clone(&srv);
         let h2 = tokio::spawn(async move { s2.accept_one().await });
-        let ack2 = send_hello(&url, &hello("dev-box", NodeAuth::JoinToken { token: second })).await;
+        let ack2 = send_hello(
+            &url,
+            &hello("dev-box", NodeAuth::JoinToken { token: second }),
+        )
+        .await;
         assert_eq!(
             sebas_node_link::rejection_of(&ack2).unwrap().0,
             RejectCode::NodeIdConflict
@@ -684,11 +746,18 @@ mod tests {
         let (_tmp, url, registry, srv) = server().await;
         let srv = Arc::new(srv);
         for (id, node) in [("node-a", "node-a"), ("node-b", "node-b")] {
-            let token = registry.lock().await.issue_join_token(now_unix(), 600).unwrap();
+            let token = registry
+                .lock()
+                .await
+                .issue_join_token(now_unix(), 600)
+                .unwrap();
             let s = Arc::clone(&srv);
             let handle = tokio::spawn(async move { s.accept_one().await });
             let ack = send_hello(&url, &hello(id, NodeAuth::JoinToken { token })).await;
-            assert!(matches!(ack.outcome, HelloOutcome::Accepted { .. }), "{node}");
+            assert!(
+                matches!(ack.outcome, HelloOutcome::Accepted { .. }),
+                "{node}"
+            );
             let _ = handle.await;
         }
         let reg = registry.lock().await;

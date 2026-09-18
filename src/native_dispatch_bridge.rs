@@ -91,7 +91,9 @@ impl DispatchNativeBridge {
                     // 事件驱动 Updated，让 webui/channel 看到新内容。
                     bridge.router.touch_native_session(&key).await;
                 }
-                AgentEvent::ToolStart { tool_name, args, .. } => {
+                AgentEvent::ToolStart {
+                    tool_name, args, ..
+                } => {
                     let args_str = serde_json::to_string_pretty(&args).unwrap_or_default();
                     let rendered = format!("📖 **{tool_name}**\n```json\n{args_str}\n```");
                     let entry = TurnEntry::markdown(0, rendered);
@@ -101,7 +103,9 @@ impl DispatchNativeBridge {
                         .await;
                     bridge.router.touch_native_session(&key).await;
                 }
-                AgentEvent::ToolEnd { tool_name, result, .. } => {
+                AgentEvent::ToolEnd {
+                    tool_name, result, ..
+                } => {
                     let rendered = format!("✓ **{tool_name}**\n{result}");
                     let entry = TurnEntry::markdown(0, rendered);
                     bridge
@@ -132,7 +136,9 @@ impl DispatchNativeBridge {
                 AgentEvent::Finished { .. } => {
                     bridge.router.touch_native_session(&key).await;
                 }
-                AgentEvent::Error { message, terminal, .. } => {
+                AgentEvent::Error {
+                    message, terminal, ..
+                } => {
                     let rendered = format!("⚠ {message}");
                     let entry = TurnEntry::markdown(0, rendered);
                     bridge
@@ -181,7 +187,9 @@ impl NativeSessionBridge for DispatchNativeBridge {
                 );
             }
             // 登记进 router（Active，session_id = 内核 key），广播 Created。
-            self.router.insert_mapping(key.clone(), session_id.clone()).await;
+            self.router
+                .insert_mapping(key.clone(), session_id.clone())
+                .await;
             // 事件泵：内核事件 → router 状态。必须先订阅再首 prompt——
             // 内核在首个 turn 内就可能发 PermissionRequest，晚订阅会丢事件
             // （broadcast 只转发订阅后的事件）。

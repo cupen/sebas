@@ -114,9 +114,7 @@ fn add(store: &Path, source: &str) -> Result<()> {
         }
         AddSource::Npx(pkg) => {
             skills::add_from_npx(&pkg, store)?;
-            println!(
-                "npx skills add {pkg} 完成（落点由 skills CLI 决定，不经 sebas 仓）"
-            );
+            println!("npx skills add {pkg} 完成（落点由 skills CLI 决定，不经 sebas 仓）");
         }
     }
     Ok(())

@@ -78,15 +78,22 @@ impl StallRegistry {
     }
 
     /// 权限批复出站：从**任意**会话的泊车集合解除该 request_id（emit 单点，
-    /// 调用方不必知道归属会话）。
-    pub async fn note_permission_resolved(&self, request_id: &str) {
+    /// 调用方不必知道归属会话）。返回解除所在的 session_id（`None` = 该
+    /// request_id 本就未泊车，no-op）——调用方（engine `emit`）据此对解除
+    /// 的会话发布 Updated（waiting → 原 phase 的 flip 即刻广播）。
+    pub async fn note_permission_resolved(&self, request_id: &str) -> Option<String> {
         let mut parked = self.parked.write().await;
         // remove 返回 true = 该集合曾有此请求；集合因此变空时连同会话条目
         // 一起清掉（防空壳积累）。未泊车的 id 解除是无害 no-op。
-        parked.retain(|_, ids| {
+        let mut resolved_session = None;
+        parked.retain(|sid, ids| {
             let had = ids.remove(request_id);
+            if had {
+                resolved_session = Some(sid.clone());
+            }
             !had || !ids.is_empty()
         });
+        resolved_session
     }
 
     /// 该会话当前泊车中的权限请求数。
@@ -118,9 +125,7 @@ impl StallRegistry {
         let parked = self.parked.read().await;
         clocks
             .iter()
-            .filter(|(sid, last)| {
-                now - *last > timeout && !parked.contains_key(sid.as_str())
-            })
+            .filter(|(sid, last)| now - *last > timeout && !parked.contains_key(sid.as_str()))
             .map(|(sid, last)| StallFacts {
                 session_id: sid.clone(),
                 last_event_unix: *last,

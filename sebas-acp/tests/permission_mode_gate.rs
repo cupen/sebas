@@ -250,6 +250,14 @@ async fn set_mode_auto_silences_the_next_tool_call_without_respawn() {
     // set_permission_mode 只 ack 不改自身档位（main-loop handler 才更新），
     // 所以第二跳仍会咨询——正是这条 journal 证明静默出自**驱动门控**，
     // 而非 fake 自身的跳过逻辑。
+    //
+    // 计数断言用 `>= 1` 而非 `== 1`（flaky 修复）：驱动的存活看门狗每秒发
+    // 一次 `set_permission_mode(当前档)` 探针（driver.rs Sel::Tick），fake
+    // 对所有入站行无差别记 journal——测试 wall-clock 跨过 1s 刻度时 journal
+    // 就多一行与 SetMode 逐字节相同的探针行（`mode` 同为当前档），无法按
+    // 内容区分。「SetMode 已送达」由 ModeChanged 事件断言 + 本断言共同钉
+    // 住；「无重复下发/无 respawn」由下方 meta 行数（单进程）与 hook 应答
+    // 来源断言钉住，探针不触碰其中任何一个。
     let raw = std::fs::read_to_string(&journal).expect("journal exists");
     // 驱动下发的 SetMode：判定窗口钉在「首个 hook 应答之前」——1s 看门狗
     // 存活探针与 SetMode 走同一条 wire 消息（set_permission_mode），探针
@@ -264,6 +272,16 @@ async fn set_mode_auto_silences_the_next_tool_call_without_respawn() {
             .take(first_answer)
             .any(|l| l.contains("set_permission_mode") && l.contains("\"dir\":\"in\"")),
         "driver must issue set_permission_mode before the first hook answer: {raw}"
+    );
+    // 送达的档位必须是 auto 对应的 bypass tier（spawn flag 与运行时 SetMode
+    // 双路同词）——只看「有下发」会漏掉档位翻译错误。
+    assert!(
+        raw.lines().any(|l| {
+            l.contains("set_permission_mode")
+                && l.contains("\"dir\":\"in\"")
+                && l.contains("bypassPermissions")
+        }),
+        "the delivered set_permission_mode must carry the bypass tier: {raw}"
     );
     assert_eq!(
         raw.lines()

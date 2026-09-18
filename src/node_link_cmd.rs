@@ -78,7 +78,10 @@ pub async fn run(args: Args) -> Result<(), SebasError> {
                 eprintln!("（还没有已注册的节点）");
                 return Ok(());
             }
-            println!("{:<24} {:<10} {:>12}  last seen", "NODE", "STATUS", "PAIRED AT");
+            println!(
+                "{:<24} {:<10} {:>12}  last seen",
+                "NODE", "STATUS", "PAIRED AT"
+            );
             for n in nodes {
                 println!(
                     "{:<24} {:<10} {:>12}  {}",

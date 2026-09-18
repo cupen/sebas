@@ -12,9 +12,7 @@
 //! 仅在 unix 编译；Windows 上该测试目标为空。
 #![cfg(unix)]
 
-use sebas::core_channel::protocol::{
-    ChannelHandshake, CoreChannelRequest, StateStreamFrame,
-};
+use sebas::core_channel::protocol::{ChannelHandshake, CoreChannelRequest, StateStreamFrame};
 use sebas::core_channel::server;
 use sebas::sebas_state::engine::DbStateEngine;
 use sebas::sebas_state::writer::StateWriter;
@@ -204,10 +202,7 @@ async fn providers_and_aliases_mutation_round_trip_over_channel() {
     let core = start_core(dir.path()).await;
 
     // 一次性请求 helper：握手 + 发请求 + 读响应。
-    async fn req_once(
-        path: &std::path::Path,
-        req: &serde_json::Value,
-    ) -> serde_json::Value {
+    async fn req_once(path: &std::path::Path, req: &serde_json::Value) -> serde_json::Value {
         let stream = UnixStream::connect(path).await.unwrap();
         let (r, mut w) = stream.into_split();
         let mut reader = BufReader::new(r);
@@ -276,8 +271,7 @@ async fn providers_and_aliases_mutation_round_trip_over_channel() {
         "providers snapshot must contain anthropic: {resp}"
     );
     assert_eq!(
-        resp["payload"]["model_aliases"]["my-claude"]["provider"],
-        "anthropic",
+        resp["payload"]["model_aliases"]["my-claude"]["provider"], "anthropic",
         "aliases must ride along in the providers snapshot: {resp}"
     );
 

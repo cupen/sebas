@@ -100,7 +100,11 @@ mod tests {
     async fn imports_once_then_never_reads_again() {
         let dir = tempfile::tempdir().unwrap();
         let defaults = defaults_file(dir.path());
-        std::fs::write(&defaults, r#"{"provider": "deepseek", "model": "deepseek-chat"}"#).unwrap();
+        std::fs::write(
+            &defaults,
+            r#"{"provider": "deepseek", "model": "deepseek-chat"}"#,
+        )
+        .unwrap();
 
         let writer = StateWriter::start(dir.path().join("import.db")).unwrap();
         // 第一次：导入成功。

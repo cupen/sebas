@@ -151,7 +151,9 @@ describe('sebas-new-session-dialog', () => {
     >
     expect(detail.agent).toBe('claude')
     expect(detail.model).toBe('deepseek-chat')
-    expect(detail.mode).toBeNull()
+    // （3.2，D5b）未选 mode = 显式缺省 ask：wire 无条件携带 mode 字段，
+    // 不再有「省略字段 = agent 默认」的空路径。
+    expect(detail.mode).toBe('ask')
   })
 
   it('choosing a permission mode rides on the confirm detail', async () => {
@@ -344,7 +346,7 @@ describe('sebas-new-session-dialog', () => {
     expect((codex as unknown as { title: string }).title).toContain('command not found')
   })
 
-  it('reopen resets the mode to the agent-default default', async () => {
+  it('reopen resets the mode to the explicit ask default (D5b)', async () => {
     const el = await mount({ open: true, defaultAgent: 'claude' })
     await pick(el, 'dialog-mode-select', 'auto')
     const modeSel = () =>
@@ -358,6 +360,7 @@ describe('sebas-new-session-dialog', () => {
     el.open = true
     await el.updateComplete
     await new Promise((r) => setTimeout(r, 0))
-    expect(modeSel().value).toBe('')
+    // （3.2，D5b）重开 = 回到显式 ask（真源缺省），而非空选项。
+    expect(modeSel().value).toBe('ask')
   })
 })

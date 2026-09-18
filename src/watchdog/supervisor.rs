@@ -421,7 +421,11 @@ async fn set_state(snapshot: &Mutex<ServiceSnapshot>, state: ServiceState) {
 
 /// 把一次 spawn 失败写进快照（`sebas ctl status` 的 startup_failure 数据源，
 /// spec「spawn failure within limit still logged」：未达上限也必须可见）。
-async fn record_failure(snapshot: &Mutex<ServiceSnapshot>, count: u32, cause: &str) -> StartupFailureInfo {
+async fn record_failure(
+    snapshot: &Mutex<ServiceSnapshot>,
+    count: u32,
+    cause: &str,
+) -> StartupFailureInfo {
     let info = StartupFailureInfo {
         count,
         last_stderr: cause.to_string(),
@@ -694,7 +698,10 @@ async fn supervise(
                         tokio::time::sleep(delay).await;
                     }
                     CrashDecision::CoolDown { delay } => {
-                        warn!(service = name.as_str(), "crash loop limit reached, cooling down");
+                        warn!(
+                            service = name.as_str(),
+                            "crash loop limit reached, cooling down"
+                        );
                         tokio::time::sleep(delay).await;
                     }
                 }
@@ -1019,7 +1026,10 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         failures.changed().await.expect("failure channel open");
-        let event = failures.borrow().clone().expect("terminal event must be Some");
+        let event = failures
+            .borrow()
+            .clone()
+            .expect("terminal event must be Some");
         assert_eq!(event.service, ServiceName::Core);
         assert!(handle.snapshot().await.startup_failure.is_some());
         let _ = tokio::time::timeout(Duration::from_millis(200), task).await;
@@ -1281,7 +1291,11 @@ mod tests {
             "Degraded 后 spawn 应停止"
         );
         // Restart 命令复位 degraded。
-        assert!(handle.send(ServiceCommand::Restart { is_upgrade: false }).await);
+        assert!(
+            handle
+                .send(ServiceCommand::Restart { is_upgrade: false })
+                .await
+        );
         // 等待重新 spawn（bind_failed 的 auto_exit_ms=10，会再次用退出码 75 退出，
         // 但重要的是 spawner 被调用了）。
         tokio::time::sleep(Duration::from_millis(60)).await;

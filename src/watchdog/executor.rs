@@ -124,7 +124,8 @@ pub struct ControlExecutor {
     /// Pending dangerous actions awaiting confirmation, keyed by the opaque
     /// grant token. The `(Actor, ControlRequest)` is the canonical action
     /// truth — the client only ever carries the token.
-    pending: Arc<Mutex<HashMap<String, PendingControl>>>,}
+    pending: Arc<Mutex<HashMap<String, PendingControl>>>,
+}
 
 /// A dangerous action held until its confirmation token is redeemed.
 #[derive(Debug, Clone)]
@@ -174,7 +175,15 @@ impl ControlExecutor {
             channel_path,
             secret,
         });
-        Self::with_activity_probe(control, runner, service, config, config_path, services, probe)
+        Self::with_activity_probe(
+            control,
+            runner,
+            service,
+            config,
+            config_path,
+            services,
+            probe,
+        )
     }
 
     /// 注入探针的构造形态（测试替身 / 未来扩展用）。
@@ -503,7 +512,11 @@ impl ControlExecutor {
             } => {
                 self.control.lock().await.mark_running(
                     &operation_id,
-                    format!("setting {} to {desired:?}{}", name.as_str(), if force { " (force)" } else { "" }),
+                    format!(
+                        "setting {} to {desired:?}{}",
+                        name.as_str(),
+                        if force { " (force)" } else { "" }
+                    ),
                 );
                 match self.services.set_desired(name, desired, persist).await {
                     Ok(()) => self.control.lock().await.mark_done(
@@ -572,10 +585,12 @@ impl ControlExecutor {
                         } else if outcome == crate::watchdog::updater::UpdateOutcome::UpToDate {
                             // up-to-date short-circuit：无安装即无重启（watchdog
                             // spec：no download, install, or restart）。
-                            self.control
-                                .lock()
-                                .await
-                                .mark_done(&operation_id, format!("{label} completed (already up to date; core not restarted)"));
+                            self.control.lock().await.mark_done(
+                                &operation_id,
+                                format!(
+                                    "{label} completed (already up to date; core not restarted)"
+                                ),
+                            );
                         } else {
                             // 升级/回滚落地：重启 core 并标记 is_upgrade，
                             // 交给 readiness 门 + 自动回滚钩子兜底。
@@ -708,10 +723,7 @@ impl ControlExecutor {
             .all_snapshots()
             .await
             .into_iter()
-            .filter_map(|snap| {
-                snap.startup_failure
-                    .map(|info| (snap.name, info))
-            })
+            .filter_map(|snap| snap.startup_failure.map(|info| (snap.name, info)))
             .collect();
         // 终态优先，其次最近发生。
         candidates.sort_by_key(|(_, info)| std::cmp::Reverse(info.at_unix));
@@ -814,7 +826,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl UpdaterRunner for FakeRunner {
-        async fn run(&self, plan: &UpdatePlan, _watchdog: &WatchdogConfig) -> Result<UpdateOutcome> {
+        async fn run(
+            &self,
+            plan: &UpdatePlan,
+            _watchdog: &WatchdogConfig,
+        ) -> Result<UpdateOutcome> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.seen_dev.lock().unwrap().push(plan.dev);
             if self.panic {
@@ -870,8 +886,7 @@ mod tests {
     ) -> (ControlExecutor, Arc<Mutex<ControlService>>) {
         let control = Arc::new(Mutex::new(ControlService::new()));
         let services = ServiceManager::new(
-            std::env::temp_dir()
-                .join(format!("sebas-executor-probe-{}.json", std::process::id())),
+            std::env::temp_dir().join(format!("sebas-executor-probe-{}.json", std::process::id())),
         );
         let executor = ControlExecutor::with_activity_probe(
             control.clone(),
@@ -1254,8 +1269,11 @@ mod tests {
 
     /// 注册了一个 disabled im entry 的 executor：验证 ServiceStatus 列表形状
     /// （恰为受管 entry 快照集合）用。
-    fn executor_with_disabled_im(
-    ) -> (ControlExecutor, Arc<Mutex<ControlService>>, Arc<NeverSpawner>) {
+    fn executor_with_disabled_im() -> (
+        ControlExecutor,
+        Arc<Mutex<ControlService>>,
+        Arc<NeverSpawner>,
+    ) {
         let control = Arc::new(Mutex::new(ControlService::new()));
         let spawner = Arc::new(NeverSpawner {
             spawns: AtomicUsize::new(0),
@@ -1318,8 +1336,7 @@ mod tests {
         let (executor, _control, _spawner) = executor_with_disabled_im();
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
-        let RpcControlResponse::Services { services } =
-            executor.service_status_for("im").await
+        let RpcControlResponse::Services { services } = executor.service_status_for("im").await
         else {
             panic!("service_status_for must return Services");
         };
