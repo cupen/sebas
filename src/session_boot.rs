@@ -246,7 +246,7 @@ pub async fn acp_resume_and_activate(
     if is_fallback {
         router
             .map
-            .preserve_closed_mapping(old_session_id, acp_session_id)
+            .preserve_closed_mapping(key, old_session_id, acp_session_id)
             .await;
     }
     let rx = mgr

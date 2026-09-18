@@ -99,6 +99,43 @@ async fn fail_spawn_keeps_session_visible_as_spawn_failed() {
 }
 
 #[tokio::test]
+async fn fail_spawn_keeps_the_sessions_project_and_agent() {
+    // 「会话必须从属于项目」：spawn 失败只翻状态，**不得**抹掉会话身份——
+    // 项目归属（project_dir）、请求的 agent kind/mode 都在 spawn 之前记账，
+    // 失败不改变它们。此前整体重建映射会把这些一并丢掉：会话从项目里消失、
+    // agent 展示名回退通用标签，把「启动失败」谎报成「没有归属」。
+    let map = SessionMap::new();
+    let key = key();
+    map.begin_spawn_with(
+        key.clone(),
+        Some("claude".into()),
+        None,
+        Some("auto".into()),
+        false,
+    )
+    .await
+    .expect("insert");
+    map.set_project_dir(&key, Some("/tmp/proj".into())).await;
+    map.fail_spawn(&key, "unknown agent kind")
+        .await
+        .expect("fail");
+
+    let m = map.get(&key).await.expect("mapping kept");
+    assert_eq!(
+        m.project_dir.as_deref(),
+        Some("/tmp/proj"),
+        "失败不改项目归属"
+    );
+    assert_eq!(m.pending_kind.as_deref(), Some("claude"), "失败不改 agent");
+    assert_eq!(
+        m.pending_mode.as_deref(),
+        Some("auto"),
+        "失败不改请求的 mode"
+    );
+    assert_eq!(m.desired_mode, "auto", "失败不改期望 mode");
+}
+
+#[tokio::test]
 async fn pending_queue_capped_at_16() {
     // workbench-turn-queue 5.1：满队列不再静默吞掉——第 17 条起返回
     // Overflow{cap}（携带上限、不顶掉已暂存条目），激活时合并 m1..m16。
