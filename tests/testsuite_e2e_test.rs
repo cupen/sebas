@@ -20,9 +20,9 @@ use std::time::Duration;
 mod support;
 
 use support::{
-    Sandbox, free_port, http_client, next_ws_frame, post_json, spawn_sse_stub_upstream,
-    wait_for, wait_reachable, wait_router_addr, wait_unreachable_with_cause, webui_healthy,
-    ws_connect, WsStream,
+    Sandbox, free_port, http_client, next_ws_frame, post_json, scene_project_id,
+    spawn_sse_stub_upstream, wait_for, wait_reachable, wait_router_addr,
+    wait_unreachable_with_cause, webui_healthy, ws_connect, WsStream,
 };
 
 /// 从 core 日志里等出一次性 bootstrap 配对 token（只打印一次，读过就没了）。
@@ -398,10 +398,11 @@ async fn session_round_trip_via_webui_http() {
     let _webui = sb.spawn_webui(&sb.core_secret);
     wait_reachable(&cli, &sb).await;
 
+    let project_id = scene_project_id(&cli, &sb).await;
     let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "prompt": "hello", "agent": "claude" }),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "hello", "agent": "claude" }),
     )
     .await
     .expect("create session");
@@ -482,20 +483,22 @@ async fn two_sessions_spawn_and_turn_concurrently() {
     wait_reachable(&cli, &sb).await;
 
     // Two first messages back-to-back: both sessions enter the spawn window.
+    let project_id = scene_project_id(&cli, &sb).await;
     let (status_a, body_a) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "prompt": "stream", "agent": "claude" }),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "stream", "agent": "claude" }),
     )
     .await
     .expect("create session A");
     assert_eq!(status_a, 201, "create A: {body_a}");
     let key_a = body_a["key"].as_str().expect("key A").to_string();
 
+    let project_id = scene_project_id(&cli, &sb).await;
     let (status_b, body_b) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "prompt": "hello", "agent": "claude" }),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "hello", "agent": "claude" }),
     )
     .await
     .expect("create session B");
@@ -595,10 +598,11 @@ async fn cancel_typed_rejections_over_webui_http() {
     assert_eq!(status, 404, "unknown key must 404: {body}");
 
     // 已知会话、无在飞 turn（首个 turn 已收敛）→ 409 空闲。
+    let project_id = scene_project_id(&cli, &sb).await;
     let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "prompt": "hello", "agent": "claude" }),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "hello", "agent": "claude" }),
     )
     .await
     .expect("create session");
@@ -667,10 +671,11 @@ async fn cancel_interrupts_in_flight_turn_over_webui_http() {
     let _webui = sb.spawn_webui(&sb.core_secret);
     wait_reachable(&cli, &sb).await;
 
+    let project_id = scene_project_id(&cli, &sb).await;
     let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "prompt": "stream", "agent": "claude" }),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "stream", "agent": "claude" }),
     )
     .await
     .expect("create session");
@@ -754,10 +759,11 @@ async fn cancel_without_core_answers_503() {
     wait_reachable(&cli, &sb).await;
 
     // 先建一个会话（idle 即可——503 来自通道不可达，先于 idle 判定）。
+    let project_id = scene_project_id(&cli, &sb).await;
     let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "prompt": "hello", "agent": "claude" }),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "hello", "agent": "claude" }),
     )
     .await
     .expect("create session");
@@ -1151,14 +1157,11 @@ async fn agent_loop_journey_claude_over_fake_upstream() {
     let _webui = sb.spawn_webui(&sb.core_secret);
     wait_reachable(&cli, &sb).await;
 
+    let project_id = scene_project_id(&cli, &sb).await;
     let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({
-            "prompt": "Use the Read tool on the file SEBAS_FAKE_TOOL_LOOP, then report what happened.",
-            "agent": "claude",
-            "mode": "allow"
-        }),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "Use the Read tool on the file SEBAS_FAKE_TOOL_LOOP, then report what happened.", "agent": "claude", "mode": "allow" }),
     )
     .await
     .expect("create ACP session");
@@ -1526,10 +1529,11 @@ async fn no_secret_assembly_end_to_end() {
     }
 
     // 完整会话往返（与带 env 用例同款断言）。
+    let project_id = scene_project_id(&cli, &sb).await;
     let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "prompt": "hello", "agent": "claude" }),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "hello", "agent": "claude" }),
     )
     .await
     .expect("create session");
@@ -1706,10 +1710,11 @@ async fn turn_queue_timing_and_dropped_accounting() {
     wait_reachable(&cli, &sb).await;
 
     // 创建会话（首 prompt "stream" 触发流式场景）→ 等 WORKING 可见。
+    let project_id = scene_project_id(&cli, &sb).await;
     let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "prompt": "stream", "agent": "claude" }),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "stream", "agent": "claude" }),
     )
     .await
     .expect("create session");
@@ -1863,10 +1868,11 @@ async fn turn_queue_timing_and_dropped_accounting() {
     // WORKING 窗口无限长，close 的丢弃记账不再与回合收尾/排队 drain 竞速
     // （"stream" 的 800ms 窗口是既有的计时边沿，曾在并行负载下偶发把
     // discarded 记成 0）。
+    let project_id = scene_project_id(&cli, &sb).await;
     let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "prompt": "stall", "agent": "claude" }),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "stall", "agent": "claude" }),
     )
     .await
     .expect("create second session");
@@ -2113,30 +2119,33 @@ async fn mode_threads_to_agent_argv() {
     wait_reachable(&cli, &sb).await;
 
     // 对照会话：不带 mode → argv 无 --permission-mode。
+    let project_id = scene_project_id(&cli, &sb).await;
     let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "prompt": "hello", "agent": "claude" }),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "hello", "agent": "claude" }),
     )
     .await
     .expect("create default session");
     assert_eq!(status, 201, "create default session: {body}");
 
     // mode=allow → argv 含 --permission-mode bypassPermissions。
+    let project_id = scene_project_id(&cli, &sb).await;
     let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "prompt": "hello", "agent": "claude", "mode": "allow" }),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "hello", "agent": "claude", "mode": "allow" }),
     )
     .await
     .expect("create allow session");
     assert_eq!(status, 201, "create allow session: {body}");
 
     // 未知 mode → 400（词汇校验，不静默降级）。
+    let project_id = scene_project_id(&cli, &sb).await;
     let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "prompt": "x", "agent": "claude", "mode": "plan" }),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "x", "agent": "claude", "mode": "plan" }),
     )
     .await
     .expect("create unknown-mode session");
@@ -2218,10 +2227,11 @@ async fn mode_mid_session_switch() {
     let _webui = sb.spawn_webui(&sb.core_secret);
     wait_reachable(&cli, &sb).await;
 
+    let project_id = scene_project_id(&cli, &sb).await;
     let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "prompt": "hello", "agent": "claude" }),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "hello", "agent": "claude" }),
     )
     .await
     .expect("create session");
@@ -2397,10 +2407,11 @@ async fn slash_commands_advertise_and_reach_stub() {
     wait_reachable(&cli, &sb).await;
 
     // 1) 创建 acp（claude 驱动）会话——仓库现状的真实请求形状。
+    let project_id = scene_project_id(&cli, &sb).await;
     let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "prompt": "hello", "agent": "claude" }),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "hello", "agent": "claude" }),
     )
     .await
     .expect("create session");
@@ -2545,10 +2556,11 @@ async fn claude_model_surface_reaches_snapshot_and_switch_round_trips() {
     let _webui = sb.spawn_webui(&sb.core_secret);
     wait_reachable(&cli, &sb).await;
 
+    let project_id = scene_project_id(&cli, &sb).await;
     let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "prompt": "hello", "agent": "claude" }),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "hello", "agent": "claude" }),
     )
     .await
     .expect("create session");
@@ -2989,10 +3001,11 @@ async fn activate_placeholder_spawns_without_prompt() {
     wait_reachable(&cli, &sb).await;
 
     // 0-turn 占位：创建请求不带 prompt。
+    let project_id = scene_project_id(&cli, &sb).await;
     let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "agent": "claude" }),
+        serde_json::json!({ "project_id": project_id.clone(), "agent": "claude" }),
     )
     .await
     .expect("create placeholder");
@@ -3065,10 +3078,11 @@ async fn turn_appends_stream_over_ws() {
     wait_reachable(&cli, &sb).await;
 
     // 创建并等首回合收敛（fake-claude 对任意 prompt 回 "hello world"）。
+    let project_id = scene_project_id(&cli, &sb).await;
     let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "prompt": "stream me", "agent": "claude" }),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "stream me", "agent": "claude" }),
     )
     .await
     .expect("create session");
@@ -3156,10 +3170,11 @@ async fn stalled_turn_force_settles_and_the_queue_self_heals() {
     wait_reachable(&cli, &sb).await;
 
     // 创建会话（"stall" → 一帧内容后子进程沉默）→ 等首帧内容上屏。
+    let project_id = scene_project_id(&cli, &sb).await;
     let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "prompt": "stall", "agent": "claude" }),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "stall", "agent": "claude" }),
     )
     .await
     .expect("create session");
@@ -3299,10 +3314,11 @@ async fn parked_permission_does_not_trip_the_stall_guard() {
     wait_reachable(&cli, &sb).await;
 
     // "perm" → Bash 工具调用被 PreToolUse 审批泊住（等 hook 决定）。
+    let project_id = scene_project_id(&cli, &sb).await;
     let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "prompt": "perm", "agent": "claude" }),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "perm", "agent": "claude" }),
     )
     .await
     .expect("create session");
@@ -3723,10 +3739,11 @@ async fn claude_turn_streams_multiple_frames_to_the_webui() {
     })
     .await;
 
+    let project_id = scene_project_id(&cli, &sb).await;
     let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "prompt": "drip", "agent": "claude" }),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "drip", "agent": "claude" }),
     )
     .await
     .expect("create session");
@@ -3898,10 +3915,11 @@ async fn native_turn_streams_deltas_to_the_webui() {
     })
     .await;
 
+    let project_id = scene_project_id(&cli, &sb).await;
     let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "prompt": "hi", "agent": "native" }),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "hi", "agent": "native" }),
     )
     .await
     .expect("create native session");
@@ -4026,10 +4044,11 @@ async fn summary_stays_small_while_transcript_is_large() {
     let _webui = sb.spawn_webui(&sb.core_secret);
     wait_reachable(&cli, &sb).await;
 
+    let project_id = scene_project_id(&cli, &sb).await;
     let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "prompt": "flood", "agent": "claude" }),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "flood", "agent": "claude" }),
     )
     .await
     .expect("create session");

@@ -1232,6 +1232,53 @@ fn strip_ansi(line: &str) -> String {
     out
 }
 
+/// 沙箱场景项目：把沙箱目录注册为项目并返回它的稳定 id（幂等——已在册就
+/// 复用）。
+///
+/// 「会话必须从属于项目」：`POST /api/sessions` 的 `project_id` 必填，任何
+/// 经 WebUI 建立的会话都要有一个已注册的项目；沙箱把 workspace root 钉在
+/// 沙箱目录，所以注册它必定界内。所有 e2e / 验收旅程的创建都经这里取目标。
+pub async fn scene_project_id(cli: &reqwest::Client, sb: &Sandbox) -> String {
+    let path = forward_slash(&sb.path);
+    // 沙箱目录可能以符号链接形态存在（路径超限时的短链接），注册表落的是
+    // 服务端规范化后的路径——比对与注册都用规范化形态，避免同目录两个字符串。
+    let canonical = |p: &std::path::Path| -> String {
+        forward_slash(&std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))
+    };
+    let path = {
+        let c = canonical(&sb.path);
+        if c.is_empty() { path } else { c }
+    };
+    let projects_url = format!("{}/api/projects", sb.webui_url());
+    let (status, body) = post_json(
+        cli,
+        &projects_url,
+        serde_json::json!({ "path": path }),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("register scene project: {e}"));
+    if status == 201 {
+        return body["id"].as_str().expect("project id").to_string();
+    }
+    // 409 = 已在册（或注册竞态，或测试自己注册过同一目录）：从列表取回既有 id。
+    let list = get_json(cli, &projects_url)
+        .await
+        .unwrap_or_else(|| panic!("list projects after HTTP {status}: {body}"));
+    list["projects"]
+        .as_array()
+        .expect("projects array")
+        .iter()
+        .find(|p| {
+            p["path"]
+                .as_str()
+                .map(|registered| canonical(std::path::Path::new(registered)) == path)
+                .unwrap_or(false)
+        })
+        .and_then(|p| p["id"].as_str())
+        .unwrap_or_else(|| panic!("scene project missing from list: {list}"))
+        .to_string()
+}
+
 /// POST a JSON body, return (status, body). Err on transport failure.
 pub async fn post_json(
     cli: &reqwest::Client,

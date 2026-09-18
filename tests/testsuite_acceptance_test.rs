@@ -12,12 +12,24 @@ use std::time::Duration;
 
 mod support;
 
-use support::{Sandbox, http_client, post_json, spawn_stub_upstream, wait_for, wait_router_addr};
+use support::{
+    Sandbox, http_client, post_json, scene_project_id, spawn_stub_upstream, wait_for,
+    wait_router_addr,
+};
 
 const TURN: Duration = Duration::from_secs(30);
 const STARTUP: Duration = Duration::from_secs(30);
 
+/// 建会话（`body` 里不用自带 project_id：会话必须从属于项目，这里统一注入
+/// 沙箱场景项目）。
 async fn create_session(cli: &reqwest::Client, sb: &Sandbox, body: serde_json::Value) -> String {
+    let mut body = body;
+    if body.get("project_id").is_none() {
+        let project_id = scene_project_id(cli, sb).await;
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert("project_id".to_string(), serde_json::json!(project_id));
+        }
+    }
     let (status, resp) = post_json(cli, &format!("{}/api/sessions", sb.webui_url()), body)
         .await
         .expect("create session");
@@ -293,10 +305,26 @@ async fn native_agent_turn_via_router_journey() {
     .await;
 
     let create_url = format!("{dashboard_url}/api/sessions");
+    // 会话必须从属于项目：先注册沙箱场景项目并带上。本用例的 webui 是
+    // **进程内**（core --webui，端口与 $sb.webui_url() 不同），故注册走
+    // dashboard_url；workspace root 已钉在沙箱目录，注册必定界内。
+    let (pstatus, pbody) = post_json(
+        &cli,
+        &format!("{dashboard_url}/api/projects"),
+        serde_json::json!({ "path": support::forward_slash(&sb.path) }),
+    )
+    .await
+    .expect("register scene project");
+    assert_eq!(pstatus, 201, "register scene project: {pbody}");
+    let project_id = pbody["id"].as_str().expect("project id").to_string();
     let (status, resp) = post_json(
         &cli,
         &create_url,
-        serde_json::json!({ "prompt": "hello", "agent": "native" }),
+        serde_json::json!({
+            "prompt": "hello",
+            "agent": "native",
+            "project_id": project_id,
+        }),
     )
     .await
     .expect("create native session");
@@ -539,10 +567,11 @@ async fn creation_dialog_journey() {
 
     // 4) agent 词汇门（对话框的 agent 词汇表 = 配置键名/native；旧 backend
     //    词汇在 wire 上被类型化拒绝——对话框选不出也发不出这些值）。
+    let project_id = scene_project_id(&cli, &sb).await;
     let (status, resp) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "agent": "acp:claude" }),
+        serde_json::json!({ "project_id": project_id.clone(), "agent": "acp:claude" }),
     )
     .await
     .expect("legacy agent create");
