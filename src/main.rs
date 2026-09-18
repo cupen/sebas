@@ -59,6 +59,14 @@ async fn main() -> anyhow::Result<()> {    // reqwest 0.12 链路启用 rustls/a
             }
             Ok(())
         }
+        Cmd::FakeProvider(args) => {
+            if let Err(e) = sebas::fake_provider_cmd::run(args.into()).await {
+                // 生命周期子命令：ready 之前返回 Err（坏 scenario / bind 失败）
+                // 即启动失败 → 75 + 摘要。
+                startup_failure_exit(&e);
+            }
+            Ok(())
+        }
         Cmd::AgentKinds(args) => match args.cmd {
             AgentKindsCmd::List(list) => {
                 if let Err(e) = sebas::agent_kinds::run(sebas::agent_kinds::ListArgs {
@@ -556,6 +564,16 @@ impl From<RecordArgs> for sebas::record::RecordArgs {
     }
 }
 
+impl From<cli::FakeProviderArgs> for sebas::fake_provider_cmd::FakeProviderArgs {
+    fn from(a: cli::FakeProviderArgs) -> Self {
+        Self {
+            listen: a.listen,
+            scenario: a.scenario,
+            journal: a.journal,
+        }
+    }
+}
+
 impl From<RouterArgs> for sebas::router_cmd::RouterArgs {
     fn from(a: RouterArgs) -> Self {
         Self {
@@ -688,6 +706,40 @@ mod tests {
             panic!("expected Router subcommand");
         };
         assert!(args.debug, "--debug flag must be captured");
+    }
+
+    #[test]
+    fn fake_provider_subcommand_parses_flags() {
+        // fake-provider-upstream 2.1：--listen / --scenario / --journal 三旗标。
+        let cli = Cli::try_parse_from([
+            "sebas",
+            "fake-provider",
+            "--listen",
+            "127.0.0.1:9999",
+            "--scenario",
+            "/tmp/s.json",
+            "--journal",
+            "/tmp/j.jsonl",
+        ])
+        .expect("`sebas fake-provider …` must parse");
+        let Cmd::FakeProvider(args) = cli.cmd else {
+            panic!("expected FakeProvider subcommand");
+        };
+        assert_eq!(args.listen, "127.0.0.1:9999");
+        assert_eq!(args.scenario.as_deref(), Some("/tmp/s.json"));
+        assert_eq!(args.journal.as_deref(), Some("/tmp/j.jsonl"));
+
+        // 缺省值：127.0.0.1:0（随机端口），scenario/journal 不配。
+        let cli = Cli::try_parse_from(["sebas", "fake-provider"]).expect("bare must parse");
+        let Cmd::FakeProvider(args) = cli.cmd else {
+            panic!("expected FakeProvider subcommand");
+        };
+        assert_eq!(args.listen, "127.0.0.1:0");
+        assert!(args.scenario.is_none() && args.journal.is_none());
+
+        // 转译到薄壳 Args 不丢字段。
+        let shell: sebas::fake_provider_cmd::FakeProviderArgs = args.into();
+        assert_eq!(shell.listen, "127.0.0.1:0");
     }
 
     #[test]
