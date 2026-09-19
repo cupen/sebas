@@ -3061,6 +3061,116 @@ async fn activate_placeholder_spawns_without_prompt() {
     assert_eq!(body["status"], "already-running", "activate #2: {body}");
 }
 
+/// fix-webui-qa-defects 3.3（session-lifecycle「idle placeholder is never
+/// stall-settled」的进程级回归）：0-turn 占位经聚焦拉起（activate：无 prompt
+/// spawn、握手 lazy seed 出 SEED 卡、transcript 恒空——QA 幽灵回合的实体）
+/// 后闲置超过配置调小的 `turn_stall_timeout`（3s）——
+/// 1) detail 无任何 error 条目：占位不构成在飞回合，看门狗绝不注入合成
+///    「回合停滞被强制收尾」；
+/// 2) 状态可写：首条消息照常开轮并完成完整回合；完成后再次越过阈值，
+///    transcript 依旧无合成错误（看门狗不误伤已收回合）。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn idle_placeholder_never_stall_settles_and_stays_writable() {
+    let sb = Sandbox::new("testsuite_e2e", "placeholder-idle-stall");
+    sb.set_turn_stall_timeout(3);
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    // 0-turn 占位（创建请求不带 prompt）→ 聚焦拉起（activate #1 = started）。
+    let project_id = scene_project_id(&cli, &sb).await;
+    let key = create_project_placeholder(&cli, &sb, &project_id, "idle-stall").await;
+    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+    let activate_url = format!("{}/api/sessions/{key}/activate", sb.webui_url());
+    let (status, body) = post_json(&cli, &activate_url, serde_json::json!({}))
+        .await
+        .expect("activate placeholder");
+    assert_eq!(status, 200, "activate placeholder: {body}");
+    assert_eq!(body["status"], "started", "activate placeholder: {body}");
+
+    // 子进程拉起后离开 starting 态（0-turn 占位：无 prompt、零条目）。
+    let hint = sb.path.clone();
+    wait_for(
+        "placeholder to leave starting after activate",
+        Duration::from_secs(25),
+        &hint,
+        {
+            let cli = cli.clone();
+            let url = detail_url.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    (v["status_slug"].as_str() != Some("starting")).then_some(v)
+                })
+            }
+        },
+    )
+    .await;
+
+    // 闲置超过阈值（3s 配置，8s 观察窗）：detail 保持干净——零 error 条目、
+    // 无「回合停滞」合成文案（占位幽灵回合的进程级反证）。
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    let (status, v) = get_json_status(&cli, &detail_url)
+        .await
+        .expect("detail after the idle window");
+    assert_eq!(status, 200, "detail after the idle window: {v}");
+    let entries = v["entries"].as_array().cloned().unwrap_or_default();
+    assert!(
+        entries
+            .iter()
+            .all(|e| e["element_type"].as_str() != Some("error")),
+        "an idle 0-turn placeholder must never carry a synthetic error entry: {entries:?}"
+    );
+
+    // 状态可写：首条消息照常开轮并完成完整回合（占位豁免绝不外溢到真实
+    // 回合——看门狗对它照常计时，回合正常完成即不受影响）。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+        serde_json::json!({ "message": "first real message" }),
+    )
+    .await
+    .expect("message the idle placeholder");
+    assert_eq!(status, 200, "the idle placeholder must stay writable: {body}");
+    wait_turn_done(&cli, &sb, &detail_url).await;
+
+    // 完成后再次越过阈值：看门狗不误伤已收回合，transcript 仍无合成错误，
+    // 且真实回合的事实（操作者 prompt + fake-claude 回复）完整在场。
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    let (_status, v) = get_json_status(&cli, &detail_url)
+        .await
+        .expect("detail after the post-done window");
+    let entries = v["entries"].as_array().cloned().unwrap_or_default();
+    assert!(
+        entries
+            .iter()
+            .all(|e| e["element_type"].as_str() != Some("error")),
+        "a completed turn must not gain a synthetic error after the timeout: {entries:?}"
+    );
+    let transcript = entries
+        .iter()
+        .filter_map(|e| e["content"].as_str())
+        .collect::<Vec<_>>()
+        .join("");
+    assert!(
+        transcript.contains("first real message")
+            && transcript.contains("hello")
+            && transcript.contains("world"),
+        "the real turn's prompt and reply must be intact: {transcript:?}"
+    );
+}
+
 /// workbench-live-conversation-flow 2.1/7.1：回合内容实时流式的进程级
 /// 旅程——订阅 `/ws` 后提交一条消息，`turn.append` 帧（合并窗批帧，条目
 /// position 单调）必须在回合结束前/后到达，且内容覆盖操作员 prompt 与
@@ -4146,5 +4256,162 @@ async fn summary_stays_small_while_transcript_is_large() {
     assert_eq!(
         tail_entries.last().unwrap()["position"].as_u64(),
         Some(entries.len() as u64 - 1),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// fix-webui-qa-defects 2.4 的进程级回归（本 change
+// fix-webui-approval-restore-and-session-identity 7.2 遗留债）：归档 → 恢复 →
+// rail 可见、转写完整、History 清空——纯 HTTP 面钉同一契约（浏览器级旅程由
+// testsuite-webui 的 archive-restore.spec / archive-identity.spec 承担）。
+// ---------------------------------------------------------------------------
+
+/// 归档恢复全契约：完整回合 → 归档（活动列表退场、条目带全量转写快照 +
+/// agent 身份）→ 恢复（行重建回原项目、转写完整、History 清空、可继续对话、
+/// 身份原样带回）。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn archive_restore_rebuilds_row_transcript_and_clears_history() {
+    let sb = Sandbox::new("testsuite_e2e", "archive-restore");
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    // 完整回合先落地：归档快照与恢复重建都必须带走它。
+    let project_id = scene_project_id(&cli, &sb).await;
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({
+            "project_id": project_id.clone(),
+            "prompt": "archive-me",
+            "agent": "claude"
+        }),
+    )
+    .await
+    .expect("create session");
+    assert_eq!(status, 201, "create session: {body}");
+    let key = body["key"].as_str().expect("key").to_string();
+    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+    wait_turn_done(&cli, &sb, &detail_url).await;
+    let (_status, before) = get_json_status(&cli, &detail_url)
+        .await
+        .expect("detail before archive");
+    let entries_before = before["entries"].as_array().expect("entries").len();
+    assert!(entries_before > 0, "the turn must have landed: {before}");
+
+    // 归档：行退出活动列表；条目携带全量转写快照 + 归档时刻的身份
+    // （本 change 3.1：agent_kind 随 SessionInfo 落档）。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions/{key}/archive", sb.webui_url()),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("archive");
+    assert_eq!(status, 200, "archive: {body}");
+    assert_eq!(body["status"], "archived", "{body}");
+
+    let (_, list) = get_json_status(&cli, &format!("{}/api/sessions", sb.webui_url()))
+        .await
+        .expect("session list after archive");
+    assert!(
+        list["recent_sessions"]
+            .as_array()
+            .map_or(true, |rows| rows
+                .iter()
+                .all(|r| r["encoded_key"].as_str() != Some(key.as_str()))),
+        "the archived session must leave the active list: {list}"
+    );
+
+    let (_, archive) = get_json_status(&cli, &format!("{}/api/archive", sb.webui_url()))
+        .await
+        .expect("archive list after archive");
+    let entries = archive["archived_sessions"].as_array().expect("entries");
+    assert_eq!(entries.len(), 1, "History holds exactly the new entry: {archive}");
+    let entry = &entries[0];
+    // axum percent-decodes path params, so the entry stores the RAW key
+    // (literal NUL) while the create response carries the encoded form.
+    let raw_key = key.replace("%00", "\u{0}");
+    assert_eq!(entry["session_key"].as_str(), Some(raw_key.as_str()), "{entry}");
+    assert_eq!(
+        entry["transcript"].as_array().map(Vec::len),
+        Some(entries_before),
+        "the snapshot must carry the full transcript: {entry}"
+    );
+    assert_eq!(
+        entry["agent_kind"].as_str(),
+        Some("claude"),
+        "the entry must carry the agent identity: {entry}"
+    );
+
+    // 恢复：行重建回原项目（rail 可见）、转写完整、History 清空。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions/{key}/restore", sb.webui_url()),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("restore");
+    assert_eq!(status, 200, "restore: {body}");
+    assert_eq!(body["status"], "restored", "{body}");
+
+    let (_, list) = get_json_status(&cli, &format!("{}/api/sessions", sb.webui_url()))
+        .await
+        .expect("session list after restore");
+    let row = list["recent_sessions"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .find(|r| r["encoded_key"].as_str() == Some(key.as_str()))
+        .unwrap_or_else(|| panic!("the rebuilt session must be listed again: {list}"));
+    assert_eq!(
+        row["project_id"].as_str(),
+        Some(project_id.as_str()),
+        "the row must be back under its original project: {row}"
+    );
+
+    let (_status, after) = get_json_status(&cli, &detail_url)
+        .await
+        .expect("detail after restore");
+    assert_eq!(
+        after["entries"].as_array().map(Vec::len),
+        Some(entries_before),
+        "the rebuilt session must expose the SAME transcript: {after}"
+    );
+    // （3.2）身份随恢复链路原样带回。
+    assert_eq!(
+        after["agent_kind"].as_str(),
+        Some("claude"),
+        "the restored session must keep its agent identity: {after}"
+    );
+
+    let (_, archive) = get_json_status(&cli, &format!("{}/api/archive", sb.webui_url()))
+        .await
+        .expect("archive list after restore");
+    assert!(
+        archive["archived_sessions"]
+            .as_array()
+            .map_or(true, |rows| rows.is_empty()),
+        "History must be cleared after a successful restore: {archive}"
+    );
+
+    // 可写：恢复后的会话照常对话（Resume 路径完成完整回合）。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+        serde_json::json!({ "message": "still here" }),
+    )
+    .await
+    .expect("message after restore");
+    assert_eq!(status, 200, "the restored session must be writable: {body}");
+    wait_turn_done(&cli, &sb, &detail_url).await;
+    let (_status, grown) = get_json_status(&cli, &detail_url)
+        .await
+        .expect("detail after follow-up");
+    assert!(
+        grown["entries"].as_array().expect("entries").len() > entries_before,
+        "the follow-up must append on top of the restored transcript: {grown}"
     );
 }

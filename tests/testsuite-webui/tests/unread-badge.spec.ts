@@ -60,7 +60,7 @@ test.describe('未读徽标', () => {
 
     await page.goto('/')
     await expect(rail.host).toBeVisible()
-    await rail.expandProject(projectName)
+    await rail.ensureProjectExpanded(projectName)
 
     // 首访无锚点 = 全部已读：两行都带着 msg_count=1，却都不冒红点。
     await expect(rail.host.locator('[data-testid="session-unread"]')).toHaveCount(0)

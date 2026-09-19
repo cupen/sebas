@@ -387,7 +387,7 @@ test.describe('项目管理覆盖', () => {
       expect(collector.clean()).toEqual([])
     })
 
-    test('P2 empty path disables submit; missing path errors inline, dialog stays', async ({
+    test('P2 empty path disables submit; missing path gets the precheck reason, dialog stays', async ({
       page,
     }) => {
       const rail = new ProjectRail(page)
@@ -401,24 +401,22 @@ test.describe('项目管理覆盖', () => {
 
       const dialog = rail.addDialog()
       const submit = dialog.locator('wa-button').filter({ hasText: 'Add project' })
-      // Empty path: the footer submit carries the disabled attribute (wa-button
-      // is a custom element — assert the attribute, not native semantics).
-      await expect(submit).toHaveAttribute('disabled', '')
+      // Empty path: the footer submit is disabled. wa-button does not reflect
+      // disabled to a host attribute — assert the property, not native
+      // semantics (Playwright can't see WA's internal disabled state).
+      await expect(submit).toHaveJSProperty('disabled', true)
 
-      // Missing path: server rejects, the rejection surfaces INSIDE the dialog
-      // (no close, no registry write).
+      // Missing path: the browse-dirs precheck（本 change 5.2）answers with
+      // the concrete reason under the input and the submit STAYS disabled —
+      // the register-side inline error is reserved for precheck-pass races,
+      // not for this journey (不可解析即越界，add-workspace-root).
       const missing = path.join(sceneDir(), `no-such-dir-${Date.now()}`)
       const pathInput = dialog.locator('wa-input[label="Project path"] input')
       await pathInput.click()
       await pathInput.pressSequentially(missing)
-      await expect(submit).not.toHaveAttribute('disabled', '')
-      await submit.click()
-      // The rejection renders in the dialog's inline-error slot (scoped by
-      // testid — structural `+` selectors broke when the node select landed
-      // between the path field and the error div). 不可解析即越界（
-      // add-workspace-root）：不存在路径与确定越界同文案。
-      const inlineError = dialog.locator('[data-testid="add-project-error"]')
-      await expect(inlineError).toContainText('路径超出允许范围', { timeout: 10_000 })
+      const hint = dialog.locator('[data-testid="add-project-scope-hint"]')
+      await expect(hint).toContainText('不存在', { timeout: 10_000 })
+      await expect(submit).toHaveJSProperty('disabled', true)
       // The dialog is still open (heading visible) and the registry untouched.
       await expect(
         dialog.locator('h2, [role="heading"]', { hasText: 'Add project' }).first(),

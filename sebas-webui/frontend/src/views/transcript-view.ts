@@ -415,6 +415,36 @@ export function deniedLabel(label: string): string {
 }
 
 /**
+ * 被拒工具条目的展开体正文（fix-webui-qa-defects 5.3，纯函数）：core 写入
+ * 的 ToolEnd 内容以 `✓ **tool**` 开头，被拒条目的折叠标题已挂 ✗（deniedLabel），
+ * 展开详情的首行却仍是 ✓——与折叠态自相矛盾。这里把首行的成功前缀改写为
+ * ✗（无前缀的形态原样返回，由调用方决定是否另加角标）。
+ */
+export function deniedDetailContent(content: string, title?: string | null): string {
+  if (!toolResultDenied(content, title)) return content
+  return content.replace(/^✓\s*/, '✗ ')
+}
+
+/**
+ * 错误气泡的分类标签（fix-webui-qa-defects 5.2，design D5，纯函数）：按
+ * `failure_class` 如实渲染——spawn → 「spawn failed」、stall → 「回合停滞」；
+ * generic 或旧条目（无分类）→ 中性「错误」。写死的「spawn failed」退役。
+ */
+export function errorEntryLabel(entry: {
+  failure_class?: string | null
+  content?: string
+}): string {
+  switch (entry.failure_class) {
+    case 'spawn':
+      return 'spawn failed'
+    case 'stall':
+      return '回合停滞'
+    default:
+      return '错误'
+  }
+}
+
+/**
  * Second-level fold label fallback（2.2）: entries without the structured
  * `title` (legacy persisted data) show a generic stable label derived from
  * the element type instead. （5.6）被拒条目去 ✓ 挂 ✗。
@@ -1359,7 +1389,7 @@ export class SebasTranscriptView extends LitElement {
         <div class="avatar error">!</div>
         <div class="bubble error">
           <div class="meta">
-            <span class="author error">spawn failed</span>
+            <span class="author error">${errorEntryLabel(e)}</span>
             ${count > 1 ? html`<span class="count">×${count}</span>` : nothing}
             <time class="time" datetime=${iso || nothing}>${ts}</time>
           </div>
@@ -1523,11 +1553,13 @@ export class SebasTranscriptView extends LitElement {
     `
   }
 
-  /** （4.5）二级条目的展开体：超阈值截断 + 明示省略量 + 「查看全部」。 */
+  /** （4.5）二级条目的展开体：超阈值截断 + 明示省略量 + 「查看全部」。
+   *  （fix-webui-qa-defects 5.3）被拒条目的展开详情与折叠标题一致挂 ✗。 */
   private renderItemBody(it: ProcessItem) {
-    const cut = truncateHtml(it)
+    const content = deniedDetailContent(it.content, it.title)
+    const cut = truncateHtml({ ...it, content })
     if (!cut.truncated) {
-      return html`<div class="body item-body">${unsafeHTML(renderMarkdown(it.content))}</div>`
+      return html`<div class="body item-body">${unsafeHTML(renderMarkdown(content))}</div>`
     }
     return html`
       <div class="body item-body" data-truncated>

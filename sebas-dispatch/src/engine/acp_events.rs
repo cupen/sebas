@@ -36,9 +36,11 @@ impl DispatchHandle {
             } => {
                 // fix-pending-queue-liveness 2.1（design D2）：权限请求泊车
                 // 登记——该回合在等人批复，看门狗豁免计时；批复经 emit 的
-                // PermissionReply 钩子解除后重新计时。
+                // PermissionReply 钩子解除后重新计时。（1.1）登记带工具/参数：
+                // 读模型 `pending_permission_requests` 的数据源，审批面刷新后
+                // 从这里重建，不再依赖一次性 WS 推送。
                 self.stall
-                    .note_permission_parked(session_id, request_id)
+                    .note_permission_parked(session_id, request_id, tool_name, args.clone())
                     .await;
                 // 独立权限广播（design D6）：与飞书卡片路径并行，任何订阅者
                 // （如 webui InProcessBackend）都能拿到这条 PermissionRequest。

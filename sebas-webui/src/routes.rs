@@ -61,6 +61,9 @@ pub(crate) fn build_session_rows(
                 // 本机公式算 id，会挂到「本机同路径项目」下（或一个不存在的 id）。
                 project_id: crate::projects::project_id_for_session(info),
                 prompt_preview: info.user_prompt.clone(),
+                // （5.1，design D6）label 随行下发——rail 行命名优先级
+                // label → 首条 prompt 预览 → 短 id 的第一顺位数据源。
+                label: info.label.clone(),
                 current_model: info.current_model.clone(),
                 desired_mode: info.desired_mode.clone(),
                 effective_mode: info.effective_mode.clone(),

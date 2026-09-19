@@ -26,7 +26,10 @@
 //!    than delivered a gap; the client re-snapshots on reconnect.
 
 use sebas_channels::ChannelKey;
-use sebas_dispatch::{PendingSubmission, SessionEvent, SessionInfo, TurnEntry, TurnStreamEvent};
+use sebas_dispatch::{
+    PendingApproval, PendingSubmission, SessionEvent, SessionInfo, SessionIdentity, TurnEntry,
+    TurnStreamEvent,
+};
 use sebas_webui::session_backend::{PermissionDecision, PermissionNotice};
 use serde::{Deserialize, Serialize};
 
@@ -143,6 +146,26 @@ pub enum CoreChannelRequest {
     Cancel { key: ChannelKey },
     /// Close (kill) a session.
     Close { key: ChannelKey },
+    /// 从归档条目重建会话（fix-webui-qa-defects 2.2，design D1）：core 侧
+    /// `web_restore_session`——原 key 重建 Dormant 映射 + 转写回放。detached
+    /// webui 的 restore handler 先调这里、成功后才消费本地归档条目。
+    RestoreSession {
+        key: ChannelKey,
+        /// 归档时刻的原路由 id；`None` = 旧条目（引擎按 key 合成）。
+        #[serde(default)]
+        session_id: Option<String>,
+        /// 原项目路径；`None`/空 = 无项目会话。
+        #[serde(default)]
+        project_dir: Option<String>,
+        /// 归档的对话快照。
+        #[serde(default)]
+        transcript: Vec<TurnEntry>,
+        /// （fix-webui-approval-restore-and-session-identity 3.2，design D3）
+        /// 归档条目携带的会话身份，恢复时原样带回引擎。`#[serde(default)]`：
+        /// 旧客户端不发这个字段 = 全空身份（恢复维持现默认）。
+        #[serde(default)]
+        identity: SessionIdentity,
+    },
     /// （workbench-turn-queue 4.2/D7）按 id 移除一个未开始的待生效提交。
     RemovePending { key: ChannelKey, pending_id: u64 },
     /// （workbench-turn-queue 4.2/D7）把一个未开始的提交重排到其处置组内
@@ -158,6 +181,12 @@ pub enum CoreChannelRequest {
     SetFocus { key: Option<ChannelKey> },
     /// Ask for the focused session.
     Focused,
+    /// 待批审批读模型（fix-webui-approval-restore-and-session-identity 1.2）：
+    /// detached webui 打开/刷新会话时向 core 拉取当前泊车审批。
+    PendingApprovals { key: ChannelKey },
+    /// 设置/清空会话 label（fix-webui-approval-restore-and-session-identity
+    /// 5.1，design D6）；`None` = 清空。
+    SetSessionLabel { key: ChannelKey, label: Option<String> },
     /// Start the event stream (see module docs for the frame order).
     Subscribe,
     /// Snapshot a domain of the core state store (add-state-store).
@@ -261,6 +290,9 @@ pub enum CoreChannelResponse {
     Turns { entries: Vec<TurnEntry> },
     /// Focused-session result.
     Focused { key: Option<ChannelKey> },
+    /// 待批审批读模型应答（fix-webui-approval-restore-and-session-identity
+    /// 1.2）：会话当前泊车的审批全量（空表 = 无泊车）。
+    PendingApprovals { requests: Vec<PendingApproval> },
     /// Activate 的应答：started = 本次调用真正触发了拉起（false = 已活着
     /// 或已在途，幂等无操作）。
     Activated { started: bool },
@@ -455,6 +487,20 @@ mod tests {
             },
             CoreChannelRequest::Cancel { key: key.clone() },
             CoreChannelRequest::Close { key: key.clone() },
+            CoreChannelRequest::RestoreSession {
+                key: key.clone(),
+                session_id: Some("old-1".into()),
+                project_dir: Some("/proj".into()),
+                transcript: vec![TurnEntry::prompt(0, "p")],
+                identity: sebas_dispatch::SessionIdentity::default(),
+            },
+            // fix-webui-approval-restore-and-session-identity：待批审批读模型
+            // 与会话命名的 wire 往返。
+            CoreChannelRequest::PendingApprovals { key: key.clone() },
+            CoreChannelRequest::SetSessionLabel {
+                key: key.clone(),
+                label: Some("label-1".into()),
+            },
             CoreChannelRequest::RemovePending {
                 key: key.clone(),
                 pending_id: 7,
@@ -572,6 +618,7 @@ mod tests {
             turn_engaged: false,
             spawn_failure_reason: None,
             parked_approvals: 0,
+            label: None,
             available_commands: Vec::new(),
         };
         let frames = vec![

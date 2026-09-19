@@ -65,7 +65,7 @@ vi.mock('../api/shared-ws.js', () => {
 })
 
 vi.mock('../api/client.js', () => ({
-  api: { answerPermission: vi.fn() },
+  api: { answerPermission: vi.fn(), sessionApprovals: vi.fn() },
   ApiError: class MockApiError extends Error {
     readonly status: number
     constructor(status: number, message: string) {
@@ -83,6 +83,7 @@ import { api, ApiError } from '../api/client.js'
 
 const ws = sharedWs as unknown as FakeSharedWs
 const answerMock = api.answerPermission as ReturnType<typeof vi.fn>
+const approvalsMock = api.sessionApprovals as ReturnType<typeof vi.fn>
 
 // ---- helpers -----------------------------------------------------------
 
@@ -129,6 +130,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   ws.reset()
   answerMock.mockResolvedValue({ status: 'delivered' })
+  approvalsMock.mockResolvedValue({ approvals: [] })
 })
 
 afterEach(() => {
@@ -270,6 +272,68 @@ describe('sebas-review-cards', () => {
     ;(card.querySelector('wa-button.allow-once') as HTMLElement).click()
     await flush(el)
     expect(answerMock).toHaveBeenCalledTimes(2)
+    expect(cards(el).length).toBe(0)
+  })
+
+  // ---- fix-webui-approval-restore-and-session-identity 1.3：读模型重建 ----
+
+  it('rebuilds the review surface from the read model when sessionKey is set', async () => {
+    approvalsMock.mockResolvedValue({
+      approvals: [
+        {
+          request_id: 'tc_rebuild',
+          tool_name: 'Write',
+          args: { path: '/proj/a.rs' },
+        },
+      ],
+    })
+    const el = await mount('oc_enc')
+    await flush(el)
+
+    expect(api.sessionApprovals).toHaveBeenCalledWith('oc_enc')
+    expect(cards(el).length).toBe(1)
+    const card = cards(el)[0]!
+    expect(card.dataset.requestId).toBe('tc_rebuild')
+    expect(card.querySelector('.tool')?.textContent).toBe('Write')
+    expect(card.querySelector('wa-button.allow-once')).toBeTruthy()
+  })
+
+  it('merges a push for an already-rebuilt request_id into the same card', async () => {
+    approvalsMock.mockResolvedValue({
+      approvals: [{ request_id: 'tc_dup', tool_name: 'Bash', args: {} }],
+    })
+    const el = await mount('oc_enc')
+    await flush(el)
+    expect(cards(el).length).toBe(1)
+
+    // The broadcast repeats the same id (the rebuild raced the push) —
+    // exactly one decision surface, no duplicate.
+    ws.emit(permFrame({ request_id: 'tc_dup', session_id: 'oc_enc' }))
+    await el.updateComplete
+    expect(cards(el).length).toBe(1)
+    expect(cards(el)[0]!.dataset.requestId).toBe('tc_dup')
+  })
+
+  it('never resurrects a decided id from a push or a stale read-model row', async () => {
+    approvalsMock.mockResolvedValue({
+      approvals: [{ request_id: 'tc_gone', tool_name: 'Bash', args: {} }],
+    })
+    const el = await mount('oc_enc')
+    await flush(el)
+    expect(cards(el).length).toBe(1)
+
+    ;(cards(el)[0]!.querySelector('wa-button.allow-once') as HTMLElement).click()
+    await flush(el)
+    expect(cards(el).length).toBe(0)
+
+    // Late broadcast for the decided id: no card.
+    ws.emit(permFrame({ request_id: 'tc_gone', session_id: 'oc_enc' }))
+    await el.updateComplete
+    expect(cards(el).length).toBe(0)
+
+    // A stale read-model re-pull still listing the decided id: no card.
+    await el['pullApprovals']('oc_enc')
+    await flush(el)
     expect(cards(el).length).toBe(0)
   })
 

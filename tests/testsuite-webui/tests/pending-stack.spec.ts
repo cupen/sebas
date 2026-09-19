@@ -72,7 +72,7 @@ test.describe('待执行堆叠区', () => {
     // Rail 归档该会话（归档即关闭，4.2：唯一生命周期出口）：确认对话框
     // 点名「将丢弃 1 条」，确认后出现一次性「未执行」提示，逐条点名被
     // 丢弃的提交（7.3）。
-    await rail.expandProject(projectName)
+    await rail.ensureProjectExpanded(projectName)
     const dialog = await rail.openArchiveDialog('stream')
     // wa-dialog host 在 top layer 读作 hidden——断言渲染出的内部元素
     // （与 settings.spec 的既有纪律一致）。

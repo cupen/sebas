@@ -170,7 +170,7 @@ test.describe('对话视图（workbench-conversation-view）', () => {
 
       await page.goto('/')
       await expect(workbench.composer).toBeVisible()
-      await rail.expandProject(projectName)
+      await rail.ensureProjectExpanded(projectName)
       await rail.sessionItem(`inplace-${t}`).click()
 
       // The conversation renders IN PLACE: same workbench surface, no

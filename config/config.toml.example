@@ -9,6 +9,10 @@ app_secret = ""
 #   driver = "acp"     → 任意支持 Agent Client Protocol v1 的 CLI（opencode/gemini…）
 [acp.agents.claude]
 driver = "claude"
+# 附加 CLI 参数必须用键值形式（`--flag value`；fix-webui-qa-defects 6.2）。
+# 位置参数（如 "thinking"）无法表达进子进程 argv——解析期直接报错，不再
+# 静默丢弃。
+# args = ["--scenario", "thinking"]
 
 # [acp.agents.opencode]
 # driver = "acp"

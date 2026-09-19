@@ -124,6 +124,9 @@ pub struct CcDriver {
     /// a turn is active — otherwise the child is idle (waiting for the next
     /// prompt) and must not be killed.
     turn_active: bool,
+    /// （fix-webui-approval-restore-and-session-identity 6.2）MessageParse
+    /// 告警降噪标记：同一会话连续 parse 失败只告警一次，收到合法消息即复位。
+    parse_warn_shown: bool,
     /// （add-agent-mode-selection）当前生效的权限模式：spawn 时来自
     /// `--permission-mode` argv（或 ConnectConfig 覆盖），运行时切换成功后
     /// 更新。存活探针发这个值（不能发硬编码 Default——那会把操作者设置的
@@ -407,6 +410,7 @@ impl CcDriver {
             models,
             observed_model: None,
             tool_names: HashMap::new(),
+            parse_warn_shown: false,
             terminal_sent,
             stderr_tail,
             last_activity: tokio::time::Instant::now(),
@@ -647,6 +651,8 @@ impl CcDriver {
                     // Any real message from the child counts as activity:
                     // resets the hang timer and clears the escalation stage
                     // (sebas-9pz ①).
+                    // （6.2）合法消息到达 = parse 失败序列结束，告警重新武装。
+                    self.parse_warn_shown = false;
                     self.last_activity = tokio::time::Instant::now();
                     self.hang_stage = 0;
                     // Message::Result = turn finished (child will go silent
@@ -684,14 +690,20 @@ impl CcDriver {
                     // MessageParseError = unknown message type from CLI, not
                     // a real error. Log the raw data and continue instead of
                     // killing the session.
+                    // （6.2）降噪：带 subtype/type 上下文；同一会话连续 parse
+                    // 失败只告警一次（合法消息到达即复位）——生产噪音不再逐
+                    // 帧刷屏（真实 CLI 的未知帧可能整流连发）。
                     if let claude_agent_sdk::ClaudeError::MessageParse(inner) = &e {
-                        if let Some(raw) = &inner.data {
-                            tracing::warn!(
-                                raw = %serde_json::to_string(raw).unwrap_or_default(),
-                                "ignoring unknown message type from claude"
-                            );
-                        } else {
-                            tracing::warn!("ignoring unknown message from claude");
+                        if let Some(warning) =
+                            message_parse_warning(&mut self.parse_warn_shown, inner.data.as_ref())
+                        {
+                            match &inner.data {
+                                Some(raw) => tracing::warn!(
+                                    raw = %serde_json::to_string(raw).unwrap_or_default(),
+                                    "{warning}"
+                                ),
+                                None => tracing::warn!("{warning}"),
+                            }
                         }
                         continue;
                     }
@@ -1048,6 +1060,34 @@ pub(crate) fn map_server_info_commands(info: &serde_json::Value) -> Vec<Availabl
 ///   type strictness (e.g. missing optional fields) can't drop them.
 /// - `Result{is_error:false}` → Finished; `is_error:true` → terminal Error
 ///   (post-error CLI state is unknown; the honest mapping is session death).
+/// （fix-webui-approval-restore-and-session-identity 6.2）`MessageParse` 的
+/// 降噪告警判定与文案：带消息 type/subtype 上下文（排查可用），同一会话连续
+/// parse 失败只告警一次（`shown` 置位；调用方在合法消息到达时复位）。返回
+/// `Some(文案)` = 本轮失败序列的第一次；`None` = 重复失败，跳过（降噪）。
+fn message_parse_warning(shown: &mut bool, raw: Option<&serde_json::Value>) -> Option<String> {
+    if *shown {
+        return None;
+    }
+    *shown = true;
+    let ctx = raw.map(|v| {
+        let mut parts: Vec<String> = Vec::new();
+        for key in ["type", "subtype"] {
+            if let Some(val) = v.get(key).and_then(serde_json::Value::as_str) {
+                parts.push(format!("{key}={val}"));
+            }
+        }
+        if parts.is_empty() {
+            "无 type/subtype 线索".to_string()
+        } else {
+            parts.join(", ")
+        }
+    });
+    match ctx {
+        Some(ctx) => Some(format!("ignoring unparseable message from claude（{ctx}；连续失败只告警一次）")),
+        None => Some("ignoring unparseable message from claude（无 raw 载荷；连续失败只告警一次）".into()),
+    }
+}
+
 pub(crate) fn map_message(
     session_id: &str,
     tool_names: &mut HashMap<String, String>,
@@ -1442,6 +1482,37 @@ fn conn_err(e: ConnectError) -> crate::agent_driver::DriverError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- fix-webui-approval-restore-and-session-identity 6.2：MessageParse
+    // ---- 告警降噪 ----
+
+    /// 首次失败：Some（带 type/subtype 上下文）；连续失败：None（降噪）；
+    /// `shown` 复位后重新告警。
+    #[test]
+    fn message_parse_warning_warns_once_per_failure_run() {
+        let mut shown = false;
+        let raw = serde_json::json!({"type": "assistant", "subtype": "weird"});
+        let first = message_parse_warning(&mut shown, Some(&raw)).expect("first failure warns");
+        assert!(first.contains("type=assistant"), "{first}");
+        assert!(first.contains("subtype=weird"), "{first}");
+        // 连续失败：静默。
+        assert!(message_parse_warning(&mut shown, Some(&raw)).is_none());
+        assert!(message_parse_warning(&mut shown, None).is_none());
+
+        // 合法消息到达（调用方复位）：下一轮失败重新告警。
+        shown = false;
+        let again = message_parse_warning(&mut shown, None).expect("reset re-arms the warning");
+        assert!(again.contains("连续失败只告警一次"), "{again}");
+    }
+
+    /// 无 type/subtype 的 raw：仍告警但注明无线索（不空泛丢上下文）。
+    #[test]
+    fn message_parse_warning_names_missing_context() {
+        let mut shown = false;
+        let raw = serde_json::json!({"payload": 1});
+        let msg = message_parse_warning(&mut shown, Some(&raw)).expect("warns");
+        assert!(msg.contains("无 type/subtype 线索"), "{msg}");
+    }
 
     // ---- add-agent-mode-selection：控制面 mode → CLI flag 约定映射 ----
 

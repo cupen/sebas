@@ -18,6 +18,7 @@
 //! `chat_id\0thread_id`; only the feishu adapter interprets it).
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use sebas_channels::ChannelKey;
 
@@ -169,6 +170,27 @@ pub struct SessionInfo {
     /// `#[serde(default)]` 兼容旧快照/旧事件。
     #[serde(default)]
     pub parked_approvals: u32,
+    /// （fix-webui-approval-restore-and-session-identity 5.1，design D6）操作者
+    /// 设置的会话 label。`None` = 未设置（命名回退首条 prompt 预览 / 短 id，
+    /// 行为与旧版本完全一致——只影响「设置了 label」的会话）。
+    /// `#[serde(default, skip_serializing_if)]` 兼容旧快照/旧事件，None 不上 wire。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// 一条待批权限请求的读模型行（fix-webui-approval-restore-and-session-identity
+/// 1.1，design D1）：按会话枚举当前泊车审批（request_id / 工具 / 参数）。
+/// 与推送通道独立——WebUI 打开/刷新会话时主动拉取它重建审批面，与 WS
+/// `permission.requested` 按 `request_id` 幂等合并。serde-native：跨 core
+/// session channel 传输。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PendingApproval {
+    /// 权限请求 id（agent-driver 命名空间，如 `claude:tc-N`）。
+    pub request_id: String,
+    /// 被门控的工具名。
+    pub tool_name: String,
+    /// 工具调用参数（原样 JSON）。
+    pub args: Value,
 }
 
 /// （3.2，design D5b）`desired_mode` 的反序列化兼容：旧 core-channel 报文
@@ -296,6 +318,14 @@ pub struct TurnEntry {
     /// 不破坏旧消费端）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// （fix-webui-qa-defects 5.1/5.2，design D5）错误条目的失败分类：
+    /// `"spawn"`（spawn 失败）| `"stall"`（回合停滞强收）| `"generic"`
+    /// （回合终态错误，含 refusal）。前端气泡标签据此如实分类渲染，不再
+    /// 一律写死「spawn failed」。仅 `element_type = "error"` 的条目携带；
+    /// `None` = 旧条目（前端回退中性「错误」标签）。serde 缺省兼容旧
+    /// archive.json / turn 快照。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_class: Option<String>,
 }
 
 /// 实时回合内容事件（workbench-live-conversation-flow 1.1）：transcript
@@ -370,6 +400,7 @@ impl TurnEntry {
             // the helper was called.
             created_at_unix: now_unix_secs(),
             title: None,
+            failure_class: None,
         }
     }
 
@@ -379,6 +410,22 @@ impl TurnEntry {
         self.title = Some(title.into());
         self
     }
+
+    /// 附加失败分类（fix-webui-qa-defects 5.1，design D5）：仅错误条目使用，
+    /// 链在 [`TurnEntry::error`] 之后。分类词表见 [`TurnEntry`] 的
+    /// `failure_class` 字段文档。
+    pub fn with_failure_class(mut self, class: impl Into<String>) -> Self {
+        self.failure_class = Some(class.into());
+        self
+    }
+}
+
+/// 错误条目的失败分类词表（design D5）：spawn = spawn 失败；stall = 回合
+/// 停滞强收；generic = 回合终态错误（含 refusal）。前端按词表映射标签。
+pub mod failure_class {
+    pub const SPAWN: &str = "spawn";
+    pub const STALL: &str = "stall";
+    pub const GENERIC: &str = "generic";
 }
 
 /// 折叠标题的硬上限（workbench-agent-identity-and-process-folds 1.2）：
@@ -497,6 +544,7 @@ mod tests {
             turn_engaged: true,
             spawn_failure_reason: None,
             parked_approvals: 0,
+            label: None,
             // session-slash-commands：命令表随 SessionInfo 往返。
             available_commands: vec![
                 sebas_acp::AvailableCommand {
@@ -580,6 +628,7 @@ mod tests {
             turn_engaged: false,
             spawn_failure_reason: None,
             parked_approvals: 0,
+            label: None,
             // session-slash-commands：无发现能力会话的命令表恒空。
             available_commands: Vec::new(),
         };
@@ -748,6 +797,7 @@ fn session_info_usage_field_is_additive() {
         turn_engaged: false,
         spawn_failure_reason: None,
         parked_approvals: 0,
+            label: None,
         available_commands: Vec::new(),
     };
     let json = serde_json::to_string(&full).unwrap();
@@ -793,6 +843,7 @@ fn session_info_available_commands_field_is_additive() {
         turn_engaged: true,
         spawn_failure_reason: None,
         parked_approvals: 0,
+            label: None,
         available_commands: vec![sebas_acp::AvailableCommand {
             name: "goal".into(),
             description: "Set a goal".into(),
@@ -904,6 +955,7 @@ fn chat_message_count_ignores_noise_and_empty_entries() {
             content: String::new(),
             created_at_unix: 1,
             title: None,
+            failure_class: None,
         },
         TurnEntry::markdown(2, " still same segment"),
     ];
@@ -966,6 +1018,7 @@ fn session_info_turn_engaged_field_is_additive() {
         turn_engaged: true,
         spawn_failure_reason: None,
         parked_approvals: 0,
+            label: None,
         available_commands: Vec::new(),
     };
     let json = serde_json::to_string(&engaged).unwrap();

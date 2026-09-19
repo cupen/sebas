@@ -48,8 +48,15 @@ test.describe('分级通知层', () => {
       // 只有 detached 拓扑（9897）能安全停核：共享单进程套件（9899）的
       // testIgnore 无法由本侧收紧（配置在别的 change 维护），这里按 baseURL
       // 自卫跳过，防误入共享沙箱杀核。
-      const use = (test.info().config as { use?: { baseURL?: string } }).use
-      const baseURL = String(use?.baseURL ?? '')
+      // fix-webui-qa-defects 9.1：Playwright 1.63 的 config.use 不携带顶层
+      // use 合并结果（baseURL 实际落在 config.projects[0].use.baseURL）——
+      // 旧取法恒 undefined，skip 条件恒真，该旅程自 181bd69 起从未真正执行。
+      // 两个位置都读：projects[0] 优先（真实所在），顶层 use 兜底。
+      const cfg = test.info().config as {
+        use?: { baseURL?: string }
+        projects?: { use?: { baseURL?: string } }[]
+      }
+      const baseURL = String(cfg.projects?.[0]?.use?.baseURL ?? cfg.use?.baseURL ?? '')
       test.skip(
         !baseURL.endsWith(':9897'),
         'fatal-lock journey runs only under playwright.detached.config.ts (port 9897)',

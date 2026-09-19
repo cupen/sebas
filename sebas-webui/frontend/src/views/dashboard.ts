@@ -22,6 +22,30 @@ import { icon } from '../components/icons.js'
 import { guardedHide } from '../components/wa-hide-guard.js'
 import { notify } from '../notify.js'
 import { modeBadgeLabel } from './mode-vocabulary.js'
+// fix-webui-qa-defects 7.3：终止通知的可读会话名与 rail 同源（回退链复用）。
+import { fullSessionLabel, RAIL_FOCUS_EVENT } from './project-rail.js'
+
+/**
+ * 聚焦会话反投影项目上下文的窗口级事件（fix-webui-approval-restore-and-
+ * session-identity 4.1，design D4）：`detail.path` 是聚焦会话所属项目的
+ * 路径。app-shell 监听后更新 `selectedPath`——主区标题与项目上下文跟随
+ * 聚焦会话，而项目行的 `rail-select` 语义保持独立（两条链路收敛到 shell
+ * 的同一状态源，不另立状态）。
+ */
+export const PROJECT_FOLLOW_EVENT = 'sebas:project-follow'
+
+/**
+ * 聚焦会话 → 所属项目路径（4.1 纯函数）：按 `project_id` 在注册项目列表
+ * 中查找；未命中（会话项目不在列表 / 无项目绑定）返回 `null`——维持
+ * 「未选择项目」现状，不臆造归属。
+ */
+export function focusedProjectPath(
+  projects: Array<{ id: string; path: string }>,
+  projectId: string | null | undefined,
+): string | null {
+  if (!projectId) return null
+  return projects.find((p) => p.id === projectId)?.path ?? null
+}
 import { viewStyles } from '../styles/shared.js'
 import {
   clampComposerHeight,
@@ -339,10 +363,16 @@ export class SebasDashboard extends LitElement {
    * 限承诺），否则是常规关闭/回收。已收对话保持在下方只读可见。
    */
   private announceFocusedRemoval(key: string): void {
-    const label =
-      this.focusedDetail?.chat_id ??
-      this.data?.active_session?.chat_id ??
-      decodeURIComponent(key.split('%00').pop() ?? key)
+    // fix-webui-qa-defects 7.3：可读会话名 = rail 同款回退链
+    // （prompt_preview → session_id_short → chat_id → 键尾段）。直接拿
+    // `chat_id` 会把「web-1789…-1」原始键摆上通知——0-turn 占位三者常空，
+    // 必须落到 summary 行的 fullSessionLabel 兜底。
+    const row = this.data?.recent_sessions?.find((r) => r.encoded_key === key)
+    const label = row
+      ? fullSessionLabel(row)
+      : (this.focusedDetail?.chat_id ??
+        this.data?.active_session?.chat_id ??
+        decodeURIComponent(key.split('%00').pop() ?? key))
     const wasEngaged = this.turnEngagedNow()
     const cause = wasEngaged ? 'agent 进程异常退出' : '会话已关闭'
     this.terminatedFor = key
@@ -775,6 +805,50 @@ export class SebasDashboard extends LitElement {
     `,
   ]
 
+  /**
+   * fix-webui-qa-defects 4.1（design D3）：rail 切换会话成功后的即时聚焦
+   * ——switch 只写服务端指针、不产生 WS 事件，工作台此前要等下一个无关
+   * 会话事件才刷新 summary。rail 派发 [`RAIL_FOCUS_EVENT`] 后这里立即走
+   * 既有节流刷新（复用 500ms 合并窗，与「一个普通会话事件」同级延迟）；
+   * summary 到达后 refreshLists 的既有链路会以新指针取聚焦详情。同会话
+   * 重复事件幂等——刷新收敛到同一指针，无副作用。深链
+   * （`/sessions/:key`）语义不变：URL 决定视图。
+   */
+  private onRailFocus = (ev: Event): void => {
+    // fix-webui-approval-restore-and-session-identity review 3：rail 切换后、
+    // 节流 summary 落地前存在 stale focus 窗口——active_session_key 仍指旧
+    // 会话，旧会话的流式回合照常喂进仍 keyed 到它的 transcript（sticky），
+    // 被「亲眼看着到达」写锚，徽标永远不亮（unread-badge × rail-focus 互斥
+    // 的根因）。事件携带的目标 key 在此立即生效，summary 追平后清除。
+    const key = (ev as CustomEvent<{ key?: string }>).detail?.key
+    if (key) this.focusOverride = key
+    this.scheduleListRefresh()
+  }
+
+  /**
+   * （4.1，design D4）焦点反投影：聚焦会话变化时把其所属项目路径经
+   * [`PROJECT_FOLLOW_EVENT`] 投影给 shell 的 `selectedPath`——rail 切换、
+   * 新建落地、恢复聚焦三条链路都经 summary 刷新收敛到这里。幂等：同一
+   * 聚焦 key 只投影一次；项目未命中/与当前选中一致时不派发（项目行点击
+   * 的独立选择语义不受影响）。
+   */
+  private lastFollowedFocusKey: string | null = null
+  private followFocusedProject(): void {
+    const key = this.data?.active_session_key ?? null
+    if (key === null || key === this.lastFollowedFocusKey) return
+    const path = focusedProjectPath(
+      this.projects,
+      this.data?.active_session?.project_id ?? null,
+    )
+    // 未命中也记账：同一会话反复刷新不再重复解析（项目列表后到时，下一次
+    // 聚焦变化或 refetch 会重试）。
+    this.lastFollowedFocusKey = key
+    if (path === null || path === this.selectedPath) return
+    window.dispatchEvent(
+      new CustomEvent(PROJECT_FOLLOW_EVENT, { detail: { path } }),
+    )
+  }
+
   connectedCallback(): void {
     super.connectedCallback()
     this.refetch()
@@ -782,6 +856,8 @@ export class SebasDashboard extends LitElement {
     // 3.2（D4）：订阅回调只做事件分流——不再无条件 refetch。
     this.unsubscribe = sharedWs.subscribe(this.onWsEvent)
     window.addEventListener('sebas:refetch', this.refetch)
+    // fix-webui-qa-defects 4.1：rail 切换会话的即时聚焦事件。
+    window.addEventListener(RAIL_FOCUS_EVENT, this.onRailFocus)
     // workbench-rail-polish 3.2/D2：rail 创建会话成功后的对焦请求（请求
     // 一次性派发，落地走下面的短窗重试）。
     window.addEventListener(COMPOSER_FOCUS_REQUEST, this.onComposerFocusRequest)
@@ -794,6 +870,7 @@ export class SebasDashboard extends LitElement {
     this.unsubscribe?.()
     this.unlistenNarrow?.()
     window.removeEventListener('sebas:refetch', this.refetch)
+    window.removeEventListener(RAIL_FOCUS_EVENT, this.onRailFocus)
     window.removeEventListener(COMPOSER_FOCUS_REQUEST, this.onComposerFocusRequest)
     this.stopComposerFocusWindow()
     if (this.listRefreshTimer !== null) {
@@ -942,8 +1019,12 @@ export class SebasDashboard extends LitElement {
       .summary()
       .then((d) => {
         this.data = d
+        // focus override 已被 summary 追平（或被其它表面的焦点变更取代）——
+        // 无论如何归还 summary 权威，override 只覆盖节流窗口。
+        this.focusOverride = null
         this.error = ''
         this.loadFocused(this.effectiveFocusKey())
+        this.followFocusedProject()
       })
       .catch((e) => {
         this.error = String(e)
@@ -951,12 +1032,23 @@ export class SebasDashboard extends LitElement {
   }
 
   /**
+   * rail 切换的即时焦点覆盖（见 onRailFocus）：仅桥接 RAIL_FOCUS_EVENT 与
+   * summary 落地之间的节流窗口，summary 到达即清除。**@state**——赋值即
+   * 重渲染，renderTurnStream 的 `encoded_key === key` 守卫随即卸载仍 keyed
+   * 到旧会话的 transcript（其 WS 订阅与「亲眼看着到达」写锚一并失效），
+   * 新视图等 loadFocused 落地。此前 override 只做逻辑门时，stale transcript
+   * 仍通过自己的 WS 订阅给旧会话写锚（unread-badge × rail-focus 互斥根因）。
+   */
+  @state() private focusOverride: string | null = null
+
+  /**
    * 生效的聚焦 key：深链优先（URL 决定视图——读 detail 即设置服务端焦点
-   * 指针，summary 随后收敛到同一会话）；无深链时由 summary 的焦点指针驱动
-   * （rail switch / 创建会话就地生效）。
+   * 指针，summary 随后收敛到同一会话）；其次 rail 切换的即时 override
+   * （见 onRailFocus：桥接节流窗口，杜绝 stale focus 写锚）；无深链时由
+   * summary 的焦点指针驱动（rail switch / 创建会话就地生效）。
    */
   private effectiveFocusKey(): string | null {
-    return this.deepLinkKey ?? this.data?.active_session_key ?? null
+    return this.deepLinkKey ?? this.focusOverride ?? this.data?.active_session_key ?? null
   }
 
   /**
@@ -969,6 +1061,9 @@ export class SebasDashboard extends LitElement {
       .projects.list()
       .then((d) => {
         this.projects = d.projects
+        // （4.1）项目列表先到/后到都可能：聚焦投影用列表解析路径，这里
+        // 再核对一拍（幂等——lastFollowedFocusKey 已挡重复派发）。
+        this.followFocusedProject()
       })
       .catch(() => {
         /* 分组降级：列表不可得时保持旧值 */
@@ -977,8 +1072,11 @@ export class SebasDashboard extends LitElement {
       .summary()
       .then((d) => {
         this.data = d
+        // 全量刷新同样归还 summary 权威（override 只桥接节流窗口）。
+        this.focusOverride = null
         this.error = ''
         this.loadFocused(this.effectiveFocusKey())
+        this.followFocusedProject()
       })
       .catch((e) => {
         this.error = String(e)
@@ -1321,6 +1419,13 @@ export class SebasDashboard extends LitElement {
                 <p class="dialog-body">
                   将把会话 <b>${arch.label}</b> 恢复到
                   <b>${arch.project_path || '（无项目）'}</b> 并结束只读。
+                </p>
+                <!-- fix-webui-qa-defects 2.3：恢复语义如实前置——恢复是
+                     「重建会话行」，不是只把条目从 History 里拿掉。 -->
+                <p class="dialog-body" data-testid="restore-rebuild-note">
+                  ${detail && detail.entry.session_key === arch.session_key
+                    ? `将重建会话并保留对话记录（${detail.entries.length} 条消息），恢复后可在原项目下继续对话。`
+                    : '将重建会话并保留对话记录，恢复后可在原项目下继续对话。'}
                 </p>
                 <p class="dialog-body" style="font-size:0.8rem;color:var(--sebas-text-faint);">
                   若该项目当前未注册，恢复后仍会从对应项目路径再次可达。

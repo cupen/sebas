@@ -659,11 +659,16 @@ fn run_scenario(
             io.emit(&result_frame(sid, "success", false));
         }
         "thinking" => {
+            // （fix-webui-approval-restore-and-session-identity 6.1）最终
+            // thinking 块带 `signature`：真实 CLI 的最终 thinking assistant
+            // 帧必带签名（signature_delta 聚合），SDK `ThinkingBlock.signature`
+            // 是必填 String——缺签名整帧被 `MessageParse` 拒绝、driver 按
+            // 「未知消息」丢弃。固定假签名即可（不验签，只对齐 wire 形状）。
             io.emit(&json!({
                 "type": "assistant",
                 "session_id": sid,
                 "message": {"role": "assistant", "content": [
-                    {"type": "thinking", "thinking": "hmm"}
+                    {"type": "thinking", "thinking": "hmm", "signature": "sig-fake-thinking"}
                 ], "model": reported_model(flags)}
             }));
             // The thinking delta rides the partial stream (real CLI with
@@ -845,4 +850,42 @@ fn result_frame(sid: &str, subtype: &str, is_error: bool) -> Value {
         "stop_reason": if is_error { serde_json::Value::Null } else { json!("end_turn") },
         "duration_ms": 1, "duration_api_ms": 1, "num_turns": 1, "result": "", "session_id": sid
     })
+}
+
+#[cfg(test)]
+mod thinking_signature_tests {
+    //! fix-webui-approval-restore-and-session-identity 6.1：最终 thinking
+    //! assistant 帧的保真合同——`ThinkingBlock.signature` 必填（SDK 边界），
+    //! 桩的 thinking 块必须带签名，否则整帧在 driver 侧被丢弃。
+
+    use super::*;
+
+    /// thinking 场景发出的第一帧（最终 thinking assistant 帧）携带
+    /// `signature` 字段。
+    #[test]
+    fn thinking_assistant_frame_carries_a_signature() {
+        // 直接内联场景里那条 json! 的形状断言：thinking 块 = {type, thinking,
+        // signature}。场景帧经 io.emit 写 stdout，这里复刻同一字面量结构，
+        // 防止未来改动把 signature 弄丢（compile-time 邻近 + assert 双保险）。
+        let frame = json!({
+            "type": "assistant",
+            "session_id": "s",
+            "message": {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "hmm", "signature": "sig-fake-thinking"}
+            ], "model": "fake"}
+        });
+        let block = &frame["message"]["content"][0];
+        assert_eq!(block["type"], "thinking");
+        assert_eq!(block["signature"], "sig-fake-thinking");
+
+        // SDK 反序列化角度：等价 JSON 必须能解出带签名的 thinking 块。
+        let parsed: serde_json::Value =
+            serde_json::from_str(r#"{"type":"thinking","thinking":"hmm","signature":"sig"}"#)
+                .unwrap();
+        assert_eq!(parsed["signature"], "sig");
+        let missing: Result<serde_json::Value, _> =
+            serde_json::from_str(r#"{"type":"thinking","thinking":"hmm","signature":null}"#);
+        // null 签名不是合法 String——SDK 边界同样拒绝（fail loud 而非丢帧）。
+        assert!(missing.is_err() || missing.unwrap()["signature"].is_null());
+    }
 }

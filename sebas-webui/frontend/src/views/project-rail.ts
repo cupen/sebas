@@ -50,6 +50,76 @@ const NAME_CAP_CODEPOINTS = 40
 /** 未读徽标数字封顶（design Open Question：任务内自决为 99+）。 */
 const UNREAD_BADGE_CAP = 99
 
+/**
+ * rail 切换会话成功后的窗口级聚焦事件（fix-webui-qa-defects 4.1，design
+ * D3）：`detail.key` 是 switch 响应的 `active_session_key`。dashboard 监听
+ * 后立即节流刷新 summary——焦点指针是每客户端操作面，不走 WS/服务端推送。
+ * 独立事件名，不复用语义不同的 `sebas:refetch`（全量 refetch）。
+ */
+export const RAIL_FOCUS_EVENT = 'sebas:rail-focus'
+
+/**
+ * 手填路径的禁用原因（fix-webui-qa-defects 7.2 修复，本 change 5.2 收口为
+ * spec：越界**与不存在**都必须给出原因且提交控件禁用——不允许只禁用不解
+ * 释）。纯函数：注册/预检错误文案映射为输入框旁可读原因；未知失败返回
+ * null（不拦截，留给注册接口的点名报错）。
+ */
+export function addPathScopeHintFrom(error: string): string | null {
+  if (/超出允许范围|超出根目录范围|workspace root/.test(error)) {
+    return '路径在 workspace root 之外——只能注册工作区内的目录'
+  }
+  if (/不存在|无法访问/.test(error)) {
+    return '路径不存在或无法访问——请检查路径是否正确'
+  }
+  if (/不是目录/.test(error)) {
+    return '该路径不是目录——请选择一个目录'
+  }
+  return null
+}
+
+/**
+ * rail 展开态的 localStorage 键（fix-webui-approval-restore-and-session-identity
+ * 4.2，design D5）：值为**已展开**的项目路径数组——按路径存，删除的项目恢复
+ * 时静默忽略（与项目删除语义一致）。
+ */
+export const RAIL_EXPANDED_KEY = 'sebas.rail-expanded'
+
+/** 解析持久化的展开态：非法/缺失 JSON → `{}`（全收起）；数组元素取字符串。 */
+export function parseRailExpanded(raw: string | null): Record<string, boolean> {
+  if (!raw) return {}
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return {}
+    const out: Record<string, boolean> = {}
+    for (const item of parsed) {
+      if (typeof item === 'string' && item) out[item] = true
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+/** 展开态 → 持久化形状（已展开路径数组）。 */
+export function serializeRailExpanded(record: Record<string, boolean>): string {
+  return JSON.stringify(Object.keys(record).filter((k) => record[k]))
+}
+
+/**
+ * 项目行的展开判定（4.2）：有持久化记录以记录为准；**无记录**且该会话项目
+ * 下有聚焦会话 → 缺省展开（聚焦所在项目不必先点一下才可见）；否则收起。
+ * 展开态绝不因刷新/聚焦变化自行翻转——记录存在时聚焦不再改写缺省。
+ */
+export function railExpandedDefault(
+  record: Record<string, boolean>,
+  path: string,
+  focusedSessionInProject: boolean,
+): boolean {
+  const recorded = record[path]
+  if (recorded !== undefined) return recorded
+  return focusedSessionInProject
+}
+
 /** 会话名截断：超上限加 `…`（按码点，不切多字节字符）。 */
 export function truncateName(label: string, cap = NAME_CAP_CODEPOINTS): string {
   const cps = [...label]
@@ -66,7 +136,11 @@ export function truncateName(label: string, cap = NAME_CAP_CODEPOINTS): string {
  * 渲染炸掉。模块级导出：/sessions 表格的卡片链接同源复用。
  */
 export function fullSessionLabel(row: SessionRow): string {
+  // （fix-webui-approval-restore-and-session-identity 5.1，design D6）命名
+  // 优先级：label → 首条 prompt 预览 → 短 id → 键尾段。只影响「设置了
+  // label」的会话——未设置时行为与旧版本完全一致。
   return (
+    row.label ??
     row.prompt_preview ??
     row.session_id_short ??
     row.chat_id ??
@@ -124,6 +198,8 @@ export class SebasProjectRail extends LitElement {
   @state() private addDialogOpen = false
   @state() private addPath = ''
   @state() private addError: string | null = null
+  /** fix-webui-qa-defects 7.2：手填路径越界的禁用原因（null = 界内/未知）。 */
+  @state() private addPathScopeHint: string | null = null
   /** 注册对话框选定的执行节点（`''` = 本机，隐式；8.1）。 */
   @state() private addNodeId = ''
 
@@ -374,6 +450,9 @@ export class SebasProjectRail extends LitElement {
 
   connectedCallback(): void {
     super.connectedCallback()
+    // （4.2，design D5）展开态从 localStorage 恢复（键不存在/损坏 → 全收起
+    // 的既有缺省）；聚焦缺省展开在 isProjectExpanded 的无记录分支生效。
+    this.expanded = parseRailExpanded(this.readExpandedStorage())
     void this.refresh()
     this.unsubscribe = sharedWs.subscribe((ev) => this.onWsEvent(ev))
     window.addEventListener('sebas:refetch', this.refetchBound)
@@ -386,7 +465,7 @@ export class SebasProjectRail extends LitElement {
     this.unsubscribe?.()
     window.removeEventListener('sebas:refetch', this.refetchBound)
     if (this.nodeTimer !== undefined) {
-      window.clearInterval(this.nodeTimer)
+      this.nodeTimer = window.clearInterval(this.nodeTimer) as unknown as number
       this.nodeTimer = undefined
     }
     super.disconnectedCallback()
@@ -426,6 +505,18 @@ export class SebasProjectRail extends LitElement {
       if (seq !== this.fetchSeq) return
       this.sessions = list.recent_sessions
       this.focusedKey = list.active_session_key
+      // （4.2）聚焦缺省展开的**物化**：无记录且其下有聚焦会话的项目，此刻
+      // 把展开写进记录（随写持久化）。物化让缺省成为显式状态——之后的聚焦
+      // 变化/刷新绝不翻转它（「无操作不自行收起」），toggle 也从确定基数
+      // 起步，而不是从随焦点漂移的派生值起步。
+      let materialized = false
+      for (const p of this.projects) {
+        if (this.expanded[p.path] === undefined && this.focusedInProject(p.path)) {
+          this.expanded = { ...this.expanded, [p.path]: true }
+          materialized = true
+        }
+      }
+      if (materialized) this.writeExpandedStorage()
     } catch { /* ignore */ }
     try {
       const { archived_sessions } = await api.archiveList()
@@ -476,8 +567,42 @@ export class SebasProjectRail extends LitElement {
   }
 
   private onSelect(path: string) {
-    this.expanded = { ...this.expanded, [path]: !(this.expanded[path] ?? false) }
+    this.expanded = { ...this.expanded, [path]: !this.isProjectExpanded(path) }
+    // （4.2）写入时机 = toggle：持久化让展开跨刷新保持（只写，不联动
+    // rail-select 的主区项目选择语义）。
+    this.writeExpandedStorage()
     this.dispatchEvent(new CustomEvent('rail-select', { detail: { path }, bubbles: true, composed: true }))
+  }
+
+  /** 项目行的展开判定（4.2）：持久化记录优先，无记录时聚焦所在项目缺省展开。 */
+  private isProjectExpanded(path: string): boolean {
+    return railExpandedDefault(this.expanded, path, this.focusedInProject(path))
+  }
+
+  /** 聚焦会话是否落在给定路径的项目下（rail 已知 active key 时才有意义）。 */
+  private focusedInProject(path: string): boolean {
+    if (this.focusedKey === null) return false
+    const project = this.projects.find((p) => p.path === path)
+    if (!project) return false
+    return this.sessions.some(
+      (r) => r.encoded_key === this.focusedKey && r.project_id === project.id,
+    )
+  }
+
+  private readExpandedStorage(): string | null {
+    try {
+      return window.localStorage.getItem(RAIL_EXPANDED_KEY)
+    } catch {
+      return null
+    }
+  }
+
+  private writeExpandedStorage(): void {
+    try {
+      window.localStorage.setItem(RAIL_EXPANDED_KEY, serializeRailExpanded(this.expanded))
+    } catch {
+      /* 隐私模式等 localStorage 不可用：展开态退化为纯内存（现状行为）。 */
+    }
   }
 
   /**
@@ -487,8 +612,9 @@ export class SebasProjectRail extends LitElement {
    * 时只刷新列表，不导航。
    */
   private async openSession(row: SessionRow) {
+    let resp: { status: string; redirect: string; active_session_key: string } | undefined
     try {
-      await api.switchSession(row.encoded_key)
+      resp = await api.switchSession(row.encoded_key)
     } catch (err) {
       this.error = err instanceof Error ? err.message : String(err)
       void this.refresh()
@@ -499,6 +625,16 @@ export class SebasProjectRail extends LitElement {
     // msg_count，徽标清零（无锚点会话自此刻起开始累计未读）。
     writeFocusAnchor(row.encoded_key, row.msg_count)
     if (location.pathname !== '/') navigate('/')
+    // fix-webui-qa-defects 4.1（design D3）：switch 只写服务端指针、不发任何
+    // 事件——dashboard 的焦点视图此前要等下一个无关会话事件刷新 summary 才
+    // 「跳」过来。这里以响应里的 active_session_key 派发窗口级聚焦事件，
+    // dashboard 监听后立即走节流刷新（同会话重复派发幂等——刷新收敛到同一
+    // 指针，无副作用）。
+    window.dispatchEvent(
+      new CustomEvent(RAIL_FOCUS_EVENT, {
+        detail: { key: resp?.active_session_key ?? row.encoded_key },
+      }),
+    )
   }
 
   sessionsFor(id: string) { return this.sessions.filter((r) => r.project_id === id) }
@@ -540,8 +676,9 @@ export class SebasProjectRail extends LitElement {
       // workbench-rail-polish 3.1/D2：创建成功后的焦点链三步显式化，不再
       // 借用 onSelect 的 toggle——从已展开的项目行「+」进来会把组误折叠，
       // 新会话行根本不可见。
-      // ① 强制展开（非 toggle）：新会话行必须立即可见；
+      // ① 强制展开（非 toggle）：新会话行必须立即可见（随写持久化）。
       this.expanded = { ...this.expanded, [p.path]: true }
+      this.writeExpandedStorage()
       // ② 不派发 rail-select：主区项目切换语义不掺进创建路径；新会话行的
       //    「当前」标记由 refresh() 后的 active_session_key 回填（创建请求
       //    服务端已 set_focus）。
@@ -596,6 +733,13 @@ export class SebasProjectRail extends LitElement {
   @state() private closeTarget: SessionRow | null = null
   @state() private closeError: string | null = null
 
+  // ─── Rename（fix-webui-approval-restore-and-session-identity 5.1）────
+  /** 重命名目标（`null` = 对话框关闭）。零轮占位同样可命名。 */
+  @state() private renameTarget: SessionRow | null = null
+  @state() private renameValue = ''
+  @state() private renameError: string | null = null
+  @state() private renaming = false
+
   // ─── Archive（workbench-live-conversation-flow 4.2：唯一出口，确认框
   // 合并 close 语义——终止子进程 + 点名将被丢弃的待执行条数）────────────
   private requestArchive(e: Event, row: SessionRow) {
@@ -620,6 +764,37 @@ export class SebasProjectRail extends LitElement {
       this.closeError = err instanceof Error ? err.message : String(err)
     } finally {
       this.archiving = false
+    }
+  }
+
+  // ─── Rename（5.1，design D6）：行菜单提交 label；清空 = 回退首条 prompt ─
+  private openRenameDialog(e: Event, row: SessionRow) {
+    void e
+    this.renameTarget = row
+    // 预填当前 label（未设置 = 空输入，提交空 = 清空语义）。
+    this.renameValue = row.label ?? ''
+    this.renameError = null
+  }
+  private closeRenameDialog() {
+    this.renameTarget = null
+    this.renameValue = ''
+    this.renameError = null
+  }
+  private async confirmRename() {
+    const row = this.renameTarget
+    if (!row || this.renaming) return
+    this.renaming = true
+    this.renameError = null
+    const label = this.renameValue.trim()
+    try {
+      // 空输入 = 清空（wire 语义单一出处：服务端把空白归一为 None）。
+      await api.setSessionLabel(row.encoded_key, label || null)
+      this.closeRenameDialog()
+      await this.refresh()
+    } catch (err) {
+      this.renameError = err instanceof Error ? err.message : String(err)
+    } finally {
+      this.renaming = false
     }
   }
 
@@ -671,13 +846,46 @@ export class SebasProjectRail extends LitElement {
     this.addDialogOpen = true
     this.addPath = ''
     this.addError = null
+    this.addPathScopeHint = null
     // 默认选本机（隐式注册的既有行为）。
     this.addNodeId = ''
     const picker = this.shadowRoot?.querySelector('.folder-picker') as any
     if (picker?.reset) void picker.reset()
   }
-  private closeAddDialog() { this.addDialogOpen = false; this.addPath = ''; this.addError = null }
-  private onFolderSelected(e: CustomEvent) { this.addPath = e.detail.path }
+  private closeAddDialog() {
+    this.addDialogOpen = false
+    this.addPath = ''
+    this.addError = null
+    this.addPathScopeHint = null
+  }
+  private onFolderSelected(e: CustomEvent) {
+    this.addPath = e.detail.path
+    void this.checkAddPathScope(this.addPath)
+  }
+
+  /**
+   * 5.2：手填路径的越界预检（fix-webui-qa-defects 7.2）：此前越界路径要等提交
+   * 被 400 拒绝才见文案，按钮只按「空路径」禁用——越界被拒时操作者只看到
+   * 一个灰按钮、无从得知原因。这里用 browse-dirs（后端同一 safe_path 权威）
+   * 预判：越界即输入框旁给出禁用原因并禁用提交；其余失败（不存在等）不
+   * 拦截，留给注册接口的点名报错。
+   */
+  private addPathScopeSeq = 0
+  private async checkAddPathScope(path: string) {
+    const trimmed = path.trim()
+    const seq = ++this.addPathScopeSeq
+    if (!trimmed) {
+      this.addPathScopeHint = null
+      return
+    }
+    try {
+      await api.fsBrowseDirs(trimmed)
+      if (seq === this.addPathScopeSeq) this.addPathScopeHint = null
+    } catch (e) {
+      if (seq !== this.addPathScopeSeq) return
+      this.addPathScopeHint = addPathScopeHintFrom(e instanceof Error ? e.message : String(e))
+    }
+  }
   private async submitAddProject() {
     const path = this.addPath.trim()
     if (!path) { this.addError = '请输入路径'; return }
@@ -772,6 +980,9 @@ export class SebasProjectRail extends LitElement {
           >${icon('more', 12)}</button>
           <!-- （workbench-live-conversation-flow 4.2）归档是唯一生命周期
                出口，自带 close 语义（终止子进程 + 丢弃待执行，确认框点名）。 -->
+          <!-- （5.1，design D6）重命名：设置 label 后行名与对话框同源优先
+               显示 label；清空回退首条 prompt 预览。 -->
+          <wa-dropdown-item value="rename" @click=${(e: Event) => this.openRenameDialog(e, row)}>重命名</wa-dropdown-item>
           <wa-dropdown-item value="archive" variant="danger" @click=${(e: Event) => this.requestArchive(e, row)}>归档</wa-dropdown-item>
         </wa-dropdown>
       </li>`
@@ -796,7 +1007,8 @@ export class SebasProjectRail extends LitElement {
     const accessible = info ? info.accessible : true
     const { count, waiting } = this.countsFor(p.id)
     const isActive = this.activePath === p.path
-    const isExpanded = this.expanded[p.path] ?? false
+    // （4.2）持久化记录优先、聚焦所在项目无记录时缺省展开。
+    const isExpanded = this.isProjectExpanded(p.path)
     const dragging = this.dragIndex === index
     const dragOver = this.dragOverIndex === index && this.dragIndex !== null && this.dragIndex !== index
     const projectSessions = this.sessionsFor(p.id)
@@ -898,8 +1110,14 @@ export class SebasProjectRail extends LitElement {
           <p style="font-size:0.85rem;color:var(--sebas-text);margin:0;">Choose a directory to add as a project:</p>
           <sebas-folder-picker class="folder-picker" @folder-selected=${this.onFolderSelected}></sebas-folder-picker>
           <p style="font-size:0.8rem;color:var(--sebas-text-faint);margin:0;text-align:center;">or</p>
-          <!-- Web Awesome 3.x 派发标准 input 事件（不派发 wa-input），手动路径才能联动启用提交按钮。 -->
-          <wa-input label="Project path" placeholder="/absolute/path/to/repo" .value=${this.addPath} @input=${(e: any) => (this.addPath = e.target.value)}>
+          <!-- Web Awesome 3.x 派发标准 input 事件（不派发 wa-input），手动路径才能联动启用提交按钮。
+               fix-webui-qa-defects 7.2：手填路径即时预检越界（禁用不再静默）。
+               fix-webui-approval-restore-and-session-identity 5.2：本行行尾曾有
+               一个游离引号（.value 绑定后跟一个未配对的引号再接标签收尾）——
+               属性未加引号，该引号被并进属性值，把 @input 的 EventPart 降级成
+               普通属性 part，listener 永不挂接（历轮「手填路径失灵」的根因）；
+               同时把引号灌进 .value 值。引号已除，@input 绑定恢复。 -->
+          <wa-input label="Project path" placeholder="/absolute/path/to/repo" .value=${this.addPath} @input=${(e: any) => { this.addPath = e.target.value; void this.checkAddPathScope(this.addPath) }}>
             <wa-icon slot="start" name="folder" aria-hidden="true"></wa-icon>
           </wa-input>
           <!-- 8.1：节点维度。空值 = 本机隐式注册（既有行为）；选远端时路径由
@@ -919,8 +1137,10 @@ export class SebasProjectRail extends LitElement {
             ? nothing
             : html`<p style="font-size:0.75rem;color:var(--sebas-text-faint);margin:0;">远端节点状态不可得${this.nodesCause ? `：${this.nodesCause}` : ''}</p>`}
           ${this.addError ? html`<div style="color:var(--sebas-status-failed);font-size:0.78rem;" data-testid="add-project-error">${this.addError}</div>` : nothing}
+          <!-- fix-webui-qa-defects 7.2：越界禁用原因在输入框旁可见，不再静默。 -->
+          ${this.addPathScopeHint ? html`<div style="color:var(--sebas-status-failed);font-size:0.78rem;" data-testid="add-project-scope-hint">${this.addPathScopeHint}</div>` : nothing}
         </div>
-        <wa-button slot="footer" variant="brand" @click=${() => void this.submitAddProject()} ?disabled=${!this.addPath.trim()}>Add project</wa-button>
+        <wa-button slot="footer" variant="brand" @click=${() => void this.submitAddProject()} ?disabled=${!this.addPath.trim() || this.addPathScopeHint !== null}>Add project</wa-button>
         <wa-button slot="footer" appearance="plain" @click=${() => this.closeAddDialog()}>Cancel</wa-button>
       </wa-dialog>` : nothing}
 
@@ -969,6 +1189,24 @@ export class SebasProjectRail extends LitElement {
         </div>
         <wa-button slot="footer" variant="danger" @click=${() => void this.confirmArchiveSession()}>归档</wa-button>
         <wa-button slot="footer" appearance="plain" @click=${() => this.closeConfirmDialog()}>取消</wa-button>
+      </wa-dialog>` : nothing}
+
+      <!-- （5.1）重命名对话框：label 是操作者自由输入，零轮占位同样可命名；
+           空输入 = 清空。关闭即整棵移出 ARIA 树。 -->
+      ${this.renameTarget !== null ? html`
+      <wa-dialog label="重命名会话" style="--width: 440px;" .open=${true} @wa-hide=${guardedHide(() => this.closeRenameDialog())}>
+        <div class="wa-stack" style="gap:var(--sebas-space-3);">
+          <wa-input
+            data-testid="rename-input"
+            label="会话名称"
+            placeholder="留空则回退到首条消息预览"
+            .value=${this.renameValue}
+            @input=${(e: Event) => (this.renameValue = (e.target as HTMLInputElement).value)}
+          ></wa-input>
+          ${this.renameError ? html`<div style="color:var(--sebas-status-failed);font-size:0.78rem;" data-testid="rename-error">${this.renameError}</div>` : nothing}
+        </div>
+        <wa-button slot="footer" variant="brand" ?loading=${this.renaming} @click=${() => void this.confirmRename()}>保存</wa-button>
+        <wa-button slot="footer" appearance="plain" @click=${() => this.closeRenameDialog()}>取消</wa-button>
       </wa-dialog>` : nothing}
 
       <!-- 创建会话对话框（workbench-interaction-polish D2）：唯一可选 agent

@@ -13,7 +13,10 @@
 use async_trait::async_trait;
 use sebas_channels::key::ChannelKey;
 use sebas_dispatch::engine::CancelOutcome;
-use sebas_dispatch::{PendingSubmission, SessionEvent, SessionInfo, TurnEntry, TurnStreamEvent};
+use sebas_dispatch::{
+    PendingApproval, PendingSubmission, SessionEvent, SessionInfo, SessionIdentity, TurnEntry,
+    TurnStreamEvent,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -378,6 +381,32 @@ pub trait SessionBackend: Send + Sync {
         None
     }
 
+    /// 待批请求读模型（fix-webui-approval-restore-and-session-identity 1.2）：
+    /// 按会话枚举当前泊车审批（request_id / 工具 / 参数），与推送通道独立
+    /// ——WebUI 打开/刷新会话时拉取它重建审批面。未知会话 → typed rejection
+    /// （路由转 404）；无泊车 = 空表。默认诚实不可用：不承载泊车登记的后端
+    /// 不假装知道。
+    async fn pending_approvals(
+        &self,
+        _key: ChannelKey,
+    ) -> Result<Vec<PendingApproval>, SessionRejection> {
+        Err(SessionRejection::Unavailable {
+            cause: "此后端不承载泊车审批读模型".into(),
+        })
+    }
+
+    /// 设置/清空会话 label（fix-webui-approval-restore-and-session-identity
+    /// 5.1，design D6）。`None` = 清空。未知会话 → typed rejection。
+    async fn set_session_label(
+        &self,
+        _key: ChannelKey,
+        _label: Option<String>,
+    ) -> Result<(), SessionRejection> {
+        Err(SessionRejection::Unavailable {
+            cause: "此后端不支持会话命名".into(),
+        })
+    }
+
     /// Deliver an operator decision for `request_id`. Returns `false` when
     /// no pending request carries that id (already answered, timed out, or
     /// unknown — callers may retry briefly).
@@ -461,6 +490,24 @@ pub trait SessionBackend: Send + Sync {
     ) -> Result<(), SessionRejection> {
         Err(SessionRejection::Unavailable {
             cause: "此后端不支持会话级模式切换".into(),
+        })
+    }
+
+    /// 从归档条目重建会话（fix-webui-qa-defects 2.2，design D1）：以原 key
+    /// 重建 Dormant 映射（`session_id` / `project_dir` 沿用）并把归档转写
+    /// 回放进 turn 存储。成功后快照/detail 立即可见该会话；失败时调用方
+    /// 必须保留归档条目（「消费归档 ⇄ 重建会话」同事务语义——绝不删了
+    /// 归档却没重建会话）。默认诚实不可用。
+    async fn restore_session(
+        &self,
+        _key: ChannelKey,
+        _session_id: Option<String>,
+        _project_dir: Option<String>,
+        _transcript: Vec<TurnEntry>,
+        _identity: SessionIdentity,
+    ) -> Result<(), SessionRejection> {
+        Err(SessionRejection::Unavailable {
+            cause: "此后端不支持从归档重建会话".into(),
         })
     }
 }
@@ -843,6 +890,29 @@ impl SessionBackend for InProcessBackend {
             })
     }
 
+    /// 归档恢复（fix-webui-qa-defects 2.2）：直达引擎的 `web_restore_session`
+    /// ——Dormant 重建 + 转写回放。引擎拒绝按类型映射为 wire 拒绝。
+    async fn restore_session(
+        &self,
+        key: ChannelKey,
+        session_id: Option<String>,
+        project_dir: Option<String>,
+        transcript: Vec<TurnEntry>,
+        identity: SessionIdentity,
+    ) -> Result<(), SessionRejection> {
+        self.router
+            .web_restore_session(key, session_id, project_dir, transcript, identity)
+            .await
+            .map_err(|e| match e {
+                sebas_dispatch::error::DispatchError::Capacity(limit) => {
+                    SessionRejection::Capacity { limit }
+                }
+                other => SessionRejection::Unavailable {
+                    cause: format!("restore failed: {other}"),
+                },
+            })
+    }
+
     async fn reachability(&self) -> Reachability {
         // Same process as the authority: always reachable.
         Reachability::Reachable
@@ -898,6 +968,34 @@ impl SessionBackend for InProcessBackend {
         Some(self.notices.subscribe())
     }
 
+    /// （1.2）读模型直达引擎：泊车登记（工具/参数）按会话枚举。未知会话 →
+    /// UnknownSession（路由转 404）；占位（无 session_id）如实返回空表。
+    async fn pending_approvals(
+        &self,
+        key: ChannelKey,
+    ) -> Result<Vec<PendingApproval>, SessionRejection> {
+        self.router
+            .pending_permission_requests(&key)
+            .await
+            .ok_or(SessionRejection::UnknownSession {
+                key: key.reference.clone(),
+            })
+    }
+
+    /// （5.1）label 设置直达引擎映射；未知 key → UnknownSession。
+    async fn set_session_label(
+        &self,
+        key: ChannelKey,
+        label: Option<String>,
+    ) -> Result<(), SessionRejection> {
+        self.router
+            .web_set_session_label(key.clone(), label)
+            .await
+            .map_err(|_| SessionRejection::UnknownSession {
+                key: key.reference.clone(),
+            })
+    }
+
     async fn answer_permission(&self, request_id: &str, decision: PermissionDecision) -> bool {
         let session_id = self.request_sessions.read().await.get(request_id).cloned();
         let Some(session_id) = session_id else {
@@ -905,6 +1003,8 @@ impl SessionBackend for InProcessBackend {
         };
         // 原生会话（make-feishu-optional-webui-primary）：权限请求来自桥 →
         // 决定回填到原生内核（ApproverHub）。先试 native，失败再回退 acp。
+        // 原生泊车同样登记在引擎泊车表（publish_native_permission），其批复
+        // 成功在此解除登记——读模型/fail-closed 对两条执行体同一口径。
         let native = match decision.clone() {
             PermissionDecision::AllowOnce => {
                 sebas_dispatch::native_bridge::NativeApprovalDecision::AllowOnce
@@ -922,9 +1022,21 @@ impl SessionBackend for InProcessBackend {
             .answer_native_permission(request_id, native)
             .await
         {
+            self.router.resolve_permission_request(request_id).await;
             return true;
         }
-        // acp 会话：走既有 Out::SendAcp PermissionReply。
+        // acp 会话：走既有 Out::SendAcp PermissionReply。（1.4 / 2.3）
+        // fail-closed：只有**当前泊车中**的 request_id 可批复——已批复 /
+        // 已随 cancel 释放 / 从未泊车的 id 一律拒绝（返回 false → 路由 404），
+        // 绝不复活任何状态。
+        if self
+            .router
+            .permission_parked_session(request_id)
+            .await
+            .is_none()
+        {
+            return false;
+        }
         let decision = map_permission_decision(decision);
         self.router
             .emit(sebas_dispatch::Out::SendAcp {
@@ -944,6 +1056,9 @@ impl SessionBackend for InProcessBackend {
         // 消失）只是失去 mode 切换，不影响已回的 allow。成败经事件流回执
         // （`ModeChanged`=成功 / 带「模式未变」标记的非终态 `Error`=失败，
         // engine 的 apply_event 据实翻卡上报，im/前端失败呈现已就绪）。
+        // （2.3）批复出站后摘除路由登记——同 id 迟到的第二次批复不再命中
+        // request_sessions（且泊车登记已由 emit 单点解除），双保险 fail-closed。
+        self.request_sessions.write().await.remove(request_id);
         if matches!(decision, sebas_acp::Decision::AllowSession)
             && let Some(key) = self.router.map.lookup_key_by_session(&session_id).await
         {
@@ -987,6 +1102,15 @@ pub struct FakeBackend {
     /// add-remote-execution-node 8.1（route 层测试用）：最近一次
     /// `spawn_with` / `create_placeholder` 收到的 `node`。`None` = 还没调用过。
     last_spawn_node: std::sync::Mutex<Option<Option<String>>>,
+    /// fix-webui-qa-defects 2.2（route 层测试用）：记录 `restore_session`
+    /// 调用 `(key, session_id, project_dir, 条目数, 身份)`。
+    restores: std::sync::Mutex<Vec<(ChannelKey, Option<String>, Option<String>, usize, SessionIdentity)>>,
+    /// fix-webui-approval-restore-and-session-identity 1.2（route 层测试用）：
+    /// 按编码会话键注入的待批审批读模型；未注入的键 = 未知会话拒绝。
+    approvals: std::sync::Mutex<HashMap<String, Vec<PendingApproval>>>,
+    /// fix-webui-approval-restore-and-session-identity 5.1（route 层测试用）：
+    /// 最近一次 `set_session_label` 的入参。
+    last_label: std::sync::Mutex<Option<(String, Option<String>)>>,
 }
 
 #[derive(Default)]
@@ -1018,7 +1142,28 @@ impl FakeBackend {
             nodes: std::sync::Mutex::new(None),
             path_checks: std::sync::Mutex::new(HashMap::new()),
             last_spawn_node: std::sync::Mutex::new(None),
+            restores: std::sync::Mutex::new(Vec::new()),
+            approvals: std::sync::Mutex::new(HashMap::new()),
+            last_label: std::sync::Mutex::new(None),
         }
+    }
+
+    /// fix-webui-approval-restore-and-session-identity 1.2（route 层测试用）：
+    /// 注入某会话（编码键）的待批审批读模型。
+    pub fn set_pending_approvals(&self, encoded_key: &str, approvals: Vec<PendingApproval>) {
+        self.approvals
+            .lock()
+            .expect("approvals lock")
+            .insert(encoded_key.to_string(), approvals);
+    }
+
+    /// fix-webui-approval-restore-and-session-identity 5.1（route 层测试用）：
+    /// 最近一次 `set_session_label` 收到的 `(编码键, label)`。
+    pub fn last_label(&self) -> Option<(String, Option<String>)> {
+        self.last_label
+            .lock()
+            .expect("last label lock")
+            .clone()
     }
 
     /// Seed/replace the visible session set.
@@ -1054,6 +1199,7 @@ impl FakeBackend {
                 .unwrap_or(0),
             // webui 侧自建条目（本地回显等）无结构化标题。
             title: None,
+            failure_class: None,
         });
     }
 
@@ -1110,6 +1256,14 @@ impl FakeBackend {
             .expect("last spawn node lock")
             .clone()
             .flatten()
+    }
+
+    /// fix-webui-qa-defects 2.2：已记录的 restore 调用（route 层测试断言
+    /// 「重建请求确实传到了缝上」）。
+    pub async fn restores(
+        &self,
+    ) -> Vec<(ChannelKey, Option<String>, Option<String>, usize, SessionIdentity)> {
+        self.restores.lock().expect("restores lock").clone()
     }
 
     /// （wire-webui-sebas-agent-e2e 3.1）注入逐执行体可用性，summary 原样
@@ -1191,6 +1345,7 @@ impl SessionBackend for FakeBackend {
             turn_engaged: true,
             spawn_failure_reason: None,
             parked_approvals: 0,
+            label: None,
         };
         let ev = SessionEvent::Created { session };
         if let SessionEvent::Created { session } = &ev {
@@ -1282,6 +1437,67 @@ impl SessionBackend for FakeBackend {
             .get(&sid)
             .map(|log| log.iter().filter(|e| e.position >= from).cloned().collect())
             .unwrap_or_default())
+    }
+
+    /// fix-webui-qa-defects 2.2：reachable = 记录调用并成功；unreachable =
+    /// 如实拒绝（route 层据此断言「失败时归档不动」）。
+    async fn restore_session(
+        &self,
+        key: ChannelKey,
+        session_id: Option<String>,
+        project_dir: Option<String>,
+        transcript: Vec<TurnEntry>,
+        identity: SessionIdentity,
+    ) -> Result<(), SessionRejection> {
+        if !self.reachable.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(SessionRejection::Unavailable {
+                cause: "核心不可达（fake）".into(),
+            });
+        }
+        let n = transcript.len();
+        self.restores
+            .lock()
+            .expect("restores lock")
+            .push((key, session_id, project_dir, n, identity));
+        Ok(())
+    }
+
+    /// fix-webui-approval-restore-and-session-identity 1.2：注入的读模型；
+    /// 未注入的键如实拒绝（UnknownSession → 路由 404）。
+    async fn pending_approvals(
+        &self,
+        key: ChannelKey,
+    ) -> Result<Vec<PendingApproval>, SessionRejection> {
+        let encoded = crate::routes::encode_session_key(&key);
+        match self.approvals.lock().expect("approvals lock").get(&encoded) {
+            Some(list) => Ok(list.clone()),
+            None => Err(SessionRejection::UnknownSession {
+                key: encoded,
+            }),
+        }
+    }
+
+    /// fix-webui-approval-restore-and-session-identity 5.1：就地改会话行的
+    /// label（快照即真相）；未知会话拒绝。记录最近一次入参供断言。
+    async fn set_session_label(
+        &self,
+        key: ChannelKey,
+        label: Option<String>,
+    ) -> Result<(), SessionRejection> {
+        let encoded = crate::routes::encode_session_key(&key);
+        *self.last_label.lock().expect("last label lock") = Some((encoded.clone(), label.clone()));
+        let mut g = self.inner.write().await;
+        match g
+            .sessions
+            .iter_mut()
+            .find(|s| s.channel == key.channel.as_str() && s.key == key.reference)
+        {
+            Some(s) => {
+                s.label = label;
+                Ok(())
+            }
+            None => Err(SessionRejection::UnknownSession { key: encoded }),
+        }
     }
 
     async fn state_snapshot(&self, domain: &str) -> Option<serde_json::Value> {
@@ -1461,6 +1677,7 @@ mod tests {
                 turn_engaged: false,
                 spawn_failure_reason: None,
                 parked_approvals: 0,
+                label: None,
             }])
             .await;
         backend.push_turn("s9", "prompt", "p1").await;
@@ -1582,17 +1799,38 @@ mod tests {
         let (router, mut out_rx) = sebas_dispatch::DispatchHandle::new(map);
         let backend = InProcessBackend::new(router.clone());
         // 生产由 relay 在 PermissionRequest 广播时登记；测试直接注入
-        // request_id → routing session_id（同文件私有字段）。
+        // request_id → routing session_id（同文件私有字段）。批复前请求必须
+        // 处于泊车中（fail-closed 前提）——与 dispatch_acp_event 泊车登记一致。
         backend
             .request_sessions
             .write()
             .await
             .insert("req-auto".into(), "s-mode".into());
+        router
+            .stall_registry()
+            .note_permission_parked("s-mode", "req-auto", "Bash", serde_json::json!({}))
+            .await;
 
         assert!(
             backend
                 .answer_permission("req-auto", PermissionDecision::AllowSession)
                 .await
+        );
+        // 批复成功后泊车解除（读模型随之清空——1.1 契约的批复侧）。
+        assert_eq!(
+            router
+                .pending_permission_requests(&key)
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
+        // 迟到的第二次批复被拒（1.4/2.3：不复活任何状态）。
+        assert!(
+            !backend
+                .answer_permission("req-auto", PermissionDecision::Deny)
+                .await,
+            "a decided request must not be answerable again"
         );
 
         // Out 顺序钉死语义：① 放行（首要语义先行）② SetMode{auto}
@@ -1646,6 +1884,15 @@ mod tests {
             .write()
             .await
             .insert("req-2".into(), "s-mode".into());
+        // 两条请求均在泊车中（批复的 fail-closed 前提）。
+        router
+            .stall_registry()
+            .note_permission_parked("s-mode", "req-1", "Bash", serde_json::json!({}))
+            .await;
+        router
+            .stall_registry()
+            .note_permission_parked("s-mode", "req-2", "Read", serde_json::json!({}))
+            .await;
 
         for (req, expect) in [
             ("req-1", sebas_acp::Decision::AllowOnce),

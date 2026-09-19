@@ -120,6 +120,46 @@ fn next_failed_id() -> String {
     format!("failed-{n}")
 }
 
+/// 会话身份（fix-webui-approval-restore-and-session-identity 3.1/3.2，design
+/// D3）：归档条目携带、恢复重建时原样带回的四项。全 `Option`——旧归档条目
+/// 缺字段时如实回退既有默认（agent 显示回退、模型目录清空），不做数据迁移。
+/// serde-native：跨归档文件与 core session channel 传输。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionIdentity {
+    /// 创建时绑定的执行后端 kind（`[acp.agents.*]` 配置键）；`None` = 配置默认。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_kind: Option<String>,
+    /// 归档时刻的期望 mode（控制面词汇 ask/edit/allow/auto）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desired_mode: Option<String>,
+    /// 归档时刻的当前模型 id。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_model: Option<String>,
+    /// 归档时刻的可选模型目录。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available_models: Option<Vec<String>>,
+}
+
+impl SessionIdentity {
+    /// 从 [`Mapping`] 的身份字段取快照（归档路由的数据源）。
+    pub fn of(m: &Mapping) -> Self {
+        Self {
+            agent_kind: m.pending_kind.clone(),
+            desired_mode: Some(m.desired_mode.clone()),
+            current_model: m.current_model.clone(),
+            available_models: m.available_models.clone(),
+        }
+    }
+
+    /// 全空 = 旧归档条目（恢复路径维持现默认，wire 上可省键）。
+    pub fn is_empty(&self) -> bool {
+        self.agent_kind.is_none()
+            && self.desired_mode.is_none()
+            && self.current_model.is_none()
+            && self.available_models.is_none()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Mapping {
     pub state: MappingState,
@@ -172,6 +212,10 @@ pub struct Mapping {
     /// = 无命令面板（native 等无发现能力的会话恒空，诚实退化非错误）。
     /// 内存层字段，不落盘——重连后 agent 重新广告即可重建。
     pub available_commands: Vec<sebas_acp::AvailableCommand>,
+    /// （fix-webui-approval-restore-and-session-identity 5.1，design D6）操作者
+    /// 设置的会话 label。`None` = 未设置（命名回退首条 prompt 预览 / 短 id）。
+    /// 随 MappingDto 落盘——label 跨重启保持。
+    pub label: Option<String>,
 }
 
 impl Mapping {
@@ -191,6 +235,7 @@ impl Mapping {
             current_model: None,
             available_models: None,
             available_commands: Vec::new(),
+            label: None,
         }
     }
 
@@ -212,6 +257,7 @@ impl Mapping {
             current_model: None,
             available_models: None,
             available_commands: Vec::new(),
+            label: None,
         }
     }
 
@@ -232,6 +278,7 @@ impl Mapping {
             current_model: None,
             available_models: None,
             available_commands: Vec::new(),
+            label: None,
         }
     }
 
@@ -270,6 +317,7 @@ impl Mapping {
             current_model: None,
             available_models: None,
             available_commands: Vec::new(),
+            label: None,
         }
     }
 
@@ -289,6 +337,7 @@ impl Mapping {
             current_model: None,
             available_models: None,
             available_commands: Vec::new(),
+            label: None,
         }
     }
 
@@ -306,13 +355,29 @@ impl Mapping {
     }
 
     /// Transcript 寻址 id：`Active` 用路由 id；`SpawnFailed` 用合成 id（错误
-    /// 条目挂在它下面）。其余状态没有可寻址的 transcript。
+    /// 条目挂在它下面）；`Dormant` 用持久化的 session_id（fix-webui-qa-defects
+    /// 2.1：归档恢复以 Dormant 重建映射并把转写回放进 turn 存储，detail 必须
+    /// 能按该 id 取回全部条目——重启恢复的 Dormant 会话 turn_log 本就为空，
+    /// 行为不变）。`Spawning` 占位无可寻址 transcript。
     pub fn transcript_id(&self) -> Option<&str> {
         match &self.state {
-            MappingState::Active { session_id } => Some(session_id),
+            MappingState::Active { session_id }
+            | MappingState::Dormant { session_id } => Some(session_id),
             MappingState::SpawnFailed { session_id, .. } => Some(session_id),
-            MappingState::Spawning { .. } | MappingState::Dormant { .. } => None,
+            MappingState::Spawning { .. } => None,
         }
+    }
+
+    /// 0-turn 占位旗标（fix-webui-qa-defects 3.1，design D2）：占位不构成在飞
+    /// 回合，停滞看门狗据此跳过（经映射查询，不改卡片 FSM）。
+    pub fn awaiting_first_prompt(&self) -> bool {
+        matches!(
+            &self.state,
+            MappingState::Spawning {
+                awaiting_first_prompt: true,
+                ..
+            }
+        )
     }
 
     /// The spawn-failure reason, when this mapping is in the `SpawnFailed`
@@ -787,6 +852,21 @@ impl SessionMap {
         }
     }
 
+    /// 设置/清空会话 label（fix-webui-approval-restore-and-session-identity
+    /// 5.1，design D6）：`None` = 清空（命名回退首条 prompt 预览 / 短 id）。
+    /// 任何映射状态都可命名——0-turn 占位（无 session_id）同样可以（label 是
+    /// 操作者自由输入）。无映射时返回 `false`（调用方转 UnknownSession）。
+    pub async fn set_label(&self, key: &ChannelKey, label: Option<String>) -> bool {
+        let mut g = self.inner.write().await;
+        match g.get_mut(key) {
+            Some(m) => {
+                m.label = label;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// （session-slash-commands 2.1）物化 agent 广告的会话命令表：
     /// `AcpEvent::AvailableCommands` 到达时全量覆盖（二次通知 = 刷新旧表，
     /// 与 model/mode 同一到达线）。无映射时 no-op。空表同样写入——agent 撤
@@ -1148,6 +1228,7 @@ impl SessionMap {
                     pending_mode: m.pending_mode.clone(),
                     desired_mode: m.desired_mode.clone(),
                     project_dir: m.project_dir.clone(),
+                    label: m.label.clone(),
                     awaiting_first_prompt: is_placeholder,
                 };
                 out.insert(
@@ -1219,6 +1300,8 @@ impl SessionMap {
             // 旧文件无该字段 → None → agent 默认行为。
             m.pending_mode = dto.pending_mode;
             m.desired_mode = dto.desired_mode;
+            // （5.1，design D6）操作者 label：旧文件无字段 → None（命名回退不变）。
+            m.label = dto.label;
             m.project_dir = dto.project_dir;
             map.insert(key, m);
         }
@@ -1319,6 +1402,10 @@ struct MappingDto {
     /// `#[serde(default)]` 兼容旧文件。
     #[serde(default)]
     project_dir: Option<String>,
+    /// 操作者设置的会话 label（5.1，design D6）。`#[serde(default)]` 兼容
+    /// 旧文件（无字段 → None，命名回退首条 prompt 预览）。
+    #[serde(default)]
+    label: Option<String>,
     /// 0-turn 占位标记（workbench-agent-wire-fix D1）。`true` + 空
     /// `session_id` = 重启后仍是等待首条消息的占位。`#[serde(default)]`
     /// 兼容旧文件（旧记录一律视为非占位）。
@@ -1341,6 +1428,36 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// fix-webui-approval-restore-and-session-identity 5.1：label 随
+    /// MappingDto 落盘 → restore 保留；旧文件（无字段）→ None（命名回退
+    /// 不变）。
+    #[tokio::test]
+    async fn label_round_trips_through_disk_shape() {
+        let map = SessionMap::new();
+        let key = ChannelKey::new("web", "web-label");
+        let mut m = Mapping::dormant("s-label", 1);
+        m.project_dir = Some("/tmp/proj-label".into());
+        m.label = Some("重构计划".into());
+        map.insert(key.clone(), m).await.unwrap();
+        let json = map.dump_json().await.unwrap();
+        assert!(json.contains("\"label\""), "label must be persisted: {json}");
+
+        let restored = SessionMap::restore_json(&json).unwrap();
+        let back = restored.get(&key).await.unwrap();
+        assert_eq!(back.label.as_deref(), Some("重构计划"));
+
+        // 旧文件无 label 字段 → None。
+        let legacy_key = serde_json::to_string(&ChannelKey::new("web", "web-old")).unwrap();
+        let legacy_json = format!(
+            r#"{{"{k}": {{"session_id":"s-old","last_active_unix":1,"project_dir":"/tmp/p"}}}}"#,
+            k = legacy_key.replace('"', "\\\"")
+        );
+        let bare = SessionMap::restore_json(&legacy_json).unwrap();
+        let old_key = ChannelKey::new("web", "web-old");
+        let old_m = bare.get(&old_key).await.unwrap();
+        assert_eq!(old_m.label, None, "legacy records restore without a label");
+    }
 
     /// add-composer-agent-binding 1.2：pending_kind 落盘 → 重载保留；
     /// 旧文件（无该字段）→ None（UI 回退默认 kind 标签）。

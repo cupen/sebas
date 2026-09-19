@@ -16,17 +16,32 @@
 //! 纯事实 + 纯内存：扫描与强制收尾在 [`super::DispatchHandle`]（它才能摸到
 //! 卡片态与队列），本类型只回答「谁停滞了」。
 
-use std::collections::{HashMap, HashSet};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::RwLock;
+
+/// 一条泊车审批的完整登记（fix-webui-approval-restore-and-session-identity
+/// 1.1）：request_id 之外带上工具名与参数——「按会话枚举当前待批请求」的
+/// 读模型直接从这里投影，刷新/重连后的审批面重建不再依赖一次性 WS 推送。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ParkedRequest {
+    /// 权限请求 id（agent-driver 命名空间，如 `claude:tc-N`）。
+    pub request_id: String,
+    /// 被门控的工具名。
+    pub tool_name: String,
+    /// 工具调用参数（原样 JSON）。
+    pub args: Value,
+}
 
 #[derive(Default, Clone)]
 pub struct StallRegistry {
     /// session_id → 最近一次事件到达的 unix 秒。
     clocks: Arc<RwLock<HashMap<String, i64>>>,
-    /// session_id → 在等批复的权限 request_id 集合（泊车豁免事实）。
-    parked: Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    /// session_id → 在等批复的权限请求登记（request_id → 工具/参数）。
+    parked: Arc<RwLock<HashMap<String, HashMap<String, ParkedRequest>>>>,
     /// 看门狗阈值（秒）；0 = 关闭。
     timeout_secs: Arc<AtomicU64>,
 }
@@ -67,14 +82,28 @@ impl StallRegistry {
             .insert(session_id.to_string(), super::now_unix());
     }
 
-    /// 权限请求泊车：登记 request_id（该会话豁免计时，design D2）。
-    pub async fn note_permission_parked(&self, session_id: &str, request_id: &str) {
+    /// 权限请求泊车：登记 request_id + 工具/参数（该会话豁免计时，design D2）。
+    /// 同 id 重登（重放的 PermissionRequest）幂等覆盖为最新登记。
+    pub async fn note_permission_parked(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        tool_name: &str,
+        args: Value,
+    ) {
         self.parked
             .write()
             .await
             .entry(session_id.to_string())
             .or_default()
-            .insert(request_id.to_string());
+            .insert(
+                request_id.to_string(),
+                ParkedRequest {
+                    request_id: request_id.to_string(),
+                    tool_name: tool_name.to_string(),
+                    args,
+                },
+            );
     }
 
     /// 权限批复出站：从**任意**会话的泊车集合解除该 request_id（emit 单点，
@@ -87,13 +116,54 @@ impl StallRegistry {
         // 一起清掉（防空壳积累）。未泊车的 id 解除是无害 no-op。
         let mut resolved_session = None;
         parked.retain(|sid, ids| {
-            let had = ids.remove(request_id);
+            let had = ids.remove(request_id).is_some();
             if had {
                 resolved_session = Some(sid.clone());
             }
             !had || !ids.is_empty()
         });
         resolved_session
+    }
+
+    /// 该会话当前泊车的权限请求全量（读模型投影源，落库序不保证——按
+    /// request_id 字典序稳定输出，方便测试与呈现）。
+    pub async fn parked_requests(&self, session_id: &str) -> Vec<ParkedRequest> {
+        let g = self.parked.read().await;
+        match g.get(session_id) {
+            Some(ids) => {
+                let mut out: Vec<ParkedRequest> = ids.values().cloned().collect();
+                out.sort_by(|a, b| a.request_id.cmp(&b.request_id));
+                out
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// 该 request_id 当前泊车在哪个会话（`None` = 未泊车）。批复路由的
+    /// fail-closed 校验源：未泊车的 id 不可批复。
+    pub async fn parked_owner(&self, request_id: &str) -> Option<String> {
+        self.parked
+            .read()
+            .await
+            .iter()
+            .find(|(_, ids)| ids.contains_key(request_id))
+            .map(|(sid, _)| sid.clone())
+    }
+
+    /// fail-closed 释放：清空该会话的**全部**泊车登记（cancel / 会话终结
+    /// 路径调用）。返回被释放的 request_id 列表（日志/断言用）；幂等——
+    /// 重复释放返回空表、无副作用。孤儿泊车自此不再豁免计时，也绝不可再
+    /// 批复（[`Self::note_permission_resolved`] 对已释放 id 本就是 no-op）。
+    pub async fn release_session(&self, session_id: &str) -> Vec<String> {
+        let mut parked = self.parked.write().await;
+        match parked.remove(session_id) {
+            Some(ids) => {
+                let mut out: Vec<String> = ids.into_keys().collect();
+                out.sort();
+                out
+            }
+            None => Vec::new(),
+        }
     }
 
     /// 该会话当前泊车中的权限请求数。
@@ -162,7 +232,8 @@ mod tests {
         assert_eq!(reg.stalled_sessions().await.len(), 1);
 
         // 泊车 → 豁免：不进停滞名单。
-        reg.note_permission_parked("s1", "req-1").await;
+        reg.note_permission_parked("s1", "req-1", "Bash", serde_json::json!({"command": "ls"}))
+            .await;
         assert_eq!(reg.parked_count("s1").await, 1);
         assert!(
             reg.stalled_sessions().await.is_empty(),
@@ -214,14 +285,64 @@ mod tests {
     #[tokio::test]
     async fn resolve_is_targeted_and_tolerates_unknown_ids() {
         let reg = StallRegistry::default();
-        reg.note_permission_parked("s1", "r1").await;
-        reg.note_permission_parked("s1", "r2").await;
-        reg.note_permission_parked("s2", "r3").await;
+        reg.note_permission_parked("s1", "r1", "Bash", serde_json::json!({})).await;
+        reg.note_permission_parked("s1", "r2", "Read", serde_json::json!({})).await;
+        reg.note_permission_parked("s2", "r3", "Grep", serde_json::json!({})).await;
         reg.note_permission_resolved("does-not-exist").await;
         assert_eq!(reg.parked_count("s1").await, 2);
         assert_eq!(reg.parked_count("s2").await, 1);
         reg.note_permission_resolved("r1").await;
         assert_eq!(reg.parked_count("s1").await, 1, "only r1 leaves s1");
         assert_eq!(reg.parked_count("s2").await, 1, "s2 untouched");
+    }
+
+    /// fix-webui-approval-restore-and-session-identity 1.1：泊车登记携带
+    /// 工具/参数——读模型枚举逐一可见、批复后消失；同 id 重登幂等覆盖。
+    #[tokio::test]
+    async fn parked_requests_enumerate_tool_and_args_and_clear_on_resolve() {
+        let reg = StallRegistry::default();
+        let args = serde_json::json!({"command": "rm -rf build", "dir": "/x"});
+        reg.note_permission_parked("s1", "claude:tc-1", "Bash", args.clone()).await;
+        // 同 id 重登 = 覆盖（幂等），不重复计数。
+        reg.note_permission_parked("s1", "claude:tc-1", "Bash", args.clone()).await;
+        reg.note_permission_parked("s1", "claude:tc-2", "Read", serde_json::json!({"path": "a.rs"})).await;
+
+        let listed = reg.parked_requests("s1").await;
+        assert_eq!(listed.len(), 2, "one card per request id");
+        assert_eq!(listed[0].request_id, "claude:tc-1", "stable request_id order");
+        assert_eq!(listed[0].tool_name, "Bash");
+        assert_eq!(listed[0].args, args);
+        assert_eq!(listed[1].tool_name, "Read");
+
+        // 批复 → 该请求从读模型消失；另一条不受影响。
+        assert_eq!(reg.note_permission_resolved("claude:tc-1").await.as_deref(), Some("s1"));
+        let listed = reg.parked_requests("s1").await;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].request_id, "claude:tc-2");
+
+        // 未知会话 → 空表。
+        assert!(reg.parked_requests("nope").await.is_empty());
+    }
+
+    /// fix-webui-approval-restore-and-session-identity 2.1：release_session
+    /// 一次性释放全部泊车（fail-closed）、幂等；释放后 parked_owner 查无此 id。
+    #[tokio::test]
+    async fn release_session_clears_every_parked_request_idempotently() {
+        let reg = StallRegistry::default();
+        reg.note_permission_parked("s1", "r1", "Bash", serde_json::json!({})).await;
+        reg.note_permission_parked("s1", "r2", "Read", serde_json::json!({})).await;
+        reg.note_permission_parked("s2", "r3", "Grep", serde_json::json!({})).await;
+
+        assert_eq!(reg.parked_owner("r1").await.as_deref(), Some("s1"));
+        let released = reg.release_session("s1").await;
+        assert_eq!(released, vec!["r1".to_string(), "r2".to_string()]);
+        assert_eq!(reg.parked_count("s1").await, 0, "s1 fully released");
+        assert_eq!(reg.parked_owner("r1").await, None, "released id is no longer answerable");
+        assert_eq!(reg.parked_count("s2").await, 1, "other sessions untouched");
+
+        // 幂等：重复释放返回空表。
+        assert!(reg.release_session("s1").await.is_empty());
+        // 未知会话释放 = no-op。
+        assert!(reg.release_session("nope").await.is_empty());
     }
 }

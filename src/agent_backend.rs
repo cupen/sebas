@@ -23,7 +23,8 @@ use sebas_agent::session::{AgentEvent, SessionConfig, SessionHandle, SessionMana
 use sebas_agent::tools::ToolRegistry;
 use sebas_channels::ChannelKey;
 use sebas_dispatch::{
-    SessionEvent, SessionInfo, TurnEntry, TurnStreamEvent, count_chat_messages,
+    PendingApproval, SessionEvent, SessionIdentity, SessionInfo, TurnEntry, TurnStreamEvent,
+    count_chat_messages,
 };
 use sebas_webui::session_backend::{
     CloseReport, PermissionDecision, PermissionNotice, Reachability, SessionBackend,
@@ -76,6 +77,7 @@ impl NativeSession {
             content,
             created_at_unix: chrono::Utc::now().timestamp().max(0) as u64,
             title: None,
+            failure_class: None,
         };
         self.transcript.push(entry.clone());
         entry
@@ -131,6 +133,7 @@ impl NativeSession {
             turn_engaged: false,
             spawn_failure_reason: None,
             parked_approvals: 0,
+            label: None,
         }
     }
 }
@@ -1068,6 +1071,40 @@ impl SessionBackend for DualSessionBackend {
 
     async fn close(&self, key: ChannelKey) -> Result<CloseReport, SessionRejection> {
         self.route(&key).close(key).await
+    }
+
+    /// 归档恢复（fix-webui-qa-defects 2.2）：按 key 分发到归属执行体后端。
+    /// （3.2）会话身份随恢复链路透传给归属后端。
+    async fn restore_session(
+        &self,
+        key: ChannelKey,
+        session_id: Option<String>,
+        project_dir: Option<String>,
+        transcript: Vec<TurnEntry>,
+        identity: SessionIdentity,
+    ) -> Result<(), SessionRejection> {
+        self.route(&key)
+            .restore_session(key, session_id, project_dir, transcript, identity)
+            .await
+    }
+
+    /// 待批审批读模型（fix-webui-approval-restore-and-session-identity 1.2）：
+    /// 按 key 分发到归属执行体后端。
+    async fn pending_approvals(
+        &self,
+        key: ChannelKey,
+    ) -> Result<Vec<PendingApproval>, SessionRejection> {
+        self.route(&key).pending_approvals(key).await
+    }
+
+    /// 会话命名（fix-webui-approval-restore-and-session-identity 5.1）：按 key
+    /// 分发到归属执行体后端。
+    async fn set_session_label(
+        &self,
+        key: ChannelKey,
+        label: Option<String>,
+    ) -> Result<(), SessionRejection> {
+        self.route(&key).set_session_label(key, label).await
     }
 
     async fn cancel(&self, key: ChannelKey) -> Result<(), SessionRejection> {

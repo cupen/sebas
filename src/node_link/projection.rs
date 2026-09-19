@@ -952,6 +952,7 @@ impl RemoteProjection {
             // 本机 spawn-failed 概念，恒 None。
             spawn_failure_reason: None,
             parked_approvals: 0,
+            label: None,
             // rail-declutter-unread：远端会话的段计数不在本路径（节点侧日志
             // 词表与 TurnEntry 不同）——如实记 0，远端行的徽标恒不亮。已知
             // 局限，待节点链路透出统一口径后再接。
@@ -1099,6 +1100,7 @@ pub fn turn_entry_of(entry: &LogEntry) -> TurnEntry {
         created_at_unix: entry.at_unix.max(0) as u64,
         // 节点日志无结构化标题来源（workbench-agent-identity-and-process-folds）。
         title: None,
+        failure_class: None,
     }
 }
 

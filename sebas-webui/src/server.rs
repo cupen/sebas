@@ -222,6 +222,9 @@ fn build_router_full(
     let core = Router::new()
         .route("/", get(assets::index))
         .route("/assets/{*path}", get(assets::asset))
+        // （fix-webui-approval-restore-and-session-identity 5.4）本地图标
+        // 子集（`<wa-icon>` 经 setIconPath('/icons') 同源取 SVG）。
+        .route("/icons/{*path}", get(assets::icons_file))
         .route("/health", get(routes::health))
         .route(
             "/api/sessions",
@@ -238,6 +241,11 @@ fn build_router_full(
         .route("/api/sessions/{key}/mode", post(api::set_session_mode))
         .route("/api/sessions/{key}/close", post(api::close_session))
         .route("/api/sessions/{key}/switch", post(api::switch_session))
+        // fix-webui-approval-restore-and-session-identity 1.2：待批审批读模型
+        // （刷新/重连后审批面重建的数据源）。
+        .route("/api/sessions/{key}/approvals", get(api::session_approvals))
+        // fix-webui-approval-restore-and-session-identity 5.1：会话命名。
+        .route("/api/sessions/{key}/label", post(api::set_session_label))
         // workbench-turn-queue 6.2：待生效提交的管理面（remove / move）。
         .route(
             "/api/sessions/{key}/pending/{pending_id}/remove",
@@ -1748,6 +1756,7 @@ mod workspace_root_tests {
             turn_engaged: false,
             spawn_failure_reason: None,
             parked_approvals: 0,
+            label: None,
         }
     }
 
@@ -2322,5 +2331,171 @@ mod system_dir_denylist_tests {
         assert_eq!(echo, "/");
         let (status2, _) = req(app, "GET", "/api/fs/browse-dirs?path=/", None).await;
         assert_eq!(status2, StatusCode::OK, "echoed root must round-trip");
+    }
+}
+
+#[cfg(test)]
+mod restore_route_tests {
+    //! 归档恢复的路由级验收（fix-webui-qa-defects 2.2，design D1）：
+    //! 重建成功后才消费归档条目；重建失败（core 不可达）时 archive.json
+    //! 原样保留——「消费归档 ⇄ 重建会话」同事务语义。
+    use super::*;
+    use crate::archive::test_env_lock;
+    use crate::models::RouterInfo;
+    use crate::session_backend::FakeBackend;
+    use axum::body::Body;
+    use axum::extract::ConnectInfo;
+    use http_body_util::BodyExt;
+    use sebas_dispatch::TurnEntry;
+    use sebas_feishu::cards::CardConfig;
+    use serde_json::Value;
+    use std::net::{IpAddr, SocketAddr};
+    use tower::ServiceExt;
+
+    fn test_addr() -> SocketAddr {
+        SocketAddr::new(IpAddr::from([127, 0, 0, 1]), 12345)
+    }
+
+    fn app(backend: Arc<FakeBackend>) -> Router {
+        build_router_with_auth(
+            backend,
+            RouterInfo::default(),
+            CardConfig::default(),
+            None,
+            Arc::new(crate::agent_kinds::ConfigAgentKindProvider::new(Vec::new())),
+            30,
+            Arc::new(AuthHandle::disabled()),
+        )
+    }
+
+    async fn req(app: Router, method: &str, uri: &str) -> (StatusCode, Value) {
+        let builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("host", "127.0.0.1:12345")
+            .extension(ConnectInfo(test_addr()));
+        let req = builder.body(Body::empty()).unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let v = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+        };
+        (status, v)
+    }
+
+    /// archive env 的进程级串行临界区（与 archive.rs 测试共用一把锁）。
+    /// 返回 (归档文件路径, 归档条目 key, URL 段)。条目 key 是 axum Path
+    /// 解码后的原形（含 NUL）——与生产 archive handler 的存储形一致；URL
+    /// 段是它的百分位编码。持锁跨 await 是刻意的——整个异步测试体都要串行。
+    #[allow(clippy::await_holding_lock)]
+    fn seed_archive(
+        dir: &std::path::Path,
+        session_id: Option<String>,
+    ) -> (std::path::PathBuf, String, String) {
+        // SAFETY: test_env_lock 保证进程内归档相关测试串行。
+        unsafe {
+            std::env::set_var("SEBAS_ARCHIVE_PATH", dir.join("archive.json"));
+        }
+        let raw = "web\0web-restore-1";
+        let url_segment = urlencoding::encode(raw).into_owned();
+        crate::archive::archive_session(
+            raw,
+            "/proj",
+            "archived label",
+            session_id,
+            sebas_dispatch::SessionIdentity::default(),
+            30,
+            vec![TurnEntry::prompt(0, "hello"), TurnEntry::markdown(1, "world")],
+        )
+        .expect("seed archive entry");
+        (dir.join("archive.json"), raw.to_string(), url_segment)
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    fn clear_archive_env() {
+        // SAFETY: test_env_lock 保证进程内归档相关测试串行。
+        unsafe {
+            std::env::remove_var("SEBAS_ARCHIVE_PATH");
+        }
+    }
+
+    fn archive_snapshot(path: &std::path::Path) -> String {
+        std::fs::read_to_string(path).unwrap_or_default()
+    }
+
+    /// 主契约：重建成功（fake 可达）→ 200、归档条目被消费、重建请求确实
+    /// 带着原 session_id 与完整转写到达了 backend 缝。
+    #[tokio::test]
+    async fn restore_rebuilds_first_and_only_then_consumes_the_archive() {
+        let _lock = test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let (_path, _raw_key, url) = seed_archive(dir.path(), Some("old-sid".into()));
+
+        let backend = Arc::new(FakeBackend::new());
+        let (status, resp) = req(app(backend.clone()), "POST", &format!("/api/sessions/{url}/restore")).await;
+        assert_eq!(status, StatusCode::OK, "resp: {resp}");
+        assert_eq!(resp["status"], "restored");
+
+        // 归档条目已被消费（History 清空）。
+        assert!(
+            crate::archive::list().is_empty(),
+            "the archive entry must be consumed after a successful rebuild"
+        );
+
+        // 重建请求到达缝上：原 key、原 session_id、项目、完整转写。
+        let restores = backend.restores().await;
+        assert_eq!(restores.len(), 1, "exactly one rebuild call: {restores:?}");
+        let (key, session_id, project_dir, entries, _identity) = &restores[0];
+        assert_eq!(key.reference, "web-restore-1");
+        assert_eq!(session_id.as_deref(), Some("old-sid"));
+        assert_eq!(project_dir.as_deref(), Some("/proj"));
+        assert_eq!(*entries, 2, "the full transcript rides the rebuild");
+        clear_archive_env();
+    }
+
+    /// 失败路径：core 不可达 → 503，且 archive.json 一个字节都没动。
+    #[tokio::test]
+    async fn failed_rebuild_leaves_the_archive_untouched() {
+        let _lock = test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let (path, raw_key, url) = seed_archive(dir.path(), None);
+        let before = archive_snapshot(&path);
+
+        let backend = Arc::new(FakeBackend::new());
+        backend.set_reachable(false, "core down");
+        let (status, resp) =
+            req(app(backend.clone()), "POST", &format!("/api/sessions/{url}/restore")).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "resp: {resp}");
+
+        // 归档原样保留：文件未动、条目仍在（数据没有可逆丢失）。
+        assert_eq!(archive_snapshot(&path), before, "archive.json must be byte-identical");
+        assert!(
+            crate::archive::entry(raw_key.as_str()).is_some(),
+            "the archive entry must survive a failed rebuild"
+        );
+        assert!(backend.restores().await.is_empty());
+        clear_archive_env();
+    }
+
+    /// 未知 key 照旧 404（无条目可恢复，不触碰任何状态）。
+    #[tokio::test]
+    async fn restore_unknown_key_is_a_not_found() {
+        let _lock = test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        // SAFETY: test_env_lock。
+        unsafe {
+            std::env::set_var("SEBAS_ARCHIVE_PATH", dir.path().join("archive.json"));
+        }
+        let encoded = urlencoding::encode("web\0web-ghost").into_owned();
+        let backend = Arc::new(FakeBackend::new());
+        let (status, _) = req(app(backend), "POST", &format!("/api/sessions/{encoded}/restore")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        // SAFETY: test_env_lock。
+        unsafe {
+            std::env::remove_var("SEBAS_ARCHIVE_PATH");
+        }
     }
 }

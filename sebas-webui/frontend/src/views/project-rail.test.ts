@@ -11,7 +11,15 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { api, type Project, type SessionRow } from '../api/client.js'
 import { writeFocusAnchor } from './unread-cursor.js'
 import './project-rail.js'
-import { SebasProjectRail } from './project-rail.js'
+import {
+  SebasProjectRail,
+  RAIL_EXPANDED_KEY,
+  addPathScopeHintFrom,
+  fullSessionLabel,
+  parseRailExpanded,
+  railExpandedDefault,
+  serializeRailExpanded,
+} from './project-rail.js'
 
 // ---- localStorage polyfill --------------------------------------------
 // 测试环境的全局没有 localStorage；徽标读锚走共享游标模块（写全局），用
@@ -151,6 +159,32 @@ afterEach(() => {
   seenStore.clear()
 })
 
+
+// ── fix-webui-qa-defects 7.2：Add project 越界路径的禁用原因 ───────────────
+
+describe('add-project scope hint (fix-webui-qa-defects 7.2 / 本 change 5.2)', () => {
+  it('maps the server boundary rejection to a readable out-of-scope reason', () => {
+    const hint = addPathScopeHintFrom('路径超出允许范围: 不在 workspace root 内')
+    // （5.2）文案与 spec 对齐：越界点名列出边界。
+    expect(hint).toContain('workspace root 之外')
+    expect(hint).toContain('workspace root')
+  })
+
+  it('maps the browse-dirs boundary failure to the same reason', () => {
+    expect(addPathScopeHintFrom('path outside the workspace root')).toBeTruthy()
+  })
+
+  it('nonexistent / not-a-directory now carry their own reasons (5.2 收口)', () => {
+    expect(addPathScopeHintFrom('路径不存在或无法访问: /x')).toContain('不存在')
+    expect(addPathScopeHintFrom('不是目录')).toContain('不是目录')
+  })
+
+  it('returns null for non-scope failures so the register call names them', () => {
+    expect(addPathScopeHintFrom('路径不存在: /x')).toContain('不存在')
+    expect(addPathScopeHintFrom('读取目录失败: …')).toBeNull()
+  })
+})
+
 describe('sebas-project-rail (sidebar tree)', () => {
   it('renders project rows with live session counts from the fetched snapshot', async () => {
     const el = await mount()
@@ -278,9 +312,8 @@ describe('sebas-project-rail (sidebar tree)', () => {
     })
     const el = await mount()
     await el.updateComplete
-    // 展开含 oc_2 的组（oc_1/oc_2 都是 proj-alpha 组 → 点第一行展开）。
-    ;(el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).click()
-    await el.updateComplete
+    // （4.2）焦点指针指向 oc_2（proj-alpha）→ alpha 组缺省展开并物化，
+    // 无需再点项目行；点击反而会 toggle 收起。
     const items = [...el.shadowRoot!.querySelectorAll('li.session-item')]
     expect(items[0]!.classList.contains('current')).toBe(false)
     expect(items[1]!.classList.contains('current')).toBe(true)
@@ -1088,10 +1121,8 @@ describe('rail highlight layering — rendered rows (workbench-rail-polish scena
   it('highlights the selected project row and its focused session row at once, with distinct treatments', async () => {
     const el = await mountWithFocusedSession()
     el.activePath = '/home/me/alpha'
-    // 展开选中项目组，让其中的会话行同屏渲染（spec：including the session
-    // focused inside the selected project）。
-    ;(el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).click()
     await el.updateComplete
+    // （4.2）聚焦会话所在项目缺省展开——会话行天然同屏渲染，无需点击。
 
     const activeRow = el.shadowRoot!.querySelector('.row.active')
     expect(activeRow).toBeTruthy()
@@ -1108,7 +1139,7 @@ describe('rail highlight layering — rendered rows (workbench-rail-polish scena
 
   it('keeps the focused-session marker regardless of which project is selected', async () => {
     const el = await mountWithFocusedSession()
-    ;(el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).click() // 展开 alpha
+    // （4.2）alpha 组随聚焦缺省展开——current 标记无需手动展开即可见。
     await el.updateComplete
     expect(el.shadowRoot!.querySelector('li.session-item.current')).toBeTruthy()
 
@@ -1265,6 +1296,210 @@ describe('creation focus chain (workbench-rail-polish 3.1/3.2)', () => {
     ) as unknown as HTMLElement & { open: boolean }
     expect(dialog.open).toBe(true)
     window.removeEventListener('sebas:composer-focus', requested)
+    el.remove()
+  })
+})
+
+describe('rail focus event dispatch (fix-webui-qa-defects 4.1)', () => {
+  it('a successful in-place switch dispatches the focus event with the active key', async () => {
+    mockOf(apiMock.switchSession).mockResolvedValue({
+      status: 'switched',
+      redirect: '/sessions/oc_1%00',
+      active_session_key: 'oc_1%00',
+    })
+    window.history.replaceState({}, '', '/')
+    const events: CustomEvent[] = []
+    const listener = (e: Event) => events.push(e as CustomEvent)
+    window.addEventListener('sebas:rail-focus', listener)
+    try {
+      const el = await mount()
+      ;(el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).click()
+      await el.updateComplete
+      const first = el.shadowRoot!.querySelector('li.session-item') as HTMLElement
+      first.click()
+      await new Promise((r) => setTimeout(r, 0))
+      await el.updateComplete
+      const focus = events.find((e) => (e.detail as { key?: string })?.key === 'oc_1%00')
+      expect(focus, 'the focus event must carry the switch response key').toBeTruthy()
+      el.remove()
+    } finally {
+      window.removeEventListener('sebas:rail-focus', listener)
+    }
+  })
+
+  it('a failed switch dispatches no focus event', async () => {
+    mockOf(apiMock.switchSession).mockRejectedValue(new Error('404'))
+    window.history.replaceState({}, '', '/')
+    const events: CustomEvent[] = []
+    const listener = (e: Event) => events.push(e as CustomEvent)
+    window.addEventListener('sebas:rail-focus', listener)
+    try {
+      const el = await mount()
+      ;(el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).click()
+      await el.updateComplete
+      const first = el.shadowRoot!.querySelector('li.session-item') as HTMLElement
+      first.click()
+      await new Promise((r) => setTimeout(r, 0))
+      await el.updateComplete
+      expect(events).toHaveLength(0)
+      el.remove()
+    } finally {
+      window.removeEventListener('sebas:rail-focus', listener)
+    }
+  })
+})
+
+// ── fix-webui-approval-restore-and-session-identity ──────────────────────
+
+describe('rail expansion persistence (4.2)', () => {
+  beforeEach(() => {
+    window.localStorage.clear()
+  })
+
+  it('parse/serialize round-trip and tolerate junk (4.2)', () => {
+    expect(parseRailExpanded(null)).toEqual({})
+    expect(parseRailExpanded('not json')).toEqual({})
+    expect(parseRailExpanded('{"object":"not array"}')).toEqual({})
+    expect(parseRailExpanded(JSON.stringify(['/a', '', 42, '/b']))).toEqual({ '/a': true, '/b': true })
+    expect(serializeRailExpanded(parseRailExpanded(JSON.stringify(['/a', '/b'])))).toBe('["/a","/b"]')
+  })
+
+  it('recorded expansion wins over the focused default (4.2)', () => {
+    expect(railExpandedDefault({ '/a': false }, '/a', true)).toBe(false)
+    expect(railExpandedDefault({ '/a': true }, '/a', false)).toBe(true)
+  })
+
+  it('a project without a record default-expands when its session is focused (4.2)', () => {
+    expect(railExpandedDefault({}, '/a', true)).toBe(true)
+    expect(railExpandedDefault({}, '/a', false)).toBe(false)
+  })
+
+  it('toggling persists the expansion and a fresh mount restores it (4.2)', async () => {
+    // Toggle the first project row (alpha) — no focused session (default mock).
+    const el = await mount()
+    const row = el.shadowRoot!.querySelectorAll<HTMLElement>('.row')[0]!
+    expect(row.getAttribute('aria-expanded')).toBe('false')
+    row.click()
+    await el.updateComplete
+    expect(row.getAttribute('aria-expanded')).toBe('true')
+    expect(window.localStorage.getItem(RAIL_EXPANDED_KEY)).toBe(JSON.stringify(['/home/me/alpha']))
+    el.remove()
+
+    // A fresh mount (page reload analogue) restores the recorded expansion.
+    const el2 = await mount()
+    const row2 = el2.shadowRoot!.querySelectorAll<HTMLElement>('.row')[0]!
+    expect(row2.getAttribute('aria-expanded')).toBe('true')
+    // The un-toggled project stays collapsed (recorded-only state).
+    expect(
+      el2.shadowRoot!.querySelectorAll<HTMLElement>('.row')[1]!.getAttribute('aria-expanded'),
+    ).toBe('false')
+    el2.remove()
+  })
+
+  it('a focused session expands its project by default when no record exists (4.2)', async () => {
+    // Focus a session that belongs to proj-beta; no persisted record.
+    const focused = row({ project_id: 'proj-beta', status: 'done', status_slug: 'done' })
+    mockOf(apiMock.sessions).mockResolvedValue({
+      ...sessionList([focused]),
+      active_session_key: focused.encoded_key,
+    })
+    const el = await mount()
+    const rows = el.shadowRoot!.querySelectorAll<HTMLElement>('.row')
+    // beta（index 1）缺省展开；alpha（无聚焦、无记录）保持收起。
+    expect(rows[0]!.getAttribute('aria-expanded')).toBe('false')
+    expect(rows[1]!.getAttribute('aria-expanded')).toBe('true')
+    el.remove()
+  })
+
+  it('expansion does not flip on its own across refreshes (4.2)', async () => {
+    const el = await mount()
+    const row = el.shadowRoot!.querySelectorAll<HTMLElement>('.row')[0]!
+    row.click()
+    await el.updateComplete
+    expect(row.getAttribute('aria-expanded')).toBe('true')
+
+    // A background refresh (ws refetch / node poll) must not touch expansion.
+    await el.refresh()
+    await el.updateComplete
+    expect(
+      el.shadowRoot!.querySelectorAll<HTMLElement>('.row')[0]!.getAttribute('aria-expanded'),
+    ).toBe('true')
+    el.remove()
+  })
+})
+
+describe('session naming by operator label (5.1)', () => {
+  it('label takes precedence over the first-prompt preview; clearing falls back (5.1)', async () => {
+    const named = row({
+      project_id: 'proj-alpha',
+      prompt_preview: 'first prompt',
+      label: '重构计划',
+    })
+    expect(fullSessionLabel(named)).toBe('重构计划')
+    // 清空（null/缺省）→ 首条 prompt 预览（旧行为完全一致）。
+    expect(fullSessionLabel({ ...named, label: null })).toBe('first prompt')
+    expect(fullSessionLabel({ ...named, label: undefined })).toBe('first prompt')
+  })
+
+  it('the rename action sets the label via the seam and refreshes (5.1)', async () => {
+    mockOf(apiMock.setSessionLabel).mockResolvedValue({ status: 'ok' })
+    const el = await mount()
+    const target = (el as any).sessions[0] as SessionRow
+    ;(el as any).openRenameDialog(new Event('click'), target)
+    await (el as any).updateComplete
+    const dialog = el.shadowRoot!.querySelector('wa-dialog[label="重命名会话"]')
+    expect(dialog).toBeTruthy()
+    expect((el as any).renameValue).toBe('')
+
+    ;(el as any).renameValue = '  我的项目会话  '
+    await (el as any).confirmRename()
+    expect(mockOf(apiMock.setSessionLabel)).toHaveBeenCalledWith(target.encoded_key, '我的项目会话')
+    expect((el as any).renameTarget).toBeNull()
+    el.remove()
+  })
+
+  it('an empty rename clears the label (falls back to the prompt preview) (5.1)', async () => {
+    mockOf(apiMock.setSessionLabel).mockResolvedValue({ status: 'ok' })
+    const el = await mount()
+    const named = row({ project_id: 'proj-alpha', prompt_preview: 'prompt', label: '旧名' })
+    ;(el as any).openRenameDialog(new Event('click'), named)
+    ;(el as any).renameValue = '   '
+    await (el as any).confirmRename()
+    expect(mockOf(apiMock.setSessionLabel)).toHaveBeenCalledWith(named.encoded_key, null)
+    el.remove()
+  })
+})
+
+describe('add-project scope hint (5.2)', () => {
+  it('out-of-workspace errors (both wordings) name the boundary', () => {
+    expect(addPathScopeHintFrom('路径超出允许范围: 不在 workspace root 内')).toContain(
+      'workspace root 之外',
+    )
+    // browse-dirs 对根外绝对路径的实际文案（此前漏配——静默禁用的根因）。
+    expect(addPathScopeHintFrom('路径超出根目录范围')).toContain('workspace root 之外')
+  })
+
+  it('nonexistent paths get their own reason and not-a-directory too (5.2)', () => {
+    expect(addPathScopeHintFrom('路径不存在或无法访问: /nope')).toContain('不存在')
+    expect(addPathScopeHintFrom('不是目录')).toContain('不是目录')
+    // 未知失败不拦截（留给注册接口点名）。
+    expect(addPathScopeHintFrom('boom')).toBeNull()
+  })
+
+  it('submit stays disabled while a scope hint is present (5.2)', async () => {
+    const el = await mount()
+    ;(el as any).addDialogOpen = true
+    ;(el as any).addPath = '/home/me/alpha'
+    ;(el as any).addPathScopeHint = '路径在 workspace root 之外——只能注册工作区内的目录'
+    await (el as any).updateComplete
+    const submit = [...el.shadowRoot!.querySelectorAll('wa-button')].find((b) =>
+      b.textContent!.includes('Add project'),
+    ) as HTMLElement & { hasAttribute: (n: string) => boolean }
+    expect(submit.hasAttribute('disabled')).toBe(true)
+    // 原因在输入框旁可见（data-testid 钩子）。
+    expect(
+      el.shadowRoot!.querySelector('[data-testid="add-project-scope-hint"]'),
+    ).toBeTruthy()
     el.remove()
   })
 })

@@ -131,7 +131,8 @@ impl DispatchNativeBridge {
                     let encoded = Self::encode(&key);
                     bridge
                         .router
-                        .publish_native_permission(encoded, request_id, tool_name, args);
+                        .publish_native_permission(encoded, request_id, tool_name, args)
+                        .await;
                 }
                 AgentEvent::Finished { .. } => {
                     bridge.router.touch_native_session(&key).await;

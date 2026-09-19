@@ -100,6 +100,10 @@ if (!customElements.get('sebas-workbench-composer')) {
 }
 
 import './dashboard.js'
+// RAIL_FOCUS_EVENT：rail 切换成功的窗口级聚焦事件（4.1，design D3）。
+import { RAIL_FOCUS_EVENT } from './project-rail.js'
+// PROJECT_FOLLOW_EVENT / focusedProjectPath：聚焦反投影项目上下文（本 change 4.1）。
+import { PROJECT_FOLLOW_EVENT, focusedProjectPath } from './dashboard.js'
 import type { SebasDashboard } from './dashboard.js'
 import { SebasDashboard as DashboardImpl } from './dashboard.js'
 
@@ -186,6 +190,7 @@ function focusedSummary(): Summary {
       current_model: null,
       available_models: null,
       agent_kind: 'claude',
+      project_id: 'proj-sebas',
       pending: [],
       turn_engaged: false,
       desired_mode: 'ask',
@@ -1459,6 +1464,11 @@ describe('archived view + restore semantics (polish-workbench-walkthrough-ux 2.1
     const dialog = el.shadowRoot!.querySelector('[data-testid="restore-dialog"]')
     expect(dialog).toBeTruthy()
     expect(dialog!.textContent).toContain('/home/me/archived-proj')
+    // fix-webui-qa-defects 2.3：恢复语义如实前置——「将重建会话并保留对话
+    // 记录」，条数随对话快照可见。
+    const note = el.shadowRoot!.querySelector('[data-testid="restore-rebuild-note"]')
+    expect(note?.textContent).toContain('将重建会话并保留对话记录')
+    expect(note?.textContent).toContain('2 条消息')
     ;(el.shadowRoot!.querySelector('[data-testid="restore-confirm"]') as HTMLElement).click()
     await new Promise((r) => setTimeout(r, 0))
     await settle(el)
@@ -1532,6 +1542,116 @@ describe('focused session termination consistency (polish-workbench-walkthrough-
   })
 })
 
+
+// ── fix-webui-qa-defects 4.1：rail 切换的即时聚焦 ─────────────────────────
+
+describe('rail focus follow (fix-webui-qa-defects 4.1, design D3)', () => {
+  async function settle(el: SebasDashboard): Promise<void> {
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+  }
+
+  it('a rail focus event triggers a list refresh without any WS traffic', async () => {
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    const el = await mount()
+    await settle(el)
+    const callsBefore = apiMocks.summary.mock.calls.length
+
+    window.dispatchEvent(new CustomEvent(RAIL_FOCUS_EVENT, { detail: { key: 'oc_live%00' } }))
+    // 节流窗（500ms）内首事件立即触发；给 setTimeout(0) 一拍。
+    await new Promise((r) => setTimeout(r, 10))
+    await settle(el)
+
+    expect(apiMocks.summary.mock.calls.length).toBeGreaterThan(callsBefore)
+    el.remove()
+  })
+
+  it('repeated rail focus events for the same session stay idempotent', async () => {
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    const el = await mount()
+    await settle(el)
+    for (let i = 0; i < 3; i++) {
+      window.dispatchEvent(new CustomEvent(RAIL_FOCUS_EVENT, { detail: { key: 'oc_live%00' } }))
+    }
+    // 节流窗口内三次合并为一轮刷新（首事件立即，其余并入尾沿）。
+    await new Promise((r) => setTimeout(r, 10))
+    await settle(el)
+    await new Promise((r) => setTimeout(r, 550))
+    const calls = apiMocks.summary.mock.calls.length
+    await new Promise((r) => setTimeout(r, 550))
+    expect(apiMocks.summary.mock.calls.length).toBe(calls)
+    el.remove()
+  })
+})
+
+// ── fix-webui-qa-defects 7.3：终止通知使用 rail 同款可读会话名 ─────────────
+
+describe('termination notice naming (fix-webui-qa-defects 7.3)', () => {
+  async function settle(el: SebasDashboard): Promise<void> {
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+  }
+
+  it('uses the rail label (prompt preview) instead of the raw web- key', async () => {
+    // summary 里该会话行带 prompt_preview——通知必须用它，而非 chat_id /
+    // 原始键「web-1789…-1」。
+    apiMocks.summary.mockResolvedValue({
+      ...focusedSummary(),
+      recent_sessions: [
+        row({
+          encoded_key: 'oc_live%00',
+          chat_id: 'web-1789abcde-1',
+          prompt_preview: 'fix the login bug',
+          session_id_short: 'aaaa0009',
+        }),
+      ],
+    })
+    const el = await mount()
+    await settle(el)
+    const notices: NoticeItem[] = []
+    const unsubscribe = subscribeNotices((st) => {
+      notices.splice(0, notices.length, ...st.items)
+    })
+    wsMocks.emit({ type: 'session.removed', session_id: 'oc_live%00' })
+    await settle(el)
+    const toast = notices.find((n) => n.message.includes('已终止'))
+    expect(toast, 'a termination notice must fire').toBeTruthy()
+    expect(toast?.message).toContain('fix the login bug')
+    expect(toast?.message).not.toContain('web-1789abcde-1')
+    unsubscribe()
+    resetNotices()
+    el.remove()
+  })
+
+  it('falls back through the rail chain (short id) when no preview exists', async () => {
+    apiMocks.summary.mockResolvedValue({
+      ...focusedSummary(),
+      recent_sessions: [
+        row({
+          encoded_key: 'oc_live%00',
+          chat_id: 'web-1789abcde-1',
+          prompt_preview: null,
+          session_id_short: 'aaaa0009',
+        }),
+      ],
+    })
+    const el = await mount()
+    await settle(el)
+    const notices: NoticeItem[] = []
+    const unsubscribe = subscribeNotices((st) => {
+      notices.splice(0, notices.length, ...st.items)
+    })
+    wsMocks.emit({ type: 'session.removed', session_id: 'oc_live%00' })
+    await settle(el)
+    const toast = notices.find((n) => n.message.includes('已终止'))
+    expect(toast?.message).toContain('aaaa0009')
+    expect(toast?.message).not.toContain('web-1789abcde-1')
+    unsubscribe()
+    resetNotices()
+    el.remove()
+  })
+})
+
 describe('slash command palette stacking (polish-workbench-walkthrough-ux 2.5)', () => {
   it('composer-area does not clip the palette: overflow is visible, not auto', () => {
     // 根因：面板 DOM 与 sessionCommands 数据都在，但 .composer-area 的
@@ -1545,5 +1665,88 @@ describe('slash command palette stacking (polish-workbench-walkthrough-ux 2.5)',
     const areaRule = css.match(/\.composer-area\s*\{[^}]*\}/)?.[0] ?? ''
     expect(areaRule).toContain('overflow: visible')
     expect(areaRule).not.toContain('overflow-y: auto')
+  })
+})
+
+// ── fix-webui-approval-restore-and-session-identity ──────────────────────
+
+describe('focused session drives project context (4.1)', () => {
+  it('focusedProjectPath resolves by project id and misses honestly', () => {
+    const projects = [
+      { id: 'proj-sebas', path: '/home/me/sebas' },
+      { id: 'proj-x', path: '/home/me/x' },
+    ]
+    expect(focusedProjectPath(projects, 'proj-x')).toBe('/home/me/x')
+    expect(focusedProjectPath(projects, 'proj-ghost')).toBeNull()
+    expect(focusedProjectPath(projects, null)).toBeNull()
+  })
+
+  it('a focus change projects the session project onto shell selectedPath (4.1)', async () => {
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    const events: CustomEvent[] = []
+    const listener = (e: Event) => events.push(e as CustomEvent)
+    window.addEventListener(PROJECT_FOLLOW_EVENT, listener)
+    try {
+      const el = await mount()
+      await new Promise((r) => setTimeout(r, 0))
+      await el.updateComplete
+      const follow = events.find((e) => (e.detail as { path?: string })?.path === '/home/me/sebas')
+      expect(follow, 'the focused session must project its project path').toBeTruthy()
+      // 同一聚焦 key 的重复刷新不再派发（幂等）。
+      const before = events.length
+      await (el as any).refreshLists()
+      await new Promise((r) => setTimeout(r, 0))
+      expect(events.length).toBe(before)
+      el.remove()
+    } finally {
+      window.removeEventListener(PROJECT_FOLLOW_EVENT, listener)
+    }
+  })
+
+  it('a session whose project is not registered projects nothing (4.1 未命中)', async () => {
+    apiMocks.summary.mockResolvedValue({
+      ...focusedSummary(),
+      active_session: { ...focusedSummary().active_session!, project_id: 'proj-ghost' },
+    })
+    const events: CustomEvent[] = []
+    const listener = (e: Event) => events.push(e as CustomEvent)
+    window.addEventListener(PROJECT_FOLLOW_EVENT, listener)
+    try {
+      const el = await mount()
+      await new Promise((r) => setTimeout(r, 0))
+      await el.updateComplete
+      expect(
+        events.find((e) => (e.detail as { path?: string })?.path !== undefined),
+        'an unregistered project must keep 未选择项目',
+      ).toBeUndefined()
+      el.remove()
+    } finally {
+      window.removeEventListener(PROJECT_FOLLOW_EVENT, listener)
+    }
+  })
+})
+
+describe('session header agent identity (3.3)', () => {
+  it('the restored identity rides the detail into the header; legacy falls back honestly', async () => {
+    // 恢复带身份：detail.agent_kind 原样上头（来源 = SessionInfo 身份四项）。
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    apiMocks.session.mockResolvedValue({ ...detailFixture(), agent_kind: 'codex' })
+    const el = await mount()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(
+      el.shadowRoot!.querySelector('[data-testid="agent-lock"]')?.textContent,
+    ).toContain('codex')
+    el.remove()
+
+    // 旧归档条目（无身份字段）：header 如实回退 "default agent"，不编造。
+    apiMocks.session.mockResolvedValue({ ...detailFixture(), agent_kind: null })
+    const el2 = await mount()
+    await new Promise((r) => setTimeout(r, 0))
+    await el2.updateComplete
+    expect(
+      el2.shadowRoot!.querySelector('[data-testid="agent-lock"]')?.textContent,
+    ).toContain('default agent')
+    el2.remove()
   })
 })

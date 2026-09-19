@@ -37,6 +37,9 @@ import {
 // The sidebar tree + settings modal are shell-owned; the outlet views are
 // registered in main.ts.
 import './views/project-rail.js'
+// （fix-webui-approval-restore-and-session-identity 4.1，design D4）聚焦会话
+// 反投影项目上下文的事件名（dashboard 发、shell 收——selectedPath 单一所有权）。
+import { PROJECT_FOLLOW_EVENT } from './views/dashboard.js'
 import './views/settings-modal.js'
 import './views/login-view.js'
 import './views/setup-view.js'
@@ -431,6 +434,9 @@ export class SebasApp extends LitElement {
     }
     window.addEventListener('popstate', this.onNavigateBound)
     document.addEventListener('click', this.onClick)
+    // （4.1）聚焦会话驱动项目上下文：dashboard 在聚焦变化时投影所属项目
+    // 路径，shell 更新 selectedPath（项目行点击的 rail-select 语义保持独立）。
+    window.addEventListener(PROJECT_FOLLOW_EVENT, this.onProjectFollow)
     // 5.1：窄屏翻转 → 分割线禁拖（布局退化由 CSS 媒体查询承接）。
     this.unlistenNarrow = onNarrowChange((n) => (this.narrow = n))
     // add-webui-tiered-notices 3.2：WS 连接状态 → 通知层的持续 warn 驻留
@@ -590,6 +596,7 @@ export class SebasApp extends LitElement {
   disconnectedCallback(): void {
     window.removeEventListener('popstate', this.onNavigateBound)
     document.removeEventListener('click', this.onClick)
+    window.removeEventListener(PROJECT_FOLLOW_EVENT, this.onProjectFollow)
     this.unlistenNarrow?.()
     window.removeEventListener('sebas:ws-state', this.onWsState)
     this.unsubscribeWs?.()
@@ -633,6 +640,17 @@ export class SebasApp extends LitElement {
     // 切项目 = 离开归档只读视图（归档视图只由恢复/关闭动作退出自身）。
     this.archivedEntry = null
     if (location.pathname !== '/') navigate('/')
+  }
+
+  /**
+   * （4.1，design D4）聚焦会话反投影：聚焦会话所属项目写成 selectedPath
+   * （未命中时 dashboard 不派发）。与 rail-select 收敛到同一状态源——主区
+   * 标题/项目上下文随聚焦即时跟随，项目行点击的独立选择不受影响。
+   */
+  private onProjectFollow = (e: Event): void => {
+    const path = (e as CustomEvent<{ path: string | null }>).detail.path
+    if (!path) return
+    this.selectedPath = path
   }
 
   /**

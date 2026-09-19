@@ -251,6 +251,9 @@ pub async fn session_detail(
             // workbench-agent-identity-and-process-folds 1.1：工具条目标题
             // 原样透传（None = 旧条目，前端回退通用标签）。
             title: e.title.clone(),
+            // fix-webui-qa-defects 5.2：错误条目的失败分类原样透传（None =
+            // 旧条目，前端回退中性标签）。
+            failure_class: e.failure_class.clone(),
         })
         .collect();
 
@@ -1301,6 +1304,55 @@ pub async fn cancel_session(State(state): State<WebUiState>, Path(key): Path<Str
     }
 }
 
+/// GET /api/sessions/{key}/approvals — the session's currently parked
+/// permission requests as a read model
+/// （fix-webui-approval-restore-and-session-identity 1.2，design D1）。与推送
+/// 通道独立：客户端打开/刷新会话时拉取它重建 Permission review 面板，与 WS
+/// `permission.requested` 按 `request_id` 幂等合并。未知会话 404；无泊车 =
+/// 空表。鉴权语义随既有会话读路由。
+pub async fn session_approvals(
+    State(state): State<WebUiState>,
+    Path(key): Path<String>,
+) -> Response {
+    let session_key = match decode_session_key(&key) {
+        Some(k) => k,
+        None => return api_error(StatusCode::BAD_REQUEST, "Invalid session key"),
+    };
+    match state.backend.pending_approvals(session_key).await {
+        Ok(approvals) => Json(json!({ "approvals": approvals })).into_response(),
+        Err(rej) => rejection_response(rej),
+    }
+}
+
+/// POST /api/sessions/{key}/label — 设置/清空会话 label
+/// （fix-webui-approval-restore-and-session-identity 5.1，design D6）。
+/// `{"label": "新名"}` 设置；`{"label": null}` 或空串 = 清空（行命名回退
+/// 首条 prompt 预览 / 短 id）。零轮占位同样可命名。未知会话 404。
+#[derive(Deserialize)]
+pub struct SetSessionLabelRequest {
+    pub label: Option<String>,
+}
+
+pub async fn set_session_label(
+    State(state): State<WebUiState>,
+    Path(key): Path<String>,
+    Json(req): Json<SetSessionLabelRequest>,
+) -> Response {
+    let session_key = match decode_session_key(&key) {
+        Some(k) => k,
+        None => return api_error(StatusCode::BAD_REQUEST, "Invalid session key"),
+    };
+    // 空白 = 清空（wire 词汇单一出处，调用方不必区分 null 与空串）。
+    let label = req
+        .label
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty());
+    match state.backend.set_session_label(session_key, label).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "status": "ok" }))).into_response(),
+        Err(rej) => rejection_response(rej),
+    }
+}
+
 /// POST /api/sessions/{key}/close — kill and remove a session. Returns 200
 /// with the new focused session key (or null); 404 if the key mapped to
 /// nothing.
@@ -2101,6 +2153,8 @@ pub async fn archive_detail(State(_state): State<WebUiState>, Path(key): Path<St
                     content: e.content.clone(),
                     created_at_unix: e.created_at_unix,
                     title: e.title.clone(),
+                    // fix-webui-qa-defects 5.2：失败分类随归档快照透传。
+                    failure_class: e.failure_class.clone(),
                 })
                 .collect();
             Json(json!({ "entry": entry, "entries": entries })).into_response()
@@ -2148,10 +2202,20 @@ pub async fn archive_session(State(state): State<WebUiState>, Path(key): Path<St
         // If close fails (unknown, unavailable), we still proceed with the archive.
     }
 
+    // （fix-webui-approval-restore-and-session-identity 3.1，design D3）
+    // 归档条目携带会话身份——手里有完整 SessionInfo，四项一并落档。
+    let identity = sebas_dispatch::SessionIdentity {
+        agent_kind: info.agent_kind.clone(),
+        desired_mode: Some(info.desired_mode.clone()),
+        current_model: info.current_model.clone(),
+        available_models: info.available_models.clone(),
+    };
     match crate::archive::archive_session(
         &key,
         &project_path,
         &label,
+        info.session_id.clone(),
+        identity,
         state.archive_retention_days,
         transcript,
     ) {
@@ -2165,21 +2229,47 @@ pub async fn archive_session(State(state): State<WebUiState>, Path(key): Path<St
 }
 
 /// POST /api/sessions/{key}/restore — restore an archived session to its
-/// original project.
+/// original project（fix-webui-qa-defects 2.2，design D1）：先经 backend 重建
+/// 会话（Dormant 映射 + 转写回放），**成功后**才从归档删除条目——消费归档
+/// 与重建会话是同一结果的两半，重建失败时归档原样保留并返回 5xx，数据
+/// 不再有「归档删了、会话没回来」的丢失形态。
 pub async fn restore_session(
-    State(_state): State<WebUiState>,
+    State(state): State<WebUiState>,
     Path(key): Path<String>,
 ) -> Response {
+    // 先读条目（删除动作推迟到重建成功之后）；未知 key 照旧 404。
+    let Some(entry) = crate::archive::entry(&key) else {
+        return api_error(StatusCode::NOT_FOUND, "Archived session not found");
+    };
+    let session_key = match decode_session_key(&key) {
+        Some(k) => k,
+        None => return api_error(StatusCode::BAD_REQUEST, "Invalid session key"),
+    };
+    // 归档条目里空串项目路径归一为 None（无项目会话）。
+    let project_dir = Some(entry.project_path.clone()).filter(|p| !p.is_empty());
+    // （fix-webui-approval-restore-and-session-identity 3.2，design D3）身份
+    // 四项随恢复链路带回引擎——旧条目（全空）维持现默认。
+    let identity = entry.identity();
+    if let Err(rej) = state
+        .backend
+        .restore_session(
+            session_key,
+            entry.session_id.clone(),
+            project_dir,
+            entry.transcript.clone(),
+            identity,
+        )
+        .await
+    {
+        // 重建失败：归档条目原样保留（未消费），按 typed rejection 映射。
+        return rejection_response(rej);
+    }
     match crate::archive::restore_session(&key) {
-        Some(entry) => {
-            // The session key is the same, so it reappears in the next snapshot
-            // fetch. The frontend will re-fetch the session list.
-            (
-                StatusCode::OK,
-                Json(json!({ "status": "restored", "entry": entry })),
-            )
-                .into_response()
-        }
+        Some(entry) => (
+            StatusCode::OK,
+            Json(json!({ "status": "restored", "entry": entry })),
+        )
+            .into_response(),
         None => api_error(StatusCode::NOT_FOUND, "Archived session not found"),
     }
 }
@@ -2934,5 +3024,218 @@ mod ws_resync_tests {
             panic!("resync must ride a Notification frame");
         };
         assert_eq!(notification.method, "session.resync");
+    }
+}
+
+#[cfg(test)]
+mod approvals_label_route_tests {
+    //! fix-webui-approval-restore-and-session-identity 1.2 / 5.1 的路由级单测：
+    //! - GET /api/sessions/{key}/approvals：泊车中返回请求体、空时返回 `[]`、
+    //!   未知会话 404（FakeBackend 注入读模型）；
+    //! - POST /api/sessions/{key}/label：设置/清空直达 seam、未知会话 404。
+    //! 鉴权关闭（AuthHandle::disabled）——语义归鉴权套件，这里只测路由面。
+
+    use super::*;
+    use crate::auth::AuthHandle;
+    use crate::server::build_router_with_auth;
+    use crate::session_backend::FakeBackend;
+    use sebas_dispatch::PendingApproval;
+    use axum::body::Body;
+    use axum::extract::ConnectInfo;
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use sebas_feishu::cards::CardConfig;
+    use crate::models::RouterInfo;
+    use std::net::{IpAddr, SocketAddr};
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    fn test_addr() -> SocketAddr {
+        SocketAddr::new(IpAddr::from([127, 0, 0, 1]), 12345)
+    }
+
+    fn app(backend: Arc<FakeBackend>) -> axum::Router {
+        build_router_with_auth(
+            backend,
+            RouterInfo::default(),
+            CardConfig::default(),
+            None,
+            Arc::new(crate::agent_kinds::ConfigAgentKindProvider::new(Vec::new())),
+            30,
+            Arc::new(AuthHandle::disabled()),
+        )
+    }
+
+    async fn json_of(resp: axum::response::Response) -> serde_json::Value {
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    }
+
+    async fn get(app: &axum::Router, uri: &str) -> (StatusCode, serde_json::Value) {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        (resp.status(), json_of(resp).await)
+    }
+
+    async fn post(
+        app: &axum::Router,
+        uri: &str,
+        body: String,
+    ) -> (StatusCode, serde_json::Value) {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .header("host", "127.0.0.1:12345")
+                    .extension(ConnectInfo(test_addr()))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        (resp.status(), json_of(resp).await)
+    }
+
+    /// 灌一个 FakeBackend 会话（1.2 / 5.1 的已知会话前提）。FakeBackend 的
+    /// spawn 产出的键形是 `web\0web-fake-N`；这里直接用它的 seed 面。
+    async fn seed_session(backend: &FakeBackend) -> String {
+        use sebas_channels::ChannelKey;
+        use sebas_dispatch::SessionInfo;
+        let key = ChannelKey::new("web", "web-route-1");
+        backend
+            .set_sessions(vec![SessionInfo {
+                channel: key.channel.as_str().to_string(),
+                key: key.reference.clone(),
+                session_id: Some("s-route".into()),
+                status: "active".into(),
+                phase: None,
+                user_prompt: None,
+                last_active_unix: 0,
+                project_dir: None,
+                current_model: None,
+                available_models: None,
+                agent_kind: None,
+                usage: None,
+                backend: None,
+                pending: Vec::new(),
+                remote: None,
+                desired_mode: sebas_dispatch::engine::ask_mode(),
+                effective_mode: None,
+                msg_count: 0,
+                available_commands: Vec::new(),
+                turn_engaged: false,
+                spawn_failure_reason: None,
+                parked_approvals: 0,
+                label: None,
+            }])
+            .await;
+        crate::routes::encode_session_key(&key)
+    }
+
+    /// 1.2 泊车中返回请求体（request_id / tool / args 原样）。
+    #[tokio::test]
+    async fn approvals_route_lists_parked_requests() {
+        let backend = Arc::new(FakeBackend::new());
+        let encoded = seed_session(backend.as_ref()).await;
+        backend.set_pending_approvals(
+            &encoded,
+            vec![PendingApproval {
+                request_id: "claude:tc-9".into(),
+                tool_name: "Bash".into(),
+                args: serde_json::json!({"command": "ls"}),
+            }],
+        );
+        let (status, body) = get(&app(backend.clone()), &format!("/api/sessions/{encoded}/approvals")).await;
+        assert_eq!(status, StatusCode::OK);
+        let list = body["approvals"].as_array().expect("approvals array");
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0]["request_id"], "claude:tc-9");
+        assert_eq!(list[0]["tool_name"], "Bash");
+        assert_eq!(list[0]["args"]["command"], "ls");
+    }
+
+    /// 1.2 无泊车 = 空表（200）。
+    #[tokio::test]
+    async fn approvals_route_returns_empty_list_when_nothing_is_parked() {
+        let backend = Arc::new(FakeBackend::new());
+        let encoded = seed_session(backend.as_ref()).await;
+        backend.set_pending_approvals(&encoded, Vec::new());
+        let (status, body) = get(&app(backend), &format!("/api/sessions/{encoded}/approvals")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["approvals"].as_array().map(Vec::len),
+            Some(0),
+            "no parked requests must read as an empty list"
+        );
+    }
+
+    /// 1.2 未知会话 404。
+    #[tokio::test]
+    async fn approvals_route_rejects_unknown_session_with_404() {
+        let backend = Arc::new(FakeBackend::new());
+        let encoded = crate::routes::encode_session_key(&sebas_channels::ChannelKey::new(
+            "web",
+            "web-never-seeded",
+        ));
+        let (status, _body) = get(&app(backend), &format!("/api/sessions/{encoded}/approvals")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    /// 5.1 设置 label 直达 seam；清空（空串 = None）同样接受。
+    #[tokio::test]
+    async fn label_route_sets_and_clears() {
+        let backend = Arc::new(FakeBackend::new());
+        let encoded = seed_session(backend.as_ref()).await;
+
+        let (status, _body) = post(
+            &app(backend.clone()),
+            &format!("/api/sessions/{encoded}/label"),
+            r#"{"label": "重构计划"}"#.into(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            backend.last_label().unwrap().1,
+            Some("重构计划".into()),
+            "the label must reach the seam verbatim"
+        );
+
+        // 空白 = 清空。
+        let (status, _body) = post(
+            &app(backend.clone()),
+            &format!("/api/sessions/{encoded}/label"),
+            r#"{"label": "   "}"#.into(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(backend.last_label().unwrap().1, None);
+    }
+
+    /// 5.1 未知会话 404。
+    #[tokio::test]
+    async fn label_route_rejects_unknown_session() {
+        let backend = Arc::new(FakeBackend::new());
+        let encoded = crate::routes::encode_session_key(&sebas_channels::ChannelKey::new(
+            "web",
+            "web-never-seeded",
+        ));
+        let (status, _body) = post(
+            &app(backend),
+            &format!("/api/sessions/{encoded}/label"),
+            r#"{"label": "x"}"#.into(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 }

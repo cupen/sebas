@@ -163,3 +163,115 @@ async fn terminal_error_preserves_pre_death_transcript() {
     );
     assert!(map.get(&key).await.is_none(), "terminal 必清 mapping");
 }
+
+// ── fix-webui-qa-defects 5.1（design D5）：is_error 终态合成 error 条目 ─────
+
+/// refusal（非终态 Error + Finished 配对，无任何文本条目）的回合不再
+/// 「石沉大海」：transcript 出现携带 generic 分类的 error 条目，消息原文
+/// 保留，会话照常存活。
+#[tokio::test]
+async fn refusal_error_synthesizes_a_classified_transcript_entry() {
+    let map = SessionMap::new();
+    let key = ChannelKey::feishu("oc_refuse", None);
+    map.insert(key.clone(), Mapping::active("s-refuse"))
+        .await
+        .unwrap();
+    let (router, mut out_rx) = DispatchHandle::new(map.clone());
+
+    // refusal result 帧的映射产物：Error{terminal:false} + Finished。
+    router
+        .dispatch_acp_event(AcpEvent::Error {
+            session_id: "s-refuse".into(),
+            message: "I cannot help with that request.".into(),
+            terminal: false,
+        })
+        .await;
+    router
+        .dispatch_acp_event(AcpEvent::Finished {
+            session_id: "s-refuse".into(),
+        })
+        .await;
+    let _ = drain(&mut out_rx).await;
+
+    let turns = router.session_turns(&key, 0).await.expect("mapping exists");
+    let err = turns
+        .iter()
+        .find(|t| t.element_type == "error")
+        .expect("a refused turn must leave a visible error entry");
+    assert!(
+        err.content.contains("I cannot help with that request."),
+        "the refusal text rides the entry: {err:?}"
+    );
+    assert_eq!(
+        err.failure_class.as_deref(),
+        Some(sebas_dispatch::failure_class::GENERIC),
+        "agent-turn errors carry the generic failure class"
+    );
+    assert!(
+        map.get(&key).await.is_some(),
+        "refusal keeps the session alive"
+    );
+}
+
+/// SetMode 失败（带「模式未变」标记的非终态 Error）不重复合成 error 条目
+/// ——它已由 permission_mode_result 契约条目上报。
+#[tokio::test]
+async fn mode_unchanged_error_does_not_duplicate_an_error_entry() {
+    let map = SessionMap::new();
+    let key = ChannelKey::feishu("oc_mode_err", None);
+    map.insert(key.clone(), Mapping::active("s-mode-err"))
+        .await
+        .unwrap();
+    let (router, mut out_rx) = DispatchHandle::new(map.clone());
+
+    router
+        .dispatch_acp_event(AcpEvent::Error {
+            session_id: "s-mode-err".into(),
+            message: "permission mode 未变（模式未变）".into(),
+            terminal: false,
+        })
+        .await;
+    let _ = drain(&mut out_rx).await;
+
+    let turns = router.session_turns(&key, 0).await.expect("mapping exists");
+    assert!(
+        !turns.iter().any(|t| t.element_type == "error"),
+        "the mode-unchanged marker error must not synthesize a duplicate error entry: {turns:?}"
+    );
+}
+
+/// 终态 Error 同样合成带分类的条目。映射在同一事件的拆除臂中被移除
+/// （终态会话整体消失是既有契约），故经 apply_event 在拆除前断言条目。
+#[tokio::test]
+async fn terminal_error_also_lands_a_classified_entry() {
+    let map = SessionMap::new();
+    let key = ChannelKey::feishu("oc_term", None);
+    map.insert(key.clone(), Mapping::active("s-term"))
+        .await
+        .unwrap();
+    let (router, _out_rx) = DispatchHandle::new(map.clone());
+
+    // apply_event = 事件落账的公共半边（拆除发生在 apply_event_to_out 的
+    // 终态臂）；条目在本事件内先于映射移除写入 turn 存储。
+    router
+        .apply_event(
+            "s-term",
+            &AcpEvent::Error {
+                session_id: "s-term".into(),
+                message: "agent process exited".into(),
+                terminal: true,
+            },
+        )
+        .await;
+
+    let turns = router.session_turns(&key, 0).await.expect("mapping still up");
+    let err = turns
+        .iter()
+        .find(|t| t.element_type == "error")
+        .expect("terminal error must land a transcript entry");
+    assert_eq!(err.content, "agent process exited");
+    assert_eq!(
+        err.failure_class.as_deref(),
+        Some(sebas_dispatch::failure_class::GENERIC)
+    );
+}

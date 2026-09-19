@@ -323,10 +323,12 @@ mod tests {
             .to_string_lossy()
             .to_string();
         let cfg: crate::config::Config = toml::from_str(&format!(
+            // TOML literal string（单引号）：Windows 下 `fake` 含 `\` 反斜杠，
+            // basic string 会把它当转义序列在解析期炸掉（环境性失败）。
             r#"
             [acp.agents.claude]
             driver = "claude"
-            path = "{fake}"
+            path = '{fake}'
             args = ["--hang-on-init"]
             startup_timeout_secs = {STARTUP_TIMEOUT_SECS}
             sessions_dir = "/tmp/sebas-dispatch-test-sessions"

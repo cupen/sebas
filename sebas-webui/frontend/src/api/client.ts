@@ -100,6 +100,12 @@ export interface SessionRow {
   /** Short preview of the first user message, used as display label. */
   prompt_preview: string | null
   /**
+   * （fix-webui-approval-restore-and-session-identity 5.1，design D6）操作者
+   * 设置的会话 label；null/缺省 = 未设置。行命名优先级：label → 首条 prompt
+   * 预览 → 短 id。
+   */
+  label?: string | null
+  /**
    * rail-declutter-unread：服务端累计的可见回复段数。rail 未读徽标 =
    * `msg_count − 共享读锚（unread-cursor 模块）`，聚焦会话即清零。
    */
@@ -158,6 +164,11 @@ export interface SessionSummary {
   agent_kind: string | null
   /** （wire-webui-sebas-agent-e2e）会话所属执行体（"acp"/"native"）；null = 未打标。 */
   backend?: string | null
+  /**
+   * （fix-webui-approval-restore-and-session-identity 4.1）绑定项目的稳定 id
+   * ——聚焦反投影项目上下文的查找键。null = 无项目会话。
+   */
+  project_id?: string | null
   /** （workbench-turn-queue 6.1）待生效提交全量视图（投递序）。 */
   pending: PendingSubmission[]
   /** （add-remote-execution-node 8.x）远端节点/mode/悬空审批呈现；null = 本机。 */
@@ -313,6 +324,12 @@ export interface ConversationEntryView {
    * 旧持久化条目没有该字段（undefined/null），前端回退通用标签。
    */
   title?: string | null
+  /**
+   * （fix-webui-qa-defects 5.2，design D5）错误条目的失败分类
+   * （`spawn` | `stall` | `generic`）。可选：旧条目没有该字段，前端回退
+   * 中性标签——错误气泡标签不再一律写死「spawn failed」。
+   */
+  failure_class?: string | null
 }
 
 export interface SessionDetail {
@@ -973,6 +990,23 @@ export const api = {
       mode,
     }),
   /**
+   * （fix-webui-approval-restore-and-session-identity 1.2）待批审批读模型：
+   * 打开/刷新会话时拉取一次，与 WS `permission.requested` 按 request_id
+   * 幂等合并。未知会话 404（ApiError）；无泊车 = 空表。
+   */
+  sessionApprovals: (encodedKey: string) =>
+    get<{ approvals: PendingApprovalInfo[] }>(
+      `/api/sessions/${encodedKey}/approvals`,
+    ),
+  /**
+   * （fix-webui-approval-restore-and-session-identity 5.1）设置/清空会话
+   * label。`null` = 清空（行命名回退首条 prompt 预览 / 短 id）。
+   */
+  setSessionLabel: (encodedKey: string, label: string | null) =>
+    post<{ status: string }>(`/api/sessions/${encodedKey}/label`, {
+      label,
+    }),
+  /**
    * Answer a gated tool call (review card). Resolves `{status: "delivered"}`
    * when the pending request got the decision; rejects with `ApiError`
    * status 404 when no pending request carries that id (already answered,
@@ -1172,6 +1206,25 @@ export interface ArchiveEntry {
   label: string
   archived_at: number
   retention_deadline: number
+  /**
+   * （fix-webui-approval-restore-and-session-identity 3.1，design D3）归档
+   * 时刻的会话身份四项；旧条目（无字段）恢复时如实回退默认。
+   */
+  agent_kind?: string | null
+  desired_mode?: string | null
+  current_model?: string | null
+  available_models?: string[] | null
+}
+
+/**
+ * （fix-webui-approval-restore-and-session-identity 1.2）一条待批权限请求的
+ * 读模型行——`GET /api/sessions/{key}/approvals` 的元素。与 WS 推送按
+ * `request_id` 幂等合并，重建审批面不依赖是否收到过原始事件。
+ */
+export interface PendingApprovalInfo {
+  request_id: string
+  tool_name: string
+  args: unknown
 }
 
 /** Response from GET /api/archive. */

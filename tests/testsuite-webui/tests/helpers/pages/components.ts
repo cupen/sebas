@@ -28,6 +28,24 @@ export class ProjectRail {
     await this.projectRow(name).click()
   }
 
+  /**
+   * Expand a project row ONLY when collapsed — the row itself is the toggle,
+   * so a blind click on an already-expanded row would hide the sessions this
+   * journey needs to see. Waits for the row first and re-reads the attribute
+   * after each click: the expansion default can lag the rail's first sessions
+   * fetch (the focused key arrives asynchronously), so a single attribute read
+   * at mount races the render.
+   */
+  async ensureProjectExpanded(name: string): Promise<void> {
+    const row = this.projectRow(name)
+    await row.waitFor({ state: 'visible', timeout: 15_000 })
+    for (let guard = 0; guard < 5; guard++) {
+      if ((await row.getAttribute('aria-expanded')) !== 'false') return
+      await row.click()
+      await this.page.waitForTimeout(250)
+    }
+  }
+
 
   /** Expand the History group (archived sessions; hidden when empty). */
   async expandHistory(): Promise<void> {

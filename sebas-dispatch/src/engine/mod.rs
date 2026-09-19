@@ -14,8 +14,12 @@ pub mod provider_card;
 pub mod stall;
 
 pub use events::{
-    RemoteSessionView, SessionEvent, SessionInfo, TurnEntry, TurnStreamEvent, count_chat_messages,
+    PendingApproval, RemoteSessionView, SessionEvent, SessionInfo, TurnEntry, TurnStreamEvent,
+    count_chat_messages,
 };
+// 失败分类词表（fix-webui-qa-defects 5.1/5.2，design D5）：webui 前端标签
+// 映射与 wire 值同源，避免字符串漂移。
+pub use events::failure_class;
 pub use maps::{
     AutoModeSwitch, AutoModeSwitchMap, MsgIdMap, PermCardEntry, PermCardMap, ReplyTargetMap,
 };
@@ -325,6 +329,12 @@ pub struct DispatchHandle {
     /// design D1/D2）：事件时钟 + 泊车豁免 + 阈值。扫描与收尾逻辑在
     /// [`DispatchHandle::force_settle_stalled_turns`]。
     stall: stall::StallRegistry,
+    /// （fix-webui-approval-restore-and-session-identity 2.2，design D2）被
+    /// 操作者取消（stop / interrupt）的回合打标：cancel 命令发出时记入
+    /// session_id，`apply_event` 的 `Finished` 分支消费——为被打标的回合
+    /// append 一条「回合被停止」错误类条目，不再让被停回合无声消失。
+    /// 纯内存、随事件消费，`Finished` 之后标志即清（正常完成不含该条目）。
+    cancelled_turns: Arc<RwLock<std::collections::HashSet<String>>>,
 }
 
 impl Clone for DispatchHandle {
@@ -349,6 +359,7 @@ impl Clone for DispatchHandle {
             turn_events: self.turn_events.clone(),
             turn_log: self.turn_log.clone(),
             stall: self.stall.clone(),
+            cancelled_turns: self.cancelled_turns.clone(),
         }
     }
 }
@@ -426,6 +437,7 @@ impl DispatchHandle {
                 perm_events,
                 turn_events,
                 stall: stall::StallRegistry::default(),
+                cancelled_turns: Arc::new(RwLock::new(std::collections::HashSet::new())),
             },
             rx,
         )
@@ -502,7 +514,17 @@ impl DispatchHandle {
         };
         let (phase, user_prompt, usage) = match session_id.as_ref() {
             Some(sid) => match self.card_states.snapshot(sid).await {
-                Some(st) => (Some(st.status_emoji), Some(st.user_prompt), Some(st.usage)),
+                Some(st) => {
+                    // 空串归 None（fix-webui-approval-restore-and-session-identity
+                    // review 4）：种子卡态的默认空 prompt 投成 Some("") 会让
+                    // rail 行名闪现空串窗口（`??` 链不跳过空串）。
+                    let prompt = if st.user_prompt.is_empty() {
+                        None
+                    } else {
+                        Some(st.user_prompt)
+                    };
+                    (Some(st.status_emoji), prompt, Some(st.usage))
+                }
                 None => (None, None, None),
             },
             None => (None, None, None),
@@ -582,6 +604,8 @@ impl DispatchHandle {
             // remote 会话的泊车走 remote 视图，此处照填无妨（上游合并时
             // remote 值优先）。
             parked_approvals,
+            // （5.1，design D6）操作者 label 随快照下发（None 不上 wire）。
+            label: m.label.clone(),
         })
     }
 
@@ -750,25 +774,103 @@ impl DispatchHandle {
         self.perm_events.subscribe()
     }
 
+    /// 待批请求读模型（fix-webui-approval-restore-and-session-identity 1.1，
+    /// design D1）：按会话枚举当前泊车审批（request_id / 工具 / 参数）。
+    /// 数据取自引擎的泊车登记（推送通道之外的第二条腿）——客户端刷新/
+    /// 重连后从这里重建审批面，不依赖是否收到过原始事件。`None` = 会话
+    /// 未知（无映射）；无泊车 = 空表。
+    pub async fn pending_permission_requests(
+        &self,
+        key: &ChannelKey,
+    ) -> Option<Vec<crate::engine::events::PendingApproval>> {
+        let m = self.map.get(key).await?;
+        let sid = match m.session_id() {
+            Some(sid) => sid.to_string(),
+            // Spawning 占位没有 session_id，也不可能有泊车（泊车发生在回合
+            // 内）——如实返回空表而非 None（会话是存在的）。
+            None => return Some(Vec::new()),
+        };
+        Some(
+            self.stall
+                .parked_requests(&sid)
+                .await
+                .into_iter()
+                .map(|p| crate::engine::events::PendingApproval {
+                    request_id: p.request_id,
+                    tool_name: p.tool_name,
+                    args: p.args,
+                })
+                .collect(),
+        )
+    }
+
+    /// 该 request_id 当前泊车在哪个会话（批复路由的 fail-closed 校验源）。
+    /// `None` = 未泊车（从未泊车 / 已批复 / 已随 cancel 释放）——此类 id
+    /// 不可再批复（1.4 / 2.3）。
+    pub async fn permission_parked_session(&self, request_id: &str) -> Option<String> {
+        self.stall.parked_owner(request_id).await
+    }
+
+    /// 设置/清空会话 label（5.1，design D6）。会话未知 = `Err`（Unknown），
+    /// 成功后发布 Updated 让 rail 行即时反映新名。
+    pub async fn web_set_session_label(
+        &self,
+        key: ChannelKey,
+        label: Option<String>,
+    ) -> Result<(), crate::state::PendingOpError> {
+        if self.map.set_label(&key, label).await {
+            self.publish_updated(&key).await;
+            Ok(())
+        } else {
+            Err(crate::state::PendingOpError::Unknown)
+        }
+    }
+
     /// Publish a native-kernel permission request onto the same ACP permission
     /// broadcast (make-feishu-optional-webui-primary, design D3). The webui
     /// `InProcessBackend` relays `AcpEvent::PermissionRequest` into its
     /// review-card feed already — reusing the shape means feishu-originated
     /// native sessions surface permission cards for free, encoded key lookup
     /// included. `session_id` is the URL-safe encoded `ChannelKey`.
-    pub fn publish_native_permission(
+    ///
+    /// （fix-webui-approval-restore-and-session-identity 1.1）原生泊车同步登记
+    /// 进引擎泊车表（编码 key 反查路由 sid）：审批读模型对原生会话同样成立，
+    /// 批复的 fail-closed 校验（未泊车不可批）对两条执行体同一口径。查不到
+    /// 映射时只广播、不登记（现状行为不变）。
+    pub async fn publish_native_permission(
         &self,
         session_id: String,
         request_id: String,
         tool_name: String,
         args: serde_json::Value,
     ) {
+        if let Some(key) = decode_key(&session_id)
+            && let Some(m) = self.map.get(&key).await
+            && let Some(sid) = m.session_id()
+        {
+            self.stall
+                .note_permission_parked(sid, &request_id, &tool_name, args.clone())
+                .await;
+        }
         let _ = self.perm_events.send(AcpEvent::PermissionRequest {
             session_id,
             request_id,
             tool_name,
             args,
         });
+    }
+
+    /// 按 request_id 解除泊车登记（原生桥批复成功的收尾；acp 路径走 `emit`
+    /// 的 PermissionReply 钩子，不经这里）。返回解除所在的会话 id（`None` =
+    /// 本就未泊车）。解除即广播 Updated——waiting 投影即时翻转。
+    pub async fn resolve_permission_request(&self, request_id: &str) -> Option<String> {
+        let sid = self.stall.note_permission_resolved(request_id).await;
+        if let Some(ref sid) = sid
+            && let Some(key) = self.map.lookup_key_by_session(sid).await
+        {
+            self.publish_updated(&key).await;
+        }
+        sid
     }
 
     /// 原生内核会话登记为已存在（幂等）：事件驱动地刷新一次 Updated，
@@ -1039,6 +1141,19 @@ impl DispatchHandle {
                 self.transcript_push(session_id, TurnEntry::markdown(0, delta.clone()))
                     .await;
             }
+            // fix-webui-qa-defects 5.1（design D5）：is_error 终态（含 refusal
+            // 的非终态 Error + Finished 配对）此前只翻卡片 FSM、不进 transcript
+            // ——被拒回合「石沉大海」。错误消息如实合成一条带 generic 分类的
+            // error 条目（与 spawn-failure 条目同通道），前端必有可见气泡。
+            // SetMode 失败的「模式未变」标记错误已由 permission_mode_result
+            // 契约条目上报，不重复合成。
+            AcpEvent::Error { message, .. } => {
+                if !message.contains(MODE_UNCHANGED_MARKER) {
+                    let entry = TurnEntry::error(0, message.clone())
+                        .with_failure_class(failure_class::GENERIC);
+                    self.transcript_push(session_id, entry).await;
+                }
+            }
             AcpEvent::ThinkingDelta { delta, .. } => {
                 if cfg.thinking != crate::cards::ThinkingDisplay::Hide {
                     self.transcript_push(session_id, TurnEntry::thinking(0, delta.clone()))
@@ -1074,6 +1189,17 @@ impl DispatchHandle {
                         .with_title(events::tool_entry_title(true, tool_name, None)),
                 )
                 .await;
+            }
+            AcpEvent::Finished { session_id } => {
+                // （2.2，design D2）被取消的回合在此收尾：cancel 命令发出的
+                // 打标在 Finished 到达时消费——append 一条错误类「回合被停止」
+                // 条目（复用既有错误条目渲染，不新增 entry kind），transcript
+                // 不再让被停回合无声消失。正常完成回合无标、无条目。
+                if self.cancelled_turns.write().await.remove(session_id) {
+                    let entry = TurnEntry::error(0, "回合被停止（操作者中断了本次回复）")
+                        .with_failure_class(failure_class::GENERIC);
+                    self.transcript_push(session_id, entry).await;
+                }
             }
             _ => {}
         }
@@ -1349,17 +1475,53 @@ impl DispatchHandle {
         acp_session_id: Option<String>,
         model: Option<sebas_acp::AcpModelInfo>,
     ) -> Vec<String> {
+        // fix-webui-qa-defects 2.1：resume 回退新路由 id 时（agent 无法 load
+        // 旧对话），旧 id 名下的 transcript（归档恢复回放的条目）随激活迁移
+        // 到新 id——对话历史不因路由 id 更换而「消失」。成功 load 时路由 id
+        // 不变，迁移退化为同 id no-op。
+        let previous_transcript_id = self
+            .map
+            .get(key)
+            .await
+            .and_then(|m| m.transcript_id().map(str::to_owned));
         let existed = self.map.get(key).await.is_some();
         let pending = self
             .map
-            .activate(key, session_id, acp_session_id, model)
+            .activate(key, session_id.clone(), acp_session_id, model)
             .await;
+        if let Some(old) = previous_transcript_id
+            && old != session_id
+        {
+            self.transcript_migrate(&old, &session_id).await;
+        }
         if existed {
             self.publish_updated(key).await;
         } else {
             self.publish_created(key).await;
         }
         pending
+    }
+
+    /// 把旧 session_id 名下的 transcript 条目整体迁移到新 id（position 顺序
+    /// 保持，在新 id 下从 0 重排）。旧条目随映射换 id 本会被静默孤儿化——
+    /// 归档恢复的会话续聊后历史仍在 detail 可见（fix-webui-qa-defects 2.1）。
+    async fn transcript_migrate(&self, old: &str, new: &str) {
+        let moved = {
+            let mut g = self.turn_log.write().await;
+            if let Some(mut entries) = g.remove(old) {
+                for (i, e) in entries.iter_mut().enumerate() {
+                    e.position = i as u64;
+                }
+                let n = entries.len();
+                g.entry(new.to_string()).or_default().extend(entries);
+                n
+            } else {
+                0
+            }
+        };
+        if moved > 0 {
+            tracing::info!(%old, %new, moved, "migrated transcript to the new routing id");
+        }
     }
 
     /// 会话模型切换成功（AcpEvent::ModelChanged）后更新映射的 current model，
@@ -1399,7 +1561,10 @@ impl DispatchHandle {
         let transcript_id = self.map.fail_spawn(key, reason).await;
         if was_spawning {
             if let Some(tid) = transcript_id {
-                let entry = TurnEntry::error(0, format!("**spawn failed**: {reason}"));
+                // （fix-webui-qa-defects 5.1，design D5）错误条目携带失败分类，
+                // 前端气泡标签按类如实渲染（spawn failed），不再一律写死。
+                let entry = TurnEntry::error(0, format!("**spawn failed**: {reason}"))
+                    .with_failure_class(failure_class::SPAWN);
                 self.transcript_push(&tid, entry).await;
             }
             self.publish_updated(key).await;
@@ -1514,6 +1679,71 @@ impl DispatchHandle {
         }
     }
 
+    /// 从归档条目重建会话（fix-webui-qa-defects 2.1，design D1）：以原 key
+    /// 重建 `Dormant` 映射（惰性激活——首条消息走既有 resume 语义，agent
+    /// 无法 load 时如实回退新会话），并把归档转写条目回放进 turn 存储，使
+    /// `GET /api/sessions/{key}`（detail）恢复后立即可见全部 N 条条目。
+    ///
+    /// 这是「消费归档 ⇄ 重建会话」原子语义的引擎半边：调用方（webui restore
+    /// handler）必须先调本方法、成功后才从归档删除条目——重建失败时归档
+    /// 原样保留，数据不再有「三处皆空」的丢失形态。
+    ///
+    /// - `session_id`：归档时刻的原路由 id（`ArchiveEntry.session_id`）。恢复
+    ///   后 Dormant 映射以它寻址 transcript，也供 resume 尝试加载原对话；
+    ///   `None`（旧归档条目）时以 key reference 合成确定性 id，transcript
+    ///   寻址不受影响（resume 会被 agent 拒绝并诚实回退）。
+    /// - `identity`（fix-webui-approval-restore-and-session-identity 3.2，
+    ///   design D3）：归档条目携带的会话身份（agent_kind / desired_mode /
+    ///   current_model / available_models），恢复时原样带回——后续对话用回
+    ///   原 agent 与模型面。旧归档条目（全空）维持既有默认（agent 显示回退、
+    ///   模型目录清空），不做数据迁移。
+    /// - 拒绝：key 已有映射（活会话/占位与归档同 key 是状态矛盾）→
+    ///   [`crate::error::DispatchError`]；容量满 → Capacity。
+    pub async fn web_restore_session(
+        &self,
+        key: ChannelKey,
+        session_id: Option<String>,
+        project_dir: Option<String>,
+        transcript: Vec<TurnEntry>,
+        identity: crate::state::SessionIdentity,
+    ) -> Result<(), crate::error::DispatchError> {
+        if self.map.get(&key).await.is_some() {
+            return Err(crate::error::DispatchError::Conflict(format!(
+                "会话映射已存在，拒绝从归档覆盖重建: {}",
+                key.reference
+            )));
+        }
+        let sid = session_id.unwrap_or_else(|| key.reference.clone());
+        let mut mapping = crate::state::Mapping::dormant(sid.clone(), now_unix());
+        mapping.project_dir = project_dir;
+        // （3.2）身份带回：四项原样落入映射（`None` 维持现默认）。
+        mapping.pending_kind = identity.agent_kind;
+        mapping.current_model = identity.current_model;
+        mapping.available_models = identity.available_models;
+        if let Some(mode) = identity.desired_mode {
+            mapping.desired_mode = mode;
+        }
+        self.map.insert(key.clone(), mapping).await?;
+        // 转写回放：条目按归档快照顺序重排 position（0..n 单调），随 Dormant
+        // 的 transcript_id（2.1）在 detail / msg_count 投影完整可见。
+        if !transcript.is_empty() {
+            let mut g = self.turn_log.write().await;
+            let log = g.entry(sid).or_default();
+            log.reserve(transcript.len());
+            for (i, mut e) in transcript.into_iter().enumerate() {
+                e.position = i as u64;
+                log.push(e);
+            }
+        }
+        // 广播 Created：detached 前端的 rail / 会话列表不等轮询即收敛。
+        self.publish_created(&key).await;
+        tracing::info!(
+            key = %key.reference,
+            "restored archived session as a Dormant mapping with its transcript"
+        );
+        Ok(())
+    }
+
     /// Send a message to an existing session from the WebUI.
     /// Routes the message through the session map (same logic as Feishu
     /// text messages) and emits the appropriate Out instruction. Command
@@ -1524,7 +1754,17 @@ impl DispatchHandle {
     /// ——在飞 turn 已派发中断（Dispatched）、会话无在飞 turn（Idle）、
     /// 未知会话（Unknown）。空闲/未知由调用方转 typed rejection，不再把
     /// 「无事可取消」伪装成成功。判定与回合队列的 in-flight 定义同源
-    /// （card FSM 的 WORKING 态，`submit_turn` 同款），会话保留、可继续对话。
+    /// （card FSM 的 WORKING 态 ∨ 泊车审批在等——`turn_engaged` 同款，
+    /// fix-webui-approval-restore-and-session-identity 2.1：泊车中的回合同样
+    /// 可停），会话保留、可继续对话。
+    ///
+    /// （fix-webui-approval-restore-and-session-identity 2.1，design D2）
+    /// interrupt 全程收尾：Cancel 派发后同步 fail-closed 释放该会话的**全部**
+    /// 泊车审批（幂等，未决请求不再阻塞、`turn_engaged` 随 `parked_count=0`
+    /// 回落），并把回合打上「被取消」标——`Finished` 到达时补一条停止条目
+    /// （2.2），被停回合不再无声消失。释放只影响 engine 侧登记：driver 内部
+    /// 的 hook 等待不受影响（子进程随后被断开），已释放请求的迟到批复走
+    /// typed rejection（2.3）。
     pub async fn web_cancel_session(&self, key: &ChannelKey) -> CancelOutcome {
         use crate::card_state::phase::WORKING;
         let sid = self
@@ -1539,15 +1779,41 @@ impl DispatchHandle {
             self.card_states.status_emoji(&sid).await.as_deref(),
             Some(WORKING)
         );
-        if !working {
+        let parked = self.stall.parked_count(&sid).await > 0;
+        if !working && !parked {
             return CancelOutcome::Idle;
         }
+        self.mark_cancelled_turn(&sid).await;
         self.emit(Out::SendAcp {
             session_id: sid.clone(),
-            cmd: AcpCommand::Cancel { session_id: sid },
+            cmd: AcpCommand::Cancel { session_id: sid.clone() },
         })
         .await;
+        self.release_parked_approvals(&sid).await;
         CancelOutcome::Dispatched
+    }
+
+    /// （2.1）fail-closed 释放会话的全部泊车审批并广播状态翻转。幂等：无
+    /// 泊车时 no-op。返回被释放的 request_id 列表（日志/测试断言用）。
+    pub async fn release_parked_approvals(&self, session_id: &str) -> Vec<String> {
+        let released = self.stall.release_session(session_id).await;
+        if !released.is_empty()
+            && let Some(key) = self.map.lookup_key_by_session(session_id).await
+        {
+            // 泊车集合清空 = (phase, parked) 投影翻转（waiting 消失、
+            // turn_engaged 回落）——即刻广播，rail/提交控件不等轮询。
+            self.publish_updated(&key).await;
+        }
+        released
+    }
+
+    /// （2.2）回合取消打标：cancel 派发前调用，`apply_event` 的 `Finished`
+    /// 分支消费后补「回合被停止」条目。正常完成回合无标、无条目。
+    async fn mark_cancelled_turn(&self, session_id: &str) {
+        self.cancelled_turns
+            .write()
+            .await
+            .insert(session_id.to_string());
     }
 
     /// Send a message to an existing session from the WebUI. Returns
@@ -1580,9 +1846,16 @@ impl DispatchHandle {
                             session_id: sid.clone(),
                             prompt: "/status".into(),
                         },
-                        Command::Cancel => AcpCommand::Cancel {
-                            session_id: sid.clone(),
-                        },
+                        Command::Cancel => {
+                            // （2.2）`/cancel` 与停止按钮同一收尾语义：打标 +
+                            // fail-closed 释放泊车（append 停止条目走 Finished
+                            // 分支）。
+                            self.mark_cancelled_turn(&sid).await;
+                            self.release_parked_approvals(&sid).await;
+                            AcpCommand::Cancel {
+                                session_id: sid.clone(),
+                            }
+                        }
                         _ => unreachable!(),
                     };
                     self.emit(Out::SendAcp {
@@ -1751,6 +2024,9 @@ impl DispatchHandle {
             self.card_states.drop(sid).await;
             self.msgid.drop(sid).await;
             self.transcript_drop(sid).await;
+            // （2.1）会话终结路径同样 fail-closed：泊车审批随终结释放（孤儿
+            // 泊车不可越过会话存活）、时钟退役——复用 id 不继承 stale 事实。
+            self.stall.drop_session(sid).await;
         }
 
         // Remove the mapping. Active/Dormant keys are indexed by session_id;
@@ -1968,6 +2244,12 @@ impl DispatchHandle {
                 self.stall.drop_session(&sid).await;
                 continue;
             };
+            // fix-webui-qa-defects 3.1（design D2）：0-turn 占位不构成在飞回合
+            // ——占位旗标仍在的映射（未经首条消息/激活消费）绝不强收、绝不向
+            // 其 transcript 注入合成错误。真实回合的判定在旗标翻转后照常。
+            if self.map.get(&key).await.is_some_and(|m| m.awaiting_first_prompt()) {
+                continue;
+            }
             let phase = self.card_states.status_emoji(&sid).await;
             if !matches!(
                 phase.as_deref(),
@@ -1978,6 +2260,19 @@ impl DispatchHandle {
                 // 本就不再参与判定）。
                 self.stall.drop_session(&sid).await;
                 continue;
+            }
+            // fix-webui-qa-defects 3.1（design D2 补口）：从未开过轮的会话同样
+            // 不是在飞回合——聚焦即拉起（激活 spawn）只握手、无 prompt，卡片
+            // 经 apply_event 的 lazy seed 落在 SEED 且 transcript 为空；它在
+            // turn_stall_timeout 后曾被强收并写入「回合停滞被强制收尾」合成
+            // 错误（占位幽灵回合）。真实回合开轮必经 seed_card 落下 prompt
+            // 条目，transcript 非空；空 transcript = 没有任何回合可收尾。
+            // 不 drop 时钟：该会话首条消息开轮后由既有路径照常计时。
+            {
+                let g = self.turn_log.read().await;
+                if g.get(&sid).is_none_or(|log| log.is_empty()) {
+                    continue;
+                }
             }
             // 收尾锚定（防误收尾）：仅 SEED/WORKING 转移到 DONE，与
             // non-terminal Error 臂同款契约。
@@ -2000,6 +2295,8 @@ impl DispatchHandle {
             }
             // transcript 就地点名（会话内可见「回合为何被收尾」）；数字是
             // 收尾时刻的搁浅条目数——drain 会让队头开轮，其余随之解除卡死。
+            // （fix-webui-qa-defects 5.1，design D5）错误条目带 stall 分类，
+            // 前端气泡标签渲染「回合停滞」而非通用 spawn failed。
             let released = self.map.queue_len(&key).await;
             self.transcript_push(
                 &sid,
@@ -2011,7 +2308,8 @@ impl DispatchHandle {
                         facts.silent_for_secs,
                         released
                     ),
-                ),
+                )
+                .with_failure_class(failure_class::STALL),
             )
             .await;
             self.flush_card(&sid).await;
