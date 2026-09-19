@@ -19,6 +19,16 @@
  * created, nothing focused.
  * 无可选 agent（catalog 为空）时确认钮禁用（spec「dialog requires an
  * explicit agent」）。
+ * （round3 1.3）创建在途 = busy 忙态：确认控件禁用 + loading，入口 guard
+ * 忽略后续激活（防重复提交）。
+ * （round3 1.2）确认控件用**原生 button**（design 决策 1 备选路径）：真实
+ * 浏览器回归证伪了「浮层残留挡路」假设，真凶是 Popover API 的 dismiss 吞
+ * click 语义（指针序列期间的 hidePopover 会吞掉该序列的 click，详见 design
+ * 附录「缺陷 1」第三轮）。换原生 button 让激活面干净、wa-select-rescue 第三
+ * 版摘掉吞 click 来源，confirm 入口再加**同一弹窗会话内 300ms 去重**兜底
+ * （busy 由 rail 异步置位，快速二次激活在翻转前仍可能双发）——除它之外不再
+ * 加任何吞点击相关 hack。同时加 dialog 级表单提交语义：Enter（按钮与
+ * wa-select 自留键面除外）触发 confirm()，与点击汇聚同一入口。
  */
 
 import { LitElement, css, html, nothing, type PropertyValues } from 'lit'
@@ -34,7 +44,6 @@ import {
 } from '../api/model-catalog.js'
 import { MODE_OPTIONS } from './mode-vocabulary.js'
 import '@awesome.me/webawesome/dist/components/dialog/dialog.js'
-import '@awesome.me/webawesome/dist/components/button/button.js'
 import '@awesome.me/webawesome/dist/components/select/select.js'
 import '@awesome.me/webawesome/dist/components/option/option.js'
 
@@ -75,6 +84,12 @@ export class SebasNewSessionDialog extends LitElement {
   @property({ attribute: false }) defaultAgent: string | null = null
   /** 创建失败的就地呈现（rail 写入；开盒/成功时清空）。 */
   @property({ attribute: false }) error: string | null = null
+  /**
+   * （round3 1.3）创建请求在途（rail 的 creatingSession 下传）：确认控件
+   * 呈现忙态（禁用 + loading 指示），confirm 入口忽略后续激活——防重复
+   * 提交的单一守卫点，rail 侧的 creatingSession 兜底第二道。
+   */
+  @property({ type: Boolean }) busy = false
 
   /** Agent catalog（/api/agents；唯一可用性真源，含 native 行）。 */
   @state() private agents: AgentKindInfo[] = []
@@ -90,6 +105,12 @@ export class SebasNewSessionDialog extends LitElement {
   @state() private catalogUnavailable = false
   /** 选定的权限模式。（3.2，D5b）非空：打开即预填 'ask'（真源如此）。 */
   @state() private mode: string = 'ask'
+
+  /**
+   * （round3 1.2 第三轮）同一弹窗会话内最近一次确认的时刻；`-Infinity` =
+   * 本会话尚未确认过。弹窗重开时归零（willUpdate）。
+   */
+  private lastConfirmAt = Number.NEGATIVE_INFINITY
 
   /** 一级选定的 provider 下的模型 id 列表（保持 payload 顺序）。 */
   private modelsFor(provider: string): string[] {
@@ -132,6 +153,8 @@ export class SebasNewSessionDialog extends LitElement {
       void this.loadCatalog()
       // （3.2，D5b）mode 回到显式缺省 ask——不再有「agent 默认」空路径。
       this.mode = 'ask'
+      // （round3 1.2 第三轮）重开 = 新的弹窗会话：300ms 同窗去重窗口归零。
+      this.lastConfirmAt = Number.NEGATIVE_INFINITY
       this.agent = ''
       if (this.defaultAgent) this.agent = this.defaultAgent
       this.applyCatalogPreselect()
@@ -140,6 +163,11 @@ export class SebasNewSessionDialog extends LitElement {
     if (changed.has('defaultAgent') && this.open && this.defaultAgent) {
       this.agent = this.defaultAgent
     }
+    // （round3 1.2 第三轮）busy 一旦翻转（rail 异步置位/解除），「确认已发
+    // 出但 busy 还没跟上」的同步双发窗口就已关闭：300ms 去重窗口归零——
+    // 失败后的原地重试（spec「retry in place」）是合法的第二次创建，绝不能
+    // 被去重误伤；busy=true 期间仍有入口 guard 挡着，窗口归零不放大风险。
+    if (changed.has('busy')) this.lastConfirmAt = Number.NEGATIVE_INFINITY
   }
 
   /**
@@ -195,7 +223,18 @@ export class SebasNewSessionDialog extends LitElement {
   }
 
   private confirm(): void {
-    if (this.confirmDisabled) return
+    // （round3 1.3）in-flight 防重复提交：忙态期间的后续激活不再发
+    // dialog-confirm（spec「ignores further activation attempts instead of
+    // issuing duplicate creation requests」）；rail 侧 creatingSession 守卫
+    // 兜底第二道。
+    if (this.confirmDisabled || this.busy) return
+    // （round3 1.2 第三轮）同一弹窗会话内 300ms 去重：busy 由 rail 异步置位，
+    // 快速二次激活（双击、迟到的补发点击）在 busy 翻转前仍可能双发
+    // dialog-confirm——窗口内的第二次激活直接忽略。这是 design 钦定的最后
+    // 一道网，除此之外不再加任何吞点击相关 hack。
+    const now = performance.now()
+    if (now - this.lastConfirmAt < 300) return
+    this.lastConfirmAt = now
     // 记忆唯一写入点（preselect-last-used-model 1.2）：创建对话框的确认
     // 动作——会话内模型 chip 的切换不经过这里，绝不写 last-used 记忆。
     // 目录不可得（未选模型）时无对可记，跳过。
@@ -217,6 +256,32 @@ export class SebasNewSessionDialog extends LitElement {
     )
   }
 
+  /**
+   * （round3 1.2 备选路径）dialog 级表单提交语义：弹窗面上的 Enter 触发
+   * 确认（等价点击创建），与点击汇聚到同一 confirm() 入口——agent/项目
+   * 门禁与 busy 防重复提交 guard 单点不变。键面归属让路（路径上出现即
+   * 跳过、不 preventDefault，让原生语义照常走）：
+   *  - button / wa-button：Enter 的语义就是原生 click——确认/取消各归其位；
+   *    这里若叠加提交会双发 dialog-confirm（busy 等 rail 异步置位，入口
+   *    guard 拦不住同步双发），若只 preventDefault 又会掐掉 wa-dialog
+   *    自带右上角 close 钮的原生激活——一律让路；
+   *  - wa-select：Enter 是下拉自己的「展开/选中」键。select 持焦时事件
+   *    被 WA 消费（stopPropagation / 文档级 stopImmediatePropagation）到
+   *    不了这里，但浮层**开着**时那份文档级监听在本 bubble 监听之后才跑
+   *    ——显式跳过，绝不把「正在选选项」误提交成创建。
+   */
+  private onDialogKeydown(e: KeyboardEvent): void {
+    if (e.key !== 'Enter' || e.defaultPrevented) return
+    const ownsEnter = (n: EventTarget): boolean =>
+      n instanceof Element &&
+      (n.localName === 'button' ||
+        n.localName === 'wa-button' ||
+        n.localName === 'wa-select')
+    if (e.composedPath().some(ownsEnter)) return
+    e.preventDefault()
+    this.confirm()
+  }
+
   render() {
     const providers = this.catalogProviders
     const providerModels = this.selectedProvider ? this.modelsFor(this.selectedProvider) : []
@@ -228,6 +293,7 @@ export class SebasNewSessionDialog extends LitElement {
         style="--width: 460px;"
         .open=${true}
         @wa-hide=${guardedHide(() => this.cancel())}
+        @keydown=${(e: KeyboardEvent) => this.onDialogKeydown(e)}
         data-testid="new-session-dialog"
       >
         <div class="form">
@@ -315,16 +381,23 @@ export class SebasNewSessionDialog extends LitElement {
             ? html`<p class="error" data-testid="dialog-error" role="alert">${this.error}</p>`
             : nothing}
         </div>
-        <wa-button
+        <!-- （round3 1.2）原生 <button>：语义与键盘激活来自元素本身，激活面
+             不依赖任何组件怪癖（吞点击真凶在 popover dismiss 语义，见 design
+             附录第三轮）；视觉用 WA 主题 token 在组件样式里复刻 brand/plain
+             两档。（round3 1.3）创建中 = 忙态（禁用 + aria-busy + 文案
+             切换），激活被入口 guard 忽略——防重复创建。 -->
+        <button
           slot="footer"
-          variant="brand"
+          type="button"
+          class="confirm-btn"
           data-testid="dialog-confirm"
-          ?disabled=${this.confirmDisabled}
+          ?disabled=${this.confirmDisabled || this.busy}
+          aria-busy=${this.busy ? 'true' : 'false'}
           @click=${() => this.confirm()}
-          >创建会话</wa-button
+          >${this.busy ? '创建中…' : '创建会话'}</button
         >
-        <wa-button slot="footer" appearance="plain" data-testid="dialog-cancel" @click=${() => this.cancel()}
-          >取消</wa-button
+        <button slot="footer" type="button" class="cancel-btn" data-testid="dialog-cancel" @click=${() => this.cancel()}
+          >取消</button
         >
       </wa-dialog>
     `
@@ -350,6 +423,71 @@ export class SebasNewSessionDialog extends LitElement {
       margin: 0;
       font-size: 0.78rem;
       color: var(--sebas-status-failed);
+    }
+    /* （round3 1.2 备选路径）原生按钮复刻 WA 按钮视觉：WA 的文档级原生
+         按钮样式（native.css）进不了 shadow DOM，这里用同一批 WA 主题
+         token 就地等价实现——明暗模式随 :root.wa-dark 切换，与其它页面的
+         wa-button 同观感。几何/禁用/悬停均对照 WA native.css 的按钮规则。 */
+    button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font: inherit;
+      font-weight: var(--wa-font-weight-action, 600);
+      height: var(--wa-form-control-height, 2.75rem);
+      padding: 0 var(--wa-form-control-padding-inline, 1em);
+      border: none;
+      border-radius: var(--wa-form-control-border-radius, var(--sebas-radius-md, 8px));
+      white-space: nowrap;
+      vertical-align: middle;
+      user-select: none;
+      cursor: pointer;
+      transition:
+        background-color var(--sebas-dur, 150ms) var(--sebas-ease, ease),
+        color var(--sebas-dur, 150ms) var(--sebas-ease, ease);
+    }
+    button:focus-visible {
+      outline: var(--sebas-focus-ring, 2px solid var(--wa-color-focus, #8b93ff));
+      outline-offset: 2px;
+    }
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    /* confirm = brand + loud：WA brand 填充，悬停/按下走主题混色。 */
+    .confirm-btn {
+      background-color: var(--wa-color-brand-fill-loud, var(--wa-color-brand, #5b64f2));
+      color: var(--wa-color-brand-on-loud, #fff);
+    }
+    .confirm-btn:hover:enabled {
+      background-color: color-mix(
+        in oklab,
+        var(--wa-color-brand-fill-loud, #5b64f2),
+        var(--wa-color-mix-hover, rgba(255, 255, 255, 0.1))
+      );
+    }
+    .confirm-btn:active:enabled {
+      background-color: color-mix(
+        in oklab,
+        var(--wa-color-brand-fill-loud, #5b64f2),
+        var(--wa-color-mix-active, rgba(0, 0, 0, 0.1))
+      );
+      transform: var(--wa-button-transform-active, none);
+    }
+    /* cancel = plain：透明底 quiet 文字，悬停浮出 quiet 填充。 */
+    .cancel-btn {
+      background-color: transparent;
+      color: var(--wa-color-on-quiet, var(--sebas-text-dim, #9aa3b2));
+    }
+    .cancel-btn:hover:enabled {
+      background-color: var(--wa-color-fill-quiet, rgba(127, 127, 127, 0.15));
+    }
+    .cancel-btn:active:enabled {
+      background-color: color-mix(
+        in oklab,
+        var(--wa-color-fill-quiet, rgba(127, 127, 127, 0.15)),
+        var(--wa-color-mix-active, rgba(0, 0, 0, 0.1))
+      );
     }
   `
 }

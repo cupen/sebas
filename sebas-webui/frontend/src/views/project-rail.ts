@@ -128,6 +128,17 @@ export function truncateName(label: string, cap = NAME_CAP_CODEPOINTS): string {
 }
 
 /**
+ * （round3 4.4）展示路径分隔符统一：注册弹窗的填充值与「项目已注册」等
+ * 服务端错误提示里的路径，展示前把反斜杠归一为正斜杠——folder-picker
+ * （browse-dirs）回传的是正斜杠普通形，服务端错误消息里是反斜杠普通形，
+ * 同一界面两种分隔符混排即 QA 4.4 的「\\ / 混用」。纯展示归一：两种形态
+ * 服务端 canonicalize 等价接受，不改变语义。
+ */
+export function normalizeDisplayPath(text: string): string {
+  return text.replace(/\\/g, '/')
+}
+
+/**
  * 会话名 = 首条用户消息预览；零轮占位回退短 id / 键尾段（D10）。
  *
  * workbench-interaction-polish 3.2 修复：0-turn 占位（无 prompt、无
@@ -218,7 +229,7 @@ export class SebasProjectRail extends LitElement {
   // ─── New session dialog（workbench-interaction-polish 3.2/D2）──────────
   /** 对话框当前绑定的项目（`null` = 关闭）。唯一创建入口：项目行「+」。 */
   @state() private newSessionTarget: Project | null = null
-  /** 创建请求在途（防双击重复创建）。 */
+  /** 创建请求在途（防双击重复创建；round3 1.3 起同时下传对话框忙态）。 */
   @state() private creatingSession = false
   /** 创建失败：留在对话框内就地呈现。 */
   @state() private newSessionError: string | null = null
@@ -666,12 +677,18 @@ export class SebasProjectRail extends LitElement {
     this.creatingSession = true
     this.newSessionError = null
     try {
-      await api.createSession({
+      const created = await api.createSession({
         projectId: p.id,
         agent: e.detail.agent,
         model: e.detail.model,
         mode: e.detail.mode,
       })
+      // （round3 3.1）创建即见过：读锚在本浏览器就地立基（0 轮占位）。
+      // 创建路径没有 rail 点击（服务端 set_focus 直达焦点），此前锚永远
+      // 缺位，而无锚会话按 spec 读作 fully-read——新会话之后的非聚焦新回复
+      // 因此永远推不出未读徽章（QA 缺陷 3 的根因）。游标单调：重复创建/
+      // 已有更高锚不回退。
+      writeFocusAnchor(created.key, 0)
       this.closeNewSessionDialog()
       // workbench-rail-polish 3.1/D2：创建成功后的焦点链三步显式化，不再
       // 借用 onSelect 的 toggle——从已展开的项目行「+」进来会把组误折叠，
@@ -859,7 +876,9 @@ export class SebasProjectRail extends LitElement {
     this.addPathScopeHint = null
   }
   private onFolderSelected(e: CustomEvent) {
-    this.addPath = e.detail.path
+    // （round3 4.4）picker 回填值即展示值：分隔符归一后再进输入框，避免
+    // 与服务端错误提示里的反斜杠普通形混排。
+    this.addPath = normalizeDisplayPath(e.detail.path)
     void this.checkAddPathScope(this.addPath)
   }
 
@@ -905,7 +924,11 @@ export class SebasProjectRail extends LitElement {
       // 时项目仍落栏（本地注册表），但操作者不再直到新建会话才得知。
       this.degradedHint = p.degraded?.cause ? `核心不可达（${p.degraded.cause}），已写入本地注册表` : null
       this.onSelect(p.path)
-    } catch (e) { this.addError = e instanceof Error ? e.message : String(e) }
+    } catch (e) {
+      // （round3 4.4）「项目已注册」等服务端点名消息里的路径随展示归一，
+      // 与输入框里的 picker 回填值同一分隔符。
+      this.addError = normalizeDisplayPath(e instanceof Error ? e.message : String(e))
+    }
   }
 
   private countsFor(id: string): { count: number; waiting: boolean } {
@@ -1220,6 +1243,7 @@ export class SebasProjectRail extends LitElement {
         .projectName=${this.newSessionTarget?.name ?? null}
         .defaultAgent=${this.newSessionTarget?.default_agent ?? null}
         .error=${this.newSessionError}
+        .busy=${this.creatingSession}
         @dialog-confirm=${(e: CustomEvent<NewSessionDialogConfirm>) =>
           void this.confirmNewSession(e)}
         @dialog-cancel=${() => this.closeNewSessionDialog()}

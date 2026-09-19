@@ -2122,3 +2122,57 @@ describe('no horizontal overflow in the settings modal (polish-workbench-walkthr
     expect(css).toContain('min-width: 0')
   })
 })
+
+// ── fix-webui-qa-defects-round3：About 空值兜底（4.3）+ 命令名不断行（4.4）──
+
+describe('About / Services display defects (round3 4.3/4.4)', () => {
+  it('About Rust toolchain falls back to 未知 when the build-time inject is empty (4.3)', async () => {
+    apiMocks.about.mockResolvedValue({
+      uptime: '3h 12m',
+      version: '0.4.2',
+      rustc_version: '',
+      router_listen: '127.0.0.1:8787',
+      provider_count: 2,
+      default_agent_kind: 'claude',
+    })
+    const el = await mount()
+    await goto(el, 6)
+    const row = [...el.shadowRoot!.querySelectorAll('dl.about-build .kv')].find((kv) =>
+      kv.textContent?.includes('Rust toolchain'),
+    )
+    expect(row).toBeTruthy()
+    // 构建期注入失败 = 「未知」，不再渲染空值行。
+    expect(row!.querySelector('dd')!.textContent!.trim()).toBe('未知')
+    el.remove()
+  })
+
+  it('About Rust toolchain shows the real value when present (4.3)', async () => {
+    const el = await mount()
+    await goto(el, 6)
+    const row = [...el.shadowRoot!.querySelectorAll('dl.about-build .kv')].find((kv) =>
+      kv.textContent?.includes('Rust toolchain'),
+    )
+    expect(row!.querySelector('dd')!.textContent!.trim()).toBe('1.88')
+    el.remove()
+  })
+
+  it('the Services no-adapter banner keeps the sebas run command unbreakable (4.4)', async () => {
+    apiMocks.adminServicesSafe.mockResolvedValue({ adapter_ok: false, services: [] })
+    const el = await mount()
+    await goto(el, 2)
+    const cmd = el.shadowRoot!.querySelector('code.run-cmd')
+    expect(cmd, 'inline command carries the no-wrap class').toBeTruthy()
+    expect(cmd!.textContent).toBe('sebas run')
+    el.remove()
+  })
+
+  it('the run-cmd no-wrap rule ships in the modal styles (4.4)', () => {
+    const styles = SettingsModalImpl.styles
+    const css = (Array.isArray(styles) ? styles : [styles])
+      .map((s) => (s as unknown as { cssText: string }).cssText)
+      .join('\n')
+    // .run-cmd 规则存在且为整体不断行（白空间策略）。
+    expect(css).toContain('.run-cmd')
+    expect(css).toMatch(/\.run-cmd\s*\{[^}]*white-space:\s*nowrap/)
+  })
+})

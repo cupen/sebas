@@ -14,6 +14,15 @@
  *     （wire 上省略），选 edit = 'edit'
  *   - 目录不可得：显式引导（Settings → Models），无 provider/model 下拉
  *   - 不可达 agent：禁选并标注 cause
+ *   （round3 1.2：确认控件 = 原生 button + dialog 级 Enter 提交 + 同窗去重）
+ *   - 确认/取消控件是原生 <button>（激活面不依赖任何组件怪癖）
+ *   - 首次激活：操作过 Agent 下拉后，原生按钮第一次 click 恰好一条
+ *     dialog-confirm
+ *   - 同窗去重：同一弹窗会话内 300ms 内的第二次激活不再发 dialog-confirm
+ *     （busy 由 rail 异步置位，快速双击的兜底网）；重开弹窗窗口归零
+ *   - Enter 提交：弹窗面上的 Enter 触发确认（等价点击）；wa-select 键面
+ *     与按钮键面让路（下拉自留展开/选中、按钮自留 click），不误发不双发
+ *   - busy：click 与 Enter 双通道都被入口 guard 拦下（防重复提交）
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -76,6 +85,10 @@ function confirmButton(el: SebasNewSessionDialog): HTMLButtonElement {
   return el.shadowRoot?.querySelector(
     '[data-testid="dialog-confirm"]',
   ) as unknown as HTMLButtonElement
+}
+
+function dialogPanel(el: SebasNewSessionDialog): HTMLElement {
+  return el.shadowRoot?.querySelector('wa-dialog') as unknown as HTMLElement
 }
 
 /**
@@ -379,5 +392,174 @@ describe('sebas-new-session-dialog', () => {
     await new Promise((r) => setTimeout(r, 0))
     // （3.2，D5b）重开 = 回到显式 ask（真源缺省），而非空选项。
     expect(modeSel().value).toBe('ask')
+  })
+
+  // ── fix-webui-qa-defects-round3 1.2/1.3：原生 button + Enter 提交 + 忙态 ──
+
+  it('confirm and cancel are native buttons (round3 1.2 fallback path)', async () => {
+    // 真实浏览器证伪了浮层残留假设后改走决策 1 备选路径：确认/取消控件
+    // 是原生 <button>——激活面不依赖任何组件怪癖（吞点击真凶在 popover
+    // dismiss 语义，与控件实现无关，见 design 附录第三轮）。
+    const el = await mount({ open: true, defaultAgent: 'claude' })
+    expect(confirmButton(el).localName).toBe('button')
+    const cancel = el.shadowRoot?.querySelector(
+      '[data-testid="dialog-cancel"]',
+    ) as unknown as HTMLElement
+    expect(cancel.localName).toBe('button')
+    el.remove()
+  })
+
+  it('first activation after operating the agent dropdown issues exactly one confirm (round3 1.2)', async () => {
+    // spec 场景「First click after picking an agent creates the session」：
+    // 操作过 Agent 下拉之后，第一次确认（点击）必须立即触发创建——恰好一条
+    // dialog-confirm，绝不需要点第二次。激活面已是原生 button（round3 1.2
+    // 备选路径）；wa-select-rescue 第三版在 change 后就清残留，与本入口无关。
+    const el = await mount({ open: true, defaultAgent: null })
+    // 无预选 → 首个可达 agent 兜底 'claude'；操作下拉改选另一个可达 agent。
+    await pick(el, 'dialog-agent-select', 'native')
+    const confirmed = vi.fn()
+    el.addEventListener('dialog-confirm', confirmed)
+    const button = confirmButton(el)
+    expect(button.localName).toBe('button')
+    button.click()
+    await new Promise((r) => setTimeout(r, 0))
+    expect(confirmed).toHaveBeenCalledTimes(1)
+    expect((confirmed.mock.calls[0]![0] as CustomEvent).detail).toMatchObject({ agent: 'native' })
+  })
+
+  it('a second activation within 300ms in the same dialog session is deduped (round3 1.2 final net)', async () => {
+    // design 钦定的最后一道网：busy 由 rail 异步置位，快速双击（或迟到的
+    // 补发点击）在 busy 翻转前仍可能双发 dialog-confirm——同一弹窗会话内
+    // 300ms 内的第二次激活直接忽略。
+    const el = await mount({ open: true, defaultAgent: 'claude' })
+    const confirmed = vi.fn()
+    el.addEventListener('dialog-confirm', confirmed)
+    const button = confirmButton(el)
+    button.click()
+    button.click()
+    button.click()
+    await new Promise((r) => setTimeout(r, 0))
+    expect(confirmed).toHaveBeenCalledTimes(1)
+
+    // busy 一旦翻转（rail 置位/解除），同步双发窗口即关闭：去重不得误伤
+    // 失败后的原地重试（spec「retry in place」）——busy=false 后立即再点，
+    // 虽在 300ms 内仍是合法的第二次创建。
+    el.busy = true
+    await el.updateComplete
+    el.busy = false
+    await el.updateComplete
+    button.click()
+    await new Promise((r) => setTimeout(r, 0))
+    expect(confirmed).toHaveBeenCalledTimes(2)
+
+    // 重开弹窗（rail 复用同一实例）：去重窗口归零，首次激活照常发送。
+    el.open = false
+    await el.updateComplete
+    el.open = true
+    await el.updateComplete
+    await new Promise((r) => setTimeout(r, 0))
+    confirmButton(el).click()
+    await new Promise((r) => setTimeout(r, 0))
+    expect(confirmed).toHaveBeenCalledTimes(3)
+    el.remove()
+  })
+
+  it('Enter on the dialog panel submits through the same confirm handler (round3 1.2)', async () => {
+    // dialog 级表单提交语义：Enter 在弹窗面上（如点过标题后焦点落回弹窗）
+    // 等价点击创建——与点击汇聚到同一 confirm() 入口，恰好一条事件。
+    const el = await mount({ open: true, defaultAgent: 'claude' })
+    const confirmed = vi.fn()
+    el.addEventListener('dialog-confirm', confirmed)
+    dialogPanel(el).dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, composed: true }),
+    )
+    await new Promise((r) => setTimeout(r, 0))
+    expect(confirmed).toHaveBeenCalledTimes(1)
+    expect((confirmed.mock.calls[0]![0] as CustomEvent).detail).toMatchObject({ agent: 'claude' })
+  })
+
+  it('Enter on a wa-select key surface never submits (the dropdown owns that key)', async () => {
+    // wa-select 持焦时 Enter 是「展开/选中」键（真浏览器里被 WA 消费，到
+    // 不了 dialog 监听；浮层开着时文档级监听更在本监听之后）——弹窗级
+    // handler 仍显式跳过，绝不把选选项误提交成创建。
+    const el = await mount({ open: true, defaultAgent: 'claude' })
+    const confirmed = vi.fn()
+    el.addEventListener('dialog-confirm', confirmed)
+    agentSelect(el).dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, composed: true }),
+    )
+    await new Promise((r) => setTimeout(r, 0))
+    expect(confirmed).not.toHaveBeenCalled()
+    el.remove()
+  })
+
+  it('Enter on a button key surface adds no extra confirm (the native click owns it)', async () => {
+    // 焦点在按钮上时 Enter 的语义就是原生 click：浏览器一次按键只走
+    // click——keydown 路径必须让路，否则同一次按键在 click 之外再发一条
+    // dialog-confirm（busy 等 rail 异步置位，入口 guard 拦不住同步双发）。
+    const el = await mount({ open: true, defaultAgent: 'claude' })
+    const confirmed = vi.fn()
+    el.addEventListener('dialog-confirm', confirmed)
+    // 模拟真浏览器按键序列：keydown（target=按钮）→ 原生 click。
+    confirmButton(el).dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, composed: true }),
+    )
+    confirmButton(el).click()
+    await new Promise((r) => setTimeout(r, 0))
+    expect(confirmed).toHaveBeenCalledTimes(1)
+    el.remove()
+  })
+
+  it('Enter keeps wa-dialog own close button working instead of submitting', async () => {
+    // wa-dialog 自带的右上角 close 钮在弹窗 shadow 里：它的 keydown 冒泡
+    // 到弹窗级监听时 target 已重定向成 wa-dialog 宿主，仅查 target 会漏判
+    // ——提交若在这里 preventDefault 还会掐掉 close 钮的原生 click 激活
+    // （Enter 变成创建而不是关闭）。路径里含 wa-button 即让路。
+    const el = await mount({ open: true, defaultAgent: 'claude' })
+    const confirmed = vi.fn()
+    el.addEventListener('dialog-confirm', confirmed)
+    const closeBtn = dialogPanel(el).shadowRoot?.querySelector(
+      'wa-button[part="close-button"]',
+    ) as HTMLElement | null
+    expect(closeBtn).toBeTruthy()
+    closeBtn!.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, composed: true }),
+    )
+    await new Promise((r) => setTimeout(r, 0))
+    expect(confirmed).not.toHaveBeenCalled()
+    el.remove()
+  })
+
+  it('in-flight creation shows busy state and ignores re-activation via click or Enter (round3 1.3)', async () => {
+    // spec 场景「In-flight creation shows busy state and ignores
+    // re-activation」：busy 期间确认控件禁用 + aria-busy 指示，click 与
+    // Enter 双通道的再激活都不再发 dialog-confirm（防重复创建请求）。
+    const el = await mount({ open: true, defaultAgent: 'claude' })
+    el.busy = true
+    await el.updateComplete
+
+    const button = confirmButton(el)
+    expect(button.hasAttribute('disabled')).toBe(true)
+    expect(button.getAttribute('aria-busy')).toBe('true')
+    expect(button.textContent).toContain('创建中')
+
+    const confirmed = vi.fn()
+    el.addEventListener('dialog-confirm', confirmed)
+    button.click()
+    button.click()
+    dialogPanel(el).dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, composed: true }),
+    )
+    await new Promise((r) => setTimeout(r, 0))
+    expect(confirmed).not.toHaveBeenCalled()
+
+    // 在途结束（rail 关闭/失败落 error）：控件恢复可激活。
+    el.busy = false
+    await el.updateComplete
+    expect(button.hasAttribute('disabled')).toBe(false)
+    expect(button.getAttribute('aria-busy')).toBe('false')
+    button.click()
+    await new Promise((r) => setTimeout(r, 0))
+    expect(confirmed).toHaveBeenCalledTimes(1)
   })
 })
