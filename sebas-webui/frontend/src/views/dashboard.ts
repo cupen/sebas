@@ -1255,7 +1255,11 @@ export class SebasDashboard extends LitElement {
                   <div class="empty-stream">
                     <span class="glyph">${icon('message', 20)}</span>
                     <span class="title">未聚焦任何会话</span>
-                    <p class="hint">从左侧项目树选择一个会话——或用项目行的 + 新建。</p>
+                    <p class="hint">
+                      ${this.narrow
+                        ? '点左上角的 ☰ 打开项目树——选项目、进会话，或用项目行的 + 新建。'
+                        : '从左侧项目树选择一个会话——或用项目行的 + 新建。'}
+                    </p>
                   </div>
                 `}
           </div>

@@ -362,6 +362,21 @@ export class WsClient implements ReactiveController {
     this.pending.clear()
   }
 
+  /**
+   * fix-webui-mobile-polish：跳过重连退避立即发起连接（未连接时；已连接/
+   * 用户关闭则为 no-op）。认证就绪的瞬间调用——登录前 /ws 的认证拒绝让
+   * 退避爬到最长 15s，不收敛的话「服务器断开」横幅会在工作台上驻留到
+   * 下一轮退避。
+   */
+  reconnectNow(): void {
+    if (this.closedByUser || this.connected || this.socket) return
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
+    this.connect()
+  }
+
   private connect(): void {
     if (this.socket) return
     const proto = location.protocol === 'https:' ? 'wss://' : 'ws://'

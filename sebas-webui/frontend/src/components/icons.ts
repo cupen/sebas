@@ -48,6 +48,9 @@ const PATHS: Record<string, string> = {
   // add-agent-skills 5.2：Settings「Skills」分区入口（lucide book-open）。
   skills:
     '<path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>',
+  // fix-webui-mobile-polish：窄屏项目抽屉的开关（lucide menu / x）。
+  menu: '<line x1="4" x2="20" y1="6" y2="6"/><line x1="4" x2="20" y1="12" y2="12"/><line x1="4" x2="20" y1="18" y2="18"/>',
+  x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
 }
 
 /** Render a decorative inline-SVG icon by name; empty string when unknown.
