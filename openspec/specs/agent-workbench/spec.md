@@ -337,7 +337,7 @@ The rail session row's overflow menu SHALL be the ONLY operator-facing archive e
 
 ### Requirement: History group is the archive
 
-The History group SHALL contain only archived sessions, listed newest-first by archive time. The rail SHALL NOT render an Inbox group: sessions with no project directory SHALL NOT be listed in the rail (they remain accessible through the sessions API and their originating surface). The History group SHALL show the total count of archived sessions and be collapsible.
+The History group SHALL contain only archived sessions, listed newest-first by archive time. The rail SHALL render one group per registered project and SHALL NOT render an Inbox group: every session the webui presents belongs to a project, and the only project-less sessions are Feishu-originated ones, which remain out of the rail entirely and are presented by their originating surface. The History group SHALL show the total count of archived sessions and be collapsible.
 
 #### Scenario: History holds only archived sessions
 
@@ -352,7 +352,7 @@ The History group SHALL contain only archived sessions, listed newest-first by a
 #### Scenario: Inbox for unbound sessions
 
 - **WHEN** a session has no project directory
-- **THEN** it appears in no rail group — the Inbox group no longer exists — and History does not list it either
+- **THEN** the only such sessions are Feishu-originated ones: it appears in no rail group — the Inbox group does not exist — and History does not list it either; every webui-created session belongs to a project and is listed under it
 
 ### Requirement: Archive expiry
 
@@ -664,7 +664,12 @@ folds SHALL stay collapsed while their entries stream in, and the fold's
 summary row SHALL update live during streaming (the running tool's title and
 the entry count); when the operator has expanded a fold, newly streamed
 entries of that fold SHALL append in place. A submission SHALL appear in the
-conversation only when its turn starts.
+conversation only when its turn starts. A turn that terminates in an engine
+error — including a refusal result or any `is_error` terminal — SHALL render
+a visible error entry in the conversation naming the failure; the operator
+SHALL NEVER see a submitted message followed by silence with no agent-side
+entry. The error entry's summary label SHALL state the actual failure class
+(such as spawn failure or turn stall) rather than a fixed generic string.
 
 #### Scenario: both sides of the conversation are visible
 
@@ -701,6 +706,21 @@ conversation only when its turn starts.
 - **WHEN** a submission is accepted while the agent is still working
 - **THEN** it is not rendered as a started turn until its turn actually begins
 
+#### Scenario: a refused turn renders an error entry
+
+- **WHEN** an agent turn ends with a refusal or other `is_error` result that produced no text entries
+- **THEN** the conversation shows a visible error entry for that turn following the operator's submission, and the session remains usable for the next submission
+
+#### Scenario: error entries name their failure class
+
+- **WHEN** a turn is force-settled by the stall watchdog
+- **THEN** its error entry's summary label identifies the stall (not a generic spawn-failure label), while a genuine spawn failure is labeled as such
+
+#### Scenario: a denied tool result shows a denied marker
+
+- **WHEN** an expanded process fold contains a denied tool result
+- **THEN** the denied entry's detail is prefixed with a denied marker consistent with its collapsed title, not an approved marker
+
 ### Requirement: Workbench is the single conversation surface
 
 The workbench SHALL be the only conversation surface. Selecting a session in the
@@ -710,12 +730,20 @@ resolving and SHALL render the same workbench with that session focused, so
 bookmarks and links keep working. The rail's current-session marker SHALL follow
 the focused-session pointer rather than the browser location. Every per-session
 action the retired detail page offered — close, archive, and the gated-call
-review cards — SHALL remain reachable from the workbench.
+review cards — SHALL remain reachable from the workbench. Selecting a session in
+the rail SHALL take effect immediately: the workbench MUST render the selected
+session's conversation without waiting for an unrelated session event to refresh
+the focus pointer.
 
 #### Scenario: selecting a session keeps the operator in the workbench
 
 - **WHEN** the operator selects a session in the rail
 - **THEN** that session becomes the focused one and the workbench renders its conversation without a page change to a different surface
+
+#### Scenario: rail selection renders the conversation immediately
+
+- **WHEN** the operator selects a session in the rail while a different session is displayed, and no other session event occurs
+- **THEN** the workbench renders the selected session's conversation within the focus-follow latency of an ordinary session event (no dependence on subsequent unrelated events)
 
 #### Scenario: deep link renders the workbench
 
@@ -774,41 +802,77 @@ whose mode is `auto` SHALL be visually distinguishable from a gated session.
 
 ### Requirement: Parked remote approvals surface in the workbench
 
-Permission requests that stayed parked while the control plane was away SHALL be
-surfaced to the operator on return, grouped so that a session waiting on a
-decision is distinguishable from one that is working. A session waiting on a
-parked decision SHALL be presented as waiting, not as running.
+Permission requests that stayed parked while the control plane was away SHALL be surfaced to the operator on return, grouped so that a session waiting on a decision is distinguishable from one that is working. A session waiting on a parked decision SHALL be presented as waiting, not as running. The workbench SHALL rebuild the permission review surface from the read model when a waiting session is opened or reloaded, merging it with realtime push by `request_id` so no request is rendered twice and no push for an already-decided request resurrects a card.
 
 #### Scenario: returning operator sees what is waiting
 
-- **WHEN** the operator returns to a control plane that was away while requests
-  were parked
-- **THEN** every session waiting on a decision is presented as waiting, with its
-  parked requests reachable
+- **WHEN** the operator returns to a control plane that was away while requests were parked
+- **THEN** every session waiting on a decision is presented as waiting, with its parked requests reachable
 
 #### Scenario: waiting is not reported as working
 
 - **WHEN** a remote session is blocked on an unanswered permission request
 - **THEN** the workbench does not present it as actively working
 
+#### Scenario: 刷新后审批面从读模型重建
+
+- **WHEN** the page is reloaded while a session has a parked permission request
+- **THEN** the permission review surface (allow / deny actions) is presented again for that request without any new push
+
+#### Scenario: 重建与推送按 request_id 幂等合并
+
+- **WHEN** a request was rebuilt from the read model and a push for the same `request_id` arrives
+- **THEN** only one decision surface for that `request_id` is shown
+
 ### Requirement: Composer toolbar composition
 
-The composer toolbar SHALL place the focused session's read-only agent identity (with the lock affordance) at the bottom-left, and the model chip and submit control at the bottom-right. The composer SHALL NOT render a settings entry — the app shell owns settings — SHALL NOT render any creation control, and SHALL NOT render a permission-mode control: creation-time mode choice lives in the creation dialog, and mid-session mode switching stays in the session header (webui「会话 mode 在 dashboard 可见可切」).
+The composer toolbar SHALL place the focused session's read-only agent identity (with the lock affordance) at the bottom-left, and the model chip and submit control at the bottom-right. The bottom-left tool group SHALL carry the session's permission-mode switch, rendered as a compact select: its resting width SHALL fit the selected label (max-content behaviour) within a small cap (about 110px), and its option labels SHALL be Title Case (Ask/Edit/Allow/Auto) — the wire vocabulary stays lowercase. The mode switch SHALL always present a definite value: every session's `desired_mode` SHALL be one of the four control-plane words and SHALL NOT be nullable on the wire or in memory — the `Option<String>` shape is dropped entirely. **The control-plane default is `ask`** — the domain's `SessionMode::#[default]` (every gated action pauses for operator approval). A session created without an explicit mode choice SHALL be stored with `desired_mode = "ask"`, the creation dialog SHALL preselect `ask`, and any pre-existing database row whose stored value is null SHALL be rewritten to `"ask"` by a one-shot startup migration before it is ever projected. There SHALL be no read-path fallback that interprets null as ask — the migration is the single point where null goes away, and every projection afterwards reads the migrated value verbatim. The composer SHALL NOT render an empty or placeholder mode state. The toolbar's left and right tool groups SHALL align on a shared baseline (a stable grid or equivalent), so controls of different intrinsic heights line up horizontally instead of floating apart. The composer SHALL NOT render a settings entry — the app shell owns settings — and SHALL NOT render any creation control; the toolbar mode switch is the mid-session surface, and the creation dialog owns the creation-time choice.
+
+Each of the four control-plane words SHALL map to a definite executor behaviour on every supported agent, or produce an explicit typed report that the executing body cannot honour it:
+
+- **claude**: `ask` maps to the driver's Default permission mode (every gated action asks), `edit` maps to AcceptEdits, `allow` and `auto` map to BypassPermissions; the mapping SHALL be applied both at spawn time (via the driver's argv choice) and mid-session (via the driver's runtime SetMode command) so switching takes real effect.
+- **generic ACP agents**: the ACP protocol carries no permission-mode vocabulary; a mode switch SHALL surface an explicit typed notice that the mode cannot be applied to this body and the session's previous mode SHALL remain in effect. The system SHALL NOT pretend the switch succeeded.
+- **native (agent-*) sessions**: mode switching SHALL surface an explicit typed unavailability report; the system SHALL NOT pretend the switch succeeded.
 
 #### Scenario: toolbar places identity left, actions right
 
 - **WHEN** a session is focused and the composer renders
 - **THEN** the locked agent identity appears at the bottom-left and the model chip and submit control appear at the bottom-right
 
-#### Scenario: no settings entry in the composer
+#### Scenario: mode select is compact and titled
 
-- **WHEN** the operator inspects the composer toolbar
-- **THEN** no settings control is rendered; settings remain reachable from the app shell's sidebar entry
+- **WHEN** the operator inspects the composer's mode switch
+- **THEN** the select hugs its label within the small width cap, the options read Ask/Edit/Allow/Auto, and switching still sends the lowercase wire value
+
+#### Scenario: unset mode is stored and rendered as Ask
+
+- **WHEN** the operator creates a session without explicitly choosing a mode
+- **THEN** the session is stored with `desired_mode = "ask"`, the composer presents Ask as the selected mode, and any subsequent read (list, detail, composer binding) returns `"ask"`
+
+#### Scenario: legacy null mode is migrated to ask at startup
+
+- **WHEN** the binary starts against a database whose session rows contain a null `desired_mode`
+- **THEN** a startup migration rewrites those rows to `"ask"` before any projection is served, and every subsequent read (list, detail, composer binding) observes `"ask"` — no read-path fallback for null remains in the code
+
+#### Scenario: mode switch on an agent that cannot honour it
+
+- **WHEN** the operator switches the mode on a generic ACP or native session
+- **THEN** the system surfaces a typed notice that the executing body cannot apply the new mode, and the session's previous mode remains in effect
+
+#### Scenario: toolbar rows share a baseline
+
+- **WHEN** the toolbar renders controls of different intrinsic heights (select, chip, icon button)
+- **THEN** the groups align on one horizontal baseline with no control sitting visibly higher or lower than its neighbours
 
 #### Scenario: no mode control in the composer
 
 - **WHEN** a session is focused and the operator inspects the composer toolbar
-- **THEN** no permission-mode control is rendered — mode is visible and switchable in the session header, and the creation dialog owns the creation-time choice
+- **THEN** the permission-mode switch renders in the toolbar's left tool group as a compact select（本场景随 spec 漂移修正改写：mode 切换已自会话头迁入 composer 底沿左端，本 delta 以代码现状为基线——创建期选择仍归创建对话框）
+
+#### Scenario: no settings entry in the composer
+
+- **WHEN** the operator inspects the composer toolbar
+- **THEN** no settings control is rendered; settings remain reachable from the app shell's sidebar entry
 
 ### Requirement: Submit control reflects submission and turn state
 
@@ -819,6 +883,7 @@ The composer's submit control SHALL reflect the state of the input and the focus
 - a submission POST in flight: the control SHALL render an in-progress indication instead of the send affordance;
 - the focused session has a turn in flight and the input is empty: the control SHALL render as a stop affordance, and activating it SHALL request cancellation of the session's in-flight turn;
 - the focused session has a turn in flight and the input is non-empty: the control SHALL render a queued affordance, and submitting SHALL enqueue the submission via the existing turn queue without dropping or replacing pending entries;
+- the focused session's child is starting (spawn requested or in flight, no live turn yet) with the input non-empty: the control SHALL render a starting affordance that is visually distinct from the queued affordance — the submission is staged for the starting child, and the workbench SHALL NOT present it as queued behind a running turn;
 - when the turn ends (or the cancel completes), the control SHALL return to the send affordance.
 
 #### Scenario: empty input is disabled
@@ -845,6 +910,11 @@ The composer's submit control SHALL reflect the state of the input and the focus
 
 - **WHEN** the focused session is streaming a turn and the input is non-empty
 - **THEN** the control renders a queued affordance and submitting appends the text to the pending stack
+
+#### Scenario: starting child stages rather than queues
+
+- **WHEN** the focused session's child is starting and the operator submits a message
+- **THEN** the control renders the starting affordance, distinct from the queued affordance, and the message is staged for the child that is starting
 
 #### Scenario: cancel does not drop pending submissions
 
@@ -1073,3 +1143,127 @@ The workbench layout SHALL keep the rail, conversation stage, and composer visua
 
 - **WHEN** a rail session row has a 12-character Chinese title and the rail is at its default width on a viewport of at least 1440px
 - **THEN** the title is visible without truncation
+
+### Requirement: Focused session drives project context
+
+When the workbench focuses a session (via a rail session click, creation landing, or restore activation), the main region's project context (title and project scope) SHALL follow the focused session's project immediately — without requiring the operator to click the project row. Clicking a project row SHALL continue to select the project independently.
+
+#### Scenario: rail 切换会话后项目标题跟随
+
+- **WHEN** the operator clicks a different session row in the rail while a project context is not selected
+- **THEN** the main region's project title shows the focused session's project without any further interaction
+
+#### Scenario: 新建会话落地后项目标题跟随
+
+- **WHEN** a new session is created and focus lands on its placeholder
+- **THEN** the main region's project title shows the session's project immediately
+
+#### Scenario: 项目行点击仍独立生效
+
+- **WHEN** the operator clicks a project row itself
+- **THEN** the project context switches to that project as before (existing behavior preserved)
+
+### Requirement: Stop reply fully settles the turn
+
+Stopping a turn SHALL be a full settlement: the turn's end SHALL append a visible transcript entry stating the turn was stopped (an error-class entry with a readable cause), and the stop control SHALL disappear once the turn has settled. The settled state SHALL be stable across page reloads — a reloaded page SHALL NOT present a stopped turn as still in flight.
+
+#### Scenario: 停止后 transcript 有停止条目
+
+- **WHEN** the operator stops an in-flight turn
+- **THEN** the conversation shows a transcript entry stating the turn was stopped, instead of the user's message silently hanging
+
+#### Scenario: 停止控件随回合结算消失
+
+- **WHEN** a stopped turn has settled (no in-flight phase and no parked approvals)
+- **THEN** the composer no longer shows the stop control
+
+#### Scenario: 刷新后不复活在飞状态
+
+- **WHEN** the page is reloaded after a turn was stopped and settled
+- **THEN** the session is presented as idle (no stop control), regardless of the pre-reload presentation
+
+### Requirement: Rail expansion state is persistent and predictable
+
+The rail's project expansion (which projects show their session list) SHALL be persisted in the browser and restored on reload. A project whose session is focused SHALL be presented expanded by default when no persisted state exists for it. Expansion SHALL NOT change on its own across refreshes or focus changes.
+
+#### Scenario: 展开状态跨刷新保持
+
+- **WHEN** the operator expands a project's session list and reloads the page
+- **THEN** the project's session list is still expanded
+
+#### Scenario: 聚焦会话所在项目缺省展开
+
+- **WHEN** no persisted expansion state exists and a session of project P is focused
+- **THEN** project P's session list is shown expanded on load
+
+#### Scenario: 无操作不自行收起
+
+- **WHEN** the page is reloaded with no operator interaction on the rail
+- **THEN** the expansion state does not differ from the persisted state
+
+### Requirement: Session status lives in one place
+
+Session-lived status SHALL be presented exactly once, on the rail: each session row SHALL carry a compact coloured dot keyed by the session's status slug (starting, queued, working, waiting, done, failed, dormant), using the existing `--sebas-status-*` token set. The same session's status SHALL NOT be re-expressed in the conversation stage — the session-head card SHALL present identity and action affordances (chat, agent, model, mode, actions) and SHALL NOT render a status badge (no `<sebas-status-badge>` with the session's slug/label/glyph), SHALL NOT render a status-coloured border, banner, or equivalent treatment. The project header SHALL NOT render a session-count badge, an active/idle pill, or a second copy of the focused session's status badge; a focused-session link MAY keep the session's stable chat identity as the anchor text, but SHALL NOT re-express the session's status slug. Message-level queueing SHALL remain an attribute of the message surface (the pending stack above the composer) and SHALL NOT be projected onto any session-level chrome — no header, banner, or rail text SHALL label a session as "queued" because of queued messages. The `<sebas-status-badge>` component itself MAY remain for other views that still use it; this requirement governs the workbench surface only.
+
+#### Scenario: rail dot reflects each session's status slug
+
+- **WHEN** the rail lists sessions in mixed states (e.g. one working, one queued, one failed)
+- **THEN** each row carries the coloured dot matching its own slug, and that dot is the only per-row expression of status
+
+#### Scenario: session-head card renders no session-status treatment
+
+- **WHEN** the operator focuses a session whose slug is `queued`, `working`, `waiting`, or any other
+- **THEN** the session-head card renders identity (chat / agent / model / mode / actions) without a `<sebas-status-badge>` for the session status, without a status-keyed border, banner, or color
+
+#### Scenario: project header has no session-count or status-badge copies
+
+- **WHEN** the operator views the workbench with sessions in any state
+- **THEN** the project header renders the project name, execution node chip, and branch pill, and SHALL NOT render a `X sessions` count, an `active`/`idle` pill, or a `<sebas-status-badge>` inside the focused-session link
+
+#### Scenario: queued messages do not leak into session chrome
+
+- **WHEN** a session has queued messages while its own slug is `working`
+- **THEN** the queued count appears only in the pending stack above the composer; nothing on the session row, session-head card, or project header marks the session itself as queued
+
+### Requirement: Compact island spacing
+
+The workbench's floating surfaces SHALL be separated by the compact spacing token (8px): the gap between the project rail and the main area, and the seam between the conversation stage and the composer, SHALL each present as a narrow breathing space rather than a wide band; the stage column and the composer column SHALL share identical horizontal padding so their content edges line up. Reducing the gaps SHALL NOT eliminate the draggable boundaries — both resize affordances SHALL remain reachable.
+
+#### Scenario: rail and main area sit close together
+
+- **WHEN** the operator views the workbench at desktop width
+- **THEN** the space between the rail island and the main area matches the compact spacing token, with the divider still hoverable for resizing
+
+#### Scenario: stage and composer edges align
+
+- **WHEN** the operator compares the stage island's and the composer island's horizontal content edges
+- **THEN** both columns share the same inset, and the vertical breathing space between them matches the compact spacing token while remaining draggable
+
+### Requirement: Sessions belong to a project
+
+Every session presented by the webui SHALL belong to a registered project. Creating a session SHALL require a target project: `POST /api/sessions` without a usable `project_id` (omitted, `null`, blank, or unknown) SHALL be rejected with a typed 400 naming `project_id` — no project-less session SHALL ever come into existence through any path, and no Inbox group SHALL be reintroduced. A session's project ownership SHALL be part of its identity: a spawn failure SHALL NOT detach the session from its project or from the agent that was asked to serve it. The one exception is Feishu-originated sessions, which have no project directory by nature and are presented by their originating surface (see the `feishu-option` capability).
+
+#### Scenario: Creation without a project is rejected
+
+- **WHEN** a create-session request omits `project_id`, sends `null`, sends a blank value, or names an unknown project
+- **THEN** the request is rejected with HTTP 400 and an error message naming `project_id`
+- **AND** no session, mapping, or placeholder is created
+
+#### Scenario: Creation with a project binds every layer
+
+- **WHEN** a create-session request names a registered project
+- **THEN** the session's working directory and execution node are resolved server-side from that project's registration
+- **AND** the created session appears under that project in the workbench rail
+
+#### Scenario: A failed spawn keeps the session's ownership
+
+- **WHEN** a session's agent spawn fails (unknown agent, missing binary, handshake failure)
+- **THEN** the session's mapping keeps its project directory and requested agent kind/mode
+- **AND** the session remains listed under its project in the rail with the failure state
+- **AND** the failure reason is presented inline in the workbench
+
+#### Scenario: Project-less persisted sessions are dropped
+
+- **WHEN** the session state is restored or dumped and an entry carries no project directory on a non-Feishu channel
+- **THEN** that entry is dropped with a warning rather than loaded or persisted
+- **AND** internal archive records (`closed-*`, acp-session-mapping) are exempt and keep their original mapping's project identity
