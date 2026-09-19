@@ -1050,6 +1050,30 @@ async fn dispatch(
                 Err(rejection) => CoreChannelResponse::Rejected { rejection },
             }
         }
+        // 归档恢复（fix-webui-qa-defects 2.2，design D1）：core 侧直达引擎
+        // 重建 Dormant 映射 + 转写回放；拒绝类型化透传（webui 保留归档条目）。
+        CoreChannelRequest::RestoreSession {
+            key,
+            session_id,
+            project_dir,
+            transcript,
+            identity,
+        } => match router
+            .web_restore_session(key, session_id, project_dir, transcript, identity)
+            .await
+        {
+            Ok(()) => CoreChannelResponse::Ok,
+            Err(sebas_dispatch::error::DispatchError::Capacity(limit)) => {
+                CoreChannelResponse::Rejected {
+                    rejection: SessionRejection::Capacity { limit },
+                }
+            }
+            Err(e) => CoreChannelResponse::Rejected {
+                rejection: SessionRejection::Unavailable {
+                    cause: format!("restore failed: {e}"),
+                },
+            },
+        },
         // workbench-turn-queue 4.2：pending 管理与 in-process 实现共用同一
         // seam（backend 方法直调），typed rejection 原样透传。
         CoreChannelRequest::RemovePending { key, pending_id } => {
@@ -1088,6 +1112,22 @@ async fn dispatch(
         CoreChannelRequest::Focused => CoreChannelResponse::Focused {
             key: router.active_session_snapshot().await,
         },
+        // 待批审批读模型（fix-webui-approval-restore-and-session-identity
+        // 1.2）：core 侧直达引擎泊车登记；拒绝类型化透传。
+        CoreChannelRequest::PendingApprovals { key } => {
+            match backend.pending_approvals(key).await {
+                Ok(requests) => CoreChannelResponse::PendingApprovals { requests },
+                Err(rejection) => CoreChannelResponse::Rejected { rejection },
+            }
+        }
+        // 会话命名（fix-webui-approval-restore-and-session-identity 5.1）：
+        // label 落到映射；拒绝类型化透传。
+        CoreChannelRequest::SetSessionLabel { key, label } => {
+            match backend.set_session_label(key, label).await {
+                Ok(()) => CoreChannelResponse::Ok,
+                Err(rejection) => CoreChannelResponse::Rejected { rejection },
+            }
+        }
         CoreChannelRequest::ApprovalAnswer {
             request_id,
             decision,
@@ -1551,6 +1591,7 @@ mod tests {
             msg_count: 0,
             turn_engaged: false,
             parked_approvals: 0,
+            label: None,
             spawn_failure_reason: None,
             available_commands: Vec::new(),
         }

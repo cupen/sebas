@@ -73,7 +73,7 @@ both live in tasks.py — the old `scripts/*sandbox*.sh` harnesses were removed
 
    - config `-c` path (no sandbox-safe default exists), with
      `[dispatch] state_file`, `[media] download_dir`,
-     `[acp.claude] sessions_dir` / `work_dir`,
+     `[acp.agents.<name>] sessions_dir` / `work_dir`,
      `[service.core] channel_path`, `[skills] dir` (defaults to the real
      `~/.agents/skills` — pin it or `GET /api/skills` scans the operator's
      real store; reading is already out of bounds), and `[service.webui]`
@@ -145,8 +145,8 @@ both live in tasks.py — the old `scripts/*sandbox*.sh` harnesses were removed
 
 `--debug` makes the router inject a built-in `test` provider that answers
 itself (fixed text + echo, no upstream dial, downstream auth skipped), and
-pointing `[acp.claude] path` at the `tests/bin` fake-claude stub (built by
-`cargo build`) lets ACP sessions complete full turns with zero real
+pointing `[acp.agents.claude] path` at the `tests/bin` fake-claude stub
+(built by `cargo build`) lets ACP sessions complete full turns with zero real
 credentials. Let `<SB>` be the throwaway dir (e.g. `/tmp/sebas-debug`).
 
 需要「可拨的真上游」来压透传链路时，用 `sebas fake-provider --listen
@@ -168,10 +168,19 @@ addr=127.0.0.1:<port>`，router 侧用自定义 provider（`[provider.fake]` 哑
    [feishu]
    enabled = false
 
-   [acp.claude]
+   # fix-webui-qa-defects 8.1：现行 agent 配置形态 = `[acp] default` +
+   # `[acp.agents.<name>]`（driver 标签）。旧的 `[acp.claude]` 段已被
+   # deny_unknown_fields 在解析期拒绝。场景参数用键值形式（`--flag value`）——
+   # 位置参数（如 `args = ["thinking"]`）无法到达子进程 argv，解析期直接报错。
+   [acp]
+   default = "claude"
+
+   [acp.agents.claude]
+   driver = "claude"
    path = "<repo>/target/debug/fake-claude.exe"   # no .exe suffix on unix
    sessions_dir = "<SB>/claude-sessions"
    work_dir = "<SB>/work"
+   # args = ["--scenario", "thinking"]            # 键值形式示例
 
    [dispatch]
    state_file = "<SB>/sessions.json"

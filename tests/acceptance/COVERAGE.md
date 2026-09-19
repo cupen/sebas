@@ -323,7 +323,18 @@ requirement），子功能 = 二层 `test.describe`，一行 = 一条用例；�
 | 会话管理 | close 与 archive | History lists newly archived sessions newest-first (rail-declutter-unread D7) | `session-mgmt.spec.ts` | project-session-actions「History is sorted newest-first」（rail-declutter-unread） |
 | 未读徽标 | 真实回复点亮与聚焦清零 | a reply to an unfocused session lights the badge; focusing clears it and parks the anchor | `unread-badge.spec.ts` | session-unread-badge「new reply on an unfocused session」「focusing the session clears the badge」「first visit shows no unread」（rail-declutter-unread，跨层旅程：fake-claude 回复 → API `msg_count` 投影 → 徽标免刷新亮起 → 聚焦清零且锚落 localStorage） |
 | 会话管理 | 多会话切换 | 2.1 dual-session switch (rail + deep-link) does not crosstalk | `sessions.spec.ts` | 会话管理覆盖「多会话切换」 |
-| 会话管理 | archive 写保护 | 2.2 archive → 400 write-protection → restore unhides honestly | `sessions.spec.ts` | 会话管理覆盖「archive 写保护与 restore 诚实语义」 |
+| 会话管理 | archive 写保护 | 2.2 archive → 400 write-protection → restore unhides honestly | `sessions.spec.ts` | 会话管理覆盖「archive 写保护与 restore 诚实语义」（restore 语义随 fix-webui-qa-defects 翻转为重建会话行，见下行） |
+| 会话管理 | 归档恢复重建 | archive → restore: rail row back, transcript intact, History cleared, writable again | `archive-restore.spec.ts` | project-session-actions「restore archived session」+「restore preserves the transcript」（fix-webui-qa-defects delta²：恢复确认弹窗含重建文案、rail 行回原项目、detail 全 N 条、History 清空、首条消息可写） |
+| 会话管理 | rail 切换即时聚焦 | 4.2 focusing A and clicking B in the rail renders B within the throttle window, with no other events | `rail-focus.spec.ts` | agent-workbench「rail selection renders the conversation immediately」（fix-webui-qa-defects delta²：switch 后无任何会话事件介入，`sebas:rail-focus` → 节流刷新 → 主区渲染 B） |
+| 审批卡片旅程 | 审批读模型恢复 | reload rebuilds the review card from the read model under the same request_id, and deciding clears it for good | `approval-restore.spec.ts` | permission-flow「刷新或重连后仍可取得」+ agent-workbench「刷新后审批面从读模型重建」（fix-webui-approval-restore-and-session-identity delta³：刷新后卡片按同 request_id 重建、唯一决策面、批复后读模型清空、rail waiting 投影） |
+| 停止收尾 | 回合被停止条目 | stopping a streaming turn appends the stop entry, resets the control, and stays settled across reloads | `stop-settle.spec.ts` | agent-workbench「停止后 transcript 有停止条目」+「刷新后不复活在飞状态」（同上 delta³：错误类停止条目、控件复位、reload 稳定、会话存活可继续） |
+| 停止收尾 | 停止释放泊车审批 | stopping a parked turn releases the approval fail-closed: read model drains, late decision is rejected, stop entry lands | `stop-settle.spec.ts` | permission-flow「停止回复清空未决审批」+「释放的请求不可再批复」（同上 delta³：读模型清空、迟到批复 404、卡面 expired、turn_engaged 复位） |
+| 会话管理 | 聚焦联动与展开持久 | rail switch and creation landing drive the project title; project-row clicks stay independent | `rail-expand.spec.ts` | agent-workbench「rail 切换会话后项目标题跟随」+「项目行点击仍独立生效」（同上 delta³：`sebas:project-follow` 反投影 shell selectedPath，rail 点击/新建落地均跟随） |
+| 会话管理 | 聚焦联动与展开持久 | expansion persists across reloads; the focused project defaults to expanded with no record | `rail-expand.spec.ts` | agent-workbench「展开状态跨刷新保持」+「聚焦会话所在项目缺省展开」（同上 delta³：`sebas.rail-expanded` 持久、聚焦缺省展开并物化、无操作不自行收起） |
+| 会话管理 | 行重命名 | label takes precedence over the first-prompt preview, survives reloads, and clearing falls back | `session-label.spec.ts` | project-session-actions「operator label takes precedence」+「renaming from the rail」（同上 delta³：rail … 菜单改名就地生效、对话框同源命名、清空回退首条 prompt 预览） |
+| 会话管理 | 归档恢复身份 | archived→restored keeps agent_kind, mode and the model catalog; legacy entries fall back honestly | `archive-identity.spec.ts` | project-session-actions「恢复保留 agent 身份与模型面」+「旧归档条目如实回退」（同上 delta³：fakeacp+ask 身份四项随归档→恢复原样带回、头部如实显示；旧档 strip 身份后 default agent 回退） |
+| 项目管理覆盖 | 越界禁用原因 | out-of-root and missing paths state their reason with submit disabled; a valid path enables it | `add-scope-reason.spec.ts` | workspace-root「手填越界路径给出禁用原因」（同上 delta³：越界/不存在各给原因、提交保持禁用、合法路径恢复可用；⚠ 当前被 Add project 手填绑定缺陷阻塞，见 change 报告） |
+| 工作台首屏 | 图标本地化 | blocking the icon CDN changes nothing: zero CDN requests, local /icons assets, icons still render | `icons-local.spec.ts` | fix-webui-approval-restore-and-session-identity tasks 5.4（无 delta scenario：阻断 ka-f.fontawesome.com 零请求 + wa-icon 资源同源 /icons；⚠ 当前被 `/icons/{*path}` 路由前缀缺陷阻塞，见 change 报告） |
 | 模型管理覆盖 | claude 别名模型面与切换 | claude alias table reaches the snapshot, switch rides the control protocol, and the chip follows | `models.spec.ts` | acp-model-selection「Claude session exposes the alias table」+「Claude switch applies from the next turn」（workbench-composer-input-polish；原「无模型会话 set_model 诚实拒绝」的浏览器载体随 claude 自报模型面退役——claude 现在有别名表，无模型诚实缺省由前端单测 + 无 configOptions 的通用 ACP agent 承载）|
 | 模型管理覆盖 | settings provider 抓取 + 条目编辑 | 3.2 providers are editable: model entries with capability tags persist; browsing stays probe-free | `models.spec.ts` | webui「Provider management page」（redesign-provider-models-settings）|
 | 模型管理覆盖 | settings provider 抓取 + 条目编辑 | fetch lists the official ids without persisting; picking joins the catalog via an ordinary edit | `models.spec.ts` | webui「Fetch models from the provider's official base URL」 |
@@ -385,6 +396,14 @@ requirement），子功能 = 二层 `test.describe`，一行 = 一条用例；�
 > 同理），经上表 tree 侧行同源锚定。harness 级 scenario（沙箱装配：启动即隔离 /
 > 成功退出清理 / 失败保留现场；一键入口：一键运行 / 单旅程过滤 / 渐进补用例不改入口 /
 > 顶层裸 test 拒绝）由入口机制承担，均不设单用例行。
+>
+> ³ 审批读模型恢复 / 停止收尾 / 聚焦联动与展开持久 / 行重命名 / 归档恢复身份 /
+> 越界禁用原因各行的锚点指向尚未归档的 change
+> `fix-webui-approval-restore-and-session-identity` 的 delta scenario（2026-09-19
+> review/e2e 阶段补齐）；同步主 spec 时随该 change 归档一并落锚。其中
+> add-scope-reason 与 icons-local 两旅程当前被两个既有实现缺陷阻塞（Add project
+> 手填路径 @input 绑定失效；`/icons/{*path}` 路由漏拼 `icons/` 前缀），旅程本身
+> 即缺陷的回归钉，修复后应转绿。
 >
 > 旅程加固波（2026-09-11，交付终验前）：新增 4 例——未读徽标跨层旅程
 > （`unread-badge.spec.ts` 新 spec）、History 倒序浏览器旅程（`session-mgmt.spec.ts`）、

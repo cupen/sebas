@@ -45,7 +45,9 @@ import {
   TRUNCATE_CHARS,
   TRUNCATE_LINES,
   awaitingReceipt,
+  deniedDetailContent,
   deniedLabel,
+  errorEntryLabel,
   groupConversation,
   mergeSpawnErrors,
   middleTruncate,
@@ -1688,5 +1690,66 @@ describe('truncation + view-all dialog (fix-webui-streaming-liveness 4.5)', () =
     // 对话面本身不受影响：预览仍在、无残留弹层节点。
     expect(el.shadowRoot!.querySelector('[data-truncated]')).toBeTruthy()
     expect(el.shadowRoot!.querySelector('.scroll')!.textContent).toContain('row 0')
+  })
+})
+
+// ── fix-webui-qa-defects 5.2：错误气泡标签按失败分类渲染 ──────────────────
+
+describe('errorEntryLabel (fix-webui-qa-defects 5.2, design D5)', () => {
+  it('labels a spawn failure as spawn failed', () => {
+    expect(errorEntryLabel({ failure_class: 'spawn' })).toBe('spawn failed')
+  })
+
+  it('labels a stall force-settle as 回合停滞, never as a spawn failure', () => {
+    const label = errorEntryLabel({ failure_class: 'stall' })
+    expect(label).toContain('停滞')
+    expect(label).not.toContain('spawn')
+  })
+
+  it('labels generic agent-turn errors (refusal included) neutrally', () => {
+    expect(errorEntryLabel({ failure_class: 'generic' })).toBe('错误')
+    expect(errorEntryLabel({ failure_class: 'generic', content: 'I cannot help with that.' })).toBe(
+      '错误',
+    )
+  })
+
+  it('falls back to the neutral label for legacy entries without a class', () => {
+    expect(errorEntryLabel({})).toBe('错误')
+    expect(errorEntryLabel({ failure_class: null })).toBe('错误')
+    expect(errorEntryLabel({ failure_class: undefined })).toBe('错误')
+  })
+})
+
+// ── fix-webui-qa-defects 5.3：被拒工具条目的展开详情与折叠标题一致（✗）────
+
+describe('deniedDetailContent (fix-webui-qa-defects 5.3)', () => {
+  const item = (content: string, title?: string | null): ProcessItem => ({
+    elementType: 'tool',
+    content,
+    title,
+    position: 0,
+  })
+
+  it('rewrites the leading approved prefix of a denied tool result to ✗', () => {
+    const content = '✓ **Bash**\n已拒绝 by policy'
+    const out = deniedDetailContent(content, item(content, '✓ Bash').title)
+    expect(out.startsWith('✗')).toBe(true)
+    expect(out.startsWith('✓')).toBe(false)
+  })
+
+  it('leaves a non-denied tool result untouched', () => {
+    const content = '✓ **Read**\nfile contents'
+    expect(deniedDetailContent(content, null)).toBe(content)
+  })
+
+  it('flags denial from the structured title even when the result text is plain', () => {
+    const content = '✓ **Bash**\nexit 1'
+    const out = deniedDetailContent(content, '✓ Bash · denied')
+    expect(out.startsWith('✗')).toBe(true)
+  })
+
+  it('keeps content without a ✓ prefix intact (nothing to rewrite)', () => {
+    const content = '已拒绝：普通文本结果（无 ✓ 前缀）'
+    expect(deniedDetailContent(content, null)).toBe(content)
   })
 })

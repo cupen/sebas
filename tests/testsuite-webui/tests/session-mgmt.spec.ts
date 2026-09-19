@@ -76,7 +76,7 @@ test.describe('会话管理', () => {
 
       await page.goto('/')
       await expect(rail.host).toBeVisible()
-      await rail.expandProject(projectName)
+      await rail.ensureProjectExpanded(projectName)
       await rail.archiveSession(tag)
 
       // The row leaves the active rail...
@@ -113,7 +113,7 @@ test.describe('会话管理', () => {
 
       await page.goto('/')
       await expect(rail.host).toBeVisible()
-      await rail.expandProject(projectName)
+      await rail.ensureProjectExpanded(projectName)
 
       // archived_at is unix SECONDS: the two archives must land in different
       // seconds or the descending sort keeps insertion order and the newest-

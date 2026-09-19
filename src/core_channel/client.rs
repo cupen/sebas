@@ -19,7 +19,7 @@ use super::secret::ChannelSecret;
 use async_trait::async_trait;
 use sebas_channels::ChannelKey;
 use sebas_dispatch::TurnStreamEvent;
-use sebas_dispatch::{PendingSubmission, SessionEvent, SessionInfo, TurnEntry};
+use sebas_dispatch::{PendingApproval, PendingSubmission, SessionEvent, SessionInfo, SessionIdentity, TurnEntry};
 use sebas_ipc::{ReadHalf, WriteHalf};
 use sebas_webui::session_backend::{
     CloseReport, PermissionDecision, PermissionNotice, Reachability, SessionBackend,
@@ -795,6 +795,65 @@ impl SessionBackend for CoreChannelBackend {
             CoreChannelResponse::Closed { discarded_pending } => {
                 Ok(CloseReport { discarded_pending })
             }
+            CoreChannelResponse::Rejected { rejection } => Err(rejection),
+            other => Err(unavailable(format!("unexpected response: {other:?}"))),
+        }
+    }
+
+    /// 归档恢复（fix-webui-qa-defects 2.2）：core 侧重建 Dormant 映射 +
+    /// 转写回放；失败以 typed rejection 透传（调用方保留归档条目）。
+    async fn restore_session(
+        &self,
+        key: ChannelKey,
+        session_id: Option<String>,
+        project_dir: Option<String>,
+        transcript: Vec<TurnEntry>,
+        identity: SessionIdentity,
+    ) -> Result<(), SessionRejection> {
+        match self
+            .request(&CoreChannelRequest::RestoreSession {
+                key,
+                session_id,
+                project_dir,
+                transcript,
+                identity,
+            })
+            .await?
+        {
+            CoreChannelResponse::Ok => Ok(()),
+            CoreChannelResponse::Rejected { rejection } => Err(rejection),
+            other => Err(unavailable(format!("unexpected response: {other:?}"))),
+        }
+    }
+
+    /// fix-webui-approval-restore-and-session-identity 1.2：待批审批读模型
+    /// 经 core channel 直达引擎泊车登记（detached webui 刷新重建审批面）。
+    async fn pending_approvals(
+        &self,
+        key: ChannelKey,
+    ) -> Result<Vec<PendingApproval>, SessionRejection> {
+        match self
+            .request(&CoreChannelRequest::PendingApprovals { key })
+            .await?
+        {
+            CoreChannelResponse::PendingApprovals { requests } => Ok(requests),
+            CoreChannelResponse::Rejected { rejection } => Err(rejection),
+            other => Err(unavailable(format!("unexpected response: {other:?}"))),
+        }
+    }
+
+    /// fix-webui-approval-restore-and-session-identity 5.1：label 设置经 core
+    /// channel 落到映射（detached webui 的 rail 重命名）。
+    async fn set_session_label(
+        &self,
+        key: ChannelKey,
+        label: Option<String>,
+    ) -> Result<(), SessionRejection> {
+        match self
+            .request(&CoreChannelRequest::SetSessionLabel { key, label })
+            .await?
+        {
+            CoreChannelResponse::Ok => Ok(()),
             CoreChannelResponse::Rejected { rejection } => Err(rejection),
             other => Err(unavailable(format!("unexpected response: {other:?}"))),
         }

@@ -62,7 +62,18 @@ pnpm --dir tests/testsuite-webui exec playwright test
 | 会话管理 | 深链与退役路径 | deep link renders the session via SPA fallback; /settings redirects to / | `session-mgmt.spec.ts` | 会话管理覆盖「深链与退役路径」 |
 | 会话管理 | 模型面诚实缺省 | model honest absence — no selector, switch attempt keeps model absent | `session-mgmt.spec.ts` | 工作台、项目与会话管理面旅程「模型面诚实缺省」 |
 | 会话管理 | 多会话切换 | 2.1 dual-session switch (rail + deep-link) does not crosstalk | `sessions.spec.ts` | 会话管理覆盖「多会话切换」 |
-| 会话管理 | archive 写保护 | 2.2 archive → 400 write-protection → restore unhides honestly | `sessions.spec.ts` | 会话管理覆盖「archive 写保护与 restore 诚实语义」 |
+| 会话管理 | archive 写保护 | 2.2 archive → 400 write-protection → restore unhides honestly | `sessions.spec.ts` | 会话管理覆盖「archive 写保护与 restore 诚实语义」（restore 语义随 fix-webui-qa-defects 翻转为重建）² |
+| 会话管理 | 归档恢复重建 | archive → restore: rail row back, transcript intact, History cleared, writable again | `archive-restore.spec.ts` | project-session-actions「restore archived session」+「restore preserves the transcript」² |
+| 会话管理 | rail 切换即时聚焦 | 4.2 focusing A and clicking B in the rail renders B within the throttle window, with no other events | `rail-focus.spec.ts` | agent-workbench「rail selection renders the conversation immediately」² |
+| 审批卡片旅程 | 审批读模型恢复 | reload rebuilds the review card from the read model under the same request_id, and deciding clears it for good | `approval-restore.spec.ts` | permission-flow「刷新或重连后仍可取得」+ agent-workbench「刷新后审批面从读模型重建」³ |
+| 停止收尾 | 回合被停止条目 | stopping a streaming turn appends the stop entry, resets the control, and stays settled across reloads | `stop-settle.spec.ts` | agent-workbench「停止后 transcript 有停止条目」+「刷新后不复活在飞状态」³ |
+| 停止收尾 | 停止释放泊车审批 | stopping a parked turn releases the approval fail-closed: read model drains, late decision is rejected, stop entry lands | `stop-settle.spec.ts` | permission-flow「停止回复清空未决审批」+「释放的请求不可再批复」³ |
+| 会话管理 | 聚焦联动与展开持久 | rail switch and creation landing drive the project title; project-row clicks stay independent | `rail-expand.spec.ts` | agent-workbench「rail 切换会话后项目标题跟随」+「项目行点击仍独立生效」³ |
+| 会话管理 | 聚焦联动与展开持久 | expansion persists across reloads; the focused project defaults to expanded with no record | `rail-expand.spec.ts` | agent-workbench「展开状态跨刷新保持」+「聚焦会话所在项目缺省展开」³ |
+| 会话管理 | 行重命名 | label takes precedence over the first-prompt preview, survives reloads, and clearing falls back | `session-label.spec.ts` | project-session-actions「operator label takes precedence」+「renaming from the rail」³ |
+| 会话管理 | 归档恢复身份 | archived→restored keeps agent_kind, mode and the model catalog; legacy entries fall back honestly | `archive-identity.spec.ts` | project-session-actions「恢复保留 agent 身份与模型面」+「旧归档条目如实回退」³ |
+| 项目管理覆盖 | 越界禁用原因 | out-of-root and missing paths state their reason with submit disabled; a valid path enables it | `add-scope-reason.spec.ts` | workspace-root「手填越界路径给出禁用原因」³ |
+| 工作台首屏 | 图标本地化 | blocking the icon CDN changes nothing: zero CDN requests, local /icons assets, icons still render | `icons-local.spec.ts` | fix-webui-approval-restore-and-session-identity tasks 5.4（无 delta scenario，task 级验收：阻断 CDN 零请求 + 本地 icons 资源） |
 | 模型管理覆盖 | 无模型诚实缺省 | 3.2 set_model on a model-less session fails terminally and honestly | `models.spec.ts` | 模型管理覆盖「无模型会话 set_model 诚实拒绝」 |
 | 模型管理覆盖 | settings provider 只读 | 3.2 settings provider list matches API, zero probe traffic | `models.spec.ts` | 模型管理覆盖「settings provider 只读」 |
 | 设置面 ¹ | 只读呈现 | S1 services rows match /api/admin/services truth (response-driven) | `settings.spec.ts` | 设置面只读呈现覆盖「只读分区与 API 对账」¹ |
@@ -77,6 +88,16 @@ pnpm --dir tests/testsuite-webui exec playwright test
 > scenario（尚未同步进主 spec）；S5a/S5b 锚到主 spec `模型管理覆盖`「settings provider
 > 只读」（provider 写 503 语义已由该 scenario 吸收）。harness 级 scenario（沙箱装配、
 > 一键入口）不设单用例行。
+>
+> ² 归档恢复与 rail 聚焦聚焦行的锚点指向尚未归档的 change `fix-webui-qa-defects` 的
+> delta scenario；同步时注意主 spec `testsuite-webui-browser`「archive 写保护与
+> restore 诚实语义」的旧文案（「restore 不复活会话，详情页如实 404」）需随 D1 语义
+> （restore = 重建会话行 + 保留转写）一并改写。
+>
+> ³ 审批读模型恢复 / 停止收尾 / 聚焦联动与展开持久 / 行重命名 / 归档恢复身份 /
+> 越界禁用原因各行的锚点指向尚未归档的 change
+> `fix-webui-approval-restore-and-session-identity` 的 delta scenario；同步主 spec
+> 时随该 change 归档一并落锚。
 >
 > 首启 root 引导四例（`auth-setup.spec.ts`）跑在第三种沙箱形态上：auth 开关打开、
 > 零用户、不预建户（tasks.py `TESTSUITE_AUTH_SETUP=1`，端口 9896）——首启设置页

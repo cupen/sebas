@@ -13,15 +13,18 @@ pub mod state;
 pub mod state_store;
 
 pub use crate::engine::{
-    DispatchHandle, MsgIdMap, Out, RemoteSessionView, SessionEvent, SessionInfo, TurnEntry,
-    TurnStreamEvent, count_chat_messages,
+    DispatchHandle, MsgIdMap, Out, PendingApproval, RemoteSessionView, SessionEvent, SessionInfo,
+    TurnEntry, TurnStreamEvent, count_chat_messages,
 };
+/// 错误条目失败分类词表（fix-webui-qa-defects 5.1/5.2）：`TurnEntry
+/// ::failure_class` 的合法值。webui 标签映射与 wire 值同源。
+pub use crate::engine::failure_class;
 pub use cards::{CardConfig, ThinkingDisplay};
 pub use commands::{Command, RouterAction, parse_command};
 pub use crud::{CrudForm, CrudStore, FileStore, InMemoryStore, Item, ProviderForms};
 pub use state::{
     MAX_PENDING_SUBMISSIONS, Mapping, PendingDisposition, PendingOpError, PendingSubmission,
-    QueuedTurn, SessionMap,
+    QueuedTurn, SessionIdentity, SessionMap,
 };
 
 /// 所有 SEBAS_STATE_FILE env 操作串行化（crud + provider_state 共享）。

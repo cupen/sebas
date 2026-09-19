@@ -1153,3 +1153,62 @@ describe('interception and honest degradation (session-slash-commands 4.1/4.2, d
     expect(el.shadowRoot?.querySelector('[data-testid="slash-unsupported"]')).toBeNull()
   })
 })
+
+// ── fix-webui-approval-restore-and-session-identity ──────────────────────
+
+describe('stop control settles with the turn (2.4)', () => {
+  function stateOf(el: SebasWorkbenchComposer): string | null {
+    return (
+      el.shadowRoot
+        ?.querySelector('[data-testid="submit-control"]')
+        ?.getAttribute('data-state') ?? null
+    )
+  }
+
+  it('detail turn_engaged:false renders no stop state — stable across reloads (2.4)', async () => {
+    // 停止结算后的复现面：turn_engaged=false（引擎事实）→ 停止控件不渲染，
+    // 提交控件回落 disabled（空输入）。同一真相跨刷新稳定——展示态只从
+    // wire 事实派生，没有跨刷新驻留的内存「在飞」标志。
+    const el = await mount({ ...focus, turnInFlight: false })
+    expect(stateOf(el)).not.toBe('stop')
+    expect(stateOf(el)).toBe('disabled')
+
+    // 对照组：engine 事实翻 true 才出现 stop（既有契约，钉住差分）。
+    const engaged = await mount({ ...focus, turnInFlight: true })
+    expect(stateOf(engaged)).toBe('stop')
+    engaged.remove()
+    el.remove()
+  })
+})
+
+describe('model menu current marker + mode popup bounds (5.3)', () => {
+  it('the current model carries a visible 当前 marker in the menu (5.3)', async () => {
+    const el = await mount({
+      ...focus,
+      sessionModels: ['m-a', 'm-b'],
+      currentModel: 'm-b',
+    })
+    await el.updateComplete
+    ;(el.shadowRoot?.querySelector('[data-testid="model-chip"]') as HTMLElement).click()
+    await el.updateComplete
+    const items = [...el.shadowRoot!.querySelectorAll('[data-testid="model-menu"] .menu-item')]
+    expect(items).toHaveLength(2)
+    const current = items.find((i) => i.getAttribute('data-model') === 'm-b')!
+    expect(current.getAttribute('aria-selected')).toBe('true')
+    // 可见标识（不止 ✓ 装饰）：data-testid 钩住的「当前」标签。
+    expect(current.querySelector('[data-testid="model-current-tag"]')?.textContent).toBe('当前')
+    const other = items.find((i) => i.getAttribute('data-model') === 'm-a')!
+    expect(other.querySelector('[data-testid="model-current-tag"]')).toBeNull()
+    el.remove()
+  })
+
+  it('the mode select popup opens upward so it never overflows the card (5.3)', async () => {
+    const el = await mount({ ...focus, modeEditable: true })
+    const sel = el.shadowRoot?.querySelector('[data-testid="mode-switch"]') as HTMLElement & {
+      getAttribute: (n: string) => string | null
+    }
+    expect(sel.getAttribute('placement')).toBe('top')
+    expect(sel.getAttribute('hoist')).not.toBeNull()
+    el.remove()
+  })
+})

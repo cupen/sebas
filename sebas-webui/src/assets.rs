@@ -43,6 +43,15 @@ pub async fn root_file(Path(path): Path<String>) -> Response {
     lookup(&path).unwrap_or_else(|| (StatusCode::NOT_FOUND, "not found").into_response())
 }
 
+/// GET /icons/{*path} — the vendored `<wa-icon>` SVG subset. rust-embed keys
+/// carry the `icons/` dist prefix while the route strips it, so re-prepend
+/// before lookup（fix-webui-approval-restore-and-session-identity 5.4 review
+/// 修复：此前直接按 stripped 路径查嵌入根，图标资源全量 404）。
+pub async fn icons_file(Path(path): Path<String>) -> Response {
+    let key = format!("icons/{path}");
+    lookup(&key).unwrap_or_else(|| (StatusCode::NOT_FOUND, "icon not found").into_response())
+}
+
 fn entry_document() -> Response {
     match FrontendAssets::get("index.html") {
         Some(file) => Html(String::from_utf8_lossy(&file.data).into_owned()).into_response(),

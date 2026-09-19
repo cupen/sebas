@@ -447,6 +447,7 @@ fn remote_session() -> SessionInfo {
         turn_engaged: true,
         spawn_failure_reason: None,
         parked_approvals: 0,
+        label: None,
     }
 }
 

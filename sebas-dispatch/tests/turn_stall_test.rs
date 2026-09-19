@@ -468,6 +468,173 @@ trait StatusProbe {
     async fn card_state_status_emoji(&self, session_id: &str) -> Option<String>;
 }
 
+// ── fix-webui-qa-defects 3.1/3.2：占位不武装看门狗（design D2）──────────────
+
+/// 3.1 场景 a（占位旗标仍在）：0-turn 占位（awaiting_first_prompt = true）
+/// 卡片经事件 lazy seed 落在 SEED、时钟被拨到远超阈值，看门狗也不收尾、
+/// 不写合成错误条目——占位不构成在飞回合。
+#[tokio::test]
+async fn idle_placeholder_with_flag_is_never_stall_settled() {
+    let map = SessionMap::new();
+    let key = web_key("ghost-flag");
+    let (router, _out_rx) = DispatchHandle::new(map);
+    router.set_turn_stall_timeout(600);
+
+    // 占位：awaiting_first_prompt = true 的 Spawning 映射 + 一个挂在占位
+    // 身上的 SEED 卡与 stale 时钟（QA 复现形态：握手事件 lazy seed）。
+    router
+        .map
+        .begin_spawn_with(key.clone(), None, None, None, true)
+        .await
+        .unwrap();
+    router
+        .map
+        .set_project_dir(&key, Some("/proj".into()))
+        .await;
+    let sid = "sid-placeholder";
+    router
+        .dispatch_acp_event(AcpEvent::UsageUpdate {
+            session_id: sid.into(),
+            usage: sebas_acp::TurnUsage {
+                model: None,
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: None,
+            },
+        })
+        .await;
+    assert_eq!(
+        router.card_state_status_emoji(sid).await.as_deref(),
+        Some(phase::SEED),
+        "setup: lazy-seeded card sits in SEED"
+    );
+    router
+        .stall_registry()
+        .rewind_last_event_for_test(sid, 3600)
+        .await;
+
+    let settled = router.force_settle_stalled_turns().await;
+    assert!(
+        settled.is_empty(),
+        "an awaiting-first-prompt placeholder must never be force-settled"
+    );
+    // transcript 干净：无「回合停滞被强制收尾」合成错误。
+    let turns = router.session_turns(&key, 0).await.unwrap_or_default();
+    assert!(
+        !turns
+            .iter()
+            .any(|t| t.element_type == "error" && t.content.contains("回合停滞")),
+        "no synthetic stall error may be injected into a placeholder: {turns:?}"
+    );
+}
+
+/// 3.1 场景 b（占位幽灵回合的实体——激活后无轮）：占位经聚焦拉起（旗标
+/// 已被激活消费、映射 Active、卡片 lazy seed 于 SEED、transcript 零条目）
+/// 沉默超阈值，看门狗同样不收尾——空 transcript = 从未开轮。
+#[tokio::test]
+async fn activated_never_prompted_session_is_not_stall_settled() {
+    let map = SessionMap::new();
+    let key = web_key("ghost-activated");
+    let (router, _out_rx) = DispatchHandle::new(map);
+    router.set_turn_stall_timeout(600);
+
+    // 激活完成后的形态：Active 映射 + lazy-seeded SEED 卡 + stale 时钟、
+    // 无任何 transcript 条目（激活 spawn 不带 prompt，seed_card 未跑）。
+    router
+        .map
+        .insert(key.clone(), Mapping::active("sid-idle"))
+        .await
+        .unwrap();
+    router
+        .dispatch_acp_event(AcpEvent::UsageUpdate {
+            session_id: "sid-idle".into(),
+            usage: sebas_acp::TurnUsage {
+                model: None,
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: None,
+            },
+        })
+        .await;
+    router
+        .stall_registry()
+        .rewind_last_event_for_test("sid-idle", 3600)
+        .await;
+
+    let settled = router.force_settle_stalled_turns().await;
+    assert!(
+        settled.is_empty(),
+        "a session that never started a turn must not be force-settled (ghost-turn fix)"
+    );
+    assert!(
+        !router
+            .session_turns(&key, 0)
+            .await
+            .unwrap()
+            .iter()
+            .any(|t| t.element_type == "error"),
+        "no synthetic error may appear in an idle session's transcript"
+    );
+}
+
+/// 3.2：首条消息使占位转入真实 spawn 并开轮（activate + seed_card 落下
+/// prompt 条目）后，看门狗对同一会话恢复生效——占位豁免绝不外溢到真实回合。
+#[tokio::test]
+async fn first_message_turn_is_still_guarded_after_the_placeholder() {
+    let map = SessionMap::new();
+    let key = web_key("real-turn");
+    let (router, _out_rx) = DispatchHandle::new(map);
+    router.set_turn_stall_timeout(600);
+    let sid = "sid-real";
+
+    // 占位：awaiting_first_prompt = true。
+    router
+        .map
+        .begin_spawn_with(key.clone(), None, None, None, true)
+        .await
+        .unwrap();
+    // 首条消息消费占位旗标（SpawnNew），随后 spawn 完成、映射翻 Active，
+    // seed_card 开轮（prompt 条目落 transcript）——真实回合成立。
+    let route = router
+        .map
+        .route_text(key.clone(), "the first real prompt".into())
+        .await
+        .unwrap();
+    assert!(matches!(route, sebas_dispatch::state::TextRoute::SpawnNew));
+    router.activate(&key, sid.to_string(), None, None).await;
+    router
+        .seed_card(sid.to_string(), "the first real prompt".into())
+        .await;
+    // 真实回合的开轮事实：prompt 条目已落 transcript（占位的 transcript
+    // 恒空——这是看门狗区分二者的引擎事实）。
+    let turns = router.session_turns(&key, 0).await.unwrap();
+    assert!(
+        turns.iter().any(|t| t.kind == "prompt"),
+        "setup: the real turn's prompt entry must be in the transcript: {turns:?}"
+    );
+    router
+        .stall_registry()
+        .rewind_last_event_for_test(sid, 3600)
+        .await;
+
+    let settled = router.force_settle_stalled_turns().await;
+    assert_eq!(
+        settled,
+        vec![(key.clone(), 0)],
+        "a real turn on the formerly-placeholder session is guarded as today"
+    );
+    // 收尾条目带 stall 分类（5.1，design D5）。
+    let turns = router.session_turns(&key, 0).await.unwrap();
+    let stall_entry = turns
+        .iter()
+        .find(|t| t.element_type == "error" && t.content.contains("回合停滞"))
+        .expect("the stall entry must be in the transcript");
+    assert_eq!(stall_entry.failure_class.as_deref(), Some("stall"));
+}
+
+
 impl StatusProbe for DispatchHandle {
     async fn card_state_status_emoji(&self, session_id: &str) -> Option<String> {
         // engine_test 系列经 dispatch 驱动；这里用公开的 card_state_snapshot。

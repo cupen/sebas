@@ -27,10 +27,18 @@ export interface SessionRow {
   project_dir: string | null
   available_models: string[] | null
   current_model: string | null
+  /** 绑定项目的稳定 id（workbench-agent-wire-fix 2.5；null = inbox）。 */
+  project_id?: string | null
   /** rail-declutter-unread：可见回复段数（未读徽标的服务端计数）。 */
   msg_count?: number
   /** rail-declutter-unread：首条用户消息预览（rail 行名数据源）。 */
   prompt_preview?: string | null
+  /** fix-webui-approval-restore-and-session-identity 5.1：操作者 label（行名第一顺位）。 */
+  label?: string | null
+  /** rail 行名回退链的短 id 形态（后端 middle_truncate 18）。 */
+  session_id_short?: string | null
+  /** 创建时绑定的 agent kind（归档恢复身份断言用）；null = 默认。 */
+  agent_kind?: string | null
 }
 
 export interface ConversationEntry {
@@ -53,6 +61,31 @@ export interface SessionDetail {
   /** add-agent-mode-selection：本机会话的 argv 应用值 / ModeChanged 同步值。 */
   desired_mode?: string | null
   effective_mode?: string | null
+  /** 创建时绑定的 agent kind；null/缺省 = 默认 agent（归档恢复身份断言用）。 */
+  agent_kind?: string | null
+  /** fix-pending-queue-liveness：回合占用事实——只在 true 时上 wire。 */
+  turn_engaged?: true
+}
+
+/** 泊车审批读模型行（fix-webui-approval-restore-and-session-identity 1.2）。 */
+export interface PendingApproval {
+  request_id: string
+  tool_name: string
+  args: unknown
+}
+
+/**
+ * GET /api/sessions/{key}/approvals — the session's parked permission
+ * requests (the read model the review surface rebuilds from on reload).
+ */
+export async function getSessionApprovals(
+  request: APIRequestContext,
+  encodedKey: string,
+): Promise<{ status: number; approvals: PendingApproval[] }> {
+  const resp = await request.get(`${sessionPath(encodedKey)}/approvals`)
+  if (!resp.ok()) return { status: resp.status(), approvals: [] }
+  const body = (await resp.json()) as { approvals?: PendingApproval[] }
+  return { status: resp.status(), approvals: body.approvals ?? [] }
 }
 
 export interface Summary {

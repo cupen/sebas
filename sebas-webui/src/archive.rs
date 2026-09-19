@@ -12,6 +12,7 @@
 //! `$HOME/.sebas/archive.json`（仅迁移源）。钉定 state 目录的部署（沙箱
 //! 尤其）随之钉定归档文件；旧路径只读降级语义见 [`migrate_once`]。
 
+use sebas_dispatch::SessionIdentity;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,6 +36,24 @@ pub struct ArchiveEntry {
     /// `#[serde(default)]` 兼容旧 archive.json（无字段 → 空对话）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub transcript: Vec<sebas_dispatch::TurnEntry>,
+    /// 归档时刻的原路由 session id（fix-webui-qa-defects 2.1）：恢复时以此
+    /// 重建 Dormant 映射——transcript 寻址 + resume 尝试加载原对话。`None`
+    /// （旧条目）时由引擎以 key reference 合成确定性 id。serde 缺省兼容旧
+    /// archive.json。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// 归档时刻的会话身份四项（fix-webui-approval-restore-and-session-identity
+    /// 3.1，design D3）：恢复重建时原样带回，恢复后的会话延续原 agent 与模型
+    /// 面。全 `Option` + serde default：旧 archive.json（无字段）可读，恢复时
+    /// 如实回退既有默认（agent 显示回退、模型目录清空），不做数据迁移。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desired_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available_models: Option<Vec<String>>,
 }
 
 /// The on-disk archive file format.
@@ -227,11 +246,14 @@ pub fn list() -> Vec<ArchiveEntry> {
 
 /// Archive a session: create an entry with the given metadata and the
 /// configured retention period, snapshotting the conversation captured
-/// before close. Returns the new entry.
+/// before close. `session_id` is the archived routing id（fix-webui-qa-defects
+/// 2.1，恢复重建 Dormant 映射时沿用）. Returns the new entry.
 pub fn archive_session(
     session_key: &str,
     project_path: &str,
     label: &str,
+    session_id: Option<String>,
+    identity: SessionIdentity,
     retention_days: u64,
     transcript: Vec<sebas_dispatch::TurnEntry>,
 ) -> Result<ArchiveEntry, String> {
@@ -246,6 +268,11 @@ pub fn archive_session(
         session_key: session_key.to_string(),
         project_path: project_path.to_string(),
         label: label.to_string(),
+        session_id,
+        agent_kind: identity.agent_kind,
+        desired_mode: identity.desired_mode,
+        current_model: identity.current_model,
+        available_models: identity.available_models,
         archived_at: now,
         retention_deadline: now + retention_secs,
         transcript,
@@ -253,6 +280,18 @@ pub fn archive_session(
     entries.push(entry.clone());
     save(&entries)?;
     Ok(entry)
+}
+
+/// 从 [`ArchiveEntry`] 的身份四项重建 [`SessionIdentity`]（恢复链路传参）。
+impl ArchiveEntry {
+    pub fn identity(&self) -> SessionIdentity {
+        SessionIdentity {
+            agent_kind: self.agent_kind.clone(),
+            desired_mode: self.desired_mode.clone(),
+            current_model: self.current_model.clone(),
+            available_models: self.available_models.clone(),
+        }
+    }
 }
 
 /// Fetch one archived entry (with its conversation snapshot) by session key.
@@ -341,7 +380,7 @@ mod tests {
     fn add_and_list_entry() {
         let _lock = ARCHIVE_TEST_LOCK.lock().unwrap();
         let _p = test_path("add_and_list");
-        let entry = archive_session("sess_abc", "/home/user/proj", "My Session", 30, Vec::new()).unwrap();
+        let entry = archive_session("sess_abc", "/home/user/proj", "My Session", None, Default::default(), 30, Vec::new()).unwrap();
         assert_eq!(entry.session_key, "sess_abc");
         assert_eq!(entry.project_path, "/home/user/proj");
         assert_eq!(entry.label, "My Session");
@@ -358,7 +397,7 @@ mod tests {
     fn remove_entry() {
         let _lock = ARCHIVE_TEST_LOCK.lock().unwrap();
         let _p = test_path("remove_entry");
-        archive_session("sess_xyz", "/home/user/proj", "Test", 30, Vec::new()).unwrap();
+        archive_session("sess_xyz", "/home/user/proj", "Test", None, Default::default(), 30, Vec::new()).unwrap();
         let restored = restore_session("sess_xyz");
         assert!(restored.is_some(), "must find the entry");
         assert_eq!(restored.unwrap().session_key, "sess_xyz");
@@ -381,9 +420,9 @@ mod tests {
         let _lock = ARCHIVE_TEST_LOCK.lock().unwrap();
         let _p = test_path("cleanup_expired");
         // Add an entry with 0-day retention — it should be expired immediately.
-        archive_session("sess_expired", "/home/user/proj", "Expired", 0, Vec::new()).unwrap();
+        archive_session("sess_expired", "/home/user/proj", "Expired", None, Default::default(), 0, Vec::new()).unwrap();
         // Add one with a long retention.
-        archive_session("sess_kept", "/home/user/proj", "Kept", 999, Vec::new()).unwrap();
+        archive_session("sess_kept", "/home/user/proj", "Kept", None, Default::default(), 999, Vec::new()).unwrap();
 
         let removed = cleanup_expired();
         assert_eq!(removed, 1, "the expired entry should be removed");
@@ -397,8 +436,8 @@ mod tests {
     fn duplicate_archive_rejected() {
         let _lock = ARCHIVE_TEST_LOCK.lock().unwrap();
         let _p = test_path("dup_rejected");
-        archive_session("sess_dup", "/home/user/proj", "First", 30, Vec::new()).unwrap();
-        let result = archive_session("sess_dup", "/home/user/proj", "Second", 30, Vec::new());
+        archive_session("sess_dup", "/home/user/proj", "First", None, Default::default(), 30, Vec::new()).unwrap();
+        let result = archive_session("sess_dup", "/home/user/proj", "Second", None, Default::default(), 30, Vec::new());
         assert!(result.is_err(), "duplicate must be rejected");
         assert!(result.unwrap_err().contains("已归档"));
     }
@@ -408,7 +447,7 @@ mod tests {
         let _lock = ARCHIVE_TEST_LOCK.lock().unwrap();
         let _p = test_path("is_archived");
         assert!(!is_archived("sess_check"), "must not find unarchived key");
-        archive_session("sess_check", "/home/user/proj", "Check", 30, Vec::new()).unwrap();
+        archive_session("sess_check", "/home/user/proj", "Check", None, Default::default(), 30, Vec::new()).unwrap();
         assert!(is_archived("sess_check"), "must find archived key");
     }
 
@@ -536,8 +575,77 @@ mod tests {
             sebas_dispatch::TurnEntry::prompt(0, "hello"),
             sebas_dispatch::TurnEntry::markdown(1, "world"),
         ];
-        archive_session("sess_t", "/proj", "T", 30, transcript.clone()).unwrap();
+        archive_session("sess_t", "/proj", "T", None, Default::default(), 30, transcript.clone()).unwrap();
         let entry = entry("sess_t").expect("entry must be found");
         assert_eq!(entry.transcript, transcript);
+    }
+
+    // ── fix-webui-approval-restore-and-session-identity 3.1：归档身份 ────
+
+    /// 归档条目携带身份四项，落盘读回逐一对应（3.1）。
+    #[test]
+    fn archived_entry_carries_and_round_trips_identity() {
+        let _lock = ARCHIVE_TEST_LOCK.lock().unwrap();
+        let _p = test_path("identity_round_trip");
+        let identity = SessionIdentity {
+            agent_kind: Some("claude".into()),
+            desired_mode: Some("auto".into()),
+            current_model: Some("claude-sonnet-4".into()),
+            available_models: Some(vec!["claude-sonnet-4".into(), "claude-opus-4".into()]),
+        };
+        archive_session("sess_id", "/proj", "T", Some("sid-1".into()), identity, 30, Vec::new())
+            .unwrap();
+        let e = entry("sess_id").expect("entry must be found");
+        assert_eq!(e.agent_kind.as_deref(), Some("claude"));
+        assert_eq!(e.desired_mode.as_deref(), Some("auto"));
+        assert_eq!(e.current_model.as_deref(), Some("claude-sonnet-4"));
+        assert_eq!(
+            e.available_models.as_deref(),
+            Some(&["claude-sonnet-4".to_string(), "claude-opus-4".to_string()][..])
+        );
+        // identity() → SessionIdentity（恢复链路传参形状）。
+        let id = e.identity();
+        assert_eq!(id.agent_kind.as_deref(), Some("claude"));
+        assert!(!id.is_empty());
+    }
+
+    /// 旧格式 archive.json（无身份字段）仍可反序列化——四项全 None，恢复时
+    /// 如实回退（不迁移旧档，spec 合同）。
+    #[test]
+    fn legacy_archive_entry_without_identity_fields_deserializes() {
+        let _lock = ARCHIVE_TEST_LOCK.lock().unwrap();
+        let p = test_path("legacy_identity");
+        let legacy = r#"{
+            "entries": [{
+                "session_key": "web%00web-old",
+                "project_path": "/proj",
+                "label": "legacy entry",
+                "archived_at": 100,
+                "retention_deadline": 9999999999
+            }]
+        }"#;
+        std::fs::write(&p, legacy).unwrap();
+        let e = entry("web%00web-old").expect("legacy entry must be readable");
+        assert_eq!(e.label, "legacy entry");
+        assert_eq!(e.agent_kind, None);
+        assert_eq!(e.desired_mode, None);
+        assert_eq!(e.current_model, None);
+        assert_eq!(e.available_models, None);
+        assert!(e.identity().is_empty(), "legacy identity is all-None");
+    }
+
+    /// 身份四项全 None 时不落键（archive.json 形状与旧版本一致——只增可选
+    /// 字段，不破坏旧读端）。
+    #[test]
+    fn empty_identity_is_omitted_from_the_wire() {
+        let _lock = ARCHIVE_TEST_LOCK.lock().unwrap();
+        let _p = test_path("identity_omit");
+        archive_session("sess_omit", "/proj", "T", None, Default::default(), 30, Vec::new())
+            .unwrap();
+        let raw = std::fs::read_to_string(&std::env::var("SEBAS_ARCHIVE_PATH").unwrap()).unwrap();
+        assert!(
+            !raw.contains("agent_kind"),
+            "all-None identity must not serialize keys: {raw}"
+        );
     }
 }

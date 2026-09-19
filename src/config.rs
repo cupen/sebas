@@ -174,7 +174,8 @@ pub struct AcpClaudeConfig {
     #[serde(default)]
     pub args: Vec<String>,
     /// 产品展示名（workbench-agent-wire-fix 3.1，可选）：仅用于 UI 呈现，
-    /// 不是 wire 标识；缺省由 driver 推导（"Claude Code"）。
+    /// 不是 wire 标识；缺省由目录层回退 agent id 本身
+    /// （fix-webui-qa-defects 7.1：不再按 driver 推导 "Claude Code"）。
     #[serde(default)]
     pub display: Option<String>,
     #[serde(default = "default_sessions_dir")]
@@ -944,6 +945,41 @@ impl Config {
         // 部署（config/config.toml）以 owner_id = "" 运行单用户机器人；
         // 空值语义 = 跳过 owner 过滤。风险（任何飞书用户都可驱动 bot）在
         // run::run 启动时以 warn 提示，并在 config.toml.example 文档化。
+        self.validate_agent_args()?;
+        Ok(())
+    }
+
+    /// claude-driver agent 的 `args` argv 保真（fix-webui-qa-defects 6.1，
+    /// design D4）：内部 flag-map 无法表达位置参数，运行期只会 warn 后丢弃
+    /// ——「配置写了、子进程没收到」的静默失效。解析期直接拒绝：点名参数
+    /// 并给出键值形式示例。判定与 driver 的 `args_to_extra_args` 配对规则
+    /// 同构（`--flag` 后紧跟的非 `--` 令牌是它的值；其余无 `--` 前缀令牌
+    /// 一律按位置参数拒绝——含单 `-` 形态，driver 的键化同样表达不了）。
+    fn validate_agent_args(&self) -> Result<()> {
+        for (name, agent) in &self.acp.agents {
+            let AgentConfig::Claude(cfg) = agent else {
+                continue;
+            };
+            let args = &cfg.args;
+            let mut i = 0;
+            while i < args.len() {
+                if args[i].starts_with("--") {
+                    // 键值配对：跳过 `--flag` 与它消费的值（非 `--` 前缀）。
+                    if matches!(args.get(i + 1), Some(v) if !v.starts_with("--")) {
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                    continue;
+                }
+                return Err(SebasError::Config(format!(
+                    "[acp.agents.{name}] args 含位置参数 {:?}：\
+                     位置参数不会到达子进程 argv（会被静默丢弃），\
+                     请改用键值形式（如 args = [\"--scenario\", \"thinking\"]）",
+                    args[i]
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -1085,6 +1121,96 @@ pub fn expand_tilde(p: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── fix-webui-qa-defects 6.1（design D4）：claude args argv 保真 ────────
+
+    #[test]
+    fn positional_claude_arg_is_rejected_at_parse_time() {
+        let err = Config::parse(
+            "[acp.agents.claude]
+driver = \"claude\"
+args = [\"thinking\"]
+",
+        )
+        .expect_err("位置参数必须在解析期拒绝");
+        let msg = format!("{err}");
+        assert!(msg.contains("thinking"), "错误点名参数: {msg}");
+        assert!(
+            msg.contains("--scenario") && msg.contains("thinking"),
+            "错误给出键值形式示例: {msg}"
+        );
+        assert!(msg.contains("acp.agents.claude"), "错误点名配置键: {msg}");
+    }
+
+    #[test]
+    fn keyed_claude_args_parse() {
+        let cfg = Config::parse(
+            "[acp.agents.claude]
+driver = \"claude\"
+args = [\"--scenario\", \"thinking\"]
+",
+        )
+        .expect("键值形式的 args 必须通过解析");
+        let AgentConfig::Claude(c) = cfg.acp.agents.get("claude").expect("agent present") else {
+            panic!("claude agent");
+        };
+        assert_eq!(c.args, vec!["--scenario".to_string(), "thinking".to_string()]);
+    }
+
+    #[test]
+    fn mixed_args_flag_value_and_trailing_flags_parse() {
+        // `--flag value` 消费值对；值以 `--` 开头时不消费（与 driver 的
+        // flag-map 配对规则同构，值归属下一个 flag）。
+        let cfg = Config::parse(
+            "[acp.agents.claude]
+driver = \"claude\"
+args = [\"--verbose\", \"--model\", \"opus\"]
+",
+        )
+        .expect("混排 args 必须通过解析");
+        let AgentConfig::Claude(c) = cfg.acp.agents.get("claude").unwrap() else {
+            panic!("claude agent");
+        };
+        assert_eq!(c.args.len(), 3);
+    }
+
+    #[test]
+    fn positional_after_a_value_pair_is_also_rejected() {
+        let err = Config::parse(
+            "[acp.agents.claude]
+driver = \"claude\"
+args = [\"--model\", \"opus\", \"thinking\"]
+",
+        )
+        .expect_err("值对之后的位置参数同样拒绝");
+        assert!(format!("{err}").contains("thinking"));
+    }
+
+    #[test]
+    fn acp_driver_agent_args_are_not_checked() {
+        // 通用 ACP driver 的 command 本就是 argv 数组，无 flag-map 问题。
+        let cfg = Config::parse(
+            "[acp.agents.open]
+driver = \"acp\"
+command = [\"opencode\", \"positional-ok\"]
+",
+        )
+        .expect("acp driver 不受 args 检查约束");
+        assert!(cfg.acp.agents.contains_key("open"));
+    }
+
+    #[test]
+    fn legacy_positional_configs_now_fail_loudly_instead_of_silently_dropping() {
+        // 释放说明点名（design Risks）：此前静默失效的配置现在启动报错。
+        let err = Config::parse(
+            "[acp.agents.claude]
+driver = \"claude\"
+args = [\"verbose\"]
+",
+        )
+        .expect_err("无 -- 前缀的旧配置必须显式报错");
+        assert!(format!("{err}").contains("verbose"));
+    }
 
     #[test]
     fn skills_dir_default_and_override() {

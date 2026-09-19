@@ -1400,6 +1400,7 @@ mod tests {
             turn_engaged: false,
             spawn_failure_reason: None,
             parked_approvals: 0,
+            label: None,
             available_commands: Vec::new(),
         };
         fe.on_session_info(info.clone()).await;
@@ -1517,6 +1518,7 @@ mod tests {
             content: payload.to_string(),
             created_at_unix: 0,
             title: None,
+            failure_class: None,
         };
         let ok = parse_mode_result_entry(&entry(json!({
             "request_id": "toolu_9", "ok": false, "mode": "auto", "detail": "boom"
@@ -1572,6 +1574,7 @@ mod tests {
             turn_engaged: false,
             spawn_failure_reason: None,
             parked_approvals: 0,
+            label: None,
             available_commands: Vec::new(),
         })
         .await;
@@ -1590,6 +1593,7 @@ mod tests {
             .to_string(),
             created_at_unix: 0,
             title: None,
+            failure_class: None,
         };
         fe.apply_turns(key, vec![entry]).await;
 
@@ -1769,6 +1773,7 @@ mod tests {
             turn_engaged: false,
             spawn_failure_reason: None,
             parked_approvals: 0,
+            label: None,
             available_commands: Vec::new(),
         }
     }

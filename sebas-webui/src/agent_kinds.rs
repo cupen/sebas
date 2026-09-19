@@ -33,26 +33,22 @@ pub struct AgentKindInfo {
 }
 
 /// A configured agent to probe: its id, full launch argv, driver tag
-/// (configuration-layer only, used to derive the display fallback) and the
-/// optional explicit display name.
+/// (configuration-layer only) and the optional explicit display name.
 #[derive(Debug, Clone)]
 pub struct AgentKindSource {
     pub slug: String,
     pub command: Vec<String>,
-    /// 静态 launch 策略标签（配置层；不上 wire）：`"claude"` → display 兜底
-    /// "Claude Code"，其余 → 键名本身。
+    /// 静态 launch 策略标签（配置层；不上 wire，display 兜底不再读它）。
     pub driver: String,
     pub display: Option<String>,
 }
 
 impl AgentKindSource {
-    /// Display 兜底推导（D3）：显式配置优先；`claude` 驱动 → "Claude Code"；
-    /// 其余 → agent id 本身。
+    /// Display 兜底推导（fix-webui-qa-defects 7.1）：显式配置优先；缺省一律
+    /// 回退 agent id 本身。此前 claude 驱动兜底 "Claude Code"——多个 claude
+    /// 驱动的 agent 在下拉里三项同名、无法分辨；id 是唯一稳定的区分词。
     fn fallback_display(&self) -> String {
-        match self.driver.as_str() {
-            "claude" => "Claude Code".to_string(),
-            _ => self.slug.clone(),
-        }
+        self.slug.clone()
     }
 }
 
@@ -276,13 +272,18 @@ mod tests {
         assert_eq!(info.cause.as_deref(), Some("empty command"));
     }
 
-    /// workbench-agent-wire-fix 3.1：display 兜底——显式配置优先；
-    /// `claude` 驱动 → "Claude Code"；其余 → agent id 本身。
+    /// fix-webui-qa-defects 7.1：display 兜底——显式配置优先；缺省一律
+    /// 回退 agent id（不再按 driver 推导——多个 claude 驱动的 agent 曾
+    /// 三项同名 "Claude Code"）。
     #[tokio::test]
-    async fn display_falls_back_by_driver() {
+    async fn display_falls_back_to_the_agent_id() {
         let mut src = source("myclaude", &["definitely-not-on-path-xyz"]);
         src.driver = "claude".to_string();
-        assert_eq!(discover_agent(&src).await.display, "Claude Code");
+        assert_eq!(
+            discover_agent(&src).await.display,
+            "myclaude",
+            "no display config must fall back to the agent id, not a driver label"
+        );
 
         let mut src = source("codex", &["definitely-not-on-path-xyz"]);
         src.display = Some("Codex CLI".to_string());

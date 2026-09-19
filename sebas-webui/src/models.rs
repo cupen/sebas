@@ -169,6 +169,11 @@ pub struct SessionRow {
     /// A short preview of the session's first user message, used by the
     /// agent sidebar as a display label when no project_dir is set.
     pub prompt_preview: Option<String>,
+    /// （fix-webui-approval-restore-and-session-identity 5.1，design D6）操作者
+    /// 设置的会话 label；`None`/缺省 = 未设置（行命名回退首条 prompt 预览）。
+    /// `#[serde(default, skip_serializing_if)]` 兼容旧快照，None 不上 wire。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     /// 当前生效的模型 id（add-acp-model-selection）；`None` = agent 无模型面。
     pub current_model: Option<String>,
     /// 该会话可选的模型 id 列表（agent 的 configOptions）。创建会话表单用它
@@ -292,6 +297,12 @@ pub struct ConversationEntryView {
     /// `None` = 旧条目无标题，前端回退通用标签；序列化时省略键。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// （fix-webui-qa-defects 5.2，design D5）错误条目的失败分类
+    /// （`spawn` | `stall` | `generic`），前端气泡标签按类如实渲染，不再
+    /// 一律写死「spawn failed」。`None` = 旧条目，前端回退中性标签。
+    /// 序列化时省略键。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_class: Option<String>,
 }
 
 #[cfg(test)]

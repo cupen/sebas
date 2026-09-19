@@ -84,7 +84,7 @@ test.describe('会话管理', () => {
       // switch + focus, no navigation away from the workbench, no reload).
       await page.goto('/')
       await expect(rail.host).toBeVisible()
-      await rail.expandProject(projectName)
+      await rail.ensureProjectExpanded(projectName)
       await rail.sessionItem(promptB).click()
       await expectDetail(page, detail, promptB)
       expect(page.url()).not.toContain('/sessions/')
@@ -133,7 +133,7 @@ test.describe('会话管理', () => {
       // (rail-declutter-unread 3.2：归档动作收进菜单；行名 = 首 prompt)。
       await page.goto('/')
       await expect(rail.host).toBeVisible()
-      await rail.expandProject(projectName)
+      await rail.ensureProjectExpanded(projectName)
       await rail.archiveSession(tag)
       await expect(rail.sessionItem(tag)).toHaveCount(0, { timeout: 10_000 })
 
@@ -157,15 +157,11 @@ test.describe('会话管理', () => {
         expect(afterRefuse.detail.entries.length).toBe(bodyBefore)
       }
 
-      // Restore via the History row. IMPLEMENTATION DISCOVERY (honest contract):
-      // archive closed the session (mapping + transcript dropped,
-      // engine/mod.rs web_close_session), and restore only deletes the archive
-      // entry (api.rs restore_session) — it does NOT resurrect the session.
-      // The rail's restore stays on the workbench (the switch 404s silently —
-      // the session is gone); no fabricated success, no dead deep link.
-      //
-      // polish-workbench-walkthrough-ux 2.1/2.2：归档行点击打开的是**只读
-      // 归档视图**，不再是即点即恢复——恢复是视图内的显式按钮 + 确认弹窗。
+      // Restore via the History row: read-only archived view → explicit
+      // restore button + confirm dialog（polish-workbench-workthrough-ux
+      // 2.1/2.2：归档行点击打开只读归档视图，恢复是视图内的显式按钮 + 确认
+      // 弹窗）. fix-webui-qa-defects 2.2 起，restore 语义 = 重建会话行（本
+      // 用例只钉写保护半边；重建契约全旅程见 archive-restore.spec.ts）。
       await page.goto('/')
       await expect(rail.host).toBeVisible()
       await rail.expandHistory()
@@ -188,14 +184,22 @@ test.describe('会话管理', () => {
       // 恢复后只读视图退场（archive-view-close）。
       await expect(archivedView).toHaveCount(0, { timeout: 10_000 })
 
-      // Archive list no longer carries the entry; the session stays gone from
-      // the live list (it was closed at archive time, restore resurrects nothing).
+      // Archive list no longer carries the entry; the session is REBUILT and
+      // writable again — the refetched list holds it (fix-webui-qa-defects
+      // 2.2: the old "restore resurrects nothing" contract was the data-loss
+      // defect; see archive-restore.spec.ts for the full rebuild journey).
       const archiveList = await page.request.get('/api/archive')
       expect(archiveList.ok()).toBe(true)
       expect(await archiveList.text()).not.toContain(tag)
-      expect(
-        (await listSessions(page.request)).filter((r) => r.encoded_key === key).length,
-      ).toBe(0)
+      await expect
+        .poll(
+          async () =>
+            (await listSessions(page.request)).some((r) => r.encoded_key === key),
+          { timeout: 15_000, intervals: [250] },
+        )
+        .toBe(true)
+      const restored = await getSession(page.request, key)
+      expect(restored.detail).not.toBeNull()
 
       expect(collector.clean()).toEqual([])
     })

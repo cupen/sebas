@@ -754,7 +754,9 @@ export class SebasWorkbenchComposer extends LitElement {
           }}
         >
           <span class="menu-item-label">${m}</span>
-          ${this.currentModel === m ? html`<span class="check" aria-hidden="true">✓</span>` : nothing}
+          ${this.currentModel === m
+            ? html`<span class="current-tag" data-testid="model-current-tag">当前</span>`
+            : nothing}
         </button>
       `,
     )
@@ -853,11 +855,14 @@ export class SebasWorkbenchComposer extends LitElement {
         </div>
         <div class="composer-bottom">
           <div class="left-tools">
+            <!-- （5.3）弹层向上开（placement="top"）：选择器贴卡片底沿，
+                 向下弹会溢出卡片边界（压到提交控件/视口外）。 -->
             ${this.modeEditable
               ? html`<wa-select
                   class="mode-select"
                   size="xs"
                   hoist
+                  placement="top"
                   value=${this.currentMode}
                   ?disabled=${this.modeSwitching}
                   aria-label="权限模式"
@@ -1209,6 +1214,16 @@ export class SebasWorkbenchComposer extends LitElement {
         color: var(--sebas-accent);
         font-weight: 700;
       }
+      /* （5.3）当前模型的可见标识（aria-selected 之外的明示标签）。 */
+      .menu-item .current-tag {
+        flex: 0 0 auto;
+        font-size: 0.62rem; font-weight: 700;
+        color: var(--sebas-accent);
+        background: var(--sebas-accent-soft);
+        border-radius: var(--sebas-radius-full);
+        padding: 0 6px;
+      }
+
       /* ── 提交控件状态机（design D4）──────────────────────────────────── */
       /* 泊车指示（fix-pending-queue-liveness 3.2）：提交控件左侧的就地状态
          词——等待批复 = 你的回合。signal 强调色与审查卡同源。 */

@@ -43,6 +43,15 @@ export class ErrorCollector {
       //    are unrelated to the app-under-test and may 403 in the sandbox.
       if (text.includes('favicon')) return
       if (text.includes('404') && /\/api\/sessions\//.test(url)) return
+      // Intentional precheck probes (5.2 scope-reason journey): the add-
+      // project path field validates via browse-dirs as-you-type; out-of-root
+      // and missing candidates answer 400 BY DESIGN (the journey asserts the
+      // honest inline reason and the disabled submit, not network silence).
+      if (text.includes('400') && /\/api\/fs\/browse-dirs/.test(url)) return
+      // Intentional typed-rejection probe (5.2 release journey): deciding a
+      // parked request that a stop already released answers 404 on the
+      // review-card's own POST — the card honestly degrades to expired.
+      if (text.includes('404') && /\/api\/permissions\/.+\/answer/.test(url)) return
       // Intentional honest-degradation probes (settings journeys; provider
       // cluster renamed from /router/api/* in retire-webui-router-surface):
       // the sandbox answers provider reads/mutations with 503 while the core
