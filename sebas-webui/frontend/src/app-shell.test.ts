@@ -50,6 +50,7 @@ const wsMocks = vi.hoisted(() => {
     emit: (ev: unknown): void => {
       for (const h of handlers) h(ev)
     },
+    reconnectNow: vi.fn(),
     clearHandlers: (): void => handlers.clear(),
   }
 })

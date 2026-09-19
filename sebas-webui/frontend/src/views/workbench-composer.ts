@@ -80,6 +80,7 @@ import { renderMarkdown } from '../components/markdown.js'
 import { MODE_OPTIONS, MODE_DEFAULT_LABEL } from './mode-vocabulary.js'
 import { icon } from '../components/icons.js'
 import { viewStyles } from '../styles/shared.js'
+import { isNarrowViewport, onNarrowChange } from './split-persist.js'
 import '@awesome.me/webawesome/dist/components/textarea/textarea.js'
 import '@awesome.me/webawesome/dist/components/select/select.js'
 import '@awesome.me/webawesome/dist/components/option/option.js'
@@ -244,14 +245,20 @@ export class SebasWorkbenchComposer extends LitElement {
     void this.loadCatalog()
   }
 
+  /** fix-webui-mobile-polish：窄屏感知（空态提示指向 ☰ 抽屉而非左侧栏）。 */
+  @state() private narrow = isNarrowViewport()
+  private unlistenNarrow?: () => void
+
   connectedCallback(): void {
     super.connectedCallback()
+    this.unlistenNarrow = onNarrowChange((n) => (this.narrow = n))
     void this.loadCatalog()
     // defaults/catalog 变更（管理页 set/clear）即时反映到芯片分组。
     window.addEventListener('sebas:refetch', this.reloadCatalogBound)
   }
 
   disconnectedCallback(): void {
+    this.unlistenNarrow?.()
     window.removeEventListener('sebas:refetch', this.reloadCatalogBound)
     this.removeMenuDismissListeners()
     super.disconnectedCallback()
@@ -831,7 +838,9 @@ export class SebasWorkbenchComposer extends LitElement {
         ${this.renderBanners()}
         <div class="composer no-focus" data-testid="composer-no-focus">
           <span class="no-focus-hint">
-            在左侧项目栏的 <b>+</b> 新建会话后，这里开始对话。
+            ${this.narrow
+              ? html`点左上角的 <b>☰</b> 打开项目树，新建会话后这里开始对话。`
+              : html`在左侧项目栏的 <b>+</b> 新建会话后，这里开始对话。`}
           </span>
         </div>
       `

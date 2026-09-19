@@ -37,6 +37,7 @@ import {
 // The sidebar tree + settings modal are shell-owned; the outlet views are
 // registered in main.ts.
 import './views/project-rail.js'
+import { RAIL_FOCUS_EVENT } from './views/project-rail.js'
 // （fix-webui-approval-restore-and-session-identity 4.1，design D4）聚焦会话
 // 反投影项目上下文的事件名（dashboard 发、shell 收——selectedPath 单一所有权）。
 import { PROJECT_FOLLOW_EVENT } from './views/dashboard.js'
@@ -359,6 +360,33 @@ export class SebasApp extends LitElement {
         padding: var(--sebas-space-5) var(--sebas-space-4);
       }
     }
+    /* fix-webui-mobile-polish：抽屉开关/遮罩/关闭钮仅窄屏出现，桌面不渲染
+       布局影响（base 隐藏；窄屏规则见下方媒体块）。 */
+    .rail-toggle,
+    .rail-close {
+      display: none;
+    }
+    .rail-toggle {
+      align-items: center;
+      justify-content: center;
+      width: 38px;
+      height: 38px;
+      padding: 0;
+      border: 1px solid var(--sebas-border, rgba(128, 138, 160, 0.35));
+      border-radius: var(--sebas-radius-full, 10px);
+      background: var(--sebas-surface, #fff);
+      color: var(--sebas-text);
+      cursor: pointer;
+    }
+    .nav-scrim {
+      position: fixed;
+      inset: 0;
+      z-index: 60;
+      border: 0;
+      padding: 0;
+      background: rgba(8, 10, 18, 0.45);
+      cursor: default;
+    }
     @media (max-width: 640px) {
       :host {
         flex-direction: column;
@@ -382,19 +410,68 @@ export class SebasApp extends LitElement {
         padding: var(--sebas-space-3) var(--sebas-space-4);
         overflow-y: visible;
       }
-      main {
-        margin: 0 var(--sebas-space-2) var(--sebas-space-2);
+      /* fix-webui-mobile-polish：nav 整体成为抽屉（品牌/rail/设置/登出都在
+         里面），顶栏 ☰ 悬浮常驻、主区让出顶部一条，避免覆盖工作台头部。 */
+      .rail-toggle {
+        display: inline-flex;
+        position: fixed;
+        top: 10px;
+        left: 10px;
+        z-index: 80;
       }
-      .brand {
-        padding: 0 var(--sebas-space-4) 0 0;
+      main {
+        margin: 52px var(--sebas-space-2) var(--sebas-space-2);
       }
       .brand .name small {
         display: none;
       }
-      /* 窄屏时项目树收进顶栏之外（预览原型的 Projects/Chat 顶页签明确
-       * 不在本期范围内）——只留品牌 + Settings 图标，保证 375px 无横向
-       * 滚动；/sessions 仍可经会话详情页的 "All sessions" 回链到达。 */
-      sebas-project-rail,
+      /* fix-webui-mobile-polish：项目树改为**抽屉**——顶栏 ☰ 呼出，左滑入、
+         遮罩/关闭钮/选中会话收起。此前窄屏直接 display:none，手机上没有
+         任何入口可选项目与会话（工作台不可用）。 */
+      .rail-toggle {
+        display: inline-flex;
+      }
+      nav.rail-drawer {
+        position: fixed;
+        top: 0;
+        bottom: 0;
+        left: 0;
+        width: min(85vw, 320px);
+        z-index: 70;
+        margin: 0;
+        border-radius: 0;
+        flex-direction: column;
+        padding: var(--sebas-space-3);
+        overflow-y: auto;
+        transform: translateX(-102%);
+        transition: transform var(--sebas-dur, 0.2s) var(--sebas-ease, ease);
+        background: var(--sebas-canvas, var(--sebas-bg));
+      }
+      nav.rail-drawer.open {
+        transform: none;
+        box-shadow: 0 12px 48px rgba(8, 10, 18, 0.4);
+      }
+      nav.rail-drawer sebas-project-rail {
+        display: block;
+        flex: 1;
+        min-height: 0;
+      }
+      nav.rail-drawer .rail-close {
+        display: inline-flex;
+        position: absolute;
+        top: 10px;
+        right: 10px;
+        align-items: center;
+        justify-content: center;
+        width: 32px;
+        height: 32px;
+        padding: 0;
+        border: 1px solid var(--sebas-border, rgba(128, 138, 160, 0.35));
+        border-radius: var(--sebas-radius-full, 10px);
+        background: var(--sebas-surface, #fff);
+        color: var(--sebas-text);
+        cursor: pointer;
+      }
       .spacer {
         display: none;
       }
@@ -442,6 +519,8 @@ export class SebasApp extends LitElement {
     // add-webui-tiered-notices 3.2：WS 连接状态 → 通知层的持续 warn 驻留
     // 横幅（重连即消）；connected=true 时顺带发起可达性 get（onWsState）。
     window.addEventListener('sebas:ws-state', this.onWsState)
+    // fix-webui-mobile-polish：手机抽屉里点了会话（rail-focus）即收起抽屉。
+    window.addEventListener(RAIL_FOCUS_EVENT, this.onRailFocusCloseDrawer)
     // add-core-reachability-ws-push D4：订阅 core.reachability 翻转推送
     // （shell 常驻，订阅不漏帧；初始态由连接建立时的 get 补齐）。
     this.unsubscribeWs = sharedWs.subscribe(this.onCoreReachabilityEvent)
@@ -531,8 +610,30 @@ export class SebasApp extends LitElement {
 
   private onWsState = (e: Event): void => {
     const connected = (e as CustomEvent<{ connected: boolean }>).detail?.connected !== false
+    // fix-webui-mobile-polish：登录/首启设置态下的 /ws 认证拒绝循环（连接即
+    // 被升级前 401 关闭、退避一路爬升）是未登录的**预期形状**，不是「服务
+    // 器断开」——横幅只在进入工作台后才有意义；就绪瞬间 reconnectNow 兜住
+    // 退避尾巴，横幅不再在工作台上驻留。
+    if (this.authState !== 'ready') return
     setWsDown(!connected)
     if (connected) void this.refreshCoreReachability()
+  }
+
+  /**
+   * 进入工作台的统一出口：翻转鉴权态 + 立即重连 /ws（fix-webui-mobile-polish，
+   * 见 onWsState 注释）。
+   */
+  private markAuthReady(): void {
+    this.authState = 'ready'
+    sharedWs.reconnectNow()
+  }
+
+  /** 窄屏项目抽屉开关（fix-webui-mobile-polish）：≤640px 时项目树收进抽屉。 */
+  @state() private railDrawerOpen = false
+
+  /** 手机抽屉：会话聚焦（rail 点了会话）即收起，把屏幕还给工作台。 */
+  private onRailFocusCloseDrawer = (): void => {
+    if (this.railDrawerOpen) this.railDrawerOpen = false
   }
 
   /**
@@ -551,12 +652,12 @@ export class SebasApp extends LitElement {
       }
       this.authUsername = info.authenticated ? info.username : null
       this.authRole = info.authenticated ? (info.role ?? null) : null
-      this.authState = 'ready'
+      this.markAuthReady()
     } catch {
       if (this.authState === 'checking') {
         // /api/auth/me 本身失败（网络/服务异常）：按未启用处理，后续请求的
         // 401 会经 setUnauthorizedHandler 再切回登录页。
-        this.authState = 'ready'
+        this.markAuthReady()
       }
       // 登录/设置成功后的身份重探失败：维持当前视图，操作者可重试或登出。
     }
@@ -573,14 +674,14 @@ export class SebasApp extends LitElement {
    */
   private onLoginSuccess = (e: Event): void => {
     this.authUsername = (e as CustomEvent<{ username: string | null }>).detail?.username ?? null
-    this.authState = 'ready'
+    this.markAuthReady()
     void this.checkAuth()
   }
 
   /** 首启设置成功（root 已建、会话已立）：与登录同一放行路径。 */
   private onSetupSuccess = (e: Event): void => {
     this.authUsername = (e as CustomEvent<{ username: string | null }>).detail?.username ?? null
-    this.authState = 'ready'
+    this.markAuthReady()
     void this.checkAuth()
   }
 
@@ -599,6 +700,7 @@ export class SebasApp extends LitElement {
     window.removeEventListener(PROJECT_FOLLOW_EVENT, this.onProjectFollow)
     this.unlistenNarrow?.()
     window.removeEventListener('sebas:ws-state', this.onWsState)
+    window.removeEventListener(RAIL_FOCUS_EVENT, this.onRailFocusCloseDrawer)
     this.unsubscribeWs?.()
     this.unsubscribeWs = null
     this.unsubscribeStall?.()
@@ -711,6 +813,23 @@ export class SebasApp extends LitElement {
       return html`<sebas-setup @setup-success=${this.onSetupSuccess}></sebas-setup>`
     }
     return html`
+      ${this.narrow && !this.railDrawerOpen
+        ? html`<button
+            class="rail-toggle"
+            aria-label="打开项目树"
+            title="项目树"
+            @click=${() => (this.railDrawerOpen = true)}
+          >
+            ${icon('menu', 20)}
+          </button>`
+        : nothing}
+      ${this.narrow && this.railDrawerOpen
+        ? html`<button
+            class="nav-scrim"
+            aria-label="关闭项目树"
+            @click=${() => (this.railDrawerOpen = false)}
+          ></button>`
+        : nothing}
       <wa-split-panel
         class="frame"
         orientation="horizontal"
@@ -720,7 +839,14 @@ export class SebasApp extends LitElement {
         ?inert=${this.coreReachability?.ok === false}
         @wa-reposition=${this.onRailReposition}
       >
-        <nav slot="start" aria-label="Primary">
+        <nav slot="start" class="rail-drawer ${this.railDrawerOpen && this.narrow ? 'open' : ''}" aria-label="Primary">
+          <button
+            class="rail-close"
+            aria-label="关闭项目树"
+            @click=${() => (this.railDrawerOpen = false)}
+          >
+            ${icon('x', 16)}
+          </button>
           <a class="brand" href="/" aria-label="sebas console home">
             <span class="mark" aria-hidden="true">❯</span>
             <span class="name">sebas<small>${APP_TAGLINE}</small></span>
