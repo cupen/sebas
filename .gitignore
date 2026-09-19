@@ -34,3 +34,4 @@ gui-test-screenshots
 config/core.secret
 __pycache__/
 *.egg-info/
+config/config.prod.toml
