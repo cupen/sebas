@@ -104,6 +104,8 @@ import './dashboard.js'
 import { RAIL_FOCUS_EVENT } from './project-rail.js'
 // PROJECT_FOLLOW_EVENT / focusedProjectPath：聚焦反投影项目上下文（本 change 4.1）。
 import { PROJECT_FOLLOW_EVENT, focusedProjectPath } from './dashboard.js'
+// writeFocusAnchor：焦点处立读锚的既有锚点写入（round3 3.1）。
+import { writeFocusAnchor } from './unread-cursor.js'
 import type { SebasDashboard } from './dashboard.js'
 import { SebasDashboard as DashboardImpl } from './dashboard.js'
 
@@ -1748,5 +1750,131 @@ describe('session header agent identity (3.3)', () => {
       el2.shadowRoot!.querySelector('[data-testid="agent-lock"]')?.textContent,
     ).toContain('default agent')
     el2.remove()
+  })
+})
+
+// ── fix-webui-qa-defects-round3：焦点处立读锚（3.1）+ 深链项目标题（4.2）──
+
+describe('focus establishes the read anchor (round3 3.1)', () => {
+  const KEY = 'oc_live%00'
+  const anchorKey = `sebas:seen:${KEY}`
+
+  beforeEach(() => {
+    localStorage.removeItem(anchorKey)
+  })
+  afterEach(() => {
+    localStorage.removeItem(anchorKey)
+  })
+
+  it('a session focused without a rail click gets its anchor at detail arrival', async () => {
+    // 创建 set_focus / 深链 / 恢复聚焦走进焦点的会话此前永远没有本地锚——
+    // 无锚 = fully read，之后的非聚焦新回复推不出未读徽章（QA 缺陷 3）。
+    // 详情到达时按真实段数立锚。
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    apiMocks.session.mockResolvedValue(detailFixture()) // msg_count: 2
+    const el = await mount()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(JSON.parse(localStorage.getItem(anchorKey)!)).toEqual({ anchor_count: 2 })
+    el.remove()
+  })
+
+  it('an existing anchor is never overwritten by the establishment pass', async () => {
+    // 锚已存在（rail 点击建立 / 流式推进）：立锚不回写，单调归游标模块。
+    writeFocusAnchor(KEY, 1)
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    apiMocks.session.mockResolvedValue(detailFixture())
+    const el = await mount()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(JSON.parse(localStorage.getItem(anchorKey)!)).toEqual({ anchor_count: 1 })
+    el.remove()
+  })
+
+  it('a detail load in a hidden tab does not establish the anchor', async () => {
+    // design 决策 4 的「看着」边界：后台 tab 里的装载不算看着——锚留空，
+    // 回到页面的下一次详情装载再立。否则后台轮询到的段数会把没看过的内容
+    // 全部标成已读，未读徽章在另一个 tab 里静默丢失。
+    Object.defineProperty(document, 'visibilityState', {
+      value: 'hidden',
+      configurable: true,
+    })
+    try {
+      apiMocks.summary.mockResolvedValue(focusedSummary())
+      apiMocks.session.mockResolvedValue(detailFixture())
+      const el = await mount()
+      await new Promise((r) => setTimeout(r, 0))
+      await el.updateComplete
+      expect(localStorage.getItem(anchorKey)).toBeNull()
+      el.remove()
+    } finally {
+      // 摘掉实例遮蔽，恢复 Document.prototype 上的原生 getter。
+      delete (document as unknown as { visibilityState?: string }).visibilityState
+    }
+  })
+})
+
+describe('review-cards phase wiring (round3 2.2)', () => {
+  it('the focused session phase is passed to sebas-review-cards for reconciliation', async () => {
+    // 相位对账的另一半在 dashboard：卡片组件自己不订阅相位帧，靠这里把
+    // 聚焦会话的 status_slug 下传。绑定一旦脱落，丢帧自愈就静默失效——
+    // 钉住 dashboard → 卡片的接线。
+    apiMocks.summary.mockResolvedValue({
+      ...focusedSummary(),
+      active_session: {
+        ...focusedSummary().active_session!,
+        status: 'waiting',
+        status_label: 'Waiting',
+        status_slug: 'waiting',
+      },
+    })
+    apiMocks.session.mockResolvedValue({
+      ...detailFixture(),
+      status: 'waiting',
+      status_label: 'Waiting',
+      status_slug: 'waiting',
+    })
+    const el = await mount()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    const review = el.shadowRoot!.querySelector('sebas-review-cards') as unknown as {
+      sessionKey: string | null
+      sessionPhase: string | null
+    }
+    expect(review).toBeTruthy()
+    expect(review.sessionKey).toBe('oc_live%00')
+    expect(review.sessionPhase).toBe('waiting')
+    el.remove()
+  })
+})
+
+describe('deep link binds the project title (round3 4.2)', () => {
+  it('a /sessions/:key deep link projects the session project before summary catches up', async () => {
+    // 深链窗口：summary 的焦点指针尚未落位（active_session 为空，读 detail
+    // 才设服务端焦点）——此前归属解析只能等下一次无关刷新，主区标题一直
+    // 「未选择项目」。detail 到达后的核对一拍经 focusedDetail.project_id
+    // 完成投影。
+    apiMocks.summary.mockResolvedValue(summaryBase) // active_session: null
+    apiMocks.session.mockResolvedValue({ ...detailFixture(), project_id: 'proj-sebas' })
+
+    const el = document.createElement('sebas-dashboard') as SebasDashboard
+    el.deepLinkKey = 'oc_live%00'
+    document.body.appendChild(el)
+
+    const events: CustomEvent[] = []
+    const listener = (e: Event) => events.push(e as CustomEvent)
+    window.addEventListener(PROJECT_FOLLOW_EVENT, listener)
+    try {
+      await el.updateComplete
+      await new Promise((r) => setTimeout(r, 0))
+      await el.updateComplete
+      const follow = events.find(
+        (e) => (e.detail as { path?: string })?.path === '/home/me/sebas',
+      )
+      expect(follow, 'deep link must bind the project context immediately').toBeTruthy()
+    } finally {
+      window.removeEventListener(PROJECT_FOLLOW_EVENT, listener)
+      el.remove()
+    }
   })
 })

@@ -358,4 +358,84 @@ describe('sebas-review-cards', () => {
     expect(cards(el).length).toBe(1)
     expect(cards(el)[0]!.dataset.requestId).toBe('t_b')
   })
+
+  // ---- fix-webui-qa-defects-round3 2.1/2.2：单一 store 入口 + 相位对账 ----
+
+  it('renders the review card the moment the push arrives (no reload)', async () => {
+    // 固定期望行为（2.1）：推送到达即渲染——这是缺陷 2 的验收句，结构收敛
+    // （2.2）不得改变它。
+    const el = await mount('oc_enc')
+    expect(cards(el).length).toBe(0)
+    ws.emit(permFrame({ request_id: 'tc_push', session_id: 'oc_enc' }))
+    await el.updateComplete
+    expect(cards(el).length).toBe(1)
+    expect(cards(el)[0]!.dataset.requestId).toBe('tc_push')
+  })
+
+  it('reconciles with the read model when the phase says waiting but no live card exists', async () => {
+    // 丢帧自愈（2.2）：rail 已亮「等待」（相位帧 waiting），但推送丢了——
+    // 相位变化触发读模型重取（同一 mergeRows 入口），卡片不必等 reload。
+    approvalsMock.mockResolvedValue({ approvals: [] })
+    const el = await mount('oc_enc')
+    await flush(el)
+    expect(cards(el).length).toBe(0)
+
+    // 此刻读模型里已有泊车审批（重启后重拉才可见），且再无推送到来。
+    approvalsMock.mockResolvedValue({
+      approvals: [{ request_id: 'tc_heal', tool_name: 'Bash', args: {} }],
+    })
+    el.sessionPhase = 'waiting'
+    await flush(el)
+    expect(cards(el).length).toBe(1)
+    expect(cards(el)[0]!.dataset.requestId).toBe('tc_heal')
+    expect(approvalsMock).toHaveBeenCalledWith('oc_enc')
+  })
+
+  it('phase reconciliation does not duplicate a live card or resurrect a decided one', async () => {
+    approvalsMock.mockResolvedValue({
+      approvals: [{ request_id: 'tc_live', tool_name: 'Bash', args: {} }],
+    })
+    const el = await mount('oc_enc')
+    el.sessionPhase = 'waiting'
+    await flush(el)
+    expect(cards(el).length).toBe(1)
+
+    // 相位再次翻到 waiting（帧重放）：store 已有待决卡 → 不重取不重复。
+    approvalsMock.mockClear()
+    el.sessionPhase = 'working'
+    await el.updateComplete
+    el.sessionPhase = 'waiting'
+    await flush(el)
+    expect(cards(el).length).toBe(1)
+    expect(approvalsMock).not.toHaveBeenCalled()
+
+    // 已决策的卡：相位再回 waiting，读模型里陈旧行也不复活。
+    ;(cards(el)[0]!.querySelector('wa-button.allow-once') as HTMLElement).click()
+    await flush(el)
+    expect(cards(el).length).toBe(0)
+    approvalsMock.mockResolvedValue({
+      approvals: [{ request_id: 'tc_live', tool_name: 'Bash', args: {} }],
+    })
+    el.sessionPhase = 'working'
+    await el.updateComplete
+    el.sessionPhase = 'waiting'
+    await flush(el)
+    expect(cards(el).length).toBe(0)
+  })
+
+  it('phase reconciliation is inert without a session key or on non-waiting phases', async () => {
+    approvalsMock.mockResolvedValue({
+      approvals: [{ request_id: 'tc_noop', tool_name: 'Bash', args: {} }],
+    })
+    const el = await mount(null)
+    el.sessionPhase = 'waiting'
+    await flush(el)
+    // sessionKey 为空（渲染所有会话的面）：没有可对账的读模型入口，不动。
+    expect(approvalsMock).not.toHaveBeenCalled()
+    expect(cards(el).length).toBe(0)
+
+    el.sessionPhase = 'working'
+    await el.updateComplete
+    expect(approvalsMock).not.toHaveBeenCalled()
+  })
 })

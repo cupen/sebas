@@ -54,3 +54,18 @@
 
   --wa-color-focus: #4750d8;
 }
+
+/* ── fix-webui-qa-defects-round3 4.1 ─────────────────────────────────────
+ * wa-select 选项面板：面板最小宽度放宽到内容宽（封顶 320px），选项文案
+ * 单行省略——中文长模式文案（如「allow（放行并留审计）」）不再按字折行
+ * 挤压选项行高；超长时省略号收干，语义随选中值回显仍可读。 */
+wa-select::part(listbox) {
+  min-width: max-content;
+  max-width: 320px;
+}
+
+wa-option::part(label) {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

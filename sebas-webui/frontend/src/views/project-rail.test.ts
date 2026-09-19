@@ -16,6 +16,7 @@ import {
   RAIL_EXPANDED_KEY,
   addPathScopeHintFrom,
   fullSessionLabel,
+  normalizeDisplayPath,
   parseRailExpanded,
   railExpandedDefault,
   serializeRailExpanded,
@@ -1500,6 +1501,248 @@ describe('add-project scope hint (5.2)', () => {
     expect(
       el.shadowRoot!.querySelector('[data-testid="add-project-scope-hint"]'),
     ).toBeTruthy()
+    el.remove()
+  })
+})
+
+// ── fix-webui-qa-defects-round3：路径展示归一（4.4）+ 创建立锚（3.1）──────
+
+describe('display path normalization (round3 4.4)', () => {
+  it('normalizes backslashes to forward slashes for display', () => {
+    expect(normalizeDisplayPath('D:\\work\\repos\\sebas')).toBe('D:/work/repos/sebas')
+    expect(normalizeDisplayPath('/home/me/alpha')).toBe('/home/me/alpha')
+    expect(normalizeDisplayPath('already /mixed\\path')).toBe('already /mixed/path')
+    expect(normalizeDisplayPath('')).toBe('')
+  })
+
+  it('folder-picker fills the add-project input with the normalized path', async () => {
+    mockOf(apiMock.fsBrowseDirs).mockResolvedValue({ entries: [], root: 'D:/work' })
+    const el = await mount()
+    ;(el as any).addDialogOpen = true
+    await (el as any).updateComplete
+    const picker = el.shadowRoot!.querySelector('sebas-folder-picker')
+    expect(picker).toBeTruthy()
+    picker!.dispatchEvent(
+      new CustomEvent('folder-selected', { detail: { path: 'D:\\work\\repos\\sebas' } }),
+    )
+    await (el as any).updateComplete
+    // 填充值即展示值：反斜杠普通形归一为正斜杠，与服务端错误消息同词。
+    expect((el as any).addPath).toBe('D:/work/repos/sebas')
+    el.remove()
+  })
+
+  it('the already-registered server error is shown with normalized separators', async () => {
+    mockOf(apiMock.projects.add).mockRejectedValue(
+      new Error('项目已注册：D:\\work\\repos\\sebas'),
+    )
+    mockOf(apiMock.fsBrowseDirs).mockResolvedValue({ entries: [], root: 'D:/work' })
+    const el = await mount()
+    ;(el as any).addDialogOpen = true
+    ;(el as any).addPath = 'D:/work/repos/sebas'
+    await (el as any).updateComplete
+    await (el as any).submitAddProject()
+    await (el as any).updateComplete
+    expect((el as any).addError).toBe('项目已注册：D:/work/repos/sebas')
+    el.remove()
+  })
+})
+
+describe('creation establishes the read anchor (round3 3.1)', () => {
+  it('creating a session writes the local anchor at zero for the new key', async () => {
+    // 创建路径没有 rail 点击（服务端 set_focus 直达焦点），锚原本永远缺位，
+    // 无锚 = fully read——新会话之后的非聚焦新回复推不出未读徽章（QA 缺陷
+    // 3 根因）。创建成功即在本浏览器立锚（0 轮占位）。
+    mockOf(apiMock.createSession).mockResolvedValue({ key: 'oc_new' })
+    mockOf(apiMock.nodes).mockResolvedValue({
+      nodes: [{ id: 'local', status: 'online', local: true }],
+      remote_available: true,
+    })
+    const el = await mount()
+    ;(
+      el.shadowRoot!.querySelector('button[aria-label="New session in alpha"]') as HTMLButtonElement
+    ).click()
+    await el.updateComplete
+    ;(el as any).confirmNewSession(
+      new CustomEvent('dialog-confirm', {
+        detail: { agent: 'codex', model: null, mode: 'ask' },
+        bubbles: true,
+        composed: true,
+      }),
+    )
+    await new Promise((r) => setTimeout(r, 0))
+    expect(JSON.parse(localStorage.getItem('sebas:seen:oc_new')!)).toEqual({ anchor_count: 0 })
+    el.remove()
+  })
+})
+
+// ── fix-webui-qa-defects-round3 1.2/1.3：真实确认按钮穿过双层 guard 的集成 ──
+
+describe('in-flight creation guard through the real confirm button (round3 1.2/1.3)', () => {
+  beforeEach(() => {
+    // 本文件各 describe 自管 mock 生命周期：清掉先前用例留下的调用记录与
+    // 实现（含 Once 队列）——本组断言「恰好一次 POST」，计数必须从零起算。
+    mockOf(apiMock.createSession).mockReset()
+  })
+
+  async function openReadyDialog(): Promise<{
+    el: SebasProjectRail
+    dialog: HTMLElement & { busy: boolean; updateComplete: Promise<boolean> }
+    confirmButton: HTMLElement
+  }> {
+    // agent 目录就位：预选首个可达 agent → 确认钮可激活（目录不可得时确认
+    // 被 agent 门禁拦下，走不进本用例要压的 in-flight 路径）。
+    mockOf(apiMock.agents).mockResolvedValue({
+      agents: [{ id: 'claude', display: 'Claude Code', reachable: true }],
+    })
+    mockOf(apiMock.providers).mockResolvedValue({ providers: [] })
+    mockOf(apiMock.providerDefaults).mockResolvedValue({
+      default_provider: null,
+      default_model: null,
+    })
+    mockOf(apiMock.nodes).mockResolvedValue({
+      nodes: [{ id: 'local', status: 'online', local: true }],
+      remote_available: true,
+    })
+    const el = await mount()
+    ;(
+      el.shadowRoot!.querySelector('button[aria-label="New session in alpha"]') as HTMLButtonElement
+    ).click()
+    await el.updateComplete
+    const dialog = el.shadowRoot!.querySelector(
+      'sebas-new-session-dialog',
+    ) as unknown as HTMLElement & { busy: boolean; updateComplete: Promise<boolean> }
+    // loadAgents/loadCatalog 是 fire-and-forget：多拍冲刷到 agent 预选落位。
+    for (let i = 0; i < 4; i += 1) {
+      await dialog.updateComplete
+      await new Promise((r) => setTimeout(r, 0))
+    }
+    const confirmButton = dialog.shadowRoot!.querySelector(
+      '[data-testid="dialog-confirm"]',
+    ) as unknown as HTMLElement
+    expect(confirmButton.hasAttribute('disabled')).toBe(false)
+    return { el, dialog, confirmButton }
+  }
+
+  it('a double activation in flight issues exactly one POST; the dialog shows busy until it resolves', async () => {
+    // spec 场景 2 的集成半边：dialog 的 busy 属性来自 rail 的
+    // creatingSession，属性下传有一个渲染拍——同步连点两下时第二下仍会
+    // 穿过 dialog guard，第二道 rail 守卫（creatingSession）必须兜住。
+    let resolveCreate!: (v: { key: string }) => void
+    mockOf(apiMock.createSession).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveCreate = resolve
+        }),
+    )
+    const { el, dialog, confirmButton } = await openReadyDialog()
+
+    confirmButton.click()
+    confirmButton.click() // 在途（属性尚未下传）的第二击
+    await el.updateComplete
+    await dialog.updateComplete
+
+    expect(mockOf(apiMock.createSession)).toHaveBeenCalledTimes(1)
+    // busy 下传：对话框呈忙态（rail creatingSession → dialog.busy）。
+    // （round3 1.2 备选路径）确认控件是原生 button：忙态指示经 aria-busy。
+    expect(dialog.busy).toBe(true)
+    expect(confirmButton.hasAttribute('disabled')).toBe(true)
+    expect(confirmButton.getAttribute('aria-busy')).toBe('true')
+    expect(confirmButton.textContent).toContain('创建中')
+
+    // 请求落定（成功）：恰好这一次创建，对话框收起。
+    resolveCreate({ key: 'oc_new' })
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(mockOf(apiMock.createSession)).toHaveBeenCalledTimes(1)
+    expect(el.shadowRoot!.querySelector('sebas-new-session-dialog')).toBeNull()
+    el.remove()
+  })
+
+  it('busy releases with the failed request so the operator can retry in place', async () => {
+    // spec「busy state for the duration of the request」的收尾半边：忙态精确
+    // 覆盖在途窗口——请求以失败告终时必须随之解除，按钮恢复可激活，重试
+    // 就在对话框内完成。（忙态窗口要可观察，请求得先悬在在途再失败。）
+    let rejectCreate!: (e: Error) => void
+    mockOf(apiMock.createSession).mockImplementation(
+      () =>
+        new Promise((_, reject) => {
+          rejectCreate = reject
+        }),
+    )
+    const { el, dialog, confirmButton } = await openReadyDialog()
+
+    confirmButton.click()
+    await el.updateComplete
+    await dialog.updateComplete
+    expect(dialog.busy).toBe(true)
+
+    // 请求失败落定：忙态解除、按钮复活、错误就地呈现（既有用例钉文案，
+    // 这里钉忙态收尾）。
+    rejectCreate(new Error('HTTP 409: 已有会话'))
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    await dialog.updateComplete
+    expect(dialog.busy).toBe(false)
+    expect(confirmButton.hasAttribute('disabled')).toBe(false)
+    expect(confirmButton.hasAttribute('loading')).toBe(false)
+    expect(dialog.shadowRoot!.querySelector('[data-testid="dialog-error"]')).toBeTruthy()
+
+    // 原地重试成功 → 创建请求共两次、对话框收起。
+    mockOf(apiMock.createSession).mockResolvedValue({ key: 'oc_new' })
+    confirmButton.click()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(mockOf(apiMock.createSession)).toHaveBeenCalledTimes(2)
+    expect(el.shadowRoot!.querySelector('sebas-new-session-dialog')).toBeNull()
+    el.remove()
+  })
+})
+
+describe('unread badge journey after creation (round3 3.1)', () => {
+  it('a created session earns its badge from a later non-focused reply', async () => {
+    // 缺陷 3 的旅程级链路：创建立 0 锚 → 该会话在非聚焦下收到新回复帧 →
+    // rail 行冒出未读计数。创建半边与帧推导半边各有单测，这里钉它们的接缝。
+    mockOf(apiMock.createSession).mockResolvedValue({ key: 'oc_new' })
+    mockOf(apiMock.sessions).mockResolvedValue(
+      sessionList([row({ encoded_key: 'oc_new', project_id: 'proj-alpha', msg_count: 0 })]),
+    )
+    mockOf(apiMock.nodes).mockResolvedValue({
+      nodes: [{ id: 'local', status: 'online', local: true }],
+      remote_available: true,
+    })
+    const el = await mount()
+    ;(
+      el.shadowRoot!.querySelector('button[aria-label="New session in alpha"]') as HTMLButtonElement
+    ).click()
+    await el.updateComplete
+    ;(el as any).confirmNewSession(
+      new CustomEvent('dialog-confirm', {
+        detail: { agent: 'codex', model: null, mode: 'ask' },
+        bubbles: true,
+        composed: true,
+      }),
+    )
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+
+    // 创建成功：0 段占位锚 + 创建流强制展开 alpha 组，新会话行可见、无徽标。
+    const items = () => [...el.shadowRoot!.querySelectorAll('li.session-item')]
+    expect(items().length).toBe(1)
+    expect(items()[0]!.querySelector('[data-testid="session-unread"]')).toBeNull()
+
+    // 非聚焦新回复（帧带 msg_count 1）：锚 0 → 徽标 1，无需列表刷新。
+    wsMocks.emit({
+      type: 'session.updated',
+      session_id: 'oc_new',
+      status_slug: 'working',
+      turn_engaged: true,
+      msg_count: 1,
+      pending: [],
+    })
+    await el.updateComplete
+    const badge = items()[0]!.querySelector('[data-testid="session-unread"]')
+    expect(badge).toBeTruthy()
+    expect(badge!.textContent).toBe('1')
     el.remove()
   })
 })

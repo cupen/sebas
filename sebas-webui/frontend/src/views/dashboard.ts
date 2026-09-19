@@ -24,6 +24,8 @@ import { notify } from '../notify.js'
 import { modeBadgeLabel } from './mode-vocabulary.js'
 // fix-webui-qa-defects 7.3：终止通知的可读会话名与 rail 同源（回退链复用）。
 import { fullSessionLabel, RAIL_FOCUS_EVENT } from './project-rail.js'
+// （round3 3.1）焦点处立读锚：详情到达时为本浏览器缺锚的聚焦会话立锚。
+import { readAnchorCount, writeFocusAnchor } from './unread-cursor.js'
 
 /**
  * 聚焦会话反投影项目上下文的窗口级事件（fix-webui-approval-restore-and-
@@ -831,17 +833,28 @@ export class SebasDashboard extends LitElement {
    * 新建落地、恢复聚焦三条链路都经 summary 刷新收敛到这里。幂等：同一
    * 聚焦 key 只投影一次；项目未命中/与当前选中一致时不派发（项目行点击
    * 的独立选择语义不受影响）。
+   *
+   * （round3 4.2）深链/刷新直达 `/sessions/…` 的归属来源补全：summary 的
+   * 焦点指针要等 detail 读回（读即设服务端焦点）才落位，此前 active_session
+   * 为空、投影只能等下一次无关刷新——主区项目标题整段窗口挂着「未选择
+   * 项目」。归属解析补 focusedDetail 侧的等价来源（detail 的 project_id
+   * 同词表），并在 detail 到达后再核对一拍（loadFocused）。
    */
   private lastFollowedFocusKey: string | null = null
   private followFocusedProject(): void {
-    const key = this.data?.active_session_key ?? null
+    const key = this.effectiveFocusKey()
     if (key === null || key === this.lastFollowedFocusKey) return
-    const path = focusedProjectPath(
-      this.projects,
-      this.data?.active_session?.project_id ?? null,
-    )
-    // 未命中也记账：同一会话反复刷新不再重复解析（项目列表后到时，下一次
-    // 聚焦变化或 refetch 会重试）。
+    // 归属解析：summary 优先（会话无项目 = 确认 null），detail 兜底（深链
+    // 窗口里 summary 还没跟上）；两处都没有 = 数据未到，不记账，下次再试。
+    const fromSummary =
+      this.data?.active_session_key === key
+        ? (this.data.active_session?.project_id ?? null)
+        : undefined
+    const fromDetail =
+      this.focusedDetail?.encoded_key === key ? (this.focusedDetail.project_id ?? null) : undefined
+    const projectId = fromSummary ?? fromDetail
+    if (projectId === undefined) return
+    const path = focusedProjectPath(this.projects, projectId)
     this.lastFollowedFocusKey = key
     if (path === null || path === this.selectedPath) return
     window.dispatchEvent(
@@ -1277,6 +1290,7 @@ export class SebasDashboard extends LitElement {
           <div class="composer-area">
             <sebas-review-cards
               .sessionKey=${focusKey}
+              .sessionPhase=${this.focusedDetail?.status_slug ?? d.active_session?.status_slug ?? null}
               @review-pending-changed=${this.onReviewPendingChanged}
             ></sebas-review-cards>
             <sebas-pending-stack
@@ -1510,6 +1524,19 @@ export class SebasDashboard extends LitElement {
         this.sessionEntries.set(d.encoded_key, merged)
         this.focusedDetail = { ...d, entries: merged }
         this.focusedUnavailable = false
+        // （round3 3.1）焦点处立读锚（一次性、按锚推导的另一半）：rail 点击
+        // 之外走进焦点的会话（创建 set_focus、深链、恢复聚焦）此前永远没有
+        // 本地锚，而无锚会话按 spec 读作 fully-read——它之后的非聚焦新回复
+        // 推不出未读徽章。详情到达且文档可见才以真实段数立锚（后台 tab 里
+        // 的装载不算「看着」——锚留空，回到页面的下一次详情装载再立）；
+        // 锚已存在绝不回写（流式/隐藏 tab 的推进语义归 transcript，单调由
+        // 游标模块保证）。
+        if (document.visibilityState === 'visible' && readAnchorCount(d.encoded_key) === null) {
+          writeFocusAnchor(d.encoded_key, d.msg_count ?? 0)
+        }
+        // （round3 4.2）深链窗口的归属核对：detail 到达时 summary 的焦点
+        // 指针往往还没落位，这里补一拍投影（幂等）。
+        this.followFocusedProject()
       })
       .catch(() => {
         if (seq !== this.fetchSeq) return

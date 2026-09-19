@@ -1,7 +1,15 @@
 /**
- * Review cards: the operator surface for gated tool calls. Subscribes to
- * the shared WebSocket; every `permission.requested` frame becomes a card
- * keyed by `request_id` (duplicate frames never create a second card).
+ * Review cards: the operator surface for gated tool calls. Rendering has a
+ * SINGLE store entry (round3 2.2, design decision 3): both the read model
+ * (`GET /api/sessions/{key}/approvals`) and the WS `permission.requested`
+ * push normalize their rows into `mergeRows` — the push only writes the
+ * store, the store is the only thing that renders. Merging is keyed by
+ * `request_id` (duplicate frames never create a second card) and decided
+ * ids are tombstoned (a late push or stale read-model row cannot resurrect
+ * a settled card). While the phase feed says the session is `waiting` but
+ * the store holds no live card (a lost push), the read model is re-pulled
+ * through the same entry so the card recovers without a reload.
+ *
  * Answering POSTs the decision to `/api/permissions/{request_id}/answer` —
  * success removes the card, a 404 marks it expired (the pending request is
  * gone server-side: answered, timed out or unknown), any other error keeps
@@ -39,10 +47,30 @@ interface ReviewCard {
   escalateReason: string
 }
 
+/**
+ * 进入 store 的审批行（round3 2.2）：推送帧与读模型行各自的字段形状归一
+ * 到这里（reason 缺省空串），合并语义只有 mergeRows 一处。
+ */
+interface ApprovalRow {
+  request_id: string
+  session_id: string
+  tool_name: string
+  args: unknown
+  reason: string
+}
+
 @customElement('sebas-review-cards')
 export class SebasReviewCards extends LitElement {
   /** Encoded session key to filter on; null renders every request. */
   @property({ attribute: false }) sessionKey: string | null = null
+
+  /**
+   * （round3 2.2）聚焦会话的相位词（dashboard 从相位帧/详情下传）。帧说
+   * 「waiting」（在等审批）而 store 里没有待决卡 = 推送半边丢了帧——经
+   * 读模型重取一次（同一 mergeRows 入口）就地补卡，不必等 reload。只在
+   * 相位变化时触发；有卡或读模型为空都无变化，幂等。
+   */
+  @property({ attribute: false }) sessionPhase: string | null = null
 
   @state() private cards: ReviewCard[] = []
   private unsubscribe?: () => void
@@ -144,28 +172,19 @@ export class SebasReviewCards extends LitElement {
     this.unsubscribe = sharedWs.subscribe((event) => {
       if (event.type !== 'permission.requested') return
       if (this.sessionKey && event.session_id !== this.sessionKey) return
-      // Dedup by request_id: the frame is broadcast and can repeat after a
-      // reconnect — one card per request, ever (an expired card stays in
-      // the list precisely so a late repeat cannot resurrect it). A frame
-      // for an id rebuilt from the read model below merges into the same
-      // card instead of duplicating it. Decided ids are tombstoned so a
-      // late broadcast can never resurrect a settled card
-      // （fix-webui-approval-restore-and-session-identity 1.3）.
-      if (this.decided.has(event.request_id)) return
-      if (this.cards.some((c) => c.request_id === event.request_id)) return
-      this.cards = [
-        ...this.cards,
+      // （round3 2.2）推送只写 store：帧归一为 ApprovalRow 经 mergeRows
+      // 单一入口合并——与读模型重建同一渲染入口，不再有与重建并行的独立
+      // 推送渲染分支。mergeRows 负责 request_id 去重与已决墓碑（广播可
+      // 重放，一张卡只建一次；过期卡留在列表里，迟到重放无法复活）。
+      this.mergeRows([
         {
           request_id: event.request_id,
           session_id: event.session_id,
           tool_name: event.tool_name,
           args: event.args,
           reason: event.reason,
-          state: 'pending',
-          error: '',
-          escalateReason: '',
         },
-      ]
+      ])
     })
     // fix-webui-approval-restore-and-session-identity 1.3：组件挂载时
     // sessionKey 已就绪（深链/刷新直进详情）同样重建一次。
@@ -193,12 +212,47 @@ export class SebasReviewCards extends LitElement {
         void this.pullApprovals(key)
       }
     }
+    // （round3 2.2）相位帧对账：帧在说「waiting」而 store 无待决卡 = 推送
+    // 丢帧，经读模型（同一入口）补齐——rail 已亮「等待」而审查卡缺席的
+    // 空悬态就此收敛，不再依赖 reload。
+    if (changed.has('sessionPhase')) this.reconcileWithPhase()
   }
 
   /**
-   * 读模型重建（1.3）：拉取当前泊车审批并按 `request_id` 合并（已有的卡
-   * 不重复建）。失败静默降级——读模型不可得时审批面仍由推送通道承载。
-   * 代际核对：响应回来时 sessionKey 已切换则丢弃。
+   * （round3 2.2）store → 渲染的唯一入口：推送帧与读模型行都归一为
+   * ApprovalRow 经这里合并进 cards。已决墓碑优先（迟到推送/陈旧读模型行
+   * 都不复活卡片），request_id 去重（重建与推送竞速也只建一张卡）。
+   */
+  private mergeRows(rows: ApprovalRow[]): void {
+    const fresh = rows.filter(
+      (r) =>
+        !this.decided.has(r.request_id) &&
+        !this.cards.some((c) => c.request_id === r.request_id),
+    )
+    if (fresh.length === 0) return
+    this.cards = [
+      ...this.cards,
+      ...fresh.map((r) => ({
+        ...r,
+        state: 'pending' as const,
+        error: '',
+        escalateReason: '',
+      })),
+    ]
+  }
+
+  /** 相位帧 → store 对账（round3 2.2）：waiting 且无待决卡才重取读模型。 */
+  private reconcileWithPhase(): void {
+    if (this.sessionPhase !== 'waiting' || !this.sessionKey) return
+    if (this.cards.some((c) => c.state !== 'expired')) return
+    const key = this.sessionKey
+    void this.pullApprovals(key)
+  }
+
+  /**
+   * 读模型重建（1.3 + round3 2.2）：拉取当前泊车审批，行归一为 ApprovalRow
+   * 后经 mergeRows 单一入口合并。失败静默降级——读模型不可得时审批面仍由
+   * 推送通道承载。代际核对：响应回来时 sessionKey 已切换则丢弃。
    */
   private pullSeq = 0
   private async pullApprovals(sessionKey: string): Promise<void> {
@@ -210,25 +264,15 @@ export class SebasReviewCards extends LitElement {
       return
     }
     if (seq !== this.pullSeq || this.sessionKey !== sessionKey) return
-    const fresh = approvals.filter(
-      (a) =>
-        !this.decided.has(a.request_id) &&
-        !this.cards.some((c) => c.request_id === a.request_id),
-    )
-    if (fresh.length === 0) return
-    this.cards = [
-      ...this.cards,
-      ...fresh.map((a) => ({
+    this.mergeRows(
+      approvals.map((a) => ({
         request_id: a.request_id,
         session_id: sessionKey,
         tool_name: a.tool_name,
         args: a.args,
         reason: '',
-        state: 'pending' as const,
-        error: '',
-        escalateReason: '',
       })),
-    ]
+    )
   }
 
   /** 已决 request_id 墓碑：批复成功后到达的同 id 推送/读模型行不再复活卡片。 */

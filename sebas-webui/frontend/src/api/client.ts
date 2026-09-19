@@ -362,6 +362,12 @@ export interface SessionDetail {
   agent_kind: string | null
   /** （wire-webui-sebas-agent-e2e）会话所属执行体（"acp"/"native"）；null = 未打标。 */
   backend?: string | null
+  /**
+   * （fix-webui-qa-defects-round3 4.2）绑定项目的稳定 id——与 summary 行的
+   * `project_id` 同词表（detail 投影本就下发，接口此前漏声明）。深链窗口
+   * 里 summary 的焦点指针未落位时，归属反投影从 detail 取它。
+   */
+  project_id?: string | null
   /** （workbench-turn-queue 6.1）待生效提交全量视图（投递序）。 */
   pending: PendingSubmission[]
   /** （add-remote-execution-node 8.x）远端节点/mode/悬空审批呈现；null = 本机。 */

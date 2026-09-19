@@ -1117,6 +1117,57 @@ async fn projects_branch_404_for_unregistered_path() {
 }
 
 #[tokio::test]
+async fn detail_projection_carries_the_owning_project_id() {
+    let (router, _rx, app) = fixture().await;
+    let _env = isolated_projects().await;
+
+    // 注册项目并创建从属会话，然后读详情：detail 投影必须携带归属项目的
+    // 稳定 id。SPA 深链/刷新直达 `/sessions/…` 的主区项目标题绑定（读
+    // detail 才设服务端焦点、summary 焦点指针滞后）与焦点处立读锚都从
+    // 这个字段解析归属——wire 漏键即前端深链窗口的「未选择项目」回归。
+    let project_id = temp_project_id(&app, "detail-proj").await;
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "prompt": "hello",
+                        "project_id": project_id,
+                        "agent": "claude",
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let v: serde_json::Value = serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+    let key_str = v["key"].as_str().expect("key string").to_string();
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/sessions/{key_str}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+    assert_eq!(
+        v["project_id"].as_str(),
+        Some(project_id.as_str()),
+        "session detail must carry the owning project id"
+    );
+}
+
+#[tokio::test]
 async fn create_session_with_project_dir_binds_to_path() {
     let (router, _rx, app) = fixture().await;
     let _env = isolated_projects().await;

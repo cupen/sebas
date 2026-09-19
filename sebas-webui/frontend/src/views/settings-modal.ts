@@ -1216,6 +1216,11 @@ export class SebasSettingsModal extends LitElement {
       white-space: nowrap;
       border: 0;
     }
+    /* （round3 4.4）Services 页的 sebas run 内联命令名作为整体不断行：
+         窄面板里被折成「sebas / run」两行后不可复制也不可读。 */
+    .run-cmd {
+      white-space: nowrap;
+    }
   `,
   ]
 
@@ -2450,8 +2455,8 @@ export class SebasSettingsModal extends LitElement {
     if (this.adapterOk !== true)
       return html`
         <div class="callout services-banner" role="status">
-          无 watchdog 控制面 — 受管服务列表不可用。启用请运行 <code>sebas run</code>（watchdog
-          形态）后再打开此页。
+          无 watchdog 控制面 — 受管服务列表不可用。启用请运行
+          <code class="run-cmd">sebas run</code>（watchdog 形态）后再打开此页。
         </div>
       `
     return html`
@@ -2785,7 +2790,7 @@ export class SebasSettingsModal extends LitElement {
         </div>
         <div class="kv">
           <dt>Rust toolchain</dt>
-          <dd>${a.rustc_version}</dd>
+          <dd>${a.rustc_version || '未知'}</dd>
         </div>
         <div class="kv">
           <dt>Router listen</dt>
