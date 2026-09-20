@@ -28,10 +28,17 @@ not-yet-started submission), `POST /api/sessions/{key}/pending/{pending_id}/move
 `to_index`), `GET /api/summary`, `POST /api/permissions/{request_id}/answer`,
 `GET /api/settings`, `GET /api/about`, `POST /api/sessions/{key}/model`
 (mid-session model switch), `POST /api/sessions/{key}/mode` (mid-session
-permission-mode switch), the agent catalog `GET /api/agents` (each configured
+permission-mode switch), `POST /api/sessions/{key}/activate` (start the
+child in the background for a placeholder/dormant session), `GET
+/api/sessions/{key}/approvals` (approval read model for restoring pending
+review cards), `POST /api/sessions/{key}/label` (set the operator label),
+the agent catalog `GET /api/agents` (each configured
 agent plus the built-in native kernel, with id, display name, reachability,
-optional cause and version), `GET /api/provider-presets` (read-only preset
-table), `GET/POST /api/auth/login`, `GET /api/auth/me`, `POST
+optional cause and version), `GET /api/nodes` (remote execution node list),
+the skills surface `GET/POST /api/skills` (store listing; sync trigger) and
+`GET/DELETE /api/skills/{name}`, `GET /api/provider-presets` (read-only preset
+table), `POST /api/auth/login` (the login page itself is rendered by the SPA),
+`GET /api/auth/me`, `POST
 /api/auth/logout`, the project APIs `GET /api/projects` and `POST
 /api/projects` (register), `POST /api/projects/reorder`, `POST
 /api/projects/{id}/remove`, `GET /api/projects/{id}/branch`, `GET
@@ -40,13 +47,15 @@ the workspace root — the listing starts at the workspace root, and an
 explicit `root` query parameter is honoured only inside it), `POST
 /api/sessions/{key}/archive` (archive a session), `POST
 /api/sessions/{key}/restore` (restore an archived session), `GET /api/archive`
-(list archived sessions with expiry info), and `GET /ws` (WebSocket session
+(list archived sessions with expiry info), `GET /api/archive/{key}` (one
+archived session's snapshot), and `GET /ws` (WebSocket session
 stream). Project and session mutations are POST-only and carry the same
 posture as the existing session APIs. The provider management cluster under
 `/api/*` (`GET/POST /api/providers`, `PUT/DELETE /api/providers/{name}`,
-`POST /api/providers/{name}/probe`, `GET /api/provider-presets`, `GET
-/api/provider-defaults`, `GET/POST/DELETE /api/model-aliases`, `DELETE
-/api/model-aliases/{alias}`) SHALL be fulfilled by the WebUI backend from the
+`POST /api/providers/{name}/probe`, `GET /api/provider-defaults`, `POST
+/api/model-aliases` (create/update one alias), `PUT/DELETE
+/api/model-aliases/{alias}`; the alias table is read through the providers
+projection rather than a dedicated list endpoint) SHALL be fulfilled by the WebUI backend from the
 core-owned provider store over the core channel, never by proxying the router
 process. The retired `/router/api/*` namespace (including `POST
 /router/api/reload`) and the retired `GET /api/router` endpoint SHALL NOT be
@@ -469,14 +478,20 @@ remain as display metadata.
 
 ### Requirement: Session dashboard and focus semantics
 
-The cross-project session list SHALL render one row per known session (encoded key, chat and thread ids, session id, status, phase, relative last-active), active-first, and SHALL be reachable from the workbench rather than from primary navigation. The session list SHALL exclude archived sessions — those are served by `GET /api/archive`. Selecting a session in the rail, opening its `/sessions/{key}` deep link, or posting `/switch` SHALL focus that session in place — a display pointer only that never changes message routing — and `switch` returns the redirect target or 404 for an unknown key. There SHALL be no separate per-session detail surface: the workbench renders the focused session. Switching the displayed project SHALL NOT alter the focused session pointer. The rail's current-session marker SHALL be derived from the focused-session pointer, not from the browser location.
+The cross-project session list SHALL render one row per known session (encoded key, operator label or first-message preview, session id, status slug, relative last-active), active-first, and SHALL be reachable from the workbench rather than from primary navigation. The session list SHALL exclude archived sessions — those are served by `GET /api/archive`. Selecting a session in the rail, opening its `/sessions/{key}` deep link, or posting `/switch` SHALL focus that session in place — a display pointer only that never changes message routing — and `switch` returns the redirect target or 404 for an unknown key. There SHALL be no separate per-session detail surface: the workbench renders the focused session. Switching the displayed project SHALL NOT alter the focused session pointer. The rail's current-session marker SHALL be derived from the focused-session pointer, not from the browser location.
 
 The focused-session pointer SHALL be the single source of truth for the workbench composer's follow-up vs creation mode: with a focused session the composer targets that session; without one the composer is in creation mode. Any path that focuses a session (switch endpoint, deep-link visit, placeholder creation) SHALL leave the composer able to submit a follow-up message to that session without further operator action.
+
+`GET /api/summary` SHALL NOT embed the focused session's full transcript; conversation content SHALL be fetched via the per-session detail endpoint with an incremental cursor. The dashboard SHALL rate-limit and dispatch refetches: lightweight events (session metadata, presence) refresh lists, turn content events update only the focused conversation via its cursor — an operator's browser SHALL NOT issue a full refetch storm (multi-request × whole-transcript responses) per streamed frame.
+
+前端 SHALL 在会话重建或 core 重启后作废本地增量游标：当快照响应携带的世代/起始位置与本地游标矛盾（本地游标大于服务端当前日志长度，或会话标识世代变化）时，客户端 SHALL 丢弃本地游标与缓冲、重取全量快照，不得因陈旧游标永久拒收增量。
+
+对话视图 SHALL 在回合进行中自动跟随流式输出：当操作者已聚焦该会话并处于贴底跟随状态时，新到内容 SHALL 持续滚动可见；未读缝的显隐 SHALL NOT 重建整个对话 DOM（既有条目的展开态 SHALL 保留）。流式期间渲染 SHALL NOT 对未变化的历史条目做整块重解析——正文增量 SHALL 以增量方式合并进当前条目。
 
 #### Scenario: focus is cosmetic
 
 - **WHEN** the user focuses session B in the WebUI while session A is active
-- **THEN** subsequent Feishu messages still route per the router's own session mapping, unchanged
+- **THEN** subsequent Feishu messages still route per the core's own session mapping, unchanged
 
 #### Scenario: switch unknown key
 
@@ -503,18 +518,44 @@ The focused-session pointer SHALL be the single source of truth for the workbenc
 - **WHEN** a session becomes focused through any supported path
 - **THEN** the workbench composer's next submission is delivered to that session as a follow-up message
 
+#### Scenario: summary stays small while transcript is large
+
+- **WHEN** the focused session has a multi-megabyte transcript and a turn is streaming
+- **THEN** `GET /api/summary` responses remain in the kilobyte range; conversation content flows only through the session detail endpoint with the cursor
+
+#### Scenario: streamed frame does not trigger full refetch
+
+- **WHEN** a `turn.append` frame arrives
+- **THEN** the dashboard updates the focused conversation from the frame (or a cursor-limited detail fetch), without re-fetching nodes, projects, sessions, and the full summary
+
+#### Scenario: stale cursor after core restart converges
+
+- **WHEN** the core restarts and the rebuilt session log assigns positions from zero while the browser holds an old high-water cursor
+- **THEN** the browser detects the contradiction, resets its cursor, refetches the full snapshot, and subsequent increments apply normally
+
+#### Scenario: auto-scroll follows streaming at the bottom
+
+- **WHEN** the operator is focused and pinned to the bottom while output streams
+- **THEN** new content stays in view without manual scrolling
+
+#### Scenario: seam toggle preserves DOM state
+
+- **WHEN** the unread seam appears or disappears during streaming
+- **THEN** previously rendered entries are not rebuilt from scratch and expanded thinking/tool items keep their open state
+
 ### Requirement: Web session close
 
 `POST /api/sessions/{key}/close` SHALL kill the ACP child when the mapping
 is active, drop the mapping and card state, clear the chat-level permission
 allowlist and reply target, and clear the focused-session pointer if it
 pointed at the closed session. Dormant mappings drop without a kill. Unknown
-keys return 404. Confirmation is client-side only (detail-page banner);
-dashboard close buttons act immediately.
+keys return 404. For an active session the workbench asks for confirmation
+inline (the rail row's overflow menu) before sending the close; the close
+endpoint itself performs no server-side confirmation.
 
 #### Scenario: close active session
 
-- **WHEN** the user closes an active session from the detail page
+- **WHEN** the user confirms closing an active session from the workbench
 - **THEN** the child process is terminated, the mapping is removed, and the
   permission allowlist for that chat is cleared
 
@@ -592,7 +633,7 @@ The WebUI crate SHALL access sessions through a backend abstraction rather than 
 #### Scenario: approval_answer end-to-end (detached topology)
 
 - **WHEN** 同一流程跑在双进程沙箱（独立 core + 独立 webui，harden 5.4 的可复用 harness）：fake-claude 触发 gated tool call → channel ApprovalRequested 帧跨进程到达 webui → review-card → answer → ApprovalAnswer 回 core → acp 子进程继续
-- **THEN** allow / deny 各一条旅程全绿；单进程形态的同名用例保持全绿（两种拓扑不互相代替）。本 scenario 阻塞于 `wire-webui-sebas-agent-e2e` 任务 1.3（审批通道接线）+ harden 5.4 harness 落地，见 tasks B 批
+- **THEN** allow / deny 各一条旅程全绿；单进程形态的同名用例保持全绿（两种拓扑不互相代替）
 
 #### Scenario: approval_answer rejects unknown request_id
 
@@ -704,7 +745,9 @@ service back to `Restarting` and attempt a new spawn.
 
 ### Requirement: Archive persistence
 
-The archive registry SHALL persist to its own file, separate from the project registry and the router state file. Each entry SHALL record the session key, the original project path, the session label, the archive timestamp, and the retention deadline.
+The archive registry SHALL persist to its own file, separate from the project registry and the core state store. Each entry SHALL record the session key, the original project path, the session label, the archive timestamp, and the retention deadline.
+
+The archive file's location SHALL resolve in the following priority order: an explicit `SEBAS_ARCHIVE_PATH` override; otherwise `archive.json` in the state database's directory (the directory of `SEBAS_STATE_DB`), so that deployments which pin the state directory — sandboxes in particular — pin the archive with it. The legacy default (`archive.json` directly under the home `.sebas` directory) SHALL be honored as a migration source only: when the resolved location holds no archive file and the legacy location does, the WebUI SHALL move the legacy file to the resolved location at startup; when the move fails, the WebUI SHALL warn and continue reading from the legacy location rather than silently starting empty. A migration SHALL be announced through the WebUI's notification channel.
 
 #### Scenario: archive survives restart
 
@@ -716,9 +759,57 @@ The archive registry SHALL persist to its own file, separate from the project re
 - **WHEN** the WebUI starts and an archived session has passed its retention deadline
 - **THEN** that entry is removed from the archive file and the session is no longer listed
 
+#### Scenario: pinned state directory pins the archive
+
+- **WHEN** the WebUI runs with `SEBAS_STATE_DB` pointing inside a sandbox directory and no `SEBAS_ARCHIVE_PATH` is set
+- **THEN** the archive file is read and written inside that same sandbox directory, and no path under the real home directory is read or written
+
+#### Scenario: explicit override wins
+
+- **WHEN** `SEBAS_ARCHIVE_PATH` is set
+- **THEN** that exact file is used regardless of the state database location
+
+#### Scenario: legacy archive migrates forward
+
+- **WHEN** the WebUI starts with no archive file at the resolved location and a legacy archive file exists under the home `.sebas` directory
+- **THEN** the legacy file is moved to the resolved location, its entries are listed as before, and a notification announces the migration
+
+#### Scenario: failed migration degrades read-only rather than empty
+
+- **WHEN** the legacy move fails at startup
+- **THEN** the WebUI warns, continues to serve the legacy entries, and does not start an empty archive over them
+
+### Requirement: Focused session termination is reflected consistently
+
+When a session the operator is focused on is terminated and removed by the
+backend — child process crash, dispatch reaping, or any other removal — the
+focused view SHALL leave the Working state in the same update cycle: it SHALL
+NOT continue rendering a live session with an active stop control once the
+backend no longer knows the session. The termination SHALL be announced
+through the notification channel with the session label and the observed
+cause (for a child crash, at minimum that the agent process exited
+unexpectedly), and the transcript already received SHALL remain viewable. The
+rail, the focused view, and the backend session list SHALL agree on the
+session's existence.
+
+#### Scenario: child crash ends the Working state
+
+- **WHEN** the focused session's agent child crashes after emitting partial
+  output and the backend removes the session
+- **THEN** the focused view stops presenting Working and its stop control, a
+  notification names the crashed session, the received transcript stays
+  readable, and the rail no longer lists the session
+
+#### Scenario: rail and focused view agree with the backend
+
+- **WHEN** a session is removed by the backend for any reason
+- **THEN** within the same update cycle the rail drops the row and a focused
+  view of that session either closes or presents the read-only remnant — it
+  never shows a live state the backend does not confirm
+
 ### Requirement: Configurable archive retention
 
-The WebUI config SHALL support an `archive_retention_days` field under the `[webui]` section, with a default of 30 days. The expiry check SHALL run at WebUI startup and on every `GET /api/archive` or `GET /api/sessions` request.
+The WebUI config SHALL support an `archive_retention_days` field under the `[service.webui]` section (the WebUI 配置的现唯一归属地；无独立 `[webui]` 顶层节), with a default of 30 days. The expiry check SHALL run at WebUI startup and on every `GET /api/archive` or `GET /api/sessions` request.
 
 #### Scenario: default retention
 
@@ -727,7 +818,7 @@ The WebUI config SHALL support an `archive_retention_days` field under the `[web
 
 #### Scenario: custom retention
 
-- **WHEN** `[webui] archive_retention_days = 60` is set
+- **WHEN** `[service.webui] archive_retention_days = 60` is set
 - **THEN** archived sessions are retained for 60 days
 
 ### Requirement: Provider management page
@@ -837,36 +928,6 @@ control of the provider editor SHALL NOT close the editor.
 - **WHEN** the user edits a provider and submits with the API key field left
   empty
 - **THEN** the stored key is unchanged and no key material was rendered
-
-### Requirement: Provider status parity across deployment forms
-
-The WebUI's provider-derived surfaces (`GET /api/settings` 的 gateway 段、
-`GET /api/gateway`、`GET /api/about` 的 provider 计数，及 composer 的
-provider 标签）SHALL 在 `run --webui` 与 `sebas webui` 两种部署形态下，对同一
-配置呈现一致且真实的 provider 状态。detached 形态 SHALL NOT 以空占位
-（`GatewayInfo` 缺省值）作为最终数据源：provider 列表 SHALL 来自 webui 可达的
-provider 真源（状态库），gateway 静态事实（listen、debug、has_auth）SHALL
-来自配置解析。当 provider 真源不可用时，响应 SHALL 如实标注不可用，而不是
-报告"未配置 provider"。
-
-#### Scenario: detached 与 in-process 的 provider 标签一致
-
-- **WHEN** 同一份含已注册 provider 的配置分别以 `run --webui` 与
-  `sebas webui`（core 经通道在跑）启动，浏览器打开工作台 composer
-- **THEN** 两者的 provider 标签显示相同的 provider 名，而非 detached 侧显示
-  "no provider configured"
-
-#### Scenario: detached 反映运行期 provider 变更
-
-- **WHEN** 操作员经 gateway admin API 新增或改名 provider 后刷新 detached
-  WebUI 的 settings
-- **THEN** 响应中的 provider 集合反映该变更，无需重启 webui 进程
-
-#### Scenario: provider 真源不可用时如实上报
-
-- **WHEN** detached webui 无法从状态库读取 provider 数据
-- **THEN** `/api/settings` 的 gateway 段携带可辨识的"不可用"指示，而不是把空
-  集合冒充"未配置"
 
 ### Requirement: Honest session rejection causes
 
@@ -1000,6 +1061,58 @@ app-shell SHALL 提供全局「核心不可达」fatal 通知，其状态由 WS 
 
 - **WHEN** 鉴权启用且操作者处于登录页或首启设置页时 core 不可达
 - **THEN** 登录 / 设置流程照常可交互，不出现工作台锁定遮罩
+
+### Requirement: Directory listing omits system directories
+
+`GET /api/fs/browse-dirs` SHALL NOT list child directories that resolve onto the built-in system-directory denylist. The filter is a coarse UX filter for the picker tree; authoritative enforcement remains at project registration. Non-denylisted entries SHALL be unaffected, and the round-trip contract (an echoed `path` is accepted verbatim as a later request) SHALL continue to hold.
+
+#### Scenario: denylisted child is not listed
+
+- **WHEN** a directory listing would contain a child directory that resolves onto the built-in denylist (for example browsing a workspace root of `/`, which contains `/usr` and `/etc`)
+- **THEN** those children are absent from the response entries
+
+#### Scenario: other entries and the round-trip are unaffected
+
+- **WHEN** a directory listing contains only non-denylisted subdirectories
+- **THEN** all of them are listed as before, and joining a child name onto the echoed `path` resolves to that child on a subsequent request
+
+### Requirement: Project registration rejects system directories
+
+Local project registration (`POST /api/projects`) SHALL reject a submitted path that resolves onto a built-in system directory with a 400 error naming the submitted path (never the server-resolved form), and no project SHALL be created. The comparison SHALL run on the resolved real path — so `..` segments, path aliases, and symlinks pointing at a denylisted directory are caught — and SHALL be an exact match on the directory itself: a subdirectory of a denylisted directory remains registrable subject to the workspace-root containment rules. On Windows the comparison SHALL be case-insensitive, and drive roots (`C:\`, `D:\`, …) SHALL be matched by pattern rather than enumeration. The built-in denylist SHALL cover, on Unix: `/`, `/bin`, `/sbin`, `/boot`, `/dev`, `/etc`, `/lib`, `/lib32`, `/lib64`, `/libx32`, `/proc`, `/sys`, `/usr`, `/var`, `/run`, `/root`, `/home`, `/tmp` — and deliberately not `/opt`, `/srv`, `/mnt`, `/media`; on Windows: drive roots, `C:\Windows`, `C:\Program Files`, `C:\Program Files (x86)`, `C:\ProgramData`, `C:\Users`, `System Volume Information`, and `$Recycle.Bin`. The denylist is built-in and fixed; no configuration can extend or trim it. Both sides of the comparison SHALL be resolved before matching, so platform directory aliases (for example macOS `/tmp` → `/private/tmp`) hit the list. The denylist judgement SHALL run after the workspace-root containment judgement, which keeps its existing precedence and error.
+
+#### Scenario: system directory itself is rejected
+
+- **WHEN** the workspace root is `/` and `POST /api/projects` is called with path `/usr`
+- **THEN** the response is 400 naming `/usr` as a system directory, and no project is registered
+
+#### Scenario: a subdirectory of a denylisted directory stays registrable
+
+- **WHEN** the workspace root is `/` and `POST /api/projects` is called with path `/home/user/code`
+- **THEN** the project registers as before — only the denylisted directory itself is refused
+
+#### Scenario: alias and traversal resolve before the comparison
+
+- **WHEN** a submitted path reaches a denylisted directory through `..` segments, a filesystem alias, or a symlink inside the workspace root
+- **THEN** the registration is rejected exactly as if the system directory had been named directly
+
+#### Scenario: Windows comparison is case-insensitive and covers drive roots
+
+- **WHEN** on Windows `POST /api/projects` is called with `c:\WINDOWS` or with a drive root such as `D:\`
+- **THEN** the response is 400 naming the submitted path, and no project is registered
+
+#### Scenario: out-of-scope precedence is unchanged
+
+- **WHEN** a submitted path lies outside the workspace root and also happens to be a system directory
+- **THEN** the out-of-scope rejection is returned — the containment judgement keeps precedence
+
+### Requirement: Workspace root resolving onto a system directory warns at startup
+
+When the resolved workspace root is itself a built-in system directory, the assembling process SHALL log a startup warning naming the resolved root and SHALL start normally — the registration denylist is the safety net, so a too-wide root degrades to denylist-enforced operation rather than misbehaving silently.
+
+#### Scenario: root at a system directory starts with a warning
+
+- **WHEN** the workspace root resolves to `/` (or another built-in system directory) and the WebUI assembles
+- **THEN** a warning naming the resolved root is logged at startup, and the server starts and serves normally
 
 ### Requirement: 项目注册降级如实提示
 
@@ -1238,7 +1351,7 @@ entries a client holding position N has not seen.
 
 ### Requirement: 会话创建携带 mode
 
-`POST /api/sessions` SHALL 接受可选 `mode` 字段，词汇为 `ask / edit / allow / auto`（与节点链路 `SessionMode` 一致）。缺省或 null 表示"agent 默认行为"，wire 上不携带 mode。未知词汇 SHALL 返回 400 指出非法值，SHALL NOT 静默降级为默认。`mode` 与 `agent`/`model` 一样在创建时记入会话映射；0-turn 占位会话 SHALL 记住请求的 mode，并在首条消息触发 spawn 时应用。远端节点上的 0-turn 占位仍按既有规则如实拒绝。
+`POST /api/sessions` SHALL 接受 `mode` 字段，词汇为 `ask / edit / allow / auto`（与节点链路 `SessionMode` 一致）。创建对话框预填 `ask` 并在 wire 上无条件发送 mode 字段——不存在"缺省 = 省略字段"的空路径；协议层仍容忍缺省/null（按 `ask` 以外的执行体默认处理），但 WebUI 自身的创建路径恒发送显式值。未知词汇 SHALL 返回 400 指出非法值，SHALL NOT 静默降级为默认。`mode` 与 `agent`/`model` 一样在创建时记入会话映射；0-turn 占位会话 SHALL 记住请求的 mode，并在首条消息触发 spawn 时应用。远端节点上的 0-turn 占位仍按既有规则如实拒绝。
 
 #### Scenario: 创建会话带 mode=allow
 
@@ -1333,7 +1446,7 @@ WebUI SHALL 提供只读端点 `GET /api/env`：读取 **webui 进程自身**的
 
 ### Requirement: 鉴权开关（auth）与首启用户引导
 
-WebUI SHALL 提供 `[service.webui] auth` 配置开关，默认 `true`。开关为 `true` 时，鉴权门 SHALL 恒在：`/api/*`、`/router/api/*`、`/ws` 需要有效 会话；用户库（auth.db）零用户时 SHALL 不自动生成任何凭据，改为进入 首启引导流程（见 `webui-user-management` 能力：设置页或环境变量建立 root），期间 `GET /api/auth/me` SHALL 报告 `needs_setup: true`。开关为 `false` 时，无论用户库是否存在用户，SHALL 对所有路由（含静态资源） 完全放行，不要求登录且不触发引导；`GET /api/auth/me` SHALL 报告 `enabled: false`（前端据此不渲染登录页）。`sebas webui-passwd` 在开关 关闭时仍可管理用户（为重新启用做准备），但不产生任何强制登录效果。
+WebUI SHALL 提供 `[service.webui] auth` 配置开关，默认 `true`。开关为 `true` 时，鉴权门 SHALL 恒在：`/api/*` 与 `/ws` 需要有效 会话（已退役的 `/router/api/*` 命名空间由静态回退显式 404，不进入鉴权门）；用户库（auth.db）零用户时 SHALL 不自动生成任何凭据，改为进入 首启引导流程（见 `webui-user-management` 能力：设置页或环境变量建立 root），期间 `GET /api/auth/me` SHALL 报告 `needs_setup: true`。开关为 `false` 时，无论用户库是否存在用户，SHALL 对所有路由（含静态资源） 完全放行，不要求登录且不触发引导；`GET /api/auth/me` SHALL 报告 `enabled: false`（前端据此不渲染登录页）。`sebas webui-passwd` 在开关 关闭时仍可管理用户（为重新启用做准备），但不产生任何强制登录效果。
 
 #### Scenario: 默认打开且有用户
 
@@ -1421,3 +1534,8 @@ WebUI SHALL 提供唯一的视口级顶部居中通知层，按四级呈现全�
 
 - **WHEN** `/ws` 连接断开
 - **THEN** 持续 warn 驻留横幅出现在通知层（旧 app-shell 横幅不再渲染），既有指数退避重连继续；重连成功后横幅消失并触发既有 `sebas:refetch` 刷新
+
+#### Scenario: 鉴权拒绝型断开不亮断连横幅
+
+- **WHEN** 登录态下 `/ws` 因鉴权被拒而断开（而非网络断开），且重连退避在运行
+- **THEN** 不弹出「服务器断开」warn 横幅（避免误导为服务故障）；页面就绪即重连并清空退避，连接恢复后一切照常

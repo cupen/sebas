@@ -58,7 +58,10 @@ pub enum SessionRejection {
     UnusableProjectDir,
     /// The core is at its session capacity.
     Capacity { limit: usize },
-    /// The request could not be delivered to the session authority.
+    /// The request could not be delivered to the session authority, or the
+    /// targeted surface is not hosted by this backend.（fix-webui-qa-defects
+    /// -round5 1.3）Display 文案如实说「操作不可用」——「核心不可达」的说法
+    /// 只保留给 core.reachability 真实可达性信号。
     Unavailable { cause: String },
     /// The targeted execution backend cannot serve the request even though
     /// the core is reachable (e.g. native without provider credentials), or
@@ -108,7 +111,12 @@ impl std::fmt::Display for SessionRejection {
                 write!(f, "项目目录不可用（不是目录或无法访问）")
             }
             SessionRejection::Capacity { limit } => write!(f, "会话数已达上限 {limit}"),
-            SessionRejection::Unavailable { cause } => write!(f, "核心不可达: {cause}"),
+            // fix-webui-qa-defects-round5 1.3：Unavailable 的文案不再自称
+            // 「核心不可达」——该变体同时承载真实可达性失败（core 通道客户端）
+            // 与语义不可用（不承载队列/注册表/远端放置），后者在 core 可达时
+            // 报「核心不可达」是误导 QA 实锤的文案。「核心不可达」的说法只
+            // 保留给 core.reachability 真实可达性信号（前端 fatal 横幅）。
+            SessionRejection::Unavailable { cause } => write!(f, "操作不可用: {cause}"),
             SessionRejection::BackendUnavailable { backend, cause } => {
                 write!(f, "执行体不可用: {backend} — {cause}")
             }
@@ -497,7 +505,8 @@ pub trait SessionBackend: Send + Sync {
     /// 重建 Dormant 映射（`session_id` / `project_dir` 沿用）并把归档转写
     /// 回放进 turn 存储。成功后快照/detail 立即可见该会话；失败时调用方
     /// 必须保留归档条目（「消费归档 ⇄ 重建会话」同事务语义——绝不删了
-    /// 归档却没重建会话）。默认诚实不可用。
+    /// 归档却没重建会话）。`label` / `prompt_preview`（round4 3.1）= 归档
+    /// 时刻的命名来源，随恢复迁回映射。默认诚实不可用。
     async fn restore_session(
         &self,
         _key: ChannelKey,
@@ -505,6 +514,8 @@ pub trait SessionBackend: Send + Sync {
         _project_dir: Option<String>,
         _transcript: Vec<TurnEntry>,
         _identity: SessionIdentity,
+        _label: Option<String>,
+        _prompt_preview: Option<String>,
     ) -> Result<(), SessionRejection> {
         Err(SessionRejection::Unavailable {
             cause: "此后端不支持从归档重建会话".into(),
@@ -891,7 +902,8 @@ impl SessionBackend for InProcessBackend {
     }
 
     /// 归档恢复（fix-webui-qa-defects 2.2）：直达引擎的 `web_restore_session`
-    /// ——Dormant 重建 + 转写回放。引擎拒绝按类型映射为 wire 拒绝。
+    /// ——Dormant 重建 + 转写回放 + 命名来源迁移（round4 3.1）。引擎拒绝按
+    /// 类型映射为 wire 拒绝。
     async fn restore_session(
         &self,
         key: ChannelKey,
@@ -899,9 +911,19 @@ impl SessionBackend for InProcessBackend {
         project_dir: Option<String>,
         transcript: Vec<TurnEntry>,
         identity: SessionIdentity,
+        label: Option<String>,
+        prompt_preview: Option<String>,
     ) -> Result<(), SessionRejection> {
         self.router
-            .web_restore_session(key, session_id, project_dir, transcript, identity)
+            .web_restore_session(
+                key,
+                session_id,
+                project_dir,
+                transcript,
+                identity,
+                label,
+                prompt_preview,
+            )
             .await
             .map_err(|e| match e {
                 sebas_dispatch::error::DispatchError::Capacity(limit) => {
@@ -1103,14 +1125,27 @@ pub struct FakeBackend {
     /// `spawn_with` / `create_placeholder` 收到的 `node`。`None` = 还没调用过。
     last_spawn_node: std::sync::Mutex<Option<Option<String>>>,
     /// fix-webui-qa-defects 2.2（route 层测试用）：记录 `restore_session`
-    /// 调用 `(key, session_id, project_dir, 条目数, 身份)`。
-    restores: std::sync::Mutex<Vec<(ChannelKey, Option<String>, Option<String>, usize, SessionIdentity)>>,
+    /// 调用 `(key, session_id, project_dir, 条目数, 身份, label, prompt_preview)`。
+    restores: std::sync::Mutex<
+        Vec<(
+            ChannelKey,
+            Option<String>,
+            Option<String>,
+            usize,
+            SessionIdentity,
+            Option<String>,
+            Option<String>,
+        )>,
+    >,
     /// fix-webui-approval-restore-and-session-identity 1.2（route 层测试用）：
     /// 按编码会话键注入的待批审批读模型；未注入的键 = 未知会话拒绝。
     approvals: std::sync::Mutex<HashMap<String, Vec<PendingApproval>>>,
     /// fix-webui-approval-restore-and-session-identity 5.1（route 层测试用）：
     /// 最近一次 `set_session_label` 的入参。
     last_label: std::sync::Mutex<Option<(String, Option<String>)>>,
+    /// fix-webui-qa-defects-round5 1.2（route 层测试用）：pending 管理面
+    /// （remove/move）的类型化拒绝注入。`None` = 缺省诚实不可用（Unavailable）。
+    pending_op_rejection: std::sync::Mutex<Option<PendingReason>>,
 }
 
 #[derive(Default)]
@@ -1145,6 +1180,7 @@ impl FakeBackend {
             restores: std::sync::Mutex::new(Vec::new()),
             approvals: std::sync::Mutex::new(HashMap::new()),
             last_label: std::sync::Mutex::new(None),
+            pending_op_rejection: std::sync::Mutex::new(None),
         }
     }
 
@@ -1164,6 +1200,15 @@ impl FakeBackend {
             .lock()
             .expect("last label lock")
             .clone()
+    }
+
+    /// fix-webui-qa-defects-round5 1.2（route 层测试用）：注入 pending 管理
+    /// 面（remove/move）的类型化拒绝；`None` 恢复缺省诚实不可用。
+    pub fn set_pending_op_rejection(&self, reason: Option<PendingReason>) {
+        *self
+            .pending_op_rejection
+            .lock()
+            .expect("pending op rejection lock") = reason;
     }
 
     /// Seed/replace the visible session set.
@@ -1259,10 +1304,18 @@ impl FakeBackend {
     }
 
     /// fix-webui-qa-defects 2.2：已记录的 restore 调用（route 层测试断言
-    /// 「重建请求确实传到了缝上」）。
+    /// 「重建请求确实传到了缝上」）。round4 3.1：随行携带命名来源。
     pub async fn restores(
         &self,
-    ) -> Vec<(ChannelKey, Option<String>, Option<String>, usize, SessionIdentity)> {
+    ) -> Vec<(
+        ChannelKey,
+        Option<String>,
+        Option<String>,
+        usize,
+        SessionIdentity,
+        Option<String>,
+        Option<String>,
+    )> {
         self.restores.lock().expect("restores lock").clone()
     }
 
@@ -1421,6 +1474,45 @@ impl SessionBackend for FakeBackend {
             .unwrap_or_default())
     }
 
+    // fix-webui-qa-defects-round5 1.2：注入的类型化拒绝（路由映射断言用）；
+    // 未注入 = 与 trait 缺省同形的诚实不可用。
+    async fn remove_pending(
+        &self,
+        _key: ChannelKey,
+        _pending_id: u64,
+    ) -> Result<Vec<PendingSubmission>, SessionRejection> {
+        match self
+            .pending_op_rejection
+            .lock()
+            .expect("pending op rejection lock")
+            .clone()
+        {
+            Some(reason) => Err(SessionRejection::PendingRejected { reason }),
+            None => Err(SessionRejection::Unavailable {
+                cause: "此后端不承载待执行队列".into(),
+            }),
+        }
+    }
+
+    async fn move_pending(
+        &self,
+        _key: ChannelKey,
+        _pending_id: u64,
+        _to_index: usize,
+    ) -> Result<Vec<PendingSubmission>, SessionRejection> {
+        match self
+            .pending_op_rejection
+            .lock()
+            .expect("pending op rejection lock")
+            .clone()
+        {
+            Some(reason) => Err(SessionRejection::PendingRejected { reason }),
+            None => Err(SessionRejection::Unavailable {
+                cause: "此后端不承载待执行队列".into(),
+            }),
+        }
+    }
+
     async fn turns(&self, key: ChannelKey, from: u64) -> Result<Vec<TurnEntry>, SessionRejection> {
         let g = self.inner.read().await;
         let Some(sid) = g
@@ -1448,6 +1540,8 @@ impl SessionBackend for FakeBackend {
         project_dir: Option<String>,
         transcript: Vec<TurnEntry>,
         identity: SessionIdentity,
+        label: Option<String>,
+        prompt_preview: Option<String>,
     ) -> Result<(), SessionRejection> {
         if !self.reachable.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(SessionRejection::Unavailable {
@@ -1458,7 +1552,15 @@ impl SessionBackend for FakeBackend {
         self.restores
             .lock()
             .expect("restores lock")
-            .push((key, session_id, project_dir, n, identity));
+            .push((
+                key,
+                session_id,
+                project_dir,
+                n,
+                identity,
+                label,
+                prompt_preview,
+            ));
         Ok(())
     }
 
@@ -1775,6 +1877,44 @@ mod tests {
                 "cap" => assert!(matches!(r, SessionRejection::Capacity { limit: 3 })),
                 _ => assert!(matches!(r, SessionRejection::Unavailable { .. })),
             }
+        }
+    }
+
+    // fix-webui-qa-defects-round5 1.3：Unavailable 的 Display 不再自称
+    // 「核心不可达」——该说法只保留给 core.reachability 真实可达性信号
+    // （前端 fatal 横幅）；语义不可用（如不承载队列）如实呈现 cause。
+    #[test]
+    fn unavailable_display_names_the_cause_without_claiming_core_unreachable() {
+        let r = SessionRejection::Unavailable {
+            cause: "此后端不承载待执行队列".into(),
+        };
+        let text = r.to_string();
+        assert_eq!(text, "操作不可用: 此后端不承载待执行队列");
+        assert!(!text.contains("核心不可达"), "{text}");
+    }
+
+    // fix-webui-qa-defects-round5 1.2 收口：PendingReason 四类 Display
+    // 是 wire 上 404 / 409 / 400 文案的最终真源（api.rs 路由层只做
+    // HTTP 状态码映射，文本走这里的 Display），下游 e2e（pending_management
+    // _passes_typed_rejections_through_composite_409 / _reaches_the_host_
+    // backend_in_embedded_shape）按字面匹配 cause 子串——文案漂移即 break
+    // 契约。单测钉死四类：未知 id / 已开始 / 越优先 / 越界。
+    #[test]
+    fn pending_reason_display_text_is_the_wire_truth() {
+        let cases = [
+            (PendingReason::Unknown, "待执行提交不存在"),
+            (PendingReason::AlreadyStarted, "该提交已开始执行"),
+            (PendingReason::PriorityConflict, "不能越过优先提交排序"),
+            (PendingReason::OutOfRange, "目标位置越界"),
+        ];
+        for (reason, expected) in cases {
+            let text = reason.to_string();
+            assert_eq!(text, expected, "{reason:?}");
+            // 四类文案均不得冒充可达性失败（round5 1.3 文案诚实性）。
+            assert!(
+                !text.contains("核心不可达") && !text.contains("操作不可用"),
+                "{reason:?} must not impersonate reachability: {text}"
+            );
         }
     }
 

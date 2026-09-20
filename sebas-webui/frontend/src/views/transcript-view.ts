@@ -509,6 +509,18 @@ export function awaitingReceipt(units: TurnUnit[]): boolean {
 }
 
 /**
+ * （fix-webui-qa-defects-round4 2.2，design D1）同一事实的 entries 级同构
+ * 判定：最新转录条目仍是操作员提交（`kind === 'prompt'`）即处于「已收到」
+ * 接收回执相位。composer 的停止控件供数走这里——dashboard 手里是 detail
+ * 的 entries（转录流推送即时到达），无需先经 transcript-view 的分组管线；
+ * 与 [`awaitingReceipt`] 是同一事实的两张皮（分组前后），漂移由各自单测
+ * 钉住。
+ */
+export function entriesAwaitReceipt(entries: readonly { kind: string }[]): boolean {
+  return entries.length > 0 && entries[entries.length - 1].kind === 'prompt'
+}
+
+/**
  * Render a unix-seconds timestamp into the format dictated by the spec:
  *   - today          → HH:MM:SS
  *   - this year      → MM-DD HH:MM

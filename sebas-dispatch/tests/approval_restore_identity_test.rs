@@ -187,6 +187,89 @@ async fn released_request_id_is_no_longer_answerable() {
     );
 }
 
+/// （fix-webui-qa-defects-round4 2.3）接收回执相位的提交走既有 turn-queue：
+/// SEED+prompt 的在飞窗口内的新提交入队（不重置卡态、不二次 SendAcp 顶掉
+/// 在飞回合），与 WORKING 相位同一 back-pressure 语义。空 prompt 的 SEED
+/// （resume 激活语义）不算在飞——照常开轮。
+#[tokio::test]
+async fn submission_during_receipt_phase_queues_instead_of_interleaving() {
+    let (router, mut out_rx) = DispatchHandle::new(SessionMap::new());
+    let key = web_key("receipt-q");
+    router
+        .map
+        .insert(key.clone(), Mapping::active("s-rcpt"))
+        .await
+        .unwrap();
+    // 接收回执相位：卡态 SEED + prompt（提交已接受、首帧未落）。
+    router.seed_card("s-rcpt".to_string(), "first prompt".into()).await;
+
+    // 在飞判定：turn_engaged 为 true（spec「accepted-receipt phase」）。
+    let info = router.session_info_for(&key).await.expect("info");
+    assert!(
+        info.turn_engaged,
+        "the receipt phase counts as turn-occupied"
+    );
+
+    // 新提交：入队而非开新轮。
+    router
+        .web_send_message(key.clone(), "second during receipt".into())
+        .await
+        .expect("accepted");
+    assert_eq!(
+        router.map.queue_len(&key).await,
+        1,
+        "the submission must be enqueued during the receipt phase"
+    );
+    // 卡态未被重置（prompt 仍是首条提交），transcript 只有一轮的 prompt。
+    assert_eq!(
+        card_phase(&router, "s-rcpt").await.as_deref(),
+        Some(phase::SEED)
+    );
+    let turns = router.session_turns(&key, 0).await.unwrap();
+    assert_eq!(
+        turns.iter().filter(|e| e.kind == "prompt").count(),
+        1,
+        "no second prompt entry may land while the first turn is a receipt: {turns:?}"
+    );
+    // 排空 Out 通道，确认没有第二次 SendAcp/开轮卡。
+    let mut saw_continue = false;
+    while let Ok(Some(o)) =
+        tokio::time::timeout(std::time::Duration::from_millis(60), out_rx.recv()).await
+    {
+        if matches!(
+            o,
+            Out::SendAcp {
+                cmd: AcpCommand::ContinueSession { .. },
+                ..
+            }
+        ) {
+            saw_continue = true;
+        }
+    }
+    assert!(
+        !saw_continue,
+        "the receipt-phase submission must not drive a second turn"
+    );
+
+    // 空 prompt 的 SEED（激活语义）不在飞：新提交照常开轮（SendAcp 发出）。
+    let key_idle = web_key("receipt-idle");
+    router
+        .map
+        .insert(key_idle.clone(), Mapping::active("s-rcpt-idle"))
+        .await
+        .unwrap();
+    router.seed_card("s-rcpt-idle".to_string(), String::new()).await;
+    router
+        .web_send_message(key_idle.clone(), "first real turn".into())
+        .await
+        .expect("accepted");
+    assert_eq!(
+        router.map.queue_len(&key_idle).await,
+        0,
+        "an activated-idle session must start the turn, not queue"
+    );
+}
+
 /// 2.2 主契约：被打标回合的 `Finished` append「回合被停止」错误类条目；
 /// 正常完成回合不含该条目。
 #[tokio::test]
@@ -200,10 +283,19 @@ async fn cancelled_turn_appends_a_stop_entry_and_normal_finish_does_not() {
         .insert(key_a.clone(), Mapping::active("s-a"))
         .await
         .unwrap();
+    // 无卡态（真空闲）→ Idle、不打标（无事可停不算取消）。
+    // （round4 2.3：带 prompt 的 SEED 卡 = 接收回执相位，可停——见下。）
+    let outcome = router.web_cancel_session(&key_a).await;
+    assert!(matches!(outcome, sebas_dispatch::engine::CancelOutcome::Idle));
+
+    // 接收回执相位（SEED + prompt 已随开轮记入卡态）同样可停（round4 2.3，
+    // spec「accepted receipt without agent output offers stop」的引擎半边）。
     router.seed_card("s-a".to_string(), "run".into()).await;
     let outcome = router.web_cancel_session(&key_a).await;
-    // 泊车/WORKING 均无 → Idle、不打标（无事可停不算取消）。
-    assert!(matches!(outcome, sebas_dispatch::engine::CancelOutcome::Idle));
+    assert!(matches!(
+        outcome,
+        sebas_dispatch::engine::CancelOutcome::Dispatched
+    ));
 
     // 让回合 A 真正进入在飞（SEED→WORKING）再取消。
     router
@@ -297,6 +389,8 @@ async fn restore_rebuilds_the_session_identity_and_legacy_entries_fall_back() {
             Some("/proj".into()),
             Vec::new(),
             identity,
+            None,
+            None,
         )
         .await
         .expect("restore must succeed");
@@ -321,6 +415,8 @@ async fn restore_rebuilds_the_session_identity_and_legacy_entries_fall_back() {
             Some("/proj".into()),
             Vec::new(),
             SessionIdentity::default(),
+            None,
+            None,
         )
         .await
         .expect("legacy restore must succeed");
@@ -337,9 +433,14 @@ async fn restore_rebuilds_the_session_identity_and_legacy_entries_fall_back() {
 
 /// 5.1 主契约：label 设置/清空随快照可见；未知会话类型化拒绝；零轮占位
 /// 同样可命名。
+///
+/// （fix-webui-qa-defects-round5 3.1）label 写入成功路径必须广播既有
+/// session.updated 事件（订阅端 = WebUI ws 转发层的唯一事件源，五键相位
+/// 帧由它驱动；帧形状不变，label 经订阅端的轻量重取刷新行名）。
 #[tokio::test]
 async fn session_label_sets_clears_and_rejects_unknown_keys() {
     let (router, _rx) = DispatchHandle::new(SessionMap::new());
+    let mut events = router.subscribe_session_events();
 
     // 零轮占位（Spawning + awaiting_first_prompt）可命名。
     let placeholder = web_key("placeholder");
@@ -352,23 +453,45 @@ async fn session_label_sets_clears_and_rejects_unknown_keys() {
         .web_set_session_label(placeholder.clone(), Some("重构计划".into()))
         .await
         .expect("placeholder is nameable");
+
+    // 订阅端收到该会话的 Updated，且载荷携带新 label（rail 重取的行真源）。
+    let ev = events.recv().await.expect("label write must publish");
+    match ev {
+        sebas_dispatch::SessionEvent::Updated { session } => {
+            assert_eq!(session.channel_key(), placeholder);
+            assert_eq!(session.label.as_deref(), Some("重构计划"));
+        }
+        other => panic!("expected Updated, got {other:?}"),
+    }
+
     let info = router.session_info_for(&placeholder).await.expect("info");
     assert_eq!(info.label.as_deref(), Some("重构计划"));
 
-    // 清空（None）回退。
+    // 清空（None）回退：同样发布 Updated（行名回到 prompt 预览的事实源）。
     router
         .web_set_session_label(placeholder.clone(), None)
         .await
         .expect("clearing works");
+    let ev = events.recv().await.expect("clear must publish too");
+    match ev {
+        sebas_dispatch::SessionEvent::Updated { session } => {
+            assert_eq!(session.label, None);
+        }
+        other => panic!("expected Updated, got {other:?}"),
+    }
     let info = router.session_info_for(&placeholder).await.expect("info");
     assert_eq!(info.label, None);
 
-    // 未知会话拒绝。
+    // 未知会话拒绝，且不发布任何事件（拒绝不产生相位帧）。
     assert!(
         router
             .web_set_session_label(web_key("unknown"), Some("x".into()))
             .await
             .is_err(),
         "unknown session must be rejected"
+    );
+    assert!(
+        events.try_recv().is_err(),
+        "a rejected label write must not publish"
     );
 }

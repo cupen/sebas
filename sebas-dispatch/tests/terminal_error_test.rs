@@ -19,7 +19,7 @@ async fn drain(rx: &mut tokio::sync::mpsc::Receiver<Out>) -> Vec<Out> {
 }
 
 #[tokio::test]
-async fn terminal_error_removes_mapping_and_marks_card() {
+async fn terminal_error_retires_binding_and_marks_card() {
     let map = SessionMap::new();
     let key = ChannelKey::feishu("oc_x", None);
     map.insert(key.clone(), Mapping::active("s1"))
@@ -47,10 +47,21 @@ async fn terminal_error_removes_mapping_and_marks_card() {
         }
         other => panic!("expected UpdateCard, got {other:?}"),
     }
+    // （fix-webui-qa-defects-round4 1.2）teardown 只清活跃绑定：映射以
+    // Dormant 记录形态保留（列表行不消失、转录可寻址），不再是 Active。
+    let m = map
+        .get(&key)
+        .await
+        .expect("terminal error must keep the session record");
     assert!(
-        map.get(&key).await.is_none(),
-        "terminal error must remove the session mapping"
+        m.session_id().is_none() && m.transcript_id() == Some("s1"),
+        "live binding must be gone but the record (Dormant) must remain: {m:?}"
     );
+    let info = router
+        .session_info_for(&key)
+        .await
+        .expect("retired session stays listed");
+    assert_eq!(info.status, "dormant", "retired row reports dormant");
 }
 
 #[tokio::test]
@@ -161,7 +172,25 @@ async fn terminal_error_preserves_pre_death_transcript() {
                 == sebas_dispatch::card_state::phase::FAILED)),
         "terminal 不应发 Out::React FAILED: {outs:?}"
     );
-    assert!(map.get(&key).await.is_none(), "terminal 必清 mapping");
+    // （fix-webui-qa-defects-round4 1.2）记录保留：映射以 Dormant 形态存在，
+    // 死前 transcript + 错误条目经 session_turns 全部可回看。
+    let m = map
+        .get(&key)
+        .await
+        .expect("terminal 必须保留会话记录（Dormant）");
+    assert!(m.session_id().is_none(), "活跃绑定必须清掉: {m:?}");
+    let turns = router
+        .session_turns(&key, 0)
+        .await
+        .expect("retired record keeps the transcript retrievable");
+    let joined = turns
+        .iter()
+        .map(|t| t.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(joined.contains("step1"), "死前 TextDelta 保留: {joined}");
+    assert!(joined.contains("step2"), "死前 ToolEnd 保留: {joined}");
+    assert!(joined.contains("agent crashed"), "错误正文: {joined}");
 }
 
 // ── fix-webui-qa-defects 5.1（design D5）：is_error 终态合成 error 条目 ─────
@@ -240,8 +269,8 @@ async fn mode_unchanged_error_does_not_duplicate_an_error_entry() {
     );
 }
 
-/// 终态 Error 同样合成带分类的条目。映射在同一事件的拆除臂中被移除
-/// （终态会话整体消失是既有契约），故经 apply_event 在拆除前断言条目。
+/// 终态 Error 同样合成带分类的条目。条目在拆除臂的 apply_event 内先于
+/// 退役写入 turn 存储（round4 后拆除不再抹记录，条目随记录保留可回看）。
 #[tokio::test]
 async fn terminal_error_also_lands_a_classified_entry() {
     let map = SessionMap::new();
@@ -273,5 +302,149 @@ async fn terminal_error_also_lands_a_classified_entry() {
     assert_eq!(
         err.failure_class.as_deref(),
         Some(sebas_dispatch::failure_class::GENERIC)
+    );
+}
+
+// ── fix-webui-qa-defects-round4 1.2/1.3：升级击杀保留会话 ────────────────
+
+/// 升级击杀（driver 终态 Error）后会话必须仍可回看：列表快照含该行
+/// （dormant 态）、转录经 session API 可取、受影响回合以携带升级原因的
+/// error 条目收尾、无静默移除事件。
+#[tokio::test]
+async fn escalation_kill_keeps_the_session_browsable() {
+    let map = SessionMap::new();
+    let key = ChannelKey::new("web", "web-hang");
+    map.insert(key.clone(), Mapping::active("s-hang"))
+        .await
+        .unwrap();
+    let (router, mut out_rx) = DispatchHandle::new(map.clone());
+    let mut events = router.subscribe_session_events();
+
+    router
+        .dispatch_acp_event(AcpEvent::Error {
+            session_id: "s-hang".into(),
+            message: "agent hung (no activity for 5m; 3 cancels failed)".into(),
+            terminal: true,
+        })
+        .await;
+    let _ = drain(&mut out_rx).await;
+
+    // 列表仍含该会话，dormant 态（不再是 active/spawning）。
+    let infos = router.session_info_snapshot().await;
+    let row = infos
+        .iter()
+        .find(|i| i.key == key.reference)
+        .expect("escalation kill must keep the session listed");
+    assert_eq!(row.status, "dormant");
+
+    // 详情（transcript）可回看，末尾是携带升级原因的 error 条目。
+    let turns = router
+        .session_turns(&key, 0)
+        .await
+        .expect("transcript must remain retrievable");
+    let err = turns
+        .iter()
+        .find(|t| t.element_type == "error")
+        .expect("the killed turn must be finalized with a visible error entry");
+    assert!(
+        err.content.contains("agent hung"),
+        "the escalation cause rides the entry: {err:?}"
+    );
+
+    // 无静默移除：到达的生命周期事件里没有 Removed。
+    let mut saw_removed = false;
+    let mut saw_updated = false;
+    while let Ok(ev) = events.try_recv() {
+        match ev {
+            sebas_dispatch::engine::SessionEvent::Removed { .. } => saw_removed = true,
+            sebas_dispatch::engine::SessionEvent::Updated { session } => {
+                if session.status == "dormant" {
+                    saw_updated = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(!saw_removed, "record removal must not be announced");
+    assert!(saw_updated, "retirement must refresh the row via Updated");
+}
+
+/// （1.3）升级终止时排队提交按 pending-queue 语义如实释放并上报
+/// not-executed，不随记录消失或滞留在退役行上。
+#[tokio::test]
+async fn escalation_kill_releases_queued_submissions_with_reporting() {
+    use sebas_dispatch::state::QueuedTurn;
+    let map = SessionMap::new();
+    let key = ChannelKey::new("web", "web-hang-q");
+    map.insert(key.clone(), Mapping::active("s-hang-q"))
+        .await
+        .unwrap();
+    map.enqueue_turn(&key, QueuedTurn::new("second message", None, false))
+        .await;
+    let (router, mut out_rx) = DispatchHandle::new(map.clone());
+    let mut events = router.subscribe_session_events();
+
+    router
+        .dispatch_acp_event(AcpEvent::Error {
+            session_id: "s-hang-q".into(),
+            message: "agent hung".into(),
+            terminal: true,
+        })
+        .await;
+    let _ = drain(&mut out_rx).await;
+
+    // 逐条上报：PendingDropped 携带被释放的提交原文。
+    let mut dropped_texts = Vec::new();
+    while let Ok(ev) = events.try_recv() {
+        if let sebas_dispatch::engine::SessionEvent::PendingDropped { dropped, .. } = ev {
+            dropped_texts.extend(dropped.into_iter().map(|d| d.text));
+        }
+    }
+    assert_eq!(
+        dropped_texts,
+        vec!["second message".to_string()],
+        "the queued submission must be reported as not executed"
+    );
+    // 释放后退役行上不再滞留 pending。
+    assert!(
+        router.session_pending(&key).await.is_empty(),
+        "retired row must not keep dropped submissions"
+    );
+    // 记录本身仍在。
+    assert!(
+        router.session_info_for(&key).await.is_some(),
+        "the session record survives the release"
+    );
+}
+
+/// （1.2 命名连续性）卡态丢弃前命名来源迁进映射：升级后行名仍来自
+/// 首 prompt 预览，不退化为短 id。
+#[tokio::test]
+async fn escalation_kill_keeps_the_row_named_by_the_first_prompt() {
+    let map = SessionMap::new();
+    let key = ChannelKey::new("web", "web-hang-name");
+    map.insert(key.clone(), Mapping::active("s-hang-name"))
+        .await
+        .unwrap();
+    let (router, mut out_rx) = DispatchHandle::new(map.clone());
+    router.seed_card("s-hang-name".into(), "跑一下命令".into()).await;
+
+    router
+        .dispatch_acp_event(AcpEvent::Error {
+            session_id: "s-hang-name".into(),
+            message: "agent hung".into(),
+            terminal: true,
+        })
+        .await;
+    let _ = drain(&mut out_rx).await;
+
+    let info = router
+        .session_info_for(&key)
+        .await
+        .expect("record stays listed");
+    assert_eq!(
+        info.user_prompt.as_deref(),
+        Some("跑一下命令"),
+        "the row name source must survive card-state teardown"
     );
 }

@@ -2798,7 +2798,13 @@ export class SebasSettingsModal extends LitElement {
         </div>
         <div class="kv">
           <dt>Providers</dt>
-          <dd>${a.provider_count}</dd>
+          <dd>
+            ${a.provider_count}
+            <!-- （fix-webui-qa-defects-round5 4.3）口径标注：这是 router 侧
+                 计数（含 debug provider），与 Models 分区的注册表口径不同，
+                 两个数字不一一对应。 -->
+            <span class="service-sub">router 侧计数，含 debug provider</span>
+          </dd>
         </div>
       </dl>
     `

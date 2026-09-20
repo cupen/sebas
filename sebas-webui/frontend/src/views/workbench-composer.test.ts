@@ -84,6 +84,7 @@ async function mount(initial: Partial<SebasWorkbenchComposer> = {}) {
   if (initial.sessionModels !== undefined) el.sessionModels = initial.sessionModels
   if (initial.currentModel !== undefined) el.currentModel = initial.currentModel
   if (initial.turnInFlight !== undefined) el.turnInFlight = initial.turnInFlight
+  if (initial.awaitingReceipt !== undefined) el.awaitingReceipt = initial.awaitingReceipt
   if (initial.waitingApproval !== undefined) el.waitingApproval = initial.waitingApproval
   if (initial.sessionCommands !== undefined) el.sessionCommands = initial.sessionCommands
   if (initial.childStarting !== undefined) el.childStarting = initial.childStarting
@@ -657,6 +658,73 @@ describe('submit control state machine (4.3, design D4)', () => {
     await el.updateComplete
     const err = el.shadowRoot?.querySelector('[data-testid="composer-error"]')
     expect(err?.textContent).toContain('会话空闲')
+  })
+})
+
+// ── fix-webui-qa-defects-round4 2.1/2.2：接收回执阶段可取消 ──────────────
+
+describe('accepted receipt without agent output offers stop (round4 2.1)', () => {
+  function stateOf(el: SebasWorkbenchComposer): string | null {
+    return (
+      el.shadowRoot
+        ?.querySelector('[data-testid="submit-control"]')
+        ?.getAttribute('data-state') ?? null
+    )
+  }
+
+  it('empty input during the receipt phase renders the stop affordance, not a disabled send', async () => {
+    // turnInFlight=false（旧判定枚举漏掉接收回执相位）+ awaitingReceipt=true
+    //（prompt 已是最新转录单元、agent 首条目未落）→ 停止方块可达。
+    const el = await mount({ ...focus, turnInFlight: false, awaitingReceipt: true })
+    expect(stateOf(el)).toBe('stop')
+    const btn = el.shadowRoot?.querySelector('[data-testid="submit-control"]') as HTMLButtonElement
+    expect(btn.disabled).toBe(false)
+  })
+
+  it('activating stop during the receipt phase cancels via the existing interrupt chain', async () => {
+    const el = await mount({ ...focus, turnInFlight: false, awaitingReceipt: true })
+    ;(el.shadowRoot?.querySelector('[data-testid="submit-control"]') as HTMLElement).click()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(api.cancelSession).toHaveBeenCalledWith('web%00web-1')
+    expect(api.sendMessage).not.toHaveBeenCalled()
+  })
+
+  it('receipt phase with text queues the submission behind the accepted turn', async () => {
+    const el = await mount({ ...focus, turnInFlight: false, awaitingReceipt: true })
+    await type(el, 'next please')
+    expect(stateOf(el)).toBe('queued')
+    ;(el.shadowRoot?.querySelector('[data-testid="submit-control"]') as HTMLElement).click()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(api.sendMessage).toHaveBeenCalledWith('web%00web-1', 'next please')
+    expect(api.cancelSession).not.toHaveBeenCalled()
+  })
+
+  it('the first agent entry landing clears the receipt phase (control returns to send/disabled)', async () => {
+    const el = await mount({ ...focus, turnInFlight: false, awaitingReceipt: true })
+    expect(stateOf(el)).toBe('stop')
+    el.awaitingReceipt = false
+    await el.updateComplete
+    expect(stateOf(el)).toBe('disabled')
+  })
+
+  it('the starting affordance keeps priority over the receipt fold (existing order, no regression)', async () => {
+    // 优先级序钉住：sending > starting(hasText) > in-flight。starting 窗口
+    // （spawn 窗口、无在飞 turn）与回执折叠同现时，starting 形态不被吞。
+    const el = await mount({
+      ...focus,
+      turnInFlight: false,
+      awaitingReceipt: true,
+      childStarting: true,
+    })
+    await type(el, 'while starting')
+    expect(stateOf(el)).toBe('starting')
+  })
+
+  it('engine turn_engaged still wins when both facts agree (no double mapping)', async () => {
+    const el = await mount({ ...focus, turnInFlight: true, awaitingReceipt: true })
+    expect(stateOf(el)).toBe('stop')
   })
 })
 

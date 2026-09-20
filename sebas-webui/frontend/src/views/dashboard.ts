@@ -60,6 +60,29 @@ import {
 import '../components/review-card.js'
 import '../components/pending-stack.js'
 import './transcript-view.js'
+// （fix-webui-qa-defects-round4 2.2）接收回执判定与 transcript-view 同源。
+import { entriesAwaitReceipt } from './transcript-view.js'
+
+/**
+ * （fix-webui-qa-defects-round4 review 修正）回执事实的过期 slug：回合已终态
+ * （done/failed）时「最新条目是 prompt」不再是等待 agent 首帧的证据——零输出
+ * 完结的回合会把 prompt 留在转录末尾，此时 receipt-stop 是残留形态（点击得
+ * 409）。终态 slug 下不再向 composer 供数。
+ */
+export const RECEIPT_EXPIRING_SLUGS: ReadonlySet<string> = new Set(['done', 'failed'])
+
+/**
+ * （fix-webui-qa-defects-round4 2.2 review 修正）回执相位的最终判定：转录层
+ * 事实（最新条目是 prompt、无 agent 输出）与引擎终态 slug 取交——回合已
+ * done/failed 时转录事实过期（零输出完结婚把 prompt 留在末尾），不再向
+ * composer 供数（残留 receipt-stop 点击只会得到 409）。
+ */
+export function receiptPhaseActive(
+  entries: readonly { kind: string }[] | undefined,
+  statusSlug: string | null | undefined,
+): boolean {
+  return entriesAwaitReceipt(entries ?? []) && !RECEIPT_EXPIRING_SLUGS.has(statusSlug ?? '')
+}
 import { COMPOSER_FOCUS_REQUEST } from './workbench-composer.js'
 import '@awesome.me/webawesome/dist/components/button/button.js'
 import '@awesome.me/webawesome/dist/components/dialog/dialog.js'
@@ -577,6 +600,9 @@ export class SebasDashboard extends LitElement {
       .session-head .node-tag[data-node-status='terminated'] {
         color: var(--sebas-status-failed);
       }
+      /* （fix-webui-qa-defects-round4 3.3）white-space:nowrap：≤640px 窄视
+         口下权限模式章曾被 flex 挤压成逐字竖排换行——章内禁止断行；横向
+         溢出由 meta 行的 flex-wrap 兜住（整枚章换行，不是字断开）。 */
       .mode-tag {
         font-family: var(--sebas-font-mono);
         font-size: 0.7rem;
@@ -584,6 +610,7 @@ export class SebasDashboard extends LitElement {
         background: var(--sebas-surface-2);
         border-radius: var(--sebas-radius-full);
         padding: 0 7px;
+        white-space: nowrap;
       }
       /* （4.2）过渡态「模式切换中…」= 中性灰章；不再有红色英文 UNKNOWN/
          UNGATED。琥珀语义色只留在需要警惕的 ungated（auto）章本身。 */
@@ -684,6 +711,9 @@ export class SebasDashboard extends LitElement {
         display: flex;
         gap: var(--sebas-space-2);
         align-items: center;
+        /* （fix-webui-qa-defects-round4 3.3）窄视口放不下整行时整枚徽章
+           换行兜底，配合 .mode-tag 的 nowrap（章内不断字）。 */
+        flex-wrap: wrap;
         color: var(--sebas-text-dim);
         font-size: 0.74rem;
         font-variant-numeric: tabular-nums;
@@ -1310,6 +1340,7 @@ export class SebasDashboard extends LitElement {
             <sebas-workbench-composer
               .sessionKey=${focusKey}
               .turnInFlight=${turnEngaged}
+              .awaitingReceipt=${receiptPhaseActive(this.focusedDetail?.entries, this.focusedDetail?.status_slug ?? d.active_session?.status_slug ?? null)}
               .waitingApproval=${waitingApproval}
               .agentKind=${this.focusedDetail?.agent_kind ?? d.active_session?.agent_kind ?? null}
               .sessionModels=${this.focusedDetail?.available_models ?? d.active_session?.available_models ?? []}

@@ -97,7 +97,7 @@ impl DispatchHandle {
             }
             AcpEvent::Error { terminal: true, .. } => {
                 // terminal Error 并入累积模型（openspec/specs/feishu-cards/spec.md）：apply_event（置 ❌ + append
-                // 错误正文，保留死前 transcript）→ flush_card → remove_by_session
+                // 错误正文，保留死前 transcript）→ flush_card → retire_to_record
                 // → drop_card。**不** emit_reaction —— 终态视觉由 card body 表达
                 // （card_events::apply_event_to_card 把 ❌ 错误行 push 到 body），
                 // reaction 维持"已收到 / 折腾中"语义。drop_card 无条件执行（无论
@@ -107,9 +107,9 @@ impl DispatchHandle {
                 let sid = session_id.as_str();
                 if let Some(key) = self.map.lookup_key_by_session(sid).await {
                     self.reply_targets.clear(&key).await;
-                    // workbench-turn-queue 5.2（design D5）：移除映射**之前**
-                    // 发出 PendingDropped——随会话死掉的待生效提交被逐条标注
-                    // 为未执行，绝不静默丢弃。
+                    // workbench-turn-queue 5.2（design D5）：退役**之前**发出
+                    // PendingDropped——随会话死掉的待生效提交被逐条标注为未
+                    // 执行，绝不静默丢弃（round4 1.3）。
                     let dropped = self.map.pending_submissions(&key).await;
                     if !dropped.is_empty() {
                         self.publish(SessionEvent::PendingDropped {
@@ -118,10 +118,27 @@ impl DispatchHandle {
                             dropped,
                         });
                     }
-                    self.map.remove_by_session(sid).await;
-                    // Terminal teardown is observable: detached frontends
-                    // must drop the row.
-                    self.publish_removed(&key);
+                    // （fix-webui-qa-defects-round4 1.2，design 附录）teardown
+                    // 只清活跃绑定，**不抹记录**：remove_by_session +
+                    // publish_removed 曾把整个会话从列表/详情里抹掉（升级击杀
+                    // 后历史全部不可回看、无任何告知）。改为 Active→Dormant
+                    // 退役：行保留（dormant 态）、转录经同一 transcript_id 照常
+                    // 可读；命名来源（卡面 user_prompt）在卡态丢弃前迁进映射，
+                    // 行名不退化为短 id；turn 队列随退役清空（上一条
+                    // PendingDropped 已如实上报）。
+                    let preview = self
+                        .card_states
+                        .snapshot(sid)
+                        .await
+                        .map(|st| st.user_prompt)
+                        .filter(|p| !p.is_empty());
+                    let retired = self.map.retire_to_record(sid, preview).await.is_some();
+                    // Teardown is observable: detached frontends refresh the
+                    // row（退役后是 Updated——记录仍在列表；Removed 只属于
+                    // 操作者显式 close）。
+                    if retired {
+                        self.publish_updated(&key).await;
+                    }
                 }
                 self.drop_card(sid).await;
                 // 会话消亡 = 不会再有 ModeChanged/Error 来消费在飞的自动

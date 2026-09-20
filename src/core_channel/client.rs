@@ -802,6 +802,7 @@ impl SessionBackend for CoreChannelBackend {
 
     /// 归档恢复（fix-webui-qa-defects 2.2）：core 侧重建 Dormant 映射 +
     /// 转写回放；失败以 typed rejection 透传（调用方保留归档条目）。
+    /// （round4 3.1）命名来源（label / prompt_preview）随请求迁回 core。
     async fn restore_session(
         &self,
         key: ChannelKey,
@@ -809,6 +810,8 @@ impl SessionBackend for CoreChannelBackend {
         project_dir: Option<String>,
         transcript: Vec<TurnEntry>,
         identity: SessionIdentity,
+        label: Option<String>,
+        prompt_preview: Option<String>,
     ) -> Result<(), SessionRejection> {
         match self
             .request(&CoreChannelRequest::RestoreSession {
@@ -817,6 +820,8 @@ impl SessionBackend for CoreChannelBackend {
                 project_dir,
                 transcript,
                 identity,
+                label,
+                prompt_preview,
             })
             .await?
         {

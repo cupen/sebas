@@ -146,5 +146,8 @@ async fn terminal_error_flushes_removes_and_exits() {
         got_red,
         "terminal 必产含 ❌ + 死前 transcript + 错误正文的卡"
     );
-    assert!(map.get(&key).await.is_none(), "terminal 后 mapping 必清");
+    // （fix-webui-qa-defects-round4 1.2）terminal 拆除只退役活跃绑定：映射
+    // 以 Dormant 记录形态保留（会话行不消失、转录可回看），不再是 Active。
+    let m = map.get(&key).await.expect("记录（Dormant）必须保留");
+    assert!(m.session_id().is_none(), "活跃绑定必须清掉: {m:?}");
 }

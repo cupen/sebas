@@ -400,9 +400,10 @@ async fn seed_phase_stall_is_also_force_settled_and_drains() {
 }
 
 /// 状态迁移的 wire 面（前端 refetch 链的引擎半边）：开轮发布的 Updated 携带
-/// `turn_engaged=false`（SEED 不占用，design D3 词表），首个内容帧触发的
-/// SEED→WORKING 迁移发布的 Updated 携带 `turn_engaged=true`——静默窗内
-/// WS 驱动的 refetch 读到的就是这份事实（提交控件据此呈停止形态）。
+/// `turn_engaged=true`（round4 2.2：带 prompt 的 SEED = 接收回执相位，在飞
+/// ——提交控件据此在「已收到」窗口呈停止形态），首个内容帧触发的
+/// SEED→WORKING 迁移发布的 Updated 继续携带 `turn_engaged=true`——静默窗内
+/// WS 驱动的 refetch 读到的就是这份事实。
 #[tokio::test]
 async fn seed_to_working_transition_publishes_updated_with_turn_engaged() {
     let map = SessionMap::new();
@@ -423,7 +424,8 @@ async fn seed_to_working_transition_publishes_updated_with_turn_engaged() {
         })
         .await;
 
-    // 收集 Updated 序列：seed 后（SEED）= 不占用；内容帧后（WORKING）= 占用。
+    // 收集 Updated 序列：seed 后（接收回执 SEED）= 占用；内容帧后（WORKING）
+    // = 占用。
     let mut engaged_timeline: Vec<bool> = Vec::new();
     while let Ok(ev) = events.try_recv() {
         if let SessionEvent::Updated { session } = ev {
@@ -434,13 +436,14 @@ async fn seed_to_working_transition_publishes_updated_with_turn_engaged() {
     }
     assert_eq!(
         engaged_timeline,
-        vec![false, true],
-        "the Updated wire must carry the engagement fact at both milestones (SEED then WORKING)"
+        vec![true, true],
+        "the Updated wire must carry the engagement fact at both milestones (receipt then WORKING)"
     );
 }
 
 /// 终态 Error 拆除会话时，看门狗的时钟与泊车登记一并清空（复用 id 不继承
-/// stale 事实）。
+/// stale 事实）。round4 1.2：活跃绑定退役为 Dormant 记录（行保留），但
+/// stall 事实（时钟 + 泊车登记）照旧清空——记录保留 ≠ 运行时状态保留。
 #[tokio::test]
 async fn terminal_error_drops_the_stall_facts() {
     let map = SessionMap::new();
@@ -457,8 +460,13 @@ async fn terminal_error_drops_the_stall_facts() {
         })
         .await;
 
-    let info = router.session_info_for(&key).await;
-    assert!(info.is_none(), "terminal error tears the mapping down");
+    // 活跃绑定已退役：行还在（dormant）但不再构成在飞回合。
+    let info = router
+        .session_info_for(&key)
+        .await
+        .expect("the record survives teardown");
+    assert_eq!(info.status, "dormant");
+    assert!(!info.turn_engaged, "a retired record occupies no turn");
     // 登记表清空：扫描无事实可看（不 panic、不复活 stale 时钟）。
     assert!(router.force_settle_stalled_turns().await.is_empty());
 }

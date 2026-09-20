@@ -51,6 +51,12 @@ const NAME_CAP_CODEPOINTS = 40
 const UNREAD_BADGE_CAP = 99
 
 /**
+ * （fix-webui-qa-defects-round5 3.2）帧触发行名重取的尾沿防抖窗口：同窗
+ * 多帧合并为一次列表重取，队列高频翻转不放大请求量。
+ */
+export const LABEL_REFRESH_DEBOUNCE_MS = 400
+
+/**
  * rail 切换会话成功后的窗口级聚焦事件（fix-webui-qa-defects 4.1，design
  * D3）：`detail.key` 是 switch 响应的 `active_session_key`。dashboard 监听
  * 后立即节流刷新 summary——焦点指针是每客户端操作面，不走 WS/服务端推送。
@@ -261,6 +267,11 @@ export class SebasProjectRail extends LitElement {
             }
           : row
       this.sessions = this.sessions.map(patch)
+      // （fix-webui-qa-defects-round5 3.2，design 决策 4）相位帧是五键定形、
+      // 不携带 label——任意路径（rail 对话框 / API）的 label 写入成功都发
+      // Updated，行名的命名来源可能随该帧变化：防抖后做一次轻量列表重取，
+      // 用返回的 label 重渲染行名（不做全列表轮询）。
+      this.scheduleLabelRefresh()
       return
     }
     if (
@@ -272,8 +283,28 @@ export class SebasProjectRail extends LitElement {
     }
   }
 
+  /**
+   * （fix-webui-qa-defects-round5 3.2）帧触发的行名重取：队列高频翻转时
+   * session.updated 可能连发——尾沿防抖把一个窗口内的多帧合并为一次既有
+   * `GET /api/sessions` 重取（行投影里 label 的唯一来源；单会话 detail 带
+   * 聚焦副作用且不带 label，不用）。量级与 10s 轮询兜底相当。
+   */
+  private labelRefreshTimer: number | undefined = undefined
+  private scheduleLabelRefresh(): void {
+    if (this.labelRefreshTimer !== undefined) window.clearTimeout(this.labelRefreshTimer)
+    this.labelRefreshTimer = window.setTimeout(() => {
+      this.labelRefreshTimer = undefined
+      void this.refresh()
+    }, LABEL_REFRESH_DEBOUNCE_MS)
+  }
+
   static styles = css`
     :host { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+    /* （fix-webui-qa-defects-round5 4.1）菜单关闭态对辅助技术隐藏：wa-dropdown
+       的 open 反射属性关闭时菜单项 display:none，a11y 树不再暴露「重命名/
+       归档/移除项目」。open 翻转（dropdown updated 内）与 popup 激活同帧，
+       打开即恢复可见；菜单项是本树的光 DOM 子孙，宿主样式表可直接命中。 */
+    wa-dropdown:not([open]) wa-dropdown-item { display: none; }
     .section-label {
       display: flex; align-items: center; gap: 6px;
       padding: var(--sebas-space-2) 8px var(--sebas-space-1);
@@ -425,7 +456,13 @@ export class SebasProjectRail extends LitElement {
     li.session-item .row-action:hover { color: var(--sebas-accent); background: var(--sebas-accent-soft); }
     li.session-item.archived { opacity: 0.7; }
     li.session-item.archived:hover { opacity: 1; }
-    .archive-meta { font-size: 0.66rem; color: var(--sebas-text-faint); font-family: var(--sebas-font-mono); }
+    /* （fix-webui-qa-defects-round4 3.2）History 条目的项目路径段截断省略：
+       Windows 绝对路径很长（且分隔符可能未归一），不截断会把 rail 撑出横向
+       滚动。min-width:0 + 允许收缩是 flex 子项省略号生效的前提。 */
+    .archive-meta {
+      font-size: 0.66rem; color: var(--sebas-text-faint); font-family: var(--sebas-font-mono);
+      min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
     .group-section { margin-top: var(--sebas-space-3); }
     .group-head {
       /* （5.5）原生 <button>：语义与键盘行为来自元素本身；重置外观回原 div 视觉。 */
@@ -478,6 +515,10 @@ export class SebasProjectRail extends LitElement {
     if (this.nodeTimer !== undefined) {
       this.nodeTimer = window.clearInterval(this.nodeTimer) as unknown as number
       this.nodeTimer = undefined
+    }
+    if (this.labelRefreshTimer !== undefined) {
+      window.clearTimeout(this.labelRefreshTimer)
+      this.labelRefreshTimer = undefined
     }
     super.disconnectedCallback()
   }
@@ -797,12 +838,26 @@ export class SebasProjectRail extends LitElement {
     this.renameValue = ''
     this.renameError = null
   }
+  /**
+   * （fix-webui-qa-defects-round5 2.1，design 决策 3）保存时显式从 wa-input
+   * 的内部原生 input 取值——QA D3a 实锤：slot 结构下宿主 value 属性与内部
+   * 原生 input 可能不同步，依赖宿主属性让输入值在保存链路丢失（保存成静默
+   * 清空）。升级后的 wa-input 以 shadowRoot 里的原生 input 为锚；未升级
+   * （测试环境）退化为宿主 value，再退组件状态。
+   */
+  private renameInputValue(): string {
+    const host = this.shadowRoot?.querySelector<HTMLInputElement>(
+      'wa-input[data-testid="rename-input"]',
+    )
+    const native = host?.shadowRoot?.querySelector<HTMLInputElement>('input')
+    return String(native?.value ?? host?.value ?? this.renameValue ?? '')
+  }
   private async confirmRename() {
     const row = this.renameTarget
     if (!row || this.renaming) return
     this.renaming = true
     this.renameError = null
-    const label = this.renameValue.trim()
+    const label = this.renameInputValue().trim()
     try {
       // 空输入 = 清空（wire 语义单一出处：服务端把空白归一为 None）。
       await api.setSessionLabel(row.encoded_key, label || null)
@@ -1021,7 +1076,10 @@ export class SebasProjectRail extends LitElement {
       >
         <span class="session-dot done" aria-hidden="true"></span>
         <span class="session-name">${a.label}</span>
-        <span class="archive-meta">${a.project_path.split('/').filter(Boolean).pop() ?? ''}</span>
+        <!-- （fix-webui-qa-defects-round4 3.2）basename 切分同时接受 \ 与 /：
+             Windows 归档路径存的是反斜杠普通形，此前 split('/') 不切、整条
+             路径原样进 .archive-meta，撑出横向滚动。 -->
+        <span class="archive-meta">${a.project_path.split(/[\\/]/).filter(Boolean).pop() ?? ''}</span>
       </li>`
   }
 

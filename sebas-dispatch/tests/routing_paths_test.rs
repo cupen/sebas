@@ -422,7 +422,7 @@ async fn permission_request_without_key_is_dropped() {
 }
 
 #[tokio::test]
-async fn terminal_error_removes_mapping_and_drops_card() {
+async fn terminal_error_retires_mapping_and_drops_card() {
     let map = SessionMap::new();
     map.insert(key(), Mapping::active("s1")).await.unwrap();
     let (router, mut out_rx) = DispatchHandle::new(map.clone());
@@ -438,7 +438,12 @@ async fn terminal_error_removes_mapping_and_drops_card() {
     assert!(matches!(out, Out::UpdateCard { .. }));
     // terminal Error 不再发 Out::React 换 FAILED（❌ 行已 push 到 body）；
     // queue timeout 之后应无更多 Out。
-    assert!(map.get(&key()).await.is_none(), "mapping removed");
+    // （fix-webui-qa-defects-round4 1.2）活跃绑定清掉，记录以 Dormant 保留。
+    let m = map
+        .get(&key())
+        .await
+        .expect("record (Dormant) survives terminal teardown");
+    assert!(m.session_id().is_none(), "live binding removed: {m:?}");
     // CardState 已清：后续 flush 是 no-op。
     router.flush_card("s1").await;
     let r = tokio::time::timeout(Duration::from_millis(150), out_rx.recv()).await;
