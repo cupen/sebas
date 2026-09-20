@@ -19,7 +19,7 @@
 ## 4. P3 瑕疵批量打磨
 
 - [x] 4.1 wa-select 选项面板最小宽度放宽、中文长文案不换行（或单行省略），模式/agent 下拉目测验收；验证标准：截图对比（⚠️ 浏览器回归：agent 下拉 Native Kernel 选项已单行 ✅；composer 模式下拉选项仍折行 ❌——修复面未覆盖到该形态，遗留记入 §6）
-- [x] 4.2 深链/刷新直达 `/sessions/…` 时主区项目标题从会话归属项目绑定，不再显示「未选择项目」；验证标准：刷新直达后标题正确（✅ 根因重查定案：`followFocusedProject` 在「detail 先于 projects.list 落地」的深链竞态下以 `path=null` 空转一次即写 `lastFollowedFocusKey` 记账，列表到达后的核对一拍全部早退——标题停在「未选择项目」；上一轮的 detail 侧对账与 `project_id` 字段本身有效，失效路径在记账时序。修复：项目 id 有值而路径未解析不记账，列表到达的 refetch 补投影。单测覆盖「项目列表晚于 detail 到达仍投影」。待主 agent 浏览器回归）
+- [x] 4.2 深链/刷新直达 `/sessions/…` 时主区项目标题从会话归属项目绑定，不再显示「未选择项目」；验证标准：刷新直达后标题正确（✅ 根因重查定案：`followFocusedProject` 在「detail 先于 projects.list 落地」的深链竞态下以 `path=null` 空转一次即写 `lastFollowedFocusKey` 记账，列表到达后的核对一拍全部早退——标题停在「未选择项目」；上一轮的 detail 侧对账与 `project_id` 字段本身有效，失效路径在记账时序。修复：项目 id 有值而路径未解析不记账，列表到达的 refetch 补投影。单测覆盖「项目列表晚于 detail 到达仍投影」。✅ 主 agent 浏览器回归通过（2026-09-21 沙箱 GUI）：硬刷新直达 `/sessions/web%00…` 后主区标题=归属项目名，快照全树 0 处「未选择项目」；证据 `.openspec/round5-evidence/deeplink-session-title.png`）
 - [x] 4.3 About 页 Rust toolchain 空值回退为「未知」；验证标准：About 页无空行值
 - [x] 4.4 路径展示统一规范化（注册弹窗填充值与「项目已注册」错误提示）+ Services 页 `sebas run` 内联代码不断行；验证标准：截图对比（✅ 主 agent 浏览器回归：注册弹窗填充值已统一正斜杠）
 
@@ -30,9 +30,9 @@
 
 ## 6. 浏览器回归遗留问题（本 change 收口时如实记录，待后续小 change 处理）
 
-- [x] 6.1 未读徽章边界：聚焦会话收到新回复（流式底部跟读场景）仍被标未读——违反 session-unread-badge「read at the bottom never badges」；聚焦行重复点击（同会话 no-op）不触发清零。（✅ 修复落地，四层收敛：① rail 行未读按「聚焦 + 文档可见不呈现」推导（后台 tab 照常计未读），锚的推进权仍归 transcript；② 读锚写入广播 `sebas:anchor-advanced`，rail 监听就地失效重渲染（localStorage 非响应式——此前锚推进后徽标驻留的根因）；③ transcript 快照增长路径与 turn.append 同一贴底语义推进锚（首挂载/换会话装载除外——「开门不是看着」）；④ 空流登记补 dashboard 侧入口（`registerEmptyStreamSession`，0 回合占位渲染的是 dashboard 空态而非 transcript 组件），首聚焦交换的锚建立不再依赖巧合。spec 增量「Focused session arrivals never badge」写入本 change specs/agent-workbench/spec.md，兑现 round4「首聚焦交换永不闪现」。单测覆盖：聚焦+流式到达不出徽章、后台 tab 仍出、重复聚焦清零、锚外推清零不刷新、非聚焦到达仍出徽章。待主 agent 浏览器回归。复现背景：新建即聚焦会话的首个交换即触发，三个不同 agent 会话均复现；visibilityState=visible 且 hasFocus=true）
-- [x] 6.2 composer 模式下拉选项中文长文案仍折行（4.1 修复只覆盖 agent 下拉形态）。（✅ 根因：4.1 的放宽写在 document 级 `wa-overrides.css`，选择器匹配不到 shadow 树里的 wa-select——composer 下拉从未被覆盖，agent 下拉当时目测单行是短文案的假阳性。修复：同款规则（listbox min-width:max-content / 320px 封顶 + option 单行省略）补进 `workbench-composer.ts` 组件样式表——shadow 内样式表才能命中子组件 part。单测以 4.1 同款源码读回钉死。待主 agent 浏览器回归）
-- [x] 6.3 深链/刷新直达 `/sessions/…` 主区标题仍「未选择项目」（4.2 修复未生效，需重查 followFocusedProject 归属解析路径）。（✅ 与 4.2 同一修复：记账时序竞态，见 4.2 行内记录。待主 agent 浏览器回归）
+- [x] 6.1 未读徽章边界：聚焦会话收到新回复（流式底部跟读场景）仍被标未读——违反 session-unread-badge「read at the bottom never badges」；聚焦行重复点击（同会话 no-op）不触发清零。（✅ 修复落地，四层收敛：① rail 行未读按「聚焦 + 文档可见不呈现」推导（后台 tab 照常计未读），锚的推进权仍归 transcript；② 读锚写入广播 `sebas:anchor-advanced`，rail 监听就地失效重渲染（localStorage 非响应式——此前锚推进后徽标驻留的根因）；③ transcript 快照增长路径与 turn.append 同一贴底语义推进锚（首挂载/换会话装载除外——「开门不是看着」）；④ 空流登记补 dashboard 侧入口（`registerEmptyStreamSession`，0 回合占位渲染的是 dashboard 空态而非 transcript 组件），首聚焦交换的锚建立不再依赖巧合。spec 增量「Focused session arrivals never badge」写入本 change specs/agent-workbench/spec.md，兑现 round4「首聚焦交换永不闪现」。单测覆盖：聚焦+流式到达不出徽章、后台 tab 仍出、重复聚焦清零、锚外推清零不刷新、非聚焦到达仍出徽章。✅ 主 agent 浏览器回归通过（2026-09-21 沙箱 GUI）：聚焦+贴底到达不出徽章（badge-focused-arrival-no-badge.png）；上滚后到达→切走徽章「1」如实出现→点回清零（badge-clears-on-refocus.png）；首访无锚=已读语义复核一致。观察：hidden-tab 期间到达切回无徽章（聚焦+可见即抑制，与 delta 字面一致；「隐藏期到达无任何提示」的 UX 缺口另记 bd 跟进）。复现背景：新建即聚焦会话的首个交换即触发，三个不同 agent 会话均复现；visibilityState=visible 且 hasFocus=true）
+- [x] 6.2 composer 模式下拉选项中文长文案仍折行（4.1 修复只覆盖 agent 下拉形态）。（✅ 根因：4.1 的放宽写在 document 级 `wa-overrides.css`，选择器匹配不到 shadow 树里的 wa-select——composer 下拉从未被覆盖，agent 下拉当时目测单行是短文案的假阳性。修复：同款规则（listbox min-width:max-content / 320px 封顶 + option 单行省略）补进 `workbench-composer.ts` 组件样式表——shadow 内样式表才能命中子组件 part。单测以 4.1 同款源码读回钉死。✅ 主 agent 浏览器回归通过（2026-09-21 沙箱 GUI）：模式下拉展开后四选项全部单行无折行，含最长「allow（放行并留审计）」；证据 `.openspec/round5-evidence/composer-mode-dropdown-singleline.png`）
+- [x] 6.3 深链/刷新直达 `/sessions/…` 主区标题仍「未选择项目」（4.2 修复未生效，需重查 followFocusedProject 归属解析路径）。（✅ 与 4.2 同一修复：记账时序竞态，见 4.2 行内记录。主 agent 浏览器回归通过，证据同 deeplink-session-title.png）
 
 ## 7. review 缺陷收尾（2026-09-20 提交 review 发现，bd 工单同源）
 
