@@ -2378,8 +2378,9 @@ async fn handle_client_frame(
 
 /// （session-parallel-liveness-and-unread-polish 2.1，design D2）`SessionInfo`
 /// → 相位帧载荷：`SessionStatus::derive` 把 (MappingState, phase) 翻成操作者
-/// 词（含泊车投影），与 HTTP 行投影同一函数；五键全部携带，无缺省、无
-/// 「只在 true 时上 wire」的兼容保留。
+/// 词（含泊车投影），与 HTTP 行投影同一函数；键全部携带，无缺省、无
+/// 「只在 true 时上 wire」的兼容保留。（round5 6.3）载荷扩展 `label`——
+/// 操作者命名随帧下发，rail 据此把行名重取收窄到真实命名变化。
 fn session_phase_frame(info: &SessionInfo) -> crate::events::SessionPhaseFrame {
     // （review 3c 补口）泊车维度本地/远端合并：本地会话读 `parked_approvals`
     // （StallRegistry 投影），远端会话读 remote 视图——二选一，不会同时有值。
@@ -2394,6 +2395,7 @@ fn session_phase_frame(info: &SessionInfo) -> crate::events::SessionPhaseFrame {
         turn_engaged: info.turn_engaged,
         msg_count: info.msg_count,
         pending: info.pending.clone(),
+        label: info.label.clone(),
     }
 }
 
@@ -3032,6 +3034,90 @@ mod ws_resync_tests {
             panic!("resync must ride a Notification frame");
         };
         assert_eq!(notification.method, "session.resync");
+    }
+}
+
+#[cfg(test)]
+mod session_phase_frame_label_tests {
+    //! fix-webui-qa-defects-round5 6.3：相位帧载荷扩展 `label` 的**映射**面
+    //! ——`session_event_to_frame` 必须把 `SessionInfo.label` 原样带上
+    //! Created/Updated 帧。rail（project-rail onWsEvent）据此把行名重取收窄
+    //! 为「帧 label ≠ 行已知 label 才调度」：这条映射一断（恒 None），rail
+    //! 的比对永远相等、label 变化再也不触发重取——静默失活且无报错。
+    //! 序列化形状（label 键恒在、None = null）由 events.rs 的
+    //! events_serialize_with_dotted_type_tag 钉死，这里只钉 SessionInfo → 帧
+    //! 载荷的搬运；wire 端到端由 e2e label_write_reaches_clients_as_session_
+    //! update_without_reload 断言。
+
+    use super::*;
+    use sebas_channels::ChannelKey;
+
+    fn info(label: Option<String>) -> SessionInfo {
+        let key = ChannelKey::new("web", "web-label-frame");
+        SessionInfo {
+            channel: key.channel.as_str().to_string(),
+            key: key.reference.clone(),
+            session_id: Some("s-label".into()),
+            status: "active".into(),
+            phase: None,
+            user_prompt: None,
+            last_active_unix: 0,
+            project_dir: None,
+            current_model: None,
+            available_models: None,
+            agent_kind: None,
+            usage: None,
+            backend: None,
+            pending: Vec::new(),
+            remote: None,
+            desired_mode: sebas_dispatch::engine::ask_mode(),
+            effective_mode: None,
+            msg_count: 2,
+            available_commands: Vec::new(),
+            turn_engaged: false,
+            spawn_failure_reason: None,
+            parked_approvals: 0,
+            label,
+        }
+    }
+
+    #[test]
+    fn updated_frame_carries_the_session_label() {
+        let ev = session_event_to_frame(SessionEvent::Updated {
+            session: info(Some("操作者命名".into())),
+        });
+        match ev.expect("updated must produce a frame") {
+            WebUiEvent::SessionUpdated { phase, .. } => {
+                assert_eq!(phase.label, Some("操作者命名".into()))
+            }
+            other => panic!("expected SessionUpdated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn updated_frame_maps_absent_label_to_none() {
+        let ev = session_event_to_frame(SessionEvent::Updated {
+            session: info(None),
+        });
+        match ev.expect("updated must produce a frame") {
+            WebUiEvent::SessionUpdated { phase, .. } => assert_eq!(phase.label, None),
+            other => panic!("expected SessionUpdated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn created_frame_carries_the_session_label_too() {
+        // created 与 updated 同形同源（session_phase_frame 单一出处）——rail
+        // 对 created 保持「建行即重取」，帧上的 label 只是顺带如实下发。
+        let ev = session_event_to_frame(SessionEvent::Created {
+            session: info(Some("创建即命名".into())),
+        });
+        match ev.expect("created must produce a frame") {
+            WebUiEvent::SessionCreated { phase, .. } => {
+                assert_eq!(phase.label, Some("创建即命名".into()))
+            }
+            other => panic!("expected SessionCreated, got {other:?}"),
+        }
     }
 }
 

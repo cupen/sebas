@@ -126,12 +126,14 @@ fn swapped_codec_tolerance_matrix_matches_the_json_implementation() {
 #[test]
 fn all_seven_events_travel_as_notifications_with_params_verbatim() {
     // （session-parallel-liveness-and-unread-polish 2.1）session.created /
-    // updated 为五键相位帧（phase flatten 进 params）。
+    // updated 为相位帧（phase flatten 进 params）；round5 6.3 起载荷扩展
+    // `label`（操作者命名随帧下发）。
     let phase = sebas_webui::events::SessionPhaseFrame {
         status_slug: "working".into(),
         turn_engaged: true,
         msg_count: 2,
         pending: Vec::new(),
+        label: Some("renamed".into()),
     };
     let events: Vec<WebUiEvent> = vec![
         WebUiEvent::SessionCreated {
@@ -141,6 +143,7 @@ fn all_seven_events_travel_as_notifications_with_params_verbatim() {
                 turn_engaged: true,
                 msg_count: 0,
                 pending: Vec::new(),
+                label: None,
             },
         },
         WebUiEvent::SessionUpdated {

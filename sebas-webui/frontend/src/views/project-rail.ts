@@ -256,6 +256,10 @@ export class SebasProjectRail extends LitElement {
    */
   private onWsEvent = (ev: WsEvent): void => {
     if (ev.type === 'session.updated' || ev.type === 'session.created') {
+      const known =
+        ev.type === 'session.updated'
+          ? this.sessions.find((r) => r.encoded_key === ev.session_id)
+          : undefined
       const patch = (row: SessionRow): SessionRow =>
         row.encoded_key === ev.session_id
           ? {
@@ -267,10 +271,15 @@ export class SebasProjectRail extends LitElement {
             }
           : row
       this.sessions = this.sessions.map(patch)
-      // （fix-webui-qa-defects-round5 3.2，design 决策 4）相位帧是五键定形、
-      // 不携带 label——任意路径（rail 对话框 / API）的 label 写入成功都发
-      // Updated，行名的命名来源可能随该帧变化：防抖后做一次轻量列表重取，
-      // 用返回的 label 重渲染行名（不做全列表轮询）。
+      // （fix-webui-qa-defects-round5 3.2/6.3，design 决策 4 收窄）相位帧
+      // 不改命名之外的任何行名来源；label 随帧载荷扩展下发（6.3）。对
+      // 已存在行的 updated 帧，先比对帧 label 与该行当前已知 label——一致
+      // （含同为空/同为退化回退态）说明命名没有变化，跳过调度；仅真实
+      // 命名变化（label 写入、清空回退）才进入防抖重取。session.created
+      // 与 rail 中不存在的会话保持现行为（要建行，必须重取列表）。
+      const namingChanged =
+        known === undefined || (ev.label ?? null) !== (known.label ?? null)
+      if (!namingChanged) return
       this.scheduleLabelRefresh()
       return
     }
@@ -284,10 +293,10 @@ export class SebasProjectRail extends LitElement {
   }
 
   /**
-   * （fix-webui-qa-defects-round5 3.2）帧触发的行名重取：队列高频翻转时
-   * session.updated 可能连发——尾沿防抖把一个窗口内的多帧合并为一次既有
-   * `GET /api/sessions` 重取（行投影里 label 的唯一来源；单会话 detail 带
-   * 聚焦副作用且不带 label，不用）。量级与 10s 轮询兜底相当。
+   * （fix-webui-qa-defects-round5 3.2/6.3）帧触发的行名重取：只有真实命名
+   * 变化（onWsEvent 的 label 比对通过）才到达这里；一个防抖窗口内的多帧
+   * 仍合并为一次既有 `GET /api/sessions` 重取（行投影里 label 的唯一来源；
+   * 单会话 detail 带聚焦副作用且不带 label，不用）。
    */
   private labelRefreshTimer: number | undefined = undefined
   private scheduleLabelRefresh(): void {

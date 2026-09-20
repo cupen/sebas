@@ -4992,18 +4992,29 @@ async fn archive_restore_preserves_the_row_naming_sources() {
 // rail 行名免刷新）由 testsuite-webui / 主 agent GUI 回归承担。
 // ---------------------------------------------------------------------------
 
-/// 在 `/ws` 帧流里等目标会话的下一条 `session.updated`（跳过无关帧；单帧
-/// 15s 超时由 [`next_ws_frame`] 兜底，循环上限防无限流）。
-async fn wait_session_updated(ws: &mut WsStream, key: &str) -> serde_json::Value {
+/// 在 `/ws` 帧流里等目标会话携带目标 `label` 的下一条 `session.updated`
+/// （跳过无关帧与 label 未变化的**回水帧**：resync 护栏放行后，建会话/回合
+/// 收敛期间的相位帧仍会在读帧前排队，它们 label 恒为写入前的旧值，必须跳过
+/// 直到目标写入的帧到达；单帧 15s 超时由 [`next_ws_frame`] 兜底，循环上限防
+/// 无限流）。
+async fn wait_session_updated_with_label(
+    ws: &mut WsStream,
+    key: &str,
+    label: Option<&str>,
+) -> serde_json::Value {
     for _ in 0..100 {
         let frame = next_ws_frame(ws).await;
         let method = frame["method"].as_str().unwrap_or_default();
         let sid = frame["params"]["session_id"].as_str().unwrap_or_default();
-        if method == "session.updated" && sid == key {
+        let label_matches = match label {
+            Some(expected) => frame["params"]["label"].as_str() == Some(expected),
+            None => frame["params"]["label"].is_null(),
+        };
+        if method == "session.updated" && sid == key && label_matches {
             return frame;
         }
     }
-    panic!("no session.updated frame for {key} arrived");
+    panic!("no session.updated frame for {key} with label {label:?} arrived");
 }
 
 /// `GET /api/sessions` 里目标会话的行投影（rail 行名重取的数据源）。
@@ -5302,6 +5313,23 @@ async fn label_write_reaches_clients_as_session_update_without_reload() {
     wait_reachable(&cli, &sb).await;
 
     let project_id = scene_project_id(&cli, &sb).await;
+    // 先连 /ws 再写 label：帧必须在既有连接上到达（免刷新的证据本体）。
+    let mut ws = ws_connect(&sb.webui_url()).await;
+    // webui 启动会与 core 的 socket bind 竞速——首个流式订阅尝试可能失败、
+    // 经 1s 退避后才连上（claude_turn_streams 同款护栏）：`session.resync`
+    // 随每次订阅快照到达，等到它才说明 forwarder 已订阅、后续变更必达；
+    // 若 4s 内没等到（forwarder 在本连接订阅前就已连上，resync 已被广播
+    // 消费），订阅同样已就绪，继续即可。
+    let _ = tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            let ev = next_ws_frame(&mut ws).await;
+            if ev["method"] == "session.resync" {
+                break;
+            }
+        }
+    })
+    .await;
+
     let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
@@ -5318,9 +5346,6 @@ async fn label_write_reaches_clients_as_session_update_without_reload() {
     let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
     wait_turn_done(&cli, &sb, &detail_url).await;
 
-    // 先连 /ws 再写 label：帧必须在既有连接上到达（免刷新的证据本体）。
-    let mut ws = ws_connect(&sb.webui_url()).await;
-
     // API 路径写入（rail 对话框与它共用同一 label API）。
     let (status, body) = post_json(
         &cli,
@@ -5331,14 +5356,15 @@ async fn label_write_reaches_clients_as_session_update_without_reload() {
     .expect("set label");
     assert_eq!(status, 200, "set label: {body}");
 
-    // 更新帧到达：五键相位帧（session_id + 四相位键；label 不进载荷——
-    // 帧形状冻结，行名刷新由客户端帧触发重取完成，见 round5 design 决策 4）。
-    let frame = wait_session_updated(&mut ws, &key).await;
+    // 更新帧到达：相位帧（session_id + 四相位键）。round5 6.3 起载荷扩展
+    // `label`（操作者命名随帧如实下发）——rail 的行名重取收窄直接消费该键
+    // （帧 label ≠ 行已知 label 才调度），断键即静默失活，必须在 wire 上钉住。
+    let frame = wait_session_updated_with_label(&mut ws, &key, Some("发布清单会话")).await;
     let params = &frame["params"];
-    assert!(params["status_slug"].is_string(), "five-key frame: {frame}");
-    assert!(params["turn_engaged"].is_boolean(), "five-key frame: {frame}");
-    assert!(params["msg_count"].is_number(), "five-key frame: {frame}");
-    assert!(params["pending"].is_array(), "five-key frame: {frame}");
+    assert!(params["status_slug"].is_string(), "phase frame: {frame}");
+    assert!(params["turn_engaged"].is_boolean(), "phase frame: {frame}");
+    assert!(params["msg_count"].is_number(), "phase frame: {frame}");
+    assert!(params["pending"].is_array(), "phase frame: {frame}");
 
     // 行投影（rail 重取的读源）已携带新 label。
     let row = listed_row(&cli, &sb, &key).await;
@@ -5356,7 +5382,11 @@ async fn label_write_reaches_clients_as_session_update_without_reload() {
     .await
     .expect("clear label");
     assert_eq!(status, 200, "clear label: {body}");
-    wait_session_updated(&mut ws, &key).await;
+    let frame = wait_session_updated_with_label(&mut ws, &key, None).await;
+    assert!(
+        frame["params"]["label"].is_null(),
+        "the cleared label must ride the frame as null (never a stale value): {frame}"
+    );
     let row = listed_row(&cli, &sb, &key).await;
     assert!(
         row["label"].is_null(),
@@ -5365,23 +5395,23 @@ async fn label_write_reaches_clients_as_session_update_without_reload() {
 }
 
 // ---------------------------------------------------------------------------
-// （fix-webui-qa-defects-round5 1.2 收口，core-session-channel「typed
-// rejections pass through the composite」内嵌形态收尾）已接受/越优先两类
-// PendingRejected 通过裸 core 复合后端 + 真 HTTP 路径走通 409——上层
-// 「unknown 404 / out_of_range 400」已随 embedded-shape 测试覆盖；这里补
-// 「AlreadyStarted / PriorityConflict 409」两层：types 必须端到端从状态层
-// 一路透到 webui api.rs 的 409 映射，绝不在某层被「不可用」笼统顶回。
+// （fix-webui-qa-defects-round5 1.2 收口；断言按 6.1/3c review 的 wire 现状
+// 校准）busy 会话的待执行管理面经裸 core 复合后端 + 真 HTTP 路径验证：
+// 重排合法生效（200）、已投递 id 的 remove 得 AlreadyStarted 409；上层
+// 「unknown 404 / out_of_range 400」已随 embedded-shape 测试覆盖；
+// PriorityConflict 的 409 映射在 wire 优先入口缺位下由 api.rs 的
+// FakeBackend 缝隙单测钉住。错误文案绝不在某层被「不可用」笼统顶替。
 //
 // 真实复现路径：核心通道端状态层 PendingOpError → InProcessBackend 透传
-// → DualSessionBackend.route() → api.rs PendingReason → StatusCode。这是
-// 1.2 表格里未在 e2e 层覆盖的盲点，故新加一条用例。
+// → DualSessionBackend.route() → api.rs PendingReason → StatusCode。
 // ---------------------------------------------------------------------------
 
-/// 在 stream 场景下把两条普通项 + 一条优先项排进队列，返回
-/// (detail_url, 普通 b 的 id, 普通 c 的 id, 优先 p 的 id)。优先项不可移
-/// 动（status 输入「/btw」走 priority=true）；c 上有一个条目跑到 pop 后变
-/// 成「delivered」id——为 AlreadyStarted 用例留窗口。
-async fn queue_three_with_priority(
+
+/// 在 stream 场景下把三条**普通**提交排进 busy 会话的待执行栈，返回
+/// (detail_url, 三条 id)。「busy 会话带待执行栈」且不需要优先项的场景
+/// （如复合后端按 key 路由的对照面）从这里拿——全部普通项，id 精确匹配
+/// 文本，没有 /btw 前缀干扰。
+async fn queue_three_pending(
     cli: &reqwest::Client,
     base: &str,
     project_id: &str,
@@ -5426,11 +5456,11 @@ async fn queue_three_with_priority(
     })
     .await;
 
-    // 三条入栈：b/c 普通、p 优先（`/btw`，claude 后端会带 priority=true）。
+    // 三条普通提交入栈（会话在飞 → 全部 pending）。
     for (tag, text) in [
         ("b", "queued-round5-b"),
         ("c", "queued-round5-c"),
-        ("p", "/btw queued-round5-p"),
+        ("p", "queued-round5-p"),
     ] {
         let (status, body) = post_json(
             cli,
@@ -5442,7 +5472,7 @@ async fn queue_three_with_priority(
         assert_eq!(status, 200, "busy-time submission {tag} must be accepted: {body}");
     }
 
-    // 三条都在 pending；pop 顺序：p（优先）/ b / c。
+    // 三条都在 pending。
     let poll_cli = cli.clone();
     let poll_url = detail_url.clone();
     let detail = wait_for(
@@ -5472,18 +5502,20 @@ async fn queue_three_with_priority(
     (detail_url, id_of("queued-round5-b"), id_of("queued-round5-c"), id_of("queued-round5-p"))
 }
 
-/// （fix-webui-qa-defects-round5 1.2，core-session-channel「typed rejections
-/// pass through the composite」内嵌形态收尾）裸 core 复合后端下：
+/// （fix-webui-qa-defects-round5 1.2；断言按 6.1/3c review 的 wire 现状校准）
+/// 裸 core 复合后端下的待执行管理面：
 ///
-/// - **PriorityConflict (409)**：把普通条目 c 移到优先条目 p 之前（落点 0）
-///   → 状态层 PriorityConflict → InProcessBackend → DualSessionBackend.route()
-///   → api.rs PendingReason::PriorityConflict → 409；
-/// - **AlreadyStarted (409)**：等首回合收敛（优先项 p 已 pop 投递，b 自动接
-///   续）→ 用陈旧的 p id 重试 remove → 状态层 delivered 集合里命中 →
-///   AlreadyStarted → 409；
+/// - **重排诚实行为 (200)**：wire 上尚无优先提交入口（web_send_message →
+///   submit_turn 恒 priority=false，/btw 的优先位只在 feishu 入站生效），
+///   队列全普通项——move c → 0 是合法重排，得 200 且顺序生效。
+///   PriorityConflict 的 409 映射由 api.rs 的 FakeBackend 缝隙单测钉住；
+///   优先项 wire 入口落地后，本腿改回「越过优先项 must 409」。
+/// - **AlreadyStarted (409)**：等 c/b/p 依序投递完（id_p 离开 pending）→
+///   用陈旧的 p id 重试 remove → 状态层 delivered 集合里命中 →
+///   AlreadyStarted → 409。
 ///
-/// 两类文案都点名原因（不能越过优先 / 该提交已开始执行）且绝不出现
-/// 「核心不可达」「操作不可用」等其它 5xx/4xx 顶替。
+/// 错误文案点名原因（该提交已开始执行）且绝不出现「核心不可达」
+/// 「操作不可用」等其它 5xx/4xx 顶替。
 #[tokio::test]
 #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
 async fn pending_management_passes_typed_rejections_through_composite_409() {
@@ -5527,34 +5559,64 @@ async fn pending_management_passes_typed_rejections_through_composite_409() {
     assert_eq!(pstatus, 201, "register scene project: {pbody}");
     let project_id = pbody["id"].as_str().expect("project id").to_string();
 
-    // 三条入栈（普通 b、普通 c、优先 p）。
+    // 三条普通入栈（wire 上无优先提交入口，见段落注释）。
     let (detail_url, _id_b, id_c, id_p) =
-        queue_three_with_priority(&cli, &base, &project_id, &hint).await;
+        queue_three_pending(&cli, &base, &project_id, &hint).await;
 
-    // ── PriorityConflict → 409：把普通项 c 移到优先项 p 之前（落点 0）。──
+    // ── 重排诚实行为 → 200：队列全普通项，move c → 0 合法且顺序生效。──
     let (status, body) = post_json(
         &cli,
         &format!("{detail_url}/pending/{id_c}/move"),
         serde_json::json!({ "to_index": 0 }),
     )
     .await
-    .expect("move c ahead of p");
+    .expect("move c to front");
     assert_eq!(
-        status, 409,
-        "moving past a priority submission must 409 (PriorityConflict), got {body}"
+        status, 200,
+        "reordering plain submissions must succeed on the wire, got {body}"
     );
-    let message = body["error"].as_str().unwrap_or_default();
-    assert!(
-        message.contains("不能越过优先提交排序"),
-        "PriorityConflict message must name the rule: {message}"
+    let (_, detail) = get_json_status(&cli, &detail_url)
+        .await
+        .expect("detail after move");
+    let order: Vec<String> = detail["pending"]
+        .as_array()
+        .expect("pending list")
+        .iter()
+        .map(|p| p["text"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(
+        order,
+        ["queued-round5-c", "queued-round5-b", "queued-round5-p"],
+        "move to front must take effect: {order:?}"
     );
-    // 关键：错误必须不冒充可达性失败（round5 1.3 文案诚实性）。
-    assert!(!message.contains("核心不可达"), "{message}");
-    assert!(!message.contains("操作不可用"), "{message}");
 
-    // ── AlreadyStarted → 409：等优先项 p 被投递（首回合收敛），保留 p id
-    // 重试 remove。delivered 集合里命中 → AlreadyStarted → 409。
-    wait_turn_done(&cli, &sb, &detail_url).await;
+    // ── AlreadyStarted → 409：p 以普通项身份依序投递。轮询直到 id_p 离开
+    // pending（= 已 pop 投递），保留陈旧 id 重试 remove：delivered 集合命中
+    // → AlreadyStarted → 409。文案诚实性断言落在本错误腿上。
+    {
+        let poll_cli = cli.clone();
+        let poll_url = detail_url.clone();
+        wait_for("p to be delivered (leaves pending)", Duration::from_secs(60), &hint, move || {
+            let cli = poll_cli.clone();
+            let url = poll_url.clone();
+            Box::pin(async move {
+                let v = cli
+                    .get(&url)
+                    .send()
+                    .await
+                    .ok()?
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()?;
+                let delivered = v["pending"]
+                    .as_array()?
+                    .iter()
+                    .all(|p| p["id"].as_u64() != Some(id_p));
+                delivered.then_some(())
+            })
+        })
+        .await;
+    }
     let (status, body) = post_json(
         &cli,
         &format!("{detail_url}/pending/{id_p}/remove"),
@@ -5596,6 +5658,7 @@ async fn pending_management_passes_typed_rejections_through_composite_409() {
 /// 只断言调用契约与文案形态——这与 1.2 表格里 FakeBackend 注入 Unavailable
 /// 的接口层单测是同形但反向验证：真实 InProcessBackend/NativeAgentBackend
 /// 路径里走出来的错误文本也得是「操作不可用」而非「核心不可达」。
+/// 键必须是 `agent-` 形引用（is_native 谓词），否则落 ACP 桥得 404 Unknown。
 #[tokio::test]
 #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
 async fn pending_management_unavailable_uses_honest_cause_text() {
@@ -5638,17 +5701,21 @@ async fn pending_management_unavailable_uses_honest_cause_text() {
     assert_eq!(pstatus, 201, "register scene project: {pbody}");
     let project_id = pbody["id"].as_str().expect("project id").to_string();
 
-    // web channel 创建会话（走 acp 桥）→ 优先入栈。
+    // web channel 创建会话（走 acp 桥）→ 三条普通提交入栈，作为「acp 侧
+    // 队列照常可用」的对照面（本用例不需要优先项）。
     let (detail_url, _id_b, _id_c, _id_p) =
-        queue_three_with_priority(&cli, &base, &project_id, &hint).await;
+        queue_three_pending(&cli, &base, &project_id, &hint).await;
 
     // 用合法编码 key 但绕开 webui 路由：直接对 feishu channel 编码键（沙箱
     // feishu disabled，route() 落到 NativeAgentBackend 的 trait 默认实现 →
     // Unavailable cause = "此后端不承载待执行队列"）。WebUI 路由 decode 该
     // key 仍合法（webui 不按 channel 过滤），仅后端不可用。
     //
-    // 编码约定：「channel%00reference」；取一个不存在的 feishu 引用即可。
-    let feishu_encoded = "feishu%00round5-native-pending";
+    // 编码约定：「channel%00reference」；is_native（src/agent_backend.rs）
+    // 只认 feishu + `agent-` 前缀才路由 native 侧——引用缺前缀会落 ACP 桥
+    // 得 PendingRejected::Unknown（404），断言的 503/诚实文案就永不匹配
+    // （round5 6.1 修的键形状），故取一个不存在的 `agent-` 形 feishu 引用。
+    let feishu_encoded = "feishu%00agent-round5-native-pending";
     for (op, suffix) in [("remove", "/remove"), ("move", "/move")] {
         let url = format!("{base}/api/sessions/{feishu_encoded}/pending/1{suffix}");
         let body = if op == "move" {
@@ -5696,7 +5763,7 @@ async fn pending_management_unavailable_uses_honest_cause_text() {
         .iter()
         .any(|r| {
             r["encoded_key"].as_str()
-                == Some(detail_url.rsplit('/').nth(1).unwrap_or(""))
+                == Some(detail_url.rsplit('/').next().unwrap_or(""))
         });
     assert!(in_list, "the queued session must still be reachable by webui list");
 }

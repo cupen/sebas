@@ -1175,6 +1175,7 @@ describe('sebas-dashboard (silent working window refetch chain)', () => {
       turn_engaged: true,
       msg_count: 2,
       pending: [],
+      label: null,
     })
     await settle(el)
 
@@ -1230,6 +1231,7 @@ describe('sebas-dashboard (silent working window refetch chain)', () => {
       turn_engaged: true,
       msg_count: 3,
       pending: [{ id: 1, text: 'x', position: 0, disposition: 'turn', priority: false }],
+      label: null,
     })
 
     const detail = (el as unknown as { focusedDetail: { status_slug: string; turn_engaged: boolean; msg_count: number; pending: unknown[] } }).focusedDetail
@@ -1283,7 +1285,7 @@ describe('ws event dispatch, throttling and resync (fix-webui-streaming-liveness
     const el = await mount()
     await settle(el)
     const base = apiMocks.summary.mock.calls.length
-    // 节流窗内的三个会话事件：只产生一轮刷新。（2.1，D2）相位帧五键必带。
+    // 节流窗内的三个会话事件：只产生一轮刷新。（2.1，D2）相位帧键必带。
     wsMocks.emit({
       type: 'session.updated',
       session_id: 'oc_live%00',
@@ -1291,6 +1293,7 @@ describe('ws event dispatch, throttling and resync (fix-webui-streaming-liveness
       turn_engaged: true,
       msg_count: 1,
       pending: [],
+      label: null,
     })
     wsMocks.emit({
       type: 'session.updated',
@@ -1299,6 +1302,7 @@ describe('ws event dispatch, throttling and resync (fix-webui-streaming-liveness
       turn_engaged: true,
       msg_count: 1,
       pending: [],
+      label: null,
     })
     wsMocks.emit({
       type: 'session.created',
@@ -1307,6 +1311,7 @@ describe('ws event dispatch, throttling and resync (fix-webui-streaming-liveness
       turn_engaged: true,
       msg_count: 0,
       pending: [],
+      label: null,
     })
     await settle(el)
     expect(apiMocks.summary.mock.calls.length).toBe(base + 1)
@@ -1318,6 +1323,7 @@ describe('ws event dispatch, throttling and resync (fix-webui-streaming-liveness
       turn_engaged: false,
       msg_count: 1,
       pending: [],
+      label: null,
     })
     await new Promise((r) => setTimeout(r, 650))
     await settle(el)

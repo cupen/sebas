@@ -10,7 +10,7 @@
 ## Goals / Non-Goals
 
 - Goals：内嵌裸 core 形态下 pending 管理面可用且类型化拒绝保真；重命名对话框「所见即所存」；label 变更实时反映到行名；三个 P3 打磨。
-- Non-Goals：不改五键帧形状（label 不进帧载荷）；不给 native 后端造队列；不重构 notice-layer 的分级体系。
+- Non-Goals：不改五键帧形状（label 不进帧载荷；6.3 收窄补记修订：label 以**加键载荷扩展**随既有帧下发，五键语义不动）；不给 native 后端造队列；不重构 notice-layer 的分级体系。
 
 ## Decisions
 
@@ -18,6 +18,7 @@
 2. **错误诚实性分两层**：后端保持 `Unavailable → 503` 映射不变（真正无队列的后端仍该这么报）；前端 notice-layer 移除对 Unavailable 的「核心不可达」退化前缀——该前缀只保留给 `core.reachability` 类真实不可达信号。备选「把 Unavailable 改映射 400」会混淆传输层语义，放弃。
 3. **重命名对话框取值**：保存 handler 显式从 `wa-input` 的内部原生 `input` 读 `value`（查询 `[data-testid="rename-input"] input`），不依赖宿主属性同步；保存后以响应结果驱动关闭。补一个组件级回归测试：渲染对话框→填值→保存→断言 fetch 请求体携带该值。
 4. **label 实时刷新：帧触发 + 单会话投影重取**。label 写入成功后引擎广播既有 session.updated 帧（五键形状不动）；rail 收到某会话的帧且该行处于命名退化或标签态时，对该会话做一次轻量投影重取（复用既有 `GET /api/sessions` 增量路径或单会话 detail），用返回的 `label` 重渲染行名。备选「帧载荷加 label 字段」违反本 change Non-goals（wire 形状冻结）；备选「全列表轮询」是既有 fallback，不作为主路径。
+   - **（6.3 收窄补记，2026-09-20 review）**初版实现对任意 session.updated/created 帧无条件调度全量 refresh（四端点），活跃 turn 期间请求放大。实现最终收敛为：相位帧载荷扩展 `label` 键（即 proposal Non-goals 所说「label 走既有帧的载荷扩展而非新帧型」——本决策原文对「帧载荷加 label」的排除收窄为「不新造帧型、不改既有五键语义」，`label` 为加键扩展）；rail 对**已存在行**的 updated 帧先比对帧 label 与行已知 label，一致（含同为空/退化回退态）即跳过调度，仅真实命名变化进入 400ms 尾沿防抖重取；session.created 与 rail 中不存在的会话保持现行为（要建行，照常重取）。fetchSeq 防陈旧与卸载清理不变。
 5. **P3 打磨**：行菜单关闭态加 `hidden`（或等效 inert）使 a11y 树不暴露菜单项；失败类 toast 增加自动消失（8s，与成功类策略分开常量化）；About 的 provider 计数旁加口径标注（「router 侧含 debug provider」），与 Models 注册表区分。
 
 ## Risks / Trade-offs

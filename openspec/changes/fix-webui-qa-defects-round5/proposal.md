@@ -7,7 +7,7 @@
 - **复合后端 pending 管理面转发（P1，实现修复 + spec 澄清）**——`DualSessionBackend` 按 key 把 `pending` / `remove_pending` / `move_pending` 路由到承载侧（内嵌形态即 acp 桥），类型化拒绝（Unknown / AlreadyStarted / PriorityConflict / OutOfRange）原样透传；WebUI 不再把后端路由缺口渲染成「核心不可达」前缀的误导文案。
 - **会话重命名链路修复（P1，实现修复）**——rail 重命名对话框保存把输入值真实写入 label API（当前输入值在保存链路丢失，静默 no-op）；后端 label API 已验证可用，仅前端修复。
 - **label 变更实时广播（P1，spec 澄清）**——label 写入路径触发会话更新帧，rail 行名消费该帧实时更新，无需整页刷新（对齐首条消息预览的既有实时性要求）。
-- **P3 批量打磨（无 spec 变化）**：关闭状态的行菜单项对辅助技术隐藏（a11y 树不再暴露）；失败类 toast 增加自动消失策略；About 实例概览的 provider 计数与 Models 区注册表口径加区分标注。
+- **P3 批量打磨**：关闭状态的行菜单项对辅助技术隐藏（a11y 树不再暴露）；失败类 toast 增加自动消失策略（error 从驻留改为默认 8s 自动消失、参与瞬时栈挤占，显式驻留仍支持——此项有 spec 变化，delta 见 `specs/webui/`）；About 实例概览的 provider 计数与 Models 区注册表口径加区分标注。
 
 ## Non-goals
 
@@ -31,3 +31,12 @@
 - 后端：`src/agent_backend.rs`（DualSessionBackend 三个方法转发）、`sebas-webui/src/session_backend.rs` 与 `api.rs`（错误映射核查，503→按真实原因类型化）
 - 前端：rename-dialog 保存链路取值、rail 行名对会话帧的消费、notice-layer 自动消失、行菜单关闭态 a11y、About 口径标注
 - 测试：DualSessionBackend 转发单测、label 变更触发帧的 wire 断言、GUI 回归（重命名/排队重排路径）
+
+## 实施记录（2026-09-20 review 补记）
+
+提交 31ae5b7 的提交信息称「第五轮QA缺陷修复与回归」、易被读作 round4 仅工件
+归并，但该提交实际载有 round4 的特性代码：teardown 语义改为 retirement、
+receipt 阶段语义、prompt_preview 经 Mapping/archive/core-channel 的迁移。
+按「工件归并」理解会漏掉这些行为变更——溯源以本注为准。另：4.2 失败类
+toast 自动消失并非「无 spec 变化」，`webui` 能力的分级通知层 requirement
+随之修改（delta 见本 change `specs/webui/spec.md`）。
