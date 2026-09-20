@@ -111,4 +111,52 @@ test.describe('agent mode 选择', () => {
     ).toHaveAttribute('data-mode', 'allow', { timeout: 10_000 })
     expect(collector.clean()).toEqual([])
   })
+
+  test.describe('composer 模式下拉形态', () => {
+    test('composer mode dropdown options stay single-line (round3 6.2)', async ({
+      page,
+      request,
+    }) => {
+      // round3 4.1 的放宽写在 document 级 wa-overrides.css，够不到 shadow 树
+      // 里的 wa-select——composer 模式下拉的中文长文案（「allow（放行并留审
+      // 计）」等）仍按字折行挤高选项行。修复把同款规则（listbox min-width:
+      // max-content / 320px 封顶 + option 单行省略）补进 workbench-composer
+      // 自己的样式表。本旅程展开真实下拉，量测每个选项盒高度：单行 ≈26px
+      // 量级，折行必然 ≥2×行高（≈44px+）——40px 阈值两侧有充分间隔。
+      const key = await createSession(request, { prompt: 'hello', mode: 'ask' })
+      await waitStatus(request, key, ['done'])
+
+      await page.goto(`/sessions/${key}`)
+      const modeSwitch = page.locator('sebas-workbench-composer wa-select[data-testid="mode-switch"]')
+      await expect(modeSwitch).toBeVisible()
+
+      await modeSwitch.click()
+      // 五个选项（默认 + 四模式）都可见——面板真实展开，不是残留浮层。
+      const options = modeSwitch.locator('wa-option')
+      await expect(options).toHaveCount(5, { timeout: 10_000 })
+      const longest = options.filter({ hasText: 'allow（放行并留审计）' })
+      await expect(longest).toBeVisible()
+
+      const heights = await options.evaluateAll((els) =>
+        els.map((el) => el.getBoundingClientRect().height),
+      )
+      expect(heights.length).toBe(5)
+      for (const h of heights) {
+        expect(h, `option box height ${h}px must be single-line (<40px)`).toBeLessThan(40)
+      }
+
+      // 选项文案不折行的机制面：label part 计算样式 white-space: nowrap
+      // （shadow 内样式表命中的直接证据；agent 下拉当时的假阳性就是短文案
+      // 掩盖了规则缺席）。
+      const labelWhiteSpace = await longest.evaluate((el) => {
+        const label = el.shadowRoot?.querySelector('[part="label"]')
+        return label ? getComputedStyle(label).whiteSpace : ''
+      })
+      expect(labelWhiteSpace).toBe('nowrap')
+
+      // 收起，不做选择（change 只在真选择时派发）。
+      await page.keyboard.press('Escape')
+      expect(collector.clean()).toEqual([])
+    })
+  })
 })

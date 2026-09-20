@@ -169,5 +169,45 @@ test.describe('会话管理', () => {
 
       expect(collector.clean()).toEqual([])
     })
+
+    test('deep link lands the focused session project in the main title, never 「未选择项目」', async ({
+      page,
+    }) => {
+      // round3 4.2/6.3：深链/刷新直达 /sessions/<key> 时 detail 常先于
+      // projects.list 落地，followFocusedProject 以 path=null 空转一次即记账，
+      // 标题整段窗口停在「未选择项目」。修复后：项目 id 有值而路径未解析不
+      // 记账，列表到达的核对一拍补投影——冷加载终点必是归属项目名。
+      const workbench = new Workbench(page)
+
+      await resetState(page.request)
+      const { name: projectName } = await ensureSceneProject(page.request)
+      const key = await createSession(page.request, { prompt: 'deeplink-title' })
+      await waitStatus(page.request, key, ['done'])
+
+      // 冷加载（无任何先前的 shell 状态）：主区项目标题从会话归属项目绑定。
+      await page.goto(`/sessions/${key}`)
+      await expect(workbench.projectHeader).toBeVisible({ timeout: 15_000 })
+      await expect(workbench.projectHeader.locator('.path:not(.muted)')).toHaveText(
+        projectName,
+        { timeout: 10_000 },
+      )
+      await expect(workbench.noProjectSelected).toHaveCount(0)
+      // 会话本体照常渲染（深链渲染语义不被标题对账干扰）。
+      await expect(
+        page.locator('sebas-dashboard sebas-transcript-view .turn-block', {
+          hasText: 'deeplink-title',
+        }),
+      ).toBeVisible({ timeout: 15_000 })
+
+      // 刷新同形：再走一次直达路径，标题不回退。
+      await page.reload()
+      await expect(workbench.projectHeader.locator('.path:not(.muted)')).toHaveText(
+        projectName,
+        { timeout: 10_000 },
+      )
+      await expect(workbench.noProjectSelected).toHaveCount(0)
+
+      expect(collector.clean()).toEqual([])
+    })
   })
 })

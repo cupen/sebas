@@ -322,16 +322,22 @@ requirement），子功能 = 二层 `test.describe`，一行 = 一条用例；�
 | 会话管理 | claude 芯片在场诚实形态（原「模型面诚实缺省」随 claude 自报模型面退役）| model surface honest default — the claude chip renders the observed current, never the placeholder | `session-mgmt.spec.ts` | 工作台、项目与会话管理面旅程「模型面诚实缺省」（workbench-composer-input-polish 改写：chip 在场 + 误导占位不得出现；无模型诚实缺省由前端单测 + 无 configOptions 通用 ACP 承载）|
 | 会话管理 | close 与 archive | History lists newly archived sessions newest-first (rail-declutter-unread D7) | `session-mgmt.spec.ts` | project-session-actions「History is sorted newest-first」（rail-declutter-unread） |
 | 未读徽标 | 真实回复点亮与聚焦清零 | a reply to an unfocused session lights the badge; focusing clears it and parks the anchor | `unread-badge.spec.ts` | session-unread-badge「new reply on an unfocused session」「focusing the session clears the badge」「first visit shows no unread」（rail-declutter-unread，跨层旅程：fake-claude 回复 → API `msg_count` 投影 → 徽标免刷新亮起 → 聚焦清零且锚落 localStorage） |
+| 未读徽标 | 聚焦到达与重复聚焦 | focused arrivals never badge; repeated same-session clicks keep it cleared | `unread-badge.spec.ts` | session-unread-badge「Streaming arrival into the focused session does not badge」+「Repeated focus keeps the badge cleared」（fix-webui-qa-defects-round3 delta⁷：聚焦 + 可见不点灯且锚被 transcript 贴底真推进——localStorage 佐证，非「抑制遮旧账」；重复同会话点击保持清零。⚠ detail 读取即设焦点的探针纪律见 waitListStatus⁷） |
 | 会话管理 | 多会话切换 | 2.1 dual-session switch (rail + deep-link) does not crosstalk | `sessions.spec.ts` | 会话管理覆盖「多会话切换」 |
 | 会话管理 | archive 写保护 | 2.2 archive → 400 write-protection → restore unhides honestly | `sessions.spec.ts` | 会话管理覆盖「archive 写保护与 restore 诚实语义」（restore 语义随 fix-webui-qa-defects 翻转为重建会话行，见下行） |
 | 会话管理 | 归档恢复重建 | archive → restore: rail row back, transcript intact, History cleared, writable again | `archive-restore.spec.ts` | project-session-actions「restore archived session」+「restore preserves the transcript」（fix-webui-qa-defects delta²：恢复确认弹窗含重建文案、rail 行回原项目、detail 全 N 条、History 清空、首条消息可写） |
 | 会话管理 | rail 切换即时聚焦 | 4.2 focusing A and clicking B in the rail renders B within the throttle window, with no other events | `rail-focus.spec.ts` | agent-workbench「rail selection renders the conversation immediately」（fix-webui-qa-defects delta²：switch 后无任何会话事件介入，`sebas:rail-focus` → 节流刷新 → 主区渲染 B） |
 | 审批卡片旅程 | 审批读模型恢复 | reload rebuilds the review card from the read model under the same request_id, and deciding clears it for good | `approval-restore.spec.ts` | permission-flow「刷新或重连后仍可取得」+ agent-workbench「刷新后审批面从读模型重建」（fix-webui-approval-restore-and-session-identity delta³：刷新后卡片按同 request_id 重建、唯一决策面、批复后读模型清空、rail waiting 投影） |
+| 审批卡片旅程 | 相位对账与挂载去重 | waiting-phase empty pull backs off and retries until the card lands without any phase change (round3 7.1) | `approval-reconcile.spec.ts` | fix-webui-qa-defects-round3 tasks 7.1⁷（无 delta scenario，task 级验收）：route 模拟「拉取先于落库」——waiting 下 ≥2 次扑空拉取证明退避环在转，放行后 ≤4s 免刷新免相位翻转补卡（sessionPhase 钉在 waiting、reload 探针）。实施期曾发现 detail 投影缺泊车合并把 sessionPhase 遮成 working（当时以 fulfill detail 舞台绕行上报）；实现修复（api.rs detail 补 `with_parked_approvals`，与 session_phase_frame 同款）落地后已拆舞台直跑真实投影 |
+| 审批卡片旅程 | 相位对账与挂载去重 | mount and session switch pull the approvals read model exactly once (round3 7.2) | `approval-reconcile.spec.ts` | fix-webui-qa-defects-round3 tasks 7.2⁷（无 delta scenario，task 级验收）：rail 切换与冷深链各恰好一次 approvals GET 且卡片照常从读模型重建（挂载期三路并发收敛为单次请求，pullSeq 防陈旧语义不回归） |
 | 停止收尾 | 回合被停止条目 | stopping a streaming turn appends the stop entry, resets the control, and stays settled across reloads | `stop-settle.spec.ts` | agent-workbench「停止后 transcript 有停止条目」+「刷新后不复活在飞状态」（同上 delta³：错误类停止条目、控件复位、reload 稳定、会话存活可继续） |
 | 停止收尾 | 停止释放泊车审批 | stopping a parked turn releases the approval fail-closed: read model drains, late decision is rejected, stop entry lands | `stop-settle.spec.ts` | permission-flow「停止回复清空未决审批」+「释放的请求不可再批复」（同上 delta³：读模型清空、迟到批复 404、卡面 expired、turn_engaged 复位） |
 | 会话管理 | 聚焦联动与展开持久 | rail switch and creation landing drive the project title; project-row clicks stay independent | `rail-expand.spec.ts` | agent-workbench「rail 切换会话后项目标题跟随」+「项目行点击仍独立生效」（同上 delta³：`sebas:project-follow` 反投影 shell selectedPath，rail 点击/新建落地均跟随） |
 | 会话管理 | 聚焦联动与展开持久 | expansion persists across reloads; the focused project defaults to expanded with no record | `rail-expand.spec.ts` | agent-workbench「展开状态跨刷新保持」+「聚焦会话所在项目缺省展开」（同上 delta³：`sebas.rail-expanded` 持久、聚焦缺省展开并物化、无操作不自行收起） |
+| 会话管理 | 聚焦联动与展开持久 | deep link lands the focused session project in the main title, never 「未选择项目」 | `rail-expand.spec.ts` | agent-workbench「rail 切换会话后项目标题跟随」深链/刷新直达半边（fix-webui-qa-defects-round3 tasks 4.2/6.3⁷：detail 先于 projects.list 落地的竞态不再把标题钉死在「未选择项目」，冷加载与刷新双查） |
 | 会话管理 | 行重命名 | label takes precedence over the first-prompt preview, survives reloads, and clearing falls back | `session-label.spec.ts` | project-session-actions「operator label takes precedence」+「renaming from the rail」（同上 delta³：rail … 菜单改名就地生效、对话框同源命名、清空回退首条 prompt 预览） |
+| 会话管理 | 行重命名 | a label write through the API flips the rail row live, without a reload (round5 C) | `session-label.spec.ts` | project-session-actions「label writes through any path update the row live」（fix-webui-qa-defects-round5 delta⁷：API 写 label → session.updated 帧 → rail 400ms 防抖重取就地翻名，≤3s 窗口钉死帧链路、清空同形，reload 探针免刷新） |
+| 会话管理 | 行菜单可达性 | closed row menus expose no menu items to the a11y tree; open ones do | `row-menu-a11y.spec.ts` | project-session-actions「renaming from the rail」（fix-webui-qa-defects-round5 tasks 4.1⁷：`wa-dropdown:not([open]) wa-dropdown-item { display:none }`，ariaSnapshot 关闭态无「重命名/归档/移除项目」、会话行与项目行展开态在场、Escape 再收） |
 | 会话管理 | 归档恢复身份 | archived→restored keeps agent_kind, mode and the model catalog; legacy entries fall back honestly | `archive-identity.spec.ts` | project-session-actions「恢复保留 agent 身份与模型面」+「旧归档条目如实回退」（同上 delta³：fakeacp+ask 身份四项随归档→恢复原样带回、头部如实显示；旧档 strip 身份后 default agent 回退） |
 | 项目管理覆盖 | 越界禁用原因 | out-of-root and missing paths state their reason with submit disabled; a valid path enables it | `add-scope-reason.spec.ts` | workspace-root「手填越界路径给出禁用原因」（同上 delta³：越界/不存在各给原因、提交保持禁用、合法路径恢复可用；⚠ 当前被 Add project 手填绑定缺陷阻塞，见 change 报告） |
 | 工作台首屏 | 图标本地化 | blocking the icon CDN changes nothing: zero CDN requests, local /icons assets, icons still render | `icons-local.spec.ts` | fix-webui-approval-restore-and-session-identity tasks 5.4（无 delta scenario：阻断 ka-f.fontawesome.com 零请求 + wa-icon 资源同源 /icons；⚠ 当前被 `/icons/{*path}` 路由前缀缺陷阻塞，见 change 报告） |
@@ -353,8 +359,11 @@ requirement），子功能 = 二层 `test.describe`，一行 = 一条用例；�
 | 对话视图 | 工具组展开 | the gated tool call renders as the turn tool group and expands | `conversation.spec.ts` | 同上（tool 组不混排 scenario）|
 | 对话视图 | 就地聚焦 | rail click focuses the session in place on the workbench | `conversation.spec.ts` | agent-workbench「Workbench is the single conversation surface」 |
 | 对话视图 | 模型两级选择 | creation mode offers provider → model from the Settings catalog; empty catalog is stated honestly | `conversation.spec.ts` | agent-workbench「Model selector offers the backend catalog before any session」 |
+| agent mode 选择 | composer 模式下拉形态 | composer mode dropdown options stay single-line (round3 6.2) | `mode.spec.ts` | fix-webui-qa-defects-round3 tasks 4.1/6.2⁷（无 delta scenario，task 级验收）：展开真实下拉量测五选项盒高度 <40px（单行 ≈26px 量级，折行 ≥2×行高必越线）+ label part computed white-space:nowrap（shadow 内样式表命中证据——4.1 的 document 级规则够不到组件 shadow 树，agent 下拉当时的单行是短文案假阳性） |
 | 待执行堆叠区 | 忙中提交上栈 | busy-time submission rides the stack, survives refresh, and archive names the loss | `pending-stack.spec.ts` | agent-workbench「Pending submissions stack above the composer」+「Rail session close entry」 |
 | 待执行堆叠区 | 确定性拒绝可见 | deterministic rejection of a removal surfaces a low-severity notice naming the entry | `pending-stack.spec.ts` | agent-workbench「Pending submissions stack above the composer」rejection 两级反馈（fix-pending-queue-liveness 3.3：拦截 remove → 404 类型化拒绝 → warn 通知点名条目与原因 + 对账） |
+| 待执行堆叠区 | 队列管理面 | move up and remove ride the composite to the hosting backend; queue and API agree (round5 A) | `pending-stack.spec.ts` | core-session-channel「reorder from the web UI in an embedded deployment」+「removing a pending submission over the channel」（fix-webui-qa-defects-round5 delta⁷：bare-core embedded 形态下 GUI 点「上移/移除」→ 复合后端按 key 转发 acp 桥，队尾相对序换位与条目消失经 GET pending 全量对账、GUI 行序一致） |
+| 分级通知层 | error toast 寿命 | an error toast auto-dismisses after ~8s without manual closing | `error-toast.spec.ts` | webui「error 默认自动消失且参与挤占」的寿命半边（fix-webui-qa-defects-round5 delta⁷：真实 error 生产者 = 归档恢复失败上报，restore 注入 404 → toast 出现、2s 驻留、≈8s 自动消失（8–20s 断言窗），全程无手动关闭；挤占半边由 notify/notice-layer 单测承载。本套件无时钟 fake 惯例，WS 驱动的 Lit 应用挂 fake clock 会误伤重连/节流计时器——8s 真实等待） |
 | 部署韧性 | 核心通道停启 | core 停 → 横幅含 cause、composer 门禁、加项目降级提示；core 恢复 → 横幅消失 | `deployment.spec.ts` | webui「全局核心可达性横幅」「项目注册降级如实提示」（harden-core-channel-deployment，detached 双进程形态）⁵ |
 | 审批卡片旅程（detached） | detached 审批闭环 | allow path — ApprovalRequested 跨进程到达 review-card，allow 后 transcript 记录允许语义 | `approval-detached.spec.ts` | webui「approval_answer end-to-end (detached topology)」（cover-core-channel-test-gaps B1.2，detached 双进程形态）⁶ |
 | 审批卡片旅程（detached） | detached 审批闭环 | deny path — deny 后 transcript 记录拒绝语义，回合完成 | `approval-detached.spec.ts` | webui「approval_answer rejects unknown request_id」⁶（cover B1.2，detached） |
@@ -416,6 +425,26 @@ requirement），子功能 = 二层 `test.describe`，一行 = 一条用例；�
 > 四例（`auth-setup.spec.ts`，第三种沙箱形态：auth 开、零用户、不预建户，
 > tasks.py `TESTSUITE_AUTH_SETUP=1` 端口 9896）。树形账本 58 行 = 全套件
 > `it` 总数 70（主 config 59 + auth 3 + auth-setup 4 + detached 4）。
+>
+> ⁷ round3/round5 QA 缺陷收尾补测（2026-09-20）：新增 9 例——聚焦到达不点灯与
+> 重复聚焦（`unread-badge.spec.ts`）、深链项目标题（`rail-expand.spec.ts`）、
+> composer 模式下拉单行（`mode.spec.ts`）、waiting 相位对账退避 + 挂载期拉取
+> 去重（`approval-reconcile.spec.ts` 新 spec）、队列管理面复合转发（
+> `pending-stack.spec.ts`）、API 写 label 行名即时翻新（`session-label.spec.ts`）、
+> 行菜单 a11y（`row-menu-a11y.spec.ts` 新 spec）、error toast 8s 寿命
+> （`error-toast.spec.ts` 新 spec）。锚点指向尚未归档的 change
+> `fix-webui-qa-defects-round3` / `fix-webui-qa-defects-round5` 的 delta scenario
+> 与任务级验收；同步主 spec 时随归档一并落锚。
+> 同源测试纪律（waitListStatus）：detail 读取（GET /api/sessions/{key}）即设
+> 服务端焦点（api.rs「Reading the detail focuses this session」）——聚焦敏感旅程
+> 在点击聚焦后轮询详情会把焦点偷回被观测会话（unread-badge 原用例曾因此假红，
+> 测试自己的探针流量成了焦点小偷）；聚焦敏感段一律走列表轮询。
+> 同批上报实现缺口（round3 7.1 review 补口，已修复落地）：detail 投影
+> （GET /api/sessions/{key}）缺 `with_parked_approvals` 合并（api.rs，列表/相位帧/
+> summary 在 review 3c 补过）——泊车期间 detail 说 working，dashboard 据此喂
+> review-card 的 sessionPhase，round3 7.1 的 waiting 退避在默认形态下被 detail
+> 遮死。修复（detail 补同款 remote 二选一合并）落地前 approval-reconcile 7.1 以
+> fulfill detail 的舞台绕行，落地后已拆舞台直跑真实投影。
 
 原「浏览器级 UI 渲染」豁免条目：workbench 首屏、审批卡片操作、登录页闭环等
 浏览器面由本套件覆盖（豁免范围收窄为「飞书端卡片渲染」等其余条目）。

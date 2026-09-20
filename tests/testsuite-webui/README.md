@@ -70,7 +70,16 @@ pnpm --dir tests/testsuite-webui exec playwright test
 | 停止收尾 | 停止释放泊车审批 | stopping a parked turn releases the approval fail-closed: read model drains, late decision is rejected, stop entry lands | `stop-settle.spec.ts` | permission-flow「停止回复清空未决审批」+「释放的请求不可再批复」³ |
 | 会话管理 | 聚焦联动与展开持久 | rail switch and creation landing drive the project title; project-row clicks stay independent | `rail-expand.spec.ts` | agent-workbench「rail 切换会话后项目标题跟随」+「项目行点击仍独立生效」³ |
 | 会话管理 | 聚焦联动与展开持久 | expansion persists across reloads; the focused project defaults to expanded with no record | `rail-expand.spec.ts` | agent-workbench「展开状态跨刷新保持」+「聚焦会话所在项目缺省展开」³ |
+| 会话管理 | 聚焦联动与展开持久 | deep link lands the focused session project in the main title, never 「未选择项目」 | `rail-expand.spec.ts` | agent-workbench「rail 切换会话后项目标题跟随」深链/刷新直达半边（fix-webui-qa-defects-round3 tasks 4.2/6.3 补齐）⁴ |
 | 会话管理 | 行重命名 | label takes precedence over the first-prompt preview, survives reloads, and clearing falls back | `session-label.spec.ts` | project-session-actions「operator label takes precedence」+「renaming from the rail」³ |
+| 会话管理 | 行重命名 | a label write through the API flips the rail row live, without a reload (round5 C) | `session-label.spec.ts` | project-session-actions「label writes through any path update the row live」（fix-webui-qa-defects-round5 delta⁴） |
+| 会话管理 | 行菜单可达性 | closed row menus expose no menu items to the a11y tree; open ones do | `row-menu-a11y.spec.ts` | project-session-actions「renaming from the rail」（fix-webui-qa-defects-round5 tasks 4.1：关闭态菜单项对辅助技术隐藏）⁴ |
+| 未读徽标 | 聚焦到达与重复聚焦 | focused arrivals never badge; repeated same-session clicks keep it cleared | `unread-badge.spec.ts` | session-unread-badge（fix-webui-qa-defects-round3 delta⁴）「Streaming arrival into the focused session does not badge」+「Repeated focus keeps the badge cleared」 |
+| agent mode 选择 | composer 模式下拉形态 | composer mode dropdown options stay single-line (round3 6.2) | `mode.spec.ts` | fix-webui-qa-defects-round3 tasks 4.1/6.2（无 delta scenario，task 级验收：选项单行不折行；add-agent-mode-selection 词汇同源）⁴ |
+| 审批卡片旅程 | 相位对账与挂载去重 | waiting-phase empty pull backs off and retries until the card lands without any phase change (round3 7.1) | `approval-reconcile.spec.ts` | fix-webui-qa-defects-round3 tasks 7.1（无 delta scenario，task 级验收：waiting 扑空退避重试补卡；permission-flow「刷新或重连后仍可取得」的对账纵深）⁴ |
+| 审批卡片旅程 | 相位对账与挂载去重 | mount and session switch pull the approvals read model exactly once (round3 7.2) | `approval-reconcile.spec.ts` | fix-webui-qa-defects-round3 tasks 7.2（无 delta scenario，task 级验收：挂载期拉取去重 + pullSeq 防陈旧不回归）⁴ |
+| 待执行堆叠区 | 队列管理面 | move up and remove ride the composite to the hosting backend; queue and API agree (round5 A) | `pending-stack.spec.ts` | core-session-channel（fix-webui-qa-defects-round5 delta⁴）「reorder from the web UI in an embedded deployment」+「removing a pending submission over the channel」 |
+| 分级通知层 | error toast 寿命 | an error toast auto-dismisses after ~8s without manual closing | `error-toast.spec.ts` | webui（fix-webui-qa-defects-round5 delta⁴）「error 默认自动消失且参与挤占」的寿命半边（挤占半边由 notify/notice-layer 单测承载） |
 | 会话管理 | 归档恢复身份 | archived→restored keeps agent_kind, mode and the model catalog; legacy entries fall back honestly | `archive-identity.spec.ts` | project-session-actions「恢复保留 agent 身份与模型面」+「旧归档条目如实回退」³ |
 | 项目管理覆盖 | 越界禁用原因 | out-of-root and missing paths state their reason with submit disabled; a valid path enables it | `add-scope-reason.spec.ts` | workspace-root「手填越界路径给出禁用原因」³ |
 | 工作台首屏 | 图标本地化 | blocking the icon CDN changes nothing: zero CDN requests, local /icons assets, icons still render | `icons-local.spec.ts` | fix-webui-approval-restore-and-session-identity tasks 5.4（无 delta scenario，task 级验收：阻断 CDN 零请求 + 本地 icons 资源） |
@@ -98,6 +107,18 @@ pnpm --dir tests/testsuite-webui exec playwright test
 > 越界禁用原因各行的锚点指向尚未归档的 change
 > `fix-webui-approval-restore-and-session-identity` 的 delta scenario；同步主 spec
 > 时随该 change 归档一并落锚。
+>
+> ⁴ 未读徽标聚焦到达 / 深链项目标题 / 模式下拉单行 / 审批对账与挂载去重 /
+> 队列管理面 / API 写 label 即时行名 / 行菜单 a11y / error toast 寿命各行的
+> 锚点指向尚未归档的 change `fix-webui-qa-defects-round3`（聚焦到达 delta、
+> tasks 4.1/6.2/4.2/6.3/7.1/7.2）与 `fix-webui-qa-defects-round5`（core-session-channel
+> 与 project-session-actions 的 label delta、webui 的 error toast delta、
+> tasks 4.1）；同步主 spec 时随归档一并落锚。
+>
+> ⁵ 焦点敏感旅程的等待纪律：detail 读取（GET /api/sessions/{key}）即设服务端
+> 焦点（api.rs「Reading the detail focuses this session」）——点击聚焦之后再轮
+> 询被观测会话的详情会把焦点偷回去，被测语义失真（unread-badge 原用例曾因此
+> 假红）。聚焦敏感段一律走 `waitListStatus`（列表轮询无焦点副作用）。
 >
 > 首启 root 引导四例（`auth-setup.spec.ts`）跑在第三种沙箱形态上：auth 开关打开、
 > 零用户、不预建户（tasks.py `TESTSUITE_AUTH_SETUP=1`，端口 9896）——首启设置页
