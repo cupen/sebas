@@ -37,4 +37,5 @@
 ## 7. review 缺陷收尾（2026-09-20 提交 review 发现，bd 工单同源）
 
 - [x] 7.1 review-card phase reconcile 关死「waiting 无卡」窗口：`sessionPhase` 为 waiting 且合并结果为空时退避重试 reconcile（或在 session.resync 到达时补一次），不再依赖相位值翻转这一单次触发（review-card.ts:245-250，Lit 按值判变导致读模型拉取先于审批落库时 reconcile 不再发生）。验证标准：单测复现「拉取先于落库」时序——waiting 期间后续重试/resync 触发 reconcile 且卡片出现（✅ 双路都做：扑空后退避重试（250ms 翻倍至 4s 封顶，waiting 不结束不放弃，换会话/卸载/出卡即撤）；`session.resync` 到达补一次对账。单测：fake timers 复现「拉取先于落库」——249ms 不动、到点重取出卡、卡后退避停摆；resync 旁路同验）
+  - 追记（2026-09-20 e2e review 补口）：detail 投影 `GET /api/sessions/{key}` 原漏 `with_parked_approvals` 合并（api.rs，与 session_phase_frame 同款 remote 二选一），泊车期间 detail 把相位喂成 working、前端退避到不了位——已补合并（proposal「不涉及后端」表述就此破例，属 7.1 验收标准的实现必要部分）；e2e `approval-reconcile.spec.ts` 复现「拉取先于落库」全链路绿。
 - [x] 7.2 收敛挂载期三路并发 sessionApprovals GET（connectedCallback:191 + willUpdate:206 + 初次 reconcile:218）为单一入口去重，保留 pullSeq 防陈旧语义。验证标准：单测断言挂载期仅发一次拉取（或等效去重）（✅ 挂载期拉取只走 willUpdate 的 sessionKey 变更一条路（connectedCallback 直拉的响应本就被 pullSeq 代际核对丢弃，纯浪费）；`pullApprovals` 按 sessionKey 共享在途 GET（in-flight map），sessionKey+waiting 同帧预置时三路收敛为一次请求；pullSeq 只在真实 GET 上自增，防陈旧语义不变。单测：waiting 预置挂载恰好一次 GET 且卡片照常出现；普通挂载一次 GET）

@@ -257,7 +257,15 @@ pub async fn session_detail(
         })
         .collect();
 
-    let derived = SessionStatus::derive(&info.status, info.phase.as_deref().unwrap_or(""));
+    // （round3 7.1 review 补口，与 session_phase_frame 同款合并）泊车维度
+    // 本地/远端二选一后并入派生——detail 漏并会让 dashboard 把泊车中的会话
+    // 喂成 working，前端 waiting 退避对账永远到不了位。
+    let parked = info
+        .remote
+        .as_ref()
+        .map_or(info.parked_approvals, |r| r.parked_approvals);
+    let derived = SessionStatus::derive(&info.status, info.phase.as_deref().unwrap_or(""))
+        .with_parked_approvals(parked);
 
     let mut data = json!({
         "channel": info.channel,
