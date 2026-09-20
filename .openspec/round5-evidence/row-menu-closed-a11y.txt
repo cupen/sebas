@@ -1,0 +1,71 @@
+- navigation "Primary":
+  - link "sebas console home":
+    - /url: /
+    - generic: ❯
+    - text: sebas
+    - generic: 你忠诚的 AI 伙伴
+  - generic: Projects
+  - button "Add project":
+  - list:
+    - generic: work
+    - generic "执行节点 local": local
+    - generic: "2"
+    - button "Project actions for work":
+    - button "New session in work":
+    - list:
+      - listitem "poke unfocused B":
+        - generic: poke unfocused B
+        - generic "执行节点 local": local
+        - button "Session actions for poke unfocused B":
+      - listitem "q3":
+        - generic: q3
+        - generic "11 条未读回复": "11"
+        - generic "执行节点 local": local
+        - button "Session actions for q3":
+        - menu
+  - button "Open settings":
+    - generic: Settings
+- separator "Resize"
+- main:
+  - generic "/tmp/sbtestsuite.vc9r_bp_/work": work
+  - generic "执行节点 local": local
+  - link "Focused session":
+    - /url: /sessions/web%00web-1789918943600975531-1
+  - generic "Focused session conversation":
+    - generic "0a32f433-d733-4f86-b47e-dbea6bd6873a": 0a32f433-d73
+    - generic "Agent is immutable — chosen when the session was created": 🔒 claude
+    - generic "执行节点 local": local
+    - generic "权限模式：逐次询问": 逐次询问
+    - generic: last active 4m ago
+    - log "Session conversation":
+      - generic: 你
+      - generic: 你
+      - time: 23:42:23
+      - paragraph: hi from api
+      - generic: C
+      - generic: claude
+      - time: 23:42:23
+      - paragraph: hello world
+      - generic: 你
+      - generic: 你
+      - time: 23:45:28
+      - paragraph: poke unfocused B
+      - generic: C
+      - generic: claude
+      - time: 23:45:28
+      - paragraph: hello world
+  - separator "Resize"
+  - generic "Message":
+    - textbox:
+      - /placeholder: Ask for follow-up changes…
+  - generic "权限模式":
+    - combobox: ask（逐次询问）
+    - textbox: ask
+    - generic: 默认（ask）
+    - generic: ask（逐次询问）
+    - generic: edit（自动接受编辑）
+    - generic: allow（放行并留审计）
+    - generic: auto（不门控，留审计）
+  - button "fake":
+    - generic: fake
+  - button "Send" [disabled]:
