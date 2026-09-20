@@ -978,7 +978,11 @@ export class SebasWorkbenchComposer extends LitElement {
       .composer wa-textarea {
         width: 100%;
         flex: 1;
-        min-height: 36px;
+        /* min-height 不设在 textarea：泊车审批卡挤压 composer 时 .input-wrap
+           收缩而 36px 地板会让 textarea 盒体溢出父容器、盖住 composer-bottom
+           的停止按钮（可见但点击被拦截）。地板挪到 .input-wrap（36px），
+           textarea 始终贴合父盒。 */
+        min-height: 0;
       }
       /* 输入区容器：命令面板的定位锚（design D4 照抄 model-wrap 的浮层
          姿势）——面板贴 textarea 上方弹出。 */
@@ -987,7 +991,7 @@ export class SebasWorkbenchComposer extends LitElement {
         display: flex;
         flex-direction: column;
         flex: 1;
-        min-height: 0;
+        min-height: 36px;
       }
       /* 命令面板（session-slash-commands 3.1）：贴 textarea 上方，配方同
          .model-menu（surface 底 + strong 边 + shadow-2，页底组件一律向上弹）。 */
