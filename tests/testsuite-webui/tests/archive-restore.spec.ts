@@ -24,7 +24,6 @@ import {
   ErrorCollector,
   getSession,
   listSessions,
-  middleTruncate,
   ProjectRail,
   resetState,
   FocusedSession,
@@ -105,16 +104,14 @@ test.describe('会话管理', () => {
       expect(page.url()).not.toContain('/sessions/')
 
       // Rail 可见：the active (non-archived) row is back under its original
-      // project; the History group no longer lists the entry. The rebuilt
-      // Dormant mapping has no card yet, so its rail label is the
-      // session_id_short fallback (fullSessionLabel chain — same projection
-      // as a dormant session after a restart), not the prompt preview.
-      const restoredPre = await getSession(page.request, key)
-      expect(restoredPre.detail!.session_id).toBeTruthy()
-      const shortId = middleTruncate(restoredPre.detail!.session_id!, 18)
+      // project; the History group no longer lists the entry. round4 3.1
+      // (design M1) migrates the naming sources across the archive round-trip,
+      // so the restored row's rail label is the archived prompt preview
+      // (= tag here) — the restored mapping is NOT label-less: the pre-round4
+      // session_id_short fallback assertion is obsolete by design.
       await ensureProjectExpanded(rail, projectName)
       await expect(
-        rail.host.locator('li.session-item:not(.archived)', { hasText: shortId }).first(),
+        rail.host.locator('li.session-item:not(.archived)', { hasText: tag }).first(),
       ).toBeVisible({ timeout: 15_000 })
       await expect(
         rail.host.locator('li.session-item.archived', { hasText: tag }),

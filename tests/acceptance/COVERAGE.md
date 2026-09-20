@@ -305,7 +305,7 @@ requirement），子功能 = 二层 `test.describe`，一行 = 一条用例；�
 | agent 对话覆盖 | 输入守卫 | 4.2 empty and blank input creates no turn, session stays usable | `dialog.spec.ts` | agent 对话覆盖「composer 输入守卫」 |
 | agent 对话覆盖 | 输入守卫 | 4.2 special-char long text round-trips without loss or console errors | `dialog.spec.ts` | agent 对话覆盖「composer 输入守卫」 |
 | agent 对话覆盖 | 错误诚实呈现 | refuse — non-terminal: session survives, next message works | `errors.spec.ts` | 会话核心旅程「错误呈现」 |
-| agent 对话覆盖 | 错误诚实呈现 | crash — honest death: mapping torn down, row gone, open view retains transcript | `errors.spec.ts` | 会话核心旅程「错误呈现」 |
+| agent 对话覆盖 | 错误诚实呈现 | crash — honest death: row retires to dormant, transcript retained, no fabricated success | `errors.spec.ts` | 会话核心旅程「错误呈现」（round4 1.2 retire-to-record 语义：行留存 dormant、转录含死前帧与 error 条目、无假成功；round6 改写钉新契约） |
 | agent 对话覆盖 | spawn 失败内显 | spawn failure inline: error event in transcript, session stays as spawn-failed | `errors.spec.ts` | webui「web_spawn 失败的立即内显」（fail-fast-on-startup-errors）；聚焦触发的 activate 会重排 SpawnFailed 致转录换址（sebas-il7s），旅程暂以 route 拦截 stabilize，产品修复后移除 |
 | 审批卡片旅程 | 拒绝路径 | deny path — refusal semantics, turn completes | `permission.spec.ts` | 审批卡片旅程「拒绝路径」 |
 | 审批卡片旅程 | 单次允许路径 | allow-once path — allowed semantics, turn completes | `permission.spec.ts` | 审批卡片旅程「单次允许路径」 |
@@ -332,6 +332,7 @@ requirement），子功能 = 二层 `test.describe`，一行 = 一条用例；�
 | 审批卡片旅程 | 相位对账与挂载去重 | mount and session switch pull the approvals read model exactly once (round3 7.2) | `approval-reconcile.spec.ts` | fix-webui-qa-defects-round3 tasks 7.2⁷（无 delta scenario，task 级验收）：rail 切换与冷深链各恰好一次 approvals GET 且卡片照常从读模型重建（挂载期三路并发收敛为单次请求，pullSeq 防陈旧语义不回归） |
 | 停止收尾 | 回合被停止条目 | stopping a streaming turn appends the stop entry, resets the control, and stays settled across reloads | `stop-settle.spec.ts` | agent-workbench「停止后 transcript 有停止条目」+「刷新后不复活在飞状态」（同上 delta³：错误类停止条目、控件复位、reload 稳定、会话存活可继续） |
 | 停止收尾 | 停止释放泊车审批 | stopping a parked turn releases the approval fail-closed: read model drains, late decision is rejected, stop entry lands | `stop-settle.spec.ts` | permission-flow「停止回复清空未决审批」+「释放的请求不可再批复」（同上 delta³：读模型清空、迟到批复 404、卡面 expired、turn_engaged 复位） |
+| 停止收尾 | 泊车审批态下停止控件可点 | parked: stop control is unobstructed by the composer input and a plain click lands | `stop-reachability.spec.ts` | agent-workbench「停止控件随回合结算消失」+ permission-flow「停止回复清空未决审批」（round6 GUI 验收固化：泊车卡挤压 composer 时 textarea 盒体不得溢出 `.input-wrap` 遮挡停止控件——几何断言 + 无 force 点击生效；修复为 36px 地板从 wa-textarea 挪到 .input-wrap） |
 | 会话管理 | 聚焦联动与展开持久 | rail switch and creation landing drive the project title; project-row clicks stay independent | `rail-expand.spec.ts` | agent-workbench「rail 切换会话后项目标题跟随」+「项目行点击仍独立生效」（同上 delta³：`sebas:project-follow` 反投影 shell selectedPath，rail 点击/新建落地均跟随） |
 | 会话管理 | 聚焦联动与展开持久 | expansion persists across reloads; the focused project defaults to expanded with no record | `rail-expand.spec.ts` | agent-workbench「展开状态跨刷新保持」+「聚焦会话所在项目缺省展开」（同上 delta³：`sebas.rail-expanded` 持久、聚焦缺省展开并物化、无操作不自行收起） |
 | 会话管理 | 聚焦联动与展开持久 | deep link lands the focused session project in the main title, never 「未选择项目」 | `rail-expand.spec.ts` | agent-workbench「rail 切换会话后项目标题跟随」深链/刷新直达半边（fix-webui-qa-defects-round3 tasks 4.2/6.3⁷：detail 先于 projects.list 落地的竞态不再把标题钉死在「未选择项目」，冷加载与刷新双查） |

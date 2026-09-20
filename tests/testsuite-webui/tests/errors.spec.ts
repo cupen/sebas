@@ -6,10 +6,12 @@
  * "refuse": the stub ends the turn with a refusal — a NON-terminal error.
  * The session must survive it honestly: no fake Done, the row stays, and
  * the next message still completes. "crash": the stub emits one last text
- * frame and the child process dies — the mapping is torn down and the UI
- * must present that death (session gone / not-found), never a fabricated
- * success. Both trigger through the follow-up composer on an already-open
- * detail page (live WS), the realistic operator flow.
+ * frame and the child process dies — round4 1.2 turned the honest-death
+ * presentation into retire-to-record: the row stays listed as dormant, the
+ * transcript (death frame + synthesized error entry) stays readable, and the
+ * UI must present that death — never a fabricated success. Both trigger
+ * through the follow-up composer on an already-open detail page (live WS),
+ * the realistic operator flow.
  */
 import { expect, test } from '@playwright/test'
 import {
@@ -19,6 +21,7 @@ import {
   listSessions,
   FocusedSession,
   Transcript,
+  waitListStatus,
   waitStatus,
 } from './helpers/index'
 
@@ -66,27 +69,33 @@ test.describe('agent 对话覆盖', () => {
       expect(collector.clean()).toEqual([])
     })
 
-    test('crash — honest death: mapping torn down, row gone, open view retains transcript', async ({ page }) => {
+    test('crash — honest death: row retires to dormant, transcript retained, no fabricated success', async ({ page }) => {
       const { key, detail } = await openIdle(page)
 
       await detail.sendFollowUp('boom crash')
 
-      // The child dies mid-turn; the session mapping is torn down. The API
-      // truth is the honest-death contract: the row leaves the live list and
-      // the detail answers not-found — no fabricated success anywhere.
-      await expect
-        .poll(
-          async () => (await listSessions(page.request)).some((r) => r.encoded_key === key),
-          { timeout: 20_000, intervals: [200] },
-        )
-        .toBe(false)
-      expect((await getSession(page.request, key)).status).toBe(404)
+      // The child dies mid-turn. round4 1.2 retired the old teardown (mapping
+      // removed + row wiped — history became unreachable with no trace): the
+      // honest-death contract is now RETIRE-TO-RECORD. The row STAYS listed
+      // as dormant (Removed is reserved for explicit operator close) and the
+      // transcript stays readable. What must never happen: a vanished row or
+      // a fabricated success.
+      await waitListStatus(page.request, key, ['dormant'], 20_000)
+
+      // API truth: the detail still answers (record retained) and carries the
+      // death evidence — the pre-crash 'boom' frame plus a synthesized
+      // error-class entry; the session is NOT presented as done/failed-fake.
+      const dead = await getSession(page.request, key)
+      expect(dead.status).toBe(200)
+      expect(dead.detail!.status_slug).toBe('dormant')
+      expect(dead.detail!.entries.some((e) => e.content.includes('boom'))).toBe(true)
+      expect(dead.detail!.entries.some((e) => e.element_type === 'error')).toBe(true)
 
       // conversation-incremental-sync：已打开的视图对增量续拉失败（会话已
-      // 拆除 → 404）保留已渲染的 transcript 与游标自愈——「Session
-      // unavailable」空态保留给首拉失败，不再出现在中途死亡的会话上
+      // 退役 → 游标续拉被拒）保留已渲染的 transcript 与游标自愈——「Session
+      // unavailable」空态保留给首拉失败，不出现在中途死亡的会话上
       // （前端单测 dashboard.test.ts 同款钉子）。呈现上没有假成功：transcript
-      // 停在死前最后一帧（"boom"），不出现任何完成态文案。
+      // 停在死前最后一帧（"boom"）加错误条目，不出现任何完成态文案。
       const transcript = new Transcript(page)
       await expect(transcript.turnWith('boom').first()).toBeVisible()
       await expect(detail.unavailableNote).toHaveCount(0)
