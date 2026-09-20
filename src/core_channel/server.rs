@@ -1052,14 +1052,25 @@ async fn dispatch(
         }
         // 归档恢复（fix-webui-qa-defects 2.2，design D1）：core 侧直达引擎
         // 重建 Dormant 映射 + 转写回放；拒绝类型化透传（webui 保留归档条目）。
+        // （round4 3.1）命名来源（label / prompt_preview）随请求迁回引擎。
         CoreChannelRequest::RestoreSession {
             key,
             session_id,
             project_dir,
             transcript,
             identity,
+            label,
+            prompt_preview,
         } => match router
-            .web_restore_session(key, session_id, project_dir, transcript, identity)
+            .web_restore_session(
+                key,
+                session_id,
+                project_dir,
+                transcript,
+                identity,
+                label,
+                prompt_preview,
+            )
             .await
         {
             Ok(()) => CoreChannelResponse::Ok,

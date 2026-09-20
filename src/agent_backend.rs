@@ -23,8 +23,8 @@ use sebas_agent::session::{AgentEvent, SessionConfig, SessionHandle, SessionMana
 use sebas_agent::tools::ToolRegistry;
 use sebas_channels::ChannelKey;
 use sebas_dispatch::{
-    PendingApproval, SessionEvent, SessionIdentity, SessionInfo, TurnEntry, TurnStreamEvent,
-    count_chat_messages,
+    PendingApproval, PendingSubmission, SessionEvent, SessionIdentity, SessionInfo, TurnEntry,
+    TurnStreamEvent, count_chat_messages,
 };
 use sebas_webui::session_backend::{
     CloseReport, PermissionDecision, PermissionNotice, Reachability, SessionBackend,
@@ -1074,7 +1074,8 @@ impl SessionBackend for DualSessionBackend {
     }
 
     /// 归档恢复（fix-webui-qa-defects 2.2）：按 key 分发到归属执行体后端。
-    /// （3.2）会话身份随恢复链路透传给归属后端。
+    /// （3.2）会话身份随恢复链路透传给归属后端；（round4 3.1）命名来源
+    /// （label / prompt_preview）一并透传。
     async fn restore_session(
         &self,
         key: ChannelKey,
@@ -1082,9 +1083,19 @@ impl SessionBackend for DualSessionBackend {
         project_dir: Option<String>,
         transcript: Vec<TurnEntry>,
         identity: SessionIdentity,
+        label: Option<String>,
+        prompt_preview: Option<String>,
     ) -> Result<(), SessionRejection> {
         self.route(&key)
-            .restore_session(key, session_id, project_dir, transcript, identity)
+            .restore_session(
+                key,
+                session_id,
+                project_dir,
+                transcript,
+                identity,
+                label,
+                prompt_preview,
+            )
             .await
     }
 
@@ -1095,6 +1106,32 @@ impl SessionBackend for DualSessionBackend {
         key: ChannelKey,
     ) -> Result<Vec<PendingApproval>, SessionRejection> {
         self.route(&key).pending_approvals(key).await
+    }
+
+    // fix-webui-qa-defects-round5 1.1（D2）：待执行队列管理面按 key 转发到
+    // 承载子后端（内嵌形态即 acp 桥的 InProcessBackend）。此前三者落入
+    // trait 默认实现恒返 Unavailable——裸 core 内嵌 WebUI 的排队重排/移除
+    // 恒 503 的根因。native 会话无队列：转发后落其诚实类型化失败
+    // （pending 空表 / remove·move 的 Unavailable），不在此层另造说辞。
+    async fn pending(&self, key: ChannelKey) -> Result<Vec<PendingSubmission>, SessionRejection> {
+        self.route(&key).pending(key).await
+    }
+
+    async fn remove_pending(
+        &self,
+        key: ChannelKey,
+        pending_id: u64,
+    ) -> Result<Vec<PendingSubmission>, SessionRejection> {
+        self.route(&key).remove_pending(key, pending_id).await
+    }
+
+    async fn move_pending(
+        &self,
+        key: ChannelKey,
+        pending_id: u64,
+        to_index: usize,
+    ) -> Result<Vec<PendingSubmission>, SessionRejection> {
+        self.route(&key).move_pending(key, pending_id, to_index).await
     }
 
     /// 会话命名（fix-webui-approval-restore-and-session-identity 5.1）：按 key
@@ -1477,6 +1514,57 @@ mod tests {
             other => panic!("expected UnknownSession, got {other:?}"),
         }
         assert_eq!(dual.snapshot().await.len(), 1, "no session may be created");
+    }
+
+    // fix-webui-qa-defects-round5 1.1：pending 管理面按 key 转发。acp 会话的
+    // move/remove 到达 acp 桥（类型化 PendingRejected——转发前会落在复合层
+    // 默认 Unavailable、WebUI 恒 503）；native 会话无队列，得到其诚实失败
+    // （pending 空表 / remove·move 的 Unavailable）。
+    #[tokio::test]
+    async fn dual_pending_management_routes_by_key() {
+        let acp: Arc<dyn SessionBackend> = Arc::new(
+            sebas_webui::session_backend::InProcessBackend::new(make_router().await),
+        );
+        let dual = DualSessionBackend::new(acp, NativeAgentBackend::with_manager(manager()));
+
+        // acp 侧（web key 路由到 InProcessBackend）：未知会话/id 同形为
+        // PendingRejected::Unknown（桥的类型化拒绝原样透传）。
+        let acp_key = ChannelKey::new("web", "web-round5-pending");
+        for op in [
+            dual.remove_pending(acp_key.clone(), 7).await.err().unwrap(),
+            dual.move_pending(acp_key.clone(), 7, 0).await.err().unwrap(),
+        ] {
+            assert!(
+                matches!(op, SessionRejection::PendingRejected { .. }),
+                "acp-hosted session must reach the acp bridge, got {op:?}"
+            );
+        }
+        assert!(
+            dual.pending(acp_key).await.unwrap().is_empty(),
+            "acp-side pending read must come from the bridge, not a composite default"
+        );
+
+        // native 侧：pending 空表（native 无待执行栈）；remove/move 落
+        // trait 默认的诚实不可用（此后端不承载待执行队列）。
+        let native_key = ChannelKey::new("feishu", "agent-round5native");
+        assert!(dual.pending(native_key.clone()).await.unwrap().is_empty());
+        for op in [
+            dual.remove_pending(native_key.clone(), 7)
+                .await
+                .err()
+                .unwrap(),
+            dual.move_pending(native_key.clone(), 7, 0)
+                .await
+                .err()
+                .unwrap(),
+        ] {
+            match &op {
+                SessionRejection::Unavailable { cause } => {
+                    assert_eq!(cause, "此后端不承载待执行队列");
+                }
+                other => panic!("native queue ops must fail honestly, got {other:?}"),
+            }
+        }
     }
 
     // workbench-agent-wire-fix D2：wire 词汇收紧后，旧 backend 值与非法

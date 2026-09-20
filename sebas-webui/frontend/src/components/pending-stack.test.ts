@@ -187,6 +187,25 @@ describe('sebas-pending-stack (7.2 removal and reorder)', () => {
     el.remove()
   })
 
+  // （fix-webui-qa-defects-round5 1.3）Unavailable 类拒绝的呈现契约：服务端
+  // cause 如实呈现（后端已不再自称「核心不可达」），前端绝不叠加任何可达性
+  // 前缀——「核心不可达」只属于 core.reachability 真实可达性信号。
+  it('presents an unavailable-rejection cause verbatim without a reachability prefix', async () => {
+    const el = await mount()
+    removeMock.mockRejectedValue(new Error('操作不可用: 此后端不承载待执行队列'))
+    sessionMock.mockResolvedValue({ pending: entries.map((p) => ({ ...p })) })
+    const btn = el.shadowRoot?.querySelectorAll('.entry')[3]?.querySelector('.remove') as HTMLElement
+    btn.click()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+
+    expect(notifyMock).toHaveBeenCalledTimes(1)
+    const arg = notifyMock.mock.calls[0][0] as { level: string; message: string }
+    expect(arg.message).toContain('此后端不承载待执行队列')
+    expect(arg.message).not.toContain('核心不可达')
+    el.remove()
+  })
+
   it('treats a network failure as a deterministic rejection (truth unavailable)', async () => {
     const el = await mount()
     // 网络失败：removePending 与真相取用（api.session）都抛 → 宁可误报，

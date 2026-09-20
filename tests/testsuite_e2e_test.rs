@@ -4415,3 +4415,1288 @@ async fn archive_restore_rebuilds_row_transcript_and_clears_history() {
         "the follow-up must append on top of the restored transcript: {grown}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// fix-webui-qa-defects-round4 的进程级回归：升级击杀保留会话（1.2/1.3）、
+// 接收回执阶段可取消（2.3/2.4）、归档恢复命名来源保留（3.1）。单元/路由层
+// 契约已由 sebas-dispatch / sebas-webui 各自的测试钉住；这里补「真 core 子
+// 进程 + 真 fake-claude 驱动」一层的 API 面证据。浏览器级 GUI 旅程由
+// testsuite-webui 承担（review 阶段单独执行，不在本套件）。
+// ---------------------------------------------------------------------------
+
+/// （round4 1.2/1.3，session-lifecycle「Escalation kill keeps the session
+/// browsable」+ acp-driver「Escalation finalizes the turn without erasing the
+/// session」）P0 进程级复现：fake-claude 在 `hang` 后沉默（活着、探测照答），
+/// `SEBAS_HANG_TIMEOUT_SECS=2` 让击杀阶梯秒级走完；`--ignore-interrupt` 让
+/// fake 扛住 interrupt → 驱动必走完整阶梯（interrupt×3 → disconnect →
+/// drop ≈SIGKILL）并以 terminal Error 收尾。修复前该会话从 /api/sessions
+/// 整行消失、详情 404；修复后必须：列表含行（dormant）、详情 200 且末回合
+/// 是携带升级原因的错误条目、击杀前产物保留可回看、排队提交经
+/// `session.pending_dropped` 逐条如实上报后清空、全程无 `session.removed`。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn escalation_kill_keeps_the_session_on_the_api_surface() {
+    let sb = Sandbox::new("testsuite_e2e", "escalation-kill");
+    sb.append_acp_args(&["--ignore-interrupt"]);
+    let cli = http_client();
+    // 2s hang 阈值：阶梯 ≈ 2s 探测 + 3×2s interrupt 宽限 + 5s SIGKILL 宽限
+    // ≈ 13s；给 90s 余量等退役（首回合的正常输出远快于阈值，不误杀）。
+    let _core = sb.spawn_core_extra(&[("SEBAS_HANG_TIMEOUT_SECS", "2")]);
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    // 先落一个完整回合：击杀前的产出必须保留（spec「the operator can see
+    // what happened and what was produced before the hang」）。
+    let project_id = scene_project_id(&cli, &sb).await;
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({
+            "project_id": project_id.clone(),
+            "prompt": "hello",
+            "agent": "claude"
+        }),
+    )
+    .await
+    .expect("create session");
+    assert_eq!(status, 201, "create session: {body}");
+    let key = body["key"].as_str().expect("key").to_string();
+    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+    wait_turn_done(&cli, &sb, &detail_url).await;
+    let (_status, before) = get_json_status(&cli, &detail_url)
+        .await
+        .expect("detail before the hang");
+    let entries_before = before["entries"].as_array().expect("entries").len();
+    assert!(entries_before > 0, "the first turn must have landed: {before}");
+
+    // hang 提交：fake 永不再出帧 → 接收回执相位一直挂着，直到阶梯击杀。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{detail_url}/message"),
+        serde_json::json!({ "message": "hang" }),
+    )
+    .await
+    .expect("hang message");
+    assert_eq!(status, 200, "hang message: {body}");
+
+    // WS 先连上再排队提交：pending_dropped 帧 = not-executed 上报的进程级
+    // 证据（上报发生在退役之前，同一连接 wire 保序，必在 dormant Updated
+    // 之前到达）。阶梯静默窗 ≈ 11-13s，超过 next_ws_frame 的 15s 单帧超时
+    // 余量太窄——这里用放宽版读帧（唯一 deadline 由本任务掌控）。
+    let mut ws: WsStream = ws_connect(&sb.webui_url()).await;
+    let ws_task = tokio::spawn(async move {
+        use futures_util::StreamExt;
+        // 放宽版读帧：唯一 deadline 由调用方给定（阶梯静默窗 ≈ 11-13s，
+        // next_ws_frame 的 15s 单帧超时余量太窄）。
+        async fn read_frame(
+            ws: &mut WsStream,
+            deadline: tokio::time::Instant,
+        ) -> Option<serde_json::Value> {
+            loop {
+                let msg = tokio::time::timeout_at(deadline, ws.next())
+                    .await
+                    .ok()??
+                    .ok()?;
+                match msg {
+                    tokio_tungstenite::tungstenite::Message::Text(text) => {
+                        return serde_json::from_str::<serde_json::Value>(&text).ok();
+                    }
+                    _ => continue,
+                }
+            }
+        }
+        let mut dropped_frame = None;
+        let mut removed_frame = None;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+        loop {
+            // pending_dropped 之后再排 5s：给（不该出现的）session.removed
+            // 留出到达窗口，然后收尾。
+            let step = if dropped_frame.is_some() {
+                tokio::time::Instant::now() + Duration::from_secs(5)
+            } else {
+                deadline
+            };
+            match read_frame(&mut ws, step).await {
+                Some(ev) => {
+                    let method = ev["method"].as_str().unwrap_or_default().to_string();
+                    if method == "session.removed" {
+                        removed_frame = Some(ev);
+                        break;
+                    }
+                    if method == "session.pending_dropped" {
+                        dropped_frame = Some(ev);
+                    }
+                }
+                None => break,
+            }
+        }
+        (dropped_frame, removed_frame)
+    });
+
+    // 击杀前排队第二条提交：接收回执相位 = 在飞 → 必须入队（200），且在
+    // 详情 pending 里可见（seed_card 在提交返回前同步落账，无竞态窗口）。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{detail_url}/message"),
+        serde_json::json!({ "message": "queued while hung" }),
+    )
+    .await
+    .expect("queue during hang");
+    assert_eq!(
+        status, 200,
+        "a submission during the hang must be accepted: {body}"
+    );
+    wait_for(
+        "the queued submission to show up in the detail pending view",
+        Duration::from_secs(10),
+        &sb.path.clone(),
+        {
+            let cli = cli.clone();
+            let url = detail_url.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    (v["pending"].as_array()?.len() == 1).then_some(())
+                })
+            }
+        },
+    )
+    .await;
+
+    // 等阶梯走完、terminal Error 退役：行转 dormant（修复前：整行消失）。
+    wait_for(
+        "the escalation kill to retire the row to dormant",
+        Duration::from_secs(90),
+        &sb.path.clone(),
+        {
+            let cli = cli.clone();
+            let url = detail_url.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    (v["status"].as_str() == Some("dormant")).then_some(())
+                })
+            }
+        },
+    )
+    .await;
+
+    // 列表仍含该行（dormant 态），行名保留首 prompt 预览——不退化为短 id。
+    let (_status, list) = get_json_status(&cli, &format!("{}/api/sessions", sb.webui_url()))
+        .await
+        .expect("session list after the kill");
+    let row = list["recent_sessions"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .find(|r| r["encoded_key"].as_str() == Some(key.as_str()))
+        .unwrap_or_else(|| panic!("the killed session must stay listed: {list}"));
+    assert_eq!(row["status"], "dormant", "the retired row reports dormant: {row}");
+    assert_eq!(
+        row["prompt_preview"], "hang",
+        "the row name must survive card-state teardown: {row}"
+    );
+
+    // 详情 200：击杀前产物保留 + hang 的 prompt 条目 + 携带升级原因的错误
+    // 条目收尾；pending 已随退役清空。
+    let (status, after) = get_json_status(&cli, &detail_url)
+        .await
+        .expect("detail after the kill");
+    assert_eq!(status, 200, "the retired session must stay retrievable");
+    let entries = after["entries"].as_array().expect("entries");
+    assert!(
+        entries.len() >= entries_before + 2,
+        "pre-kill transcript + the hang prompt + the error entry must all be there: {after}"
+    );
+    assert!(
+        entries[..entries_before]
+            .iter()
+            .any(|e| e["kind"].as_str() == Some("prompt")),
+        "the pre-kill turn must remain browsable: {after}"
+    );
+    let last = entries.last().expect("non-empty after the kill");
+    assert_eq!(
+        last["element_type"], "error",
+        "the killed turn must be finalized with a visible error entry: {after}"
+    );
+    assert!(
+        last["content"].as_str().map_or(false, |c| c.contains("agent hung")),
+        "the escalation cause must ride the error entry: {last:?}"
+    );
+    assert!(
+        after["pending"].as_array().map_or(false, Vec::is_empty),
+        "the released queue must be empty on the retired row: {after}"
+    );
+
+    // WS 证据：pending_dropped 携带被释放提交原文；且无 session.removed
+    // （记录移除不得被广播——Removed 只属于操作者显式 close）。
+    let (dropped_frame, removed_frame) = ws_task.await.expect("ws task alive");
+    let dropped_frame = dropped_frame
+        .expect("pending_dropped must be announced: the drop is never silent");
+    assert_eq!(
+        dropped_frame["params"]["session_id"],
+        key.as_str(),
+        "{dropped_frame}"
+    );
+    assert_eq!(
+        dropped_frame["params"]["dropped"][0]["text"],
+        "queued while hung",
+        "the queued submission must be reported as not executed: {dropped_frame}"
+    );
+    assert!(
+        removed_frame.is_none(),
+        "a session.removed frame must NOT be broadcast for a terminal teardown: {removed_frame:?}"
+    );
+
+    // 驱动日志：阶梯确实走过（不是别的原因杀的）。
+    let core_log = std::fs::read_to_string(&sb.core_log).unwrap_or_default();
+    assert!(
+        core_log.contains("escalating (interrupt 1/3)"),
+        "the kill ladder must have run: {}",
+        sb.core_log.display()
+    );
+
+    // 「下一消息 fresh spawn」：对退役记录再发一条消息——既有 Dormant→resume
+    // 路径（load 被拒时诚实回退）孵化全新会话并完成完整回合；保留记录 ≠
+    // 留下一个不能再说话的坑。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{detail_url}/message"),
+        serde_json::json!({ "message": "hello again" }),
+    )
+    .await
+    .expect("follow-up after the kill");
+    assert_eq!(
+        status, 200,
+        "the retired record must stay messageable (fresh spawn): {body}"
+    );
+    wait_turn_done(&cli, &sb, &detail_url).await;
+    let (_status, grown) = get_json_status(&cli, &detail_url)
+        .await
+        .expect("detail after the follow-up");
+    assert!(
+        grown["entries"].as_array().expect("entries").len() > entries.len(),
+        "the fresh turn must append on top of the preserved transcript: {grown}"
+    );
+}
+
+/// （round4 2.3/2.4，agent-workbench「accepted receipt without agent output
+/// offers stop」的引擎半边进程级旅程）提交被接受、agent 首帧未落的接收回执
+/// 相位里，取消必须可达成（修复前该相位 interrupt 被 409 Idle 顶回，操作员
+/// 在 600s 看门狗兜底前无自助手段）：cancel 200 → 回合以「回合被停止」错误
+/// 条目收尾（驱动按既有取消语义重生子进程，会话保持 active）→ 会话仍可
+/// 继续对话。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn receipt_phase_cancel_stops_the_turn_and_the_session_stays_talkative() {
+    let sb = Sandbox::new("testsuite_e2e", "receipt-cancel");
+    let cli = http_client();
+    // 默认 5 分钟 hang 阈值：取消必须远早于阶梯，可靠复现「回执窗口内的
+    // 自助停止」。
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    let project_id = scene_project_id(&cli, &sb).await;
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({
+            "project_id": project_id.clone(),
+            "prompt": "hello",
+            "agent": "claude"
+        }),
+    )
+    .await
+    .expect("create session");
+    assert_eq!(status, 201, "create session: {body}");
+    let key = body["key"].as_str().expect("key").to_string();
+    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+    wait_turn_done(&cli, &sb, &detail_url).await;
+
+    // hang 提交：提交已接受、fake 永不出帧 → 接收回执相位在 API 面可见
+    // （turn_engaged=true 且最新转录条目仍是操作员提交）。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{detail_url}/message"),
+        serde_json::json!({ "message": "hang" }),
+    )
+    .await
+    .expect("hang message");
+    assert_eq!(status, 200, "hang message: {body}");
+    wait_for(
+        "the receipt phase to show on the API face",
+        Duration::from_secs(15),
+        &sb.path.clone(),
+        {
+            let cli = cli.clone();
+            let url = detail_url.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    let entries = v["entries"].as_array()?;
+                    let last = entries.last()?;
+                    let receipt = v.get("turn_engaged").and_then(serde_json::Value::as_bool)
+                        == Some(true)
+                        && last["kind"].as_str() == Some("prompt")
+                        && last["content"].as_str() == Some("hang");
+                    receipt.then_some(())
+                })
+            }
+        },
+    )
+    .await;
+
+    // 停止：该相位必须可取消（修复前 409 Idle）。
+    let resp = cli
+        .post(format!("{detail_url}/cancel"))
+        .send()
+        .await
+        .expect("cancel during the receipt phase");
+    let status = resp.status().as_u16();
+    let body: serde_json::Value = resp.json().await.expect("cancel body");
+    assert_eq!(
+        status,
+        200,
+        "the accepted-receipt phase must be cancellable, not 409: {body}"
+    );
+    assert_eq!(body["status"], "cancelled", "{body}");
+
+    // 回合收尾：fake 被 interrupt 以错误结果退场 → 驱动按既有取消语义重生
+    // 子进程并发布 Finished——回合以「回合被停止」错误条目收尾，会话保持
+    // active（respawn 的活子进程，不是终态拆除）。
+    wait_for(
+        "the cancelled turn to settle with its stop entry",
+        Duration::from_secs(30),
+        &sb.path.clone(),
+        {
+            let cli = cli.clone();
+            let url = detail_url.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    let settled = v["status_slug"].as_str() == Some("done")
+                        && v.get("turn_engaged").is_none();
+                    settled.then_some(())
+                })
+            }
+        },
+    )
+    .await;
+    let (_status, settled) = get_json_status(&cli, &detail_url)
+        .await
+        .expect("detail after cancel");
+    let settled_entries = settled["entries"].as_array().expect("entries").len();
+    assert!(
+        settled["entries"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .any(|e| e["element_type"].as_str() == Some("error")),
+        "the stopped turn must leave a visible error entry: {settled}"
+    );
+
+    // 会话仍可对话：下一条消息孵化全新会话并完成完整回合（「下一消息
+    // fresh spawn」的可观察语义不变）。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{detail_url}/message"),
+        serde_json::json!({ "message": "hello again" }),
+    )
+    .await
+    .expect("follow-up after cancel");
+    assert_eq!(status, 200, "the session must stay talkative: {body}");
+    wait_turn_done(&cli, &sb, &detail_url).await;
+    let (_status, grown) = get_json_status(&cli, &detail_url)
+        .await
+        .expect("detail after the follow-up");
+    assert!(
+        grown["entries"].as_array().expect("entries").len() > settled_entries,
+        "the follow-up turn must append on top of the preserved transcript: {grown}"
+    );
+}
+
+/// （round4 3.1，project-session-actions「restore preserves the row name」）
+/// 归档→恢复 API 面：命名来源（操作者 label + 首 prompt 预览）随归档快照
+/// 落档、随恢复迁回——恢复后的行两个来源与归档前逐一相同，不退化为短 id。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn archive_restore_preserves_the_row_naming_sources() {
+    let sb = Sandbox::new("testsuite_e2e", "restore-naming");
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    let project_id = scene_project_id(&cli, &sb).await;
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({
+            "project_id": project_id.clone(),
+            "prompt": "run the release checklist",
+            "agent": "claude"
+        }),
+    )
+    .await
+    .expect("create session");
+    assert_eq!(status, 201, "create session: {body}");
+    let key = body["key"].as_str().expect("key").to_string();
+    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+    wait_turn_done(&cli, &sb, &detail_url).await;
+
+    // 给会话设一个操作者 label：两个命名来源同时在场（label 第一顺位、
+    // preview 第二顺位），恢复后都必须原样回来。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{detail_url}/label"),
+        serde_json::json!({ "label": "发布清单会话" }),
+    )
+    .await
+    .expect("set label");
+    assert_eq!(status, 200, "set label: {body}");
+
+    // 归档前行命名面：preview 来自首条消息、label 来自操作者。
+    let row_field = |list: &serde_json::Value, field: &str| {
+        list["recent_sessions"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .find(|r| r["encoded_key"].as_str() == Some(key.as_str()))
+            .unwrap_or_else(|| panic!("the session must be listed: {list}"))[field]
+            .clone()
+    };
+    let (_status, list) = get_json_status(&cli, &format!("{}/api/sessions", sb.webui_url()))
+        .await
+        .expect("session list before archive");
+    assert_eq!(
+        row_field(&list, "prompt_preview"),
+        "run the release checklist",
+        "the first prompt must name the row before archival: {list}"
+    );
+    assert_eq!(
+        row_field(&list, "label"),
+        "发布清单会话",
+        "the operator label must be on the row before archival: {list}"
+    );
+
+    // 归档：条目携带两个命名来源（迁移载体）。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{detail_url}/archive"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("archive");
+    assert_eq!(status, 200, "archive: {body}");
+    let (_, archive) = get_json_status(&cli, &format!("{}/api/archive", sb.webui_url()))
+        .await
+        .expect("archive list");
+    let entry = &archive["archived_sessions"].as_array().expect("entries")[0];
+    assert_eq!(
+        entry["prompt_preview"].as_str(),
+        Some("run the release checklist"),
+        "the snapshot must carry the first-prompt preview: {entry}"
+    );
+    assert_eq!(
+        entry["operator_label"].as_str(),
+        Some("发布清单会话"),
+        "the snapshot must carry the operator label: {entry}"
+    );
+
+    // 恢复：两个命名来源迁回映射——行与归档前同名，绝不退化短 id。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{detail_url}/restore"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("restore");
+    assert_eq!(status, 200, "restore: {body}");
+    let (_status, list) = get_json_status(&cli, &format!("{}/api/sessions", sb.webui_url()))
+        .await
+        .expect("session list after restore");
+    assert_eq!(
+        row_field(&list, "label"),
+        "发布清单会话",
+        "the operator label must survive the restore: {list}"
+    );
+    assert_eq!(
+        row_field(&list, "prompt_preview"),
+        "run the release checklist",
+        "the first-prompt preview must survive the restore: {list}"
+    );
+    assert_eq!(
+        row_field(&list, "status"),
+        "dormant",
+        "the restored row is a dormant record: {list}"
+    );
+
+    // 恢复后的会话照常可写（顺带钉住恢复行的 detail 可达性）。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{detail_url}/message"),
+        serde_json::json!({ "message": "still named" }),
+    )
+    .await
+    .expect("message after restore");
+    assert_eq!(status, 200, "the restored session must be writable: {body}");
+    wait_turn_done(&cli, &sb, &detail_url).await;
+}
+
+// ---------------------------------------------------------------------------
+// fix-webui-qa-defects-round5 的进程级回归（round5 tasks 1.x / 3.x 的真进程
+// 一层）：内嵌复合后端（`sebas core --webui`，DualSessionBackend = acp 桥 +
+// native）与 detached 两进程形态下的 pending 管理面可达 + 类型化拒绝透传
+// （1.1/1.2），以及 label 写入的实时广播与行投影（3.1）。路由层 fake 已钉
+// 拒绝映射（sebas-webui api.rs）、引擎层已钉 label 发布
+// （sebas-dispatch approval_restore_identity_test）、复合转发已钉
+// （src/agent_backend.rs dual_pending_management_routes_by_key）；这里补
+// 「真 core 进程 + 真 HTTP/WS 面」的证据。浏览器级 GUI 旅程（重命名对话框、
+// rail 行名免刷新）由 testsuite-webui / 主 agent GUI 回归承担。
+// ---------------------------------------------------------------------------
+
+/// 在 `/ws` 帧流里等目标会话的下一条 `session.updated`（跳过无关帧；单帧
+/// 15s 超时由 [`next_ws_frame`] 兜底，循环上限防无限流）。
+async fn wait_session_updated(ws: &mut WsStream, key: &str) -> serde_json::Value {
+    for _ in 0..100 {
+        let frame = next_ws_frame(ws).await;
+        let method = frame["method"].as_str().unwrap_or_default();
+        let sid = frame["params"]["session_id"].as_str().unwrap_or_default();
+        if method == "session.updated" && sid == key {
+            return frame;
+        }
+    }
+    panic!("no session.updated frame for {key} arrived");
+}
+
+/// `GET /api/sessions` 里目标会话的行投影（rail 行名重取的数据源）。
+async fn listed_row(cli: &reqwest::Client, sb: &Sandbox, key: &str) -> serde_json::Value {
+    let (_status, list) = get_json_status(cli, &format!("{}/api/sessions", sb.webui_url()))
+        .await
+        .expect("session list");
+    list["recent_sessions"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .find(|r| r["encoded_key"].as_str() == Some(key))
+        .cloned()
+        .unwrap_or_else(|| panic!("the session must be listed: {list}"))
+}
+
+/// 忙中把两条提交排进待执行队列（首回合 streaming 期间），返回
+/// (detail_url, 先提交的 id, 后提交的 id)。首回合用「stream」场景
+/// （5 帧 × 250ms，与 turn_queue_timing 同款节奏且可应答 watchdog 探测），
+/// 内容帧落地后忙中提交确定性入队。
+async fn queue_two_submissions(
+    cli: &reqwest::Client,
+    base: &str,
+    project_id: &str,
+    hint: &std::path::Path,
+) -> (String, u64, u64) {
+    let (status, body) = post_json(
+        cli,
+        &format!("{base}/api/sessions"),
+        serde_json::json!({
+            "project_id": project_id,
+            "prompt": "stream",
+            "agent": "claude"
+        }),
+    )
+    .await
+    .expect("create session");
+    assert_eq!(status, 201, "create session: {body}");
+    let key = body["key"].as_str().expect("key").to_string();
+    let detail_url = format!("{base}/api/sessions/{key}");
+
+    // 等首个 agent 内容帧落地（WORKING 真在跑）再提交——只认 kind=content
+    // （seed 的 prompt 条目在 SEED 阶段就进 transcript，等非空会提前放行）。
+    let content_cli = cli.clone();
+    let content_url = detail_url.clone();
+    let content_hint = hint.to_path_buf();
+    wait_for("first turn content to stream", Duration::from_secs(40), hint, move || {
+        let cli = content_cli.clone();
+        let url = content_url.clone();
+        Box::pin(async move {
+            let v = cli
+                .get(&url)
+                .send()
+                .await
+                .ok()?
+                .json::<serde_json::Value>()
+                .await
+                .ok()?;
+            let streamed = v["entries"]
+                .as_array()
+                .is_some_and(|b| b.iter().any(|e| e["kind"].as_str() == Some("content")));
+            streamed.then_some(())
+        })
+    })
+    .await;
+
+    for (tag, text) in [("b", "queued-round5-b"), ("c", "queued-round5-c")] {
+        let (status, body) = post_json(
+            cli,
+            &format!("{detail_url}/message"),
+            serde_json::json!({ "message": text }),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("submit {tag}: {e}"));
+        assert_eq!(status, 200, "busy-time submission {tag} must be accepted: {body}");
+    }
+
+    // 两条都已在 pending 里（seed 同步落账；条目开始消费前有 ≈1s 窗口）。
+    let poll_cli = cli.clone();
+    let poll_url = detail_url.clone();
+    let detail = wait_for("both submissions to ride in pending", Duration::from_secs(8), hint, move || {
+        let cli = poll_cli.clone();
+        let url = poll_url.clone();
+        Box::pin(async move {
+            let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+            let n = v["pending"].as_array().map(Vec::len)?;
+            (n == 2).then_some(v)
+        })
+    })
+    .await;
+    let pending = detail["pending"].as_array().expect("pending list");
+    let id_of = |text: &str| {
+        pending
+            .iter()
+            .find(|p| p["text"].as_str() == Some(text))
+            .unwrap_or_else(|| panic!("{text} must be in pending: {pending:?}"))["id"]
+            .as_u64()
+            .expect("pending id")
+    };
+    (detail_url, id_of("queued-round5-b"), id_of("queued-round5-c"))
+}
+
+/// （round5 1.1/1.2，core-session-channel「Session drive methods」内嵌场景）
+/// 裸 core 内嵌 WebUI（`sebas core --webui`，复合后端 = acp 桥承载会话）下，
+/// 排队提交的重排/移除必须到达承载子后端并成功，类型化拒绝原样透传
+/// （unknown 404 / out_of_range 400），错误文案绝不自称「核心不可达」。
+/// 修复前三个管理调用全部落复合层 trait 默认实现恒 503、文案谎报可达性。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn pending_management_reaches_the_host_backend_in_embedded_shape() {
+    let sb = Sandbox::new("testsuite_e2e", "embedded-pending");
+    sb.slow_fake_agent(400);
+    let cli = http_client();
+    let (_core, dashboard) = sb.spawn_core_inprocess_webui(&[]);
+    let base = format!("http://127.0.0.1:{dashboard}");
+    let hint = sb.path.clone();
+
+    // 内嵌形态的 dashboard 端口是旗标指定的 probed 端口（≠ sb.webui_port）。
+    let health_cli = cli.clone();
+    let health_url = base.clone();
+    let health_hint = hint.clone();
+    wait_for("in-process webui health", Duration::from_secs(30), &health_hint, move || {
+        let cli = health_cli.clone();
+        let url = health_url.clone();
+        Box::pin(async move {
+            cli.get(format!("{url}/health"))
+                .send()
+                .await
+                .ok()?
+                .text()
+                .await
+                .ok()
+                .map(|b| b.trim() == "ok")
+                .filter(|ok| *ok)
+        })
+    })
+    .await;
+
+    // 项目注册走 dashboard 面（workspace root 已钉在沙箱目录，注册必定界内）。
+    let (pstatus, pbody) = post_json(
+        &cli,
+        &format!("{base}/api/projects"),
+        serde_json::json!({ "path": support::forward_slash(&sb.path) }),
+    )
+    .await
+    .expect("register scene project");
+    assert_eq!(pstatus, 201, "register scene project: {pbody}");
+    let project_id = pbody["id"].as_str().expect("project id").to_string();
+
+    let (detail_url, id_b, id_c) = queue_two_submissions(&cli, &base, &project_id, &hint).await;
+
+    // 重排：queued-c 移到队首 → 200 且响应携带重排后的全量队列
+    // （修复前：复合层缺转发恒 503「操作不可用: 此后端不承载待执行队列」，
+    // 且旧文案自称「核心不可达」）。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{detail_url}/pending/{id_c}/move"),
+        serde_json::json!({ "to_index": 0 }),
+    )
+    .await
+    .expect("move queued-c");
+    assert_eq!(status, 200, "move must reach the acp bridge: {body}");
+    assert_eq!(body["status"], "moved", "{body}");
+    let moved = body["pending"].as_array().expect("pending after move");
+    assert_eq!(moved[0]["text"], "queued-round5-c", "moved entry must lead: {body}");
+    assert_eq!(moved[1]["text"], "queued-round5-b", "{body}");
+
+    // 移除：queued-b 出队 → 200，剩余队列只含 queued-c。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{detail_url}/pending/{id_b}/remove"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("remove queued-b");
+    assert_eq!(status, 200, "remove must reach the acp bridge: {body}");
+    assert_eq!(body["status"], "removed", "{body}");
+    let left = body["pending"].as_array().expect("pending after remove");
+    assert_eq!(left.len(), 1, "{body}");
+    assert_eq!(left[0]["text"], "queued-round5-c", "{body}");
+
+    // 类型化拒绝透传：unknown id → 404（文案点名「不存在」，绝不 5xx、
+    // 绝不自称不可达）。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{detail_url}/pending/9999/remove"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("remove unknown id");
+    assert_eq!(status, 404, "unknown id must pass through typed: {body}");
+    let message = body["error"].as_str().unwrap_or_default();
+    assert!(message.contains("待执行提交不存在"), "{body}");
+    assert!(!message.contains("核心不可达"), "{body}");
+
+    // 越界重排 → 400（目标位置越界），同样诚实。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{detail_url}/pending/{id_c}/move"),
+        serde_json::json!({ "to_index": 9 }),
+    )
+    .await
+    .expect("move out of range");
+    assert_eq!(status, 400, "out-of-range must pass through typed: {body}");
+    let message = body["error"].as_str().unwrap_or_default();
+    assert!(message.contains("目标位置越界"), "{body}");
+    assert!(!message.contains("核心不可达"), "{body}");
+
+    // 全程 core 可达——以上失败没有一条可以伪装成「不可达」。
+    let (_status, summary) = get_json_status(&cli, &format!("{base}/api/summary"))
+        .await
+        .expect("summary");
+    assert_eq!(
+        summary["reachability"]["ok"], true,
+        "the core was reachable the whole time: {summary}"
+    );
+}
+
+/// （round5 1.1「any deployment shape」的 detached 半边）独立 webui + core
+/// 两进程形态下同一管理面契约：move/remove 经核心通道到达 core 侧引擎队列，
+/// 成功与类型化拒绝同样保真。内嵌形态（上一条）钉复合转发；这里钉「任何
+/// 部署形态」的另一半。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn pending_management_reaches_the_core_queue_in_detached_shape() {
+    let sb = Sandbox::new("testsuite_e2e", "detached-pending");
+    sb.slow_fake_agent(400);
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    let project_id = scene_project_id(&cli, &sb).await;
+    let (detail_url, id_b, id_c) =
+        queue_two_submissions(&cli, &sb.webui_url(), &project_id, &sb.path).await;
+
+    // 重排 → 200（队列经核心通道在 core 侧翻转）。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{detail_url}/pending/{id_c}/move"),
+        serde_json::json!({ "to_index": 0 }),
+    )
+    .await
+    .expect("move queued-c");
+    assert_eq!(status, 200, "move must reach the core queue: {body}");
+    assert_eq!(body["pending"][0]["text"], "queued-round5-c", "{body}");
+
+    // 移除 → 200。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{detail_url}/pending/{id_b}/remove"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("remove queued-b");
+    assert_eq!(status, 200, "remove must reach the core queue: {body}");
+    let left = body["pending"].as_array().expect("pending after remove");
+    assert_eq!(left.len(), 1, "{body}");
+    assert_eq!(left[0]["text"], "queued-round5-c", "{body}");
+
+    // 类型化拒绝透传：unknown 404 / out_of_range 400，文案诚实。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{detail_url}/pending/9999/remove"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("remove unknown id");
+    assert_eq!(status, 404, "{body}");
+    assert!(body["error"].as_str().unwrap_or_default().contains("待执行提交不存在"), "{body}");
+    let (status, body) = post_json(
+        &cli,
+        &format!("{detail_url}/pending/{id_c}/move"),
+        serde_json::json!({ "to_index": 9 }),
+    )
+    .await
+    .expect("move out of range");
+    assert_eq!(status, 400, "{body}");
+    let message = body["error"].as_str().unwrap_or_default();
+    assert!(message.contains("目标位置越界"), "{body}");
+    assert!(!message.contains("核心不可达"), "{body}");
+}
+
+/// （round5 3.1，project-session-actions「label writes through any path
+/// update the row live」）被接受的 label 写入必须作为会话更新事件到达已
+/// 连接的客户端（rail 行名免刷新重取的触发器）——detached 形态下写入走
+/// 核心通道、事件经同一通道折返 /ws。列表行投影的 label 字段（重取的读源）
+/// 同步断言：设置与清空各走一轮。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn label_write_reaches_clients_as_session_update_without_reload() {
+    let sb = Sandbox::new("testsuite_e2e", "label-liveness");
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    let project_id = scene_project_id(&cli, &sb).await;
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({
+            "project_id": project_id,
+            "prompt": "hello",
+            "agent": "claude"
+        }),
+    )
+    .await
+    .expect("create session");
+    assert_eq!(status, 201, "create session: {body}");
+    let key = body["key"].as_str().expect("key").to_string();
+    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+    wait_turn_done(&cli, &sb, &detail_url).await;
+
+    // 先连 /ws 再写 label：帧必须在既有连接上到达（免刷新的证据本体）。
+    let mut ws = ws_connect(&sb.webui_url()).await;
+
+    // API 路径写入（rail 对话框与它共用同一 label API）。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{detail_url}/label"),
+        serde_json::json!({ "label": "发布清单会话" }),
+    )
+    .await
+    .expect("set label");
+    assert_eq!(status, 200, "set label: {body}");
+
+    // 更新帧到达：五键相位帧（session_id + 四相位键；label 不进载荷——
+    // 帧形状冻结，行名刷新由客户端帧触发重取完成，见 round5 design 决策 4）。
+    let frame = wait_session_updated(&mut ws, &key).await;
+    let params = &frame["params"];
+    assert!(params["status_slug"].is_string(), "five-key frame: {frame}");
+    assert!(params["turn_engaged"].is_boolean(), "five-key frame: {frame}");
+    assert!(params["msg_count"].is_number(), "five-key frame: {frame}");
+    assert!(params["pending"].is_array(), "five-key frame: {frame}");
+
+    // 行投影（rail 重取的读源）已携带新 label。
+    let row = listed_row(&cli, &sb, &key).await;
+    assert_eq!(
+        row["label"], "发布清单会话",
+        "the accepted label must be on the row: {row}"
+    );
+
+    // 清空（API 置 null）同样广播 + 行投影回退。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{detail_url}/label"),
+        serde_json::json!({ "label": null }),
+    )
+    .await
+    .expect("clear label");
+    assert_eq!(status, 200, "clear label: {body}");
+    wait_session_updated(&mut ws, &key).await;
+    let row = listed_row(&cli, &sb, &key).await;
+    assert!(
+        row["label"].is_null(),
+        "the cleared label must leave the row: {row}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// （fix-webui-qa-defects-round5 1.2 收口，core-session-channel「typed
+// rejections pass through the composite」内嵌形态收尾）已接受/越优先两类
+// PendingRejected 通过裸 core 复合后端 + 真 HTTP 路径走通 409——上层
+// 「unknown 404 / out_of_range 400」已随 embedded-shape 测试覆盖；这里补
+// 「AlreadyStarted / PriorityConflict 409」两层：types 必须端到端从状态层
+// 一路透到 webui api.rs 的 409 映射，绝不在某层被「不可用」笼统顶回。
+//
+// 真实复现路径：核心通道端状态层 PendingOpError → InProcessBackend 透传
+// → DualSessionBackend.route() → api.rs PendingReason → StatusCode。这是
+// 1.2 表格里未在 e2e 层覆盖的盲点，故新加一条用例。
+// ---------------------------------------------------------------------------
+
+/// 在 stream 场景下把两条普通项 + 一条优先项排进队列，返回
+/// (detail_url, 普通 b 的 id, 普通 c 的 id, 优先 p 的 id)。优先项不可移
+/// 动（status 输入「/btw」走 priority=true）；c 上有一个条目跑到 pop 后变
+/// 成「delivered」id——为 AlreadyStarted 用例留窗口。
+async fn queue_three_with_priority(
+    cli: &reqwest::Client,
+    base: &str,
+    project_id: &str,
+    hint: &std::path::Path,
+) -> (String, u64, u64, u64) {
+    let (status, body) = post_json(
+        cli,
+        &format!("{base}/api/sessions"),
+        serde_json::json!({
+            "project_id": project_id,
+            "prompt": "stream",
+            "agent": "claude"
+        }),
+    )
+    .await
+    .expect("create session");
+    assert_eq!(status, 201, "create session: {body}");
+    let key = body["key"].as_str().expect("key").to_string();
+    let detail_url = format!("{base}/api/sessions/{key}");
+
+    // 等首个 agent 内容帧落地（WORKING 真在跑）。
+    let content_cli = cli.clone();
+    let content_url = detail_url.clone();
+    let content_hint = hint.to_path_buf();
+    wait_for("first turn content to stream", Duration::from_secs(40), &content_hint, move || {
+        let cli = content_cli.clone();
+        let url = content_url.clone();
+        Box::pin(async move {
+            let v = cli
+                .get(&url)
+                .send()
+                .await
+                .ok()?
+                .json::<serde_json::Value>()
+                .await
+                .ok()?;
+            let streamed = v["entries"]
+                .as_array()
+                .is_some_and(|b| b.iter().any(|e| e["kind"].as_str() == Some("content")));
+            streamed.then_some(())
+        })
+    })
+    .await;
+
+    // 三条入栈：b/c 普通、p 优先（`/btw`，claude 后端会带 priority=true）。
+    for (tag, text) in [
+        ("b", "queued-round5-b"),
+        ("c", "queued-round5-c"),
+        ("p", "/btw queued-round5-p"),
+    ] {
+        let (status, body) = post_json(
+            cli,
+            &format!("{detail_url}/message"),
+            serde_json::json!({ "message": text }),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("submit {tag}: {e}"));
+        assert_eq!(status, 200, "busy-time submission {tag} must be accepted: {body}");
+    }
+
+    // 三条都在 pending；pop 顺序：p（优先）/ b / c。
+    let poll_cli = cli.clone();
+    let poll_url = detail_url.clone();
+    let detail = wait_for(
+        "three submissions to ride in pending",
+        Duration::from_secs(8),
+        hint,
+        move || {
+            let cli = poll_cli.clone();
+            let url = poll_url.clone();
+            Box::pin(async move {
+                let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+                let n = v["pending"].as_array().map(Vec::len)?;
+                (n == 3).then_some(v)
+            })
+        },
+    )
+    .await;
+    let pending = detail["pending"].as_array().expect("pending list");
+    let id_of = |text: &str| {
+        pending
+            .iter()
+            .find(|p| p["text"].as_str() == Some(text))
+            .unwrap_or_else(|| panic!("{text} must be in pending: {pending:?}"))["id"]
+            .as_u64()
+            .expect("pending id")
+    };
+    (detail_url, id_of("queued-round5-b"), id_of("queued-round5-c"), id_of("queued-round5-p"))
+}
+
+/// （fix-webui-qa-defects-round5 1.2，core-session-channel「typed rejections
+/// pass through the composite」内嵌形态收尾）裸 core 复合后端下：
+///
+/// - **PriorityConflict (409)**：把普通条目 c 移到优先条目 p 之前（落点 0）
+///   → 状态层 PriorityConflict → InProcessBackend → DualSessionBackend.route()
+///   → api.rs PendingReason::PriorityConflict → 409；
+/// - **AlreadyStarted (409)**：等首回合收敛（优先项 p 已 pop 投递，b 自动接
+///   续）→ 用陈旧的 p id 重试 remove → 状态层 delivered 集合里命中 →
+///   AlreadyStarted → 409；
+///
+/// 两类文案都点名原因（不能越过优先 / 该提交已开始执行）且绝不出现
+/// 「核心不可达」「操作不可用」等其它 5xx/4xx 顶替。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn pending_management_passes_typed_rejections_through_composite_409() {
+    let sb = Sandbox::new("testsuite_e2e", "embedded-pending-409");
+    sb.slow_fake_agent(400);
+    let cli = http_client();
+    let (_core, dashboard) = sb.spawn_core_inprocess_webui(&[]);
+    let base = format!("http://127.0.0.1:{dashboard}");
+    let hint = sb.path.clone();
+
+    // 内嵌形态 dashboard 等就绪。
+    let health_cli = cli.clone();
+    let health_url = base.clone();
+    let health_hint = hint.clone();
+    wait_for("in-process webui health", Duration::from_secs(30), &health_hint, move || {
+        let cli = health_cli.clone();
+        let url = health_url.clone();
+        Box::pin(async move {
+            cli.get(format!("{url}/health"))
+                .send()
+                .await
+                .ok()?
+                .text()
+                .await
+                .ok()
+                .map(|b| b.trim() == "ok")
+                .unwrap_or(false)
+                .then_some(())
+        })
+    })
+    .await;
+
+    // 注册项目（workspace root = 沙箱目录，注册必定界内）。
+    let (pstatus, pbody) = post_json(
+        &cli,
+        &format!("{base}/api/projects"),
+        serde_json::json!({ "path": support::forward_slash(&sb.path) }),
+    )
+    .await
+    .expect("register scene project");
+    assert_eq!(pstatus, 201, "register scene project: {pbody}");
+    let project_id = pbody["id"].as_str().expect("project id").to_string();
+
+    // 三条入栈（普通 b、普通 c、优先 p）。
+    let (detail_url, _id_b, id_c, id_p) =
+        queue_three_with_priority(&cli, &base, &project_id, &hint).await;
+
+    // ── PriorityConflict → 409：把普通项 c 移到优先项 p 之前（落点 0）。──
+    let (status, body) = post_json(
+        &cli,
+        &format!("{detail_url}/pending/{id_c}/move"),
+        serde_json::json!({ "to_index": 0 }),
+    )
+    .await
+    .expect("move c ahead of p");
+    assert_eq!(
+        status, 409,
+        "moving past a priority submission must 409 (PriorityConflict), got {body}"
+    );
+    let message = body["error"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("不能越过优先提交排序"),
+        "PriorityConflict message must name the rule: {message}"
+    );
+    // 关键：错误必须不冒充可达性失败（round5 1.3 文案诚实性）。
+    assert!(!message.contains("核心不可达"), "{message}");
+    assert!(!message.contains("操作不可用"), "{message}");
+
+    // ── AlreadyStarted → 409：等优先项 p 被投递（首回合收敛），保留 p id
+    // 重试 remove。delivered 集合里命中 → AlreadyStarted → 409。
+    wait_turn_done(&cli, &sb, &detail_url).await;
+    let (status, body) = post_json(
+        &cli,
+        &format!("{detail_url}/pending/{id_p}/remove"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("remove already-started id");
+    assert_eq!(
+        status, 409,
+        "removing a delivered id must 409 (AlreadyStarted), got {body}"
+    );
+    let message = body["error"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("该提交已开始执行"),
+        "AlreadyStarted message must name the cause: {message}"
+    );
+    assert!(!message.contains("核心不可达"), "{message}");
+    assert!(!message.contains("操作不可用"), "{message}");
+
+    // 全程 core 可达——以上两类失败没有一条可以伪装成「不可达」。
+    let (_status, summary) = get_json_status(&cli, &format!("{base}/api/summary"))
+        .await
+        .expect("summary");
+    assert_eq!(
+        summary["reachability"]["ok"], true,
+        "the core was reachable the whole time: {summary}"
+    );
+}
+
+/// （fix-webui-qa-defects-round5 1.3，core-session-channel 末段：错误文案
+/// 不再自称「核心不可达」）复合后端路由缺位的诚实失败 = HTTP 503 + 文案
+/// 「操作不可用: 此后端不承载待执行队列」——直接打不归 webui 路由的会话：
+/// 该键对应的 channel 后端无队列 / 该 channel 走 native 侧（不路由到 acp
+/// 桥）。这里通过在 feishu channel 上不存在会话的 known-format key 命中
+/// native 侧不可用分支（route() 路由到 NativeAgentBackend → trait 默认
+/// Unavailable），文字契约由 api.rs 透传。
+///
+/// 不创建 feishu 会话（feishu 通道默认 disabled，避免与既有沙箱冲突）；
+/// 只断言调用契约与文案形态——这与 1.2 表格里 FakeBackend 注入 Unavailable
+/// 的接口层单测是同形但反向验证：真实 InProcessBackend/NativeAgentBackend
+/// 路径里走出来的错误文本也得是「操作不可用」而非「核心不可达」。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn pending_management_unavailable_uses_honest_cause_text() {
+    let sb = Sandbox::new("testsuite_e2e", "embedded-pending-unavailable");
+    sb.slow_fake_agent(400);
+    let cli = http_client();
+    let (_core, dashboard) = sb.spawn_core_inprocess_webui(&[]);
+    let base = format!("http://127.0.0.1:{dashboard}");
+    let hint = sb.path.clone();
+
+    let health_cli = cli.clone();
+    let health_url = base.clone();
+    let health_hint = hint.clone();
+    wait_for("in-process webui health", Duration::from_secs(30), &health_hint, move || {
+        let cli = health_cli.clone();
+        let url = health_url.clone();
+        Box::pin(async move {
+            cli.get(format!("{url}/health"))
+                .send()
+                .await
+                .ok()?
+                .text()
+                .await
+                .ok()
+                .map(|b| b.trim() == "ok")
+                .unwrap_or(false)
+                .then_some(())
+        })
+    })
+    .await;
+
+    // 注册项目（让 create 不撞 scope 边界）。
+    let (pstatus, pbody) = post_json(
+        &cli,
+        &format!("{base}/api/projects"),
+        serde_json::json!({ "path": support::forward_slash(&sb.path) }),
+    )
+    .await
+    .expect("register scene project");
+    assert_eq!(pstatus, 201, "register scene project: {pbody}");
+    let project_id = pbody["id"].as_str().expect("project id").to_string();
+
+    // web channel 创建会话（走 acp 桥）→ 优先入栈。
+    let (detail_url, _id_b, _id_c, _id_p) =
+        queue_three_with_priority(&cli, &base, &project_id, &hint).await;
+
+    // 用合法编码 key 但绕开 webui 路由：直接对 feishu channel 编码键（沙箱
+    // feishu disabled，route() 落到 NativeAgentBackend 的 trait 默认实现 →
+    // Unavailable cause = "此后端不承载待执行队列"）。WebUI 路由 decode 该
+    // key 仍合法（webui 不按 channel 过滤），仅后端不可用。
+    //
+    // 编码约定：「channel%00reference」；取一个不存在的 feishu 引用即可。
+    let feishu_encoded = "feishu%00round5-native-pending";
+    for (op, suffix) in [("remove", "/remove"), ("move", "/move")] {
+        let url = format!("{base}/api/sessions/{feishu_encoded}/pending/1{suffix}");
+        let body = if op == "move" {
+            serde_json::json!({ "to_index": 0 })
+        } else {
+            serde_json::json!({})
+        };
+        let (status, body) = post_json(&cli, &url, body)
+            .await
+            .unwrap_or_else(|e| panic!("{op} feishu channel: {e}"));
+        assert_eq!(
+            status, 503,
+            "{op} on a non-queue-holding channel must 503 (Unavailable), got {body}"
+        );
+        let message = body["error"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("操作不可用"),
+            "{op} message must use the round5 honest cause prefix: {message}"
+        );
+        assert!(
+            message.contains("此后端不承载待执行队列"),
+            "{op} message must name the routing gap: {message}"
+        );
+        assert!(
+            !message.contains("核心不可达"),
+            "{op} message must NOT pretend the core is unreachable: {message}"
+        );
+    }
+
+    // 同一会话 web channel 路径上仍然 200（控制：复合后端按 key 路由成功）。
+    let (_status, summary) = get_json_status(&cli, &format!("{base}/api/summary"))
+        .await
+        .expect("summary");
+    assert_eq!(
+        summary["reachability"]["ok"], true,
+        "the core was reachable the whole time: {summary}"
+    );
+    let (_status, list) =
+        get_json_status(&cli, &format!("{base}/api/sessions"))
+            .await
+            .expect("session list");
+    let in_list = list["recent_sessions"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .any(|r| {
+            r["encoded_key"].as_str()
+                == Some(detail_url.rsplit('/').nth(1).unwrap_or(""))
+        });
+    assert!(in_list, "the queued session must still be reachable by webui list");
+}

@@ -6,6 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   DEDUPE_WINDOW_MS,
+  ERROR_TOAST_DURATION_MS,
   MAX_TRANSIENT_ITEMS,
   dismiss,
   notify,
@@ -45,16 +46,17 @@ describe('notice store: 栈上限挤占（spec「栈上限与去重」）', () =
     expect(items.some((it) => it.id === a)).toBe(false)
   })
 
-  it('error toasts are persistent: never evicted and not counted toward the cap', () => {
-    notify({ level: 'error', message: 'e1' })
-    notify({ level: 'error', message: 'e2' })
-    for (let i = 0; i < 5; i++) notify({ level: 'info', message: `i${i}` })
+  it('error toasts auto-dismiss (round5 4.2): transient, evictable, cap-counted', () => {
+    const e1 = notify({ level: 'error', message: 'e1' })!
+    const e2 = notify({ level: 'error', message: 'e2' })!
+    notify({ level: 'info', message: 'i0' })
+    notify({ level: 'info', message: 'i1' })
     const { states } = collect()
     const items = states[states.length - 1].items
-    // 两条 error 驻留 + 3 条瞬时（旧的瞬时被挤掉）。
-    expect(items.filter((it) => it.level === 'error')).toHaveLength(2)
-    expect(items.filter((it) => it.duration > 0)).toHaveLength(MAX_TRANSIENT_ITEMS)
-    expect(items).toHaveLength(5)
+    // 4.2 起失败类默认瞬时（8s 自动消失）：不再驻留，参与 3 条上限挤占
+    // ——e1 已被后续瞬时条挤出。
+    expect(items.map((it) => it.id)).toEqual([e2, 3, 4])
+    expect(items.every((it) => it.duration > 0)).toBe(true)
   })
 
   it('an explicit duration of 0 marks the item persistent regardless of level', () => {
@@ -119,7 +121,7 @@ describe('notice store: dismiss 与订阅', () => {
     expect(states[states.length - 1].items).toHaveLength(2)
   })
 
-  it('default durations follow the level map (info 5s / warn 8s / error 驻留)', () => {
+  it('default durations follow the level map (info 5s / warn 8s / error 8s, round5 4.2)', () => {
     notify({ level: 'info', message: 'i' })
     notify({ level: 'warn', message: 'w' })
     notify({ level: 'error', message: 'e' })
@@ -127,7 +129,9 @@ describe('notice store: dismiss 与订阅', () => {
     const [i, w, e] = states[states.length - 1].items
     expect(i.duration).toBe(5_000)
     expect(w.duration).toBe(8_000)
-    expect(e.duration).toBe(0)
+    // 失败类不再驻留：与成功类策略分开常量化（ERROR_TOAST_DURATION_MS）。
+    expect(e.duration).toBe(ERROR_TOAST_DURATION_MS)
+    expect(ERROR_TOAST_DURATION_MS).toBe(8_000)
   })
 })
 

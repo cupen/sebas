@@ -6,7 +6,7 @@ Defines the directory-picker project registration, zero-prompt session creation,
 
 ### Requirement: Add project via directory picker
 
-The workbench SHALL provide a modal dialog with a server-side directory tree browser and a manual path input, either of which SHALL register a project directory. The tree browser SHALL lazy-load subdirectory listings on expand from `GET /api/fs/browse-dirs?path=...&root=...`, scoped to the workspace root. The tree SHALL open at the workspace root (the listing rooted there, its canonical path displayed so the operator can see the starting scope), and expanding any node SHALL list its subdirectories without error — including on Windows, where previously the path round-trip failed with a 400. The registered project name SHALL be the directory's basename. The system SHALL probe the directory for a git branch after registration to determine directory accessibility; the branch name SHALL NOT be displayed in the project row. The manual path input SHALL be bounded by the workspace root: a path that resolves outside it SHALL be rejected with an out-of-scope error, identically to the browser path.
+The workbench SHALL provide a modal dialog with a server-side directory tree browser and a manual path input, either of which SHALL register a project directory. The tree browser SHALL lazy-load subdirectory listings on expand from `GET /api/fs/browse-dirs?path=...&root=...`, scoped to the workspace root. The tree SHALL open at the workspace root (the listing rooted there, its canonical path displayed so the operator can see the starting scope), and expanding any node SHALL list its subdirectories without error — including on Windows, where previously the path round-trip failed with a 400. The tree SHALL NOT offer a directory that resolves onto the built-in system-directory denylist. The registered project name SHALL be the directory's basename. The system SHALL probe the directory for a git branch after registration to determine directory accessibility; the branch name SHALL NOT be displayed in the project row. The manual path input SHALL be bounded by the workspace root: a path that resolves outside it SHALL be rejected with an out-of-scope error, identically to the browser path. A submitted path that resolves onto a built-in system directory SHALL likewise be refused — through either entry — with an error naming the submitted path shown inline in the dialog.
 
 #### Scenario: add project via directory browser
 
@@ -33,6 +33,16 @@ The workbench SHALL provide a modal dialog with a server-side directory tree bro
 - **WHEN** the operator types a valid directory path that resolves outside the workspace root and submits it
 - **THEN** the registration is rejected with an out-of-scope error and no project is created — the former out-of-scope tolerance is revoked by this change
 
+#### Scenario: system directory via manual input is rejected
+
+- **WHEN** the operator types a path that resolves onto a built-in system directory (for example `/usr`, or `C:\Windows`) and submits it
+- **THEN** the registration is rejected, the dialog shows the typed error naming the submitted path, and no project is created
+
+#### Scenario: the tree does not offer denylisted directories
+
+- **WHEN** a browsed listing would contain a directory that resolves onto the built-in denylist
+- **THEN** that directory does not appear as a selectable tree node, so it cannot be picked
+
 #### Scenario: project name from directory name
 
 - **WHEN** a project is registered at `/home/user/work/my-repo`
@@ -54,7 +64,7 @@ The workbench SHALL support creating a 0-turn placeholder session without requir
 
 #### Scenario: create empty session from project
 
-- **WHEN** the operator clicks the `+` button on a project row
+- **WHEN** the operator clicks the `+` button on a project row and confirms the creation dialog (agent chosen, no prompt entered)
 - **THEN** a new session with zero turns is created, the project is selected, the session is activated, and the composer is ready for the first message
 
 #### Scenario: first message spawns the child
@@ -81,6 +91,8 @@ The workbench SHALL support creating a 0-turn placeholder session without requir
 
 The rail session row's overflow menu SHALL be the operator-facing archive entry: archiving moves the session to the History group and carries the close semantics (the child is killed if active; the confirm dialog warns about pending submissions that will be discarded). The focused session's header SHALL render no action buttons and no navigation link. An archived session SHALL be read-only — the operator cannot send messages into it, cannot close it, and cannot switch to it as the active session. An archived session SHALL be restorable to its original project. The archive entry SHALL carry the session's identity — agent binding (`agent_kind`), desired permission mode, and the current/available model catalog — and restoring SHALL rebuild the session with that identity intact, so the restored session continues with the same agent and model surface it had before archiving. Legacy archive entries without identity fields SHALL restore with the existing fallbacks and the UI SHALL present that fallback honestly. Restoring SHALL remove the History entry and rebuild the session row **as one atomic outcome**: after a successful restore the session MUST be present in the session list under its original project with its full transcript, and the archive MUST no longer hold the entry. An implementation that consumes the archive entry without rebuilding the session — leaving the data reachable nowhere — SHALL be treated as data loss and is non-conformant.
 
+Clicking an archived session in the History group SHALL open a read-only archived view of that session in the main area and SHALL NOT restore it. The archived view SHALL present an explicit restore action — separate from the click target — which, after the operator confirms a restore dialog, restores the session to its original project, makes it writable, and activates it. Every restore attempt SHALL surface an outcome notification (success or failure). A restored session whose original project is not currently registered SHALL still surface its whereabouts: the outcome notification SHALL state which project path it was restored to, and the session SHALL become reachable through that project once registered.
+
 #### Scenario: archive a session
 
 - **WHEN** the operator picks archive in a rail session row's overflow menu and confirms
@@ -91,16 +103,36 @@ The rail session row's overflow menu SHALL be the operator-facing archive entry:
 - **WHEN** the operator attempts to send a message to an archived session
 - **THEN** the system rejects the message with a 400 response stating the session is archived
 
+#### Scenario: clicking an archived session views it read-only
+
+- **WHEN** the operator clicks an archived session in the History group
+- **THEN** the main area opens a read-only view of that session's conversation, the History group is unchanged, and no restore happens
+
+#### Scenario: restore is an explicit confirmed action
+
+- **WHEN** the operator activates the restore action in the archived view and confirms the restore dialog
+- **THEN** the session is restored to its original project, becomes writable, is activated, and a success notification states where it was restored to
+
+#### Scenario: restore failure is surfaced
+
+- **WHEN** a restore attempt fails
+- **THEN** a failure notification names the session and the cause, and the session remains archived
+
 #### Scenario: restore archived session
 
-- **WHEN** the operator clicks an archived session in the History group and confirms the restore dialog
-- **THEN** the session is restored to its original project, becomes writable, and is activated
+- **WHEN** the operator activates the explicit restore action in the archived view and confirms
+- **THEN** the session is restored to its original project, becomes writable, and is activated — clicking the History row alone never restores
 
 #### Scenario: restore preserves the transcript
 
 - **WHEN** an archived session holding N transcript entries is restored
 - **THEN** the rebuilt session exposes the same N entries via the session detail API, the session is listed under its original project, and the History group no longer lists it
 - **AND** no state exists in which the archive entry is consumed while the session is absent from the session list
+
+#### Scenario: restore into an unregistered project is not silent
+
+- **WHEN** the operator restores a session whose original project path is not a registered project
+- **THEN** the outcome notification states the project path it was restored to, and no archived entry disappears without a stated outcome
 
 #### Scenario: focused session header offers no actions
 
@@ -119,7 +151,7 @@ The rail session row's overflow menu SHALL be the operator-facing archive entry:
 
 ### Requirement: History group is the archive
 
-The History group SHALL contain only archived sessions, listed newest-first by archive time. The rail SHALL NOT render an Inbox group: sessions with no project directory SHALL NOT be listed in the rail (they remain accessible through the sessions API and their originating surface). The History group SHALL show the total count of archived sessions and be collapsible.
+The History group SHALL contain only archived sessions, listed newest-first by archive time. The rail SHALL NOT render an Inbox group: sessions with no project directory — whose only source is the Feishu channel, since webui creation paths always bind a project — SHALL NOT be listed in the rail; they remain accessible through their originating surface (Feishu) and the sessions API. The History group SHALL show the total count of archived sessions and be collapsible.
 
 #### Scenario: History holds only archived sessions
 
@@ -131,14 +163,14 @@ The History group SHALL contain only archived sessions, listed newest-first by a
 - **WHEN** sessions are archived at different times
 - **THEN** the History group lists them in descending order of archive time
 
-#### Scenario: Inbox for unbound sessions
+#### Scenario: unbound sessions stay out of the rail
 
-- **WHEN** a session has no project directory
-- **THEN** it appears in no rail group — the Inbox group no longer exists — and History does not list it either
+- **WHEN** a session has no project directory (a Feishu-originated session)
+- **THEN** it appears in no rail group — the Inbox group no longer exists — and History does not list it either; its conversation continues on its originating surface
 
 ### Requirement: Archive expiry
 
-The system SHALL permanently delete archived sessions whose `archived_at` timestamp is older than the configured retention period. The default retention SHALL be 30 days, configurable via `[webui] archive_retention_days` in the config file. Expired sessions SHALL be removed on WebUI startup and on every session list request, with no operator-facing notification.
+The system SHALL permanently delete archived sessions whose `archived_at` timestamp is older than the configured retention period. The default retention SHALL be 30 days, configurable via `[service.webui] archive_retention_days` in the config file. Expired sessions SHALL be removed on WebUI startup and on every session list request, with no operator-facing notification.
 
 #### Scenario: expired session cleaned up
 
@@ -147,7 +179,7 @@ The system SHALL permanently delete archived sessions whose `archived_at` timest
 
 #### Scenario: retention configured
 
-- **WHEN** `[webui] archive_retention_days = 7` is set in the config
+- **WHEN** `[service.webui] archive_retention_days = 7` is set in the config
 - **THEN** archived sessions older than 7 days are removed at startup and on list requests
 
 #### Scenario: within retention

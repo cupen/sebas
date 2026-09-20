@@ -13,6 +13,7 @@ import { writeFocusAnchor } from './unread-cursor.js'
 import './project-rail.js'
 import {
   SebasProjectRail,
+  LABEL_REFRESH_DEBOUNCE_MS,
   RAIL_EXPANDED_KEY,
   addPathScopeHintFrom,
   fullSessionLabel,
@@ -682,6 +683,42 @@ describe('history group (archived sessions)', () => {
     // 探测链路保留：branch 接口仍被调用（删除线告警依赖它）。
     expect(apiMock.projects.branch).toHaveBeenCalledWith('proj-alpha')
     el.remove()
+  })
+
+  it('archive meta shows the basename for Windows backslash paths, not the whole path (round4 3.2)', async () => {
+    mockOf(apiMock.archiveList).mockResolvedValue({
+      archived_sessions: [
+        {
+          session_key: 'oc_win%00',
+          project_path: 'C:\\workbench\\repos-ai\\sebas',
+          label: 'win session',
+          archived_at: 5000,
+          retention_deadline: 9000,
+        },
+      ],
+    })
+    const el = await mount()
+    const heads = [...el.shadowRoot!.querySelectorAll('.group-head')]
+    const historyHead = heads.find((h) => h.textContent?.includes('History'))
+    ;(historyHead as HTMLElement).click()
+    await el.updateComplete
+    const meta = el.shadowRoot!.querySelector(
+      '.group-section li.session-item.archived .archive-meta',
+    )
+    expect(meta?.textContent).toBe('sebas')
+    el.remove()
+  })
+
+  it('archive meta and session name truncate with ellipsis instead of stretching the rail (round4 3.2)', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { join, dirname } = await import('node:path')
+    const here = dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'))
+    const src = readFileSync(join(here, 'project-rail.ts'), 'utf8')
+    // .archive-meta 必须自带省略号截断（min-width:0 是 flex 子项省略号的
+    // 生效前提）——长路径不撑出横向滚动。
+    expect(src).toMatch(
+      /\.archive-meta\s*\{[^}]*min-width:\s*0;[^}]*overflow:\s*hidden;[^}]*text-overflow:\s*ellipsis;[^}]*white-space:\s*nowrap;/,
+    )
   })
 })
 
@@ -1453,6 +1490,9 @@ describe('session naming by operator label (5.1)', () => {
     expect((el as any).renameValue).toBe('')
 
     ;(el as any).renameValue = '  我的项目会话  '
+    // 保存从 DOM（wa-input）取值（round5 2.1）——先让 Lit 把状态渲染进
+    // DOM（真实流程：输入 → 渲染 → 点击保存）。
+    await (el as any).updateComplete
     await (el as any).confirmRename()
     expect(mockOf(apiMock.setSessionLabel)).toHaveBeenCalledWith(target.encoded_key, '我的项目会话')
     expect((el as any).renameTarget).toBeNull()
@@ -1468,6 +1508,124 @@ describe('session naming by operator label (5.1)', () => {
     await (el as any).confirmRename()
     expect(mockOf(apiMock.setSessionLabel)).toHaveBeenCalledWith(named.encoded_key, null)
     el.remove()
+  })
+
+  // （fix-webui-qa-defects-round5 2.1，design 决策 3）组件级回归：渲染对话框
+  // → 填值 → 保存 → 请求体携带该值且成功后关闭。宿主 value 与内部原生
+  // input 各自独立（QA D3a：宿主属性不同步让输入值在保存链路丢失，保存成
+  // 静默清空）——保存必须以内部原生 input 为锚。
+  it('the save reads the value from the internal native input and closes on success (round5 2.1)', async () => {
+    mockOf(apiMock.setSessionLabel).mockResolvedValue({ status: 'ok' })
+    const el = await mount()
+    const target = (el as any).sessions[0] as SessionRow
+    ;(el as any).openRenameDialog(new Event('click'), target)
+    await (el as any).updateComplete
+    const host = el.shadowRoot!.querySelector('wa-input[data-testid="rename-input"]') as
+      | (HTMLElement & { value?: string; shadowRoot?: ShadowRoot | null })
+    expect(host).toBeTruthy()
+    // 模拟真实 WA 内部结构：原生 input 携带输入值，宿主属性保持陈旧空值
+    // ——正是缺陷场景。测试环境 wa-input 未升级，手动附 shadowRoot。
+    const shadow = host.shadowRoot ?? host.attachShadow({ mode: 'open' })
+    const native = document.createElement('input')
+    native.value = '  来自原生输入的名字  '
+    shadow.appendChild(native)
+    host.value = '';
+    (el as any).renameValue = ''
+    await (el as any).updateComplete
+    await (el as any).confirmRename()
+    expect(mockOf(apiMock.setSessionLabel)).toHaveBeenCalledWith(
+      target.encoded_key,
+      '来自原生输入的名字',
+    )
+    expect((el as any).renameTarget).toBeNull()
+    el.remove()
+  })
+
+  it('a failed save keeps the dialog open with the inline error (round5 2.1)', async () => {
+    mockOf(apiMock.setSessionLabel).mockRejectedValue(new Error('会话不存在'))
+    const el = await mount()
+    const target = (el as any).sessions[0] as SessionRow
+    ;(el as any).openRenameDialog(new Event('click'), target)
+    ;(el as any).renameValue = '新名'
+    await (el as any).confirmRename()
+    expect((el as any).renameTarget).toBe(target)
+    const err = el.shadowRoot!.querySelector('[data-testid="rename-error"]')
+    expect(err?.textContent).toContain('会话不存在')
+    el.remove()
+  })
+})
+
+// ── fix-webui-qa-defects-round5 3.2：label 变更实时刷新 ─────────────────────
+describe('label write liveness via session.updated (round5 3.2)', () => {
+  it('frames trigger a debounced re-projection that re-renders the row name', async () => {
+    vi.useFakeTimers()
+    try {
+      const el = document.createElement('sebas-project-rail') as SebasProjectRail
+      document.body.appendChild(el)
+      // connectedCallback 的 refresh 是宏任务串——fake timers 下手动推进。
+      await vi.advanceTimersByTimeAsync(0)
+      await el.updateComplete
+      await vi.advanceTimersByTimeAsync(0)
+      await el.updateComplete
+      mockOf(apiMock.sessions).mockClear()
+      expect(mockOf(apiMock.sessions)).toHaveBeenCalledTimes(0)
+
+      // 帧到达：行就地补丁，重取在防抖窗口内不发生。
+      wsMocks.emit({
+        type: 'session.updated',
+        session_id: sessionRows[0]!.encoded_key,
+        status_slug: 'done',
+        turn_engaged: false,
+        msg_count: 3,
+        pending: [],
+      })
+      await el.updateComplete
+      expect(mockOf(apiMock.sessions)).toHaveBeenCalledTimes(0)
+
+      // 窗口内的后续帧合并为一次重取；重取结果携带新 label → 行名重渲染。
+      const relabeled = sessionRows.map((r, i) => (i === 0 ? { ...r, label: 'API 命名' } : r))
+      mockOf(apiMock.sessions).mockResolvedValue(sessionList(relabeled))
+      wsMocks.emit({
+        type: 'session.updated',
+        session_id: sessionRows[1]!.encoded_key,
+        status_slug: 'working',
+        turn_engaged: true,
+        msg_count: 9,
+        pending: [],
+      })
+      await vi.advanceTimersByTimeAsync(LABEL_REFRESH_DEBOUNCE_MS - 1)
+      wsMocks.emit({
+        type: 'session.updated',
+        session_id: sessionRows[2]!.encoded_key,
+        status_slug: 'done',
+        turn_engaged: false,
+        msg_count: 1,
+        pending: [],
+      })
+      await vi.advanceTimersByTimeAsync(LABEL_REFRESH_DEBOUNCE_MS + 1)
+      await el.updateComplete
+      await vi.advanceTimersByTimeAsync(0)
+      await el.updateComplete
+      expect(mockOf(apiMock.sessions)).toHaveBeenCalledTimes(1)
+      expect((el as any).sessions[0].label).toBe('API 命名')
+      // 展开项目组后行名以 label 重渲染（无刷新）。
+      ;(el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).click()
+      await el.updateComplete
+      expect(el.shadowRoot!.textContent).toContain('API 命名')
+      el.remove()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('the closed row menu keeps its items out of the a11y tree (round5 4.1)', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { join, dirname } = await import('node:path')
+    const here = dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'))
+    const src = readFileSync(join(here, 'project-rail.ts'), 'utf8')
+    // 关闭态（wa-dropdown 无 open 反射属性）菜单项 display:none——a11y 树
+    // 不再暴露「重命名/归档/移除项目」；打开翻转与 popup 激活同帧。
+    expect(src).toMatch(/wa-dropdown:not\(\[open\]\)\s+wa-dropdown-item\s*\{[^}]*display:\s*none/)
   })
 })
 

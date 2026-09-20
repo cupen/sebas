@@ -2210,6 +2210,8 @@ pub async fn archive_session(State(state): State<WebUiState>, Path(key): Path<St
         current_model: info.current_model.clone(),
         available_models: info.available_models.clone(),
     };
+    // （fix-webui-qa-defects-round4 3.1，design M1）命名来源一并落档：操作者
+    // label 与首条 prompt 预览随快照迁移，恢复后行名与归档前一致。
     match crate::archive::archive_session(
         &key,
         &project_path,
@@ -2218,6 +2220,8 @@ pub async fn archive_session(State(state): State<WebUiState>, Path(key): Path<St
         identity,
         state.archive_retention_days,
         transcript,
+        info.label.clone(),
+        info.user_prompt.clone(),
     ) {
         Ok(entry) => (
             StatusCode::OK,
@@ -2258,6 +2262,10 @@ pub async fn restore_session(
             project_dir,
             entry.transcript.clone(),
             identity,
+            // （fix-webui-qa-defects-round4 3.1，design M1）命名来源随恢复
+            // 迁回——旧档无字段时为 None，回退现状（短 id）。
+            entry.operator_label.clone(),
+            entry.prompt_preview.clone(),
         )
         .await
     {
@@ -3237,5 +3245,116 @@ mod approvals_label_route_tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    /// （fix-webui-qa-defects-round5 3.2）被接受的 label 写入必须立即落进读
+    /// 投影：rail 行名重取的唯一数据源是 `GET /api/sessions` 行的 `label`
+    /// 字段（帧只负责触发重取），写入读回不一致 = 「所见非所存」。设置 →
+    /// 行携带新 label；清空（null）→ 行字段回 None（wire 上 skip，读作
+    /// null）。
+    #[tokio::test]
+    async fn label_route_write_projects_label_into_list_rows() {
+        let backend = Arc::new(FakeBackend::new());
+        let encoded = seed_session(backend.as_ref()).await;
+        let row = |list: &serde_json::Value| {
+            list["recent_sessions"]
+                .as_array()
+                .expect("rows")
+                .iter()
+                .find(|r| r["encoded_key"].as_str() == Some(encoded.as_str()))
+                .unwrap_or_else(|| panic!("the session must be listed: {list}"))
+                .clone()
+        };
+
+        let (status, _body) = post(
+            &app(backend.clone()),
+            &format!("/api/sessions/{encoded}/label"),
+            r#"{"label": "发布清单会话"}"#.into(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, list) = get(&app(backend.clone()), "/api/sessions").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            row(&list)["label"], "发布清单会话",
+            "the accepted label must be on the row right after the write: {list}"
+        );
+
+        // 清空：行投影回退（label 字段不上 wire，读作 null）。
+        let (status, _body) = post(
+            &app(backend.clone()),
+            &format!("/api/sessions/{encoded}/label"),
+            r#"{"label": null}"#.into(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, list) = get(&app(backend), "/api/sessions").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            row(&list)["label"].is_null(),
+            "the cleared label must leave the row: {list}"
+        );
+    }
+
+    // ── fix-webui-qa-defects-round5 1.2：pending 管理面的拒绝映射 ─────────
+    // Unavailable（不承载队列的诚实失败）保持 503；PendingRejected 四类按
+    // 原因透传：unknown 404 / already_started·priority_conflict 409 /
+    // out_of_range 400。类型化拒绝不得被笼统「不可用」或 5xx 吞掉。
+
+    /// 四类类型化拒绝在 remove 与 move 两条路由上原样透传。
+    #[tokio::test]
+    async fn pending_routes_pass_typed_rejections_through() {
+        let cases = [
+            (crate::session_backend::PendingReason::Unknown, StatusCode::NOT_FOUND),
+            (
+                crate::session_backend::PendingReason::AlreadyStarted,
+                StatusCode::CONFLICT,
+            ),
+            (
+                crate::session_backend::PendingReason::PriorityConflict,
+                StatusCode::CONFLICT,
+            ),
+            (
+                crate::session_backend::PendingReason::OutOfRange,
+                StatusCode::BAD_REQUEST,
+            ),
+        ];
+        for (reason, want) in cases {
+            let backend = Arc::new(FakeBackend::new());
+            let encoded = seed_session(backend.as_ref()).await;
+            backend.set_pending_op_rejection(Some(reason));
+            let (status, _body) = post(
+                &app(backend.clone()),
+                &format!("/api/sessions/{encoded}/pending/7/remove"),
+                String::new(),
+            )
+            .await;
+            assert_eq!(status, want, "remove must pass {reason:?} through");
+            let (status, _body) = post(
+                &app(backend),
+                &format!("/api/sessions/{encoded}/pending/7/move"),
+                r#"{"to_index": 0}"#.into(),
+            )
+            .await;
+            assert_eq!(status, want, "move must pass {reason:?} through");
+        }
+    }
+
+    /// 未注入类型化拒绝 = 后端不承载队列的诚实失败：Unavailable 保持 503，
+    /// 文案如实呈现 cause（不再自称「核心不可达」）。
+    #[tokio::test]
+    async fn pending_routes_keep_unavailable_as_503_with_honest_cause() {
+        let backend = Arc::new(FakeBackend::new());
+        let encoded = seed_session(backend.as_ref()).await;
+        for uri in [
+            &format!("/api/sessions/{encoded}/pending/7/remove"),
+            &format!("/api/sessions/{encoded}/pending/7/move"),
+        ] {
+            let (status, body) = post(&app(backend.clone()), uri, r#"{"to_index": 0}"#.into()).await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{uri}");
+            let message = body["error"].as_str().unwrap_or_default();
+            assert!(message.contains("此后端不承载待执行队列"), "{message}");
+            assert!(!message.contains("核心不可达"), "{message}");
+        }
     }
 }

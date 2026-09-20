@@ -30,6 +30,6 @@
 
 ## 6. 浏览器回归遗留问题（本 change 收口时如实记录，待后续小 change 处理）
 
-- [ ] 6.1 未读徽章边界：聚焦会话收到新回复（流式底部跟读场景）仍被标未读——违反 session-unread-badge「read at the bottom never badges」；聚焦行重复点击（同会话 no-op）不触发清零。复现：聚焦 A，API 注入 A → A 行出现徽章。
+- [ ] 6.1 未读徽章边界：聚焦会话收到新回复（流式底部跟读场景）仍被标未读——违反 session-unread-badge「read at the bottom never badges」；聚焦行重复点击（同会话 no-op）不触发清零。复现：聚焦 A，API 注入 A → A 行出现徽章。（round5 验收补充证据：新建即聚焦会话的首个交换即触发，三个不同 agent 会话均复现；徽标+「~1 new」分界线持续不消、需手动 mark all seen；复现时 document.visibilityState=visible 且 hasFocus=true，排除后台标签豁免路径；round4 已把「首聚焦交换永不闪现」写入主 spec 但实现未跟进）
 - [ ] 6.2 composer 模式下拉选项中文长文案仍折行（4.1 修复只覆盖 agent 下拉形态）。
 - [ ] 6.3 深链/刷新直达 `/sessions/…` 主区标题仍「未选择项目」（4.2 修复未生效，需重查 followFocusedProject 归属解析路径）。

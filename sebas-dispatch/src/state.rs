@@ -216,6 +216,12 @@ pub struct Mapping {
     /// 设置的会话 label。`None` = 未设置（命名回退首条 prompt 预览 / 短 id）。
     /// 随 MappingDto 落盘——label 跨重启保持。
     pub label: Option<String>,
+    /// （fix-webui-qa-defects-round4 1.2/3.1）命名来源迁移位：首条 prompt 预览。
+    /// 活跃会话的预览以卡态（`user_prompt`）为准；本字段在卡态不存在时兜底
+    /// ——归档恢复（快照元数据迁移）与 terminal teardown（卡态丢弃前迁出），
+    /// 两处都靠它保住 rail 行名不退化为短 id。`None` = 无迁移来源（旧行为）。
+    /// 随 MappingDto 落盘。
+    pub prompt_preview: Option<String>,
 }
 
 impl Mapping {
@@ -236,6 +242,7 @@ impl Mapping {
             available_models: None,
             available_commands: Vec::new(),
             label: None,
+            prompt_preview: None,
         }
     }
 
@@ -258,6 +265,7 @@ impl Mapping {
             available_models: None,
             available_commands: Vec::new(),
             label: None,
+            prompt_preview: None,
         }
     }
 
@@ -279,6 +287,7 @@ impl Mapping {
             available_models: None,
             available_commands: Vec::new(),
             label: None,
+            prompt_preview: None,
         }
     }
 
@@ -318,6 +327,7 @@ impl Mapping {
             available_models: None,
             available_commands: Vec::new(),
             label: None,
+            prompt_preview: None,
         }
     }
 
@@ -338,6 +348,7 @@ impl Mapping {
             available_models: None,
             available_commands: Vec::new(),
             label: None,
+            prompt_preview: None,
         }
     }
 
@@ -956,6 +967,56 @@ impl SessionMap {
         }
     }
 
+    /// （fix-webui-qa-defects-round4 1.2/1.3）terminal teardown 的退役半边：
+    /// 活跃绑定（Active）转 **Dormant 记录**，会话行与转录保留——
+    /// session-lifecycle delta：teardown 清的是 live binding 与运行时状态，
+    /// 「列表消失 / 详情不可达」不属于 teardown。退役后的行以 dormant 态留在
+    /// 列表，转录经 `transcript_id`（同 sid）照常可读；下一消息走既有
+    /// Dormant→resume 路径，load 被拒时既有诚实回退孵化全新会话——
+    /// 「下一消息 fresh spawn」的可观察语义不变。
+    ///
+    /// 同时：turn 队列与 delivered 集清空（与 remove_by_session 同款——陈旧
+    /// prompt 绝不流入未来会话；PendingDropped 的上报由调用方在退役前完成）；
+    /// `prompt_preview`（命名来源）在缺省时迁移——卡态即将被丢弃，行名不得
+    /// 退化为短 id。幂等：无映射返回 `None`；已 Dormant 只补 last_active 与
+    /// 命名。返回退役涉及的 key（`Some` = 发生了 Active→Dormant 转换）。
+    pub async fn retire_to_record(
+        &self,
+        session_id: &str,
+        prompt_preview: Option<String>,
+    ) -> Option<ChannelKey> {
+        let mut g = self.inner.write().await;
+        let retired = if let Some((k, m)) = g
+            .iter_mut()
+            .find(|(_, m)| m.session_id() == Some(session_id))
+        {
+            if m.prompt_preview.is_none()
+                && prompt_preview.as_deref().is_some_and(|p| !p.is_empty())
+            {
+                m.prompt_preview = prompt_preview;
+            }
+            m.last_active_unix = crate::engine::now_unix();
+            if matches!(m.state, MappingState::Active { .. }) {
+                if let MappingState::Active { session_id: sid } = &m.state {
+                    m.state = MappingState::Dormant {
+                        session_id: sid.clone(),
+                    };
+                }
+                Some(k.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(k) = &retired {
+            // 与 remove_by_session 同款清理：队列与投递记录随活跃绑定消失。
+            self.turn_queue.write().await.remove(k);
+            self.delivered.lock().unwrap().remove(k);
+        }
+        retired
+    }
+
     /// Remove the mapping for a specific `ChannelKey`, regardless of state.
     /// Used by the WebUI close path to drop Spawning placeholders that have
     /// no session_id (so `remove_by_session` cannot find them).
@@ -1229,6 +1290,7 @@ impl SessionMap {
                     desired_mode: m.desired_mode.clone(),
                     project_dir: m.project_dir.clone(),
                     label: m.label.clone(),
+                    prompt_preview: m.prompt_preview.clone(),
                     awaiting_first_prompt: is_placeholder,
                 };
                 out.insert(
@@ -1302,6 +1364,8 @@ impl SessionMap {
             m.desired_mode = dto.desired_mode;
             // （5.1，design D6）操作者 label：旧文件无字段 → None（命名回退不变）。
             m.label = dto.label;
+            // （round4 3.1）命名来源迁移位：旧文件无字段 → None（回退不变）。
+            m.prompt_preview = dto.prompt_preview;
             m.project_dir = dto.project_dir;
             map.insert(key, m);
         }
@@ -1406,6 +1470,11 @@ struct MappingDto {
     /// 旧文件（无字段 → None，命名回退首条 prompt 预览）。
     #[serde(default)]
     label: Option<String>,
+    /// （fix-webui-qa-defects-round4 3.1）首条 prompt 预览（命名来源迁移位，
+    /// 1.2 terminal teardown / 3.1 归档恢复写入）。`#[serde(default)]` 兼容
+    /// 旧文件（无字段 → None，命名回退不变）。
+    #[serde(default)]
+    prompt_preview: Option<String>,
     /// 0-turn 占位标记（workbench-agent-wire-fix D1）。`true` + 空
     /// `session_id` = 重启后仍是等待首条消息的占位。`#[serde(default)]`
     /// 兼容旧文件（旧记录一律视为非占位）。

@@ -648,6 +648,16 @@ describe('sebas-settings-modal sections', () => {
     el.remove()
   })
 
+  it('About carries the router-side provider count annotation, distinct from the Models registry (round5 4.3)', async () => {
+    const el = await mount()
+    await goto(el, 6)
+    const text = el.shadowRoot!.textContent ?? ''
+    // 口径标注：About 的 Providers 是 router 侧计数（含 debug provider），
+    // 与 Models 分区的注册表口径区分，两个数字不一一对应。
+    expect(text).toContain('router 侧计数，含 debug provider')
+    el.remove()
+  })
+
   it('aria-current tracks the active section', async () => {
     const el = await mount()
     expect(navItems(el)[0]!.getAttribute('aria-current')).toBe('true')

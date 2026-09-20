@@ -2409,6 +2409,8 @@ mod restore_route_tests {
             sebas_dispatch::SessionIdentity::default(),
             30,
             vec![TurnEntry::prompt(0, "hello"), TurnEntry::markdown(1, "world")],
+            None,
+            None,
         )
         .expect("seed archive entry");
         (dir.join("archive.json"), raw.to_string(), url_segment)
@@ -2448,7 +2450,7 @@ mod restore_route_tests {
         // 重建请求到达缝上：原 key、原 session_id、项目、完整转写。
         let restores = backend.restores().await;
         assert_eq!(restores.len(), 1, "exactly one rebuild call: {restores:?}");
-        let (key, session_id, project_dir, entries, _identity) = &restores[0];
+        let (key, session_id, project_dir, entries, _identity, _label, _preview) = &restores[0];
         assert_eq!(key.reference, "web-restore-1");
         assert_eq!(session_id.as_deref(), Some("old-sid"));
         assert_eq!(project_dir.as_deref(), Some("/proj"));

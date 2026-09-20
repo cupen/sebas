@@ -103,7 +103,7 @@ import './dashboard.js'
 // RAIL_FOCUS_EVENT：rail 切换成功的窗口级聚焦事件（4.1，design D3）。
 import { RAIL_FOCUS_EVENT } from './project-rail.js'
 // PROJECT_FOLLOW_EVENT / focusedProjectPath：聚焦反投影项目上下文（本 change 4.1）。
-import { PROJECT_FOLLOW_EVENT, focusedProjectPath } from './dashboard.js'
+import { PROJECT_FOLLOW_EVENT, focusedProjectPath, receiptPhaseActive } from './dashboard.js'
 // writeFocusAnchor：焦点处立读锚的既有锚点写入（round3 3.1）。
 import { writeFocusAnchor } from './unread-cursor.js'
 import type { SebasDashboard } from './dashboard.js'
@@ -261,6 +261,24 @@ beforeEach(() => {
 
 afterEach(() => {
   document.body.innerHTML = ''
+})
+
+
+describe('receipt phase gating (fix-webui-qa-defects-round4 review)', () => {
+  it('prompt-tail with no agent entry and a non-terminal slug is a live receipt phase', () => {
+    expect(receiptPhaseActive([{ kind: 'prompt' }], 'working')).toBe(true)
+    expect(receiptPhaseActive([{ kind: 'prompt' }], 'starting')).toBe(true)
+    expect(receiptPhaseActive([{ kind: 'prompt' }], null)).toBe(true)
+  })
+  it('terminal slugs expire the receipt fact (zero-output completed turn)', () => {
+    expect(receiptPhaseActive([{ kind: 'prompt' }], 'done')).toBe(false)
+    expect(receiptPhaseActive([{ kind: 'prompt' }], 'failed')).toBe(false)
+  })
+  it('agent output entries end the receipt phase regardless of slug', () => {
+    expect(receiptPhaseActive([{ kind: 'prompt' }, { kind: 'content' }], 'working')).toBe(false)
+    expect(receiptPhaseActive([], 'working')).toBe(false)
+    expect(receiptPhaseActive(undefined, 'working')).toBe(false)
+  })
 })
 
 describe('sebas-dashboard (workbench main area)', () => {
@@ -638,6 +656,25 @@ describe('sebas-dashboard (workbench main area)', () => {
     )
     // 收敛不消除拖拽边界：stage|composer 分割缝保持 6px 可达把手。
     expect(styleText).toMatch(/wa-split-panel\.vsplit\s*\{[^}]*--divider-width:\s*6px/)
+    el.remove()
+  })
+
+  it('keeps the permission mode badge on one line instead of per-character wrapping (round4 3.3)', async () => {
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    const el = await mount()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    const styleText = [...el.shadowRoot!.querySelectorAll('style')]
+      .map((s) => s.textContent ?? '')
+      .join('\n')
+    // ≤640px 窄视口下 .mode-tag 曾被挤压成逐字竖排——章内禁止断行；横向
+    // 溢出由 meta 行 flex-wrap 兜底（整枚章换行）。
+    expect(styleText).toMatch(
+      /\.mode-tag\s*\{[^}]*white-space:\s*nowrap;/,
+    )
+    expect(styleText).toMatch(
+      /\.session-head \.meta\s*\{[^}]*flex-wrap:\s*wrap;/,
+    )
     el.remove()
   })
 

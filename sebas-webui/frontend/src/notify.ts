@@ -6,8 +6,9 @@
  * 三类内容：
  *
  * - `notify()` 瞬时 toast（info / warn / error）：栈上限 3 条瞬时条，超出挤
- *   掉最旧瞬时条（error 驻留条 `duration=0` 不参与挤占）；同一文案（或同一
- *   `dedupeKey`）在 8s 去重窗口内不重复弹出。
+ *   掉最旧（显式 `duration=0` 的驻留条不参与挤占）；同一文案（或同一
+ *   `dedupeKey`）在 8s 去重窗口内不重复弹出。error 默认 8s 自动消失
+ *   （fix-webui-qa-defects-round5 4.2）。
  * - `setWsDown()` 持久槽位：`/ws` 断线 → 持续 warn 驻留横幅（重连即消）。
  * - `setFatal()` 持久槽位：core 不可达 → fatal 驻留横幅 + 锁定遮罩（恢复由
  *   调用方置 null，并自行弹「核心已恢复」info）。
@@ -56,17 +57,25 @@ export interface NoticeState {
   fatal: FatalNotice | null
 }
 
-/** 各级默认时长（D2 映射表）：info 5s、warn 8s、error 驻留。 */
+/**
+ * （fix-webui-qa-defects-round5 4.2）失败类 toast 的自动消失时长（8s）——
+ * 与成功类（info 5s）策略分开常量化。失败不再驻留：异常态下层层驻留 toast
+ * 会盖住工作台，操作者重试后新反馈自然替换；持续型故障由 fatal 横幅槽位
+ * （setFatal）承载，不依赖 error toast 驻留。
+ */
+export const ERROR_TOAST_DURATION_MS = 8_000
+
+/** 各级默认时长（D2 映射表）：info 5s、warn 8s、error 8s（4.2 起自动消失）。 */
 export const DEFAULT_DURATIONS: Record<NoticeLevel, number> = {
   info: 5_000,
   warn: 8_000,
-  error: 0,
+  error: ERROR_TOAST_DURATION_MS,
 }
 
 /** 同文案去重窗口（design 共识值 8s）。 */
 export const DEDUPE_WINDOW_MS = 8_000
 
-/** 瞬时条栈上限；error 驻留条不计入、不被挤占。 */
+/** 瞬时条栈上限（4.2 起 error 默认也是瞬时条，同样参与挤占）。 */
 export const MAX_TRANSIENT_ITEMS = 3
 
 let state: NoticeState = { items: [], wsDown: false, fatal: null }
@@ -91,7 +100,8 @@ export function subscribeNotices(listener: (state: NoticeState) => void): () => 
 
 /**
  * 入栈一条通知。去重窗口内同文案（或同 dedupeKey）静默丢弃；瞬时条超上限
- * 挤掉最旧（error 驻留条不参与挤占）。返回条目 id；被去重丢弃时返回 null。
+ * 挤掉最旧（显式 duration=0 的驻留条不参与挤占）。返回条目 id；被去重丢弃
+ * 时返回 null。
  */
 export function notify(input: NoticeInput): number | null {
   const dedupeKey = input.dedupeKey ?? input.message
@@ -109,7 +119,8 @@ export function notify(input: NoticeInput): number | null {
   }
   let items = [...state.items, item]
   if (item.duration > 0) {
-    // 瞬时条（duration>0）挤占：超出上限移除最旧，驻留条（error）永不被挤。
+    // 瞬时条（duration>0）挤占：超出上限移除最旧；显式驻留条（duration=0）
+    // 永不被挤。
     const transient = items.filter((it) => it.duration > 0)
     while (transient.length > MAX_TRANSIENT_ITEMS) {
       const oldest = transient.shift()

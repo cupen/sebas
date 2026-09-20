@@ -55,6 +55,13 @@
 2. **挂起检测的 kill ladder**(acp-driver)= `interrupt()×3 → disconnect
    (≈SIGTERM) → drop (≈SIGKILL)` 的阶梯,与审批决策无关。
 
+「allow_session」二义(执行体语义不同,同名决定):
+1. **claude ACP 路径**(permission-flow):放行本次 + 会话切换 `auto`——本会话
+   后续一切 gated 动作不再询问(grant-all);
+2. **native 内核**(agent-core):该 exact `(tool, args)` 签名加入会话内
+   allowlist——同签名不再询问,不同签名仍询问(签名级)。
+   上下文无法区分时按「全会话放行」理解(claude 路径语义)。
+
 「ACP」二义:
 1. **历史 `claude-acp-bridge`**:Claude 私有转码桥,ADR-1(08-06)弃用并删除,
    **不再存在**;
@@ -98,14 +105,15 @@
   (`kind`=prompt|content,`element_type`=markdown|thinking|tool|error),
   客户端按 `kind == "prompt"` 切回合;未读 seam 也按回合计数,永不落在
   回合内部。(agent-workbench;webui;core-session-channel)
-- **工作台(workbench)**:webui 中的项目导向 agent 工作区(`/agent` 页):
-  项目列表、会话侧栏(按项目目录或聊天来源分组)、时间线与输入区、
-  inbox(操作者离开期间到达的 turn 流)。(agent-workbench;webui/projects)
+- **工作台(workbench)**:webui 中的项目导向 agent 工作区(SPA 的 `/` 页;
+  历史 `/agent` 路由已退役):项目列表、会话侧栏(按项目分组)、时间线与
+  输入区。(agent-workbench;webui)
 - **卡片(card)**:对用户的流式富文本呈现,含思考/工具面板、交互元素
   (按钮/表单)、预算与轮转。本 change 后 = **中立呈现模型**由通道适配器
   渲染成各自渠道的形态(飞书 = card schema 2.0 JSON)。(feishu-cards;channels)
-- **主控(webui 主控形态)**:部署形态——watchdog 默认只启动 webui,
-  core/飞书按需启用。(feishu-option)
+- **主控(webui 主控形态)**:部署形态——watchdog 默认启动 webui,core 恒启动
+  (无 `enabled` 开关,enable-core-by-default),router 默认关闭,im 跟随飞书
+  判定。(feishu-option)
 
 ## 通道抽象(decouple-feishu-channel 引入)
 
@@ -121,8 +129,9 @@
 - **`ChannelCard`(中立呈现模型)**:出站呈现的渠道无关累积模型——标题/
   正文/思考/工具/用法/交互元素与冻结·更新·轮转生命周期。(channels)
 - **core session channel(core.sock)**:core 与进程外客户端(独立 webui)
-  之间的 Unix socket 协议(观察/驱动会话)。core 是唯一写者,客户端只是
-  缓存。(core-session-channel)
+  之间的本地 IPC 协议——Unix domain socket / Windows named pipe(路径确定性
+  映射)+ 共享密钥鉴权(Unix 另有 peer-uid 校验)(观察/驱动会话)。core 是
+  唯一写者,客户端只是缓存。(core-session-channel)
 
 ## 易混对照
 
@@ -134,7 +143,7 @@
 | sebas-agent vs ACP 桥 | 两种执行体:自研内核 vs 经 ACP 驱动的外部 agent |
 | sebas(主控)vs sebas-node(执行节点) | 前者是主控二进制(`core`/`webui`/`router`/`im` 等子命令);后者是**第二个可分发产物**、独立二进制,不含主控角色,只作为执行位出站连回主控 |
 | 项目 vs 工作台 | 项目是目录(组织单元);工作台是 webui 里呈现它的页面 |
-| 产品定位"工作台" vs 页面级"工作台" | 前者指 sebas 整体(README 定位用法:"自托管的 agent 工作台");后者专指 webui 的 `/agent` 页。上下文无法区分时优先按页面级理解 |
+| 产品定位"工作台" vs 页面级"工作台" | 前者指 sebas 整体(README 定位用法:"自托管的 agent 工作台");后者专指 webui 的工作台页(SPA `/`,历史 `/agent` 已退役)。上下文无法区分时优先按页面级理解 |
 | 会话 vs turn | 会话是持久载体;turn 是其中一次问答执行 |
 | turn(显示回合)vs transcript 条目 | 前者是 webui 对话视图的**显示单位**(一个提交或一整个 agent 回合气泡);后者是 core transcript 的 chunk 级**存储条目**(每条带 kind/element_type/position)。一个显示回合通常对应多条 transcript 条目 |
 | pending submission vs `SessionStatus::Queued` | 前者是 core 已接受、尚未开始执行的**提交**(staging/queued turn 两种处置,见上);后者是 webui 的**会话行状态词**(`models.rs` 的 `SessionStatus::Queued`)——active 会话子进程已存在但尚未产出任何内容。两者毫无关系,spec 行文说「排队中的提交」时永远指前者 |
