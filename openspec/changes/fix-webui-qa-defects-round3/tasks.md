@@ -19,7 +19,7 @@
 ## 4. P3 瑕疵批量打磨
 
 - [x] 4.1 wa-select 选项面板最小宽度放宽、中文长文案不换行（或单行省略），模式/agent 下拉目测验收；验证标准：截图对比（⚠️ 浏览器回归：agent 下拉 Native Kernel 选项已单行 ✅；composer 模式下拉选项仍折行 ❌——修复面未覆盖到该形态，遗留记入 §6）
-- [ ] 4.2 深链/刷新直达 `/sessions/…` 时主区项目标题从会话归属项目绑定，不再显示「未选择项目」；验证标准：刷新直达后标题正确（❌ 主 agent 浏览器回归未通过：深链直达后会话头正常但主区标题仍「未选择项目」，修复未生效，待重派——见 §6）
+- [x] 4.2 深链/刷新直达 `/sessions/…` 时主区项目标题从会话归属项目绑定，不再显示「未选择项目」；验证标准：刷新直达后标题正确（✅ 根因重查定案：`followFocusedProject` 在「detail 先于 projects.list 落地」的深链竞态下以 `path=null` 空转一次即写 `lastFollowedFocusKey` 记账，列表到达后的核对一拍全部早退——标题停在「未选择项目」；上一轮的 detail 侧对账与 `project_id` 字段本身有效，失效路径在记账时序。修复：项目 id 有值而路径未解析不记账，列表到达的 refetch 补投影。单测覆盖「项目列表晚于 detail 到达仍投影」。待主 agent 浏览器回归）
 - [x] 4.3 About 页 Rust toolchain 空值回退为「未知」；验证标准：About 页无空行值
 - [x] 4.4 路径展示统一规范化（注册弹窗填充值与「项目已注册」错误提示）+ Services 页 `sebas run` 内联代码不断行；验证标准：截图对比（✅ 主 agent 浏览器回归：注册弹窗填充值已统一正斜杠）
 
@@ -30,6 +30,11 @@
 
 ## 6. 浏览器回归遗留问题（本 change 收口时如实记录，待后续小 change 处理）
 
-- [ ] 6.1 未读徽章边界：聚焦会话收到新回复（流式底部跟读场景）仍被标未读——违反 session-unread-badge「read at the bottom never badges」；聚焦行重复点击（同会话 no-op）不触发清零。复现：聚焦 A，API 注入 A → A 行出现徽章。（round5 验收补充证据：新建即聚焦会话的首个交换即触发，三个不同 agent 会话均复现；徽标+「~1 new」分界线持续不消、需手动 mark all seen；复现时 document.visibilityState=visible 且 hasFocus=true，排除后台标签豁免路径；round4 已把「首聚焦交换永不闪现」写入主 spec 但实现未跟进）
-- [ ] 6.2 composer 模式下拉选项中文长文案仍折行（4.1 修复只覆盖 agent 下拉形态）。
-- [ ] 6.3 深链/刷新直达 `/sessions/…` 主区标题仍「未选择项目」（4.2 修复未生效，需重查 followFocusedProject 归属解析路径）。
+- [x] 6.1 未读徽章边界：聚焦会话收到新回复（流式底部跟读场景）仍被标未读——违反 session-unread-badge「read at the bottom never badges」；聚焦行重复点击（同会话 no-op）不触发清零。（✅ 修复落地，四层收敛：① rail 行未读按「聚焦 + 文档可见不呈现」推导（后台 tab 照常计未读），锚的推进权仍归 transcript；② 读锚写入广播 `sebas:anchor-advanced`，rail 监听就地失效重渲染（localStorage 非响应式——此前锚推进后徽标驻留的根因）；③ transcript 快照增长路径与 turn.append 同一贴底语义推进锚（首挂载/换会话装载除外——「开门不是看着」）；④ 空流登记补 dashboard 侧入口（`registerEmptyStreamSession`，0 回合占位渲染的是 dashboard 空态而非 transcript 组件），首聚焦交换的锚建立不再依赖巧合。spec 增量「Focused session arrivals never badge」写入本 change specs/agent-workbench/spec.md，兑现 round4「首聚焦交换永不闪现」。单测覆盖：聚焦+流式到达不出徽章、后台 tab 仍出、重复聚焦清零、锚外推清零不刷新、非聚焦到达仍出徽章。待主 agent 浏览器回归。复现背景：新建即聚焦会话的首个交换即触发，三个不同 agent 会话均复现；visibilityState=visible 且 hasFocus=true）
+- [x] 6.2 composer 模式下拉选项中文长文案仍折行（4.1 修复只覆盖 agent 下拉形态）。（✅ 根因：4.1 的放宽写在 document 级 `wa-overrides.css`，选择器匹配不到 shadow 树里的 wa-select——composer 下拉从未被覆盖，agent 下拉当时目测单行是短文案的假阳性。修复：同款规则（listbox min-width:max-content / 320px 封顶 + option 单行省略）补进 `workbench-composer.ts` 组件样式表——shadow 内样式表才能命中子组件 part。单测以 4.1 同款源码读回钉死。待主 agent 浏览器回归）
+- [x] 6.3 深链/刷新直达 `/sessions/…` 主区标题仍「未选择项目」（4.2 修复未生效，需重查 followFocusedProject 归属解析路径）。（✅ 与 4.2 同一修复：记账时序竞态，见 4.2 行内记录。待主 agent 浏览器回归）
+
+## 7. review 缺陷收尾（2026-09-20 提交 review 发现，bd 工单同源）
+
+- [x] 7.1 review-card phase reconcile 关死「waiting 无卡」窗口：`sessionPhase` 为 waiting 且合并结果为空时退避重试 reconcile（或在 session.resync 到达时补一次），不再依赖相位值翻转这一单次触发（review-card.ts:245-250，Lit 按值判变导致读模型拉取先于审批落库时 reconcile 不再发生）。验证标准：单测复现「拉取先于落库」时序——waiting 期间后续重试/resync 触发 reconcile 且卡片出现（✅ 双路都做：扑空后退避重试（250ms 翻倍至 4s 封顶，waiting 不结束不放弃，换会话/卸载/出卡即撤）；`session.resync` 到达补一次对账。单测：fake timers 复现「拉取先于落库」——249ms 不动、到点重取出卡、卡后退避停摆；resync 旁路同验）
+- [x] 7.2 收敛挂载期三路并发 sessionApprovals GET（connectedCallback:191 + willUpdate:206 + 初次 reconcile:218）为单一入口去重，保留 pullSeq 防陈旧语义。验证标准：单测断言挂载期仅发一次拉取（或等效去重）（✅ 挂载期拉取只走 willUpdate 的 sessionKey 变更一条路（connectedCallback 直拉的响应本就被 pullSeq 代际核对丢弃，纯浪费）；`pullApprovals` 按 sessionKey 共享在途 GET（in-flight map），sessionKey+waiting 同帧预置时三路收敛为一次请求；pullSeq 只在真实 GET 上自增，防陈旧语义不变。单测：waiting 预置挂载恰好一次 GET 且卡片照常出现；普通挂载一次 GET）

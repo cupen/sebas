@@ -1857,6 +1857,57 @@ describe('focus establishes the read anchor (round3 3.1)', () => {
   })
 })
 
+describe('fresh placeholder first exchange never badges (round3 6.1)', () => {
+  const KEY = 'oc_live%00'
+  const anchorKey = `sebas:seen:${KEY}`
+
+  beforeEach(() => {
+    localStorage.removeItem(anchorKey)
+  })
+  afterEach(() => {
+    localStorage.removeItem(anchorKey)
+  })
+
+  it('the empty-state placeholder registers the session so its first snapshot exchange establishes the anchor', async () => {
+    // QA round5 复现链路：创建即聚焦的占位会话（detail 0 回合）渲染的是
+    // dashboard 自己的空态占位——transcript 未挂载，组件内的空流登记永不
+    // 执行；首交换经快照到达后 transcript 才挂载，锚推不动，徽标 + 「~1
+    // new」缝驻留。loadFocused 渲染空态即登记（registerEmptyStreamSession），
+    // 首交换按「看着到达」消费：锚从空流建立，不再闪缝。
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    apiMocks.session.mockResolvedValue({
+      ...detailFixture(),
+      msg_count: 0,
+      entries: [],
+      status_slug: 'done',
+      status: 'done',
+    })
+    const el = await mount()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    // 空态占位在场：transcript 未挂载；立锚一拍写入 0（创建基线）。
+    expect(el.shadowRoot!.querySelector('.empty-stream')).toBeTruthy()
+    expect(el.shadowRoot!.querySelector('sebas-transcript-view')).toBeNull()
+    expect(JSON.parse(localStorage.getItem(anchorKey)!)).toEqual({ anchor_count: 0 })
+
+    // 首交换经快照到达（prompt + 回复，msg_count 0→2），sebas:refetch 驱动
+    // 详情重取——transcript 随内容挂载并消费空流登记。
+    apiMocks.session.mockResolvedValue(detailFixture()) // msg_count: 2, entries: 3
+    window.dispatchEvent(new Event('sebas:refetch'))
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    const transcript = el.shadowRoot!.querySelector('sebas-transcript-view')
+    expect(transcript).toBeTruthy()
+    await new Promise((r) => setTimeout(r, 300)) // 盖过 MARK_SEEN_DEBOUNCE_MS
+    await el.updateComplete
+    // 锚 = max(服务端段数 2, 本地已渲染 2) = 2：首交换不产生 seam/徽标水位。
+    expect(JSON.parse(localStorage.getItem(anchorKey)!)).toEqual({ anchor_count: 2 })
+    const seam = (transcript as unknown as { shadowRoot: ShadowRoot }).shadowRoot.querySelector('.seam')
+    expect(seam?.hasAttribute('hidden')).toBe(true)
+    el.remove()
+  })
+})
+
 describe('review-cards phase wiring (round3 2.2)', () => {
   it('the focused session phase is passed to sebas-review-cards for reconciliation', async () => {
     // 相位对账的另一半在 dashboard：卡片组件自己不订阅相位帧，靠这里把
@@ -1915,6 +1966,50 @@ describe('deep link binds the project title (round3 4.2)', () => {
         (e) => (e.detail as { path?: string })?.path === '/home/me/sebas',
       )
       expect(follow, 'deep link must bind the project context immediately').toBeTruthy()
+    } finally {
+      window.removeEventListener(PROJECT_FOLLOW_EVENT, listener)
+      el.remove()
+    }
+  })
+
+  it('projects the session project when the project list lands after the detail (deep-link race)', async () => {
+    // 4.2 修订的时序复现：深链刷新下 detail 常先于 projects.list 落地——
+    // 旧实现以 path=null 空转一次即记账（lastFollowedFocusKey），列表到达
+    // 后的核对一拍全部早退，标题永远「未选择项目」。修订后「项目 id 有值
+    // 而路径未解析」不记账，列表到达的 refetch 核对补上投影。
+    let resolveProjects!: (v: unknown) => void
+    apiMocks.projectsList.mockReturnValue(
+      new Promise((resolve) => {
+        resolveProjects = resolve
+      }),
+    )
+    apiMocks.summary.mockResolvedValue(summaryBase) // active_session: null
+    apiMocks.session.mockResolvedValue({ ...detailFixture(), project_id: 'proj-sebas' })
+
+    const el = document.createElement('sebas-dashboard') as SebasDashboard
+    el.deepLinkKey = 'oc_live%00'
+    document.body.appendChild(el)
+
+    const events: CustomEvent[] = []
+    const listener = (e: Event) => events.push(e as CustomEvent)
+    window.addEventListener(PROJECT_FOLLOW_EVENT, listener)
+    try {
+      await el.updateComplete
+      await new Promise((r) => setTimeout(r, 0))
+      await el.updateComplete
+      // detail 已到而项目列表未到：不投影，也不记账。
+      expect(
+        events.find((e) => (e.detail as { path?: string })?.path === '/home/me/sebas'),
+      ).toBeUndefined()
+      resolveProjects({
+        projects: [{ id: 'proj-sebas', path: '/home/me/sebas', name: 'sebas', added_at: 0 }],
+      })
+      await new Promise((r) => setTimeout(r, 0))
+      await el.updateComplete
+      expect(
+        events.find((e) => (e.detail as { path?: string })?.path === '/home/me/sebas'),
+        'the late project list must still bind the project context',
+      ).toBeTruthy()
     } finally {
       window.removeEventListener(PROJECT_FOLLOW_EVENT, listener)
       el.remove()

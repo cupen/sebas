@@ -61,7 +61,7 @@ import '../components/review-card.js'
 import '../components/pending-stack.js'
 import './transcript-view.js'
 // （fix-webui-qa-defects-round4 2.2）接收回执判定与 transcript-view 同源。
-import { entriesAwaitReceipt } from './transcript-view.js'
+import { entriesAwaitReceipt, registerEmptyStreamSession } from './transcript-view.js'
 
 /**
  * （fix-webui-qa-defects-round4 review 修正）回执事实的过期 slug：回合已终态
@@ -885,6 +885,12 @@ export class SebasDashboard extends LitElement {
     const projectId = fromSummary ?? fromDetail
     if (projectId === undefined) return
     const path = focusedProjectPath(this.projects, projectId)
+    // （round3 4.2 修订）归属确认为「无项目绑定」才记账终态。此前无论路径
+    // 是否解析得出都先记账：深链刷新时 detail 常先于 projects.list 落地，
+    // 投影以 path=null 空转一次即被记账挡死，列表到达后的核对一拍全部
+    // 早退——标题永远停在「未选择项目」。项目 id 有值而列表未解析出路径
+    // 时不记账，留给列表到达的 refetch 再核对（幂等）。
+    if (projectId !== null && path === null) return
     this.lastFollowedFocusKey = key
     if (path === null || path === this.selectedPath) return
     window.dispatchEvent(
@@ -1555,6 +1561,12 @@ export class SebasDashboard extends LitElement {
         this.sessionEntries.set(d.encoded_key, merged)
         this.focusedDetail = { ...d, entries: merged }
         this.focusedUnavailable = false
+        // （round3 6.1）空流登记：聚焦会话为 0 回合时主区渲染的是本视图的
+        // 空态占位而非 transcript 组件，组件内的空流登记永远不跑——占位
+        // 会话的首交换（经快照到达）因此推不出「看着到达」，徽标 + 缝驻留
+        // （QA round5 复现）。这里以渲染空态这一事实登记，首回合到达仍按
+        // 聚焦 + 可见 + 贴底 guard 消费。幂等。
+        if (merged.length === 0) registerEmptyStreamSession(d.encoded_key)
         // （round3 3.1）焦点处立读锚（一次性、按锚推导的另一半）：rail 点击
         // 之外走进焦点的会话（创建 set_focus、深链、恢复聚焦）此前永远没有
         // 本地锚，而无锚会话按 spec 读作 fully-read——它之后的非聚焦新回复

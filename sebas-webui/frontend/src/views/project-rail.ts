@@ -28,7 +28,7 @@ import { sharedWs } from '../api/shared-ws.js'
 import type { WsEvent } from '../api/ws.js'
 import { icon } from '../components/icons.js'
 import { guardedHide } from '../components/wa-hide-guard.js'
-import { unreadCount, writeFocusAnchor } from './unread-cursor.js'
+import { ANCHOR_ADVANCED_EVENT, unreadCount, writeFocusAnchor } from './unread-cursor.js'
 import { COMPOSER_FOCUS_REQUEST } from './workbench-composer.js'
 import type { NewSessionDialogConfirm } from './new-session-dialog.js'
 import '../components/folder-picker.js'
@@ -513,6 +513,9 @@ export class SebasProjectRail extends LitElement {
     void this.refresh()
     this.unsubscribe = sharedWs.subscribe((ev) => this.onWsEvent(ev))
     window.addEventListener('sebas:refetch', this.refetchBound)
+    // （round3 6.1）锚点推进失效：transcript 贴底跟读 / 聚焦切换推进共享
+    // 读锚后，rail 徽标就地按新水位重渲染（localStorage 不是响应式源）。
+    window.addEventListener(ANCHOR_ADVANCED_EVENT, this.onAnchorAdvanced)
     // 8.2：节点离线/回归没有对应的会话事件，靠轮询让项目行与「+」的
     // 可用态**免刷新**翻转。
     this.nodeTimer = window.setInterval(() => { void this.refresh() }, NODE_POLL_MS)
@@ -521,8 +524,9 @@ export class SebasProjectRail extends LitElement {
   disconnectedCallback(): void {
     this.unsubscribe?.()
     window.removeEventListener('sebas:refetch', this.refetchBound)
+    window.removeEventListener(ANCHOR_ADVANCED_EVENT, this.onAnchorAdvanced)
     if (this.nodeTimer !== undefined) {
-      this.nodeTimer = window.clearInterval(this.nodeTimer) as unknown as number
+      window.clearInterval(this.nodeTimer) as unknown as number
       this.nodeTimer = undefined
     }
     if (this.labelRefreshTimer !== undefined) {
@@ -530,6 +534,18 @@ export class SebasProjectRail extends LitElement {
       this.labelRefreshTimer = undefined
     }
     super.disconnectedCallback()
+  }
+
+  /**
+   * 锚点推进 → 徽标失效（round3 6.1）：读锚在 rail 之外被推进（transcript
+   * 贴底跟读、聚焦写锚、mark-all-seen），localStorage 无响应式——按 key
+   * 命中已知行时自增失效计数触发重渲染，徽标按新水位就地清零。会话无关
+   * 的推进（其它 rail 未列会话）不重渲染。
+   */
+  @state() private anchorTick = 0
+  private onAnchorAdvanced = (e: Event): void => {
+    const key = (e as CustomEvent<{ key?: string }>).detail?.key
+    if (key && this.sessions.some((r) => r.encoded_key === key)) this.anchorTick += 1
   }
 
   async refresh() {
@@ -1021,14 +1037,32 @@ export class SebasProjectRail extends LitElement {
 
   // ─── Renderers ──────────────────────────────────────────────────
 
+  /**
+   * 行未读数（round3 6.1 修订）：锚点推导不变（msg_count − 共享读锚），
+   * 但**聚焦会话在本文档可见期间不呈现未读**——徽章的存在面是「非聚焦
+   * 会话的到达」；聚焦会话的流式到达由 transcript 的贴底跟读推进同一读锚
+   * （250ms 防抖、快照路径存在时滞），帧先到的一拍里徽标会闪现甚至驻留
+   * （QA 6.1：「看着到达仍被标未读」）。可见性 gate：后台 tab 里的到达
+   * 照常计未读（回到页面如实呈现，spec「hidden 不算看着」同一条线）。
+   */
+  private rowUnread(row: SessionRow): number {
+    const unread = unreadCount(row.encoded_key, row.msg_count)
+    if (unread === 0) return 0
+    if (row.encoded_key === this.focusedKey && document.visibilityState === 'visible') return 0
+    return unread
+  }
+
   private renderSessionRow(row: SessionRow) {
+    // 徽标按锚点实时推导：读一次失效计数，把锚点推进的失效显式纳入渲染
+    // 依赖（Lit 任意 @state 变更都会重渲染，这里读一次防“只写不读”被误清理）。
+    void this.anchorTick
     const fullLabel = fullSessionLabel(row)
     const label = truncateName(fullLabel)
     // 当前标记由焦点指针驱动（3.2）：不再比较 location.pathname。
     const current = this.focusedKey === row.encoded_key
     // rail-declutter-unread 2.3：未读徽标 = msg_count − 共享读锚；0 或负数
-    // 不显示，99+ 封顶。
-    const unread = unreadCount(row.encoded_key, row.msg_count)
+    // 不显示，99+ 封顶。（round3 6.1：聚焦会话可见期间不呈现，见 rowUnread。）
+    const unread = this.rowUnread(row)
     const badge = unread > UNREAD_BADGE_CAP ? `${UNREAD_BADGE_CAP}+` : String(unread)
     // 8.4：悬空审批 > 0 = 在等人，不是在跑（状态词由后端投影为 waiting，
     // 这里再按 remote 兜一层，老报文/直接 mock 的 remote 也能正确标）。

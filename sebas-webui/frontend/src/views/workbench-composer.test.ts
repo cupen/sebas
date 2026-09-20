@@ -557,6 +557,36 @@ describe('mode switch compact + desired-mode rendering (3.1/3.2, D5) and toolbar
     )
   })
 
+  it('the option panel lives in the component stylesheet and keeps labels on one line (round3 6.2)', async () => {
+    // 4.1 的放宽写在 document 级（wa-overrides.css），匹配不到 composer
+    // shadow 树里的 wa-select——中文长模式文案仍按字折行（§6.2）。同款
+    // 规则必须落在组件样式表（shadow 内样式表才能命中子组件 part）：
+    // 面板放宽到内容宽（320px 封顶）+ 选项单行省略。样式钉死防回落。
+    const src = readFileSync(join(here, 'workbench-composer.ts'), 'utf8')
+    expect(src).toMatch(
+      /wa-select::part\(listbox\)\s*\{[^}]*min-width:\s*max-content;[^}]*max-width:\s*320px;/,
+    )
+    expect(src).toMatch(/wa-option::part\(label\)\s*\{[^}]*white-space:\s*nowrap;[^}]*text-overflow:\s*ellipsis;/)
+  })
+
+  it('the document-level and component-level option-panel rules stay in sync (round3 6.2 drift guard)', () => {
+    // 职责边界现状：document 级（wa-overrides.css）规则只命中 document 树
+    // 的 wa-select（当前全部实例都住在 shadow 树里——两处内容相同但作用域
+    // 不同）。同一份声明存在两个落点就会漂移：这里钉死两处声明体一致，
+    // 改任何一处都必须同步另一处（或删掉 dead 的 document 级块）。
+    const read = (p: string): string => readFileSync(join(here, p), 'utf8')
+    const body = (src: string, selector: string): string => {
+      const m = src.match(new RegExp(`${selector}\\s*\\{([^}]*)\\}`))
+      expect(m, `${selector} rule must exist`).toBeTruthy()
+      return m![1]!.replace(/\s+/g, ' ').trim()
+    }
+    for (const selector of ['wa-select::part\\(listbox\\)', 'wa-option::part\\(label\\)']) {
+      expect(body(read('workbench-composer.ts'), selector)).toBe(
+        body(read(join('../styles/wa-overrides.css')), selector),
+      )
+    }
+  })
+
   it('toolbar groups align on a stable grid instead of margin-auto drift (3.3, D5)', async () => {
     // 样式钉死：两列网格 + 垂直居中，右组不再 margin-left:auto。
     const src = readFileSync(join(here, 'workbench-composer.ts'), 'utf8')

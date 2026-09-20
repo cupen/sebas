@@ -9,7 +9,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { api, type Project, type SessionRow } from '../api/client.js'
-import { writeFocusAnchor } from './unread-cursor.js'
+import { ANCHOR_ADVANCED_EVENT, readAnchorCount, writeFocusAnchor } from './unread-cursor.js'
 import './project-rail.js'
 import {
   SebasProjectRail,
@@ -531,6 +531,213 @@ describe('unread badge (rail-declutter-unread 2.3)', () => {
     await el.updateComplete
     expect(el.shadowRoot!.querySelector('[data-testid="session-unread"]')?.textContent?.trim()).toBe('99+')
     el.remove()
+  })
+})
+
+// ── fix-webui-qa-defects-round3 6.1：聚焦会话不闪徽章 + 重复聚焦清零 ──────
+
+describe('unread badge focused-session boundaries (fix-webui-qa-defects-round3 6.1)', () => {
+  /** happy-dom 的 visibilityState 无从直接赋值：实例自有属性遮蔽（原型
+   * getter 覆盖在 happy-dom 下不生效——getter 定义在内部类上），返回还原函数。 */
+  function stubVisibility(value: string): () => void {
+    const orig = Object.getOwnPropertyDescriptor(document, 'visibilityState')
+    Object.defineProperty(document, 'visibilityState', {
+      value,
+      configurable: true,
+    })
+    return () => {
+      if (orig) Object.defineProperty(document, 'visibilityState', orig)
+      else delete (document as unknown as { visibilityState?: unknown }).visibilityState
+    }
+  }
+
+  function frame(sessionId: string, msgCount: number) {
+    return {
+      type: 'session.updated',
+      session_id: sessionId,
+      status_slug: 'working',
+      turn_engaged: true,
+      msg_count: msgCount,
+      pending: [],
+      label: null,
+    }
+  }
+
+  it('a streaming arrival into the focused (visible) session shows no badge', async () => {
+    // QA 6.1 复现：聚焦 A 贴底跟读，A 收新回复——锚还没被 transcript 推进
+    // （防抖/快照时滞），帧先到的一拍里徽标闪现甚至驻留。聚焦 + 文档可见
+    // 期间徽标不呈现；锚的推进权仍在 transcript（rail 不代写共享锚）。
+    const restore = stubVisibility('visible')
+    try {
+      const focused = row({ project_id: 'proj-alpha', msg_count: 1 })
+      writeFocusAnchor(focused.encoded_key, 1)
+      mockOf(apiMock.sessions).mockResolvedValue({
+        ...sessionList([focused]),
+        active_session_key: focused.encoded_key,
+      })
+      const el = await mount()
+      const items = () => [...el.shadowRoot!.querySelectorAll('li.session-item')]
+      expect(items()[0]!.querySelector('[data-testid="session-unread"]')).toBeNull()
+
+      // 流式到达 +2：帧即刻打补丁，徽标不出现；共享锚保持 transcript 权威。
+      wsMocks.emit(frame(focused.encoded_key, 3))
+      await el.updateComplete
+      expect(items()[0]!.querySelector('[data-testid="session-unread"]')).toBeNull()
+      expect(readAnchorCount(focused.encoded_key)).toBe(1)
+      el.remove()
+    } finally {
+      restore()
+    }
+  })
+
+  it('a focused session still badges while the document is hidden', async () => {
+    // 可见性 gate：后台 tab 里的到达不算「看着」，聚焦行照常计未读。
+    const restore = stubVisibility('hidden')
+    try {
+      const focused = row({ project_id: 'proj-alpha', msg_count: 1 })
+      writeFocusAnchor(focused.encoded_key, 1)
+      mockOf(apiMock.sessions).mockResolvedValue({
+        ...sessionList([focused]),
+        active_session_key: focused.encoded_key,
+      })
+      const el = await mount()
+      const items = () => [...el.shadowRoot!.querySelectorAll('li.session-item')]
+      wsMocks.emit(frame(focused.encoded_key, 3))
+      await el.updateComplete
+      expect(items()[0]!.querySelector('[data-testid="session-unread"]')?.textContent?.trim()).toBe('2')
+      el.remove()
+    } finally {
+      restore()
+    }
+  })
+
+  it('repeated same-session clicks keep the badge cleared', async () => {
+    const target = row({ project_id: 'proj-alpha', msg_count: 5 })
+    writeFocusAnchor(target.encoded_key, 2)
+    mockOf(apiMock.sessions).mockResolvedValue(sessionList([target]))
+    mockOf(apiMock.switchSession).mockResolvedValue({
+      status: 'switched',
+      redirect: `/sessions/${target.encoded_key}`,
+      active_session_key: target.encoded_key,
+    })
+    const el = await mount()
+    ;(el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).click()
+    await el.updateComplete
+    const items = () => [...el.shadowRoot!.querySelectorAll('li.session-item')]
+    expect(items()[0]!.querySelector('[data-testid="session-unread"]')?.textContent?.trim()).toBe('3')
+    // switchSession 的 mock 计数跨用例累积（本文件 beforeEach 不清 mock）：
+    // 记差值断言。
+    const switchCallsBefore = mockOf(apiMock.switchSession).mock.calls.length
+
+    // 首次点击：聚焦写锚推进到当前 count → 徽标清零。
+    ;(items()[0] as HTMLElement).click()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('[data-testid="session-unread"]')).toBeNull()
+    expect(readAnchorCount(target.encoded_key)).toBe(5)
+
+    // 同会话重复点击（no-op switch）：锚不回退、徽标不复活——聚焦写锚照常
+    // 执行（单调游标拦截同值写入），行按同一水位渲染。
+    ;(items()[0] as HTMLElement).click()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('[data-testid="session-unread"]')).toBeNull()
+    expect(readAnchorCount(target.encoded_key)).toBe(5)
+    expect(mockOf(apiMock.switchSession).mock.calls.length - switchCallsBefore).toBe(2)
+    el.remove()
+  })
+
+  it('an anchor advanced outside the rail (transcript bottom-follow) clears the badge without a refresh', async () => {
+    // localStorage 不是响应式源：transcript 推进共享锚（写入即广播）后，
+    // rail 经 ANCHOR_ADVANCED_EVENT 失效重渲染，徽标就地清零——6.1
+    // 「读了但徽标持续不消」的半边。列表不重取。
+    const target = row({ project_id: 'proj-alpha', msg_count: 4 })
+    writeFocusAnchor(target.encoded_key, 1)
+    mockOf(apiMock.sessions).mockResolvedValue(sessionList([target]))
+    const el = await mount()
+    ;(el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).click()
+    await el.updateComplete
+    const items = () => [...el.shadowRoot!.querySelectorAll('li.session-item')]
+    expect(items()[0]!.querySelector('[data-testid="session-unread"]')?.textContent?.trim()).toBe('3')
+    const callsBefore = mockOf(apiMock.sessions).mock.calls.length
+
+    writeFocusAnchor(target.encoded_key, 4)
+    await el.updateComplete
+    expect(items()[0]!.querySelector('[data-testid="session-unread"]')).toBeNull()
+    expect(mockOf(apiMock.sessions).mock.calls.length).toBe(callsBefore)
+    el.remove()
+  })
+
+  it('an unfocused session still badges on frame arrivals (contrast guard)', async () => {
+    // 对照面：抑制只落在聚焦行——非聚焦会话的到达照常出徽章（徽章的存在面）。
+    const unfocused = row({ project_id: 'proj-alpha', msg_count: 1 })
+    const focused = row({
+      project_id: 'proj-alpha',
+      msg_count: 1,
+      status_slug: 'done',
+      status: 'done',
+    })
+    writeFocusAnchor(unfocused.encoded_key, 1)
+    writeFocusAnchor(focused.encoded_key, 1)
+    mockOf(apiMock.sessions).mockResolvedValue({
+      ...sessionList([unfocused, focused]),
+      active_session_key: focused.encoded_key,
+    })
+    const el = await mount()
+    const items = () => [...el.shadowRoot!.querySelectorAll('li.session-item')]
+    wsMocks.emit(frame(unfocused.encoded_key, 3))
+    await el.updateComplete
+    expect(items()[0]!.querySelector('[data-testid="session-unread"]')?.textContent?.trim()).toBe('2')
+    el.remove()
+  })
+
+  it('unread arrivals missed during focus badge truthfully once the focus moves away', async () => {
+    // 抑制的时界边界（review 补钉）：聚焦会话上滚未跟读时到达——聚焦+可见
+    // 期间不呈现徽章，但锚的推进权在 transcript（sticky=false 不写锚），
+    // 未读水位如实累积；切走的瞬间抑制解除，徽章按 count − 锚如实回到行上；
+    // 点回聚焦写锚清零。delta 的「While a session is the focused session…」
+    // 时界就落在这条行为上——徽章不是被吞掉，是被延迟到离开聚焦。
+    const restore = stubVisibility('visible')
+    try {
+      const a = row({ project_id: 'proj-alpha', msg_count: 1 })
+      const b = row({ project_id: 'proj-alpha', msg_count: 0 })
+      writeFocusAnchor(a.encoded_key, 1)
+      mockOf(apiMock.sessions).mockResolvedValue({
+        ...sessionList([a, b]),
+        active_session_key: a.encoded_key,
+      })
+      mockOf(apiMock.switchSession).mockResolvedValue({
+        status: 'switched',
+        redirect: `/sessions/${b.encoded_key}`,
+        active_session_key: b.encoded_key,
+      })
+      const el = await mount()
+      const items = () => [...el.shadowRoot!.querySelectorAll('li.session-item')]
+      // 聚焦 A：到达 +2（未跟读，锚停在 1）——徽章不呈现。
+      wsMocks.emit(frame(a.encoded_key, 3))
+      await el.updateComplete
+      expect(items()[0]!.querySelector('[data-testid="session-unread"]')).toBeNull()
+      expect(readAnchorCount(a.encoded_key)).toBe(1)
+      // 切到 B：A 的抑制解除——徽章如实出现（3 − 1）。
+      ;(items()[1] as HTMLElement).click()
+      await new Promise((r) => setTimeout(r, 0))
+      await el.updateComplete
+      expect(items()[0]!.querySelector('[data-testid="session-unread"]')?.textContent?.trim()).toBe('2')
+      // 点回 A：聚焦写锚推进到当前 count → 清零。
+      mockOf(apiMock.switchSession).mockResolvedValue({
+        status: 'switched',
+        redirect: `/sessions/${a.encoded_key}`,
+        active_session_key: a.encoded_key,
+      })
+      ;(items()[0] as HTMLElement).click()
+      await new Promise((r) => setTimeout(r, 0))
+      await el.updateComplete
+      expect(items()[0]!.querySelector('[data-testid="session-unread"]')).toBeNull()
+      expect(readAnchorCount(a.encoded_key)).toBe(3)
+      el.remove()
+    } finally {
+      restore()
+    }
   })
 })
 

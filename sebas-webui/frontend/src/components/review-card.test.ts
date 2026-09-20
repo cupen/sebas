@@ -438,4 +438,214 @@ describe('sebas-review-cards', () => {
     await el.updateComplete
     expect(approvalsMock).not.toHaveBeenCalled()
   })
+
+  // ---- fix-webui-qa-defects-round3 7.1/7.2：waiting 退避对账 + 挂载期去重 ----
+
+  /** fake timers 下的 flush：updateComplete + 一拍 0ms 计时推进。 */
+  async function flushFake(el: SebasReviewCards): Promise<void> {
+    await el.updateComplete
+    await vi.advanceTimersByTimeAsync(0)
+    await el.updateComplete
+  }
+
+  it('mounts with a single read-model pull even with sessionKey and waiting preset', async () => {
+    // 7.2：挂载期三路并发（旧 connectedCallback 直拉 + sessionKey 重建 +
+    // waiting 相位对账）收敛为一次 GET；卡片照常出现。
+    approvalsMock.mockResolvedValue({
+      approvals: [{ request_id: 'tc_once', tool_name: 'Bash', args: {} }],
+    })
+    const el = document.createElement('sebas-review-cards') as SebasReviewCards
+    el.sessionKey = 'oc_enc'
+    el.sessionPhase = 'waiting'
+    document.body.appendChild(el)
+    await flush(el)
+    expect(approvalsMock).toHaveBeenCalledTimes(1)
+    expect(approvalsMock).toHaveBeenCalledWith('oc_enc')
+    expect(cards(el).length).toBe(1)
+    expect(cards(el)[0]!.dataset.requestId).toBe('tc_once')
+  })
+
+  it('issues one read-model pull at mount (the wasted pre-mount GET is gone)', async () => {
+    // 旧实现 connectedCallback 的直拉响应总被 willUpdate 的 pullSeq 代际
+    // 核对丢弃——纯浪费的并发 GET。现在挂载期只有 sessionKey 变更一条路。
+    approvalsMock.mockResolvedValue({ approvals: [] })
+    const el = await mount('oc_enc')
+    await flush(el)
+    expect(approvalsMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('retries the reconcile while waiting when the pull raced ahead of persistence', async () => {
+    // 7.1 时序复现：相位已亮 waiting，读模型拉取先于审批落库——首轮合并
+    // 扑空后相位值停在 waiting 不再变（Lit 按值判变），退避重试把后来
+    // 落库的审批补上，不再依赖相位翻转这一单次触发。
+    vi.useFakeTimers()
+    try {
+      approvalsMock.mockResolvedValue({ approvals: [] })
+      const el = await mount('oc_enc')
+      await flushFake(el)
+      el.sessionPhase = 'waiting'
+      await flushFake(el)
+      expect(approvalsMock).toHaveBeenCalledTimes(2) // mount + 首轮对账各一次
+      expect(cards(el).length).toBe(0)
+
+      // 审批此刻才落库（重启重拉窗口）。
+      approvalsMock.mockResolvedValue({
+        approvals: [{ request_id: 'tc_late', tool_name: 'Bash', args: {} }],
+      })
+      // 退避 250ms 内不重试，到点重取并出卡。
+      await vi.advanceTimersByTimeAsync(249)
+      expect(approvalsMock).toHaveBeenCalledTimes(2)
+      await vi.advanceTimersByTimeAsync(1)
+      await el.updateComplete
+      expect(approvalsMock).toHaveBeenCalledTimes(3)
+      expect(cards(el).length).toBe(1)
+      expect(cards(el)[0]!.dataset.requestId).toBe('tc_late')
+
+      // 卡已出现：重试链停摆，时间流逝不再拉取。
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(approvalsMock).toHaveBeenCalledTimes(3)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('session.resync during waiting reconciles once more without waiting for backoff', async () => {
+    // 7.1 的 resync 旁路：丢帧信号到达即补一次对账（幂等），并顺手撤掉
+    // 还在排队的退避计时器。
+    vi.useFakeTimers()
+    try {
+      approvalsMock.mockResolvedValue({ approvals: [] })
+      const el = await mount('oc_enc')
+      await flushFake(el)
+      el.sessionPhase = 'waiting'
+      await flushFake(el)
+      expect(cards(el).length).toBe(0)
+
+      approvalsMock.mockResolvedValue({
+        approvals: [{ request_id: 'tc_resync', tool_name: 'Bash', args: {} }],
+      })
+      ws.emit({ type: 'session.resync' })
+      await vi.advanceTimersByTimeAsync(0)
+      await el.updateComplete
+      expect(cards(el).length).toBe(1)
+      expect(cards(el)[0]!.dataset.requestId).toBe('tc_resync')
+
+      // 卡出现后退避计时器已撤：时间流逝不再拉取。
+      const calls = approvalsMock.mock.calls.length
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(approvalsMock.mock.calls.length).toBe(calls)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  /** 退避排期铺垫：挂载拉取 + waiting 首轮对账扑空 → 退避计时器在途。 */
+  async function mountWaitingWithPendingBackoff(): Promise<SebasReviewCards> {
+    approvalsMock.mockResolvedValue({ approvals: [] })
+    const el = await mount('oc_enc')
+    await flushFake(el)
+    el.sessionPhase = 'waiting'
+    await flushFake(el)
+    expect(approvalsMock).toHaveBeenCalledTimes(2) // mount + 首轮对账
+    expect(cards(el).length).toBe(0)
+    return el
+  }
+
+  it('switching the session cancels the pending backoff retry (7.1 退避生命周期)', async () => {
+    // 换会话：旧会话的 waiting 退避重试不再有意义——计时器撤销，旧 key
+    // 不再发出任何补拉。
+    vi.useFakeTimers()
+    try {
+      const el = await mountWaitingWithPendingBackoff()
+      el.sessionKey = 'oc_enc2'
+      await flushFake(el)
+      expect(approvalsMock).toHaveBeenCalledTimes(3) // 换会话重建拉取一次
+      expect(approvalsMock).toHaveBeenLastCalledWith('oc_enc2')
+
+      await vi.advanceTimersByTimeAsync(10_000)
+      // 未撤销的话，退避会对着新 key 继续 reconcile——恰好是误补拉形态。
+      expect(approvalsMock).toHaveBeenCalledTimes(3)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('leaving the waiting phase cancels the pending backoff retry (7.1 退避生命周期)', async () => {
+    // 相位离开 waiting：对账前提消失，退避计时器撤销，不再拉取。
+    vi.useFakeTimers()
+    try {
+      const el = await mountWaitingWithPendingBackoff()
+      el.sessionPhase = 'working'
+      await flushFake(el)
+
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(approvalsMock).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('unmounting cancels the pending backoff retry (7.1 退避生命周期)', async () => {
+    // 卸载：宿主没了，计时器一并作废（撤销后回调不会在游离元素上拉取）。
+    vi.useFakeTimers()
+    try {
+      const el = await mountWaitingWithPendingBackoff()
+      el.remove()
+
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(approvalsMock).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a retry firing while a resync pull is in flight shares that GET (7.1 × 7.2 竞态)', async () => {
+    // 退避计时器与共享在途 GET 的竞态：resync 先触发一次拉取（在飞），
+    // 退避到点的 reconcile 加入同一次 GET——始终不多发请求；扑空后两条
+    // 对账路径并发收尾也只排一个计时器，下一轮带卡落地后整链停摆。
+    vi.useFakeTimers()
+    try {
+      let resolveFirst!: (v: { approvals: unknown[] }) => void
+      approvalsMock.mockReturnValue(
+        new Promise((resolve) => {
+          resolveFirst = resolve
+        }),
+      )
+      const el = await mount('oc_enc')
+      await flushFake(el)
+      el.sessionPhase = 'waiting' // 首轮对账加入挂载期在飞 GET
+      await flushFake(el)
+      expect(approvalsMock).toHaveBeenCalledTimes(1)
+
+      resolveFirst({ approvals: [] })
+      await flushFake(el) // 两轮收尾 → 排 250ms 退避
+
+      let resolveRetry!: (v: { approvals: unknown[] }) => void
+      approvalsMock.mockReturnValue(
+        new Promise((resolve) => {
+          resolveRetry = resolve
+        }),
+      )
+      await vi.advanceTimersByTimeAsync(250) // 退避到点：新 GET 在飞
+      expect(approvalsMock).toHaveBeenCalledTimes(2)
+
+      // resync 在飞期间到达：共享同一次 GET，不发第三个请求。
+      ws.emit({ type: 'session.resync' })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(approvalsMock).toHaveBeenCalledTimes(2)
+
+      // 共享 GET 带卡落地：mergeRows 在共享体内跑一次，卡出现；两条对账
+      // 收尾都看到卡 → 计时器撤、链停。
+      resolveRetry({
+        approvals: [{ request_id: 'tc_share', tool_name: 'Bash', args: {} }],
+      })
+      await flushFake(el)
+      expect(cards(el).length).toBe(1)
+      expect(cards(el)[0]!.dataset.requestId).toBe('tc_share')
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(approvalsMock).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })

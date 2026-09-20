@@ -8,7 +8,10 @@
  * ids are tombstoned (a late push or stale read-model row cannot resurrect
  * a settled card). While the phase feed says the session is `waiting` but
  * the store holds no live card (a lost push), the read model is re-pulled
- * through the same entry so the card recovers without a reload.
+ * through the same entry so the card recovers without a reload; an empty
+ * pull (the read model raced ahead of the approval being persisted) backs
+ * off and retries while `waiting` lasts, and `session.resync` reconciles
+ * once more. Mount-time pulls share one in-flight GET per session key.
  *
  * Answering POSTs the decision to `/api/permissions/{request_id}/answer` —
  * success removes the card, a 404 marks it expired (the pending request is
@@ -170,6 +173,13 @@ export class SebasReviewCards extends LitElement {
   connectedCallback(): void {
     super.connectedCallback()
     this.unsubscribe = sharedWs.subscribe((event) => {
+      if (event.type === 'session.resync') {
+        // （round3 7.1）重同步信号 = 本连接的增量可能整段丢失（broadcast
+        // lag / core 重连）。waiting 期间正是丢帧补卡的窗口，补一次相位
+        // 对账（幂等：有卡或非 waiting 都是 no-op），不等退避计时器。
+        void this.reconcileWithPhase()
+        return
+      }
       if (event.type !== 'permission.requested') return
       if (this.sessionKey && event.session_id !== this.sessionKey) return
       // （round3 2.2）推送只写 store：帧归一为 ApprovalRow 经 mergeRows
@@ -186,13 +196,15 @@ export class SebasReviewCards extends LitElement {
         },
       ])
     })
-    // fix-webui-approval-restore-and-session-identity 1.3：组件挂载时
-    // sessionKey 已就绪（深链/刷新直进详情）同样重建一次。
-    if (this.sessionKey) void this.pullApprovals(this.sessionKey)
+    // （round3 7.2）挂载期重建只走 willUpdate 的 sessionKey 变更一条路：
+    // 首挂前预置的 sessionKey 一定出现在首次 willUpdate 的 changed 里，
+    // 这里再拉一次只会发出一个响应注定被 pullSeq 代际核对丢弃的并发 GET。
   }
 
   disconnectedCallback(): void {
     this.unsubscribe?.()
+    // （round3 7.1）宿主已卸载，waiting 退避计时器一并作废。
+    this.clearReconcileRetry()
     super.disconnectedCallback()
   }
 
@@ -207,6 +219,8 @@ export class SebasReviewCards extends LitElement {
       this.cards = []
       this.decided.clear()
       this.pullSeq += 1
+      // （round3 7.1）换会话后旧会话的 waiting 退避重试不再有意义。
+      this.clearReconcileRetry()
       if (this.sessionKey) {
         const key = this.sessionKey
         void this.pullApprovals(key)
@@ -215,7 +229,7 @@ export class SebasReviewCards extends LitElement {
     // （round3 2.2）相位帧对账：帧在说「waiting」而 store 无待决卡 = 推送
     // 丢帧，经读模型（同一入口）补齐——rail 已亮「等待」而审查卡缺席的
     // 空悬态就此收敛，不再依赖 reload。
-    if (changed.has('sessionPhase')) this.reconcileWithPhase()
+    if (changed.has('sessionPhase')) void this.reconcileWithPhase()
   }
 
   /**
@@ -241,21 +255,89 @@ export class SebasReviewCards extends LitElement {
     ]
   }
 
-  /** 相位帧 → store 对账（round3 2.2）：waiting 且无待决卡才重取读模型。 */
-  private reconcileWithPhase(): void {
-    if (this.sessionPhase !== 'waiting' || !this.sessionKey) return
-    if (this.cards.some((c) => c.state !== 'expired')) return
+  /**
+   * 相位帧 → store 对账（round3 2.2，7.1 修订）：waiting 且无待决卡才重取
+   * 读模型。7.1：读模型拉取可能先于审批落库（重启重拉窗口恰是 design 引用
+   * 的场景）——合并扑空后相位值停在 waiting 不再变，Lit 按值判变让对账
+   * **永不**再触发，卡片缺失至相位翻转。改为扑空后退避重试（250ms 起步
+   * 翻倍、4s 封顶，waiting 不结束不放弃）；`session.resync` 到达也补一次。
+   * 幂等：有卡、非 waiting、会话已切换都是 no-op。
+   */
+  private async reconcileWithPhase(): Promise<void> {
+    if (this.sessionPhase !== 'waiting' || !this.sessionKey) {
+      this.clearReconcileRetry()
+      return
+    }
+    if (this.cards.some((c) => c.state !== 'expired')) {
+      this.clearReconcileRetry()
+      return
+    }
     const key = this.sessionKey
-    void this.pullApprovals(key)
+    await this.pullApprovals(key)
+    // 等待期间相位/会话已变：这轮对账作废（拉取代际核对已兜住陈旧合并）。
+    if (this.sessionPhase !== 'waiting' || this.sessionKey !== key) return
+    if (this.cards.some((c) => c.state !== 'expired')) {
+      this.clearReconcileRetry()
+      return
+    }
+    this.scheduleReconcileRetry()
+  }
+
+  /** waiting 退避重试的对账日程（round3 7.1）：250ms 起步翻倍，4s 封顶。 */
+  private static readonly RECONCILE_RETRY_BASE_MS = 250
+  private static readonly RECONCILE_RETRY_MAX_MS = 4000
+  private reconcileAttempts = 0
+  private reconcileTimer: ReturnType<typeof setTimeout> | undefined = undefined
+
+  private scheduleReconcileRetry(): void {
+    const delay = Math.min(
+      SebasReviewCards.RECONCILE_RETRY_BASE_MS * 2 ** this.reconcileAttempts,
+      SebasReviewCards.RECONCILE_RETRY_MAX_MS,
+    )
+    this.reconcileAttempts += 1
+    this.clearReconcileTimer()
+    this.reconcileTimer = setTimeout(() => {
+      this.reconcileTimer = undefined
+      void this.reconcileWithPhase()
+    }, delay)
+  }
+
+  private clearReconcileTimer(): void {
+    if (this.reconcileTimer !== undefined) {
+      clearTimeout(this.reconcileTimer)
+      this.reconcileTimer = undefined
+    }
+  }
+
+  /** 退避计时器与尝试计数一并归零（对账终态 / 换会话 / 卸载）。 */
+  private clearReconcileRetry(): void {
+    this.clearReconcileTimer()
+    this.reconcileAttempts = 0
   }
 
   /**
    * 读模型重建（1.3 + round3 2.2）：拉取当前泊车审批，行归一为 ApprovalRow
    * 后经 mergeRows 单一入口合并。失败静默降级——读模型不可得时审批面仍由
    * 推送通道承载。代际核对：响应回来时 sessionKey 已切换则丢弃。
+   *
+   * （round3 7.2）同 key 的并发拉取共享同一次 GET：挂载期 sessionKey 变更
+   * 与相位对账（waiting 预置时）在同一轮 willUpdate 里先后到达，去重把
+   * 三路并发收敛为单次请求；pullSeq 只在真实 GET 上自增，防陈旧语义不变。
    */
   private pullSeq = 0
-  private async pullApprovals(sessionKey: string): Promise<void> {
+  private inflightPulls = new Map<string, Promise<void>>()
+
+  private pullApprovals(sessionKey: string): Promise<void> {
+    const inflight = this.inflightPulls.get(sessionKey)
+    if (inflight) return inflight
+    const pull = this.doPullApprovals(sessionKey).finally(() => {
+      if (this.inflightPulls.get(sessionKey) === pull) this.inflightPulls.delete(sessionKey)
+    })
+    this.inflightPulls.set(sessionKey, pull)
+    return pull
+  }
+
+  private async doPullApprovals(sessionKey: string): Promise<void> {
     const seq = ++this.pullSeq
     let approvals: PendingApprovalInfo[]
     try {

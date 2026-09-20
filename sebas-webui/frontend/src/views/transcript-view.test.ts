@@ -54,6 +54,7 @@ import {
   processItemLabel,
   processRunDenied,
   processRunSummary,
+  registerEmptyStreamSession,
   resolveAgentDisplay,
   splitAgentRuns,
   toolResultDenied,
@@ -1543,6 +1544,55 @@ describe('unread boundary advances while focused+visible (polish-workbench-walkt
     // 打开动作本身不是「看着到达」：锚留在 1 段，第二回合仍标未读。
     expect(storedAnchor()).toBe(1)
     expect(el.shadowRoot!.querySelector('.seam')?.hasAttribute('hidden')).toBe(false)
+    el.remove()
+  })
+
+  it('已渲染会话的快照增长（重拉收敛）在贴底可见时推进锚——不依赖滚动事件（round3 6.1）', async () => {
+    // QA 6.1 的时序：聚焦会话的新段经 entries 属性到达（秒回/重拉不走
+    // turn.append），且短对话不溢出——滚动事件永不来，此前的锚推进全靠
+    // 巧合。同会话（sessionKey 不变）的快照增长在 sticky + 可见下照
+    // onTurnAppend 同一 guard 推进共享锚；seam 随之收敛。
+    store.set('sebas:seen:oc_test', JSON.stringify({ anchor_count: 1 }))
+    const el = await mount({
+      entries: streamedTurn('q', ['a'], FIXED_DATES.T1),
+      msgCount: 1,
+    })
+    expect(el.shadowRoot!.querySelector('.seam')?.hasAttribute('hidden')).toBe(true)
+    // 新回合经快照到达（属性更新，sessionKey 不变；无滚动事件）。
+    el.entries = [
+      ...streamedTurn('q', ['a'], FIXED_DATES.T1),
+      ...streamedTurn('q2', ['watched arrive'], FIXED_DATES.T3).map((e) => ({
+        ...e,
+        position: e.position + 10,
+      })),
+    ]
+    el.msgCount = 2
+    await el.updateComplete
+    await debounceWait()
+    await el.updateComplete
+    // 锚推进到已渲染段数（max(服务端 2, 本地 2)）；seam 不出现。
+    expect(storedAnchor()).toBe(2)
+    expect(el.shadowRoot!.querySelector('.seam')?.hasAttribute('hidden')).toBe(true)
+    el.remove()
+  })
+
+  it('dashboard 侧空态登记（registerEmptyStreamSession）后首交换经挂载快照建立锚（round3 6.1）', async () => {
+    // 真实应用里占位会话为空时主区渲染的是 dashboard 自己的空态占位而非
+    // transcript 组件——组件内的空流登记分支永不执行（QA round5：新建即
+    // 聚焦会话的首个交换冒徽标 + 缝且不消）。dashboard 渲染空态时经导出
+    // 的登记入口补登记；首回合（连 prompt 带回复）经挂载快照到达仍算
+    // 「亲眼看着到达」。
+    store.delete('sebas:seen:oc_test')
+    registerEmptyStreamSession('oc_test')
+    const el = await mount({
+      entries: streamedTurn('hello', ['hello world'], FIXED_DATES.T1),
+      msgCount: 2,
+    })
+    await debounceWait()
+    await el.updateComplete
+    // 锚从空流建立：写锚 = max(服务端段数 2, 本地已渲染 1) = 2，seam 不出现。
+    expect(storedAnchor()).toBe(2)
+    expect(el.shadowRoot!.querySelector('.seam')?.hasAttribute('hidden')).toBe(true)
     el.remove()
   })
 })

@@ -1116,6 +1116,21 @@ export class SebasWorkbenchComposer extends LitElement {
         --wa-form-control-width: max-content;
         max-width: 110px;
       }
+      /* （round3 6.2）mode 下拉选项面板：4.1 的放宽写在本组件 shadow 树
+         够不到的 document 级（wa-overrides.css 的 wa-select 选择器只匹配
+         文档树元素），composer 的下拉因此仍按字折行。同款规则补进自己的
+         样式表——shadow 内样式表可以命中树内子组件的 part：面板最小宽度
+         放宽到内容宽（封顶 320px），选项文案单行省略，「allow（放行并留
+         审计）」等中文长模式文案不再折行挤高选项行。 */
+      wa-select::part(listbox) {
+        min-width: max-content;
+        max-width: 320px;
+      }
+      wa-option::part(label) {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
       /* ── 模型芯片（design D3）────────────────────────────────────────── */
       .model-wrap {
         position: relative;
