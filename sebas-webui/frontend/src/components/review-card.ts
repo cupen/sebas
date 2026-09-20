@@ -1,7 +1,18 @@
 /**
- * Review cards: the operator surface for gated tool calls. Subscribes to
- * the shared WebSocket; every `permission.requested` frame becomes a card
- * keyed by `request_id` (duplicate frames never create a second card).
+ * Review cards: the operator surface for gated tool calls. Rendering has a
+ * SINGLE store entry (round3 2.2, design decision 3): both the read model
+ * (`GET /api/sessions/{key}/approvals`) and the WS `permission.requested`
+ * push normalize their rows into `mergeRows` — the push only writes the
+ * store, the store is the only thing that renders. Merging is keyed by
+ * `request_id` (duplicate frames never create a second card) and decided
+ * ids are tombstoned (a late push or stale read-model row cannot resurrect
+ * a settled card). While the phase feed says the session is `waiting` but
+ * the store holds no live card (a lost push), the read model is re-pulled
+ * through the same entry so the card recovers without a reload; an empty
+ * pull (the read model raced ahead of the approval being persisted) backs
+ * off and retries while `waiting` lasts, and `session.resync` reconciles
+ * once more. Mount-time pulls share one in-flight GET per session key.
+ *
  * Answering POSTs the decision to `/api/permissions/{request_id}/answer` —
  * success removes the card, a 404 marks it expired (the pending request is
  * gone server-side: answered, timed out or unknown), any other error keeps
@@ -39,10 +50,30 @@ interface ReviewCard {
   escalateReason: string
 }
 
+/**
+ * 进入 store 的审批行（round3 2.2）：推送帧与读模型行各自的字段形状归一
+ * 到这里（reason 缺省空串），合并语义只有 mergeRows 一处。
+ */
+interface ApprovalRow {
+  request_id: string
+  session_id: string
+  tool_name: string
+  args: unknown
+  reason: string
+}
+
 @customElement('sebas-review-cards')
 export class SebasReviewCards extends LitElement {
   /** Encoded session key to filter on; null renders every request. */
   @property({ attribute: false }) sessionKey: string | null = null
+
+  /**
+   * （round3 2.2）聚焦会话的相位词（dashboard 从相位帧/详情下传）。帧说
+   * 「waiting」（在等审批）而 store 里没有待决卡 = 推送半边丢了帧——经
+   * 读模型重取一次（同一 mergeRows 入口）就地补卡，不必等 reload。只在
+   * 相位变化时触发；有卡或读模型为空都无变化，幂等。
+   */
+  @property({ attribute: false }) sessionPhase: string | null = null
 
   @state() private cards: ReviewCard[] = []
   private unsubscribe?: () => void
@@ -142,38 +173,38 @@ export class SebasReviewCards extends LitElement {
   connectedCallback(): void {
     super.connectedCallback()
     this.unsubscribe = sharedWs.subscribe((event) => {
+      if (event.type === 'session.resync') {
+        // （round3 7.1）重同步信号 = 本连接的增量可能整段丢失（broadcast
+        // lag / core 重连）。waiting 期间正是丢帧补卡的窗口，补一次相位
+        // 对账（幂等：有卡或非 waiting 都是 no-op），不等退避计时器。
+        void this.reconcileWithPhase()
+        return
+      }
       if (event.type !== 'permission.requested') return
       if (this.sessionKey && event.session_id !== this.sessionKey) return
-      // Dedup by request_id: the frame is broadcast and can repeat after a
-      // reconnect — one card per request, ever (an expired card stays in
-      // the list precisely so a late repeat cannot resurrect it). A frame
-      // for an id rebuilt from the read model below merges into the same
-      // card instead of duplicating it. Decided ids are tombstoned so a
-      // late broadcast can never resurrect a settled card
-      // （fix-webui-approval-restore-and-session-identity 1.3）.
-      if (this.decided.has(event.request_id)) return
-      if (this.cards.some((c) => c.request_id === event.request_id)) return
-      this.cards = [
-        ...this.cards,
+      // （round3 2.2）推送只写 store：帧归一为 ApprovalRow 经 mergeRows
+      // 单一入口合并——与读模型重建同一渲染入口，不再有与重建并行的独立
+      // 推送渲染分支。mergeRows 负责 request_id 去重与已决墓碑（广播可
+      // 重放，一张卡只建一次；过期卡留在列表里，迟到重放无法复活）。
+      this.mergeRows([
         {
           request_id: event.request_id,
           session_id: event.session_id,
           tool_name: event.tool_name,
           args: event.args,
           reason: event.reason,
-          state: 'pending',
-          error: '',
-          escalateReason: '',
         },
-      ]
+      ])
     })
-    // fix-webui-approval-restore-and-session-identity 1.3：组件挂载时
-    // sessionKey 已就绪（深链/刷新直进详情）同样重建一次。
-    if (this.sessionKey) void this.pullApprovals(this.sessionKey)
+    // （round3 7.2）挂载期重建只走 willUpdate 的 sessionKey 变更一条路：
+    // 首挂前预置的 sessionKey 一定出现在首次 willUpdate 的 changed 里，
+    // 这里再拉一次只会发出一个响应注定被 pullSeq 代际核对丢弃的并发 GET。
   }
 
   disconnectedCallback(): void {
     this.unsubscribe?.()
+    // （round3 7.1）宿主已卸载，waiting 退避计时器一并作废。
+    this.clearReconcileRetry()
     super.disconnectedCallback()
   }
 
@@ -188,20 +219,125 @@ export class SebasReviewCards extends LitElement {
       this.cards = []
       this.decided.clear()
       this.pullSeq += 1
+      // （round3 7.1）换会话后旧会话的 waiting 退避重试不再有意义。
+      this.clearReconcileRetry()
       if (this.sessionKey) {
         const key = this.sessionKey
         void this.pullApprovals(key)
       }
     }
+    // （round3 2.2）相位帧对账：帧在说「waiting」而 store 无待决卡 = 推送
+    // 丢帧，经读模型（同一入口）补齐——rail 已亮「等待」而审查卡缺席的
+    // 空悬态就此收敛，不再依赖 reload。
+    if (changed.has('sessionPhase')) void this.reconcileWithPhase()
   }
 
   /**
-   * 读模型重建（1.3）：拉取当前泊车审批并按 `request_id` 合并（已有的卡
-   * 不重复建）。失败静默降级——读模型不可得时审批面仍由推送通道承载。
-   * 代际核对：响应回来时 sessionKey 已切换则丢弃。
+   * （round3 2.2）store → 渲染的唯一入口：推送帧与读模型行都归一为
+   * ApprovalRow 经这里合并进 cards。已决墓碑优先（迟到推送/陈旧读模型行
+   * 都不复活卡片），request_id 去重（重建与推送竞速也只建一张卡）。
+   */
+  private mergeRows(rows: ApprovalRow[]): void {
+    const fresh = rows.filter(
+      (r) =>
+        !this.decided.has(r.request_id) &&
+        !this.cards.some((c) => c.request_id === r.request_id),
+    )
+    if (fresh.length === 0) return
+    this.cards = [
+      ...this.cards,
+      ...fresh.map((r) => ({
+        ...r,
+        state: 'pending' as const,
+        error: '',
+        escalateReason: '',
+      })),
+    ]
+  }
+
+  /**
+   * 相位帧 → store 对账（round3 2.2，7.1 修订）：waiting 且无待决卡才重取
+   * 读模型。7.1：读模型拉取可能先于审批落库（重启重拉窗口恰是 design 引用
+   * 的场景）——合并扑空后相位值停在 waiting 不再变，Lit 按值判变让对账
+   * **永不**再触发，卡片缺失至相位翻转。改为扑空后退避重试（250ms 起步
+   * 翻倍、4s 封顶，waiting 不结束不放弃）；`session.resync` 到达也补一次。
+   * 幂等：有卡、非 waiting、会话已切换都是 no-op。
+   */
+  private async reconcileWithPhase(): Promise<void> {
+    if (this.sessionPhase !== 'waiting' || !this.sessionKey) {
+      this.clearReconcileRetry()
+      return
+    }
+    if (this.cards.some((c) => c.state !== 'expired')) {
+      this.clearReconcileRetry()
+      return
+    }
+    const key = this.sessionKey
+    await this.pullApprovals(key)
+    // 等待期间相位/会话已变：这轮对账作废（拉取代际核对已兜住陈旧合并）。
+    if (this.sessionPhase !== 'waiting' || this.sessionKey !== key) return
+    if (this.cards.some((c) => c.state !== 'expired')) {
+      this.clearReconcileRetry()
+      return
+    }
+    this.scheduleReconcileRetry()
+  }
+
+  /** waiting 退避重试的对账日程（round3 7.1）：250ms 起步翻倍，4s 封顶。 */
+  private static readonly RECONCILE_RETRY_BASE_MS = 250
+  private static readonly RECONCILE_RETRY_MAX_MS = 4000
+  private reconcileAttempts = 0
+  private reconcileTimer: ReturnType<typeof setTimeout> | undefined = undefined
+
+  private scheduleReconcileRetry(): void {
+    const delay = Math.min(
+      SebasReviewCards.RECONCILE_RETRY_BASE_MS * 2 ** this.reconcileAttempts,
+      SebasReviewCards.RECONCILE_RETRY_MAX_MS,
+    )
+    this.reconcileAttempts += 1
+    this.clearReconcileTimer()
+    this.reconcileTimer = setTimeout(() => {
+      this.reconcileTimer = undefined
+      void this.reconcileWithPhase()
+    }, delay)
+  }
+
+  private clearReconcileTimer(): void {
+    if (this.reconcileTimer !== undefined) {
+      clearTimeout(this.reconcileTimer)
+      this.reconcileTimer = undefined
+    }
+  }
+
+  /** 退避计时器与尝试计数一并归零（对账终态 / 换会话 / 卸载）。 */
+  private clearReconcileRetry(): void {
+    this.clearReconcileTimer()
+    this.reconcileAttempts = 0
+  }
+
+  /**
+   * 读模型重建（1.3 + round3 2.2）：拉取当前泊车审批，行归一为 ApprovalRow
+   * 后经 mergeRows 单一入口合并。失败静默降级——读模型不可得时审批面仍由
+   * 推送通道承载。代际核对：响应回来时 sessionKey 已切换则丢弃。
+   *
+   * （round3 7.2）同 key 的并发拉取共享同一次 GET：挂载期 sessionKey 变更
+   * 与相位对账（waiting 预置时）在同一轮 willUpdate 里先后到达，去重把
+   * 三路并发收敛为单次请求；pullSeq 只在真实 GET 上自增，防陈旧语义不变。
    */
   private pullSeq = 0
-  private async pullApprovals(sessionKey: string): Promise<void> {
+  private inflightPulls = new Map<string, Promise<void>>()
+
+  private pullApprovals(sessionKey: string): Promise<void> {
+    const inflight = this.inflightPulls.get(sessionKey)
+    if (inflight) return inflight
+    const pull = this.doPullApprovals(sessionKey).finally(() => {
+      if (this.inflightPulls.get(sessionKey) === pull) this.inflightPulls.delete(sessionKey)
+    })
+    this.inflightPulls.set(sessionKey, pull)
+    return pull
+  }
+
+  private async doPullApprovals(sessionKey: string): Promise<void> {
     const seq = ++this.pullSeq
     let approvals: PendingApprovalInfo[]
     try {
@@ -210,25 +346,15 @@ export class SebasReviewCards extends LitElement {
       return
     }
     if (seq !== this.pullSeq || this.sessionKey !== sessionKey) return
-    const fresh = approvals.filter(
-      (a) =>
-        !this.decided.has(a.request_id) &&
-        !this.cards.some((c) => c.request_id === a.request_id),
-    )
-    if (fresh.length === 0) return
-    this.cards = [
-      ...this.cards,
-      ...fresh.map((a) => ({
+    this.mergeRows(
+      approvals.map((a) => ({
         request_id: a.request_id,
         session_id: sessionKey,
         tool_name: a.tool_name,
         args: a.args,
         reason: '',
-        state: 'pending' as const,
-        error: '',
-        escalateReason: '',
       })),
-    ]
+    )
   }
 
   /** 已决 request_id 墓碑：批复成功后到达的同 id 推送/读模型行不再复活卡片。 */

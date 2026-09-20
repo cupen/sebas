@@ -26,6 +26,15 @@ function storageKey(sessionKey: string): string {
 }
 
 /**
+ * 锚点推进的窗口级广播（fix-webui-qa-defects-round3 6.1）：localStorage 不
+ * 是响应式源——rail 徽标在锚被 transcript 贴底跟读/聚焦切换推进后，需要
+ * 一次显式失效才会按新水位重渲染（否则徽标驻留到下一个无关状态变化，
+ * 「读了但徽标不消」）。写侧广播、读侧（rail）按需失效；`detail.key` 是
+ * 会话 encoded key，无订阅者时派发是无害 no-op。
+ */
+export const ANCHOR_ADVANCED_EVENT = 'sebas:anchor-advanced'
+
+/**
  * Parse a stored value into the read anchor. 返回 `null` = 无锚（包括旧
  * `seen_ts` 形态——按「无 anchor」= fully-read 对待，不迁移）。
  */
@@ -65,6 +74,10 @@ function write(sessionKey: string, anchorCount: number): void {
     // seen_ts 形态随本次写入被覆写消失。
     const stored: StoredAnchor = { anchor_count: anchorCount }
     localStorage.setItem(storageKey(sessionKey), JSON.stringify(stored))
+    // （round3 6.1）写后广播：rail 等徽标面据此失效重渲染（详见事件常量注）。
+    window.dispatchEvent(
+      new CustomEvent(ANCHOR_ADVANCED_EVENT, { detail: { key: sessionKey } }),
+    )
   } catch {
     /* storage may be disabled; degrade silently */
   }

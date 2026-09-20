@@ -512,22 +512,32 @@ impl DispatchHandle {
             // （webui spec delta「会话状态 SHALL 标记为 spawn-failed」）。
             crate::state::MappingState::SpawnFailed { .. } => ("spawn-failed", None),
         };
-        let (phase, user_prompt, usage) = match session_id.as_ref() {
+        // （round4 2.2/2.3）接收回执事实：回合已被服务端接受（prompt 已随
+        // 开轮 seed 记入卡态）但 agent 首个输出条目未落（相位仍在 SEED）。
+        // 卡态存在是前提——激活语义（resume 不带 prompt）的 SEED 卡 prompt
+        // 为空，不算接收回执（没有已接受的提交可停）。
+        let (phase, user_prompt, usage, receipt_phase) = match session_id.as_ref() {
             Some(sid) => match self.card_states.snapshot(sid).await {
                 Some(st) => {
                     // 空串归 None（fix-webui-approval-restore-and-session-identity
                     // review 4）：种子卡态的默认空 prompt 投成 Some("") 会让
                     // rail 行名闪现空串窗口（`??` 链不跳过空串）。
+                    let receipt =
+                        st.status_emoji == crate::card_state::phase::SEED
+                            && !st.user_prompt.is_empty();
                     let prompt = if st.user_prompt.is_empty() {
-                        None
+                        // （round4 1.2/3.1）卡态无预览时回退命名迁移位——
+                        // terminal teardown 退役 / 归档恢复重建的行不丢行名。
+                        m.prompt_preview.clone().filter(|p| !p.is_empty())
                     } else {
                         Some(st.user_prompt)
                     };
-                    (Some(st.status_emoji), prompt, Some(st.usage))
+                    (Some(st.status_emoji), prompt, Some(st.usage), receipt)
                 }
-                None => (None, None, None),
+                // 无卡态：命名来源只剩迁移位（dormant 退役行 / 恢复行）。
+                None => (None, m.prompt_preview.clone().filter(|p| !p.is_empty()), None, false),
             },
-            None => (None, None, None),
+            None => (None, None, None, false),
         };
         // rail-declutter-unread D1：可见回复段计数由 transcript 投影（口径见
         // [`count_chat_messages`]）。transcript 只追加、随映射删除（Dormant/
@@ -541,13 +551,15 @@ impl DispatchHandle {
             None => 0,
         };
         // fix-pending-queue-liveness 2.3（design D3）：「回合占用」的引擎事实
-        // ——WORKING 相位 ∨ 泊车审批在等 ∨ spawn 窗口。呈现层据此驱动提交
-        // 控件的排队/停止形态，不再猜展示词 slug。SpawnFailed/Dormant/终态
-        // 相位一律不占用。
+        // ——WORKING 相位 ∨ 接收回执相位（round4 2.2：提交已接受、prompt 已
+        // 是最新转录单元、agent 首个输出条目未落）∨ 泊车审批在等 ∨ spawn 窗
+        // 口。呈现层据此驱动提交控件的排队/停止形态，不再猜展示词 slug。
+        // SpawnFailed/Dormant/终态相位一律不占用。
         let turn_engaged = match &m.state {
             crate::state::MappingState::Spawning { .. } => true,
             crate::state::MappingState::Active { session_id } => {
                 phase.as_deref() == Some(crate::card_state::phase::WORKING)
+                    || receipt_phase
                     || self.stall.parked_count(session_id).await > 0
             }
             _ => false,
@@ -1697,6 +1709,10 @@ impl DispatchHandle {
     ///   current_model / available_models），恢复时原样带回——后续对话用回
     ///   原 agent 与模型面。旧归档条目（全空）维持既有默认（agent 显示回退、
     ///   模型目录清空），不做数据迁移。
+    /// - `label` / `prompt_preview`（fix-webui-qa-defects-round4 3.1，design
+    ///   M1「迁移而非重推导」）：归档时刻的命名来源（操作者 label 与首条
+    ///   prompt 预览）随快照迁回映射——Dormant 重建没有卡态，不迁移则行名
+    ///   退化为短 id。`None`/空串 = 旧档无该字段，回退现状（短 id）。
     /// - 拒绝：key 已有映射（活会话/占位与归档同 key 是状态矛盾）→
     ///   [`crate::error::DispatchError`]；容量满 → Capacity。
     pub async fn web_restore_session(
@@ -1706,6 +1722,8 @@ impl DispatchHandle {
         project_dir: Option<String>,
         transcript: Vec<TurnEntry>,
         identity: crate::state::SessionIdentity,
+        label: Option<String>,
+        prompt_preview: Option<String>,
     ) -> Result<(), crate::error::DispatchError> {
         if self.map.get(&key).await.is_some() {
             return Err(crate::error::DispatchError::Conflict(format!(
@@ -1723,6 +1741,10 @@ impl DispatchHandle {
         if let Some(mode) = identity.desired_mode {
             mapping.desired_mode = mode;
         }
+        // （round4 3.1）命名来源迁移：label 优先（行名第一顺位），预览兜底
+        // （第二顺位）。空串归 None——不占 `??` 链的位。
+        mapping.label = label.filter(|l| !l.is_empty());
+        mapping.prompt_preview = prompt_preview.filter(|p| !p.is_empty());
         self.map.insert(key.clone(), mapping).await?;
         // 转写回放：条目按归档快照顺序重排 position（0..n 单调），随 Dormant
         // 的 transcript_id（2.1）在 detail / msg_count 投影完整可见。
@@ -1766,7 +1788,7 @@ impl DispatchHandle {
     /// 的 hook 等待不受影响（子进程随后被断开），已释放请求的迟到批复走
     /// typed rejection（2.3）。
     pub async fn web_cancel_session(&self, key: &ChannelKey) -> CancelOutcome {
-        use crate::card_state::phase::WORKING;
+        use crate::card_state::phase::{SEED, WORKING};
         let sid = self
             .map
             .get(key)
@@ -1779,8 +1801,17 @@ impl DispatchHandle {
             self.card_states.status_emoji(&sid).await.as_deref(),
             Some(WORKING)
         );
+        // （fix-webui-qa-defects-round4 2.3，design D1 修正项）接收回执阶段
+        // 可停：回合已被服务端接受（prompt 已随开轮记入卡态）而 agent 首帧
+        // 未落（相位 SEED）——该阶段 interrupt 准入原来只认 WORKING，停止
+        // 会被 409（Idle）顶回，操作员在 600s 看门狗兜底前没有自助手段。
+        // 空卡 prompt（resume 激活语义的 SEED）不算：没有已接受的提交。
+        let receipt = match self.card_states.snapshot(&sid).await {
+            Some(st) => st.status_emoji == SEED && !st.user_prompt.is_empty(),
+            None => false,
+        };
         let parked = self.stall.parked_count(&sid).await > 0;
-        if !working && !parked {
+        if !working && !receipt && !parked {
             return CancelOutcome::Idle;
         }
         self.mark_cancelled_turn(&sid).await;
@@ -2121,16 +2152,24 @@ impl DispatchHandle {
         reply_to: Option<String>,
         origin: TurnOrigin,
     ) {
-        use crate::card_state::phase::WORKING;
+        use crate::card_state::phase::{SEED, WORKING};
 
         // In-flight check: if the session's card is still streaming (WORKING),
         // don't reset/don't POST a new card/don't SendAcp. Enqueue this turn
         // instead (back-pressure); Feishu additionally signals it with a ⏳
         // reaction on the in-flight card.
-        let in_flight = matches!(
-            self.card_states.status_emoji(session_id).await.as_deref(),
-            Some(WORKING)
-        );
+        // （fix-webui-qa-defects-round4 2.3）接收回执相位（SEED 且 prompt 已
+        // 随开轮记入卡态）同样在飞：此前该窗口的新提交会走 settled 臂把在飞
+        // 回合的卡态整个重置（emit_turn_card drop+seed），在飞回合与卡面被
+        // 二次提交顶掉。空 prompt 的 SEED（resume 激活语义）不算在飞——
+        // 没有回合在跑，新提交照常开轮。
+        let in_flight = match self.card_states.snapshot(session_id).await {
+            Some(st) => {
+                st.status_emoji == WORKING
+                    || (st.status_emoji == SEED && !st.user_prompt.is_empty())
+            }
+            None => false,
+        };
         if in_flight {
             self.map
                 .enqueue_turn(

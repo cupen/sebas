@@ -154,6 +154,15 @@ export class SebasWorkbenchComposer extends LitElement {
    */
   @property({ type: Boolean }) waitingApproval = false
   /**
+   * （fix-webui-qa-defects-round4 2.2，design D1）接收回执事实：提交已被
+   * 服务端接受并记为最新转录单元、agent 首个输出条目未落。数据源 = 转录
+   * 序列本身（dashboard 供数，与 transcript-view `awaitingReceipt` 同一派生）
+   * ——in-flight 判定据此并入该相位，停止控件在「已收到」窗口即可达，
+   * 不必等 core 的 turn_engaged 事件绕一圈。引擎侧同一事实由
+   * `turn_engaged`（SEED+prompt 卡态）并行供数，两者取或。
+   */
+  @property({ type: Boolean }) awaitingReceipt = false
+  /**
    * （workbench-live-conversation-flow 3.2）聚焦会话的子进程正在拉起
    * （0-turn 占位激活中 / Dormant resume 在途）。模型芯片据此显示
    * 「启动中…」而不是误导性的「无可用模型」——后者只在 spawn 完成
@@ -315,14 +324,18 @@ export class SebasWorkbenchComposer extends LitElement {
    * 启动中且有字（starting 形态，3.4）> turn 在飞且无字（停止方块）>
    * turn 在飞且有字（排队形态）> 有字（send）> 禁用。turn_engaged 覆盖
    * spawn 窗口（D2），starting 判定必须排在 queued 之前，否则启动等待会
-   * 伪装成排队提交。
+   * 伪装成排队提交。（fix-webui-qa-defects-round4 2.2）「在飞」并入接收
+   * 回执相位——`awaitingReceipt`（prompt 已是最新转录单元、无 agent 输出）
+   * 与 `turnInFlight`（引擎 turn_engaged，已含 SEED 回执相位）取或，两个
+   * 到达线（转录流推送 / 会话事件）谁先到都可停可排。
    */
   private submitState(): SubmitState {
     if (this.sending) return 'sending'
     if (this.sessionKey === null || this.unreachable !== null) return 'disabled'
     const hasText = this.text.trim().length > 0
     if (this.childStarting && hasText) return 'starting'
-    if (this.turnInFlight) return hasText ? 'queued' : 'stop'
+    const inFlight = this.turnInFlight || this.awaitingReceipt
+    if (inFlight) return hasText ? 'queued' : 'stop'
     return hasText ? 'send' : 'disabled'
   }
 
@@ -1102,6 +1115,21 @@ export class SebasWorkbenchComposer extends LitElement {
       .mode-select {
         --wa-form-control-width: max-content;
         max-width: 110px;
+      }
+      /* （round3 6.2）mode 下拉选项面板：4.1 的放宽写在本组件 shadow 树
+         够不到的 document 级（wa-overrides.css 的 wa-select 选择器只匹配
+         文档树元素），composer 的下拉因此仍按字折行。同款规则补进自己的
+         样式表——shadow 内样式表可以命中树内子组件的 part：面板最小宽度
+         放宽到内容宽（封顶 320px），选项文案单行省略，「allow（放行并留
+         审计）」等中文长模式文案不再折行挤高选项行。 */
+      wa-select::part(listbox) {
+        min-width: max-content;
+        max-width: 320px;
+      }
+      wa-option::part(label) {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
       }
       /* ── 模型芯片（design D3）────────────────────────────────────────── */
       .model-wrap {

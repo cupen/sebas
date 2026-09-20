@@ -37,6 +37,8 @@ async fn restore_rebuilds_dormant_mapping_with_full_transcript() {
             Some("/proj".to_string()),
             transcript,
             SessionIdentity::default(),
+            None,
+            None,
         )
         .await
         .expect("restore must succeed");
@@ -79,7 +81,10 @@ async fn restore_without_session_id_synthesizes_one_from_the_key() {
     let (router, _rx) = DispatchHandle::new(SessionMap::new());
     let key = web_key("r2");
     router
-        .web_restore_session(key.clone(), None, None, sample_transcript(), SessionIdentity::default())
+        .web_restore_session(key.clone(), None, None, sample_transcript(), SessionIdentity::default(),
+            None,
+            None,
+        )
         .await
         .expect("restore must succeed");
     let turns = router.session_turns(&key, 0).await.expect("mapping exists");
@@ -100,7 +105,10 @@ async fn restore_rejects_a_key_that_already_has_a_mapping() {
     let (router, _rx) = DispatchHandle::new(map);
 
     let err = router
-        .web_restore_session(key.clone(), None, None, sample_transcript(), SessionIdentity::default())
+        .web_restore_session(key.clone(), None, None, sample_transcript(), SessionIdentity::default(),
+            None,
+            None,
+        )
         .await;
     assert!(err.is_err(), "an existing mapping must block the restore");
     // 活映射未被触碰。
@@ -118,7 +126,10 @@ async fn restore_with_empty_transcript_still_rebuilds_the_mapping() {
     let (router, _rx) = DispatchHandle::new(SessionMap::new());
     let key = web_key("r4");
     router
-        .web_restore_session(key.clone(), Some("sid-4".into()), None, Vec::new(), SessionIdentity::default())
+        .web_restore_session(key.clone(), Some("sid-4".into()), None, Vec::new(), SessionIdentity::default(),
+            None,
+            None,
+        )
         .await
         .expect("restore must succeed");
     let info = router.session_info_for(&key).await.expect("mapping exists");
@@ -133,7 +144,10 @@ async fn activation_migrates_transcript_to_the_new_routing_id() {
     let (router, _rx) = DispatchHandle::new(SessionMap::new());
     let key = web_key("r5");
     router
-        .web_restore_session(key.clone(), Some("old-5".into()), None, sample_transcript(), SessionIdentity::default())
+        .web_restore_session(key.clone(), Some("old-5".into()), None, sample_transcript(), SessionIdentity::default(),
+            None,
+            None,
+        )
         .await
         .expect("restore must succeed");
     // dispatcher 的 resume 完成：activate 以新路由 id 翻正映射。
@@ -144,4 +158,66 @@ async fn activation_migrates_transcript_to_the_new_routing_id() {
         .expect("mapping exists after activation");
     assert_eq!(turns.len(), 3, "history must follow the new routing id");
     assert_eq!(turns[0].content, "hello", "order preserved after migration");
+}
+
+// ── fix-webui-qa-defects-round4 3.1：恢复保留命名来源 ────────────────────
+
+/// 归档快照携带的命名来源（label 与首条 prompt 预览）随恢复迁回映射：
+/// 快照行 label / user_prompt 与归档前一致，不再退化为短 id。
+#[tokio::test]
+async fn restore_preserves_the_row_naming_sources() {
+    let (router, _rx) = DispatchHandle::new(SessionMap::new());
+    let key = web_key("name");
+
+    router
+        .web_restore_session(
+            key.clone(),
+            Some("old-sid-name".into()),
+            Some("/proj".to_string()),
+            sample_transcript(),
+            SessionIdentity::default(),
+            Some("我的重构会话".into()),
+            Some("跑一下命令".into()),
+        )
+        .await
+        .expect("restore must succeed");
+
+    let info = router.session_info_for(&key).await.expect("mapping exists");
+    assert_eq!(
+        info.label.as_deref(),
+        Some("我的重构会话"),
+        "the operator label must survive the restore"
+    );
+    assert_eq!(
+        info.user_prompt.as_deref(),
+        Some("跑一下命令"),
+        "the first-prompt preview must survive the restore"
+    );
+}
+
+/// 历史快照（无命名元数据字段）恢复后回退现状行为——两来源全空，不伪造。
+#[tokio::test]
+async fn restore_without_naming_metadata_falls_back_to_current_behavior() {
+    let (router, _rx) = DispatchHandle::new(SessionMap::new());
+    let key = web_key("legacy-name");
+
+    router
+        .web_restore_session(
+            key.clone(),
+            Some("old-sid-legacy".into()),
+            Some("/proj".to_string()),
+            sample_transcript(),
+            SessionIdentity::default(),
+            None,
+            None,
+        )
+        .await
+        .expect("restore must succeed");
+
+    let info = router.session_info_for(&key).await.expect("mapping exists");
+    assert_eq!(info.label, None, "no operator label in a legacy entry");
+    assert_eq!(
+        info.user_prompt, None,
+        "no preview in a legacy entry: fall back to the short id (current behavior)"
+    );
 }

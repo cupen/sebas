@@ -27,10 +27,14 @@ import type { PendingSubmission } from './client.js'
 
 /**
  * （session-parallel-liveness-and-unread-polish 2.1/2.2，design D2）会话相位
- * 帧载荷：`session.created` 与 `session.updated` 同形，五键每次帧必带——
+ * 帧载荷：`session.created` 与 `session.updated` 同形，键每次帧必带——
  * 旧 `status` 人读字符串已删除，无「只在 true 时上 wire」的兼容保留。rail
  * 圆点/徽标、composer 提交控件、待执行栈全部从这一份帧事实真读，不做任何
  * `status_slug === 'working'` 之类的字符串等值回退，也不等 HTTP 详情轮询。
+ *
+ * （fix-webui-qa-defects-round5 6.3）载荷扩展 `label`（既有帧的载荷扩展，
+ * 非新帧型）：操作者命名随每次帧如实下发——rail 据此把帧触发的行名重取
+ * 收窄为「帧 label 与行已知 label 不一致才调度」，无关相位帧不再放大请求。
  */
 export interface SessionPhaseFrame {
   /** 七词相位 starting|queued|working|done|failed|waiting|dormant。 */
@@ -41,6 +45,8 @@ export interface SessionPhaseFrame {
   msg_count: number
   /** 待生效提交全量（投递序），每帧必带。 */
   pending: PendingSubmission[]
+  /** 操作者命名；null = 未设置（行名回退预览/短 id），每帧必带。 */
+  label: string | null
 }
 
 export interface WsEvents {

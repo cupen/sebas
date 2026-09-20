@@ -14,7 +14,7 @@ Session identity on the wire is channel-neutral: the protocol carries a `Channel
 
 The core process SHALL remain the only owner of session mapping state and the
 only spawner of ACP child processes. A channel client SHALL NOT construct its
-own `RouterHandle`, mutate mapping state locally, or spawn children; every
+own `DispatchHandle`, mutate mapping state locally, or spawn children; every
 mutation a client wants SHALL be requested over the channel and applied by the
 core. Client-side data SHALL be treated as a cache of core state with no
 independent authority.
@@ -33,11 +33,11 @@ independent authority.
   value on the next snapshot or event
 
 ### Requirement: Channel transport and authentication
-The core SHALL expose the channel on a Unix domain socket created with owner-only permissions (0600) at a configurable path defaulting to `$XDG_RUNTIME_DIR/sebas/core.sock` (falling back to a per-uid temporary directory when `XDG_RUNTIME_DIR` is unset). Every connection SHALL be authenticated by both peer credentials — the connecting uid MUST equal the core's own uid — and a shared secret supplied out of band, in the same posture as the watchdog control RPC. A connection failing either check SHALL be rejected and closed without processing any request. The channel SHALL NOT be exposed over TCP. **补充**：peer-uid 与 secret 鉴权 SHALL 经由真实跨 uid 进程（不仅同 uid 单测）验证——本期单测覆盖 `cross_uid_rejected` 路径。
+The core SHALL expose the channel on a local IPC endpoint at a configurable path defaulting to `$XDG_RUNTIME_DIR/sebas/core.sock` (falling back to a per-uid temporary directory when `XDG_RUNTIME_DIR` is unset): a Unix domain socket with owner-only permissions (0600) on Unix, mapped deterministically to a named pipe (`\\.\pipe\sebas/<path>`) on Windows. On Unix every connection SHALL be authenticated by both peer credentials — the connecting uid MUST equal the core's own uid — and a shared secret supplied out of band, in the same posture as the watchdog control RPC; on Windows, where peer-uid credentials are not available, the shared secret plus the default named-pipe ACL carry the authentication (peer-uid checks are a Unix-only guarantee). A connection failing either check SHALL be rejected and closed without processing any request. The channel SHALL NOT be exposed over TCP.
 
 #### Scenario: foreign uid rejected
 
-- **WHEN** a process running as a different uid connects to the socket
+- **WHEN** on Unix a process running as a different uid connects to the socket
 - **THEN** the connection is rejected and closed, and no request on it is processed
 
 #### Scenario: missing or wrong secret rejected
@@ -47,7 +47,7 @@ The core SHALL expose the channel on a Unix domain socket created with owner-onl
 
 #### Scenario: cross_uid_rejected_live_process
 
-- **WHEN** 跨 uid 进程（fork 子进程后 `setuid` 到不同账户——不是同进程改 uid，而是真实跨进程凭证）尝试连接 core socket 并发请求
+- **WHEN**（Unix）跨 uid 进程（fork 子进程后 `setuid` 到不同账户——不是同进程改 uid，而是真实跨进程凭证）尝试连接 core socket 并发请求
 - **THEN** 连接被拒绝；服务端 SHALL 在日志写 peer-uid 不匹配记录（`warn!("core channel: peer uid mismatch; closing")`）；不进入 request 处理
 
 #### Scenario: stale socket file is reclaimed
@@ -182,6 +182,30 @@ never silently ignored.
 - **THEN** the response is a typed rejection stating that it is already running,
   and the in-flight turn is unaffected
 
+### Requirement: Pending queue advances without depending on a single terminal event
+
+The core SHALL NOT allow a session's pending submission queue to stall indefinitely behind a turn that never settles. When a session's turn has been in flight (working phase), no permission decision is parked on it, and no event of any kind has arrived for that session for a configurable continuous duration (`turn_stall_timeout`, default 600 seconds, 0 disables the guard), the core SHALL force-settle the turn to a terminal phase, drain the queue head, and SHALL emit a visible warning notice naming the session and the number of stalled submissions it released. A turn parked on a pending permission request SHALL be exempt from the stall guard for as long as it stays parked. The guard SHALL NOT fire while the session is streaming events, regardless of turn duration.
+
+#### Scenario: stalled turn is force-settled and the queue drains
+
+- **WHEN** a session's turn has been working with zero events for longer than `turn_stall_timeout` and no permission is parked
+- **THEN** the core settles the turn to a terminal phase, starts the next queued submission (if any), and a warning notice names the session and the stalled submissions released
+
+#### Scenario: parked permission does not trip the stall guard
+
+- **WHEN** a session's turn has been waiting on a permission request longer than `turn_stall_timeout`
+- **THEN** the guard does not fire; the turn stays parked until the operator answers or cancels it
+
+#### Scenario: active streaming never trips the stall guard
+
+- **WHEN** a session has been streaming a long-running turn with events arriving continuously
+- **THEN** the guard does not fire regardless of total turn duration
+
+#### Scenario: stall guard can be disabled
+
+- **WHEN** `turn_stall_timeout` is configured as `0`
+- **THEN** no stall detection runs and behavior matches the pre-guard semantics
+
 ### Requirement: Turn content retrieval
 
 The channel SHALL provide a method returning the rendered turn content the core
@@ -212,7 +236,7 @@ to tell a tool invocation apart from the agent's prose.
   invocation is distinguishable from the prose rather than looking identical to it
 
 ### Requirement: Honest degradation when the core is unreachable
-When the channel cannot be reached — socket absent, connection refused, secret rejected, or the connection dropped — a client SHALL surface that condition with its cause and SHALL NOT present stale data as current, report a mutation as succeeded, or offer a control whose request cannot be delivered. A client SHALL reconnect on its own and resume with a fresh snapshot when the core returns. **补充**：cause 富化沿用已落地的无条件 enrich（`reachability()` 全失败分支并入闩锁摘要，不限于 ENOENT 分支——闩锁 ready 自清除，stale 读已防住）；三类不可达的机器区分走 `kind` 字段（startup_failed / auth_rejected / disconnected），cause 保持人类可读全串。
+When the channel cannot be reached — socket absent, connection refused, secret rejected, or the connection dropped — a client SHALL surface that condition with its cause and SHALL NOT present stale data as current, report a mutation as succeeded, or offer a control whose request cannot be delivered. A client SHALL reconnect on its own and resume with a fresh snapshot when the core returns. cause 富化由 client 侧无条件 enrich（`reachability()` 全失败分支并入闩锁摘要，不限于 ENOENT 分支——闩锁 ready 自清除，stale 读已防住）；三类不可达的机器区分走 `kind` 字段（startup_failed / auth_rejected / disconnected），cause 保持人类可读全串。
 
 #### Scenario: core down is stated, not hidden
 
@@ -425,7 +449,7 @@ core SHALL 在 `SEBAS_CORE_SECRET` 缺失或为空时仍武装核心会话通道
 - **THEN** 新 core 以 bind 失败退出码退出，supervisor 可据此标记 Degraded 而非无限重启
 
 ### Requirement: State store channel surface
-core session channel SHALL 暴露 state-store 引擎的 snapshot / mutation / subscribe 三类 RPC：`StateSnapshot { domain }` 返回该 domain 的当前快照，`StateMutation { domain, payload }` 应用变更，`StateSubscribe` 启动变更推送流；服务端 SHALL 把请求路由到 state-store engine 实例并以 `StateSnapshot / StateMutationOk` 帧回包。订阅流 SHALL 在首帧之后推送该 domain 的后续 mutation 帧，且 SHALL 在 mutation 失败时回 `Rejected { kind: ... }` typed rejection（不静默吞错）。三类 RPC SHALL 走与 session RPC 同样的 secret+peer-uid 鉴权。provider / model / alias 数据 SHALL 经 `providers` 与 `aliases` 域管理，默认 provider 与默认 model（defaults）SHALL 并入 `settings` 域；这些域 SHALL 是 provider 数据唯一的写入通道，core 以外的进程 SHALL NOT 经文件或其它路径直接改写该数据。
+core session channel SHALL 暴露 state-store 引擎的 snapshot / mutation / subscribe 三类 RPC：`StateSnapshot { domain }` 返回该 domain 的当前快照，`StateMutation { domain, payload }` 应用变更，`StateSubscribe` 启动变更推送流；服务端 SHALL 把请求路由到 state-store engine 实例并以 `StateSnapshot / StateMutationOk` 帧回包。订阅流 SHALL 在首帧之后推送该 domain 的后续变更通知帧（`Changed { scope }`——帧只带 scope 字符串，不带 payload；客户端据 scope 重取快照），且 SHALL 在 mutation 失败时回 `Rejected { rejection: ... }` typed rejection（wire 上以 `code` 标别 rejection 种类；不静默吞错）。三类 RPC SHALL 走与 session RPC 同样的 secret+peer-uid 鉴权。provider / model / alias 数据 SHALL 经 `providers` 与 `aliases` 域管理，默认 provider 与默认 model（defaults）SHALL 并入 `settings` 域；这些域 SHALL 是 provider 数据唯一的写入通道，core 以外的进程 SHALL NOT 经文件或其它路径直接改写该数据。
 
 #### Scenario: StateSnapshot returns current snapshot
 
@@ -440,12 +464,12 @@ core session channel SHALL 暴露 state-store 引擎的 snapshot / mutation / su
 #### Scenario: StateMutation rejected does not silently swallow
 
 - **WHEN** `StateMutation` 携带非法 payload（如未知字段 / 类型错误）
-- **THEN** 服务端回 `Rejected { kind: ... }` 含 typed rejection；engine 状态未变
+- **THEN** 服务端回 `Rejected { rejection: ... }` 含 typed rejection；engine 状态未变
 
-#### Scenario: StateSubscribe delivers mutations after snapshot
+#### Scenario: StateSubscribe delivers change notifications after snapshot
 
 - **WHEN** 客户端先发 `StateSubscribe { domain }`、收到首帧 snapshot；服务端在订阅期间应用 mutation
-- **THEN** 客户端收到 mutation 帧（带 domain + payload）；滞后 SHALL 走 lag-disconnect 路径
+- **THEN** 客户端收到 `Changed { scope }` 通知帧并据此重取该 domain 快照；订阅滞后（Lagged）时服务端 SHALL 重发全量快照并保持连接，不断开订阅
 
 #### Scenario: provider management runs over the channel
 
@@ -458,12 +482,12 @@ core session channel SHALL 暴露 state-store 引擎的 snapshot / mutation / su
 - **THEN** 该默认值与 provider 数据同库持久化，core 重启后仍可读，且不产生独立的 defaults 文件
 
 ### Requirement: Channel client reachability distinguishes startup failure
-`reachability()`（channel client 侧）SHALL 区分三类不可达并经 `Reachability` 枚举显式表达：(a) **socket 不存在**（core 从未启动或启动失败退出，errno=ENOENT 形态）→ `Reachability::StartupFailed { cause }`；(b) **socket 在但握手被拒**（secret 错误）→ `Reachability::AuthRejected { cause }`；(c) **握手成功后断连** → `Reachability::Disconnected { cause }`。其中 `Reachability` 三变体 + `kind` 字段是本 change 新增（fail-fast 只落地了 cause 字符串富化，未做三态枚举——owner 归属见本 change design D3）。cause 富化沿用已落地的无条件 enrich（client.rs `enrich_with_startup_summary`）：闩锁文件存在时 cause 形如 `core startup failed: <原因>`（前缀由后端拼，前端原文渲染）；`kind` 字段是前端区分文案的机器可读依据。三类 SHALL NOT 互相混淆——webui 不允许统一显示 "core is not connected"。
+`reachability()`（channel client 侧）SHALL 区分三类不可达并经 `Reachability` 枚举显式表达：(a) **socket 不存在**（core 从未启动或启动失败退出，errno=ENOENT 形态）→ `Reachability::StartupFailed { cause }`；(b) **socket 在但握手被拒**（secret 错误）→ `Reachability::AuthRejected { cause }`；(c) **握手成功后断连** → `Reachability::Disconnected { cause }`。cause 富化由 client 侧无条件 enrich（`enrich_with_startup_summary`）：闩锁文件存在时 cause 形如 `core startup failed: <原因>`（前缀由后端拼，前端原文渲染）；`kind` 字段是前端区分文案的机器可读依据。三类 SHALL NOT 互相混淆——webui 不允许统一显示 "core is not connected"。
 
 #### Scenario: socket-not-found reports startup failure with SEBAS_STARTUP_ERROR_FILE
 
 - **WHEN** channel socket 路径不存在、且 `SEBAS_STARTUP_ERROR_FILE` 指向的文件含 `startup-failure: <原因>` 一行
-- **THEN** `Reachability::StartupFailed { cause }` 返回；cause SHALL 为 `core startup failed: <原因>` 全串（与已落地的 enrich 行为一致）；`kind` SHALL 为 `startup_failed`
+- **THEN** `Reachability::StartupFailed { cause }` 返回；cause SHALL 为 `core startup failed: <原因>` 全串（enrich 行为）；`kind` SHALL 为 `startup_failed`
 
 #### Scenario: socket-not-found fallback cause
 
@@ -496,7 +520,7 @@ core session channel SHALL 暴露 state-store 引擎的 snapshot / mutation / su
 #### Scenario: Message on unknown key is rejected
 
 - **WHEN** 客户端发 `Message { key: <未知>, message: "hi" }`
-- **THEN** core 回 `Rejected { kind: UnknownSession }`；不创建任何会话
+- **THEN** core 回 `Rejected { rejection: unknown_session }`（wire 上以 `code` 标别种类）；不创建任何会话
 
 ### Requirement: Model list fetch over the channel
 

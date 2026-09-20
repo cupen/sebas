@@ -22,6 +22,7 @@ import {
   listSessions,
   ProjectRail,
   resetState,
+  setSessionLabel,
   waitStatus,
 } from './helpers/index'
 
@@ -132,6 +133,62 @@ test.describe('会话管理', () => {
       })
       const cleared = (await listSessions(page.request)).find((r) => r.encoded_key === key)
       expect(cleared?.label ?? null).toBeNull()
+
+      expect(collector.clean()).toEqual([])
+    })
+
+    test('a label write through the API flips the rail row live, without a reload (round5 C)', async ({
+      page,
+    }) => {
+      // project-session-actions delta「label writes through any path update
+      // the row live」（fix-webui-qa-defects-round5 3.x）：label 写入经既有
+      // session.updated 帧广播，rail 对该会话做 400ms 尾沿防抖的重取并就地
+      // 重渲染行名——写路径无关（对话框或 label API）。API 写半边是帧链路
+      // 的唯一无交互生产者；10s 轮询兜底也会翻名，所以窗口钉在 3s 内才算
+      // 帧+防抖链路生效。
+      const rail = new ProjectRail(page)
+
+      await resetState(page.request)
+      const { name: projectName } = await ensureSceneProject(page.request)
+      const tag = `live-label-${Date.now()}`
+      const key = await createSession(page.request, { prompt: tag })
+      await waitStatus(page.request, key, ['done'])
+
+      await page.goto('/')
+      await rail.ensureProjectExpanded(projectName)
+      const row = rail.host
+        .locator('li.session-item:not(.archived)', { hasText: tag })
+        .first()
+      await expect(row).toBeVisible({ timeout: 10_000 })
+      // reload 探针：行名翻新必须发生在同一文档里（免刷新）。
+      await page.evaluate(() => {
+        ;(window as unknown as { __labelProbeLoaded?: boolean }).__labelProbeLoaded = true
+      })
+
+      // API 直写 label（不经 rail 对话框），页面保持原样。
+      const label = `验收标签-${Date.now()}`
+      await setSessionLabel(page.request, key, label)
+
+      // 防抖窗口（400ms）+ 一次列表重取内行名翻为 label——不刷新。
+      const labeledRow = rail.host
+        .locator('li.session-item:not(.archived)', { hasText: label })
+        .first()
+      await expect(labeledRow.locator('.session-name')).toHaveText(label, { timeout: 3_000 })
+
+      // API 真源：label 已落库。
+      const stored = (await listSessions(page.request)).find((r) => r.encoded_key === key)
+      expect(stored?.label).toBe(label)
+
+      // 清空（API 半边）同样触发重取：行名回退首条 prompt 预览。
+      await setSessionLabel(page.request, key, null)
+      await expect(row.locator('.session-name')).toContainText(tag, { timeout: 3_000 })
+
+      // 免刷新佐证：初载探针仍在（任何 reload 都会清掉它）。
+      expect(
+        await page.evaluate(
+          () => (window as unknown as { __labelProbeLoaded?: boolean }).__labelProbeLoaded,
+        ),
+      ).toBe(true)
 
       expect(collector.clean()).toEqual([])
     })

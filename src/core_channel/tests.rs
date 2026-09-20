@@ -331,11 +331,21 @@ async fn backend_methods_reach_the_right_handlers() {
 
     // turns: seed content on the core, fetch via backend, incremental.
     // workbench-turn-queue 2.2：prompt 一律在开轮时由 seed_card 写入（提交
-    // 即写已退役）。两次 web_send_message 各开一轮 → 两条 prompt 条目；
-    // 最后的 seed_card("the prompt") 是重入（幂等，不再追加）。
+    // 即写已退役）。round4 2.3：回合 A 仍处接收回执相位（SEED+prompt）时
+    // 到达的第二条消息按在飞语义**入队**——先让回合 A 正常完成（Finished
+    // 收尾 DONE），第二条 web_send_message 才开回合 B（第二条 prompt 条目）。
     core.handle
-        .seed_card("s-live".into(), "the prompt".into())
+        .apply_event(
+            "s-live",
+            &AcpEvent::Finished {
+                session_id: "s-live".into(),
+            },
+        )
         .await;
+    core.handle
+        .web_send_message(channel_key.clone(), "hello".into())
+        .await
+        .ok();
     use sebas_acp::claude::session::AcpEvent;
     core.handle
         .apply_event(
@@ -347,7 +357,7 @@ async fn backend_methods_reach_the_right_handlers() {
         )
         .await;
     let all = backend.turns(key.clone(), 0).await.unwrap();
-    assert_eq!(all.len(), 3); // prompt (turn 1) + prompt (turn 2) + delta
+    assert_eq!(all.len(), 3); // prompt (turn A) + prompt (turn B) + delta
     let tail = backend.turns(key.clone(), 2).await.unwrap();
     assert_eq!(tail.len(), 1);
     assert_eq!(tail[0].content, "chunk one");

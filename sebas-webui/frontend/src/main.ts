@@ -19,6 +19,15 @@ setIconPath('/icons')
 // sebas's theme mapping on top of Web Awesome (indigo brand, dark surfaces).
 import './styles/wa-overrides.css'
 
+// （fix-webui-qa-defects-round3 1.2，第三轮）wa-select 浮层残留清理：根因是
+// popover dismiss 吞 click 语义（指针序列期间的 hidePopover 吞掉该序列的
+// click）。双保险——change 捕获监听在收起链启动时就经 0ms 定时器清残留（抢
+// 在下一次点击之前），pointerdown 捕获兜底只做检测、动作同样延后到定时器；
+// 摘层改走 removeAttribute('popover') 脱离注册，绝不再调 hidePopover。
+// 单点安装覆盖全部使用点（创建弹窗 / composer 模式切换 / 执行节点选择）。
+import { installWaSelectRescue } from './components/wa-select-rescue.js'
+installWaSelectRescue()
+
 // Theme: `wa-dark` on <html> is the single switch (dark is the default; the
 // mode lives in src/theme.ts and index.html applies it before first paint).
 // System mode live-follows an OS preference change.

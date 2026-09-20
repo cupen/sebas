@@ -14,6 +14,7 @@ import {
   createSession,
   ensureSceneProject,
   ErrorCollector,
+  getSession,
   ProjectRail,
   resetState,
   sendMessage,
@@ -126,6 +127,99 @@ test.describe('待执行堆叠区', () => {
     await expect(toast).toContainText('待执行提交不存在')
     // 对账：条目仍在服务端真相里 → 堆叠区不吞条目。
     await expect(stack).toContainText('reject me', { timeout: 10_000 })
+
+    expect(collector.clean()).toEqual([])
+  })
+
+  test('move up and remove ride the composite to the hosting backend; queue and API agree (round5 A)', async ({
+    page,
+  }) => {
+    // core-session-channel delta「reorder from the web UI in an embedded
+    // deployment」+「removing a pending submission over the channel」
+    // （fix-webui-qa-defects-round5 1.1：复合后端把 pending 管理调用按 key
+    // 转发到承载子后端）。沙箱即 bare-core embedded 形态：GUI 点「上移/
+    // 移除」→ webui API → 复合后端 → acp 桥，顺序与移除经
+    // GET /api/sessions/<key> 的 pending 全量对账。
+    //
+    // 竞态策略：入飞回合用 'stream'（WORKING ≈2s），随后快速连发 6 条排队
+    // ——每回合约 800ms，队列寿命 ≈5s；操作只碰队尾两条（FIFO 下最后才
+    // 消费），断言全部用相对序/存在性谓词，队头消费不构成干扰。
+    test.setTimeout(90_000)
+    await resetState(page.request)
+    await ensureSceneProject(page.request)
+
+    const key = await createSession(page.request, { prompt: 'stream' })
+    await page.goto('/')
+    await expect(page.locator('sebas-transcript-view').first()).toContainText(/chunk/, {
+      timeout: 15_000,
+    })
+
+    // 边发边排：6 条排队（流式回合在飞，全部确定性入队）。
+    const t = Date.now()
+    const tags = Array.from({ length: 6 }, (_, i) => `q${i + 1}-${t}`)
+    for (const tag of tags) {
+      await sendMessage(page.request, key, tag)
+    }
+    const stack = page.locator('sebas-pending-stack [data-testid="pending-stack"]')
+    await expect(stack).toBeVisible({ timeout: 5_000 })
+    await expect(stack).toContainText(tags[5])
+
+    // API 真源：pending 全量按投递序呈现（helpers SessionDetail.pending）。
+    // 断言全用队尾两条的相对序/存在性——队头消费（FIFO 先跑先离队）不改写
+    // 相对序，规避「边跑边排」的竞态。
+    const apiPending = async () =>
+      (await getSession(page.request, key)).detail?.pending?.map((p) => p.text) ?? []
+
+    // 上移队尾：tags[5] 换到 tags[4] 之前（组内 splice 语义）。
+    const tail = stack.locator('.entry', { hasText: tags[5] })
+    await tail.locator('.mv-up').click()
+    await expect
+      .poll(
+        async () => {
+          const texts = await apiPending()
+          const a = texts.indexOf(tags[5])
+          const b = texts.indexOf(tags[4])
+          return a >= 0 && b >= 0 && a === b - 1
+        },
+        { timeout: 10_000 },
+      )
+      .toBe(true)
+    // GUI 与 API 一致：栈内 tags[5] 行紧邻 tags[4] 行之前（队头可能已在
+    // 消费，故按行序相对断言，不钉绝对下标）。
+    await expect
+      .poll(
+        async () => {
+          const texts = await stack.locator('.entry .text').allTextContents()
+          const a = texts.findIndex((t) => t.includes(tags[5]))
+          const b = texts.findIndex((t) => t.includes(tags[4]))
+          return a >= 0 && b >= 0 && a === b - 1
+        },
+        { timeout: 10_000 },
+      )
+      .toBe(true)
+
+    // 移除（新）队尾 tags[4]：API 与 GUI 一致缺失该条目。
+    const newTail = stack.locator('.entry', { hasText: tags[4] })
+    await newTail.locator('.remove').click()
+    await expect.poll(apiPending, { timeout: 10_000 }).not.toContain(tags[4])
+    await expect(stack.locator('.entry', { hasText: tags[4] })).toHaveCount(0, {
+      timeout: 10_000,
+    })
+    // 其余条目原位保留：tags[5] 仍在队尾（相对序谓词，不钉全量数组——
+    // 队头可能已在消费）。
+    await expect
+      .poll(
+        async () => {
+          const texts = await apiPending()
+          return texts.includes(tags[5]) && texts.indexOf(tags[5]) === texts.length - 1
+        },
+        { timeout: 10_000 },
+      )
+      .toBe(true)
+
+    // 队列自然排空（排队回合也会跑完），会话收敛回 done。
+    await waitStatus(page.request, key, ['done'], 30_000)
+    await expect(stack).toHaveCount(0, { timeout: 10_000 })
 
     expect(collector.clean()).toEqual([])
   })

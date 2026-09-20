@@ -12,10 +12,13 @@
 import type { APIRequestContext } from '@playwright/test'
 import { sceneDir } from './scene.js'
 
+// `waiting`（泊车审批在等操作者）是 detail/rail 的七词相位之一（webui
+// models.rs Waiting → "waiting"）；审批对账旅程用它做 API 侧等待。
 export type StatusSlug =
   | 'starting'
   | 'queued'
   | 'working'
+  | 'waiting'
   | 'done'
   | 'failed'
   | 'dormant'
@@ -65,6 +68,8 @@ export interface SessionDetail {
   agent_kind?: string | null
   /** fix-pending-queue-liveness：回合占用事实——只在 true 时上 wire。 */
   turn_engaged?: true
+  /** workbench-turn-queue D1：投递序的待执行提交（队列管理面断言用）。 */
+  pending?: PendingSubmissionRow[]
 }
 
 /** 泊车审批读模型行（fix-webui-approval-restore-and-session-identity 1.2）。 */
@@ -72,6 +77,15 @@ export interface PendingApproval {
   request_id: string
   tool_name: string
   args: unknown
+}
+
+/** 会话详情携带的待执行提交行（workbench-turn-queue D1 wire 形状）。 */
+export interface PendingSubmissionRow {
+  id: number
+  text: string
+  position: number
+  disposition: 'staging' | 'turn'
+  priority: boolean
 }
 
 /**
@@ -182,6 +196,20 @@ export async function sendMessage(
 ): Promise<void> {
   const resp = await request.post(`${sessionPath(encodedKey)}/message`, { data: { message } })
   if (!resp.ok()) throw new Error(`sendMessage failed: HTTP ${resp.status()}`)
+}
+
+/**
+ * project-session-actions「label writes through any path update the row
+ * live」的 API 写入半边（fix-webui-qa-defects-round5 3.x）：绕过 rail 对话框
+ * 直接写 label；`null` = 清空。
+ */
+export async function setSessionLabel(
+  request: APIRequestContext,
+  encodedKey: string,
+  label: string | null,
+): Promise<void> {
+  const resp = await request.post(`${sessionPath(encodedKey)}/label`, { data: { label } })
+  if (!resp.ok()) throw new Error(`setSessionLabel failed: HTTP ${resp.status()}`)
 }
 
 export async function listProjects(request: APIRequestContext): Promise<
@@ -379,6 +407,33 @@ export function waitStatus(
   timeout = 20_000,
 ): Promise<SessionDetail> {
   return pollSession(request, encodedKey, (d) => slugs.includes(d.status_slug), { timeout })
+}
+
+/**
+ * Focus-safe wait: the DETAIL read (GET /api/sessions/{key}) sets the server
+ * focus pointer as a side effect（api.rs「Reading the detail focuses this
+ * session」——深链语义）。聚焦敏感的旅程（未读徽章的「聚焦 + 可见不呈现」
+ * 推导、底部跟读锚）在点击聚焦之后轮询详情，会把服务端焦点偷回被轮询的
+ * 会话，被测语义随之失真——测试自己的探针流量成了焦点小偷。列表读取
+ * （GET /api/sessions）无焦点副作用，行内 `status_slug` 同样可判相位。
+ */
+export async function waitListStatus(
+  request: APIRequestContext,
+  encodedKey: string,
+  slugs: StatusSlug[],
+  timeout = 20_000,
+): Promise<SessionRow> {
+  const deadline = Date.now() + timeout
+  for (;;) {
+    const row = (await listSessions(request)).find((r) => r.encoded_key === encodedKey)
+    if (row && slugs.includes(row.status_slug)) return row
+    if (Date.now() > deadline) {
+      throw new Error(
+        `waitListStatus: condition not met within ${timeout}ms (last: ${row?.status_slug ?? 'row missing'})`,
+      )
+    }
+    await new Promise((r) => setTimeout(r, 250))
+  }
 }
 
 /**

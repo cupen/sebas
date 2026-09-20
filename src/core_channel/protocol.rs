@@ -165,6 +165,13 @@ pub enum CoreChannelRequest {
         /// 旧客户端不发这个字段 = 全空身份（恢复维持现默认）。
         #[serde(default)]
         identity: SessionIdentity,
+        /// （fix-webui-qa-defects-round4 3.1）归档时刻的操作者 label 与首条
+        /// prompt 预览——命名来源随快照迁回。`#[serde(default)]`：旧客户端
+        /// 不发 = `None`（回退现状短 id）。
+        #[serde(default)]
+        label: Option<String>,
+        #[serde(default)]
+        prompt_preview: Option<String>,
     },
     /// （workbench-turn-queue 4.2/D7）按 id 移除一个未开始的待生效提交。
     RemovePending { key: ChannelKey, pending_id: u64 },
@@ -493,6 +500,8 @@ mod tests {
                 project_dir: Some("/proj".into()),
                 transcript: vec![TurnEntry::prompt(0, "p")],
                 identity: sebas_dispatch::SessionIdentity::default(),
+                label: None,
+                prompt_preview: None,
             },
             // fix-webui-approval-restore-and-session-identity：待批审批读模型
             // 与会话命名的 wire 往返。

@@ -92,6 +92,18 @@ const MARK_SEEN_DEBOUNCE_MS = 250
 const emptyStreamSessions = new Set<string>()
 
 /**
+ * 空流登记的外部入口（fix-webui-qa-defects-round3 6.1）：真实应用里聚焦
+ * 会话为空时 dashboard 渲染的是自己的空态占位（`empty-stream` div）而非
+ * transcript 组件——组件内的 `settleEmptyStreamAnchor` 登记分支永远不跑，
+ * 占位会话的首交换只能靠巧合推进锚（QA round5：新建即聚焦会话的首个交换
+ * 冒出徽标 + 「~1 new」缝且不消）。dashboard 在渲染空态时经此登记，之后
+ * 首回合到达仍按「看着到达」消费（聚焦 + 可见 + 贴底 guard 不变）。幂等。
+ */
+export function registerEmptyStreamSession(sessionKey: string): void {
+  if (sessionKey) emptyStreamSessions.add(sessionKey)
+}
+
+/**
  * 展开条目的截断阈值（fix-webui-streaming-liveness 4.5，D5.5）：行数或
  * 字符数任一超限即截断显示（取先到）。实现侧常量，后续可调。
  */
@@ -506,6 +518,18 @@ export function resolveAgentDisplay(agentDisplay: string | null | undefined): st
  */
 export function awaitingReceipt(units: TurnUnit[]): boolean {
   return units.length > 0 && units[units.length - 1].kind === 'operator'
+}
+
+/**
+ * （fix-webui-qa-defects-round4 2.2，design D1）同一事实的 entries 级同构
+ * 判定：最新转录条目仍是操作员提交（`kind === 'prompt'`）即处于「已收到」
+ * 接收回执相位。composer 的停止控件供数走这里——dashboard 手里是 detail
+ * 的 entries（转录流推送即时到达），无需先经 transcript-view 的分组管线；
+ * 与 [`awaitingReceipt`] 是同一事实的两张皮（分组前后），漂移由各自单测
+ * 钉住。
+ */
+export function entriesAwaitReceipt(entries: readonly { kind: string }[]): boolean {
+  return entries.length > 0 && entries[entries.length - 1].kind === 'prompt'
 }
 
 /**
@@ -1053,11 +1077,29 @@ export class SebasTranscriptView extends LitElement {
     }
     if (changed.has('entries') || changed.has('sessionKey')) {
       // 快照收敛：position 已被属性覆盖的流式条目裁掉，只留快照还没
-      // 追上的尾巴（乱序竞态下绝不回退视图）。
+      // 追上的尾巴（乱序竞速下绝不回退视图）。
       const snapMax = this.entries.reduce((m, e) => Math.max(m, e.position), 0)
       this.streamEntries = this.streamEntries.filter((e) => e.position > snapMax)
       this.rebuildUnits()
       this.recomputeSeam()
+      // （round3 6.1）快照路径与 turn.append 路径同一贴底语义：秒回场景 /
+      // 重拉收敛下新段经 entries 属性到达（不经 turn.append），此前只有
+      // 滚动事件能触发标记（短对话不溢出 = 滚动事件永不来——首个交换的
+      // 锚推进依赖巧合）。聚焦 + 可见 + 贴底时随快照增长推进共享锚（与
+      // onTurnAppend 同一 guard），seam 与 rail 徽标不再驻留。后台 tab /
+      // 用户上滚（sticky=false）不推进。**仅在会话未切换的更新里推进**：
+      // 打开既有未读会话的首帧快照（sessionKey 同帧变更）是「开门」不是
+      // 「看着到达」，锚原地不动、seam 照旧呈现（3.1 契约）。组件首次
+      // 挂载同理（hasUpdated=false：首更 changed 不带未显式设置的属性，
+      // 是装载不是到达）。
+      if (
+        this.hasUpdated &&
+        !changed.has('sessionKey') &&
+        this.sticky &&
+        this.docVisible()
+      ) {
+        this.scheduleMarkSeen()
+      }
       // （3.1）空流建立锚点：占位会话从 0 回合转出首回合、且操作员聚焦、
       // 文档可见、贴底时，这是「亲眼看着到达」的首交换——锚从空流状态建立，
       // 不画 seam、不闪徽章（session-unread-badge「first focused exchange of a

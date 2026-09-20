@@ -14,10 +14,15 @@ pub struct PendingSubmissionView {
 }
 
 /// （session-parallel-liveness-and-unread-polish 2.1，design D2）会话相位帧
-/// 的载荷：`session.updated` 与 `session.created` 同形，**五个键每次帧必带**
-/// ——旧 `status` 人读字段删除，无 serde 缺省、无「只在 true 时上 wire」的
-/// 兼容保留（core/webui/frontend 同 binary 发布，wire 无独立版本号）。
-/// 前端所有「这个会话当前状态」的路径只消费这一份帧事实，不做字符串回退。
+/// 的载荷：`session.updated` 与 `session.created` 同形，**五键每次帧必带**——
+/// 旧 `status` 人读字段删除，无 serde 缺省、无「只在 true 时上 wire」的兼容保留
+/// （core/webui/frontend 同 binary 发布，wire 无独立版本号）。前端所有「这个
+/// 会话当前状态」的路径只消费这一份帧事实，不做字符串回退。
+///
+/// （fix-webui-qa-defects-round5 6.3）`label` 随帧扩展（proposal Non-goals 的
+/// 「既有帧载荷扩展，非新帧型」）：操作者命名随每次帧如实下发——rail 据此把
+/// 帧触发的行名重取收窄为「帧 label 与行已知 label 不一致才调度」，无关相位
+/// 帧（状态/队列翻转）不再放大请求。
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionPhaseFrame {
     /// 七词相位 `starting|queued|working|done|failed|waiting|dormant`
@@ -29,6 +34,8 @@ pub struct SessionPhaseFrame {
     pub msg_count: u64,
     /// 待生效提交全量（投递序，原石 `PendingSubmission`），总是携带。
     pub pending: Vec<sebas_dispatch::PendingSubmission>,
+    /// 操作者命名（5.1，design D6；None = 未设置，行名回退预览/短 id）。
+    pub label: Option<String>,
 }
 
 /// Events that the WebUI can push to connected clients.
@@ -142,9 +149,10 @@ mod tests {
     /// `type`; this shape is the WS contract clients key off.
     ///
     /// （session-parallel-liveness-and-unread-polish 2.1，design D2）
-    /// `session.created` / `session.updated` 是五键齐全的相位帧——
+    /// `session.created` / `session.updated` 是相位帧——
     /// `status_slug`/`turn_engaged`/`msg_count`/`pending` 每帧必带，旧
-    /// `status` 字段不再出现（无兼容保留）。
+    /// `status` 字段不再出现（无兼容保留）；round5 6.3 起载荷扩展 `label`
+    /// （操作者命名随帧下发，rail 据此收窄行名重取）。
     #[test]
     fn events_serialize_with_dotted_type_tag() {
         let phase = crate::events::SessionPhaseFrame {
@@ -158,6 +166,7 @@ mod tests {
                 disposition: sebas_dispatch::PendingDisposition::Turn,
                 priority: false,
             }],
+            label: Some("renamed-by-operator".into()),
         };
         let cases: Vec<(WebUiEvent, serde_json::Value)> = vec![
             (
@@ -168,6 +177,7 @@ mod tests {
                         turn_engaged: true,
                         msg_count: 0,
                         pending: Vec::new(),
+                        label: None,
                     },
                 },
                 json!({
@@ -176,7 +186,8 @@ mod tests {
                     "status_slug": "starting",
                     "turn_engaged": true,
                     "msg_count": 0,
-                    "pending": []
+                    "pending": [],
+                    "label": null
                 }),
             ),
             (
@@ -193,10 +204,11 @@ mod tests {
                     "pending": [
                         {"id": 9, "text": "queued behind the live turn", "position": 0,
                          "disposition": "turn", "priority": false}
-                    ]
+                    ],
+                    "label": "renamed-by-operator"
                 }),
             ),
-            // 非占用相位同样五键齐全：turn_engaged=false 显式上 wire（D2：
+            // 非占用相位同样键齐全：turn_engaged=false 显式上 wire（D2：
             // 不再「只在 true 时上 wire」——键缺省即旧世界的回退分支）。
             (
                 WebUiEvent::SessionUpdated {
@@ -206,6 +218,7 @@ mod tests {
                         turn_engaged: false,
                         msg_count: 0,
                         pending: Vec::new(),
+                        label: None,
                     },
                 },
                 json!({
@@ -214,7 +227,8 @@ mod tests {
                     "status_slug": "dormant",
                     "turn_engaged": false,
                     "msg_count": 0,
-                    "pending": []
+                    "pending": [],
+                    "label": null
                 }),
             ),
             (

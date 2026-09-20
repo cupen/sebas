@@ -28,7 +28,7 @@ import { sharedWs } from '../api/shared-ws.js'
 import type { WsEvent } from '../api/ws.js'
 import { icon } from '../components/icons.js'
 import { guardedHide } from '../components/wa-hide-guard.js'
-import { unreadCount, writeFocusAnchor } from './unread-cursor.js'
+import { ANCHOR_ADVANCED_EVENT, unreadCount, writeFocusAnchor } from './unread-cursor.js'
 import { COMPOSER_FOCUS_REQUEST } from './workbench-composer.js'
 import type { NewSessionDialogConfirm } from './new-session-dialog.js'
 import '../components/folder-picker.js'
@@ -49,6 +49,12 @@ const NAME_CAP_CODEPOINTS = 40
 
 /** 未读徽标数字封顶（design Open Question：任务内自决为 99+）。 */
 const UNREAD_BADGE_CAP = 99
+
+/**
+ * （fix-webui-qa-defects-round5 3.2）帧触发行名重取的尾沿防抖窗口：同窗
+ * 多帧合并为一次列表重取，队列高频翻转不放大请求量。
+ */
+export const LABEL_REFRESH_DEBOUNCE_MS = 400
 
 /**
  * rail 切换会话成功后的窗口级聚焦事件（fix-webui-qa-defects 4.1，design
@@ -125,6 +131,17 @@ export function truncateName(label: string, cap = NAME_CAP_CODEPOINTS): string {
   const cps = [...label]
   if (cps.length <= cap) return label
   return cps.slice(0, cap).join('') + '…'
+}
+
+/**
+ * （round3 4.4）展示路径分隔符统一：注册弹窗的填充值与「项目已注册」等
+ * 服务端错误提示里的路径，展示前把反斜杠归一为正斜杠——folder-picker
+ * （browse-dirs）回传的是正斜杠普通形，服务端错误消息里是反斜杠普通形，
+ * 同一界面两种分隔符混排即 QA 4.4 的「\\ / 混用」。纯展示归一：两种形态
+ * 服务端 canonicalize 等价接受，不改变语义。
+ */
+export function normalizeDisplayPath(text: string): string {
+  return text.replace(/\\/g, '/')
 }
 
 /**
@@ -218,7 +235,7 @@ export class SebasProjectRail extends LitElement {
   // ─── New session dialog（workbench-interaction-polish 3.2/D2）──────────
   /** 对话框当前绑定的项目（`null` = 关闭）。唯一创建入口：项目行「+」。 */
   @state() private newSessionTarget: Project | null = null
-  /** 创建请求在途（防双击重复创建）。 */
+  /** 创建请求在途（防双击重复创建；round3 1.3 起同时下传对话框忙态）。 */
   @state() private creatingSession = false
   /** 创建失败：留在对话框内就地呈现。 */
   @state() private newSessionError: string | null = null
@@ -239,6 +256,10 @@ export class SebasProjectRail extends LitElement {
    */
   private onWsEvent = (ev: WsEvent): void => {
     if (ev.type === 'session.updated' || ev.type === 'session.created') {
+      const known =
+        ev.type === 'session.updated'
+          ? this.sessions.find((r) => r.encoded_key === ev.session_id)
+          : undefined
       const patch = (row: SessionRow): SessionRow =>
         row.encoded_key === ev.session_id
           ? {
@@ -250,6 +271,16 @@ export class SebasProjectRail extends LitElement {
             }
           : row
       this.sessions = this.sessions.map(patch)
+      // （fix-webui-qa-defects-round5 3.2/6.3，design 决策 4 收窄）相位帧
+      // 不改命名之外的任何行名来源；label 随帧载荷扩展下发（6.3）。对
+      // 已存在行的 updated 帧，先比对帧 label 与该行当前已知 label——一致
+      // （含同为空/同为退化回退态）说明命名没有变化，跳过调度；仅真实
+      // 命名变化（label 写入、清空回退）才进入防抖重取。session.created
+      // 与 rail 中不存在的会话保持现行为（要建行，必须重取列表）。
+      const namingChanged =
+        known === undefined || (ev.label ?? null) !== (known.label ?? null)
+      if (!namingChanged) return
+      this.scheduleLabelRefresh()
       return
     }
     if (
@@ -261,8 +292,28 @@ export class SebasProjectRail extends LitElement {
     }
   }
 
+  /**
+   * （fix-webui-qa-defects-round5 3.2/6.3）帧触发的行名重取：只有真实命名
+   * 变化（onWsEvent 的 label 比对通过）才到达这里；一个防抖窗口内的多帧
+   * 仍合并为一次既有 `GET /api/sessions` 重取（行投影里 label 的唯一来源；
+   * 单会话 detail 带聚焦副作用且不带 label，不用）。
+   */
+  private labelRefreshTimer: number | undefined = undefined
+  private scheduleLabelRefresh(): void {
+    if (this.labelRefreshTimer !== undefined) window.clearTimeout(this.labelRefreshTimer)
+    this.labelRefreshTimer = window.setTimeout(() => {
+      this.labelRefreshTimer = undefined
+      void this.refresh()
+    }, LABEL_REFRESH_DEBOUNCE_MS)
+  }
+
   static styles = css`
     :host { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+    /* （fix-webui-qa-defects-round5 4.1）菜单关闭态对辅助技术隐藏：wa-dropdown
+       的 open 反射属性关闭时菜单项 display:none，a11y 树不再暴露「重命名/
+       归档/移除项目」。open 翻转（dropdown updated 内）与 popup 激活同帧，
+       打开即恢复可见；菜单项是本树的光 DOM 子孙，宿主样式表可直接命中。 */
+    wa-dropdown:not([open]) wa-dropdown-item { display: none; }
     .section-label {
       display: flex; align-items: center; gap: 6px;
       padding: var(--sebas-space-2) 8px var(--sebas-space-1);
@@ -414,7 +465,13 @@ export class SebasProjectRail extends LitElement {
     li.session-item .row-action:hover { color: var(--sebas-accent); background: var(--sebas-accent-soft); }
     li.session-item.archived { opacity: 0.7; }
     li.session-item.archived:hover { opacity: 1; }
-    .archive-meta { font-size: 0.66rem; color: var(--sebas-text-faint); font-family: var(--sebas-font-mono); }
+    /* （fix-webui-qa-defects-round4 3.2）History 条目的项目路径段截断省略：
+       Windows 绝对路径很长（且分隔符可能未归一），不截断会把 rail 撑出横向
+       滚动。min-width:0 + 允许收缩是 flex 子项省略号生效的前提。 */
+    .archive-meta {
+      font-size: 0.66rem; color: var(--sebas-text-faint); font-family: var(--sebas-font-mono);
+      min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
     .group-section { margin-top: var(--sebas-space-3); }
     .group-head {
       /* （5.5）原生 <button>：语义与键盘行为来自元素本身；重置外观回原 div 视觉。 */
@@ -456,6 +513,9 @@ export class SebasProjectRail extends LitElement {
     void this.refresh()
     this.unsubscribe = sharedWs.subscribe((ev) => this.onWsEvent(ev))
     window.addEventListener('sebas:refetch', this.refetchBound)
+    // （round3 6.1）锚点推进失效：transcript 贴底跟读 / 聚焦切换推进共享
+    // 读锚后，rail 徽标就地按新水位重渲染（localStorage 不是响应式源）。
+    window.addEventListener(ANCHOR_ADVANCED_EVENT, this.onAnchorAdvanced)
     // 8.2：节点离线/回归没有对应的会话事件，靠轮询让项目行与「+」的
     // 可用态**免刷新**翻转。
     this.nodeTimer = window.setInterval(() => { void this.refresh() }, NODE_POLL_MS)
@@ -464,11 +524,28 @@ export class SebasProjectRail extends LitElement {
   disconnectedCallback(): void {
     this.unsubscribe?.()
     window.removeEventListener('sebas:refetch', this.refetchBound)
+    window.removeEventListener(ANCHOR_ADVANCED_EVENT, this.onAnchorAdvanced)
     if (this.nodeTimer !== undefined) {
-      this.nodeTimer = window.clearInterval(this.nodeTimer) as unknown as number
+      window.clearInterval(this.nodeTimer) as unknown as number
       this.nodeTimer = undefined
     }
+    if (this.labelRefreshTimer !== undefined) {
+      window.clearTimeout(this.labelRefreshTimer)
+      this.labelRefreshTimer = undefined
+    }
     super.disconnectedCallback()
+  }
+
+  /**
+   * 锚点推进 → 徽标失效（round3 6.1）：读锚在 rail 之外被推进（transcript
+   * 贴底跟读、聚焦写锚、mark-all-seen），localStorage 无响应式——按 key
+   * 命中已知行时自增失效计数触发重渲染，徽标按新水位就地清零。会话无关
+   * 的推进（其它 rail 未列会话）不重渲染。
+   */
+  @state() private anchorTick = 0
+  private onAnchorAdvanced = (e: Event): void => {
+    const key = (e as CustomEvent<{ key?: string }>).detail?.key
+    if (key && this.sessions.some((r) => r.encoded_key === key)) this.anchorTick += 1
   }
 
   async refresh() {
@@ -666,12 +743,18 @@ export class SebasProjectRail extends LitElement {
     this.creatingSession = true
     this.newSessionError = null
     try {
-      await api.createSession({
+      const created = await api.createSession({
         projectId: p.id,
         agent: e.detail.agent,
         model: e.detail.model,
         mode: e.detail.mode,
       })
+      // （round3 3.1）创建即见过：读锚在本浏览器就地立基（0 轮占位）。
+      // 创建路径没有 rail 点击（服务端 set_focus 直达焦点），此前锚永远
+      // 缺位，而无锚会话按 spec 读作 fully-read——新会话之后的非聚焦新回复
+      // 因此永远推不出未读徽章（QA 缺陷 3 的根因）。游标单调：重复创建/
+      // 已有更高锚不回退。
+      writeFocusAnchor(created.key, 0)
       this.closeNewSessionDialog()
       // workbench-rail-polish 3.1/D2：创建成功后的焦点链三步显式化，不再
       // 借用 onSelect 的 toggle——从已展开的项目行「+」进来会把组误折叠，
@@ -780,12 +863,26 @@ export class SebasProjectRail extends LitElement {
     this.renameValue = ''
     this.renameError = null
   }
+  /**
+   * （fix-webui-qa-defects-round5 2.1，design 决策 3）保存时显式从 wa-input
+   * 的内部原生 input 取值——QA D3a 实锤：slot 结构下宿主 value 属性与内部
+   * 原生 input 可能不同步，依赖宿主属性让输入值在保存链路丢失（保存成静默
+   * 清空）。升级后的 wa-input 以 shadowRoot 里的原生 input 为锚；未升级
+   * （测试环境）退化为宿主 value，再退组件状态。
+   */
+  private renameInputValue(): string {
+    const host = this.shadowRoot?.querySelector<HTMLInputElement>(
+      'wa-input[data-testid="rename-input"]',
+    )
+    const native = host?.shadowRoot?.querySelector<HTMLInputElement>('input')
+    return String(native?.value ?? host?.value ?? this.renameValue ?? '')
+  }
   private async confirmRename() {
     const row = this.renameTarget
     if (!row || this.renaming) return
     this.renaming = true
     this.renameError = null
-    const label = this.renameValue.trim()
+    const label = this.renameInputValue().trim()
     try {
       // 空输入 = 清空（wire 语义单一出处：服务端把空白归一为 None）。
       await api.setSessionLabel(row.encoded_key, label || null)
@@ -859,7 +956,9 @@ export class SebasProjectRail extends LitElement {
     this.addPathScopeHint = null
   }
   private onFolderSelected(e: CustomEvent) {
-    this.addPath = e.detail.path
+    // （round3 4.4）picker 回填值即展示值：分隔符归一后再进输入框，避免
+    // 与服务端错误提示里的反斜杠普通形混排。
+    this.addPath = normalizeDisplayPath(e.detail.path)
     void this.checkAddPathScope(this.addPath)
   }
 
@@ -905,7 +1004,11 @@ export class SebasProjectRail extends LitElement {
       // 时项目仍落栏（本地注册表），但操作者不再直到新建会话才得知。
       this.degradedHint = p.degraded?.cause ? `核心不可达（${p.degraded.cause}），已写入本地注册表` : null
       this.onSelect(p.path)
-    } catch (e) { this.addError = e instanceof Error ? e.message : String(e) }
+    } catch (e) {
+      // （round3 4.4）「项目已注册」等服务端点名消息里的路径随展示归一，
+      // 与输入框里的 picker 回填值同一分隔符。
+      this.addError = normalizeDisplayPath(e instanceof Error ? e.message : String(e))
+    }
   }
 
   private countsFor(id: string): { count: number; waiting: boolean } {
@@ -934,14 +1037,32 @@ export class SebasProjectRail extends LitElement {
 
   // ─── Renderers ──────────────────────────────────────────────────
 
+  /**
+   * 行未读数（round3 6.1 修订）：锚点推导不变（msg_count − 共享读锚），
+   * 但**聚焦会话在本文档可见期间不呈现未读**——徽章的存在面是「非聚焦
+   * 会话的到达」；聚焦会话的流式到达由 transcript 的贴底跟读推进同一读锚
+   * （250ms 防抖、快照路径存在时滞），帧先到的一拍里徽标会闪现甚至驻留
+   * （QA 6.1：「看着到达仍被标未读」）。可见性 gate：后台 tab 里的到达
+   * 照常计未读（回到页面如实呈现，spec「hidden 不算看着」同一条线）。
+   */
+  private rowUnread(row: SessionRow): number {
+    const unread = unreadCount(row.encoded_key, row.msg_count)
+    if (unread === 0) return 0
+    if (row.encoded_key === this.focusedKey && document.visibilityState === 'visible') return 0
+    return unread
+  }
+
   private renderSessionRow(row: SessionRow) {
+    // 徽标按锚点实时推导：读一次失效计数，把锚点推进的失效显式纳入渲染
+    // 依赖（Lit 任意 @state 变更都会重渲染，这里读一次防“只写不读”被误清理）。
+    void this.anchorTick
     const fullLabel = fullSessionLabel(row)
     const label = truncateName(fullLabel)
     // 当前标记由焦点指针驱动（3.2）：不再比较 location.pathname。
     const current = this.focusedKey === row.encoded_key
     // rail-declutter-unread 2.3：未读徽标 = msg_count − 共享读锚；0 或负数
-    // 不显示，99+ 封顶。
-    const unread = unreadCount(row.encoded_key, row.msg_count)
+    // 不显示，99+ 封顶。（round3 6.1：聚焦会话可见期间不呈现，见 rowUnread。）
+    const unread = this.rowUnread(row)
     const badge = unread > UNREAD_BADGE_CAP ? `${UNREAD_BADGE_CAP}+` : String(unread)
     // 8.4：悬空审批 > 0 = 在等人，不是在跑（状态词由后端投影为 waiting，
     // 这里再按 remote 兜一层，老报文/直接 mock 的 remote 也能正确标）。
@@ -998,7 +1119,10 @@ export class SebasProjectRail extends LitElement {
       >
         <span class="session-dot done" aria-hidden="true"></span>
         <span class="session-name">${a.label}</span>
-        <span class="archive-meta">${a.project_path.split('/').filter(Boolean).pop() ?? ''}</span>
+        <!-- （fix-webui-qa-defects-round4 3.2）basename 切分同时接受 \ 与 /：
+             Windows 归档路径存的是反斜杠普通形，此前 split('/') 不切、整条
+             路径原样进 .archive-meta，撑出横向滚动。 -->
+        <span class="archive-meta">${a.project_path.split(/[\\/]/).filter(Boolean).pop() ?? ''}</span>
       </li>`
   }
 
@@ -1220,6 +1344,7 @@ export class SebasProjectRail extends LitElement {
         .projectName=${this.newSessionTarget?.name ?? null}
         .defaultAgent=${this.newSessionTarget?.default_agent ?? null}
         .error=${this.newSessionError}
+        .busy=${this.creatingSession}
         @dialog-confirm=${(e: CustomEvent<NewSessionDialogConfirm>) =>
           void this.confirmNewSession(e)}
         @dialog-cancel=${() => this.closeNewSessionDialog()}

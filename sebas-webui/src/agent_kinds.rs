@@ -315,10 +315,12 @@ mod tests {
             "reachable opencode has no cause: {info:?}"
         );
         let v = info.version.as_deref().unwrap_or_default();
-        // opencode `--version` prints a bare semver like `1.18.25`.
+        // opencode `--version` 曾输出裸 semver（`1.18.25`）；≥2.x 起改为
+        // `opencode v2.0.8` 前缀形。探测契约（add-opencode-acp）只要求
+        // reachable + 非空版本串——断言「含数字的非空版本」，两种形态都过。
         assert!(
-            !v.is_empty() && v.chars().next().is_some_and(|c| c.is_ascii_digit()),
-            "opencode version should be a bare version number, got {v:?}"
+            !v.is_empty() && v.chars().any(|c| c.is_ascii_digit()),
+            "opencode version should be a non-empty version string, got {v:?}"
         );
     }
 }

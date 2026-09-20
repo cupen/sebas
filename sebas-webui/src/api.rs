@@ -257,7 +257,15 @@ pub async fn session_detail(
         })
         .collect();
 
-    let derived = SessionStatus::derive(&info.status, info.phase.as_deref().unwrap_or(""));
+    // （round3 7.1 review 补口，与 session_phase_frame 同款合并）泊车维度
+    // 本地/远端二选一后并入派生——detail 漏并会让 dashboard 把泊车中的会话
+    // 喂成 working，前端 waiting 退避对账永远到不了位。
+    let parked = info
+        .remote
+        .as_ref()
+        .map_or(info.parked_approvals, |r| r.parked_approvals);
+    let derived = SessionStatus::derive(&info.status, info.phase.as_deref().unwrap_or(""))
+        .with_parked_approvals(parked);
 
     let mut data = json!({
         "channel": info.channel,
@@ -2210,6 +2218,8 @@ pub async fn archive_session(State(state): State<WebUiState>, Path(key): Path<St
         current_model: info.current_model.clone(),
         available_models: info.available_models.clone(),
     };
+    // （fix-webui-qa-defects-round4 3.1，design M1）命名来源一并落档：操作者
+    // label 与首条 prompt 预览随快照迁移，恢复后行名与归档前一致。
     match crate::archive::archive_session(
         &key,
         &project_path,
@@ -2218,6 +2228,8 @@ pub async fn archive_session(State(state): State<WebUiState>, Path(key): Path<St
         identity,
         state.archive_retention_days,
         transcript,
+        info.label.clone(),
+        info.user_prompt.clone(),
     ) {
         Ok(entry) => (
             StatusCode::OK,
@@ -2258,6 +2270,10 @@ pub async fn restore_session(
             project_dir,
             entry.transcript.clone(),
             identity,
+            // （fix-webui-qa-defects-round4 3.1，design M1）命名来源随恢复
+            // 迁回——旧档无字段时为 None，回退现状（短 id）。
+            entry.operator_label.clone(),
+            entry.prompt_preview.clone(),
         )
         .await
     {
@@ -2370,8 +2386,9 @@ async fn handle_client_frame(
 
 /// （session-parallel-liveness-and-unread-polish 2.1，design D2）`SessionInfo`
 /// → 相位帧载荷：`SessionStatus::derive` 把 (MappingState, phase) 翻成操作者
-/// 词（含泊车投影），与 HTTP 行投影同一函数；五键全部携带，无缺省、无
-/// 「只在 true 时上 wire」的兼容保留。
+/// 词（含泊车投影），与 HTTP 行投影同一函数；键全部携带，无缺省、无
+/// 「只在 true 时上 wire」的兼容保留。（round5 6.3）载荷扩展 `label`——
+/// 操作者命名随帧下发，rail 据此把行名重取收窄到真实命名变化。
 fn session_phase_frame(info: &SessionInfo) -> crate::events::SessionPhaseFrame {
     // （review 3c 补口）泊车维度本地/远端合并：本地会话读 `parked_approvals`
     // （StallRegistry 投影），远端会话读 remote 视图——二选一，不会同时有值。
@@ -2386,6 +2403,7 @@ fn session_phase_frame(info: &SessionInfo) -> crate::events::SessionPhaseFrame {
         turn_engaged: info.turn_engaged,
         msg_count: info.msg_count,
         pending: info.pending.clone(),
+        label: info.label.clone(),
     }
 }
 
@@ -3028,6 +3046,90 @@ mod ws_resync_tests {
 }
 
 #[cfg(test)]
+mod session_phase_frame_label_tests {
+    //! fix-webui-qa-defects-round5 6.3：相位帧载荷扩展 `label` 的**映射**面
+    //! ——`session_event_to_frame` 必须把 `SessionInfo.label` 原样带上
+    //! Created/Updated 帧。rail（project-rail onWsEvent）据此把行名重取收窄
+    //! 为「帧 label ≠ 行已知 label 才调度」：这条映射一断（恒 None），rail
+    //! 的比对永远相等、label 变化再也不触发重取——静默失活且无报错。
+    //! 序列化形状（label 键恒在、None = null）由 events.rs 的
+    //! events_serialize_with_dotted_type_tag 钉死，这里只钉 SessionInfo → 帧
+    //! 载荷的搬运；wire 端到端由 e2e label_write_reaches_clients_as_session_
+    //! update_without_reload 断言。
+
+    use super::*;
+    use sebas_channels::ChannelKey;
+
+    fn info(label: Option<String>) -> SessionInfo {
+        let key = ChannelKey::new("web", "web-label-frame");
+        SessionInfo {
+            channel: key.channel.as_str().to_string(),
+            key: key.reference.clone(),
+            session_id: Some("s-label".into()),
+            status: "active".into(),
+            phase: None,
+            user_prompt: None,
+            last_active_unix: 0,
+            project_dir: None,
+            current_model: None,
+            available_models: None,
+            agent_kind: None,
+            usage: None,
+            backend: None,
+            pending: Vec::new(),
+            remote: None,
+            desired_mode: sebas_dispatch::engine::ask_mode(),
+            effective_mode: None,
+            msg_count: 2,
+            available_commands: Vec::new(),
+            turn_engaged: false,
+            spawn_failure_reason: None,
+            parked_approvals: 0,
+            label,
+        }
+    }
+
+    #[test]
+    fn updated_frame_carries_the_session_label() {
+        let ev = session_event_to_frame(SessionEvent::Updated {
+            session: info(Some("操作者命名".into())),
+        });
+        match ev.expect("updated must produce a frame") {
+            WebUiEvent::SessionUpdated { phase, .. } => {
+                assert_eq!(phase.label, Some("操作者命名".into()))
+            }
+            other => panic!("expected SessionUpdated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn updated_frame_maps_absent_label_to_none() {
+        let ev = session_event_to_frame(SessionEvent::Updated {
+            session: info(None),
+        });
+        match ev.expect("updated must produce a frame") {
+            WebUiEvent::SessionUpdated { phase, .. } => assert_eq!(phase.label, None),
+            other => panic!("expected SessionUpdated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn created_frame_carries_the_session_label_too() {
+        // created 与 updated 同形同源（session_phase_frame 单一出处）——rail
+        // 对 created 保持「建行即重取」，帧上的 label 只是顺带如实下发。
+        let ev = session_event_to_frame(SessionEvent::Created {
+            session: info(Some("创建即命名".into())),
+        });
+        match ev.expect("created must produce a frame") {
+            WebUiEvent::SessionCreated { phase, .. } => {
+                assert_eq!(phase.label, Some("创建即命名".into()))
+            }
+            other => panic!("expected SessionCreated, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
 mod approvals_label_route_tests {
     //! fix-webui-approval-restore-and-session-identity 1.2 / 5.1 的路由级单测：
     //! - GET /api/sessions/{key}/approvals：泊车中返回请求体、空时返回 `[]`、
@@ -3237,5 +3339,116 @@ mod approvals_label_route_tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    /// （fix-webui-qa-defects-round5 3.2）被接受的 label 写入必须立即落进读
+    /// 投影：rail 行名重取的唯一数据源是 `GET /api/sessions` 行的 `label`
+    /// 字段（帧只负责触发重取），写入读回不一致 = 「所见非所存」。设置 →
+    /// 行携带新 label；清空（null）→ 行字段回 None（wire 上 skip，读作
+    /// null）。
+    #[tokio::test]
+    async fn label_route_write_projects_label_into_list_rows() {
+        let backend = Arc::new(FakeBackend::new());
+        let encoded = seed_session(backend.as_ref()).await;
+        let row = |list: &serde_json::Value| {
+            list["recent_sessions"]
+                .as_array()
+                .expect("rows")
+                .iter()
+                .find(|r| r["encoded_key"].as_str() == Some(encoded.as_str()))
+                .unwrap_or_else(|| panic!("the session must be listed: {list}"))
+                .clone()
+        };
+
+        let (status, _body) = post(
+            &app(backend.clone()),
+            &format!("/api/sessions/{encoded}/label"),
+            r#"{"label": "发布清单会话"}"#.into(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, list) = get(&app(backend.clone()), "/api/sessions").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            row(&list)["label"], "发布清单会话",
+            "the accepted label must be on the row right after the write: {list}"
+        );
+
+        // 清空：行投影回退（label 字段不上 wire，读作 null）。
+        let (status, _body) = post(
+            &app(backend.clone()),
+            &format!("/api/sessions/{encoded}/label"),
+            r#"{"label": null}"#.into(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, list) = get(&app(backend), "/api/sessions").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            row(&list)["label"].is_null(),
+            "the cleared label must leave the row: {list}"
+        );
+    }
+
+    // ── fix-webui-qa-defects-round5 1.2：pending 管理面的拒绝映射 ─────────
+    // Unavailable（不承载队列的诚实失败）保持 503；PendingRejected 四类按
+    // 原因透传：unknown 404 / already_started·priority_conflict 409 /
+    // out_of_range 400。类型化拒绝不得被笼统「不可用」或 5xx 吞掉。
+
+    /// 四类类型化拒绝在 remove 与 move 两条路由上原样透传。
+    #[tokio::test]
+    async fn pending_routes_pass_typed_rejections_through() {
+        let cases = [
+            (crate::session_backend::PendingReason::Unknown, StatusCode::NOT_FOUND),
+            (
+                crate::session_backend::PendingReason::AlreadyStarted,
+                StatusCode::CONFLICT,
+            ),
+            (
+                crate::session_backend::PendingReason::PriorityConflict,
+                StatusCode::CONFLICT,
+            ),
+            (
+                crate::session_backend::PendingReason::OutOfRange,
+                StatusCode::BAD_REQUEST,
+            ),
+        ];
+        for (reason, want) in cases {
+            let backend = Arc::new(FakeBackend::new());
+            let encoded = seed_session(backend.as_ref()).await;
+            backend.set_pending_op_rejection(Some(reason));
+            let (status, _body) = post(
+                &app(backend.clone()),
+                &format!("/api/sessions/{encoded}/pending/7/remove"),
+                String::new(),
+            )
+            .await;
+            assert_eq!(status, want, "remove must pass {reason:?} through");
+            let (status, _body) = post(
+                &app(backend),
+                &format!("/api/sessions/{encoded}/pending/7/move"),
+                r#"{"to_index": 0}"#.into(),
+            )
+            .await;
+            assert_eq!(status, want, "move must pass {reason:?} through");
+        }
+    }
+
+    /// 未注入类型化拒绝 = 后端不承载队列的诚实失败：Unavailable 保持 503，
+    /// 文案如实呈现 cause（不再自称「核心不可达」）。
+    #[tokio::test]
+    async fn pending_routes_keep_unavailable_as_503_with_honest_cause() {
+        let backend = Arc::new(FakeBackend::new());
+        let encoded = seed_session(backend.as_ref()).await;
+        for uri in [
+            &format!("/api/sessions/{encoded}/pending/7/remove"),
+            &format!("/api/sessions/{encoded}/pending/7/move"),
+        ] {
+            let (status, body) = post(&app(backend.clone()), uri, r#"{"to_index": 0}"#.into()).await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{uri}");
+            let message = body["error"].as_str().unwrap_or_default();
+            assert!(message.contains("此后端不承载待执行队列"), "{message}");
+            assert!(!message.contains("核心不可达"), "{message}");
+        }
     }
 }

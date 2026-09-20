@@ -10,7 +10,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { installWaDomPolyfills } from '../test-support/wa-polyfills.js'
-import { dismiss, notify, resetNotices, setFatal, setWsDown } from '../notify.js'
+import { ERROR_TOAST_DURATION_MS, dismiss, notify, resetNotices, setFatal, setWsDown } from '../notify.js'
 import { CORE_FATAL_BANNER_TESTID, SebasNoticeLayer, WS_DOWN_BANNER_TESTID } from './notice-layer.js'
 import './notice-layer.js'
 import type WaToastItem from '@awesome.me/webawesome/dist/components/toast-item/toast-item.js'
@@ -83,12 +83,14 @@ describe('四级→WA 变体/时长/accent 映射（D2 表）', () => {
     expect(item.style.getPropertyValue('--accent-color')).toBe('var(--sebas-notice-warn)')
   })
 
-  it('error → danger, duration 0 (驻留), sebas error accent', async () => {
+  it('error → danger, 8s auto-dismiss (round5 4.2), sebas error accent', async () => {
     notify({ level: 'error', message: '视图不可用' })
     await layer.updateComplete
     const [item] = toastItems()
     expect(item.getAttribute('variant')).toBe('danger')
-    expect(item.duration).toBe(0)
+    // 失败类不再驻留：默认 8s 自动消失（ERROR_TOAST_DURATION_MS）。
+    expect(item.duration).toBe(ERROR_TOAST_DURATION_MS)
+    expect(item.duration).toBe(8_000)
     expect(item.style.getPropertyValue('--accent-color')).toBe('var(--sebas-notice-error)')
   })
 
@@ -127,8 +129,8 @@ describe('栈行为：挤占出栈、驻留手动关、去重', () => {
     expect(texts.some((t) => t?.includes('d'))).toBe(true)
   })
 
-  it('an error toast stays until closed; closing it writes back to the store', async () => {
-    const id = notify({ level: 'error', message: '驻留错误' })!
+  it('an explicit sticky error (duration=0) stays until closed; closing writes back to the store', async () => {
+    const id = notify({ level: 'error', message: '驻留错误', duration: 0 })!
     await layer.updateComplete
     const item = toastItems()[0]
     expect(item.duration).toBe(0)

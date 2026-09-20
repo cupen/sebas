@@ -9,13 +9,15 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { api, type Project, type SessionRow } from '../api/client.js'
-import { writeFocusAnchor } from './unread-cursor.js'
+import { ANCHOR_ADVANCED_EVENT, readAnchorCount, writeFocusAnchor } from './unread-cursor.js'
 import './project-rail.js'
 import {
   SebasProjectRail,
+  LABEL_REFRESH_DEBOUNCE_MS,
   RAIL_EXPANDED_KEY,
   addPathScopeHintFrom,
   fullSessionLabel,
+  normalizeDisplayPath,
   parseRailExpanded,
   railExpandedDefault,
   serializeRailExpanded,
@@ -229,8 +231,9 @@ describe('sebas-project-rail (sidebar tree)', () => {
     expect(items()[0]!.querySelector('[data-testid="session-unread"]')).toBeNull()
     const listCallsBefore = mockOf(apiMock.sessions).mock.calls.length
 
-    // 引擎 flip：可见回复段 +3。五键帧到达即打补丁——不刷新列表（徽标
-    // 从帧字段真读，2.2），圆点同步翻 working。
+    // 引擎 flip：可见回复段 +3。相位帧到达即打补丁——不刷新列表（徽标
+    // 从帧字段真读，2.2），圆点同步翻 working；label 与行已知一致（同为
+    // 空）→ 不调度行名重取（6.3 收窄）。
     wsMocks.emit({
       type: 'session.updated',
       session_id: 'oc_1%00',
@@ -238,6 +241,7 @@ describe('sebas-project-rail (sidebar tree)', () => {
       turn_engaged: true,
       msg_count: 3,
       pending: [],
+      label: null,
     })
     await el.updateComplete
 
@@ -530,6 +534,213 @@ describe('unread badge (rail-declutter-unread 2.3)', () => {
   })
 })
 
+// ── fix-webui-qa-defects-round3 6.1：聚焦会话不闪徽章 + 重复聚焦清零 ──────
+
+describe('unread badge focused-session boundaries (fix-webui-qa-defects-round3 6.1)', () => {
+  /** happy-dom 的 visibilityState 无从直接赋值：实例自有属性遮蔽（原型
+   * getter 覆盖在 happy-dom 下不生效——getter 定义在内部类上），返回还原函数。 */
+  function stubVisibility(value: string): () => void {
+    const orig = Object.getOwnPropertyDescriptor(document, 'visibilityState')
+    Object.defineProperty(document, 'visibilityState', {
+      value,
+      configurable: true,
+    })
+    return () => {
+      if (orig) Object.defineProperty(document, 'visibilityState', orig)
+      else delete (document as unknown as { visibilityState?: unknown }).visibilityState
+    }
+  }
+
+  function frame(sessionId: string, msgCount: number) {
+    return {
+      type: 'session.updated',
+      session_id: sessionId,
+      status_slug: 'working',
+      turn_engaged: true,
+      msg_count: msgCount,
+      pending: [],
+      label: null,
+    }
+  }
+
+  it('a streaming arrival into the focused (visible) session shows no badge', async () => {
+    // QA 6.1 复现：聚焦 A 贴底跟读，A 收新回复——锚还没被 transcript 推进
+    // （防抖/快照时滞），帧先到的一拍里徽标闪现甚至驻留。聚焦 + 文档可见
+    // 期间徽标不呈现；锚的推进权仍在 transcript（rail 不代写共享锚）。
+    const restore = stubVisibility('visible')
+    try {
+      const focused = row({ project_id: 'proj-alpha', msg_count: 1 })
+      writeFocusAnchor(focused.encoded_key, 1)
+      mockOf(apiMock.sessions).mockResolvedValue({
+        ...sessionList([focused]),
+        active_session_key: focused.encoded_key,
+      })
+      const el = await mount()
+      const items = () => [...el.shadowRoot!.querySelectorAll('li.session-item')]
+      expect(items()[0]!.querySelector('[data-testid="session-unread"]')).toBeNull()
+
+      // 流式到达 +2：帧即刻打补丁，徽标不出现；共享锚保持 transcript 权威。
+      wsMocks.emit(frame(focused.encoded_key, 3))
+      await el.updateComplete
+      expect(items()[0]!.querySelector('[data-testid="session-unread"]')).toBeNull()
+      expect(readAnchorCount(focused.encoded_key)).toBe(1)
+      el.remove()
+    } finally {
+      restore()
+    }
+  })
+
+  it('a focused session still badges while the document is hidden', async () => {
+    // 可见性 gate：后台 tab 里的到达不算「看着」，聚焦行照常计未读。
+    const restore = stubVisibility('hidden')
+    try {
+      const focused = row({ project_id: 'proj-alpha', msg_count: 1 })
+      writeFocusAnchor(focused.encoded_key, 1)
+      mockOf(apiMock.sessions).mockResolvedValue({
+        ...sessionList([focused]),
+        active_session_key: focused.encoded_key,
+      })
+      const el = await mount()
+      const items = () => [...el.shadowRoot!.querySelectorAll('li.session-item')]
+      wsMocks.emit(frame(focused.encoded_key, 3))
+      await el.updateComplete
+      expect(items()[0]!.querySelector('[data-testid="session-unread"]')?.textContent?.trim()).toBe('2')
+      el.remove()
+    } finally {
+      restore()
+    }
+  })
+
+  it('repeated same-session clicks keep the badge cleared', async () => {
+    const target = row({ project_id: 'proj-alpha', msg_count: 5 })
+    writeFocusAnchor(target.encoded_key, 2)
+    mockOf(apiMock.sessions).mockResolvedValue(sessionList([target]))
+    mockOf(apiMock.switchSession).mockResolvedValue({
+      status: 'switched',
+      redirect: `/sessions/${target.encoded_key}`,
+      active_session_key: target.encoded_key,
+    })
+    const el = await mount()
+    ;(el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).click()
+    await el.updateComplete
+    const items = () => [...el.shadowRoot!.querySelectorAll('li.session-item')]
+    expect(items()[0]!.querySelector('[data-testid="session-unread"]')?.textContent?.trim()).toBe('3')
+    // switchSession 的 mock 计数跨用例累积（本文件 beforeEach 不清 mock）：
+    // 记差值断言。
+    const switchCallsBefore = mockOf(apiMock.switchSession).mock.calls.length
+
+    // 首次点击：聚焦写锚推进到当前 count → 徽标清零。
+    ;(items()[0] as HTMLElement).click()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('[data-testid="session-unread"]')).toBeNull()
+    expect(readAnchorCount(target.encoded_key)).toBe(5)
+
+    // 同会话重复点击（no-op switch）：锚不回退、徽标不复活——聚焦写锚照常
+    // 执行（单调游标拦截同值写入），行按同一水位渲染。
+    ;(items()[0] as HTMLElement).click()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('[data-testid="session-unread"]')).toBeNull()
+    expect(readAnchorCount(target.encoded_key)).toBe(5)
+    expect(mockOf(apiMock.switchSession).mock.calls.length - switchCallsBefore).toBe(2)
+    el.remove()
+  })
+
+  it('an anchor advanced outside the rail (transcript bottom-follow) clears the badge without a refresh', async () => {
+    // localStorage 不是响应式源：transcript 推进共享锚（写入即广播）后，
+    // rail 经 ANCHOR_ADVANCED_EVENT 失效重渲染，徽标就地清零——6.1
+    // 「读了但徽标持续不消」的半边。列表不重取。
+    const target = row({ project_id: 'proj-alpha', msg_count: 4 })
+    writeFocusAnchor(target.encoded_key, 1)
+    mockOf(apiMock.sessions).mockResolvedValue(sessionList([target]))
+    const el = await mount()
+    ;(el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).click()
+    await el.updateComplete
+    const items = () => [...el.shadowRoot!.querySelectorAll('li.session-item')]
+    expect(items()[0]!.querySelector('[data-testid="session-unread"]')?.textContent?.trim()).toBe('3')
+    const callsBefore = mockOf(apiMock.sessions).mock.calls.length
+
+    writeFocusAnchor(target.encoded_key, 4)
+    await el.updateComplete
+    expect(items()[0]!.querySelector('[data-testid="session-unread"]')).toBeNull()
+    expect(mockOf(apiMock.sessions).mock.calls.length).toBe(callsBefore)
+    el.remove()
+  })
+
+  it('an unfocused session still badges on frame arrivals (contrast guard)', async () => {
+    // 对照面：抑制只落在聚焦行——非聚焦会话的到达照常出徽章（徽章的存在面）。
+    const unfocused = row({ project_id: 'proj-alpha', msg_count: 1 })
+    const focused = row({
+      project_id: 'proj-alpha',
+      msg_count: 1,
+      status_slug: 'done',
+      status: 'done',
+    })
+    writeFocusAnchor(unfocused.encoded_key, 1)
+    writeFocusAnchor(focused.encoded_key, 1)
+    mockOf(apiMock.sessions).mockResolvedValue({
+      ...sessionList([unfocused, focused]),
+      active_session_key: focused.encoded_key,
+    })
+    const el = await mount()
+    const items = () => [...el.shadowRoot!.querySelectorAll('li.session-item')]
+    wsMocks.emit(frame(unfocused.encoded_key, 3))
+    await el.updateComplete
+    expect(items()[0]!.querySelector('[data-testid="session-unread"]')?.textContent?.trim()).toBe('2')
+    el.remove()
+  })
+
+  it('unread arrivals missed during focus badge truthfully once the focus moves away', async () => {
+    // 抑制的时界边界（review 补钉）：聚焦会话上滚未跟读时到达——聚焦+可见
+    // 期间不呈现徽章，但锚的推进权在 transcript（sticky=false 不写锚），
+    // 未读水位如实累积；切走的瞬间抑制解除，徽章按 count − 锚如实回到行上；
+    // 点回聚焦写锚清零。delta 的「While a session is the focused session…」
+    // 时界就落在这条行为上——徽章不是被吞掉，是被延迟到离开聚焦。
+    const restore = stubVisibility('visible')
+    try {
+      const a = row({ project_id: 'proj-alpha', msg_count: 1 })
+      const b = row({ project_id: 'proj-alpha', msg_count: 0 })
+      writeFocusAnchor(a.encoded_key, 1)
+      mockOf(apiMock.sessions).mockResolvedValue({
+        ...sessionList([a, b]),
+        active_session_key: a.encoded_key,
+      })
+      mockOf(apiMock.switchSession).mockResolvedValue({
+        status: 'switched',
+        redirect: `/sessions/${b.encoded_key}`,
+        active_session_key: b.encoded_key,
+      })
+      const el = await mount()
+      const items = () => [...el.shadowRoot!.querySelectorAll('li.session-item')]
+      // 聚焦 A：到达 +2（未跟读，锚停在 1）——徽章不呈现。
+      wsMocks.emit(frame(a.encoded_key, 3))
+      await el.updateComplete
+      expect(items()[0]!.querySelector('[data-testid="session-unread"]')).toBeNull()
+      expect(readAnchorCount(a.encoded_key)).toBe(1)
+      // 切到 B：A 的抑制解除——徽章如实出现（3 − 1）。
+      ;(items()[1] as HTMLElement).click()
+      await new Promise((r) => setTimeout(r, 0))
+      await el.updateComplete
+      expect(items()[0]!.querySelector('[data-testid="session-unread"]')?.textContent?.trim()).toBe('2')
+      // 点回 A：聚焦写锚推进到当前 count → 清零。
+      mockOf(apiMock.switchSession).mockResolvedValue({
+        status: 'switched',
+        redirect: `/sessions/${a.encoded_key}`,
+        active_session_key: a.encoded_key,
+      })
+      ;(items()[0] as HTMLElement).click()
+      await new Promise((r) => setTimeout(r, 0))
+      await el.updateComplete
+      expect(items()[0]!.querySelector('[data-testid="session-unread"]')).toBeNull()
+      expect(readAnchorCount(a.encoded_key)).toBe(3)
+      el.remove()
+    } finally {
+      restore()
+    }
+  })
+})
+
 describe('session naming by first prompt (rail-declutter-unread 3.4)', () => {
   it('names rows by prompt_preview and carries the full text in the title', async () => {
     const named = row({
@@ -681,6 +892,42 @@ describe('history group (archived sessions)', () => {
     // 探测链路保留：branch 接口仍被调用（删除线告警依赖它）。
     expect(apiMock.projects.branch).toHaveBeenCalledWith('proj-alpha')
     el.remove()
+  })
+
+  it('archive meta shows the basename for Windows backslash paths, not the whole path (round4 3.2)', async () => {
+    mockOf(apiMock.archiveList).mockResolvedValue({
+      archived_sessions: [
+        {
+          session_key: 'oc_win%00',
+          project_path: 'C:\\workbench\\repos-ai\\sebas',
+          label: 'win session',
+          archived_at: 5000,
+          retention_deadline: 9000,
+        },
+      ],
+    })
+    const el = await mount()
+    const heads = [...el.shadowRoot!.querySelectorAll('.group-head')]
+    const historyHead = heads.find((h) => h.textContent?.includes('History'))
+    ;(historyHead as HTMLElement).click()
+    await el.updateComplete
+    const meta = el.shadowRoot!.querySelector(
+      '.group-section li.session-item.archived .archive-meta',
+    )
+    expect(meta?.textContent).toBe('sebas')
+    el.remove()
+  })
+
+  it('archive meta and session name truncate with ellipsis instead of stretching the rail (round4 3.2)', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { join, dirname } = await import('node:path')
+    const here = dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'))
+    const src = readFileSync(join(here, 'project-rail.ts'), 'utf8')
+    // .archive-meta 必须自带省略号截断（min-width:0 是 flex 子项省略号的
+    // 生效前提）——长路径不撑出横向滚动。
+    expect(src).toMatch(
+      /\.archive-meta\s*\{[^}]*min-width:\s*0;[^}]*overflow:\s*hidden;[^}]*text-overflow:\s*ellipsis;[^}]*white-space:\s*nowrap;/,
+    )
   })
 })
 
@@ -1452,6 +1699,9 @@ describe('session naming by operator label (5.1)', () => {
     expect((el as any).renameValue).toBe('')
 
     ;(el as any).renameValue = '  我的项目会话  '
+    // 保存从 DOM（wa-input）取值（round5 2.1）——先让 Lit 把状态渲染进
+    // DOM（真实流程：输入 → 渲染 → 点击保存）。
+    await (el as any).updateComplete
     await (el as any).confirmRename()
     expect(mockOf(apiMock.setSessionLabel)).toHaveBeenCalledWith(target.encoded_key, '我的项目会话')
     expect((el as any).renameTarget).toBeNull()
@@ -1467,6 +1717,250 @@ describe('session naming by operator label (5.1)', () => {
     await (el as any).confirmRename()
     expect(mockOf(apiMock.setSessionLabel)).toHaveBeenCalledWith(named.encoded_key, null)
     el.remove()
+  })
+
+  // （fix-webui-qa-defects-round5 2.1，design 决策 3）组件级回归：渲染对话框
+  // → 填值 → 保存 → 请求体携带该值且成功后关闭。宿主 value 与内部原生
+  // input 各自独立（QA D3a：宿主属性不同步让输入值在保存链路丢失，保存成
+  // 静默清空）——保存必须以内部原生 input 为锚。
+  it('the save reads the value from the internal native input and closes on success (round5 2.1)', async () => {
+    mockOf(apiMock.setSessionLabel).mockResolvedValue({ status: 'ok' })
+    const el = await mount()
+    const target = (el as any).sessions[0] as SessionRow
+    ;(el as any).openRenameDialog(new Event('click'), target)
+    await (el as any).updateComplete
+    const host = el.shadowRoot!.querySelector('wa-input[data-testid="rename-input"]') as
+      | (HTMLElement & { value?: string; shadowRoot?: ShadowRoot | null })
+    expect(host).toBeTruthy()
+    // 模拟真实 WA 内部结构：原生 input 携带输入值，宿主属性保持陈旧空值
+    // ——正是缺陷场景。测试环境 wa-input 未升级，手动附 shadowRoot。
+    const shadow = host.shadowRoot ?? host.attachShadow({ mode: 'open' })
+    const native = document.createElement('input')
+    native.value = '  来自原生输入的名字  '
+    shadow.appendChild(native)
+    host.value = '';
+    (el as any).renameValue = ''
+    await (el as any).updateComplete
+    await (el as any).confirmRename()
+    expect(mockOf(apiMock.setSessionLabel)).toHaveBeenCalledWith(
+      target.encoded_key,
+      '来自原生输入的名字',
+    )
+    expect((el as any).renameTarget).toBeNull()
+    el.remove()
+  })
+
+  it('a failed save keeps the dialog open with the inline error (round5 2.1)', async () => {
+    mockOf(apiMock.setSessionLabel).mockRejectedValue(new Error('会话不存在'))
+    const el = await mount()
+    const target = (el as any).sessions[0] as SessionRow
+    ;(el as any).openRenameDialog(new Event('click'), target)
+    ;(el as any).renameValue = '新名'
+    await (el as any).confirmRename()
+    expect((el as any).renameTarget).toBe(target)
+    const err = el.shadowRoot!.querySelector('[data-testid="rename-error"]')
+    expect(err?.textContent).toContain('会话不存在')
+    el.remove()
+  })
+})
+
+// ── fix-webui-qa-defects-round5 3.2/6.3：label 变更实时刷新（label 比对收窄）┘
+describe('label write liveness via session.updated (round5 3.2/6.3)', () => {
+  it('unrelated frames skip the re-projection; a label-change frame triggers exactly one debounced refetch', async () => {
+    vi.useFakeTimers()
+    try {
+      const el = document.createElement('sebas-project-rail') as SebasProjectRail
+      document.body.appendChild(el)
+      // connectedCallback 的 refresh 是宏任务串——fake timers 下手动推进。
+      await vi.advanceTimersByTimeAsync(0)
+      await el.updateComplete
+      await vi.advanceTimersByTimeAsync(0)
+      await el.updateComplete
+      mockOf(apiMock.sessions).mockClear()
+      expect(mockOf(apiMock.sessions)).toHaveBeenCalledTimes(0)
+
+      // 无关帧（相位/队列翻转；帧 label 与行已知 label 一致——同为空）：
+      // 只就地补丁，绝不调度重取（6.3 收窄——活跃 turn 的帧连发不再放大
+      // 请求量），相位补丁本身照常落地。
+      wsMocks.emit({
+        type: 'session.updated',
+        session_id: sessionRows[0]!.encoded_key,
+        status_slug: 'done',
+        turn_engaged: false,
+        msg_count: 3,
+        pending: [],
+        label: null,
+      })
+      await el.updateComplete
+      await vi.advanceTimersByTimeAsync(LABEL_REFRESH_DEBOUNCE_MS + 1)
+      expect(mockOf(apiMock.sessions)).toHaveBeenCalledTimes(0)
+      expect((el as any).sessions[0].status_slug).toBe('done')
+      expect((el as any).sessions[0].msg_count).toBe(3)
+
+      // label 变化帧（API 写 label 成功后的 Updated，载荷携带新 label）：
+      // 进入防抖；窗口内的第二帧（另一会话的 label 变化）合并为一次重取。
+      const relabeled = sessionRows.map((r, i) => (i === 0 ? { ...r, label: 'API 命名' } : r))
+      mockOf(apiMock.sessions).mockResolvedValue(sessionList(relabeled))
+      wsMocks.emit({
+        type: 'session.updated',
+        session_id: sessionRows[0]!.encoded_key,
+        status_slug: 'working',
+        turn_engaged: true,
+        msg_count: 4,
+        pending: [],
+        label: 'API 命名',
+      })
+      await vi.advanceTimersByTimeAsync(LABEL_REFRESH_DEBOUNCE_MS - 1)
+      const relabeled2 = relabeled.map((r, i) => (i === 1 ? { ...r, label: '第二行' } : r))
+      mockOf(apiMock.sessions).mockResolvedValue(sessionList(relabeled2))
+      wsMocks.emit({
+        type: 'session.updated',
+        session_id: sessionRows[1]!.encoded_key,
+        status_slug: 'done',
+        turn_engaged: false,
+        msg_count: 5,
+        pending: [],
+        label: '第二行',
+      })
+      await vi.advanceTimersByTimeAsync(LABEL_REFRESH_DEBOUNCE_MS + 1)
+      await el.updateComplete
+      await vi.advanceTimersByTimeAsync(0)
+      await el.updateComplete
+      expect(mockOf(apiMock.sessions)).toHaveBeenCalledTimes(1)
+      expect((el as any).sessions[0].label).toBe('API 命名')
+      expect((el as any).sessions[1].label).toBe('第二行')
+      // 展开项目组后行名以 label 重渲染（无刷新）。
+      ;(el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).click()
+      await el.updateComplete
+      expect(el.shadowRoot!.textContent).toContain('API 命名')
+      el.remove()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('label-clearing frames (label → null) count as a naming change and refetch', async () => {
+    vi.useFakeTimers()
+    try {
+      const labeled = sessionRows.map((r, i) => (i === 0 ? { ...r, label: '旧名' } : r))
+      mockOf(apiMock.sessions).mockResolvedValue(sessionList(labeled))
+      const el = document.createElement('sebas-project-rail') as SebasProjectRail
+      document.body.appendChild(el)
+      await vi.advanceTimersByTimeAsync(0)
+      await el.updateComplete
+      await vi.advanceTimersByTimeAsync(0)
+      await el.updateComplete
+      mockOf(apiMock.sessions).mockClear()
+
+      // 清空 label 的帧：帧 label null ≠ 行已知 '旧名' → 真实命名变化，
+      // 调度重取（行名回退预览/短 id 由重取收敛）。
+      wsMocks.emit({
+        type: 'session.updated',
+        session_id: labeled[0]!.encoded_key,
+        status_slug: 'done',
+        turn_engaged: false,
+        msg_count: 3,
+        pending: [],
+        label: null,
+      })
+      await vi.advanceTimersByTimeAsync(LABEL_REFRESH_DEBOUNCE_MS + 1)
+      await el.updateComplete
+      await vi.advanceTimersByTimeAsync(0)
+      await el.updateComplete
+      expect(mockOf(apiMock.sessions)).toHaveBeenCalledTimes(1)
+      el.remove()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a frame whose label equals the row\u2019s known non-null label skips the refetch', async () => {
+    // 6.3 比对的「同为已设值」半边：上面的用例钉了同为空（null==null）跳过
+    // 与清空触发；这里钉 label 已设且帧携带同一值（相位照变）也不调度——
+    // 比较的是 label 本身（null 归一），不是退化渲染名。
+    vi.useFakeTimers()
+    try {
+      const labeled = sessionRows.map((r, i) => (i === 0 ? { ...r, label: '同名' } : r))
+      mockOf(apiMock.sessions).mockResolvedValue(sessionList(labeled))
+      const el = document.createElement('sebas-project-rail') as SebasProjectRail
+      document.body.appendChild(el)
+      await vi.advanceTimersByTimeAsync(0)
+      await el.updateComplete
+      await vi.advanceTimersByTimeAsync(0)
+      await el.updateComplete
+      mockOf(apiMock.sessions).mockClear()
+
+      wsMocks.emit({
+        type: 'session.updated',
+        session_id: labeled[0]!.encoded_key,
+        status_slug: 'working',
+        turn_engaged: true,
+        msg_count: 4,
+        pending: [],
+        label: '同名',
+      })
+      await el.updateComplete
+      await vi.advanceTimersByTimeAsync(LABEL_REFRESH_DEBOUNCE_MS + 1)
+      expect(mockOf(apiMock.sessions)).toHaveBeenCalledTimes(0)
+      // 相位补丁照常落地（跳过的是重取调度，不是帧本身）。
+      expect((el as any).sessions[0].status_slug).toBe('working')
+      expect((el as any).sessions[0].msg_count).toBe(4)
+      el.remove()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('session.created and updated frames for rows the rail does not know keep the old behavior', async () => {
+    vi.useFakeTimers()
+    try {
+      const el = document.createElement('sebas-project-rail') as SebasProjectRail
+      document.body.appendChild(el)
+      await vi.advanceTimersByTimeAsync(0)
+      await el.updateComplete
+      await vi.advanceTimersByTimeAsync(0)
+      await el.updateComplete
+      mockOf(apiMock.sessions).mockClear()
+
+      // created：rail 还没有该行——保持现行为（要建行，调度重取）。
+      wsMocks.emit({
+        type: 'session.created',
+        session_id: 'oc_new%00',
+        status_slug: 'starting',
+        turn_engaged: true,
+        msg_count: 0,
+        pending: [],
+        label: null,
+      })
+      // updated 但 rail 中不存在该会话：同样调度（要建行）。
+      wsMocks.emit({
+        type: 'session.updated',
+        session_id: 'oc_unknown%00',
+        status_slug: 'working',
+        turn_engaged: true,
+        msg_count: 1,
+        pending: [],
+        label: null,
+      })
+      await vi.advanceTimersByTimeAsync(LABEL_REFRESH_DEBOUNCE_MS + 1)
+      await el.updateComplete
+      await vi.advanceTimersByTimeAsync(0)
+      await el.updateComplete
+      expect(mockOf(apiMock.sessions)).toHaveBeenCalledTimes(1)
+      el.remove()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('the closed row menu keeps its items out of the a11y tree (round5 4.1)', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { join, dirname } = await import('node:path')
+    const here = dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'))
+    const src = readFileSync(join(here, 'project-rail.ts'), 'utf8')
+    // 关闭态（wa-dropdown 无 open 反射属性）菜单项 display:none——a11y 树
+    // 不再暴露「重命名/归档/移除项目」；打开翻转与 popup 激活同帧。
+    expect(src).toMatch(/wa-dropdown:not\(\[open\]\)\s+wa-dropdown-item\s*\{[^}]*display:\s*none/)
   })
 })
 
@@ -1500,6 +1994,249 @@ describe('add-project scope hint (5.2)', () => {
     expect(
       el.shadowRoot!.querySelector('[data-testid="add-project-scope-hint"]'),
     ).toBeTruthy()
+    el.remove()
+  })
+})
+
+// ── fix-webui-qa-defects-round3：路径展示归一（4.4）+ 创建立锚（3.1）──────
+
+describe('display path normalization (round3 4.4)', () => {
+  it('normalizes backslashes to forward slashes for display', () => {
+    expect(normalizeDisplayPath('D:\\work\\repos\\sebas')).toBe('D:/work/repos/sebas')
+    expect(normalizeDisplayPath('/home/me/alpha')).toBe('/home/me/alpha')
+    expect(normalizeDisplayPath('already /mixed\\path')).toBe('already /mixed/path')
+    expect(normalizeDisplayPath('')).toBe('')
+  })
+
+  it('folder-picker fills the add-project input with the normalized path', async () => {
+    mockOf(apiMock.fsBrowseDirs).mockResolvedValue({ entries: [], root: 'D:/work' })
+    const el = await mount()
+    ;(el as any).addDialogOpen = true
+    await (el as any).updateComplete
+    const picker = el.shadowRoot!.querySelector('sebas-folder-picker')
+    expect(picker).toBeTruthy()
+    picker!.dispatchEvent(
+      new CustomEvent('folder-selected', { detail: { path: 'D:\\work\\repos\\sebas' } }),
+    )
+    await (el as any).updateComplete
+    // 填充值即展示值：反斜杠普通形归一为正斜杠，与服务端错误消息同词。
+    expect((el as any).addPath).toBe('D:/work/repos/sebas')
+    el.remove()
+  })
+
+  it('the already-registered server error is shown with normalized separators', async () => {
+    mockOf(apiMock.projects.add).mockRejectedValue(
+      new Error('项目已注册：D:\\work\\repos\\sebas'),
+    )
+    mockOf(apiMock.fsBrowseDirs).mockResolvedValue({ entries: [], root: 'D:/work' })
+    const el = await mount()
+    ;(el as any).addDialogOpen = true
+    ;(el as any).addPath = 'D:/work/repos/sebas'
+    await (el as any).updateComplete
+    await (el as any).submitAddProject()
+    await (el as any).updateComplete
+    expect((el as any).addError).toBe('项目已注册：D:/work/repos/sebas')
+    el.remove()
+  })
+})
+
+describe('creation establishes the read anchor (round3 3.1)', () => {
+  it('creating a session writes the local anchor at zero for the new key', async () => {
+    // 创建路径没有 rail 点击（服务端 set_focus 直达焦点），锚原本永远缺位，
+    // 无锚 = fully read——新会话之后的非聚焦新回复推不出未读徽章（QA 缺陷
+    // 3 根因）。创建成功即在本浏览器立锚（0 轮占位）。
+    mockOf(apiMock.createSession).mockResolvedValue({ key: 'oc_new' })
+    mockOf(apiMock.nodes).mockResolvedValue({
+      nodes: [{ id: 'local', status: 'online', local: true }],
+      remote_available: true,
+    })
+    const el = await mount()
+    ;(
+      el.shadowRoot!.querySelector('button[aria-label="New session in alpha"]') as HTMLButtonElement
+    ).click()
+    await el.updateComplete
+    ;(el as any).confirmNewSession(
+      new CustomEvent('dialog-confirm', {
+        detail: { agent: 'codex', model: null, mode: 'ask' },
+        bubbles: true,
+        composed: true,
+      }),
+    )
+    await new Promise((r) => setTimeout(r, 0))
+    expect(JSON.parse(localStorage.getItem('sebas:seen:oc_new')!)).toEqual({ anchor_count: 0 })
+    el.remove()
+  })
+})
+
+// ── fix-webui-qa-defects-round3 1.2/1.3：真实确认按钮穿过双层 guard 的集成 ──
+
+describe('in-flight creation guard through the real confirm button (round3 1.2/1.3)', () => {
+  beforeEach(() => {
+    // 本文件各 describe 自管 mock 生命周期：清掉先前用例留下的调用记录与
+    // 实现（含 Once 队列）——本组断言「恰好一次 POST」，计数必须从零起算。
+    mockOf(apiMock.createSession).mockReset()
+  })
+
+  async function openReadyDialog(): Promise<{
+    el: SebasProjectRail
+    dialog: HTMLElement & { busy: boolean; updateComplete: Promise<boolean> }
+    confirmButton: HTMLElement
+  }> {
+    // agent 目录就位：预选首个可达 agent → 确认钮可激活（目录不可得时确认
+    // 被 agent 门禁拦下，走不进本用例要压的 in-flight 路径）。
+    mockOf(apiMock.agents).mockResolvedValue({
+      agents: [{ id: 'claude', display: 'Claude Code', reachable: true }],
+    })
+    mockOf(apiMock.providers).mockResolvedValue({ providers: [] })
+    mockOf(apiMock.providerDefaults).mockResolvedValue({
+      default_provider: null,
+      default_model: null,
+    })
+    mockOf(apiMock.nodes).mockResolvedValue({
+      nodes: [{ id: 'local', status: 'online', local: true }],
+      remote_available: true,
+    })
+    const el = await mount()
+    ;(
+      el.shadowRoot!.querySelector('button[aria-label="New session in alpha"]') as HTMLButtonElement
+    ).click()
+    await el.updateComplete
+    const dialog = el.shadowRoot!.querySelector(
+      'sebas-new-session-dialog',
+    ) as unknown as HTMLElement & { busy: boolean; updateComplete: Promise<boolean> }
+    // loadAgents/loadCatalog 是 fire-and-forget：多拍冲刷到 agent 预选落位。
+    for (let i = 0; i < 4; i += 1) {
+      await dialog.updateComplete
+      await new Promise((r) => setTimeout(r, 0))
+    }
+    const confirmButton = dialog.shadowRoot!.querySelector(
+      '[data-testid="dialog-confirm"]',
+    ) as unknown as HTMLElement
+    expect(confirmButton.hasAttribute('disabled')).toBe(false)
+    return { el, dialog, confirmButton }
+  }
+
+  it('a double activation in flight issues exactly one POST; the dialog shows busy until it resolves', async () => {
+    // spec 场景 2 的集成半边：dialog 的 busy 属性来自 rail 的
+    // creatingSession，属性下传有一个渲染拍——同步连点两下时第二下仍会
+    // 穿过 dialog guard，第二道 rail 守卫（creatingSession）必须兜住。
+    let resolveCreate!: (v: { key: string }) => void
+    mockOf(apiMock.createSession).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveCreate = resolve
+        }),
+    )
+    const { el, dialog, confirmButton } = await openReadyDialog()
+
+    confirmButton.click()
+    confirmButton.click() // 在途（属性尚未下传）的第二击
+    await el.updateComplete
+    await dialog.updateComplete
+
+    expect(mockOf(apiMock.createSession)).toHaveBeenCalledTimes(1)
+    // busy 下传：对话框呈忙态（rail creatingSession → dialog.busy）。
+    // （round3 1.2 备选路径）确认控件是原生 button：忙态指示经 aria-busy。
+    expect(dialog.busy).toBe(true)
+    expect(confirmButton.hasAttribute('disabled')).toBe(true)
+    expect(confirmButton.getAttribute('aria-busy')).toBe('true')
+    expect(confirmButton.textContent).toContain('创建中')
+
+    // 请求落定（成功）：恰好这一次创建，对话框收起。
+    resolveCreate({ key: 'oc_new' })
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(mockOf(apiMock.createSession)).toHaveBeenCalledTimes(1)
+    expect(el.shadowRoot!.querySelector('sebas-new-session-dialog')).toBeNull()
+    el.remove()
+  })
+
+  it('busy releases with the failed request so the operator can retry in place', async () => {
+    // spec「busy state for the duration of the request」的收尾半边：忙态精确
+    // 覆盖在途窗口——请求以失败告终时必须随之解除，按钮恢复可激活，重试
+    // 就在对话框内完成。（忙态窗口要可观察，请求得先悬在在途再失败。）
+    let rejectCreate!: (e: Error) => void
+    mockOf(apiMock.createSession).mockImplementation(
+      () =>
+        new Promise((_, reject) => {
+          rejectCreate = reject
+        }),
+    )
+    const { el, dialog, confirmButton } = await openReadyDialog()
+
+    confirmButton.click()
+    await el.updateComplete
+    await dialog.updateComplete
+    expect(dialog.busy).toBe(true)
+
+    // 请求失败落定：忙态解除、按钮复活、错误就地呈现（既有用例钉文案，
+    // 这里钉忙态收尾）。
+    rejectCreate(new Error('HTTP 409: 已有会话'))
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    await dialog.updateComplete
+    expect(dialog.busy).toBe(false)
+    expect(confirmButton.hasAttribute('disabled')).toBe(false)
+    expect(confirmButton.hasAttribute('loading')).toBe(false)
+    expect(dialog.shadowRoot!.querySelector('[data-testid="dialog-error"]')).toBeTruthy()
+
+    // 原地重试成功 → 创建请求共两次、对话框收起。
+    mockOf(apiMock.createSession).mockResolvedValue({ key: 'oc_new' })
+    confirmButton.click()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(mockOf(apiMock.createSession)).toHaveBeenCalledTimes(2)
+    expect(el.shadowRoot!.querySelector('sebas-new-session-dialog')).toBeNull()
+    el.remove()
+  })
+})
+
+describe('unread badge journey after creation (round3 3.1)', () => {
+  it('a created session earns its badge from a later non-focused reply', async () => {
+    // 缺陷 3 的旅程级链路：创建立 0 锚 → 该会话在非聚焦下收到新回复帧 →
+    // rail 行冒出未读计数。创建半边与帧推导半边各有单测，这里钉它们的接缝。
+    mockOf(apiMock.createSession).mockResolvedValue({ key: 'oc_new' })
+    mockOf(apiMock.sessions).mockResolvedValue(
+      sessionList([row({ encoded_key: 'oc_new', project_id: 'proj-alpha', msg_count: 0 })]),
+    )
+    mockOf(apiMock.nodes).mockResolvedValue({
+      nodes: [{ id: 'local', status: 'online', local: true }],
+      remote_available: true,
+    })
+    const el = await mount()
+    ;(
+      el.shadowRoot!.querySelector('button[aria-label="New session in alpha"]') as HTMLButtonElement
+    ).click()
+    await el.updateComplete
+    ;(el as any).confirmNewSession(
+      new CustomEvent('dialog-confirm', {
+        detail: { agent: 'codex', model: null, mode: 'ask' },
+        bubbles: true,
+        composed: true,
+      }),
+    )
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+
+    // 创建成功：0 段占位锚 + 创建流强制展开 alpha 组，新会话行可见、无徽标。
+    const items = () => [...el.shadowRoot!.querySelectorAll('li.session-item')]
+    expect(items().length).toBe(1)
+    expect(items()[0]!.querySelector('[data-testid="session-unread"]')).toBeNull()
+
+    // 非聚焦新回复（帧带 msg_count 1）：锚 0 → 徽标 1，无需列表刷新。
+    wsMocks.emit({
+      type: 'session.updated',
+      session_id: 'oc_new',
+      status_slug: 'working',
+      turn_engaged: true,
+      msg_count: 1,
+      pending: [],
+      label: null,
+    })
+    await el.updateComplete
+    const badge = items()[0]!.querySelector('[data-testid="session-unread"]')
+    expect(badge).toBeTruthy()
+    expect(badge!.textContent).toBe('1')
     el.remove()
   })
 })
