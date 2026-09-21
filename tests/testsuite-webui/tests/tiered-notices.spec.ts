@@ -91,7 +91,10 @@ test.describe('分级通知层', () => {
       await expect(banner).toBeVisible({ timeout: 15_000 })
       // kind 分档（通道断开 = disconnected 档；无 kind 的旧核退化为通用文案）
       // + cause 原文随行（内文由 banner 的 cause 小字承载，断言不钉死具体值）。
-      await expect(banner).toContainText(/与核心的连接已断开|核心不可达/)
+      // 「核心启动失败」档同样在场：优雅退出的 core 会摘除 channel socket，
+      // webui 的重连探测先于本断言观察到「socket 不存在」时横幅即翻该档
+      // ——分档是重连竞态的函数，致命语义（锁定 + 解锁恢复）完全一致。
+      await expect(banner).toContainText(/与核心的连接已断开|核心不可达|核心启动失败/)
       // 锁定：遮罩 + 原因卡 + 恢复提示在场。
       const overlay = page.locator('[data-testid="core-lock-overlay"]')
       await expect(overlay).toBeVisible()

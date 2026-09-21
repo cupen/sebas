@@ -41,11 +41,31 @@ test.describe('会话管理', () => {
    * Expand a project row ONLY when collapsed — the row itself is the
    * expand/collapse toggle, so a blind click on an already-expanded row
    * would hide the sessions this journey needs to see.
+   *
+   * 展开带目标行可见性复核：goto('/') 后工作台会异步自动聚焦最近会话，
+   * rail-select 重绘可能把刚展开的项目行重新收起——只展开一次会让后续的
+   * 行内菜单 hover 在收起态等满超时（本旅程的 flaky 根因）。展开→复核→
+   * 再展开，直到目标行真正可见。
    */
-  async function ensureProjectExpanded(rail: ProjectRail, name: string): Promise<void> {
-    const row = rail.projectRow(name)
-    if ((await row.getAttribute('aria-expanded')) === 'false') {
-      await row.click()
+  async function ensureProjectExpanded(
+    rail: ProjectRail,
+    name: string,
+    sessionText: string,
+  ): Promise<void> {
+    for (let guard = 0; guard < 6; guard++) {
+      const row = rail.projectRow(name)
+      if ((await row.getAttribute('aria-expanded')) === 'false') {
+        await row.click()
+      }
+      const target = rail.host
+        .locator('li.session-item:not(.archived)', { hasText: sessionText })
+        .first()
+      try {
+        await target.waitFor({ state: 'visible', timeout: 2_500 })
+        return
+      } catch {
+        // 重绘又收起了 → 再展开一轮
+      }
     }
   }
 
@@ -69,7 +89,7 @@ test.describe('会话管理', () => {
       // ── archive via the rail row's … menu ─────────────────────────────
       await page.goto('/')
       await expect(rail.host).toBeVisible()
-      await ensureProjectExpanded(rail, projectName)
+      await ensureProjectExpanded(rail, projectName, tag)
       await rail.archiveSession(tag)
       await expect(rail.sessionItem(tag)).toHaveCount(0, { timeout: 10_000 })
 
@@ -109,7 +129,7 @@ test.describe('会话管理', () => {
       // so the restored row's rail label is the archived prompt preview
       // (= tag here) — the restored mapping is NOT label-less: the pre-round4
       // session_id_short fallback assertion is obsolete by design.
-      await ensureProjectExpanded(rail, projectName)
+      await ensureProjectExpanded(rail, projectName, tag)
       await expect(
         rail.host.locator('li.session-item:not(.archived)', { hasText: tag }).first(),
       ).toBeVisible({ timeout: 15_000 })

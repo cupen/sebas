@@ -219,8 +219,12 @@ test.describe('Skills 仓', () => {
         '1 written · 0 overwritten · 0 deleted · 1 private',
       )
 
-      // fakeacp 无落点：如实报告而不是静默跳过。
-      await expect(panel.locator('.skills-sync-noplace')).toContainText('no placement: fakeacp')
+      // fakeacp / claude-empty 无落点：如实报告而不是静默跳过。
+      // （claude-empty 是空回合 notice 旅程加入沙箱的第二驱动 agent——
+      // 方言表只认 claude/codex，它自然落在 no-placement 清单里。）
+      await expect(panel.locator('.skills-sync-noplace')).toContainText(
+        'no placement: claude-empty, fakeacp',
+      )
 
       // 投影真的落进了沙箱内的落点目录；私产字节不动。
       expect(fs.existsSync(path.join(placement, 'beads', 'SKILL.md'))).toBe(true)

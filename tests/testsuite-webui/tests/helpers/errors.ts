@@ -62,8 +62,12 @@ export class ErrorCollector {
       // Deliberate core-outage windows (deployment journey, detached
       // topology): core-proxied reads answer 502 while the channel is down
       // by design — the journey asserts the honest UI (banner / gating /
-      // degraded hint), not network silence.
+      // degraded hint), not network silence. The project-branch read answers
+      // 503 in the same window (its unreachable fallback cannot adjudicate
+      // "project not found" — the registry lives core-side in detached
+      // form), so the outage filter covers it explicitly.
       if (text.includes('502') && /\/api\//.test(url)) return
+      if (text.includes('503') && /\/api\/projects\/.+\/branch/.test(url)) return
       // Intentional rejection probe (phase-3 P2): registering a missing path
       // answers 400 and chromium logs it; the journey asserts the inline
       // dialog error and the untouched registry.

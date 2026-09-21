@@ -527,6 +527,18 @@ path = "{fake}"
 args = ["--slow-ms", "800", "--advertise-commands"]
 sessions_dir = "{cfg}/claude-sessions"
 work_dir = "{cfg}/work"
+
+# close-acceptance-blind-spots 8.1 后续：第二个 claude 驱动 agent，以
+# `--scenario empty` 跑零输出回合——空回合 notice（spec「Turn completing
+# without visible output appends a notice」）的浏览器级真链路载体。进程级
+# e2e 由验收套件的 zero_output_turn_notice_journey 覆盖；这里的空回合桩让
+# 浏览器旅程断言 transcript 的 notice 中性条目与明暗两态渲染。
+[acp.agents.claude-empty]
+driver = "claude"
+path = "{fake}"
+args = ["--scenario", "empty", "--slow-ms", "800"]
+sessions_dir = "{cfg}/claude-empty-sessions"
+work_dir = "{cfg}/work"
 {fakeacp_toml}
 [dispatch]
 state_file = "{cfg}/sessions.json"
