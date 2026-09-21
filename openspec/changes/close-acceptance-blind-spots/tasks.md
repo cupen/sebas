@@ -41,8 +41,8 @@
 
 ## 7. QA 验收技能与 subagent
 
-- [ ] 7.1 `.agents/skills/qa-acceptance/SKILL.md`：范围询问（核心五簇/非核心/全量/快速冒烟）、subagent 派发契约、汇报格式、沙箱红线
-- [ ] 7.2 subagent 执行说明（只读 + 既有 invoke 入口 + 账本复核命令清单）
+- [x] 7.1 `.agents/skills/qa-acceptance/SKILL.md`：范围询问（核心五簇/非核心/全量/快速冒烟）、subagent 派发契约、汇报格式、沙箱红线
+- [x] 7.2 subagent 执行说明（只读 + 既有 invoke 入口 + 账本复核命令清单）
 - [ ] 7.3 自测一轮：模拟「核心五簇」选择走通询问→派发→汇报闭环
 
 ## 8. 收口
