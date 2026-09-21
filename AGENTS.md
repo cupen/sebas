@@ -281,6 +281,33 @@ REAL ACP child completing a turn — without the stub, sessions spawn then the
 child dies honestly; that is not a channel failure. Report such limits
 explicitly instead of marking the task done.
 
+### 真实环境冒烟（operator 手跑，agent 禁触）
+
+沙箱零真实凭据，「真实部署可用」由这一入口负责：`invoke smoke-real`
+（close-acceptance-blind-spots，spec「真实环境冒烟入口」）。在真实凭据下对真实
+上游完成一次基本回合（注册项目 → 创建会话 → 发消息 → 非错误应答），随路打印
+env posture 结论。
+
+- **定位与红线**：operator 手跑。**不进 CI，不由 agent 自动运行**；agent 没有
+  真实凭据也不该找——入口凭据缺失即拒绝（非零退出 + 设置指引，不启动任何进程）。
+  绝不读取或复制运行实例（`~/.sebas`）的凭据与状态文件。
+- **凭据**（二选一，只经环境进入）：A. shell 导出 `ANTHROPIC_AUTH_TOKEN`
+  （或 `ANTHROPIC_API_KEY`，可选 `ANTHROPIC_BASE_URL` 指网关）；B.
+  `SEBAS_SMOKE_PROVIDER_JSON` 指向一份**专用** provider JSON
+  （`{"base_url_anthropic": "https://…", "api_key": "sk-…"}`
+  或 `{"api_key_env": "变量名"}`）——指向真实 `~/.sebas` 之下会被拒绝。
+- **拓扑**：AGENTS.md 沙箱菜谱的最简单进程形态——单进程 bare core
+  （`--webui --webui-port 9877`）+ 真实 `claude` CLI（PATH 查找）。全部状态
+  路径（config、dispatch、media、acp、workspace、skills、channel、五件套
+  env）钉进一次性目录 `sebas-smoke-*`，跑完即毁（`--keep` 留现场调试）。
+  不起独立 router：凭据走继承 env（provider 模式 Off），router 不在回合路径
+  上，省掉真实凭据落盘。
+- **用法**：预置凭据后 `invoke smoke-real`（`--timeout 120` 单回合轮询上限，
+  `--keep` 保留现场）；退出码 0 = 通过，非 0 = 拒绝或回合失败。
+- **agent 注意**：允许做的是**哑凭据演练**（`sebas fake-provider` 做上游 +
+  PATH 垫 `claude` → `fake-claude`），验证配方自身逻辑；面向真实上游的那一次
+  必须由 operator 亲手跑。
+
 ## Skills 仓与 sync（add-agent-skills）
 
 - 仓即文件系统：`[skills] dir`（缺省 `~/.agents/skills`），一 skill 一目录 +
