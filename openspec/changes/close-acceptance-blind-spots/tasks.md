@@ -15,16 +15,16 @@
 
 ## 3. 盲区 4：重启 spawning 收敛
 
-- [ ] 3.1 恢复路径实现：spawning → 重投 spawn 指令；重投失败 → 合成错误条目 + idle 终态
-- [ ] 3.2 单测：落定语义、互不阻塞；e2e：kill 于 spawning 相位 → 重启后无 spawning 会话
-- [ ] 3.3 顺带核对 dispatch 状态文件中历史 spawning 记录的迁移行为
+- [x] 3.1 恢复路径实现：spawning → 重投 spawn 指令；重投失败 → 合成错误条目 + idle 终态
+- [x] 3.2 单测：落定语义、互不阻塞；e2e：kill 于 spawning 相位 → 重启后无 spawning 会话
+- [x] 3.3 顺带核对 dispatch 状态文件中历史 spawning 记录的迁移行为
 
 ## 4. 盲区 3：零输出落点 + 提交反馈时限
 
-- [ ] 4.1 后端：空回合检测 → 投影追加 `notice` 合成条目（正常回合不受影响）
-- [ ] 4.2 前端：transcript-view 渲染 `notice` 中性信息条；dark/light 两态
-- [ ] 4.3 用例：e2e 空响应场景断言 notice 条目；浏览器用例断言提交后 5s 内可见反馈（慢后端场景走 `slow` 桩）
-- [ ] 4.4 复核 `/code-review` 零回音路径：确认经 4.1 落点后时间线不再静默
+- [x] 4.1 后端：空回合检测 → 投影追加 `notice` 合成条目（正常回合不受影响）
+- [x] 4.2 前端：transcript-view 渲染 `notice` 中性信息条；dark/light 两态
+- [x] 4.3 用例：e2e 空响应场景断言 notice 条目；浏览器用例断言提交后 5s 内可见反馈（慢后端场景走 `slow` 桩）
+- [x] 4.4 复核 `/code-review` 零回音路径：确认经 4.1 落点后时间线不再静默
 
 ## 5. 盲区 1：真实环境冒烟配方
 
