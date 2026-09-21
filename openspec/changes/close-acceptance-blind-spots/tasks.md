@@ -34,19 +34,19 @@
 
 ## 6. 账本重算与 100% 达标
 
-- [ ] 6.1 按工作树 specs 重算五簇基数（含本 change 新增 requirement），逐条核对命中证据
-- [ ] 6.2 缺口补测：优先用 1.x 场景扩 e2e/浏览器旅程；测不了的面显式豁免注明 cause
-- [ ] 6.3 回填 COVERAGE.md：新复核记录、基数差异说明、核心合计 =100%
-- [ ] 6.4 testsuite-acceptance 旅程用例按新 requirement 增补（每簇 ≥1 旅程用例保持）
+- [x] 6.1 按工作树 specs 重算五簇基数（含本 change 新增 requirement），逐条核对命中证据
+- [x] 6.2 缺口补测：优先用 1.x 场景扩 e2e/浏览器旅程；测不了的面显式豁免注明 cause
+- [x] 6.3 回填 COVERAGE.md：新复核记录、基数差异说明、核心合计 =100%
+- [x] 6.4 testsuite-acceptance 旅程用例按新 requirement 增补（每簇 ≥1 旅程用例保持）
 
 ## 7. QA 验收技能与 subagent
 
 - [x] 7.1 `.agents/skills/qa-acceptance/SKILL.md`：范围询问（核心五簇/非核心/全量/快速冒烟）、subagent 派发契约、汇报格式、沙箱红线
 - [x] 7.2 subagent 执行说明（只读 + 既有 invoke 入口 + 账本复核命令清单）
-- [ ] 7.3 自测一轮：模拟「核心五簇」选择走通询问→派发→汇报闭环
+- [x] 7.3 自测一轮：模拟「核心五簇」选择走通询问→派发→汇报闭环
 
 ## 8. 收口
 
 - [ ] 8.1 全量测试门：`cargo test`、`invoke testsuite-e2e`、`invoke testsuite-acceptance`、Playwright 全绿
-- [ ] 8.2 `openspec validate` 通过；spec delta 与实现一致性走查
+- [x] 8.2 `openspec validate` 通过；spec delta 与实现一致性走查
 - [ ] 8.3 僵尸 spawning 顺带核对：operator 实例下次重启后无 spawning 残留（汇报项，不碰实例）
