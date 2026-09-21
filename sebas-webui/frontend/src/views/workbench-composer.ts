@@ -226,6 +226,14 @@ export class SebasWorkbenchComposer extends LitElement {
    */
   @state() private slashNotice: string | null = null
   /**
+   * （close-acceptance-blind-spots 4.3，spec「Submission acknowledgment is
+   * bounded」）提交的**本地乐观排队呈现**：submit 发出（POST 在途）即刻置位，
+   * 提交面立即出现可见的排队指示——不依赖后端往返；后端确认（成功/失败）
+   * 后清除并回由转录「已收到」角标 / 错误 callout 对齐。慢核心（确认超过
+   * 5 秒）下提交面同样不吞反馈。
+   */
+  @state() private optimisticQueued: string | null = null
+  /**
    * （workbench-composer-input-polish 3.2/D3）命令面板 hover 行下标：hover
    * 与键盘高亮两态同源出泡——hover 优先，未 hover 时回落到键盘高亮行。
    * `null` = 指针不在任何行上。
@@ -367,6 +375,9 @@ export class SebasWorkbenchComposer extends LitElement {
     }
     this.sending = true
     this.error = null
+    // （close-acceptance-blind-spots 4.3）乐观排队呈现：POST 发出即刻置位，
+    // 提交面 5 秒内（实为同步）出现可见排队指示，不等后端确认。
+    this.optimisticQueued = prompt
     try {
       // turn 在飞时服务端自动排队（workbench-turn-queue）——composer 不区分
       // 开轮与排队，提交语义一条路径。
@@ -381,6 +392,9 @@ export class SebasWorkbenchComposer extends LitElement {
       this.error = String(e)
     } finally {
       this.sending = false
+      // 后端已确认（或拒绝）：乐观指示退场——成功面由转录「已收到」角标
+      // 接棒，失败面由错误 callout 呈现。
+      this.optimisticQueued = null
     }
   }
 
@@ -800,6 +814,23 @@ export class SebasWorkbenchComposer extends LitElement {
     >`
   }
 
+  /**
+   * （close-acceptance-blind-spots 4.3，spec「Submission acknowledgment is
+   * bounded」）本地乐观排队指示：提交一发出（POST 在途）即渲染——即使核心
+   * 通道的确认迟迟不来（> 5s），提交面也有可见的「已接收/排队」反馈；后端
+   * 确认后（sending 翻 false）指示消失，由转录回执/错误提示对齐。
+   */
+  private renderOptimisticQueued() {
+    if (this.optimisticQueued === null) return nothing
+    return html`<span
+      class="optimistic-queued"
+      data-testid="submit-queued-indicator"
+      role="status"
+      title="提交已发出，等待服务端回执（本地排队呈现，不依赖后端往返）"
+      >${icon('clock', 12)}已提交，等待回执</span
+    >`
+  }
+
   /** 提交控件：按 submitState() 渲染五态（design D4）。 */
   private renderSubmitButton() {
     const state = this.submitState()
@@ -909,6 +940,7 @@ export class SebasWorkbenchComposer extends LitElement {
           <div class="right-tools">
             ${this.renderModelChip()}
             ${this.renderParkedHint()}
+            ${this.renderOptimisticQueued()}
             ${this.renderSubmitButton()}
           </div>
         </div>
@@ -1271,6 +1303,21 @@ export class SebasWorkbenchComposer extends LitElement {
       .parked-hint {
         font-size: 0.72rem;
         color: var(--sebas-signal);
+        white-space: nowrap;
+      }
+      /* （close-acceptance-blind-spots 4.3）本地乐观排队指示：queued 色小
+         pill（与状态词表 queued 同源），POST 在途全程可见、确认后消失。 */
+      .optimistic-queued {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        font-size: 0.72rem;
+        line-height: 1;
+        color: var(--sebas-status-queued, var(--sebas-accent));
+        background: var(--sebas-status-queued-bg, var(--sebas-accent-soft));
+        border: 1px solid var(--sebas-status-queued-border, var(--sebas-border));
+        border-radius: var(--sebas-radius-full);
+        padding: 3px 9px;
         white-space: nowrap;
       }
       /* 28px accent icon send button; disabled dims instead of vanishing. */

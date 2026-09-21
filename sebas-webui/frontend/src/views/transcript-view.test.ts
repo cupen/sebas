@@ -59,6 +59,8 @@ import {
   splitAgentRuns,
   toolResultDenied,
   truncateHtml,
+  unitMaxTs,
+  unitSegmentCount,
 } from './transcript-view.js'
 import type { ProcessItem, ProcessRun } from './transcript-view.js'
 import type { SebasTranscriptView } from './transcript-view.js'
@@ -1801,5 +1803,88 @@ describe('deniedDetailContent (fix-webui-qa-defects 5.3)', () => {
   it('keeps content without a ✓ prefix intact (nothing to rewrite)', () => {
     const content = '已拒绝：普通文本结果（无 ✓ 前缀）'
     expect(deniedDetailContent(content, null)).toBe(content)
+  })
+})
+
+// ── close-acceptance-blind-spots 4.2：零输出回合的 notice 中性信息条 ──────
+
+describe('notice entries (close-acceptance-blind-spots 4.2, design D3)', () => {
+  const noticeEntry = (position: number, ts: number = FIXED_DATES.T2): ConversationEntryView =>
+    entry({
+      position,
+      kind: 'content',
+      element_type: 'notice',
+      content: '**回合已结束且无输出**：本轮回合未产生任何可见输出。',
+      created_at_unix: ts,
+    })
+
+  it('notice entries stay standalone units that split the surrounding agent turn', () => {
+    const entries = [
+      entry({ position: 0, kind: 'prompt', content: 'go', created_at_unix: FIXED_DATES.T1 }),
+      entry({ position: 1, kind: 'content', content: 'partial', created_at_unix: FIXED_DATES.T1 }),
+      noticeEntry(2),
+    ]
+    const units = groupConversation(mergeSpawnErrors(entries))
+    expect(units.map((u) => u.kind)).toEqual(['operator', 'agent', 'notice'])
+    expect(unitMaxTs(units[2]!)).toBe(FIXED_DATES.T2)
+  })
+
+  it('notice contributes zero visible segments (zero-output turn must not inflate unread)', () => {
+    const entries = [entry({ position: 0, kind: 'prompt', content: 'go', created_at_unix: FIXED_DATES.T1 }), noticeEntry(1)]
+    const units = groupConversation(mergeSpawnErrors(entries))
+    expect(units.map((u) => unitSegmentCount(u))).toEqual([0, 0])
+  })
+
+  it('renders as a neutral info bar, never the error bubble (failure semantics)', async () => {
+    const el = await mount({
+      entries: [
+        entry({ position: 0, kind: 'prompt', content: 'say nothing', created_at_unix: FIXED_DATES.T1 }),
+        noticeEntry(1),
+      ],
+    })
+    const block = el.shadowRoot!.querySelector<HTMLElement>('.turn-block.is-notice')!
+    expect(block).toBeTruthy()
+    // 中性信息条的可寻址 hook 与结构：i 头像 + 「提示」标签 + 正文。
+    expect(block.getAttribute('data-testid')).toBe('notice-entry')
+    expect(block.querySelector('.avatar.notice')?.textContent).toBe('i')
+    expect(block.querySelector('.author.notice')?.textContent).toBe('提示')
+    expect(block.querySelector('.body')?.textContent).toContain('回合已结束且无输出')
+    // 无错误语义：不走 error 红泡类，也不渲染计数徽标。
+    expect(block.querySelector('.avatar.error')).toBeNull()
+    expect(block.querySelector('.bubble.error')).toBeNull()
+    expect(block.querySelector('.count')).toBeNull()
+    // 同屏的错误条目仍走既有红泡分支——notice 分支是新增而不是替换。
+    const both = await mount({
+      entries: [
+        noticeEntry(0),
+        entry({ position: 1, kind: 'content', element_type: 'error', content: '**spawn failed**: x', created_at_unix: FIXED_DATES.T2 }),
+      ],
+    })
+    expect(both.shadowRoot!.querySelector('.turn-block.is-notice')).toBeTruthy()
+    expect(both.shadowRoot!.querySelector('.turn-block.is-error .bubble.error')).toBeTruthy()
+  })
+
+  it('notice styling derives from theme tokens only (dark/light flip from one source)', async () => {
+    const el = await mount({ entries: [noticeEntry(0)] })
+    const styleText = [...el.shadowRoot!.querySelectorAll('style')]
+      .map((s) => s.textContent ?? '')
+      .join('\n')
+    // 信息条的面/边/字全部走语义 token——明暗两态由 tokens.css 同源翻转
+    // （dark: 深灰蓝面 / light: 浅灰面），组件内不做任何按主题的硬编码色。
+    // var() 内允许 token 缺省兜底值（降级用），主色必须是 token。
+    const rules = new Map<string, string>()
+    for (const m of styleText.matchAll(/\.turn-block [^{]*\.notice[^{]*\{([^}]*)\}/g)) {
+      rules.set(m[0].split('{')[0]!.trim(), m[1]!)
+    }
+    const avatar = rules.get('.turn-block .avatar.notice')
+    const bubble = rules.get('.turn-block .bubble.notice')
+    expect(avatar, 'avatar.notice rule').toBeTruthy()
+    expect(avatar).toContain('background: var(--sebas-surface-2')
+    expect(avatar).toContain('color: var(--sebas-text-dim')
+    expect(bubble, 'bubble.notice rule').toBeTruthy()
+    expect(bubble).toContain('background: var(--sebas-surface-2')
+    expect(bubble).toContain('border-color: var(--sebas-border')
+    // 中性 = 不借用任何失败/警示语义色。
+    expect(styleText.match(/\.notice[^{]*\{[^}]*status-failed/g)).toBeNull()
   })
 })

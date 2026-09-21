@@ -39,6 +39,10 @@
  *     unchanged content;
  *   - error entries (spawn failures) do not join runs — they render as
  *     their own counted error bubbles, positioned in sequence (D5);
+ *   - notice entries (zero-output turn synthetic notices,
+ *     close-acceptance-blind-spots 4.2) likewise stay standalone and render
+ *     as neutral info bars — same block shape as the error bubble, no
+ *     failure semantics (no red, no count);
  *   - the operator's newest submission shows a low-key "已收到" receipt
  *     badge while no agent output has arrived (pure entry-sequence derived
  *     state — no sender-side state machine);
@@ -267,7 +271,17 @@ export interface ErrorUnit {
   entry: ErrorCountedView
 }
 
-export type TurnUnit = OperatorUnit | AgentUnit | ErrorUnit
+/**
+ * 零输出回合的中性提示条（close-acceptance-blind-spots 4.2，design D3）：
+ * core 在空回合收尾时追加的合成 `notice` 条目，独立成单元——与错误气泡
+ * 同构但走中性信息条渲染分支（非错误红泡）。
+ */
+export interface NoticeUnit {
+  kind: 'notice'
+  entry: ConversationEntryView
+}
+
+export type TurnUnit = OperatorUnit | AgentUnit | ErrorUnit | NoticeUnit
 
 /** 过程条目（D1）：进入过程 run 的 element_type 词表。 */
 function isProcessEntry(e: ConversationEntryView): boolean {
@@ -315,13 +329,16 @@ export function splitAgentRuns(entries: ConversationEntryView[]): AgentRun[] {
  * Group the ordered entry sequence into turn units (D3): each prompt opens
  * an operator turn; the entries until the next prompt belong to the
  * following agent turn; error entries render as standalone counted bubbles
- * and split the surrounding agent turns (D5 — they never join a run).
+ * and split the surrounding agent turns (D5 — they never join a run);
+ * notice entries render as standalone neutral info bars and likewise split
+ * the surrounding agent turns (close-acceptance-blind-spots 4.2).
  * Empty-content entries are skipped (they carry nothing to display).
  */
 export function groupConversation(entries: ErrorCountedView[]): TurnUnit[] {
   const units: TurnUnit[] = []
-  // 当前 agent 回合积攒的条目：error/prompt 都会终结它——前者独立成错误
-  // 气泡（D5），后者是操作者回合。收尾时一次性切 run（D1）。
+  // 当前 agent 回合积攒的条目：error/notice/prompt 都会终结它——前两者
+  // 独立成单元（错误气泡 D5 / 中性提示条），后者是操作者回合。收尾时
+  // 一次性切 run（D1）。
   let pending: ConversationEntryView[] = []
   const flush = (): void => {
     if (pending.length === 0) return
@@ -342,6 +359,11 @@ export function groupConversation(entries: ErrorCountedView[]): TurnUnit[] {
       units.push({ kind: 'error', entry: e })
       continue
     }
+    if (e.element_type === 'notice') {
+      flush()
+      units.push({ kind: 'notice', entry: e })
+      continue
+    }
     if (e.kind === 'prompt') {
       flush()
       units.push({ kind: 'operator', entry: e })
@@ -355,18 +377,22 @@ export function groupConversation(entries: ErrorCountedView[]): TurnUnit[] {
 
 /** The newest entry timestamp of a turn — the turn's seam edge (D5). */
 export function unitMaxTs(unit: TurnUnit): number {
-  if (unit.kind === 'operator' || unit.kind === 'error') return unit.entry.created_at_unix || 0
+  if (unit.kind === 'operator' || unit.kind === 'error' || unit.kind === 'notice') {
+    return unit.entry.created_at_unix || 0
+  }
   return unit.maxTs
 }
 
 /**
  * One turn's visible-segment contribution（2.3，与后端 `count_chat_messages`
  * 同口径）：agent 回合里每个 text run（相邻 markdown 合并）计 1；error 气泡
- * 按合并计数计（每条 error 后端各计 1）；operator 提交与 process 条目不计。
- * 累加即得「读到此回合为止已见的段数」，seam 与徽标共用同一份段锚。
+ * 按合并计数计（每条 error 后端各计 1）；operator 提交、process 条目与
+ * notice 提示条不计（notice 不是回复段——零输出回合不虚增未读段数，
+ * close-acceptance-blind-spots 4.2）。累加即得「读到此回合为止已见的段数」，
+ * seam 与徽标共用同一份段锚。
  */
 export function unitSegmentCount(unit: TurnUnit): number {
-  if (unit.kind === 'operator') return 0
+  if (unit.kind === 'operator' || unit.kind === 'notice') return 0
   if (unit.kind === 'error') return unit.entry.count ?? 1
   return unit.runs.filter((r) => r.type === 'text').length
 }
@@ -797,6 +823,24 @@ export class SebasTranscriptView extends LitElement {
     .turn-block .meta .count {
       font-weight: 700;
       font-variant-numeric: tabular-nums;
+    }
+    /* close-acceptance-blind-spots 4.2（design D3）：notice 中性信息条——
+       surface-2 底 + 普通边框 + dim 文字，无失败语义色。颜色全走语义
+       token，明暗两主题随 tokens.css 同源翻转（dark: 深灰蓝面；light:
+       浅灰面），无需按主题各自调色。 */
+    .turn-block .avatar.notice {
+      background: var(--sebas-surface-2, #f0f2f7);
+      color: var(--sebas-text-dim, #5f6a80);
+      border-color: var(--sebas-border);
+      font-weight: 700;
+    }
+    .turn-block .bubble.notice {
+      background: var(--sebas-surface-2, #f0f2f7);
+      border-color: var(--sebas-border);
+      border-top-left-radius: 4px;
+    }
+    .turn-block .meta .author.notice {
+      color: var(--sebas-text-dim);
     }
     .turn-block .bubble {
       flex: 1;
@@ -1416,8 +1460,33 @@ export class SebasTranscriptView extends LitElement {
 
   private renderUnit(u: TurnUnit, receipt: boolean) {
     if (u.kind === 'error') return this.renderErrorUnit(u)
+    if (u.kind === 'notice') return this.renderNoticeUnit(u)
     if (u.kind === 'operator') return this.renderOperatorUnit(u, receipt)
     return this.renderAgentUnit(u)
+  }
+
+  /**
+   * 零输出回合的中性信息条（close-acceptance-blind-spots 4.2，design D3）：
+   * `notice` 条目绝不走错误红泡——`i` 头像 + 中性标签「提示」+ surface-2
+   * 底的浅信息条。颜色全部走语义 token（明暗两主题同源翻转，无需各自的
+   * 硬编码色）。
+   */
+  private renderNoticeUnit(u: NoticeUnit) {
+    const e = u.entry
+    const iso = isoTime(e.created_at_unix)
+    const ts = formatTime(e.created_at_unix)
+    return html`
+      <div class="turn-block is-notice" data-testid="notice-entry">
+        <div class="avatar notice">i</div>
+        <div class="bubble notice">
+          <div class="meta">
+            <span class="author notice">提示</span>
+            <time class="time" datetime=${iso || nothing}>${ts}</time>
+          </div>
+          <div class="body">${unsafeHTML(renderMarkdown(e.content))}</div>
+        </div>
+      </div>
+    `
   }
 
   /** fail-fast-on-startup-errors 3.3：错误条目仍是独立计数气泡。 */
