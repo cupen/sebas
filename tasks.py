@@ -384,6 +384,8 @@ def testsuite_webui(c, case=None):
                 cmd = f"pnpm --dir {suite_dir} exec playwright test --config playwright.auth.config.ts"
             elif case == "auth-setup":
                 cmd = f"pnpm --dir {suite_dir} exec playwright test --config playwright.auth-setup.config.ts"
+            elif case == "dead-core":
+                cmd = f"pnpm --dir {suite_dir} exec playwright test --config playwright.dead-core.config.ts"
             elif case in ("deployment", "approval-detached"):
                 cmd = (
                     f"pnpm --dir {suite_dir} exec playwright test --config playwright.detached.config.ts"
@@ -397,6 +399,7 @@ def testsuite_webui(c, case=None):
                 f" && pnpm --dir {suite_dir} exec playwright test --config playwright.auth.config.ts"
                 f" && pnpm --dir {suite_dir} exec playwright test --config playwright.auth-setup.config.ts"
                 f" && pnpm --dir {suite_dir} exec playwright test --config playwright.detached.config.ts"
+                f" && pnpm --dir {suite_dir} exec playwright test --config playwright.dead-core.config.ts"
             )
         result = c.run(cmd, echo=True)
         if result.failed:
@@ -714,6 +717,12 @@ def _run_webui_sandbox(port, auth_on, keep, reuse, human, detached=False, provis
             stdout=log,
             stderr=subprocess.STDOUT,
         )
+        # 单进程形态也发布 pids.json（core 冻结/死亡旅程经
+        # tests/helpers/coreproc.ts 驱动 harness 拉起的 core 进程；detached
+        # 的同名文件早有此约定）。清理侧 child 句柄仍然直达，读它的是
+        # _cleanup_stale_sandboxes 的活性判定与浏览器用例。
+        with open(os.path.join(work, "pids.json"), "w") as f:
+            json.dump({"core": proc.pid, "router": router_proc.pid}, f)
 
     def _log_tail(n=30):
         tail = ""
@@ -763,8 +772,15 @@ def _run_webui_sandbox(port, auth_on, keep, reuse, human, detached=False, provis
             print(f"### webui 沙箱就绪：http://127.0.0.1:{port}/  （鉴权关闭，免登录；{topology}）", flush=True)
         print(f"### 日志与状态均在 {work}（core.log / router.log）；Ctrl-C 退出并清理", flush=True)
 
-    while proc.poll() is None and not stop.is_set():
-        stop.wait(0.5)
+    # TESTSUITE_ALLOW_CORE_DEATH=1（playwright.dead-core.config.ts 的死亡旅程）：
+    # core --webui 进程被用例 SIGKILL 是被测前提，harness 不得因子进程死亡
+    # 抢跑清场——只认停机信号。
+    if os.environ.get("TESTSUITE_ALLOW_CORE_DEATH") == "1":
+        while not stop.is_set():
+            stop.wait(0.5)
+    else:
+        while proc.poll() is None and not stop.is_set():
+            stop.wait(0.5)
 
     # Teardown: SIGTERM the backend(s) — the router child too（两进程形态）,
     # including any core the Playwright fixture started (pids.json always

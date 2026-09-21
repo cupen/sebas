@@ -68,6 +68,15 @@ export class ErrorCollector {
       // form), so the outage filter covers it explicitly.
       if (text.includes('502') && /\/api\//.test(url)) return
       if (text.includes('503') && /\/api\/projects\/.+\/branch/.test(url)) return
+      // Deliberate SERVER-DEATH window (singleprocess-dead-core journey): the
+      // harness core --webui process is SIGKILLed mid-journey by design —
+      // in-flight /api fetches and the page's /ws reconnect both fail with
+      // connection-refused class noise while the journey asserts the honest
+      // UI degradation (ws-down banner, composer NetworkError strip), not
+      // network silence. Keyed to the refused-connection shapes on the local
+      // origin so live-suite failures never match.
+      if (/net::ERR_CONNECTION_REFUSED/i.test(text) && /127\.0\.0\.1:\d+/.test(url)) return
+      if (/^WebSocket connection to 'ws:\/\/127\.0\.0\.1:/.test(text)) return
       // Intentional rejection probe (phase-3 P2): registering a missing path
       // answers 400 and chromium logs it; the journey asserts the inline
       // dialog error and the untouched registry.

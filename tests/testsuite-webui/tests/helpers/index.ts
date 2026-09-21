@@ -2,6 +2,7 @@
  * Barrel for helpers: `import { Workbench, Transcript, … } from './helpers'`.
  */
 export * from './api'
+export * from './coreproc'
 export * from './detached'
 export * from './errors'
 export * from './scene'

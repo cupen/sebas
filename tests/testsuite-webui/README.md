@@ -93,6 +93,8 @@ pnpm --dir tests/testsuite-webui exec playwright test
 | 设置面 ¹ | 写降级 | S4 defaults read parity; sandbox write fails honestly | `settings.spec.ts` | 设置面写操作诚实降级覆盖「写降级失败外显且状态不变」¹ |
 | 设置面 ¹ | 写降级 | S5a create/edit mutations: client validation + honest 503 | `settings.spec.ts` | 模型管理覆盖「settings provider 只读」 |
 | 设置面 ¹ | 写降级 | S5b delete/probe mutations fail honestly, list unchanged | `settings.spec.ts` | 模型管理覆盖「settings provider 只读」 |
+| 提交反馈时限 ⁶ | core 挂起窗口（SIGSTOP） | 挂起期间提交：等待回执即时可见；解冻后免刷新落账 | `core-freeze-pending-ack.spec.ts` | live-turn-stream「Submission acknowledgment is bounded」挂起形态延伸（HTTP+WS 同停，route 注入复现不了）⁶ |
+| 部署韧性 ⁶ | 单进程 core 死亡 | core 死亡：ws-down 横幅 + rail 不可达 + 提交 NetworkError 内显且草稿保留 | `singleprocess-dead-core.spec.ts` | deployment/tiered-notices fatal 旅程的单进程半边（webui 本身即死进程，断连靠 SPA 自感）⁶ |
 
 > ¹ 设置面（S1–S4, S6）的锚点指向尚未归档的 change `expand-webui-e2e-settings` 的 delta
 > scenario（尚未同步进主 spec）；S5a/S5b 锚到主 spec `模型管理覆盖`「settings provider
@@ -128,6 +130,16 @@ pnpm --dir tests/testsuite-webui exec playwright test
 > Settings 语义修正（fix-settings-menu-and-services-semantics，spec 改动 `1e4a807`）：
 > S1 改写为 `/api/admin/services` 响应驱动、S6 新增裸 core 退化覆盖；实施清单见
 > `openspec/changes/fix-settings-menu-and-services-semantics/tasks.md` §4。
+>
+> ⁶ 进程形态旅程（spec-go 整体验收 + browser-use GUI 验收 2026-09-22 收口的易错点，
+> 无 delta scenario，task/验收级锚点）：挂起与死亡都以 harness 拉起的 core 进程为
+> 手柄——单进程形态的 pids.json（tasks.py 发布 `{"core", "router"}`）+
+> `tests/helpers/coreproc.ts` 的 SIGSTOP/SIGCONT/SIGKILL。两条互补：
+> SIGSTOP 是「上游挂起」（TCP 在、HTTP+WS 同停，客户端只能以等待回执指示兜底），
+> SIGKILL 是「服务死亡」（断连只能靠 SPA 自感：ws-down 横幅 + 提交 NetworkError）。
+> 死亡旅程独占 `playwright.dead-core.config.ts`（端口 9895，
+> `TESTSUITE_ALLOW_CORE_DEATH=1` 让 harness 不因子进程死亡抢跑清场；core 一死
+> 同 config 其余用例全部失联，故不重试、不与主套件混跑）。
 
 能力矩阵账本见 `tests/acceptance/COVERAGE.md` 的 `testsuite-webui-browser` 一节。
 
@@ -137,7 +149,7 @@ pnpm --dir tests/testsuite-webui exec playwright test
 |---|---|
 | `TESTSUITE_KEEP=1 invoke testsuite-webui` | 通过后也保留沙箱现场（排障）|
 | `TESTSUITE_REUSE=1` | 复用上一次保留的沙箱（配合 TESTSUITE_KEEP）|
-| `TESTSUITE_PORT=<port>` | 覆盖沙箱端口（默认 9899；`TESTSUITE_AUTH=1` 时 9898；`TESTSUITE_AUTH_SETUP=1` 时 9896）|
+| `TESTSUITE_PORT=<port>` | 覆盖沙箱端口（默认 9899；`TESTSUITE_AUTH=1` 时 9898；`TESTSUITE_AUTH_SETUP=1` 时 9896；dead-core 配置显式传 9895）|
 
 任一用例失败时，keep-on-fail reporter 会把沙箱目录保留下来并在输出里打印路径
 （含后端日志 `core.log`），供复现。
