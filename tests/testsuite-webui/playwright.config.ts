@@ -19,12 +19,16 @@ export default defineConfig({
   // deployment.spec.ts + approval-detached.spec.ts run under
   // playwright.detached.config.ts (detached dual-process form, port 9897) —
   // stopping the core there would be lethal to the shared single-process
-  // sandbox, and the approval loop needs the channel topology.
+  // sandbox, and the approval loop needs the channel topology;
+  // singleprocess-dead-core.spec.ts runs under playwright.dead-core.config.ts
+  // (port 9895 + TESTSUITE_ALLOW_CORE_DEATH=1) — it SIGKILLs the shared
+  // core --webui process, which is the journey's premise and lethal here.
   testIgnore: [
     /auth\.spec\.ts/,
     /auth-setup\.spec\.ts/,
     /deployment\.spec\.ts/,
     /approval-detached\.spec\.ts/,
+    /singleprocess-dead-core\.spec\.ts/,
   ],
   timeout: 30_000,
   retries: 1,
