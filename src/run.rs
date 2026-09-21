@@ -148,6 +148,12 @@ pub async fn run(
         }
     }
 
+    // close-acceptance-blind-spots 盲区 2：env posture 启动告警——继承自
+    // shell 且不被 cover 语义覆盖的 ANTHROPIC_* 逐变量 WARN 点名（只报告，
+    // 不篡改 env，design D1）。放在 state store 初始化之后：provider 解析
+    // 与 spawn 路径同源（库权威）。
+    crate::spawn_env::warn_inherited_provider_env(router_cfg.as_ref());
+
     // TOML is bootstrap; settings.json (if present) wins wholesale.
     // Strict: malformed settings.json refuses to start with a clear error.
     // Missing settings.json → fall back to TOML [card] so first-boot users
