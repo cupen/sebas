@@ -5767,3 +5767,460 @@ async fn pending_management_unavailable_uses_honest_cause_text() {
         });
     assert!(in_list, "the queued session must still be reachable by webui list");
 }
+
+/// 轮询直到某进程日志同时出现全部给定片段（posture 告警在启动早期落盘，
+/// reachable 之后理应已在——wait_for 只是给慢机器留余量）。
+async fn wait_log_contains(what: &str, log: &Path, needles: &[&str]) {
+    let log = log.to_path_buf();
+    let log_hint = log.clone();
+    let needles: Vec<String> = needles.iter().map(|s| (*s).to_string()).collect();
+    wait_for(what, Duration::from_secs(20), &log_hint, move || {
+        let log = log.clone();
+        let needles = needles.clone();
+        Box::pin(async move {
+            let text = std::fs::read_to_string(&log).ok()?;
+            needles
+                .iter()
+                .all(|n| text.contains(n.as_str()))
+                .then_some(())
+        })
+    })
+    .await;
+}
+
+/// close-acceptance-blind-spots 盲区 2 进程级 e2e（spec 场景「未覆盖的继承
+/// env 触发告警」）：shell 导出 `ANTHROPIC_BASE_URL` / `ANTHROPIC_MODEL` 后，
+/// core 与 standalone webui 的启动日志各出现一条 env posture WARN，逐变量
+/// 点名「继承自 shell、将在 Claude 子进程生效」。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn env_posture_warn_names_inherited_anthropic_vars() {
+    let sb = Sandbox::new("testsuite_e2e", "env-posture-warn");
+    let cli = http_client();
+    let inherited: &[(&str, &str)] = &[
+        ("ANTHROPIC_BASE_URL", "https://corp-gw.internal/anthropic"),
+        ("ANTHROPIC_MODEL", "corp-unrouted-model"),
+    ];
+    let _core = sb.spawn_core_extra(inherited);
+    let _webui = sb.spawn_webui_extra(&sb.core_secret, inherited);
+    wait_reachable(&cli, &sb).await;
+
+    for (who, log) in [("core", sb.core_log.clone()), ("webui", sb.webui_log.clone())] {
+        wait_log_contains(
+            &format!("{who} 启动日志出现 env posture 告警并点名两个继承变量"),
+            &log,
+            &[
+                "env posture",
+                "ANTHROPIC_BASE_URL",
+                "ANTHROPIC_MODEL",
+                "继承自 shell",
+                "Claude 子进程生效",
+            ],
+        )
+        .await;
+    }
+}
+
+/// spec 场景「全覆盖时保持安静」的进程级反例：不继承任何被检变量时，core
+/// 与 webui 的启动日志都不得出现 env posture 告警。七个被检变量显式置空
+/// （空值 = 未继承），避免跑套件的 shell 恰好导出真实 `ANTHROPIC_*` 污染断言。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn env_posture_stays_silent_without_inherited_vars() {
+    let sb = Sandbox::new("testsuite_e2e", "env-posture-silent");
+    let cli = http_client();
+    let blanks: &[(&str, &str)] = &[
+        ("ANTHROPIC_BASE_URL", ""),
+        ("ANTHROPIC_AUTH_TOKEN", ""),
+        ("ANTHROPIC_MODEL", ""),
+        ("ANTHROPIC_DEFAULT_OPUS_MODEL", ""),
+        ("ANTHROPIC_DEFAULT_SONNET_MODEL", ""),
+        ("ANTHROPIC_DEFAULT_HAIKU_MODEL", ""),
+        ("ANTHROPIC_SMALL_FAST_MODEL", ""),
+    ];
+    let _core = sb.spawn_core_extra(blanks);
+    let _webui = sb.spawn_webui_extra(&sb.core_secret, blanks);
+    wait_reachable(&cli, &sb).await;
+
+    // posture 检测在启动早期执行；reachable 蕴含两边启动日志早已落盘。
+    for (who, log) in [("core", &sb.core_log), ("webui", &sb.webui_log)] {
+        let text = std::fs::read_to_string(log).unwrap_or_default();
+        assert!(
+            !text.contains("env posture"),
+            "{who} 启动日志不得出现 env posture 告警（无继承必须静默）:\n{text}"
+        );
+    }
+}
+
+// ── close-acceptance-blind-spots 1.3：fake-claude 全行为 mock 的进程级 e2e ──
+//
+// 场景用例即桩的验收（design Risks）：桩的行为由真实 core+webui 子进程反向
+// 断言，桩坏了套件红、不静默假绿。全部走一次性沙箱，零真模型调用。
+
+/// spec 场景「工具环场景」（close-acceptance-blind-spots 1.3）：tool-loop
+/// 桩发出 tool_use → 泊车审批由**测试侧**经 webui HTTP 应答 allow_once →
+/// tool_result → 环后正文 → Done。投影按 position 单调读出
+/// 「tool_use（📖 Bash）→ 工具执行（✓ Bash）→ 后续正文」三段序列；
+/// journal 逐行点名所用场景（design D4）。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn tool_loop_scenario_projects_tool_use_execution_and_post_tool_text() {
+    let sb = Sandbox::new("testsuite_e2e", "fake-tool-loop");
+    let journal = sb.path.join("fake-claude-journal.jsonl");
+    sb.append_acp_args(&[
+        "--scenario",
+        "tool-loop",
+        "--journal",
+        &support::forward_slash(&journal),
+    ]);
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    let project_id = scene_project_id(&cli, &sb).await;
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "run the loop", "agent": "claude" }),
+    )
+    .await
+    .expect("create session");
+    assert_eq!(status, 201, "create session: {body}");
+    let key = body["key"].as_str().expect("key").to_string();
+    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+
+    // 工具环的「测试侧」半边：等泊车审批出现在读模型，应答 allow_once。
+    let hint = sb.path.clone();
+    let request_id = wait_for(
+        "parked tool-loop approval",
+        Duration::from_secs(30),
+        &hint,
+        {
+            let cli = cli.clone();
+            let url = format!("{}/api/sessions/{key}/approvals", sb.webui_url());
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    let approvals = v["approvals"].as_array()?;
+                    let first = approvals.first()?;
+                    Some(first["request_id"].as_str()?.to_string())
+                })
+            }
+        },
+    )
+    .await;
+    // wire 契约（session_backend.rs + frontend client.ts 562-571）：内嵌标签
+    // 枚举再套一层 `decision` 键——`{decision: {decision: "allow_once"}}`。
+    let (ans_status, ans_body) = post_json(
+        &cli,
+        &format!("{}/api/permissions/{}/answer", sb.webui_url(), request_id),
+        serde_json::json!({ "decision": { "decision": "allow_once" } }),
+    )
+    .await
+    .expect("answer parked approval");
+    assert_eq!(ans_status, 200, "answer must be delivered: {ans_body}");
+
+    wait_turn_done(&cli, &sb, &detail_url).await;
+
+    // 投影序列：tool_use（📖 Bash + 参数）→ 工具执行（✓ Bash + loop done）
+    // → 环后正文，条目顺序单调。
+    let (_status, detail) = get_json_status(&cli, &detail_url)
+        .await
+        .expect("session detail");
+    let entries = detail["entries"].as_array().cloned().unwrap_or_default();
+    let tool_start = entries.iter().position(|e| {
+        e["element_type"].as_str() == Some("tool")
+            && e["content"]
+                .as_str()
+                .is_some_and(|c| c.contains("📖 **Bash**") && c.contains("echo loop"))
+    })
+    .expect("tool_use entry (📖 Bash) must be in the projection");
+    let tool_end = entries
+        .iter()
+        .position(|e| {
+            e["element_type"].as_str() == Some("tool")
+                && e["content"]
+                    .as_str()
+                    .is_some_and(|c| c.contains("✓ **Bash**") && c.contains("loop done"))
+        })
+        .expect("tool execution entry (✓ Bash + loop done) must follow");
+    let post_text = entries
+        .iter()
+        .position(|e| e["element_type"].as_str() == Some("markdown") && e["content"].as_str() == Some("tool loop finished"))
+        .expect("post-tool text entry must close the loop");
+    assert!(
+        tool_start < tool_end && tool_end < post_text,
+        "projection must read tool_use → execution → post-tool text in order"
+    );
+
+    // journal 逐行携带场景名（D4）：桩进程写下的每一行都点名 tool-loop。
+    let lines = read_jsonl(&journal);
+    assert!(
+        !lines.is_empty(),
+        "stub journal must have lines: {}",
+        journal.display()
+    );
+    assert!(
+        lines
+            .iter()
+            .all(|l| l["scenario"].as_str() == Some("tool-loop")),
+        "every journal line must name the scenario: {lines:?}"
+    );
+}
+
+/// spec 场景「空响应场景」前半句（close-acceptance-blind-spots 1.3）：empty
+/// 桩正常结束回合、零输出——回合 Done 且投影无任何正文条目（只有操作者
+/// prompt）。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn empty_scenario_ends_done_without_content_entries() {
+    let sb = Sandbox::new("testsuite_e2e", "fake-empty");
+    sb.append_acp_args(&["--scenario", "empty"]);
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    let project_id = scene_project_id(&cli, &sb).await;
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "say nothing", "agent": "claude" }),
+    )
+    .await
+    .expect("create session");
+    assert_eq!(status, 201, "create session: {body}");
+    let key = body["key"].as_str().expect("key").to_string();
+    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+
+    wait_turn_done(&cli, &sb, &detail_url).await;
+
+    let (_status, detail) = get_json_status(&cli, &detail_url)
+        .await
+        .expect("session detail");
+    let entries = detail["entries"].as_array().cloned().unwrap_or_default();
+    let contents: Vec<_> = entries
+        .iter()
+        .filter(|e| e["kind"].as_str() == Some("content"))
+        .collect();
+    assert!(
+        contents.is_empty(),
+        "a zero-output turn must project no content entries (prompt only): {contents:?}"
+    );
+    assert_eq!(
+        detail["status_slug"].as_str(),
+        Some("done"),
+        "the empty turn must still end Done: {detail}"
+    );
+    // TODO(close-acceptance-blind-spots 组4)：空回合检测落地后，投影会多一条
+    // 零输出合成提示（element_type == "notice"，spec「空响应场景」THEN 下半
+    // 句）——届时把上面的「无 content 条目」改为「恰好一条 notice 条目」。
+}
+
+/// 慢响应触发停滞自愈（close-acceptance-blind-spots 1.3）：slow 桩先静默
+/// `--delay-ms` 毫秒（静默期照常应答驱动探针——活着但对引擎沉默），delay
+/// 大于 `[dispatch] turn_stall_timeout` 时看门狗强制收尾：投影出现「回合停滞
+/// 被强制收尾」error 条目、会话到 Done，core.log 留 TurnStalled warn。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn slow_scenario_delay_trips_the_stall_watchdog() {
+    let sb = Sandbox::new("testsuite_e2e", "fake-slow-stall");
+    sb.set_turn_stall_timeout(2);
+    sb.append_acp_args(&["--scenario", "slow", "--delay-ms", "9000"]);
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    let project_id = scene_project_id(&cli, &sb).await;
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "take your time", "agent": "claude" }),
+    )
+    .await
+    .expect("create session");
+    assert_eq!(status, 201, "create session: {body}");
+    let key = body["key"].as_str().expect("key").to_string();
+    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+    let hint = sb.path.clone();
+
+    // 看门狗收尾：transcript 就地点名收尾原因，会话终态 Done。
+    wait_for(
+        "watchdog to settle the slow turn",
+        Duration::from_secs(30),
+        &hint,
+        {
+            let cli = cli.clone();
+            let url = detail_url.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    let settled = v["entries"].as_array().is_some_and(|entries| {
+                        entries.iter().any(|e| {
+                            e["element_type"].as_str() == Some("error")
+                                && e["content"]
+                                    .as_str()
+                                    .is_some_and(|c| c.contains("回合停滞被强制收尾"))
+                        })
+                    });
+                    let done = v["status_slug"].as_str() == Some("done");
+                    (settled && done).then_some(v)
+                })
+            }
+        },
+    )
+    .await;
+
+    // 通知事实可达：core.log 的 TurnStalled warn（与 stalled_turn 用例同源）。
+    wait_log_contains(
+        "core.log to carry the stall warning",
+        &sb.core_log,
+        &["turn stalled"],
+    )
+    .await;
+}
+
+/// 错误响应场景（close-acceptance-blind-spots 1.3）：error 桩以 is_error
+/// result 帧模拟上游错误后退出——投影出现点名错误文案的 error 条目，会话
+/// 落终态（failed；映射随会话死亡 retired 后即 dormant），绝不静默。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn error_scenario_projects_an_error_entry() {
+    let sb = Sandbox::new("testsuite_e2e", "fake-error");
+    sb.append_acp_args(&["--scenario", "error"]);
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    let project_id = scene_project_id(&cli, &sb).await;
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "explode please", "agent": "claude" }),
+    )
+    .await
+    .expect("create session");
+    assert_eq!(status, 201, "create session: {body}");
+    let key = body["key"].as_str().expect("key").to_string();
+    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+    let hint = sb.path.clone();
+
+    wait_for(
+        "the upstream error entry to land in the projection",
+        Duration::from_secs(30),
+        &hint,
+        {
+            let cli = cli.clone();
+            let url = detail_url.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    let errored = v["entries"].as_array().is_some_and(|entries| {
+                        entries.iter().any(|e| {
+                            e["element_type"].as_str() == Some("error")
+                                && e["content"]
+                                    .as_str()
+                                    .is_some_and(|c| c.contains("upstream error (fake)"))
+                        })
+                    });
+                    // 终态：映射收尾前瞬间是 failed，随会话死亡 retired 成
+                    // dormant（两个词都不是 working）——都在场才断言通过。
+                    let terminal = matches!(
+                        v["status_slug"].as_str(),
+                        Some("failed") | Some("dormant")
+                    );
+                    (errored && terminal).then_some(v)
+                })
+            }
+        },
+    )
+    .await;
+}
+
+/// 场景参数错误路径（close-acceptance-blind-spots 1.4 的进程级半边）：未知
+/// `--scenario` 值在桩解析期 exit(2)——子进程秒退，driver/manager 以终态
+/// 错误如实上报（投影 error 条目、会话 failed），绝不停在「握手成功后永远
+/// 沉默」的假绿形态。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn unknown_scenario_arg_fails_the_turn_loudly() {
+    let sb = Sandbox::new("testsuite_e2e", "fake-unknown-scenario");
+    sb.append_acp_args(&["--scenario", "no-such-scenario"]);
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    let project_id = scene_project_id(&cli, &sb).await;
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "hello", "agent": "claude" }),
+    )
+    .await
+    .expect("create session");
+    assert_eq!(status, 201, "create session: {body}");
+    let key = body["key"].as_str().expect("key").to_string();
+    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+    let hint = sb.path.clone();
+
+    wait_for(
+        "the dead-stub turn to surface a terminal error",
+        Duration::from_secs(45),
+        &hint,
+        {
+            let cli = cli.clone();
+            let url = detail_url.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    let errored = v["entries"].as_array().is_some_and(|entries| {
+                        entries.iter().any(|e| e["element_type"].as_str() == Some("error"))
+                    });
+                    let failed = v["status_slug"].as_str() == Some("failed");
+                    (errored && failed).then_some(v)
+                })
+            }
+        },
+    )
+    .await;
+}
