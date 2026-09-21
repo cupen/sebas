@@ -255,6 +255,22 @@ pub async fn run(
         }
     });
 
+    // ── 重启 spawning 收敛（close-acceptance-blind-spots 盲区 4，design D2
+    // 重投优先）──恢复载入的 spawning 相位会话（0-turn 占位）在启动期落定：
+    // 重投 spawn 指令，重投失败经既有 fail_spawn 落合成错误条目 + spawn-failed
+    // 终态——恢复完成后不再有无人收敛的 spawning 僵尸。放在出站泵装配之后：
+    // 重投指令经泵投递、每个 spawn 握手在独立任务里跑，单会话落定不阻塞其它
+    // 会话恢复，也不阻塞启动主路径。
+    {
+        let router_for_settle = router.clone();
+        tokio::spawn(async move {
+            let settled = router_for_settle.settle_restored_spawning().await;
+            if settled > 0 {
+                info!("restore: 已重投 {settled} 个 spawning 相位会话的 spawn 指令");
+            }
+        });
+    }
+
     // ── 回合停滞看门狗（fix-pending-queue-liveness 2.2，design D1/D6）──
     // `[dispatch] turn_stall_timeout`（默认 600s，0 = 关闭）配置进引擎；
     // 周期扫描复用出站泵的装配点。扫描间隔钳在 1–15s（≈阈值）：默认 600s

@@ -1992,3 +1992,169 @@ mod desired_mode_migration_tests {
         );
     }
 }
+
+// ── close-acceptance-blind-spots 盲区 4：重启 spawning 收敛（design D2 重投优先）──
+#[cfg(test)]
+mod spawning_settle_tests {
+    use super::*;
+    use crate::engine::{DispatchHandle, Out};
+    use std::time::Duration;
+
+    /// 模拟一份「实例在 spawning 相位退出」留下的状态文件（v2 结构化键）：
+    /// 两个 0-turn 占位（恢复后即 spawning 相位会话，一个带完整创建参数、
+    /// 一个只有 kind）+ 一个普通 dormant 会话（对照：落定不得误伤）。
+    fn seeded_state_json() -> String {
+        let disk_key =
+            |r: &str| serde_json::to_string(&ChannelKey::new("web", r)).expect("key serializes");
+        let mut state = serde_json::Map::new();
+        state.insert(
+            disk_key("web-restore-sp"),
+            serde_json::json!({
+                "session_id": "",
+                "last_active_unix": 10,
+                "awaiting_first_prompt": true,
+                "pending_kind": "claude",
+                "pending_model": "sonnet-x",
+                "pending_mode": "edit",
+                "desired_mode": "edit",
+                "project_dir": "/tmp/proj-settle",
+            }),
+        );
+        state.insert(
+            disk_key("web-restore-sp-bare"),
+            serde_json::json!({
+                "session_id": "",
+                "last_active_unix": 11,
+                "awaiting_first_prompt": true,
+                "pending_kind": "opencode",
+                "project_dir": "/tmp/proj-settle",
+            }),
+        );
+        state.insert(
+            disk_key("web-restore-dormant"),
+            serde_json::json!({
+                "session_id": "s-old",
+                "last_active_unix": 12,
+                "project_dir": "/tmp/proj-settle",
+            }),
+        );
+        serde_json::Value::Object(state).to_string()
+    }
+
+    async fn first_out(rx: &mut tokio::sync::mpsc::Receiver<Out>) -> Out {
+        tokio::time::timeout(Duration::from_millis(500), rx.recv())
+            .await
+            .expect("out within 500ms")
+            .expect("channel open")
+    }
+
+    /// 3.1 落定语义（重投优先）：恢复出的 spawning 占位逐个重投 spawn 指令——
+    /// 空 prompt 的 WebSpawn（激活语义）携带创建时记住的 project_dir/kind/
+    /// model/mode；占位标记被消费（重新进入 spawn 流程，后续消息走 staging 而
+    /// 不是再触发一次 spawn）。dormant 会话原样保留（落定互不阻塞、不误伤）。
+    /// 幂等：重复落定不再二次投递（在飞占位走 AlreadyStarting）。
+    #[tokio::test]
+    async fn restored_spawning_placeholders_redispatch_spawn_instructions() {
+        let map = SessionMap::restore_json(&seeded_state_json()).unwrap();
+        // 前置事实：恢复面确实有 spawning 相位会话（占位）。
+        let sp_key = ChannelKey::new("web", "web-restore-sp");
+        assert!(map.get(&sp_key).await.unwrap().awaiting_first_prompt());
+        let (router, mut out_rx) = DispatchHandle::new(map);
+
+        let redispatched = router.settle_restored_spawning().await;
+        assert_eq!(redispatched, 2, "两个占位各自重投一次");
+
+        // 重投 = 指令重发：空 prompt（激活语义）+ 创建时记住的参数。
+        match first_out(&mut out_rx).await {
+            Out::WebSpawn {
+                key,
+                prompt,
+                project_dir,
+                kind,
+                model,
+                mode,
+            } => {
+                assert_eq!(key.reference, "web-restore-sp");
+                assert_eq!(key.channel_str(), "web");
+                assert_eq!(prompt, "", "重投走激活语义，不带首轮 prompt");
+                assert_eq!(project_dir.as_deref(), Some("/tmp/proj-settle"));
+                assert_eq!(kind.as_deref(), Some("claude"));
+                assert_eq!(model.as_deref(), Some("sonnet-x"));
+                assert_eq!(mode.as_deref(), Some("edit"));
+            }
+            other => panic!("expected WebSpawn, got {other:?}"),
+        }
+        match first_out(&mut out_rx).await {
+            Out::WebSpawn {
+                key, kind, model, ..
+            } => {
+                assert_eq!(key.reference, "web-restore-sp-bare");
+                assert_eq!(kind.as_deref(), Some("opencode"));
+                assert_eq!(model, None, "未记模型的占位如实不带 model");
+            }
+            other => panic!("expected WebSpawn, got {other:?}"),
+        }
+
+        // 占位标记已消费：重新进入 spawn 流程（spec 允许的落定形态），后续
+        // 消息在 spawn 窗口内走 staging，不再误判成占位首条消息二次 spawn。
+        assert!(
+            !router.map.get(&sp_key).await.unwrap().awaiting_first_prompt(),
+            "占位标记必须被重投消费"
+        );
+        // 对照：dormant 会话的恢复不受落定影响（不阻塞、不误伤）。
+        let dormant_key = ChannelKey::new("web", "web-restore-dormant");
+        let dormant = router.map.get(&dormant_key).await.unwrap();
+        assert!(
+            matches!(dormant.state, MappingState::Dormant { session_id: ref s } if s == "s-old"),
+            "dormant 会话必须原样保留，got {:?}",
+            dormant.state
+        );
+
+        // 幂等：再次落定无事可做、不二次投递（防重复 spawn）。
+        assert_eq!(router.settle_restored_spawning().await, 0);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), out_rx.recv())
+                .await
+                .is_err(),
+            "幂等重放不得再发 spawn 指令"
+        );
+    }
+
+    /// 3.1 失败分支：重投后的 spawn 失败（出站泵 handle_web_spawn 的 Err 臂
+    /// 同款落点 fail_spawn）→ 会话投影追加合成错误条目 + spawn-failed 非
+    /// spawning 终态——绝不留无人收敛的 spawning 僵尸。
+    #[tokio::test]
+    async fn failed_redispatch_lands_synthetic_error_and_terminal_state() {
+        let map = SessionMap::restore_json(&seeded_state_json()).unwrap();
+        let (router, mut out_rx) = DispatchHandle::new(map);
+        assert_eq!(router.settle_restored_spawning().await, 2);
+
+        let Out::WebSpawn { key, .. } = first_out(&mut out_rx).await else {
+            panic!("expected WebSpawn")
+        };
+        // 泵侧失败臂的既有收敛路径（agent 配置缺失 = unknown agent kind）。
+        router.fail_spawn(&key, "unknown agent kind \"ghost\"").await;
+
+        let m = router.map.get(&key).await.unwrap();
+        let reason = m
+            .spawn_failed_reason()
+            .expect("落失败分支必须停在 spawn-failed 终态");
+        assert_eq!(reason, "unknown agent kind \"ghost\"");
+        assert!(
+            matches!(m.state, MappingState::SpawnFailed { .. }),
+            "终态非 spawning：{:?}",
+            m.state
+        );
+
+        // 合成错误条目在会话投影（合成 transcript id 名下）可读。
+        let turns = router.session_turns(&key, 0).await.expect("transcript");
+        assert_eq!(turns.len(), 1, "合成错误条目恰好一条");
+        assert_eq!(turns[0].element_type, "error");
+        assert!(turns[0].content.contains("spawn failed"));
+
+        // 对外状态面不再是 spawning。
+        let info = router.session_info_for(&key).await.expect("session info");
+        assert_eq!(info.status, "spawn-failed");
+        assert_eq!(info.spawn_failure_reason.as_deref(), Some(reason));
+    }
+}

@@ -5983,7 +5983,7 @@ async fn tool_loop_scenario_projects_tool_use_execution_and_post_tool_text() {
 /// prompt）。
 #[tokio::test]
 #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn empty_scenario_ends_done_without_content_entries() {
+async fn empty_scenario_projects_zero_output_notice() {
     let sb = Sandbox::new("testsuite_e2e", "fake-empty");
     sb.append_acp_args(&["--scenario", "empty"]);
     let cli = http_client();
@@ -6009,22 +6009,23 @@ async fn empty_scenario_ends_done_without_content_entries() {
         .await
         .expect("session detail");
     let entries = detail["entries"].as_array().cloned().unwrap_or_default();
-    let contents: Vec<_> = entries
+    let notices: Vec<_> = entries
         .iter()
-        .filter(|e| e["kind"].as_str() == Some("content"))
+        .filter(|e| {
+            e["kind"].as_str() == Some("content")
+                && e["element_type"].as_str() == Some("notice")
+        })
         .collect();
-    assert!(
-        contents.is_empty(),
-        "a zero-output turn must project no content entries (prompt only): {contents:?}"
+    assert_eq!(
+        notices.len(),
+        1,
+        "a zero-output turn must project exactly one synthetic notice entry: {notices:?}"
     );
     assert_eq!(
         detail["status_slug"].as_str(),
         Some("done"),
         "the empty turn must still end Done: {detail}"
     );
-    // TODO(close-acceptance-blind-spots 组4)：空回合检测落地后，投影会多一条
-    // 零输出合成提示（element_type == "notice"，spec「空响应场景」THEN 下半
-    // 句）——届时把上面的「无 content 条目」改为「恰好一条 notice 条目」。
 }
 
 /// 慢响应触发停滞自愈（close-acceptance-blind-spots 1.3）：slow 桩先静默
@@ -6218,6 +6219,192 @@ async fn unknown_scenario_arg_fails_the_turn_loudly() {
                     });
                     let failed = v["status_slug"].as_str() == Some("failed");
                     (errored && failed).then_some(v)
+                })
+            }
+        },
+    )
+    .await;
+}
+
+// ── close-acceptance-blind-spots 盲区 4：重启 spawning 收敛（组 3）──
+
+/// 在 core 启动前，往 dispatch 状态文件播种一条 0-turn 占位记录（v2 结构化
+/// 键，web 通道）：恢复后即 spawning 相位会话——事故里「spawning 状态被持久
+/// 化后进程退出」的盘面形态。`project_dir` 指向沙箱内已存在的 work 目录（无
+/// 项目归属的 web 行会被 restore 直接丢弃；**规范化**路径——沙箱在深 checkout
+/// 下以短符号链接使用，服务端的 workspace-root 越界检查按规范化形态比对）。
+fn seed_spawning_placeholder(sb: &Sandbox, reference: &str, kind: &str) {
+    use sebas_channels::ChannelKey;
+    let work = sb.path.join("work");
+    let canonical = support::forward_slash(
+        &std::fs::canonicalize(&work).unwrap_or(work),
+    );
+    let disk_key =
+        serde_json::to_string(&ChannelKey::new("web", reference)).expect("key serializes");
+    let mut state = serde_json::Map::new();
+    state.insert(
+        disk_key,
+        serde_json::json!({
+            "session_id": "",
+            "last_active_unix": 1_758_000_000,
+            "awaiting_first_prompt": true,
+            "pending_kind": kind,
+            "desired_mode": "ask",
+            "project_dir": canonical,
+        }),
+    );
+    std::fs::write(&sb.state_file, serde_json::Value::Object(state).to_string())
+        .expect("seed dispatch state file");
+}
+
+/// `GET /api/sessions` 里按 reference 找行，返回该行（None = 尚未列出）。
+async fn listed_row_by_reference(
+    cli: &reqwest::Client,
+    list_url: &str,
+    reference: &str,
+) -> Option<serde_json::Value> {
+    let (_status, list) = get_json_status(cli, list_url).await.ok()?;
+    list["recent_sessions"]
+        .as_array()?
+        .iter()
+        .find(|r| r["reference"].as_str() == Some(reference))
+        .cloned()
+}
+
+/// 重启不留僵尸 spawning（重投激活分支，close-acceptance-blind-spots 3.2）：
+/// dispatch 状态文件里播一个 spawning 相位（0-turn 占位）的会话条目 → 起 core
+/// → 恢复路径重投 spawn 指令（design D2 重投优先）→ 该会话离开 spawning 相位，
+/// 以创建时记住的 agent（fake-claude 桩）完成 fresh spawn 激活 → active。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn restarted_spawning_session_redispatches_and_activates() {
+    let sb = Sandbox::new("testsuite_e2e", "restore-spawning-settle");
+    const REF: &str = "restore-spawn-seed";
+    seed_spawning_placeholder(&sb, REF, "claude");
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    let list_url = format!("{}/api/sessions", sb.webui_url());
+    let hint = sb.path.clone();
+    // 恢复落定：该会话不再停留 spawning——重投激活后是 active（fake-claude
+    // 握手确定性成功；若重投失败也会落 spawn-failed，同样不是 spawning，
+    // 但在本沙箱形态下那属于环境性失败）。
+    let settled = wait_for(
+        "the seeded spawning row to settle off spawning",
+        Duration::from_secs(30),
+        &hint,
+        {
+            let cli = cli.clone();
+            let list_url = list_url.clone();
+            let reference = REF.to_string();
+            move || {
+                let cli = cli.clone();
+                let list_url = list_url.clone();
+                let reference = reference.clone();
+                Box::pin(async move {
+                    let row = listed_row_by_reference(&cli, &list_url, &reference).await?;
+                    let status = row["status"].as_str()?;
+                    (status != "spawning").then_some(status.to_string())
+                })
+            }
+        },
+    )
+    .await;
+    assert_eq!(
+        settled, "active",
+        "重投 spawn 指令应经 fake-claude 激活为 active"
+    );
+
+    // 行上身份保留：agent 仍是恢复记录里绑定的 claude，且已有真实路由 id。
+    let row = listed_row_by_reference(&cli, &list_url, REF)
+        .await
+        .expect("seeded row stays listed");
+    assert_eq!(row["agent_kind"].as_str(), Some("claude"));
+    assert!(row["session_id"].as_str().is_some_and(|s| !s.is_empty()));
+}
+
+/// 重投失败的失败分支（close-acceptance-blind-spots 3.2）：占位记录绑定的
+/// agent 配置不存在（ghost-agent）→ spawn 指令重投失败 → 会话投影追加合成
+/// 错误条目（spawn failed + 点名原因）且状态落 spawn-failed 非 spawning 终态。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn restarted_spawning_session_failed_redispatch_lands_synthetic_error() {
+    let sb = Sandbox::new("testsuite_e2e", "restore-spawning-fail");
+    const REF: &str = "restore-spawn-ghost";
+    seed_spawning_placeholder(&sb, REF, "ghost-agent");
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    // 失败分支收敛：spawn-failed 终态 + 如实的失败原因（unknown agent kind）。
+    let list_url = format!("{}/api/sessions", sb.webui_url());
+    let hint = sb.path.clone();
+    wait_for(
+        "the failed redispatch to land on spawn-failed",
+        Duration::from_secs(30),
+        &hint,
+        {
+            let cli = cli.clone();
+            let list_url = list_url.clone();
+            let reference = REF.to_string();
+            move || {
+                let cli = cli.clone();
+                let list_url = list_url.clone();
+                let reference = reference.clone();
+                Box::pin(async move {
+                    let row =
+                        listed_row_by_reference(&cli, &list_url, &reference).await?;
+                    let failed = row["status"].as_str() == Some("spawn-failed");
+                    let reason_named = row["spawn_failure_reason"]
+                        .as_str()
+                        .is_some_and(|r| r.contains("ghost-agent"));
+                    (failed && reason_named).then_some(row)
+                })
+            }
+        },
+    )
+    .await;
+
+    // 合成错误条目随投影可见（detail 按 encoded_key 取回）。
+    let row = listed_row_by_reference(&cli, &list_url, REF)
+        .await
+        .expect("seeded row stays listed");
+    let encoded = row["encoded_key"]
+        .as_str()
+        .expect("row carries its encoded key")
+        .to_string();
+    let detail_url = format!("{}/api/sessions/{encoded}", sb.webui_url());
+    wait_for(
+        "the synthetic error entry to surface in the projection",
+        Duration::from_secs(15),
+        &hint,
+        {
+            let cli = cli.clone();
+            let url = detail_url.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    let errored = v["entries"].as_array().is_some_and(|entries| {
+                        entries.iter().any(|e| {
+                            e["element_type"].as_str() == Some("error")
+                                && e["content"]
+                                    .as_str()
+                                    .is_some_and(|c| c.contains("spawn failed"))
+                        })
+                    });
+                    errored.then_some(())
                 })
             }
         },

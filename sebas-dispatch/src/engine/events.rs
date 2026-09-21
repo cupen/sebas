@@ -292,7 +292,8 @@ pub enum SessionEvent {
 /// position. `kind` distinguishes the user's prompt from agent/tool output;
 /// `element_type` tells the client how to render `content`
 /// (`"markdown"` | `"thinking"` | `"tool"` | `"error"` |
-/// `"permission_mode_result"`——最后者见 [`TurnEntry::permission_mode_result`]）。
+/// `"permission_mode_result"`——最后者见 [`TurnEntry::permission_mode_result`]；
+/// `"notice"` 见 [`TurnEntry::notice`]）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TurnEntry {
     /// 0-based monotonic position within the session's transcript.
@@ -367,6 +368,20 @@ impl TurnEntry {
     /// prompt|content 两值是 workbench-conversation-view 的 delta 契约。）
     pub fn error(position: u64, content: impl Into<String>) -> Self {
         Self::new(position, "content", "error", content)
+    }
+
+    /// 零输出回合的合成提示条目（close-acceptance-blind-spots 4.1，design
+    /// D3）：真实回合正常结束但未产生任何可见输出（正文、thinking、工具、
+    /// 错误皆无——如 claude 对未知命令零输出结束回合）时，引擎在回合收尾点
+    /// 追加一条本类型条目，回合在时间线上可见、不再不可见地消失。
+    ///
+    /// `kind = "content"` + `element_type = "notice"`：**不复用 `error`**——
+    /// 那会触发失败语义（前端红泡、failure_class 分类），而零输出不是失败；
+    /// 也不复用 `markdown` 加约定文案——语义不可区分、测试无法精确断言。
+    /// 前端渲染为中性信息条（非错误红泡）。不计入可见回复段数
+    /// （`count_chat_messages` 与前端 `unitSegmentCount` 都跳过 notice）。
+    pub fn notice(position: u64, content: impl Into<String>) -> Self {
+        Self::new(position, "content", "notice", content)
     }
 
     /// 权限卡「本会话不再询问」触发的自动模式切换结果条目

@@ -357,8 +357,14 @@ async fn backend_methods_reach_the_right_handlers() {
         )
         .await;
     let all = backend.turns(key.clone(), 0).await.unwrap();
-    assert_eq!(all.len(), 3); // prompt (turn A) + prompt (turn B) + delta
-    let tail = backend.turns(key.clone(), 2).await.unwrap();
+    // prompt (turn A) + notice + prompt (turn B) + delta。notice 是
+    // close-acceptance-blind-spots 4.1 的零输出合成提示：回合 A 以 Finished
+    // 收尾且无任何可见输出条目（只有 prompt），投影因此多一条
+    // element_type = "notice" 的中性提示——回合在时间线上不再无声消失。
+    assert_eq!(all.len(), 4);
+    assert_eq!(all[1].element_type, "notice");
+    assert!(all[1].content.contains("回合已结束且无输出"));
+    let tail = backend.turns(key.clone(), 3).await.unwrap();
     assert_eq!(tail.len(), 1);
     assert_eq!(tail[0].content, "chunk one");
     // unknown key → rejection.
