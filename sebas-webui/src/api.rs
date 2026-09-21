@@ -1562,18 +1562,31 @@ fn filter_out_of_scope_local_projects(
 /// 也接不住节点维度——远端条目写进去就等于丢节点。因此这里把文件注册表里
 /// **非本机**的条目并进列表（本机条目仍以状态库为准，避免复活已删除的项目）。
 async fn projects_from_backend(state: &WebUiState) -> Vec<serde_json::Value> {
+    projects_from_backend_with_reachability(state).await.0
+}
+
+/// 同 [`projects_from_backend`],外加「core 是否可达」。不可达时列表来自
+/// webui 本地文件回退——单进程形态里本地注册表即事实源,回退语义一致;
+/// detached 拓扑下项目注册表住在 core 侧,本地回退查无 id 不等于「项目
+/// 不存在」,调用方（branch 端点）据此应答 503(不可达)而非 404(不存在)
+/// ——停机窗口的 branch 读不该被记成针对具体项目的裁决。
+async fn projects_from_backend_with_reachability(
+    state: &WebUiState,
+) -> (Vec<serde_json::Value>, bool) {
     let mut projects = if let Some(v) = state.backend.state_snapshot("projects").await {
         v.get("projects")
             .and_then(serde_json::Value::as_array)
             .cloned()
             .unwrap_or_default()
     } else {
-        eprintln!("[proj-debug] state_snapshot projects => None (file fallback)");
         // 回退：webui 本地文件注册表（list() 自带 id 回填）。
-        return crate::projects::list()
-            .into_iter()
-            .map(|e| serde_json::to_value(&e).unwrap_or_default())
-            .collect();
+        return (
+            crate::projects::list()
+                .into_iter()
+                .map(|e| serde_json::to_value(&e).unwrap_or_default())
+                .collect(),
+            false,
+        );
     };
     // 节点维度 + 稳定 id 回填（workbench-agent-wire-fix 2.4；8.1 起 id 按
     // `(节点, 路径)` 派生）：旧行没有 node_id → 本机；id 空 → 按 node 重算。
@@ -1611,7 +1624,7 @@ async fn projects_from_backend(state: &WebUiState) -> Vec<serde_json::Value> {
         }
         projects.push(serde_json::to_value(&entry).unwrap_or_default());
     }
-    projects
+    (projects, true)
 }
 
 /// GET /api/projects — list all registered projects（状态库优先，文件回退）。
@@ -2063,11 +2076,17 @@ pub async fn projects_branch(State(state): State<WebUiState>, Path(id): Path<Str
         Ok(d) => d.into_owned(),
         Err(_) => return api_error(StatusCode::BAD_REQUEST, "invalid id encoding"),
     };
-    let projects = projects_from_backend(&state).await;
+    let (projects, backend_reachable) = projects_from_backend_with_reachability(&state).await;
     let entry = projects
         .iter()
         .find(|p| p.get("id").and_then(|v| v.as_str()) == Some(id.as_str()));
     let Some(entry) = entry else {
+        // core 不可达时本地回退查无此 id ≠ 项目不存在（detached 拓扑的注册表
+        // 住在 core 侧）——如实 503，让前端把停机窗口的读降级为「不可达」，
+        // 而不是针对具体项目裁决「not found」。
+        if !backend_reachable {
+            return crate::routes::err_503_core_unreachable();
+        }
         return api_error(StatusCode::NOT_FOUND, "project not found");
     };
     let Some(project_path) = entry

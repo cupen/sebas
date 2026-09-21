@@ -476,7 +476,7 @@ fn not_found(cause: &str) -> (axum::http::StatusCode, axum::Json<serde_json::Val
 }
 
 /// core 不可达的统一 503（读路径）。
-fn err_503_core_unreachable() -> axum::response::Response {
+pub(crate) fn err_503_core_unreachable() -> axum::response::Response {
     (
         axum::http::StatusCode::SERVICE_UNAVAILABLE,
         axum::Json(serde_json::json!({"error": "core 状态库不可达：provider 数据真源离线，拒绝返回可能过期的快照"})),
