@@ -350,6 +350,31 @@ fn main() {
         "meta",
         &json!({"argv": std::env::args().skip(1).collect::<Vec<_>>()}),
     );
+    // Diagnostic: record the provider-derived env vars (5-key cover env +
+    // endpoint keys from `ClaudeCodeDriver::resolve_env`). Tests assert that
+    // spawn_env correctly threads these to the child process.
+    //
+    // Uses `meta_env` (not `meta`) so the meta-line count stays at one per
+    // child process — some tests (sebas-acp/tests/permission_mode_gate.rs
+    // "no respawn for the mode switch") assert `meta` line count == 1, and
+    // the testsuite_e2e_respawn flow filters `argv` out of `meta` lines for
+    // per-process argv records. Splitting the tags keeps both invariants
+    // intact without needing to teach them about the new payload.
+    io.journal_write(
+        "meta_env",
+        &json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": std::env::var("ANTHROPIC_BASE_URL").ok(),
+                "ANTHROPIC_AUTH_TOKEN": std::env::var("ANTHROPIC_AUTH_TOKEN").ok(),
+                "ANTHROPIC_API_KEY": std::env::var("ANTHROPIC_API_KEY").ok(),
+                "ANTHROPIC_MODEL": std::env::var("ANTHROPIC_MODEL").ok(),
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": std::env::var("ANTHROPIC_DEFAULT_OPUS_MODEL").ok(),
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": std::env::var("ANTHROPIC_DEFAULT_SONNET_MODEL").ok(),
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL": std::env::var("ANTHROPIC_DEFAULT_HAIKU_MODEL").ok(),
+                "CLAUDE_CODE_SUBAGENT_MODEL": std::env::var("CLAUDE_CODE_SUBAGENT_MODEL").ok(),
+            }
+        }),
+    );
 
     // stdin 在后台线程读入并经 channel 转交：场景中途（流式分块之间）也能
     // 非阻塞地应答 driver 的看门狗探针（真 CLI 的控制帧与流式帧并发处理；
