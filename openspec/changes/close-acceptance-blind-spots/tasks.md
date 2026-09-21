@@ -47,6 +47,6 @@
 
 ## 8. 收口
 
-- [ ] 8.1 全量测试门：`cargo test`、`invoke testsuite-e2e`、`invoke testsuite-acceptance`、Playwright 全绿
+- [x] 8.1 全量测试门：`cargo test`、`invoke testsuite-e2e`、`invoke testsuite-acceptance`、Playwright 全绿
 - [x] 8.2 `openspec validate` 通过；spec delta 与实现一致性走查
 - [ ] 8.3 僵尸 spawning 顺带核对：operator 实例下次重启后无 spawning 残留（汇报项，不碰实例）
