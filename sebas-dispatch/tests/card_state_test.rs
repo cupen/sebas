@@ -1039,3 +1039,104 @@ async fn permission_request_without_grant_still_renders_card() {
         other => panic!("expected SendCard, got {other:?}"),
     }
 }
+
+// ---- 回归（close-acceptance-blind-spots 门禁）：webui /compact 必须翻卡态 ----
+//
+// /compact 走 web_send_message 的命令臂直发 ContinueSession。若不先把 DONE/
+// FAILED 翻成 WORKING，compact 期间在飞检查（submit_turn）视会话为空闲：
+// 新提交走 settled 臂提前 seed 下一个 prompt；随后迟到的前一回合 Finished
+// 落在「最后一条 prompt 之后为空」的窗口，零输出检测误追加合成 notice
+// （浏览器旅程 slash-commands 的 +2 断言稳定失败即此根因）。
+#[tokio::test]
+async fn webui_compact_flips_card_state_so_followup_enqueues() {
+    use sebas_acp::claude::session::AcpCommand;
+    use sebas_dispatch::state::Mapping;
+
+    let map = SessionMap::new();
+    let k = sebas_channels::ChannelKey::web_new();
+    map.insert(k.clone(), Mapping::active("sess-c"))
+        .await
+        .expect("insert");
+    let (router, mut out_rx) = DispatchHandle::new(map);
+
+    // 驱动到 DONE：首轮 prompt（seed_card）+ Finished。
+    router.seed_card("sess-c".into(), "hello".into()).await;
+    let react = router
+        .apply_event(
+            "sess-c",
+            &AcpEvent::Finished {
+                session_id: "sess-c".into(),
+            },
+        )
+        .await;
+    assert_eq!(
+        react,
+        Some(sebas_dispatch::card_state::phase::DONE),
+        "首轮收尾：SEED→DONE"
+    );
+
+    // /compact：转发 agent（ContinueSession），卡态翻 WORKING。不出卡、
+    // 不写 transcript prompt（compact 回复并入尾随气泡）。
+    router
+        .web_send_message(k.clone(), "/compact".into())
+        .await
+        .expect("compact accepted");
+    match recv(&mut out_rx).await {
+        Out::SendAcp {
+            session_id,
+            cmd: AcpCommand::ContinueSession { prompt, .. },
+        } => {
+            assert_eq!(session_id, "sess-c");
+            assert_eq!(prompt, "/compact");
+        }
+        other => panic!("expected SendAcp(ContinueSession /compact), got {other:?}"),
+    }
+    assert_no_more(&mut out_rx).await;
+
+    // compact 在飞（WORKING）期间的新提交：必须入队等待，不得提前 seed/
+    // 转发——这正是回合重叠的入口。
+    router
+        .web_send_message(k.clone(), "/goal some-condition".into())
+        .await
+        .expect("followup accepted");
+    assert_eq!(
+        router.map.queue_len(&k).await,
+        1,
+        "WORKING 期间的新提交必须入队"
+    );
+    assert_no_more(&mut out_rx).await;
+
+    // compact 的 Finished → DONE → drain 排队回合：per-turn 卡 + ContinueSession。
+    // drain 挂在 settle 路径（dispatch_acp_event→apply_event_to_out）上，
+    // 纯 FSM 的 apply_event 不触发——这里走完整到达线。
+    router
+        .dispatch_acp_event(AcpEvent::Finished {
+            session_id: "sess-c".into(),
+        })
+        .await;
+    // drain 序列：上一轮终态 UpdateCard →（React WORKING）→ per-turn SendCard
+    // → SendAcp。前两步是 flush/回切噪音，逐个消费后断言关键两步。
+    let mut saw_send_card = false;
+    for _ in 0..4 {
+        match recv(&mut out_rx).await {
+            Out::SendCard { .. } => {
+                saw_send_card = true;
+                break;
+            }
+            Out::UpdateCard { .. } | Out::React { .. } => continue,
+            other => panic!("drain 序列出现意外 Out: {other:?}"),
+        }
+    }
+    assert!(saw_send_card, "drain 必须发 per-turn 卡");
+    match recv(&mut out_rx).await {
+        Out::SendAcp {
+            session_id,
+            cmd: AcpCommand::ContinueSession { prompt, .. },
+        } => {
+            assert_eq!(session_id, "sess-c");
+            assert_eq!(prompt, "/goal some-condition");
+        }
+        other => panic!("expected drained SendAcp, got {other:?}"),
+    }
+    assert_no_more(&mut out_rx).await;
+}

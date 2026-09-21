@@ -2015,6 +2015,28 @@ impl DispatchHandle {
                     .await
                     .and_then(|m| m.session_id().map(str::to_owned));
                 if let Some(sid) = sid {
+                    // compact 回合与 submit_turn 的 settled 路径同语义：先把
+                    // DONE/FAILED 翻成 WORKING 再转发。不翻的后果：compact
+                    // 期间在飞检查视会话为空闲，新提交走 settled 臂提前 seed
+                    // 下一个 prompt——迟到的前一回合 Finished 落在「最后一条
+                    // prompt 之后为空」的窗口里，零输出检测误追加 notice
+                    // （close-acceptance-blind-spots 门禁抓到的回合重叠）。
+                    // compact 不写 transcript prompt（回复并入尾随气泡），
+                    // 因此这里只翻相位、不 emit_turn_card。
+                    self.card_states
+                        .apply(&sid, |st| {
+                            if matches!(
+                                st.status_emoji.as_str(),
+                                crate::card_state::phase::DONE
+                                    | crate::card_state::phase::FAILED
+                            ) {
+                                st.status_emoji = crate::card_state::phase::WORKING.into();
+                                true
+                            } else {
+                                false
+                            }
+                        })
+                        .await;
                     self.emit(Out::SendAcp {
                         session_id: sid.clone(),
                         cmd: AcpCommand::ContinueSession {
