@@ -2,12 +2,13 @@
 
 > 账本规则：每个能力一行，requirement 簇逐条标注命中证据（验收旅程 J*、进程级 e2e E*、
 > 既有测试引用）或豁免（注明 cause）。未命中且未豁免 = 缺口（⚠️）。
-> **核心功能集**（90% 硬指标，raise-core-coverage-to-90 起为五簇）：① 会话管理 =
+> **核心功能集**（=100% 硬指标，close-acceptance-blind-spots 起；raise-core-coverage-to-90
+> 起为五簇，界定不变）：① 会话管理 =
 > session-lifecycle + session-persistence + acp-session-mapping；② models 管理 =
 > acp-model-selection + router-model-aliases + provider-management；③ agent workbench
 > 相关 = agent-workbench + permission-flow；④ 项目管理 = project-session-actions +
 > state-store(projects) + webui(projects 面)；⑤ 通道与监督 = core-session-channel +
-> watchdog（本期新增簇，界定见主 spec「核心功能集界定」）。
+> watchdog（界定见主 spec「核心功能集界定」）。
 > 核心集增删必须留变更说明。
 >
 > 旅程用例：`invoke testsuite-acceptance`（`tests/testsuite_acceptance_test.rs`）
@@ -17,59 +18,74 @@
 
 ## 矩阵图例
 
-- ✅ = 命中（含证据）　⚠️ = 缺口（未命中且未豁免）　🚫 = 豁免（cause）
+- ✅ = 命中（含证据）　⚠️ = 缺口（未命中且未豁免）　🚫 = 豁免（cause）　➖ = 出账（requirement 自 spec REMOVED，不计分母不计豁免）
 
-## 核心功能集统计（达标复核 2026-09-11，五簇 90% 口径）
+## 核心功能集统计（达标复核 2026-09-21，五簇 =100% 口径）
 
-复核基数 = main 最新（workbench-agent-wire-fix 归档 `61feb1a`）+ 五个 change 归档后的
-工作树 specs（make-core-own-provider-data、add-fetch-models、redesign-provider-models-settings、
-workbench-turn-queue、workbench-conversation-view；specs 同步随归档落在工作树）。复核为
-requirement 级全量重数（`grep -c '^### Requirement:'` 对应 capability 目录，可重跑）；
-豁免不计分母；命中口径不变：任一测试层（验收旅程 J、进程级 e2e E、集成/单元/前端
-单测、浏览器旅程）完整命中该 requirement 即计入。router-admin-api 的 4 条 REMOVED
-（Provider CRUD endpoints、Model alias CRUD endpoints、Model probe endpoint、
-Write-then-apply semantics）退役出账；webui 只计 projects 面（界定不变）。
+复核基数 = 工作树 specs 全量重数（`grep -c '^### Requirement:'` 对应 capability 目录，
+可重跑）。上期复核（2026-09-11，`5593e2b`，117/117）之后主 spec 并未静止：09-11 当日
+两笔归档（`a21ffd8` add-agent-mode-selection、`4130618` 远程执行节点）与 09-13～09-20
+的归档/实现波（`8f4f4ce` 三项、`2d8a2d1`、`70f7180`、`eb1f288`、`6bbbc25`、`3482df9`/
+`058ca78`、`f03aeeb` 11 项、`e6612aa` 两轮 QA、`a942259` require-session-project、
+`31ae5b7` round5）把上期以「未归档锚点」预支的行转正为新分母，另带来若干新
+requirement；本 change（close-acceptance-blind-spots）delta 尚未同步，其进入核心簇的
+ADDED requirement（session-lifecycle +2）按账本规则计入分母。豁免不计分母；命中口径
+不变：任一测试层（验收旅程 J、进程级 e2e E、集成/单元/前端单测、浏览器旅程）完整命中
+该 requirement 即计入。router-admin-api 4 条 REMOVED 退役出账不变；本期新增退役出账：
+permission-flow allowlist 两条（`6bbbc25` mode 唯一门控）、state-store 迁移链两条
+（`70f7180` schema 自描述同步取代）；webui 只计 projects 面（界定不变，本期收编
+system-dir 三条）。
 
 | 核心簇 | requirement 数（计分分母） | 命中 | 命中率 | 豁免 | 套件内旅程 |
 |---|---|---|---|---|---|
-| ① 会话管理 | 14 | 14 | 100% | 0 | `session_lifecycle_journey` |
+| ① 会话管理 | 18 | 18 | 100% | 0 | `session_lifecycle_journey`、`zero_output_turn_notice_journey` |
 | ② models 管理 | 22 | 22 | 100% | 1 | `provider_governance_journey`、`native_agent_turn_via_router_journey` |
-| ③ agent workbench 相关 | 33 | 33 | 100% | 0 | `workbench_aggregate_journey`、`projects_session_journey` |
-| ④ 项目管理 | 17 | 17 | 100% | 0 | `projects_session_journey`；browser `deployment.spec.ts`（降级注册） |
-| ⑤ 通道与监督 | 31 | 31 | 100% | 0 | E: `no_secret_assembly_end_to_end`、`secret_rotation_self_heal_across_core_restart`、`watchdog_supervised_core_recovery` |
-| **核心合计** | **117** | **117** | **100%** | **1** | 每簇 ≥1 条 ✓ |
+| ③ agent workbench 相关 | 55 | 55 | 100% | 0 | `workbench_aggregate_journey`、`projects_session_journey`、`creation_dialog_journey` |
+| ④ 项目管理 | 21 | 21 | 100% | 0 | `projects_session_journey`；browser `projects.spec.ts`、`deployment.spec.ts`（降级注册） |
+| ⑤ 通道与监督 | 33 | 33 | 100% | 0 | E: `no_secret_assembly_end_to_end`、`secret_rotation_self_heal_across_core_restart`、`watchdog_supervised_core_recovery` |
+| **核心合计** | **149** | **149** | **100%** | **1** | 每簇 ≥1 条 ✓（2026-09-21 全套件 10 旅程复跑绿） |
 
-上一次复核（2026-09-08，100/100）之后本期重数差异来源（+17，100 → 117）：
+本期重数差异来源（+32，117 → 149；② 表面持平，实为「23 条 − 1 豁免」口径在两期一致，
+上期表列 23 行与分母 22 的出入即豁免口径，此处写明）：
 
-- **五 change 归档新增 requirement 入账 +7**：① +1「Pending submissions are
-  observable and manageable」；② +2「Core owns provider and model data」「Model
-  entries carry capability tags」；③ +3「Pending submissions stack above the
-  composer」「Workbench renders the focused session as a conversation」「Workbench
-  is the single conversation surface」；⑤ +1「Model list fetch over the channel」。
-- **上期基数后归档、本期补入账 +10**：③ agent-workbench +6（审计归档 `982b4cc`
-  的 Rail project removal entry、Rail session close entry、Placeholder session is
-  immediately writable；workbench-agent-wire-fix `bad057e` 的 Session agent binding
-  is immutable、Composer submissions always deliver、Project-level default agent）；
-  ④ +4（`982b4cc` 的 project-session-actions 三条 rail 面同名 requirement +
-  retire-session-persistence-record `c01211a` 给 state-store 增「Runtime state
-  boundaries for persisted session state」）。
-- **router-admin-api 非核心面退役 −4**（REMOVED，不进核心分母，见非核心表行）。
+- **① +4**：主 spec +2（Remote session lifespan is bound to its node、Spawn
+  independence is observable in the workbench——`4130618` 远程执行节点归档）；
+  本 change delta +2（Persisted spawning states settle on restore、Turn completing
+  without visible output appends a notice——未同步入库，归簇①计分）。
+- **③ +22**：agent-workbench 27 → 47——interaction-polish 四条转正（`8f4f4ce`，
+  上期已按未归档锚点预支行与证据，命中不变）+3 远程三态（Execution node
+  availability、Desired and effective mode、Parked remote approvals，`4130618`）
+  +3 对话流三态（Assistant turn identity、Operator submission receipt、Process fold
+  titles，`058ca78`）+1 Conversation incremental sync（`3482df9`）+8 QA/收尾波
+  （Rail selection hierarchy、Creating lands focus、chrome density、Focused session
+  drives project context、Stop reply settles、Rail expansion、Session status one
+  place、Compact island spacing，`f03aeeb`/`e6612aa`/`cb0bade`）+1 Sessions belong
+  to a project（`a942259`）；permission-flow 6 → 8——+4（Session mode gates 转正
+  `a21ffd8`、Remote approval requests survive `4130618`、待批读模型与 Cancel 释放
+  泊车 `f03aeeb` 波）−2（allowlist 两条 REMOVED，`6bbbc25`）。
+- **④ +4**：project-session-actions +2（Row action consolidation、Session rows are
+  named by the first prompt）；state-store −2 +1（迁移链「schema 版本与自动迁移」
+  「迁移前备份」退役，Schema self-description and startup sync 上位，`70f7180`）；
+  webui(projects 面) +3（system-dir 三条：Directory listing omits / Project
+  registration rejects / Workspace root warns，add-system-dir-denylist，spec 已先行
+  同步主 spec）。
+- **⑤ +2**：core-session-channel 18 → 20（Pending queue advances——fix-pending-queue-
+  liveness，变更账本 2026-09-17 已记 117→118；Session cancel over the channel——
+  round5 `31ae5b7`）。
 
-本期两处真实缺口，均已补测收口：router 订阅 core provider 数据的进程级闭环此前
-在任何测试层都无覆盖（`Configuration source`「card-edited provider reaches
-router」/`External change hot reload`「card edit hot-applies」/Core owns「router
-reads a core change without a restart」共同指向），本期补 E
-`core_owned_provider_reaches_router_without_restart`（watchdog 形态 router 子进程
-订阅通道 → webui BFF 写库 → 不重启可路由、不写 provider 文件）；「Project-level
-default agent」（wire-fix 引入，写路径/记忆/预选全无测试），本期补
-`session_endpoints_test::project_default_agent_follows_last_use`（API 写路径）+
-前端 composer 预选单测。收口后 requirement 级「未命中且未豁免」残留 0 条。
+本期五处补测面（本 change 组 1–5 交付）证据全数落行：spawning 收敛（E 两例 +
+`spawning_settle_tests`）、空回合 notice（J + E + 专测 + 前端）、继承 provider env
+启动告警（E 两例 + `spawn_env` 单测）、提交确认有界（前端乐观反馈 + browser
+`submit-ack.spec.ts`）、fake 桩全行为场景（5 条场景 e2e + 桩单测）。本期无新增
+requirement 级缺口，「未命中且未豁免」残留 0 条；scenario 级注记 2 条（replay-debug
+独立旅程待补；rail 行名「首条 vs 最新」漂移 = 实施期发现 #8，产品语义分歧待裁决，
+机制面全命中、非阻塞，见④行内注记）。非核心簇维持「可见不设门槛」；冒烟入口
+（`invoke smoke-real`）为 operator 手跑演练、无持久化自动化用例，如实标注于
+testsuite-acceptance 行。
 
-全量 35 个能力目录、339 条 requirement（`grep -c '^### Requirement:'` 汇总，可重跑）。
-豁免 23 条（飞书真实传输/端上卡片渲染、opencode CLI、真实模型跑分、watchdog
-spawn-fail 进程级注入，见豁免清单）；requirement 级「未命中且未豁免」残留 0 条，
-唯一保留的旅程级注记为 replay-debug 独立旅程（requirement 已由既有测试命中，
-见其行内 ⚠️ 注记，非阻塞）。非核心簇维持「可见不设门槛」。
+全量 44 个能力目录、430 条 requirement（`grep -c '^### Requirement:'` 汇总，可重跑）。
+核心豁免 1 条（飞书端卡片渲染，见豁免清单）；非核心豁免面（飞书真实传输、opencode
+CLI、真实模型跑分、watchdog spawn-fail 进程级注入等）不变。
 
 ## 能力矩阵
 
@@ -88,6 +104,10 @@ spawn-fail 进程级注入，见豁免清单）；requirement 级「未命中且
 | | 并发会话容量上限 | ✅ | sebas-router 内联测试 |
 | | 重启恢复与损坏容忍 | ✅ | `restart_recovery_test`、`state_persistence_test`；J: lifecycle |
 | | Pending submissions 可观察可管理（turn-queue 新增）| ✅ | src `core_channel/tests.rs::pending_submissions_visible_and_manageable_over_the_channel`（快照可见 + 移除/已开始 typed rejection）；`session_endpoints_test::session_payloads_carry_pending_submissions_in_delivery_order`、`pending_remove_and_move_endpoints`；前端 `pending-stack.test.ts`（顺序/priority/乐观移除/AlreadyStarted 静默和解/拖拽越组拒绝）|
+| | Remote session lifespan is bound to its node（execution-node 归档新增）| ✅ | E `remote_node_pairs_survives_node_and_core_restarts`（节点重启 → terminated 点名成因、控制面重启会话延续、对账不复活）；J: `remote_node_workbench_journey`（离线/恢复对账与 terminated 呈现）|
+| | Spawn independence is observable in the workbench（execution-node 归档新增）| ✅ | sebas（core 层）`dispatch::tests::web_spawn_instruction_is_not_blocked_by_a_stalled_handshake`（跨会话 spawn 不互堵）；spawn 窗口暂存不排队：`spawn_race_test`；spawn 失败点名成因：`workspace_root_tests::spawn_failed_session_row_and_detail_carry_the_reason` + browser `errors.spec.ts`（spawn failure inline）；E `two_sessions_spawn_and_turn_concurrently` |
+| | Persisted spawning states settle on restore（close-acceptance-blind-spots Δ）| ✅ | E `restarted_spawning_session_redispatches_and_activates`、`restarted_spawning_session_failed_redispatch_lands_synthetic_error`；sebas-dispatch `state.rs::spawning_settle_tests`（僵尸 spawning 重启落定不阻塞其余恢复）|
+| | Turn completing without visible output appends a notice（close-acceptance-blind-spots Δ）| ✅ | J: `zero_output_turn_notice_journey`；E `empty_scenario_projects_zero_output_notice`；sebas-dispatch `tests/zero_output_notice_test.rs`；前端 `transcript-view.test.ts`（terminal slugs expire the receipt fact）+ `dashboard.test.ts`（receipt phase 到期）|
 | session-persistence | 默认选择语义 | ✅ | `state_persistence_test` |
 | | 运行态不入该库 | ✅ | `state_persistence_test` |
 | acp-session-mapping | 路由 id ↔ ACP id 映射 | ✅ | `acp_session_mapping_test` |
@@ -155,10 +175,13 @@ spawn-fail 进程级注入，见豁免清单）；requirement 级「未命中且
 | | Workbench is the single conversation surface（conversation-view 新增）| ✅ | 前端 `project-rail.test.ts`（点击就地切换留在 workbench 3.1、current 标记跟随焦点指针 3.2）；`dashboard.test.ts`（深链 `/sessions/:key` 经 deepLinkKey 渲染、聚焦会话 head 带 close+archive）；browser `conversation.spec.ts`「rail click focuses the session in place on the workbench」|
 | permission-flow | Hook 驱动权限请求 | ✅ | `permission_flow_test`；fake-claude "perm" 场景 |
 | | 三种决定结果 | ✅ | `permission_flow_test`、sebas-webui `acp_permission_roundtrip_test`；E `permission_loop_allow_once/deny/allow_session_over_core_channel`（fake-claude "perm" 真实泊车经核心通道全环：allow 执行 / deny 拒绝 / allow_session 切 auto 后第二回合免审批，飞书无关面，2026-09-18 补） |
-| | allowlist 命中自动批准 | ✅ | `permission_flow_test` |
-| | allowlist 作用域与生命周期 | ✅ | `permission_flow_test` |
+| | allowlist 命中自动批准 ➖ 出账（REMOVED：`6bbbc25` mode 唯一门控，allowlist/grant_all 退役，不计分母）| — | 面退役：模式门控由「Session mode gates whether a decision is requested」承接 |
+| | allowlist 作用域与生命周期 ➖ 出账（REMOVED：同上）| — | 同上 |
 | | 迟到点击处理 | ✅ | src `core_channel/tests.rs`（typed rejection）|
 | | 无应答者 fail-closed | ✅ | src `core_channel/tests.rs`（fail-closed）；detached 审批闭环 browser `approval-detached.spec.ts`（cover-core-channel-test-gaps B1.2，原缺口 #1 已收口）|
+| | Remote approval requests survive control-plane absence（execution-node 归档新增）| ✅ | J: `remote_node_workbench_journey`（控制面离线期泊车、回归后 parked 呈现）；已决不复活/终止后决策丢弃：`approval_restore_identity_test`（1.4/2.3 fail-closed）+ browser `approval-restore.spec.ts`（同 request_id 重建、批复后清空）|
+| | 待批请求可按会话枚举（读模型）（归档波新增）| ✅ | sebas-webui `api.rs::approvals_route_lists_parked_requests / approvals_route_returns_empty_list_when_nothing_is_parked / approvals_route_rejects_unknown_session_with_404`（读模型即时反映增减、不依赖事件推送）；browser `approval-restore.spec.ts`（刷新后读模型重建）|
+| | Cancel 释放泊车审批（fail-closed）（归档波新增）| ✅ | sebas-dispatch `approval_restore_identity_test`（2.1 cancel 释放泊车：pending 清空 + `turn_engaged` 复位；2.3 `released_request_id_is_no_longer_answerable`）；browser `stop-settle.spec.ts`（停止释放泊车：读模型清空、迟到批复 404、卡面 expired）+ `stop-reachability.spec.ts`（泊车态停止控件可达）|
 | | Session mode gates whether a decision is requested（add-agent-mode-selection 修订）| ✅ | E `mode_threads_to_agent_argv`（argv 透传 + allow 免审批 + 未知 mode 400）；E/J `mode_mid_session_switch` / `remote_node_mode_journey`（远端 allow 免门控↔ask 恢复 waiting）；sebas-acp driver 单测（词汇映射/argv 解析）；browser `mode.spec.ts` |
 | | webui：会话创建携带 mode | ✅ | `session_endpoints_test::create_session_with_mode_threads_spawn_and_mid_session_mode_switch_works`（wire 透传 + 未知 mode 400）；E `mode_threads_to_agent_argv`；browser `mode.spec.ts` |
 | | webui：会话中途切换 mode | ✅ | 同上（SetMode 经 SendAcp）；E `mode_mid_session_switch`（journal 记录运行时切换 + effective 落定）|
@@ -168,6 +191,22 @@ spawn-fail 进程级注入，见豁免清单）；requirement 级「未命中且
 | | Composer toolbar composition（interaction-polish 新增）| ✅ | 前端 `workbench-composer.test.ts`（左下 🔒 agent、右下模型芯片+发送；无创建/设置/mode 控件）；browser `mode.spec.ts`（无聚焦时 composer 无 mode 控件）、`first-paint.spec.ts`（无聚焦 = 指向 rail 创建入口的提示，无任何创建控件）|
 | | Workbench layout is resizable（interaction-polish 新增）| ✅ | 前端 `split-persist.test.ts`（假 storage 持久化与恢复、180–480/120–半高 clamp、隐私模式退化）、`app-shell.test.ts`（frame 分割面板 + railWidth clamp）、`dashboard.test.ts`（vsplit + composerHeight）；browser `layout.spec.ts`（两道分割线拖拽、localStorage `sebas.rail-width`/`sebas.composer-height`、刷新恢复、<640px 禁拖退化）|
 | | Workbench regions read as floating islands（interaction-polish 新增）| ✅ | 前端 `app-shell.test.ts`（nav 圆角浮岛、无通高 border-right、frame 分割缝）；browser `layout.spec.ts`（canvas 与浮岛异色、分隔缝 rest 透明 hover 亮起、舞台浮岛在位）|
+| | Execution node availability is stated, not discovered（execution-node 归档新增）| ✅ | J: `remote_node_workbench_journey`（离线行 `node_status=offline` + `node_cause` 成因点名、离线项目上创建被拒）；前端 `dashboard.test.ts`（labels the session with its node and states the cause when the node is unreachable）|
+| | Desired and effective session mode are both visible（execution-node 归档新增）| ✅ | 前端 `dashboard.test.ts`（shows both modes and says the desired mode is not enforced when they differ；desired==effective 无 mismatch 注记）；J: `remote_node_mode_journey`（EchoBody 不声明 enforces_mode → effective 如实缺省，desired≠effective 呈现由前端单测承载）|
+| | Parked remote approvals surface in the workbench（execution-node 归档新增）| ✅ | J: `remote_node_workbench_journey`（waiting ≠ working + `parked_approvals` 计数可见）；前端 `dashboard.test.ts`（presents a parked session as waiting + lifts the parked fact from review-cards）；刷新重建/幂等合并：browser `approval-restore.spec.ts` + `approval-reconcile.spec.ts`（读模型重建、request_id 去重、waiting 退避补卡）|
+| | Assistant turn identity shows the bound agent（对话流归档新增）| ✅ | 前端 `transcript-view.test.ts`（shows the catalog display name with a first-grapheme avatar 3.1、缺 display 回退 slug）|
+| | Operator submission receipt（对话流归档新增）| ✅ | 前端 `transcript-view.test.ts`（receipt badge 显示/回复到达即清/完成保持清零 3.2）+ `dashboard.test.ts`（receiptPhaseActive：非终端 slug 活性/终端 slug 到期/agent 条目即清）；空回合到期落点见①「zero-output notice」行 |
+| | Process fold titles summarize entries（对话流归档新增）| ✅ | 前端 `transcript-view.test.ts`（2.3：折叠标题含工具名与关键参数、长标题中部省略、legacy 无 title 回退）|
+| | Conversation incremental sync（3482df9 新增）| ✅ | `session_endpoints_test::detail_without_entries_after_returns_full_sequence`、`detail_entries_after_returns_only_newer_entries_with_intact_fields`（`entries_after` 排他参数语义）；前端 `dashboard.test.ts`（WS 触发增量 append、per-session 游标、失败不推进、reload 全量重拉、resync/位点回收两例 5.3）|
+| | Rail selection hierarchy is visually distinct（归档波新增）| ✅ | 前端 `project-rail.test.ts`（project active goes neutral while the focused session keeps the accent——样式钉死：项目行选中中性提亮不沾 accent、会话行 current 保留 accent 底）|
+| | Creating a session lands focus on the placeholder（归档波新增）| ✅ | 前端 `dashboard.test.ts`（创建落地 `sebas:composer-focus` 落焦输入框）+ `project-rail.test.ts`（确认创建后 current 标记跟随、项目组不收起 3.1+3.2）；J: `creation_dialog_journey`（确认即激活）；browser `session-roundtrip.spec.ts` |
+| | Workbench chrome density and alignment（归档波新增）| ✅ | browser `layout.spec.ts`（rail/stage 分割线实测拖拽与持久化、浮岛缝呈现）；前端 `split-persist.test.ts`、`app-shell.test.ts`（分割面板 clamp 与 frame 结构）|
+| | Focused session drives project context（归档波新增）| ✅ | 前端 `dashboard.test.ts`（PROJECT_FOLLOW_EVENT 反投影项目上下文）；browser `rail-expand.spec.ts`（「rail 切换会话后项目标题跟随」+ 深链/刷新半边 + 「项目行点击仍独立生效」）|
+| | Stop reply fully settles the turn（归档波新增）| ✅ | browser `stop-settle.spec.ts`（三 scenario 逐字：停止条目落地、停止控件随结算消失、刷新不复活在飞）；前端 `dashboard.test.ts`（turn_engaged 复位）|
+| | Rail expansion state is persistent and predictable（归档波新增）| ✅ | browser `rail-expand.spec.ts`（三 scenario 逐字：跨刷新保持、聚焦项目缺省展开、无操作不自行收起，`sebas.rail-expanded` 持久化）|
+| | Session status lives in one place（round4 对齐新增）| ✅ | 前端 `project-rail.test.ts`（`.session-dot` 按 slug 着色，每行唯一状态表达）；`dashboard.test.ts`（head 卡 `data-status` 为空——head 不渲染状态徽标/描边）；queued 只在 pending-stack 呈现（`pending-stack.test.ts`）|
+| | Compact island spacing（归档波新增）| ✅ | browser `layout.spec.ts`（浮岛缝实测、divider hover 可拖不消失）；前端 `app-shell.test.ts`（分割缝 token 结构）|
+| | Sessions belong to a project（require-session-project 新增）| ✅ | `api_endpoints_test::create_session_without_a_project_is_rejected_400`（缺/空/未知 project_id 一律 400 点名）；`session_endpoints_test::detail_projection_carries_the_owning_project_id`、`create_session_with_project_dir_binds_to_path`（归属落各层）；spawn 失败不脱离归属：`spawn_race_test`；前端 `new-session-dialog.test.ts`（项目必选）；browser `projects.spec.ts`、`errors.spec.ts`（无 Inbox 回归钉）|
 
 ### ④ 项目管理（核心）
 
@@ -182,8 +221,7 @@ spawn-fail 进程级注入，见豁免清单）；requirement 级「未命中且
 | | Session close from the rail（审计补行）| ✅ | sebas-dispatch `web_close_test`（active/dormant/spawning/unknown/focused 全语义）；`session_endpoints_test::close_active_session_drops_mapping_and_returns_200` 等 close 族；browser `session-mgmt.spec.ts`「close removes the session from the active list」|
 | | Placeholder session is immediately writable（审计补行）| ✅ | `spawn_race_test` 占位三态（见簇③同行）；browser `session-roundtrip.spec.ts` |
 | state-store (projects 面) | DB 位置与单写者 | ✅ | sebas-router state_store 测试；J: lifecycle（迁移日志）|
-| | schema 版本与自动迁移 | ✅ | 同上（migration 0→1 日志）|
-| | 迁移前备份 | ✅ | 同上（backup 文件）|
+| | Schema self-description and startup sync（`70f7180` 上位；迁移链「schema 版本与自动迁移」「迁移前备份」REMOVED 出账）| ✅ | src/sebas_state `migration.rs` 单测 8 例（fresh_db_creates_schema_and_stamps_version_keys、missing_column_is_added_in_place_and_old_rows_stay_readable、extra_column/type_mismatch/missing_table_resets_database、legacy_user_version 与 unknown_version_format_resets、version_value_differs_but_structure_matches_never_resets——自描述版本元数据 + 缺列原地补 + 不兼容重置 + 版本值单独不触发重置）|
 | | 通道状态方法 | ✅ | src `core_channel/tests.rs` |
 | | 变更持久性 | ✅ | state_store 测试 |
 | | store 不可用诚实降级 | ✅ | state_store 测试 |

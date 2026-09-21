@@ -131,6 +131,19 @@ test.describe('slash 命令面板（session-slash-commands）', () => {
       // `/goal …` passthrough (3.3): whitespace keeps the palette closed, so
       // Enter submits directly and the RAW text renders as the operator's
       // own turn before the turn converges again.
+      // 基线必须等 compact 段落渲染收敛后再取：compact 回复与尾随 agent 气泡
+      // 的合并是到达序敏感的渲染判定，全量负载下可能晚于 status=done 落定，
+      // 迟到的 +1 会污染「+2」断言（表现为偶发 expected+2/received+3）。
+      await expect
+        .poll(
+          async () => {
+            const c1 = await detail.bubbles().count()
+            await page.waitForTimeout(400)
+            return c1 === (await detail.bubbles().count())
+          },
+          { timeout: 15_000, intervals: [500] },
+        )
+        .toBe(true)
       const bubblesBefore = await detail.bubbles().count()
       await detail.sendFollowUp('/goal some-condition')
       await expect(detail.userTurn('/goal some-condition')).toBeVisible({ timeout: 20_000 })
