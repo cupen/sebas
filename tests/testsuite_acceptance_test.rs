@@ -1116,3 +1116,105 @@ async fn remote_node_mode_journey() {
     core.kill().await.ok();
     webui.kill().await.ok();
 }
+
+/// 零输出回合的合成提示旅程（close-acceptance-blind-spots 4.3，spec
+/// session-lifecycle「Turn completing without visible output appends a
+/// notice」两个场景各半程）：empty 桩（回合 Done、零输出）走一条真实回合，
+/// 投影恰好落一条 notice 合成提示——回合在时间线上可见；对照面用 default
+/// 桩跑一条正常回合，断言不追加 notice（正常回合不受影响）。
+#[tokio::test]
+#[ignore = "acceptance journey; run with -- --ignored or invoke testsuite-acceptance"]
+async fn zero_output_turn_notice_journey() {
+    let cli = http_client();
+
+    // ── 场景「空回合有落点」：empty 桩（真实回合、零输出、正常 Done）──
+    let sb = Sandbox::new("acceptance", "empty-notice");
+    sb.append_acp_args(&["--scenario", "empty"]);
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    support::wait_reachable(&cli, &sb).await;
+
+    let key = create_session(
+        &cli,
+        &sb,
+        serde_json::json!({ "prompt": "say nothing", "agent": "claude" }),
+    )
+    .await;
+    let _ = wait_turn_done(&cli, &sb, &key).await;
+    let url = format!("{}/api/sessions/{key}", sb.webui_url());
+    let detail: serde_json::Value = cli
+        .get(&url)
+        .send()
+        .await
+        .expect("session detail")
+        .json()
+        .await
+        .expect("detail json");
+    let entries = detail["entries"].as_array().cloned().unwrap_or_default();
+
+    // 投影恰好一条 notice 条目，文案说明「回合已结束且无输出」。
+    let notices: Vec<_> = entries
+        .iter()
+        .filter(|e| e["element_type"].as_str() == Some("notice"))
+        .collect();
+    assert_eq!(
+        notices.len(),
+        1,
+        "an empty turn must project exactly one notice entry: {entries:?}"
+    );
+    let notice_text = notices[0]["content"].as_str().unwrap_or_default();
+    assert!(
+        notice_text.contains("回合已结束且无输出"),
+        "the notice must say the turn ended without output: {notice_text}"
+    );
+    // 回合时间线可见：prompt（操作者提交）之后紧跟 notice，此外无其他条目
+    // ——零输出回合不再不可见地消失。
+    assert_eq!(
+        entries.len(),
+        2,
+        "the timeline must read prompt → notice, nothing else: {entries:?}"
+    );
+    assert_eq!(entries[0]["kind"].as_str(), Some("prompt"));
+    assert_eq!(entries[1]["element_type"].as_str(), Some("notice"));
+    assert_eq!(entries[1]["position"].as_u64(), Some(1));
+
+    // ── 场景「正常回合不受影响」：default 桩（正文正常产出）──
+    let sb_ok = Sandbox::new("acceptance", "normal-turn-no-notice");
+    let _core_ok = sb_ok.spawn_core();
+    let _webui_ok = sb_ok.spawn_webui(&sb_ok.core_secret);
+    support::wait_reachable(&cli, &sb_ok).await;
+
+    let key_ok = create_session(
+        &cli,
+        &sb_ok,
+        serde_json::json!({ "prompt": "hello", "agent": "claude" }),
+    )
+    .await;
+    let transcript = wait_turn_done(&cli, &sb_ok, &key_ok).await;
+    assert!(!transcript.is_empty(), "the normal turn must produce output");
+    let url_ok = format!("{}/api/sessions/{key_ok}", sb_ok.webui_url());
+    let detail_ok: serde_json::Value = cli
+        .get(&url_ok)
+        .send()
+        .await
+        .expect("normal session detail")
+        .json()
+        .await
+        .expect("detail json");
+    let entries_ok = detail_ok["entries"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        entries_ok
+            .iter()
+            .all(|e| e["element_type"].as_str() != Some("notice")),
+        "a normal turn must never get a zero-output notice: {entries_ok:?}"
+    );
+    assert!(
+        entries_ok
+            .iter()
+            .any(|e| e["kind"].as_str() == Some("content")),
+        "the normal turn's content must be in the projection: {entries_ok:?}"
+    );
+}

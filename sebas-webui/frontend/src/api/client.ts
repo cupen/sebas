@@ -303,11 +303,27 @@ export interface AvailableCommandInfo {
  * conversation share one ordered sequence — a client never rebuilds the
  * operator's turns from a separate field or from timestamps.
  */
+/**
+ * 转写条目的渲染类型词表（`element_type`，与 core 侧 `TurnEntry` 同源）：
+ * markdown 正文 / thinking 过程 / tool 工具 / error 错误气泡 /
+ * permission_mode_result 权限模式切换契约条目 / notice 中性提示条目。
+ * `notice` 是零输出回合的合成提示（close-acceptance-blind-spots 4.2，
+ * design D3）：回合正常结束但零可见输出时 core 追加，前端渲染为中性
+ * 信息条——非错误语义，绝不复用 error 的红泡形态。
+ */
+export type ConversationElementType =
+  | 'markdown'
+  | 'thinking'
+  | 'tool'
+  | 'error'
+  | 'permission_mode_result'
+  | 'notice'
+
 export interface ConversationEntryView {
   /** 0-based monotonic transcript position. */
   position: number
   kind: string
-  element_type: string
+  element_type: ConversationElementType
   content: string
   /**
    * Unix seconds when this entry was appended (stamped at push time by

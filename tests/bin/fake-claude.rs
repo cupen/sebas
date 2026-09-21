@@ -20,7 +20,24 @@
 //! Flags (argv, not env — env races under cargo test parallelism):
 //!   fake-claude-cli [scenario] [--loop] [--slow-ms N] [--hang-on-init]
 //!                   [--delay-init-ms N] [--journal PATH] [--resume-fails]
-//!   scenario: hello (default) | bash | deny | thinking
+//!   scenario: hello (default) | bash | deny | thinking（位置形态，既有兼容；
+//!   全集与键值形式 `--scenario <name>` 说明见下）
+//!   （close-acceptance-blind-spots 1.2）全模型行为 mock 场景集（键值形式
+//!   `--scenario <name>` 选择，未指定 = 现行缺省行为）：
+//!   - default：现行缺省行为（hello 的同义词——正文增量流式多段文本 delta
+//!     已由缺省行为覆盖：两个 text_delta + 收尾 result）。
+//!   - thinking：thinking 增量与正文增量**交替**出现（两段 thinking、两段
+//!     正文交错——「边想边答」的 wire 形态）。
+//!   - tool-loop：完整工具环 tool_use → 测试侧 hook 应答 → tool_result →
+//!     后续正文 → result（bash/deny 没有环后正文）。
+//!   - empty：正常结束、零输出（组 4 零输出 notice 落点的数据源）。
+//!   - slow：先静默 `--delay-ms N` 毫秒（静默期照常应答控制探针），再出
+//!     正文收尾——delay 大于 `[dispatch] turn_stall_timeout` 触发停滞自愈，
+//!     小于阈值即「慢后端」反馈时限形态。
+//!   - error：上游错误形态——result 帧 is_error=true（error_during_request）
+//!     后进程退出，投影落 error 条目、会话转 failed。
+//!   journal 逐行携带 `scenario` 字段（场景断言的数据源）；未知 `--scenario`
+//!   值解析期即拒（exit 2——子进程秒退，driver 以终态错误如实上报）。
 //!   --advertise-commands: the initialize control response carries a fixed
 //!   command table (goal with an argumentHint + compact) — the claude-path
 //!   command-discovery data source (session-slash-commands 1.2); without the
@@ -52,6 +69,9 @@ struct Flags {
     scenario: String,
     loop_mode: bool,
     slow_ms: u64,
+    /// （close-acceptance-blind-spots 1.2）`--delay-ms N` 全局延迟参数：
+    /// slow 场景在**任何输出之前**静默 N 毫秒（静默期照常应答控制探针）。
+    delay_ms: u64,
     hang_on_init: bool,
     ignore_interrupt: bool,
     delay_init_ms: u64,
@@ -81,7 +101,9 @@ struct Flags {
     model: Option<String>,
 }
 
-const SCENARIOS: &[&str] = &["hello", "bash", "deny", "thinking"];
+const SCENARIOS: &[&str] = &[
+    "hello", "default", "bash", "deny", "thinking", "tool-loop", "empty", "slow", "error",
+];
 
 /// Flags that consume the NEXT argv token as their value (the SDK passes
 /// many; anything not listed here and starting with `--` is treated as a
@@ -91,6 +113,7 @@ const SCENARIOS: &[&str] = &["hello", "bash", "deny", "thinking"];
 const VALUE_FLAGS: &[&str] = &[
     "--slow-ms",
     "--delay-init-ms",
+    "--delay-ms",
     "--journal",
     "--session-id",
     "--resume",
@@ -110,10 +133,16 @@ const VALUE_FLAGS: &[&str] = &[
 ];
 
 fn parse_flags() -> Flags {
+    parse_flags_from(&std::env::args().skip(1).collect::<Vec<_>>())
+}
+
+/// （close-acceptance-blind-spots 1.4）解析从 env 抽出，便于单测直接喂 argv。
+fn parse_flags_from(args: &[String]) -> Flags {
     let mut f = Flags {
         scenario: "hello".into(),
         loop_mode: false,
         slow_ms: 0,
+        delay_ms: 0,
         hang_on_init: false,
         ignore_interrupt: false,
         delay_init_ms: 0,
@@ -128,7 +157,7 @@ fn parse_flags() -> Flags {
         session_id: "fake-1".into(),
         model: None,
     };
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args = args.to_vec();
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
@@ -150,6 +179,10 @@ fn parse_flags() -> Flags {
                 f.slow_ms = args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(0);
                 i += 1;
             }
+            "--delay-ms" => {
+                f.delay_ms = args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(0);
+                i += 1;
+            }
             "--delay-init-ms" => {
                 f.delay_init_ms = args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(0);
                 i += 1;
@@ -160,8 +193,14 @@ fn parse_flags() -> Flags {
             }
             "--scenario" => {
                 // Keyed form: survives the SDK's extra_args map (positionals
-                // cannot be expressed there).
+                // cannot be expressed there). 未知场景解析期即拒（exit 2）：
+                // 子进程秒退，driver 以终态错误如实上报，会话不会停在
+                // 「握手成功后永远沉默」。
                 if let Some(v) = args.get(i + 1) {
+                    if !SCENARIOS.contains(&v.as_str()) {
+                        eprintln!("unknown scenario: {v}");
+                        std::process::exit(2);
+                    }
                     f.scenario = v.clone();
                 }
                 i += 1;
@@ -204,6 +243,9 @@ fn parse_flags() -> Flags {
 struct Io {
     out: io::StdoutLock<'static>,
     journal: Option<std::fs::File>,
+    /// （close-acceptance-blind-spots 1.2）所用场景名——journal 逐行携带
+    /// `scenario` 字段，供 e2e 断言「跑的就是这个场景」。
+    scenario: String,
 }
 
 impl Io {
@@ -215,7 +257,10 @@ impl Io {
     }
     fn journal_write(&mut self, dir: &str, v: &Value) {
         if let Some(j) = self.journal.as_mut() {
-            let line = serde_json::to_string(&json!({"dir": dir, "msg": v})).unwrap();
+            let line = serde_json::to_string(&json!({
+                "dir": dir, "scenario": self.scenario, "msg": v
+            }))
+            .unwrap();
             let _ = writeln!(j, "{line}");
             let _ = j.flush();
         }
@@ -259,6 +304,7 @@ fn main() {
     let mut io = Io {
         out: Box::leak(Box::new(io::stdout())).lock(),
         journal,
+        scenario: flags.scenario.clone(),
     };
     // Diagnostic: record the full argv so tests can assert flag plumbing.
     io.journal_write(
@@ -461,7 +507,7 @@ fn main() {
                 } else if text == "flood" {
                     flood_turn(&mut flags, &mut io, &stdin_rx);
                 } else {
-                    run_scenario(&flags, &mut io, &stdin_rx, &mut hook_counter);
+                    run_scenario(&mut flags, &mut io, &stdin_rx, &mut hook_counter);
                 }
                 // Like the real CLI in streaming mode, stay alive for further
                 // user messages until stdin closes (multi-turn).
@@ -637,56 +683,109 @@ fn flood_turn(flags: &mut Flags, io: &mut Io, stdin_rx: &std::sync::mpsc::Receiv
 }
 
 fn run_scenario(
-    flags: &Flags,
+    flags: &mut Flags,
     io: &mut Io,
     stdin_rx: &std::sync::mpsc::Receiver<String>,
     hook_counter: &mut u64,
 ) {
     let sid = &flags.session_id;
-    let settle = || {
-        // Slow-down knob: sleep BETWEEN the content frames and the result
-        // frame so a debounced consumer observes the transient 🚧 state.
-        if flags.slow_ms > 0 {
-            std::thread::sleep(std::time::Duration::from_millis(flags.slow_ms));
-        }
-    };
     match flags.scenario.as_str() {
-        "hello" => {
+        "hello" | "default" => {
+            // default = 现行缺省行为（close-acceptance-blind-spots 1.2）：
+            // 多段文本 delta 的正文增量流式由缺省行为覆盖——两个 text_delta
+            // 帧之后收尾，消费者观察到「分段到达、逐字各一次」。
             let model = reported_model(flags);
             emit_assistant_text(io, sid, "hello ", model);
             emit_assistant_text(io, sid, "world", model);
-            settle();
+            settle_pause(flags);
             io.emit(&result_frame(sid, "success", false));
         }
         "thinking" => {
-            // （fix-webui-approval-restore-and-session-identity 6.1）最终
-            // thinking 块带 `signature`：真实 CLI 的最终 thinking assistant
-            // 帧必带签名（signature_delta 聚合），SDK `ThinkingBlock.signature`
-            // 是必填 String——缺签名整帧被 `MessageParse` 拒绝、driver 按
-            // 「未知消息」丢弃。固定假签名即可（不验签，只对齐 wire 形状）。
+            // （close-acceptance-blind-spots 1.2）thinking→正文**交替**：两段
+            // thinking 增量与两段正文增量交错（真模型「边想边答」的 wire
+            // 形态）。thinking 块仍带 `signature`（6.1 合同：SDK 的
+            // ThinkingBlock.signature 必填，缺签名整帧被拒、driver 丢帧）。
+            let model = reported_model(flags).to_string();
+            emit_assistant_thinking(io, sid, "hmm", &model);
+            emit_assistant_text(io, sid, "thought out loud", &model);
+            emit_assistant_thinking(io, sid, "hmm again", &model);
+            emit_assistant_text(io, sid, "and the answer", &model);
+            settle_pause(flags);
+            io.emit(&result_frame(sid, "success", false));
+        }
+        "tool-loop" => {
+            // （close-acceptance-blind-spots 1.2）完整工具环：tool_use →
+            // hook_callback（测试侧经泊车审批应答）→ tool_result → **环后
+            // 正文** → result。与 bash/deny 的差异就在环后还有正文——
+            // 「环收尾后模型继续作答」的投影序列断言数据源。
+            let tool_id = "toolu_loop";
+            let cmd = "echo loop";
             io.emit(&json!({
                 "type": "assistant",
                 "session_id": sid,
                 "message": {"role": "assistant", "content": [
-                    {"type": "thinking", "thinking": "hmm", "signature": "sig-fake-thinking"}
-                ], "model": reported_model(flags)}
+                    {"type": "tool_use", "id": tool_id, "name": "Bash", "input": {"command": cmd}}
+                ]}
             }));
-            // The thinking delta rides the partial stream (real CLI with
-            // --include-partial-messages); the final thinking block is
-            // skipped by the driver.
+            // Permission gate: ask the SDK side via hook_callback and block.
+            *hook_counter += 1;
+            let req_id = format!("fake-hook-{}", *hook_counter);
             io.emit(&json!({
-                "type": "stream_event",
-                "uuid": "u-think",
-                "session_id": sid,
-                "event": {
-                    "type": "content_block_delta",
-                    "index": 0,
-                    "delta": {"type": "thinking_delta", "thinking": "hmm"}
+                "type": "control_request",
+                "request_id": req_id,
+                "request": {
+                    "subtype": "hook_callback",
+                    "callback_id": "hook_0",
+                    "tool_use_id": tool_id,
+                    "input": {
+                        "hook_event_name": "PreToolUse",
+                        "session_id": sid,
+                        "tool_name": "Bash",
+                        "tool_input": {"command": cmd},
+                        "cwd": "/tmp",
+                        "transcript_path": "/tmp/fake.jsonl"
+                    }
                 }
             }));
-            emit_assistant_text(io, sid, "thought out loud", reported_model(flags));
-            settle();
+            let decision = wait_hook_decision(stdin_rx, &req_id, io);
+            if decision == "allow" {
+                io.emit(&tool_result_frame(sid, tool_id, "loop done\n", false));
+            } else {
+                io.emit(&tool_result_frame(sid, tool_id, "denied by fake", true));
+            }
+            emit_assistant_text(io, sid, "tool loop finished", reported_model(flags));
+            settle_pause(flags);
             io.emit(&result_frame(sid, "success", false));
+        }
+        "empty" => {
+            // （close-acceptance-blind-spots 1.2）空响应：正常结束、零输出。
+            // 组 4 的零输出落点（投影合成 notice 条目）与提交反馈时限用例
+            // 都以此场景为数据源——回合有终态、transcript 无任何正文条目。
+            settle_pause(flags);
+            io.emit(&result_frame(sid, "success", false));
+        }
+        "slow" => {
+            // （close-acceptance-blind-spots 1.2）慢响应：任何输出之前先静默
+            // `--delay-ms` 毫秒，再出一段正文并正常收尾。静默期照常应答控制
+            // 探针（活着但对引擎沉默——驱动 hang 链不触发，引擎停滞看门狗
+            // `[dispatch] turn_stall_timeout` 是唯一兜底）；delay 超过阈值
+            // 即停滞自愈用例，低于阈值即「慢后端」反馈时限形态。
+            slow_turn(flags, io, stdin_rx);
+        }
+        "error" => {
+            // （close-acceptance-blind-spots 1.2）上游错误形态：result 帧
+            // is_error=true（error_during_request + 错误文案）——driver 映射
+            // 为终态 Error，投影落 error 条目、会话转 failed。真 CLI 错误后
+            // 状态不可知，进程随即退出（与 interrupt 路径同款诚实语义）。
+            io.emit(&json!({
+                "type": "result", "subtype": "error_during_request", "is_error": true,
+                "stop_reason": Value::Null,
+                "duration_ms": 1, "duration_api_ms": 1, "num_turns": 1,
+                "result": "upstream error (fake): provider returned 500",
+                "session_id": sid
+            }));
+            io.out.flush().unwrap();
+            std::process::exit(1);
         }
         "bash" | "deny" => {
             let (tool_id, cmd) = if flags.scenario == "bash" {
@@ -727,14 +826,41 @@ fn run_scenario(
             } else {
                 io.emit(&tool_result_frame(sid, tool_id, "denied by fake", true));
             }
-            settle();
+            settle_pause(flags);
             io.emit(&result_frame(sid, "success", false));
         }
         other => {
+            // 防御性兜底：--scenario 与位置形态都在解析期校验过，正常到不了
+            // 这里（位置形态只接受 SCENARIOS 成员）。
             eprintln!("unknown scenario: {other}");
             std::process::exit(2);
         }
     }
+}
+
+/// Slow-down knob: sleep BETWEEN the content frames and the result frame so a
+/// debounced consumer observes the transient 🚧 state.
+fn settle_pause(flags: &Flags) {
+    if flags.slow_ms > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(flags.slow_ms));
+    }
+}
+
+/// （close-acceptance-blind-spots 1.2）slow 场景主体：先静默 `--delay-ms`
+/// 毫秒（50ms 切片轮询 stdin、照常应答控制探针——驱动看门狗的探测如果悬空
+/// 会卡住驱动泵并误判子进程死亡），随后一段正文、正常收尾。
+fn slow_turn(flags: &mut Flags, io: &mut Io, stdin_rx: &std::sync::mpsc::Receiver<String>) {
+    let sid = flags.session_id.clone();
+    if flags.delay_ms > 0 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(flags.delay_ms);
+        while std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            pump_controls(stdin_rx, io, flags);
+        }
+    }
+    emit_assistant_text(io, &sid, "slow reply", reported_model(flags));
+    settle_pause(flags);
+    io.emit(&result_frame(&sid, "success", false));
 }
 
 /// Read stdin until the control_response for our hook_callback arrives;
@@ -807,6 +933,31 @@ fn assistant_text(sid: &str, text: &str, model: &str) -> Value {
             {"type": "text", "text": text}
         ], "model": model}
     })
+}
+
+/// Emit one thinking chunk the same way (delta first, final block after).
+/// 最终 thinking assistant 帧必带 `signature`——SDK 的 ThinkingBlock.signature
+/// 是必填 String，缺签名整帧被 `MessageParse` 拒绝、driver 按「未知消息」
+/// 丢弃（fix-webui-approval-restore-and-session-identity 6.1）；driver 会
+/// 跳过最终块（增量已交付），签名只为过解析边界。
+fn emit_assistant_thinking(io: &mut Io, sid: &str, text: &str, model: &str) {
+    io.emit(&json!({
+        "type": "stream_event",
+        "uuid": format!("u-think-{}", text.len()),
+        "session_id": sid,
+        "event": {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": text}
+        }
+    }));
+    io.emit(&json!({
+        "type": "assistant",
+        "session_id": sid,
+        "message": {"role": "assistant", "content": [
+            {"type": "thinking", "thinking": text, "signature": "sig-fake-thinking"}
+        ], "model": model}
+    }));
 }
 
 /// Emit one visible text chunk the way the real CLI does under
@@ -887,5 +1038,82 @@ mod thinking_signature_tests {
             serde_json::from_str(r#"{"type":"thinking","thinking":"hmm","signature":null}"#);
         // null 签名不是合法 String——SDK 边界同样拒绝（fail loud 而非丢帧）。
         assert!(missing.is_err() || missing.unwrap()["signature"].is_null());
+    }
+}
+
+#[cfg(test)]
+mod scenario_flag_tests {
+    //! close-acceptance-blind-spots 1.4：场景参数解析——键值形态、位置形态、
+    //! `--delay-ms` 全局延迟。未知场景在解析期 exit(2)，进程内测不了退出路径
+    //! （exit 终止测试进程），由进程级 e2e 覆盖：子进程秒退 → driver 终态
+    //! 错误 → 会话投影 error 条目（testsuite_e2e_test::unknown_scenario_...）。
+
+    use super::*;
+
+    fn argv(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// 键值形态：`--scenario <name>`（SDK extra_args 唯一能表达的形态）。
+    #[test]
+    fn keyed_scenario_selects_the_named_scenario() {
+        let f = parse_flags_from(&argv(&["--scenario", "tool-loop"]));
+        assert_eq!(f.scenario, "tool-loop");
+    }
+
+    /// 位置形态向后兼容：已知场景名仍可裸放 argv。
+    #[test]
+    fn positional_scenario_still_works() {
+        let f = parse_flags_from(&argv(&["bash"]));
+        assert_eq!(f.scenario, "bash");
+    }
+
+    /// 未指定场景 = 现行缺省行为（hello），delay 归零。
+    #[test]
+    fn no_scenario_keeps_the_default_behavior() {
+        let f = parse_flags_from(&argv(&[]));
+        assert_eq!(f.scenario, "hello");
+        assert_eq!(f.delay_ms, 0);
+        assert_eq!(f.slow_ms, 0);
+    }
+
+    /// D4 场景集逐个可被键值形态选中；default 是 hello 的同义词。
+    #[test]
+    fn every_d4_scenario_selects_via_the_keyed_form() {
+        for name in ["default", "hello", "thinking", "tool-loop", "empty", "slow", "error"] {
+            assert!(SCENARIOS.contains(&name), "scenario {name} must be declared");
+            let f = parse_flags_from(&argv(&["--scenario", name]));
+            assert_eq!(f.scenario, name);
+        }
+    }
+
+    /// `--delay-ms` 全局延迟参数的数值解析。
+    #[test]
+    fn delay_ms_parses_the_global_delay() {
+        let f = parse_flags_from(&argv(&["--scenario", "slow", "--delay-ms", "9000"]));
+        assert_eq!(f.scenario, "slow");
+        assert_eq!(f.delay_ms, 9000);
+    }
+
+    /// 非数值 delay 回落 0（与 --slow-ms 同款宽容语义，不炸启动）。
+    #[test]
+    fn delay_ms_with_garbage_value_falls_back_to_zero() {
+        let f = parse_flags_from(&argv(&["--delay-ms", "abc"]));
+        assert_eq!(f.delay_ms, 0);
+    }
+
+    /// SDK 注入的其它旗标不干扰场景解析（--scenario 值消费后其余忽略）。
+    #[test]
+    fn sdk_injected_flags_do_not_disturb_the_scenario() {
+        let f = parse_flags_from(&argv(&[
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--scenario",
+            "empty",
+            "--max-turns",
+            "1",
+        ]));
+        assert_eq!(f.scenario, "empty");
     }
 }

@@ -240,10 +240,12 @@ pub async fn session_detail(
             position: e.position,
             kind: e.kind.clone(),
             element_type: match e.element_type.as_str() {
-                // thinking / tool / error 按原类型透传（conversation-view
-                // 1.1/1.3：前端靠它折叠 thinking、收工具组、渲染错误气泡）；
+                // thinking / tool / error / notice 按原类型透传（conversation-view
+                // 1.1/1.3：前端靠它折叠 thinking、收工具组、渲染错误气泡；
+                // close-acceptance-blind-spots 4.2：notice 透传给前端的中性
+                // 信息条分支，归一成 markdown 会让零输出提示失去可判别语义）；
                 // 未知遗留值归一为 markdown，内容不丢。
-                "thinking" | "tool" | "error" => e.element_type.clone(),
+                "thinking" | "tool" | "error" | "notice" => e.element_type.clone(),
                 _ => "markdown".to_string(),
             },
             content: e.content.clone(),
@@ -2155,7 +2157,9 @@ pub async fn archive_detail(State(_state): State<WebUiState>, Path(key): Path<St
                     position: e.position,
                     kind: e.kind.clone(),
                     element_type: match e.element_type.as_str() {
-                        "thinking" | "tool" | "error" => e.element_type.clone(),
+                        // notice 同步透传（close-acceptance-blind-spots 4.2）：
+                        // 归档回看里的零输出提示保持中性信息条语义。
+                        "thinking" | "tool" | "error" | "notice" => e.element_type.clone(),
                         _ => "markdown".to_string(),
                     },
                     content: e.content.clone(),

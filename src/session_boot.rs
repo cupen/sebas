@@ -30,7 +30,10 @@ use tracing::{debug, warn};
 /// fork `claude` 子进程。这是把「silent Off fallback」升级为「in-band
 /// error signal」的关键链路：用户能从 sebas stderr 直接看到原因，而不是
 /// 看到 claude 启动了但啥都没发生（然后猜是 sebas / claude / 网络哪个环节）。
-pub(crate) const SEBAS_PROVIDER_ERROR_ENV: &str = "SEBAS_PROVIDER_ERROR";
+///
+/// 常量本体收拢在 [`crate::spawn_env`]（env posture 检测同样要认得它），
+/// 这里 re-export 维持既有引用路径不变。
+pub(crate) use crate::spawn_env::SEBAS_PROVIDER_ERROR_ENV;
 
 /// Pull the openspec/specs/provider-management/spec.md abort reason out of an `extra_env` list,
 /// if present. Pure function, easy to unit-test. Returns `None` when the

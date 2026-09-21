@@ -1,24 +1,28 @@
 """Invoke tasks for sebas.
 
-Usage:
-    invoke build-image              # build image
-    invoke build-image --push       # build + push to ghcr.io
-    invoke testsuite-webui-sandbox         # throwaway webui backend for GUI testing
-    invoke testsuite-webui-sandbox --auth  # same, with admin/admin login
-    invoke testsuite-webui                 # Playwright browser suite (sandboxed)
-    invoke --help                   # list all tasks
-"""
+    Usage:
+        invoke build-image              # build image
+        invoke build-image --push       # build + push to ghcr.io
+        invoke testsuite-webui-sandbox         # throwaway webui backend for GUI testing
+        invoke testsuite-webui-sandbox --auth  # same, with admin/admin login
+        invoke testsuite-webui                 # Playwright browser suite (sandboxed)
+        invoke smoke-real               # operator-run real-credential smoke (NOT for CI/agents)
+        invoke --help                   # list all tasks
+    """
 
 import json
 import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 from invoke import task
 
@@ -862,6 +866,362 @@ def testsuite_webui_server(c):
         )
     finally:
         _cleanup_stale_sandboxes()
+
+
+# ---------------------------------------------------------------------------
+# smoke-real: operator-run real-environment smoke
+# (close-acceptance-blind-spots 组 5 / bead sebas-353r, spec「真实环境冒烟入口」).
+#
+#   NOT a CI task. NOT agent-runnable. All automated suites run sandboxed with
+#   zero real credentials (AGENTS.md sandbox rules); this entry is the one
+#   place a HUMAN operator answers "does a basic turn work against the real
+#   upstream on this machine?" — it refuses to start anything without real
+#   credentials supplied via the environment, pins every state path into one
+#   throwaway dir, runs exactly one turn, then destroys the dir.
+#
+# Credential forms (checked in this order, first match wins):
+#   A. ANTHROPIC_AUTH_TOKEN (or ANTHROPIC_API_KEY) in the environment —
+#      optionally with ANTHROPIC_BASE_URL for a gateway/custom upstream.
+#      Passed through untouched: the provider mode stays Off, the claude
+#      child inherits them, exactly like a real `sebas run` deployment.
+#   B. SEBAS_SMOKE_PROVIDER_JSON — path to a dedicated JSON file (overlay
+#      item shape: {"base_url_anthropic": "...", "api_key": "..."} or
+#      {"api_key_env": "MY_KEY"}). The smoke translates it to
+#      ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN in the core's env (same
+#      inheritance path as A; the file itself is never copied anywhere).
+#      Pointing it at the operator's real ~/.sebas/* is refused (spec red
+#      line: never read the running instance's credentials).
+#
+# Topology: minimal single-process form of the AGENTS.md sandbox recipe —
+# one bare core owning the webui API (`--webui --webui-port 9877`), NO
+# standalone router: with the Off/inheritance posture the router is off the
+# turn path entirely, and omitting it keeps real credentials out of any
+# config file on disk.
+# ---------------------------------------------------------------------------
+
+_SMOKE_WEBUI_PORT = 9877
+# 组 2（env posture 启动告警）的日志关键词，已对齐落地文案（spawn_env.rs
+# warn_inherited_provider_env）："env posture：以下变量继承自 shell 且…"。
+# 文案再变时只需更新这一处常量。
+_SMOKE_POSTURE_KEYWORDS = ("继承自 shell", "env posture")
+_SMOKE_PROMPT = "smoke-real: reply with the single word OK"
+
+
+def _smoke_credentials():
+    """Resolve the operator-supplied credential env into (base_url, token).
+
+    Returns (kind, base_url, token) or (None, reason, guidance-ish) — the
+    caller refuses with a nonzero exit BEFORE any process is started."""
+    token = os.environ.get("ANTHROPIC_AUTH_TOKEN") or os.environ.get("ANTHROPIC_API_KEY") or ""
+    base = os.environ.get("ANTHROPIC_BASE_URL", "")
+    if token.strip():
+        return "env", base.strip(), token.strip()
+
+    path = os.environ.get("SEBAS_SMOKE_PROVIDER_JSON", "")
+    if path.strip():
+        p = os.path.realpath(path.strip())
+        real_sebas = os.path.realpath(os.path.join(os.path.expanduser("~"), ".sebas"))
+        try:
+            under_real = os.path.commonpath([p, real_sebas]) == real_sebas
+        except ValueError:  # 异盘等无可共路径
+            under_real = False
+        if under_real:
+            return (
+                None,
+                f"SEBAS_SMOKE_PROVIDER_JSON 指向 {p}（真实 ~/.sebas 之下）",
+                "红线：冒烟入口不得读取运行实例的凭据。请另备一份专用 JSON（内容如 "
+                '{"base_url_anthropic": "https://…", "api_key": "sk-…"}），放在 ~/.sebas 之外。',
+            )
+        try:
+            with open(p, encoding="utf-8") as f:
+                item = json.load(f)
+        except (OSError, ValueError) as e:
+            return None, f"SEBAS_SMOKE_PROVIDER_JSON ({p}) 无法读取或解析: {e}", "请检查文件路径与 JSON 格式。"
+        if not isinstance(item, dict):
+            return None, f"SEBAS_SMOKE_PROVIDER_JSON ({p}) 顶层必须是 JSON 对象", "provider 条目形态：{\"base_url_anthropic\": …, \"api_key\": …}。"
+        key = (item.get("api_key") or "").strip()
+        if not key:
+            key_env = (item.get("api_key_env") or "").strip()
+            key = os.environ.get(key_env, "").strip() if key_env else ""
+            if not key:
+                return (
+                    None,
+                    f"provider JSON 既无 api_key，api_key_env={key_env or '(缺省)'} 在环境中也无值",
+                    'JSON 形态：{"base_url_anthropic": "https://…", "api_key": "sk-…"} 或 {"api_key_env": "变量名"}。',
+                )
+        base = (item.get("base_url_anthropic") or "").strip()
+        if not base:
+            return (
+                None,
+                "provider JSON 缺 base_url_anthropic",
+                "冒烟走 anthropic 协议直连，需要 {\"base_url_anthropic\": …}；openai 槽位不支持。",
+            )
+        return "json", base, key
+
+    return (
+        None,
+        "未检出任何真实凭据",
+        "二选一预置后再运行：\n"
+        "  A. export ANTHROPIC_AUTH_TOKEN=sk-…        # 可选：export ANTHROPIC_BASE_URL=https://网关地址\n"
+        '  B. export SEBAS_SMOKE_PROVIDER_JSON=/path/to/provider.json   # 文件内容：{"base_url_anthropic": "https://…", "api_key": "sk-…"}\n'
+        "凭据只经环境进入，冒烟不读取、不复制运行实例的 ~/.sebas。",
+    )
+
+
+def _smoke_config_text(work):
+    """config.toml — AGENTS.md 沙箱菜谱的最简单进程形态（全部路径钉进 work）。"""
+    cfg = _cfg_path(work)
+    return f"""[feishu]
+enabled = false
+
+[acp]
+default = "claude"
+
+# 真实 claude CLI，PATH 查找（default_claude_path）；凭据经环境继承，
+# 不落任何配置文件。
+[acp.agents.claude]
+driver = "claude"
+path = "claude"
+sessions_dir = "{cfg}/claude-sessions"
+work_dir = "{cfg}/work"
+
+[dispatch]
+state_file = "{cfg}/sessions.json"
+
+[media]
+download_dir = "{cfg}/downloads"
+
+[workspace]
+root = "{cfg}"
+
+[skills]
+dir = "{cfg}/agents-skills"
+
+[service.core]
+channel_path = "{cfg}/core-channel.sock"
+
+[service.webui]
+enabled = false          # bare core owns the webui via --webui-port
+auth = false             # 登录免了；SEBAS_WEBUI_AUTH_DB 已钉进沙箱
+# 无 [router] / [provider.*]：provider 模式保持 Off，claude 经继承的
+# ANTHROPIC_* env 直连真实上游——与真实部署的默认路径一致。
+"""
+
+
+def _smoke_http(url, method="GET", payload=None, timeout=10):
+    """One JSON API call → (status, parsed-or-None). HTTP error statuses and
+    connection failures come back as statuses (0 = unreachable) so callers
+    handle them with a log tail instead of a raw traceback."""
+    data = json.dumps(payload).encode() if payload is not None else None
+    req = urllib.request.Request(
+        url, data=data, method=method,
+        headers={"Content-Type": "application/json"} if data else {},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            status, body = r.status, r.read().decode(errors="replace")
+    except urllib.error.HTTPError as e:
+        status, body = e.code, e.read().decode(errors="replace")
+    except urllib.error.URLError:
+        return 0, None
+    try:
+        return status, json.loads(body) if body else None
+    except ValueError:
+        return status, None
+
+
+def _smoke_log_tail(path, n=40):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return "".join(f.readlines()[-n:])
+    except OSError:
+        return "(no log)"
+
+
+@task(
+    help={
+        "timeout": "Per-turn poll timeout in seconds (default 120)",
+        "keep": "Keep the throwaway dir on exit (debugging; default: delete)",
+    }
+)
+def smoke_real(c, timeout=120, keep=False):
+    """One real-credential turn against the real upstream, then destroy.
+
+    OPERATOR-RUN ONLY — never in CI, never agent-executed (agents hold no
+    real credentials by design; AGENTS.md「真实环境冒烟」). Refuses without
+    credentials before starting anything; every state path is pinned into a
+    throwaway dir (AGENTS.md sandbox recipe) that is deleted on exit.
+    """
+    print(
+        "smoke-real：真实环境冒烟（operator 手跑；不进 CI、agent 禁触）\n"
+        "  拓扑 = 单进程 bare core（webui API 9877）+ 真实 claude CLI + 一次性目录"
+    )
+    kind, base, token = _smoke_credentials()
+    if kind is None:
+        reason, guidance = base, token
+        print(f"❌ 拒绝启动：{reason}")
+        print(guidance)
+        raise SystemExit(1)
+    if kind == "env":
+        where = base or "官方 api.anthropic.com（未设 ANTHROPIC_BASE_URL）"
+        print(f"[cred] 形态 A：继承 shell 的 ANTHROPIC_AUTH_TOKEN → 上游 {where}")
+    else:
+        print(f"[cred] 形态 B：SEBAS_SMOKE_PROVIDER_JSON → ANTHROPIC_BASE_URL={base}")
+
+    sebas_bin = os.path.abspath(_sandbox_bin("sebas"))
+    if not (os.path.isfile(sebas_bin) and os.access(sebas_bin, os.X_OK)):
+        print(f"error: {sebas_bin} missing, run: cargo build")
+        raise SystemExit(1)
+    if not shutil.which("claude"):
+        print("error: PATH 上找不到 claude CLI（[acp.agents.claude] path 默认 \"claude\"，按 PATH 解析）")
+        raise SystemExit(1)
+
+    work = tempfile.mkdtemp(prefix="sebas-smoke-")
+    for sub in ("work", "claude-sessions", "downloads", "agents-skills"):
+        os.makedirs(os.path.join(work, sub), exist_ok=True)
+    with open(os.path.join(work, "config.toml"), "w") as f:
+        f.write(_smoke_config_text(work))
+
+    env = dict(os.environ)
+    env.update(
+        {
+            "SEBAS_STATE_DB": os.path.join(work, "sebas.db"),
+            "SEBAS_STATE_FILE": os.path.join(work, "state.json"),
+            "SEBAS_ROUTER_PROVIDER_OVERLAY": os.path.join(work, "providers.json"),
+            "SEBAS_WEBUI_AUTH_DB": os.path.join(work, "auth.db"),
+            "SEBAS_PROJECTS_PATH": os.path.join(work, "projects.json"),
+            "SEBAS_HOME": work,
+            "SEBAS_ARCHIVE_PATH": os.path.join(work, "archive.json"),
+        }
+    )
+    env.pop("SEBAS_CORE_SECRET", None)  # auto-arm 写 <work>/core.secret
+    if kind == "json":
+        # 形态 B：把 provider JSON 翻译成继承 env（与形态 A 同一条 spawn 路径）。
+        # 只进进程 env，不写任何盘上文件。
+        env["ANTHROPIC_BASE_URL"] = base
+        env["ANTHROPIC_AUTH_TOKEN"] = token
+
+    log_path = os.path.join(work, "core.log")
+    log = open(log_path, "w")
+    core = subprocess.Popen(
+        [sebas_bin, "core", "-c", os.path.join(work, "config.toml"),
+         "--webui", "--webui-port", str(_SMOKE_WEBUI_PORT)],
+        env=env, cwd=work, stdout=log, stderr=subprocess.STDOUT,
+    )
+    api = f"http://127.0.0.1:{_SMOKE_WEBUI_PORT}"
+    try:
+        # readiness：60s 内 /health 通；子进程中途死掉立即报错。
+        for _ in range(120):
+            if _health_ok(f"{api}/health"):
+                break
+            if core.poll() is not None:
+                print("error: core 在启动期退出；日志尾部：")
+                print(_smoke_log_tail(log_path))
+                raise SystemExit(1)
+            time.sleep(0.5)
+        else:
+            print("error: core 60s 未就绪；日志尾部：")
+            print(_smoke_log_tail(log_path))
+            raise SystemExit(1)
+        print(f"[core] 就绪：{api}（一次性目录 {work}）")
+
+        # env posture 结论（组 2 预留关键词；当前若无匹配如实说明）。
+        try:
+            with open(log_path, encoding="utf-8", errors="replace") as f:
+                log_text = f.read()
+        except OSError:
+            log_text = ""
+        posture = [
+            ln for ln in log_text.splitlines()
+            if any(k.lower() in ln.lower() for k in _SMOKE_POSTURE_KEYWORDS)
+        ]
+        if posture:
+            print(f"[env posture] 检出 {len(posture)} 条启动告警（继承自 shell、将作用于 Claude 子进程）：")
+            for ln in posture:
+                print(f"    {ln}")
+        else:
+            print("[env posture] 启动日志未检出继承 env 告警"
+                  "（cover 全覆盖、shell 无 ANTHROPIC_*，或组 2 关键词尚未落地——关键词常量待对齐）")
+
+        # 项目注册 → 创建会话（真实 wire 形态：project_id + agent，一次带 prompt）。
+        work_dir = os.path.join(work, "work")
+        status, proj = _smoke_http(f"{api}/api/projects", "POST", {"path": work_dir})
+        if status != 201 or not isinstance(proj, dict) or not proj.get("id"):
+            print(f"error: 项目注册失败 status={status} resp={proj}")
+            print(_smoke_log_tail(log_path))
+            raise SystemExit(1)
+        print(f"[project] 已注册 {proj['id']} → {work_dir}")
+
+        status, resp = _smoke_http(
+            f"{api}/api/sessions", "POST",
+            {"prompt": _SMOKE_PROMPT, "project_id": proj["id"], "agent": "claude"},
+        )
+        if status != 201 or not isinstance(resp, dict) or not resp.get("key"):
+            print(f"error: 会话创建失败 status={status} resp={resp}")
+            print(_smoke_log_tail(log_path))
+            raise SystemExit(1)
+        skey = urllib.parse.quote(resp["key"], safe="")
+        print(f"[session] 已创建：{resp['key']}")
+
+        # 轮询至终态（done / failed）或超时。
+        deadline = time.time() + float(timeout)
+        detail = None
+        slug = ""
+        while time.time() < deadline:
+            status, detail = _smoke_http(f"{api}/api/sessions/{skey}")
+            if status != 200 or not isinstance(detail, dict):
+                print(f"error: 会话详情读取失败 status={status}")
+                print(_smoke_log_tail(log_path))
+                raise SystemExit(1)
+            slug = detail.get("status_slug", "")
+            if slug in ("done", "failed"):
+                break
+            time.sleep(2)
+        else:
+            print(f"error: {timeout}s 内回合未到终态（最后 status_slug={slug!r}）")
+            print(_smoke_log_tail(log_path))
+            raise SystemExit(1)
+
+        entries = detail.get("entries") or []
+        errors = [e for e in entries if e.get("element_type") == "error"]
+        print(f"[turn] 终态 status_slug={slug}，条目 {len(entries)} 条（error {len(errors)} 条）")
+        for e in entries[-3:]:
+            preview = (e.get("content") or "").strip().replace("\n", " ")[:160]
+            print(f"    [{e.get('kind')}/{e.get('element_type')}] {preview}")
+
+        if slug == "failed" or errors:
+            print("❌ 冒烟失败：回合以错误收尾（详见上方条目与 core.log）")
+            raise SystemExit(1)
+        if not any(e.get("kind") != "prompt" for e in entries):
+            print("❌ 冒烟失败：终态 Done 但没有任何 agent 应答条目（零输出落点）")
+            raise SystemExit(1)
+        print("✅ 冒烟通过：真实上游一次基本回合收到非错误应答")
+    finally:
+        # SIGTERM → 宽限 10s → SIGKILL；等端口释放；删一次性目录。
+        if core.poll() is None:
+            core.terminate()
+            try:
+                core.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                core.kill()
+                core.wait(timeout=5)
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            s = socket.socket()
+            s.settimeout(0.3)
+            busy = s.connect_ex(("127.0.0.1", _SMOKE_WEBUI_PORT)) == 0
+            s.close()
+            if not busy:
+                break
+            time.sleep(0.25)
+        else:
+            print(f"⚠️ 端口 {_SMOKE_WEBUI_PORT} 在清理后仍被占用")
+        log.close()
+        if keep:
+            print(f"[cleanup] 保留现场（--keep）：{work}（core.log 在内）")
+        else:
+            shutil.rmtree(work, ignore_errors=True)
+            print(f"[cleanup] 已删除一次性目录 {work}；端口 {_SMOKE_WEBUI_PORT} 已释放")
 
 
 @task(

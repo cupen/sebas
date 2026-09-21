@@ -148,6 +148,12 @@ pub async fn run(
         }
     }
 
+    // close-acceptance-blind-spots 盲区 2：env posture 启动告警——继承自
+    // shell 且不被 cover 语义覆盖的 ANTHROPIC_* 逐变量 WARN 点名（只报告，
+    // 不篡改 env，design D1）。放在 state store 初始化之后：provider 解析
+    // 与 spawn 路径同源（库权威）。
+    crate::spawn_env::warn_inherited_provider_env(router_cfg.as_ref());
+
     // TOML is bootstrap; settings.json (if present) wins wholesale.
     // Strict: malformed settings.json refuses to start with a clear error.
     // Missing settings.json → fall back to TOML [card] so first-boot users
@@ -248,6 +254,22 @@ pub async fn run(
             }
         }
     });
+
+    // ── 重启 spawning 收敛（close-acceptance-blind-spots 盲区 4，design D2
+    // 重投优先）──恢复载入的 spawning 相位会话（0-turn 占位）在启动期落定：
+    // 重投 spawn 指令，重投失败经既有 fail_spawn 落合成错误条目 + spawn-failed
+    // 终态——恢复完成后不再有无人收敛的 spawning 僵尸。放在出站泵装配之后：
+    // 重投指令经泵投递、每个 spawn 握手在独立任务里跑，单会话落定不阻塞其它
+    // 会话恢复，也不阻塞启动主路径。
+    {
+        let router_for_settle = router.clone();
+        tokio::spawn(async move {
+            let settled = router_for_settle.settle_restored_spawning().await;
+            if settled > 0 {
+                info!("restore: 已重投 {settled} 个 spawning 相位会话的 spawn 指令");
+            }
+        });
+    }
 
     // ── 回合停滞看门狗（fix-pending-queue-liveness 2.2，design D1/D6）──
     // `[dispatch] turn_stall_timeout`（默认 600s，0 = 关闭）配置进引擎；

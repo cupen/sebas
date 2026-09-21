@@ -486,6 +486,99 @@ fn effective_provider_models(
         .map(|p| p.models.clone())
 }
 
+/// 触发 abort 的 env var 名（openspec/specs/provider-management/spec.md）。
+/// 定义收拢在 spawn_env（本模块文档即该信号的语义出处）；`session_boot`
+/// 经 `pub(crate) use` 复用同一常量。
+pub(crate) const SEBAS_PROVIDER_ERROR_ENV: &str = "SEBAS_PROVIDER_ERROR";
+
+/// env posture 启动检测的被检变量全集（close-acceptance-blind-spots 盲区 2，
+/// openspec/changes/close-acceptance-blind-spots/specs/cli-service/spec.md）。
+///
+/// 这些变量一旦继承自 shell 且不被 cover 语义覆盖，就会原样进入 Claude 子进程，
+/// 把请求引向继承值指向的网关 / 模型（真实事故：shell 导出的
+/// `ANTHROPIC_BASE_URL`/`ANTHROPIC_MODEL` 经 sebas 继承进子进程，请求被引向
+/// 公司网关上未路由的模型名）。与 cover 集的差异：`ANTHROPIC_SMALL_FAST_MODEL`
+/// 只检测不覆盖（当前没有任何解析路径强制它）；`CLAUDE_CODE_SUBAGENT_MODEL`
+/// 只覆盖不检测（不在引导请求去向的变量之列）。
+pub const PROVIDER_ENV_POSTURE_VARS: [&str; 7] = [
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_SMALL_FAST_MODEL",
+];
+
+/// env posture 纯检测（close-acceptance-blind-spots 2.1）：给定 spawn 将要
+/// 强制注入子进程的 env（`extra_env` 的键集 = cover 语义的覆盖面，与
+/// [`resolve_spawn_overrides`] 同一产物）和继承 env 的只读视图，返回「被检
+/// 变量中继承自环境且不会被覆盖」的清单，按 [`PROVIDER_ENV_POSTURE_VARS`]
+/// 顺序排列。
+///
+/// 纯函数：不读不改任何进程 env——继承视图由调用方注入（生产传
+/// `std::env::var` 的包装，测试传闭包 / 查表）。空字符串继承值视同未设置
+/// （`export FOO=` 不引导任何请求，告警它纯属噪音）。
+pub fn inherited_uncovered_provider_env(
+    spawn_env: &[(String, String)],
+    inherited: impl Fn(&str) -> Option<String>,
+) -> Vec<String> {
+    PROVIDER_ENV_POSTURE_VARS
+        .iter()
+        .filter(|var| {
+            inherited(var)
+                .filter(|value| !value.is_empty())
+                .is_some()
+                && !spawn_env.iter().any(|(k, _)| k == *var)
+        })
+        .map(|var| (*var).to_string())
+        .collect()
+}
+
+/// 启动 posture 检测（不复述日志）：以当前 provider 解析为准，返回「继承自
+/// 进程 env 且不会被 cover 语义覆盖」的被检变量清单。解析与 spawn 路径共用
+/// [`resolve_spawn_overrides`] 同一产物，杜绝两套 cover 判定漂移（design D1）。
+///
+/// 解析为 `Error` 时返回空清单：该形态下 spawn 本身会以
+/// `SEBAS_PROVIDER_ERROR` 显式失败（见 [`SEBAS_PROVIDER_ERROR_ENV`]），
+/// 继承 env 不会真的在 Claude 子进程生效——此时告警 env posture 只会把
+/// 注意力从真正的配置错误上引开。
+pub fn inherited_provider_env_posture(
+    state: &ProviderRuntimeState,
+    router_cfg: Option<&RouterConfig>,
+) -> Vec<String> {
+    let driver = ClaudeCodeDriver;
+    let (extra_env, _args) = resolve_spawn_overrides(&driver, state, router_cfg);
+    if extra_env
+        .iter()
+        .any(|(k, _)| k == SEBAS_PROVIDER_ERROR_ENV)
+    {
+        return Vec::new();
+    }
+    inherited_uncovered_provider_env(&extra_env, |k| std::env::var(k).ok())
+}
+
+/// core/webui 启动接线（close-acceptance-blind-spots 2.2）：存在未覆盖的
+/// 继承变量 → WARN 一条、逐变量点名「继承自 shell、将在 Claude 子进程生效」；
+/// covering 模式全覆盖时完全静默。只报告不篡改——env 的实际传递行为归
+/// claude-env-cover 管，这里只补可观测性（design D1）。
+///
+/// core 侧在 state store 初始化之后调用（provider 解析走库权威）；webui 侧
+/// 无状态库，`provider_state::load()` 自行按文件降级读取。
+pub fn warn_inherited_provider_env(router_cfg: Option<&RouterConfig>) {
+    let state = sebas_dispatch::provider_state::load();
+    let uncovered = inherited_provider_env_posture(&state, router_cfg);
+    if uncovered.is_empty() {
+        return;
+    }
+    let list = uncovered.join(", ");
+    tracing::warn!(
+        vars = %list,
+        "env posture：以下变量继承自 shell 且当前 provider 解析不会覆盖，将在 Claude 子进程生效：{list}\
+         （如非本意请 unset 这些变量，或在 provider 设置里改用 Direct/Router 模式覆盖）"
+    );
+}
+
 /// 给 agent 进程的额外 env vars + 额外 CLI args。
 ///
 /// 设计（openspec/specs/provider-management/spec.md + acp-claude-model-env-cover）：
@@ -1914,5 +2007,215 @@ base_url_anthropic = "https://api.anthropic.com"
             !env.iter()
                 .any(|(k, v)| k == "ANTHROPIC_MODEL" && v == &stale.1)
         );
+    }
+
+    // ---- env posture 启动检测（close-acceptance-blind-spots 盲区 2）----
+
+    /// 纯函数：无覆盖（Off 形态的空 spawn env）时，继承清单原样全列。
+    /// 非 `ANTHROPIC_*` 引导面（OPENAI_*、SUBAGENT）不在被检全集，永不入列。
+    #[test]
+    fn posture_pure_uncovered_lists_inherited_vars() {
+        let inherited = |k: &str| match k {
+            "ANTHROPIC_BASE_URL" => Some("https://corp-gw.internal".to_string()),
+            "ANTHROPIC_MODEL" => Some("corp-model".to_string()),
+            "CLAUDE_CODE_SUBAGENT_MODEL" => Some("noise".to_string()),
+            "OPENAI_BASE_URL" => Some("noise".to_string()),
+            _ => None,
+        };
+        let listed = inherited_uncovered_provider_env(&[], inherited);
+        assert_eq!(
+            listed,
+            vec![
+                "ANTHROPIC_BASE_URL".to_string(),
+                "ANTHROPIC_MODEL".to_string()
+            ],
+            "继承且未覆盖的变量逐一点名，顺序随被检全集"
+        );
+    }
+
+    /// 纯函数：全覆盖时完全静默（spec 场景「全覆盖时保持安静」的判定核心）。
+    #[test]
+    fn posture_pure_fully_covered_is_silent() {
+        // Direct{Anthropic} + 双模型 provider 的完整覆盖面（driver 2 键 +
+        // model cover 4 键；SUBAGENT 覆盖但不在被检全集）。
+        let spawn_env: Vec<(String, String)> = [
+            ("ANTHROPIC_BASE_URL", "https://example.test/anthropic"),
+            ("ANTHROPIC_AUTH_TOKEN", "sk-cover"),
+            ("ANTHROPIC_MODEL", "m-strong"),
+            ("ANTHROPIC_DEFAULT_OPUS_MODEL", "m-strong"),
+            ("ANTHROPIC_DEFAULT_SONNET_MODEL", "m-weak"),
+            ("ANTHROPIC_DEFAULT_HAIKU_MODEL", "m-weak"),
+            ("CLAUDE_CODE_SUBAGENT_MODEL", "m-weak"),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let listed = inherited_uncovered_provider_env(&spawn_env, |k| {
+            (k != "ANTHROPIC_SMALL_FAST_MODEL").then(|| "inherited".to_string())
+        });
+        assert!(
+            listed.is_empty(),
+            "六个被检变量全部被覆盖且 SMALL_FAST 未继承 → 清单必须为空；got {listed:?}"
+        );
+    }
+
+    /// 纯函数：部分覆盖只列未覆盖者——既包括从未被任何模式覆盖的
+    /// `ANTHROPIC_SMALL_FAST_MODEL`，也包括 cover 集之外的漏网变量。
+    #[test]
+    fn posture_pure_partial_cover_lists_only_uncovered() {
+        let spawn_env: Vec<(String, String)> = [
+            ("ANTHROPIC_BASE_URL", "https://example.test/anthropic"),
+            ("ANTHROPIC_AUTH_TOKEN", "sk-cover"),
+            ("ANTHROPIC_MODEL", "m-strong"),
+            ("ANTHROPIC_DEFAULT_OPUS_MODEL", "m-strong"),
+            ("ANTHROPIC_DEFAULT_SONNET_MODEL", "m-weak"),
+            ("ANTHROPIC_DEFAULT_HAIKU_MODEL", "m-weak"),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        // 继承了全部 7 个被检变量 → 只有 SMALL_FAST 漏网（无任何路径覆盖它）。
+        let listed =
+            inherited_uncovered_provider_env(&spawn_env, |k| Some(format!("inherited-{k}")));
+        assert_eq!(
+            listed,
+            vec!["ANTHROPIC_SMALL_FAST_MODEL".to_string()],
+            "被覆盖的变量不得入列；got {listed:?}"
+        );
+        // 反向：只覆盖 MODEL 一键 → BASE_URL 与 OPUS 漏网（顺序随全集）。
+        let partial = vec![("ANTHROPIC_MODEL".to_string(), "m".to_string())];
+        let listed = inherited_uncovered_provider_env(&partial, |k| {
+            (k == "ANTHROPIC_BASE_URL" || k == "ANTHROPIC_DEFAULT_OPUS_MODEL")
+                .then(|| "inherited".to_string())
+        });
+        assert_eq!(
+            listed,
+            vec![
+                "ANTHROPIC_BASE_URL".to_string(),
+                "ANTHROPIC_DEFAULT_OPUS_MODEL".to_string()
+            ]
+        );
+    }
+
+    /// 纯函数：空字符串继承值视同未设置（`export FOO=` 不引导请求，告警它是噪音）。
+    #[test]
+    fn posture_pure_ignores_empty_inherited_values() {
+        let listed =
+            inherited_uncovered_provider_env(&[], |k| (k == "ANTHROPIC_BASE_URL").then(String::new));
+        assert!(listed.is_empty(), "空值继承不入列；got {listed:?}");
+    }
+
+    /// 接线层：检测只报告不篡改——跑检测前后进程 env 与 spawn 产物逐字节
+    /// 相同（spec：MUST NOT 改变 env 的实际传递行为）。
+    #[test]
+    fn posture_detection_leaves_process_env_and_spawn_output_untouched() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        // state 重定向进沙箱（默认 Off 形态），overlay 缺文件 = no-op。
+        let state_path = dir.path().join("state.json");
+        std::fs::write(&state_path, r#"{"version":2,"deleted":[]}"#).unwrap();
+        unsafe {
+            std::env::set_var("SEBAS_STATE_FILE", state_path.to_str().unwrap());
+            std::env::set_var("SEBAS_ROUTER_PROVIDER_OVERLAY", "__no_overlay__.json");
+            std::env::set_var("ANTHROPIC_MODEL", "stale-from-shell");
+            std::env::set_var("ANTHROPIC_BASE_URL", "https://corp-gw.internal");
+        }
+        let state = off_state();
+        let before = resolve_spawn_overrides(&driver(), &state, None);
+        let first = inherited_provider_env_posture(&state, None);
+        let second = inherited_provider_env_posture(&state, None);
+        let after = resolve_spawn_overrides(&driver(), &state, None);
+        assert_eq!(first, second, "检测必须幂等：两次结果一致");
+        assert_eq!(before, after, "检测不得改变 spawn env/args 产物");
+        assert_eq!(
+            first,
+            vec![
+                "ANTHROPIC_BASE_URL".to_string(),
+                "ANTHROPIC_MODEL".to_string()
+            ],
+            "Off 形态下继承变量全部漏网并逐一点名"
+        );
+        // 进程 env 断言：检测前后继承值原样（不 remove、不改写）。
+        // SAFETY: ENV_LOCK held。
+        unsafe {
+            assert_eq!(std::env::var("ANTHROPIC_MODEL").as_deref(), Ok("stale-from-shell"));
+            assert_eq!(
+                std::env::var("ANTHROPIC_BASE_URL").as_deref(),
+                Ok("https://corp-gw.internal")
+            );
+        }
+        // SAFETY: ENV_LOCK held。
+        unsafe {
+            std::env::remove_var("SEBAS_STATE_FILE");
+            std::env::remove_var("SEBAS_ROUTER_PROVIDER_OVERLAY");
+            std::env::remove_var("ANTHROPIC_MODEL");
+            std::env::remove_var("ANTHROPIC_BASE_URL");
+        }
+    }
+
+    /// 接线层：全覆盖（Direct + 带 models 的 provider）时清单为空 → WARN
+    /// 分支不触发（spec 场景「全覆盖时保持安静」的接线侧判定）。
+    #[test]
+    fn posture_full_cover_wiring_yields_empty_list() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        // Direct 指向带 models 的 provider（v2 state 文件，provider 条目内嵌）。
+        std::fs::write(
+            &state_path,
+            r#"{"version":2,"deleted":[],"providers":{"cover":{"base_url_anthropic":"https://example.test/anthropic","api_key":"sk-cover","models":["m-strong","m-weak"]}},"mode":{"kind":"direct","provider":"cover"},"default_selection":{"provider":"cover"}}"#,
+        )
+        .unwrap();
+        // SAFETY: ENV_LOCK held。
+        unsafe {
+            std::env::set_var("SEBAS_STATE_FILE", state_path.to_str().unwrap());
+            std::env::set_var("SEBAS_ROUTER_PROVIDER_OVERLAY", "__no_overlay__.json");
+            std::env::set_var("ANTHROPIC_BASE_URL", "https://corp-gw.internal");
+            std::env::set_var("ANTHROPIC_AUTH_TOKEN", "stale-token");
+            std::env::set_var("ANTHROPIC_MODEL", "stale-model");
+            std::env::set_var("ANTHROPIC_DEFAULT_OPUS_MODEL", "stale-opus");
+            std::env::set_var("ANTHROPIC_DEFAULT_SONNET_MODEL", "stale-sonnet");
+            std::env::set_var("ANTHROPIC_DEFAULT_HAIKU_MODEL", "stale-haiku");
+        }
+        let state = sebas_dispatch::provider_state::load();
+        let listed = inherited_provider_env_posture(&state, None);
+        assert!(
+            listed.is_empty(),
+            "六个被检变量全部被覆盖且 SMALL_FAST 未继承 → 必须静默；got {listed:?}"
+        );
+        // SAFETY: ENV_LOCK held。
+        unsafe {
+            std::env::remove_var("SEBAS_STATE_FILE");
+            std::env::remove_var("SEBAS_ROUTER_PROVIDER_OVERLAY");
+            std::env::remove_var("ANTHROPIC_BASE_URL");
+            std::env::remove_var("ANTHROPIC_AUTH_TOKEN");
+            std::env::remove_var("ANTHROPIC_MODEL");
+            std::env::remove_var("ANTHROPIC_DEFAULT_OPUS_MODEL");
+            std::env::remove_var("ANTHROPIC_DEFAULT_SONNET_MODEL");
+            std::env::remove_var("ANTHROPIC_DEFAULT_HAIKU_MODEL");
+        }
+    }
+
+    /// 接线层：解析为 `Error` 时即使有继承变量也保持静默——spawn 会以
+    /// `SEBAS_PROVIDER_ERROR` 显式失败，继承 env 根本不会在子进程生效。
+    #[test]
+    fn posture_error_resolution_stays_silent() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // SAFETY: ENV_LOCK held。
+        unsafe {
+            std::env::set_var("ANTHROPIC_BASE_URL", "https://corp-gw.internal");
+        }
+        // listen 为空的 RouterConfig → resolution Error（显式失败语义）。
+        let cfg = test_router("", vec!["sk-gw".to_string()]);
+        let state = router_state();
+        let listed = inherited_provider_env_posture(&state, Some(&cfg));
+        assert!(
+            listed.is_empty(),
+            "Error 解析下 env posture 必须让位于配置错误；got {listed:?}"
+        );
+        // SAFETY: ENV_LOCK held。
+        unsafe {
+            std::env::remove_var("ANTHROPIC_BASE_URL");
+        }
     }
 }

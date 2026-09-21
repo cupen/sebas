@@ -1310,3 +1310,68 @@ describe('model menu current marker + mode popup bounds (5.3)', () => {
     el.remove()
   })
 })
+
+// ── close-acceptance-blind-spots 4.3：提交反馈时限（乐观排队呈现）──────────
+//
+// spec「Submission acknowledgment is bounded」：提交面 5 秒内呈现可见反馈，
+// 且「反馈允许前端乐观呈现（本地先显示排队，后端确认后再对齐）」——被测
+// 对象即乐观呈现本身：指示在 POST 发出时**同步**出现，不依赖任何后端往返；
+// 后端确认（resolve/reject）后消失，交由转录回执 / 错误 callout 对齐。
+describe('optimistic queued indicator (close-acceptance-blind-spots 4.3)', () => {
+  function queuedOf(el: SebasWorkbenchComposer): HTMLElement | null {
+    return el.shadowRoot?.querySelector(
+      '[data-testid="submit-queued-indicator"]',
+    ) as HTMLElement | null
+  }
+
+  it('shows the queued indicator the moment a submit is sent, before any backend ack', async () => {
+    // 后端永不确认：模拟核心通道确认延迟 > 5s 的慢后端。
+    ;(api.sendMessage as ReturnType<typeof vi.fn>).mockReturnValue(new Promise(() => {}))
+    const el = await mount(focus)
+    await type(el, 'slow core ack')
+    ;(el.shadowRoot?.querySelector('[data-testid="submit-control"]') as HTMLElement).click()
+    // 不 flush 微任务之外的等待——指示与 POST 同帧出现（远快于 5s 预算）。
+    await el.updateComplete
+    const indicator = queuedOf(el)
+    expect(indicator, 'the submission surface must show a local queued indication').toBeTruthy()
+    expect(indicator?.textContent).toContain('已提交，等待回执')
+    // 慢后端窗口内指示持续可见（不闪没）。
+    await new Promise((r) => setTimeout(r, 50))
+    await el.updateComplete
+    expect(queuedOf(el)).toBeTruthy()
+    el.remove()
+  })
+
+  it('clears the indicator once the backend acknowledges (receipt takes over)', async () => {
+    let resolveSend!: (v: { status: string }) => void
+    ;(api.sendMessage as ReturnType<typeof vi.fn>).mockReturnValue(
+      new Promise<{ status: string }>((r) => (resolveSend = r)),
+    )
+    const el = await mount(focus)
+    await type(el, 'ack me')
+    ;(el.shadowRoot?.querySelector('[data-testid="submit-control"]') as HTMLElement).click()
+    await el.updateComplete
+    expect(queuedOf(el)).toBeTruthy()
+
+    resolveSend({ status: 'delivered' })
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(queuedOf(el)).toBeNull()
+    expect(api.sendMessage).toHaveBeenCalledWith('web%00web-1', 'ack me')
+    el.remove()
+  })
+
+  it('clears the indicator on rejection; the error callout owns the feedback then', async () => {
+    ;(api.sendMessage as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('boom'))
+    const el = await mount(focus)
+    await type(el, 'will fail')
+    ;(el.shadowRoot?.querySelector('[data-testid="submit-control"]') as HTMLElement).click()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(queuedOf(el)).toBeNull()
+    expect(
+      el.shadowRoot?.querySelector('[data-testid="composer-error"]'),
+    ).toBeTruthy()
+    el.remove()
+  })
+})

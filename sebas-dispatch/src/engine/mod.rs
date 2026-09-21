@@ -777,6 +777,66 @@ impl DispatchHandle {
         }
     }
 
+    /// 重启 spawning 收敛（close-acceptance-blind-spots 盲区 4，design D2
+    /// 重投优先）：core 启动恢复状态后对恢复出的 spawning 相位会话一次性落定。
+    ///
+    /// 恢复（`SessionMap::restore_json`）能产生的 spawning 只有一种形态——
+    /// 0-turn 占位（盘上 `session_id=""` + `awaiting_first_prompt=true`，重启后
+    /// 仍是等待首条消息的空会话）；真实 spawn-in-flight 不入盘，本就不会出现在
+    /// 恢复面。不落定时它就是事故里的那种僵尸：相位永远停在 spawning，无人
+    /// 收敛。落定 = 按既定 spawn 流程**重投指令**（经 [`Self::web_activate_session`]，
+    /// 消费占位标记、以创建时记住的 project_dir/kind/model/mode 走空 prompt
+    /// fresh spawn），成功则照常激活；重投后的成败由出站泵的既有分支收敛——
+    /// spawn 成功 → Active，失败（agent 配置缺失等）→ [`Self::fail_spawn`] 追加
+    /// 合成错误条目并转 spawn-failed 非 spawning 终态。「一律落失败」被否
+    /// （D2）：会把可恢复会话误杀。
+    ///
+    /// 逐会话独立落定且只投递指令（真正的 spawn 握手在出站泵的独立任务里）：
+    /// 单个会话的重投不阻塞、不误伤其它会话的恢复——dormant/active 原样保留。
+    /// 幂等：已消费标记的在飞占位经 `route_activate` 走 AlreadyStarting，重复
+    /// 调用不再二次投递。返回实际重投的会话数。
+    pub async fn settle_restored_spawning(&self) -> usize {
+        let spawning = self
+            .map
+            .snapshot_all()
+            .await
+            .into_iter()
+            .filter(|(_, m)| m.awaiting_first_prompt())
+            .map(|(k, _)| k)
+            .collect::<Vec<_>>();
+        let mut redispatched = 0usize;
+        for key in spawning {
+            match self.web_activate_session(key.clone()).await {
+                Ok(true) => {
+                    redispatched += 1;
+                    tracing::info!(
+                        channel = %key.channel_str(),
+                        reference = %key.reference,
+                        "restore: spawning 相位会话已重投 spawn 指令"
+                    );
+                }
+                Ok(false) => tracing::warn!(
+                    channel = %key.channel_str(),
+                    reference = %key.reference,
+                    "restore: spawning 相位会话无需重投（占位标记缺失，留待常规路径收敛）"
+                ),
+                // web_activate_session 现无 Err 出口——兜底同既有 spawn 失败
+                // 落点（合成错误条目 + spawn-failed 终态），绝不停在 spawning。
+                Err(e) => {
+                    tracing::warn!(
+                        channel = %key.channel_str(),
+                        reference = %key.reference,
+                        error = %e,
+                        "restore: spawning 相位会话重投失败，落 spawn-failed 终态"
+                    );
+                    self.fail_spawn(&key, &format!("恢复重投失败: {e}"))
+                        .await;
+                }
+            }
+        }
+        redispatched
+    }
+
     /// Subscribe to the ACP permission broadcast (design D6): every
     /// `AcpEvent::PermissionRequest` the router applies is forwarded here as
     /// an independent side-channel, parallel to the Feishu card path. Lagging
@@ -1212,6 +1272,11 @@ impl DispatchHandle {
                         .with_failure_class(failure_class::GENERIC);
                     self.transcript_push(session_id, entry).await;
                 }
+                // close-acceptance-blind-spots 4.1：零可见输出回合的合成提示
+                // 落点（spec「Turn completing without visible output appends
+                // a notice」）。取消条目已在上面的分支落账，本检测天然跳过
+                // 被停回合（error 条目即可见输出）。
+                self.append_zero_output_notice_if_empty(session_id).await;
             }
             _ => {}
         }
@@ -1259,6 +1324,43 @@ impl DispatchHandle {
             self.publish_updated(&key).await;
         }
         next
+    }
+
+    /// 空回合落点（close-acceptance-blind-spots 4.1，design D3）：真实回合
+    /// 正常结束但 transcript 里本回合片段没有任何可见输出条目时，追加一条
+    /// 合成 `notice` 条目——回合在时间线上必须可见，绝不可见地消失
+    /// （真实事故：`/code-review` 发出后 claude 对未知命令零输出结束回合，
+    /// 时间线上无任何痕迹）。
+    ///
+    /// 判据与守卫：
+    /// - **真实回合**才检测：transcript 里存在 prompt 条目（`seed_card` 在
+    ///   每个真实回合开轮落下）。无 prompt = 从未开轮（占位/激活幽灵回合），
+    ///   沿 fix-webui-qa-defects 3.1 的语义不注入任何合成条目。
+    /// - 回合片段 = 最后一条 prompt 之后的部分；片段内有**任一**可见输出
+    ///   （正文/thinking/工具/错误，非空内容）即正常回合，不追加。
+    /// - 片段内已有 notice（防御：异常的重复 Finished）不再重复追加。
+    async fn append_zero_output_notice_if_empty(&self, session_id: &str) {
+        let segment: Vec<TurnEntry> = {
+            let g = self.turn_log.read().await;
+            let Some(log) = g.get(session_id) else {
+                return;
+            };
+            // 最后一条 prompt 的下一位起步；None = 无 prompt 条目（从未开轮）。
+            let Some(start) = log.iter().rposition(|e| e.kind == "prompt").map(|i| i + 1)
+            else {
+                return;
+            };
+            log[start..].to_vec()
+        };
+        if turn_has_visible_output(&segment) || segment.iter().any(is_zero_output_notice) {
+            return;
+        }
+        self.transcript_push(session_id, TurnEntry::notice(0, ZERO_OUTPUT_NOTICE.to_string()))
+            .await;
+        tracing::info!(
+            session_id = %session_id,
+            "turn finished with no visible output; appended a synthetic notice entry (close-acceptance-blind-spots)"
+        );
     }
 
     /// 发射 root 卡 reaction（apply_event 报告 FSM 转移 / continue 回切时由
@@ -2375,6 +2477,32 @@ impl DispatchHandle {
         }
         settled
     }
+}
+
+/// 零输出回合合成提示的固定文案（close-acceptance-blind-spots 4.1）：说明
+/// 「回合已结束且无输出」，措辞与停滞强收条目同风格（加粗导语 + 冒号说明）。
+pub(crate) const ZERO_OUTPUT_NOTICE: &str =
+    "**回合已结束且无输出**：本轮回合未产生任何可见输出（正文、thinking、工具、错误皆无）。";
+
+/// 一段 transcript 片段是否包含**可见输出**条目（close-acceptance-blind-spots
+/// 4.1，纯函数）：`kind = "content"` 且 `element_type ∈ {markdown, thinking,
+/// tool, error}`、内容非空即算。空内容条目对前端不可见（`count_chat_messages`
+/// 与前端分组同规则），不算可见输出。
+fn turn_has_visible_output(segment: &[TurnEntry]) -> bool {
+    segment.iter().any(|e| {
+        e.kind == "content"
+            && matches!(
+                e.element_type.as_str(),
+                "markdown" | "thinking" | "tool" | "error"
+            )
+            && !e.content.is_empty()
+    })
+}
+
+/// 该条目是否为零输出合成提示（close-acceptance-blind-spots 4.1，纯函数）：
+/// 防御异常的重复 Finished——片段里已有 notice 就不再追加第二条。
+fn is_zero_output_notice(e: &TurnEntry) -> bool {
+    e.element_type == "notice"
 }
 
 pub fn compose_media_prompt(caption: &str, files: &[String]) -> String {
