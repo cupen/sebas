@@ -9,7 +9,7 @@ overrides, and the control-plane client.
 ## Requirements
 
 ### Requirement: Subcommand tree
-The CLI SHALL provide subcommands: `service`, `service --install/--uninstall`, `run` (watchdog), `core`, `webui`, `router`, `im` (standalone IM service), `webui-passwd`, `agent-kinds`, `ctl` (alias `control`; subcommand aliases `status`/`services`), `update`, `record`, `replay`. **补充退出码语义**：每个子命令的进程退出码 SHALL 区分两类失败——启动失败（启动阶段未能达到 ready 或同等成功信号）与运行时崩溃（启动后正常服务中的崩溃）。启动失败 SHALL 以 EX_TEMPFAIL (75) 退出——systemd `Restart=on-failure` 看到 75 会走指数退避（默认 5 s 起跳），避免无限快速重启掩盖错误。运行时崩溃 SHALL 沿用既有退出码语义（典型为 1）。CLI 启动失败 SHALL 同时把失败摘要写入 stderr 的最后一行（"startup-failure: <可读原因>"）以便 CI / 操作员一眼定位。
+The CLI SHALL provide subcommands: `service`, `service --install/--uninstall`, `run` (watchdog), `core`, `webui`, `router`, `im` (standalone IM service), `webui-passwd`, `agent-kinds`, `ctl` (alias `control`; subcommand aliases `status`/`services`), `update`, `record`, `replay`, `fake-provider` (本地 Anthropic 线协议假上游，测试与演示用). **补充退出码语义**：每个子命令的进程退出码 SHALL 区分两类失败——启动失败（启动阶段未能达到 ready 或同等成功信号）与运行时崩溃（启动后正常服务中的崩溃）。启动失败 SHALL 以 EX_TEMPFAIL (75) 退出——systemd `Restart=on-failure` 看到 75 会走指数退避（默认 5 s 起跳），避免无限快速重启掩盖错误。运行时崩溃 SHALL 沿用既有退出码语义（典型为 1）。CLI 启动失败 SHALL 同时把失败摘要写入 stderr 的最后一行（"startup-failure: <可读原因>"）以便 CI / 操作员一眼定位。
 
 #### Scenario: core startup failure exits 75
 
@@ -47,6 +47,11 @@ The CLI SHALL provide subcommands: `service`, `service --install/--uninstall`, `
 - **WHEN** the user runs `sebas gateway ...` or `sebas watchdog ...`
 - **THEN** the CLI reports an unknown subcommand and exits nonzero without
   starting any service
+
+#### Scenario: fake-provider 启动假上游
+
+- **WHEN** the user runs `sebas fake-provider --listen 127.0.0.1:0`
+- **THEN** the CLI 在 127.0.0.1 上以系统分配端口启动 fake 上游并输出实际绑定地址，Anthropic `/v1/messages` 可被拨号应答
 
 ### Requirement: Service unit generation
 

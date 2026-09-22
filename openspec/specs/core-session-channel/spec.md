@@ -126,6 +126,15 @@ when the id is unknown, when the submission has already started, or when the
 requested order would move a non-priority submission ahead of a priority one —
 never silently ignored.
 
+Every deployment shape that exposes the session surface SHALL reach this
+management plane, including deployments where the web UI fronts a composite of
+multiple execution backends: the composite SHALL route each management call to
+the backend that hosts the target session's queue, and the hosting backend's
+typed rejections SHALL pass through verbatim. A missing route on the composite
+SHALL NOT surface as generic unavailability, as a core-unreachable claim, or as
+any 5xx whose message misattributes the cause; until the route exists the
+operation MUST fail loudly and honestly name the gap.
+
 #### Scenario: create spawns a real session
 
 - **WHEN** a client requests session creation with a prompt
@@ -181,6 +190,22 @@ never silently ignored.
 - **WHEN** a client removes or reorders a submission that has already started
 - **THEN** the response is a typed rejection stating that it is already running,
   and the in-flight turn is unaffected
+
+#### Scenario: reorder from the web UI in an embedded deployment
+
+- **WHEN** the operator moves or removes one of several queued submissions from
+  the web UI while the core is reachable (bare-core embedded shape, sessions on
+  the acp bridge)
+- **THEN** the queue reorders or drops the submission and every connected
+  client observes the new delivery order without a page reload
+
+#### Scenario: typed rejections pass through the composite
+
+- **WHEN** a management call names an unknown id, an already-started
+  submission, or an order that would break the priority prefix invariant
+- **THEN** the caller receives the hosting backend's typed rejection reason
+  (unknown / already started / priority conflict / out of range), not a generic
+  unavailable or unreachable error
 
 ### Requirement: Pending queue advances without depending on a single terminal event
 

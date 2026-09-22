@@ -267,6 +267,10 @@ A project row SHALL expose exactly two hover-revealed affordances, in order: an 
 
 A rail session row SHALL display a name for the session: if the operator has set a label for the session, the label SHALL be shown; otherwise the preview of the session's first user message SHALL be used. A session that has neither a label nor any user message (a zero-turn placeholder) SHALL fall back to its short session identifier. Names longer than the implementation-defined display cap SHALL be truncated with an ellipsis, while the row's hover title SHALL carry the full text. When the first message is sent to a placeholder session, its name SHALL update from the identifier to the message preview without a page reload — unless an operator label is set, which SHALL stay stable. The operator SHALL be able to set and change the label from the rail (row actions), and the rail's session dialogs SHALL name the session by the same label as its row.
 
+Restoring an archived session SHALL preserve the naming inputs captured at archive time: the first-prompt preview and the operator label (if any) SHALL survive the restore, so the restored row is named exactly as before archival and never regresses to the raw session identifier while a naming source exists.
+
+A label write that the server accepts SHALL reach connected clients as a session update event, and every connected client's rail SHALL re-render that row's name from the event without a page reload — the same liveness the first-message preview already enjoys, regardless of whether the write came from the rail dialog or the API. The rename dialog SHALL persist exactly the value it displays: submitting the dialog SHALL deliver the shown text to the label write path, and a confirmed save SHALL never leave the stored label unchanged while the dialog rendered a non-empty value.
+
 #### Scenario: named by the first message
 
 - **WHEN** a session has no operator label and has received a first user message
@@ -296,3 +300,18 @@ A rail session row SHALL display a name for the session: if the operator has set
 
 - **WHEN** the operator picks rename in a rail session row's overflow menu and submits a new label
 - **THEN** the row's name updates to the label without a page reload, and clearing the label falls back to the first-message preview
+
+#### Scenario: rename dialog saves what it shows
+
+- **WHEN** the operator types a non-empty name into the rail's rename dialog and confirms the save
+- **THEN** the stored label equals the displayed text, and a subsequent page load shows the same name (a confirmed save is never a silent no-op)
+
+#### Scenario: label writes through any path update the row live
+
+- **WHEN** a label write is accepted through any path (rail dialog or the label API) while the session list is open in a browser
+- **THEN** that session's rail row shows the new label driven by the session update event, without a manual reload
+
+#### Scenario: restore preserves the row name
+
+- **WHEN** an archived session that was named by its first-prompt preview (or carried an operator label) is restored to a project
+- **THEN** the restored row shows the same name source as before archival instead of the raw session identifier

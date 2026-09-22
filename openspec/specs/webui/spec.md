@@ -1503,7 +1503,21 @@ WebUI SHALL 提供 `[service.webui] auth` 配置开关，默认 `true`。开关�
 
 ### Requirement: 分级通知层
 
-WebUI SHALL 提供唯一的视口级顶部居中通知层，按四级呈现全局通知：info（蓝色瞬时 toast，数秒自动消失）、warn（琥珀色：瞬时来源用自动消失 toast，持续状态用驻留横幅）、error（红色驻留 toast，须操作者手动关闭）、fatal（驻留横幅 + 锁定，语义见「全局核心可达性横幅」）。判级 SHALL 由前端按影响面裁定——应用瘫痪 = fatal、单个视图 / 能力不可用 = error、单个操作失败且可立即重试 = warn、无损状态提示 = info；HTTP 状态码只是信号、不直接定级。API 客户端 SHALL 对未豁免的请求失败自动按级弹出（操作失败类 → warn），而有内联错误呈现的表单调用点与带重试的列表加载 SHALL 豁免统一拦截、维持内联呈现；401 SHALL 走既有登录跳转、SHALL NOT 进入通知层。通知层 SHALL 满足：瞬时 toast 栈上限三条、超出挤掉最旧瞬时条（error 驻留条不参与挤占）；同一文案在去重窗口内 SHALL NOT 重复弹出；info / warn toast 可提前手动关闭；fatal 横幅不可手动关闭。既有「与服务器的连接已断开」横幅 SHALL 收编为本层的持续 warn 驻留横幅，旧实现 SHALL 移除。通知层与 settings 弹窗等浮层叠放时 SHALL 保持在上；窄屏 SHALL 退化为全宽贴顶。
+WebUI SHALL 提供唯一的视口级顶部居中通知层，按四级呈现全局通知：info（蓝色瞬
+时 toast，数秒自动消失）、warn（琥珀色：瞬时来源用自动消失 toast，持续状态用
+驻留横幅）、error（红色瞬时 toast，默认 8 秒自动消失；调用点显式指定驻留
+（duration=0）时仍为驻留条、须操作者手动关闭）、fatal（驻留横幅 + 锁定，语义
+见「全局核心可达性横幅」）。判级 SHALL 由前端按影响面裁定——应用瘫痪 =
+fatal、单个视图 / 能力不可用 = error、单个操作失败且可立即重试 = warn、无损
+状态提示 = info；HTTP 状态码只是信号、不直接定级。API 客户端 SHALL 对未豁免
+的请求失败自动按级弹出（操作失败类 → warn），而有内联错误呈现的表单调用点与
+带重试的列表加载 SHALL 豁免统一拦截、维持内联呈现；401 SHALL 走既有登录跳
+转、SHALL NOT 进入通知层。通知层 SHALL 满足：瞬时 toast 栈上限三条、超出挤
+掉最旧瞬时条（显式驻留条不参与挤占；error 默认条按瞬时条参与挤占）；同一文
+案在去重窗口内 SHALL NOT 重复弹出；info / warn / error toast 可提前手动关
+闭；fatal 横幅不可手动关闭。既有「与服务器的连接已断开」横幅 SHALL 收编为本
+层的持续 warn 驻留横幅，旧实现 SHALL 移除。通知层与 settings 弹窗等浮层叠放
+时 SHALL 保持在上；窄屏 SHALL 退化为全宽贴顶。
 
 #### Scenario: 四级形态可辨识
 
@@ -1520,10 +1534,16 @@ WebUI SHALL 提供唯一的视口级顶部居中通知层，按四级呈现全�
 - **WHEN** composer 提交、settings 保存或列表初始加载等有内联错误呈现的调用点失败
 - **THEN** 错误维持内联呈现，通知层不重复弹出同一失败
 
+#### Scenario: error 默认自动消失且参与挤占
+
+- **WHEN** 视图 / 能力级故障由视图显式上报为 error 级通知，且未显式指定驻留
+- **THEN** 该通知默认 8 秒自动消失，并作为瞬时条参与三条栈上限的挤占（持续型
+  故障由 fatal 横幅槽位承载，不依赖 error toast 驻留）
+
 #### Scenario: 驻留 error 须手动关闭
 
-- **WHEN** 视图 / 能力级故障由视图显式上报为 error 级通知
-- **THEN** 该通知不自动消失，操作者手动关闭后即移除
+- **WHEN** 调用点显式以 duration=0 上报 error 级通知（要求驻留）
+- **THEN** 该通知不自动消失、不参与瞬时栈挤占，操作者手动关闭后即移除
 
 #### Scenario: 栈上限与去重
 

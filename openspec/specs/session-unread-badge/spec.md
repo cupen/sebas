@@ -44,7 +44,14 @@ The `session.updated` frame SHALL be the single source of truth for lifecycle se
 
 ### Requirement: Unread badge on session rows
 
-A rail session row SHALL display a highlighted number equal to the difference between the session's current message count and the browser's stored read anchor for that session, whenever that difference is greater than zero. Rows with no unread messages SHALL NOT display a badge. A row with unread messages SHALL be visually prominent at a glance: the badge numeral SHALL use a high-contrast emphasis treatment and the row SHALL carry an additional emphasis (such as a background tint) that distinguishes it from read rows before the operator fixates on the numeral. Focusing a session SHALL clear its badge (the read anchor advances to the current count). The read anchor SHALL be a single per-session segment count shared by every unread surface; the transcript's seen-boundary SHALL advance the same anchor when the operator reads to the boundary. The waiting badge for parked approvals SHALL remain independent of the unread badge.
+A rail session row SHALL display a highlighted number equal to the difference between the session's current message count and the browser's stored read anchor for that session, whenever that difference is greater than zero. Rows with no unread messages SHALL NOT display a badge. A row with unread messages SHALL be visually prominent at a glance: the badge numeral SHALL use a high-contrast emphasis treatment and the row SHALL carry an additional emphasis (such as a background tint) that distinguishes it from read rows before the operator fixates on the numeral. Focusing a session SHALL clear its badge (the read anchor advances to the current count). The read anchor SHALL be a single per-session segment count shared by every unread surface; the transcript's seen-boundary SHALL advance the same anchor when the operator reads to the boundary. The waiting badge for parked approvals SHALL remain independent of the unread badge. While live output streams into a focused session, the badge SHALL follow the read-anchor semantics of the `live-turn-stream` capability: anchored-and-at-bottom arrivals advance the anchor as they render instead of flashing the badge.
+
+The read anchor SHALL be established from the session's empty state when a
+freshly created placeholder session is focused, so the first focused exchange
+— including the placeholder-to-spawn transition and the reply it produces —
+never flashes the badge or the shared unseen-turn seam. Arrivals into a
+focused session with the document hidden (background tab) SHALL NOT advance
+the anchor: they remain unseen and are flagged when the operator returns.
 
 #### Scenario: new reply on an unfocused session
 
@@ -70,6 +77,16 @@ A rail session row SHALL display a highlighted number equal to the difference be
 
 - **WHEN** a session's message count equals its stored read anchor
 - **THEN** its rail row shows no unread badge
+
+#### Scenario: first focused exchange of a fresh placeholder
+
+- **WHEN** the operator creates a placeholder session, sends the first message, and watches the spawned child's reply while staying focused at the live edge
+- **THEN** no unread badge appears on the session's rail row and no unseen-turn seam is drawn for that exchange
+
+#### Scenario: hidden-tab arrivals stay unseen
+
+- **WHEN** the focused session receives reply segments while the page is in a hidden background tab
+- **THEN** the read anchor does not advance and the content is reported as unseen when the operator returns
 
 ### Requirement: Unread cursor is per-browser and shared with the seen boundary
 

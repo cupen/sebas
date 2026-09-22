@@ -122,6 +122,15 @@ When a session has unseen turns, opening it SHALL position the stream at that
 boundary rather than at the newest turn. The seen-boundary SHALL be per-browser
 state and SHALL NOT be recorded server-side. The boundary SHALL fall between two turns and SHALL count turns rather than transcript entries, so one agent turn rendered as a single bubble is never split across the seam.
 
+Turns that arrive while their session is focused and the document is visible
+SHALL advance the seen-boundary as they render, sharing the unread cursor
+semantics with the `session-unread-badge` capability: content the operator has
+watched arrive SHALL NOT be flagged by the seam on a later reopen. This holds
+in particular for the first exchange of a freshly created placeholder session
+(no scroll position to preserve and no prior boundary). The seam SHALL appear
+only for turns that arrived while the session was not focused, or while the
+page was hidden, or while the operator was scrolled away from the live edge.
+
 #### Scenario: opening a session with unseen turns
 
 - **WHEN** the operator opens a session that received turns since their last
@@ -145,6 +154,16 @@ state and SHALL NOT be recorded server-side. The boundary SHALL fall between two
 - **WHEN** the operator opens a session whose unseen turns include one long agent turn composed of streamed text, thinking and tool calls
 - **THEN** the boundary is drawn above that whole turn and no part of it appears on the seen side
 - **AND** the stated count is the number of turns below the boundary, not the number of transcript entries
+
+#### Scenario: watched arrivals leave no seam
+
+- **WHEN** the operator sends a message into the focused, visible session and the reply completes while they remain at the live edge, then closes and reopens the session
+- **THEN** no seam boundary is drawn for those turns and no "~N new since you last viewed" marker appears
+
+#### Scenario: first exchange of a placeholder session leaves no seam
+
+- **WHEN** the operator creates a placeholder session, sends the first message, and watches the spawned child's first reply in the focused view
+- **THEN** the anchor is established from the empty-stream state and the reply is treated as seen
 
 ### Requirement: Composer promises only what the process can do
 
@@ -379,6 +398,12 @@ discovers the failure on submission. Availability SHALL be derived from the
 session backend's own report of both execution bodies, not from the ACP side
 alone.
 
+The cause SHALL be stated in operator-facing language: it SHALL name the
+remediation surface (for example "未配置模型凭据 — 到 Settings → Models 配置
+provider"), and SHALL NOT expose internal environment variable names or other
+implementation identifiers in the default-visible copy; such identifiers MAY
+appear in a tooltip or help link only.
+
 #### Scenario: native kernel without credentials shown as unavailable
 
 - **WHEN** the native kernel has no provider credentials and the composer is
@@ -386,6 +411,12 @@ alone.
 - **THEN** the `native` option is shown as unavailable with the cause stated,
   and submitting a native spawn is prevented at the composer rather than
   failing at the core
+
+#### Scenario: unavailable cause speaks operator language
+
+- **WHEN** the native kernel is unavailable for lack of provider credentials
+- **THEN** the visible cause names the remediation surface and contains no
+  environment variable identifier such as `SEBAS_AGENT_PROVIDER_API_KEY`
 
 #### Scenario: both bodies available
 
@@ -426,9 +457,9 @@ bodies keep their existing model-selection behavior unchanged.
 
 ### Requirement: Model selector offers the backend catalog before any session
 
-The creation dialog's model selector SHALL offer the catalog the operator configured in Settings — every configured provider's model list, presented as two levels (provider, then model) — so the operator can pick a model for the first turn of a new session. There is no configured default provider/model feeding this preselection: the dialog SHALL preselect, in order, the operator's last-used (provider, model) pair — remembered globally in the browser and written only by a creation-dialog confirmation — when that pair still exists in the catalog; otherwise the catalog's first pair. When the catalog is empty or unavailable, the dialog SHALL NOT offer an empty or fabricated list: it SHALL present an explicit indication that no models are configured and direct the operator to Settings → Models to add one. Catalog changes SHALL be reflected in the dialog without requiring a restart; a remembered pair that has vanished from the catalog SHALL NOT be preselected.
+The creation dialog's model selector SHALL offer the catalog the operator configured in Settings — every configured provider's model list, presented as two levels (provider, then model) — so the operator can pick a model for the first turn of a new session. There is no configured default provider/model feeding this preselection: the dialog SHALL preselect, in order, the operator's last-used (provider, model) pair — remembered globally in the browser and written only by a creation-dialog confirmation — when that pair still exists in the catalog; otherwise the catalog's first pair. When the catalog is empty or unavailable, the dialog SHALL NOT offer an empty or fabricated list: it SHALL present an explicit indication that no provider models are configured and direct the operator to Settings → Models to add one. That indication SHALL also state that proceeding without a selection runs the session on the agent's own default model, so the indication does not imply that session creation is blocked when it is not. Catalog changes SHALL be reflected in the dialog without requiring a restart; a remembered pair that has vanished from the catalog SHALL NOT be preselected.
 
-The workbench composer SHALL present the focused session's model selection as a single chip at the composer's bottom-right, offering that session's `available_models`, because a mid-session switch is valid only if the session's execution body accepts the chosen model. The chip SHALL NOT derive its options from the catalog or from another session's `available_models`, and switching a session's model SHALL NOT write the last-used pair remembered for creation. While the focused session's child is starting (the eager start of a placeholder or a re-opened session), the chip SHALL state that startup is in progress rather than claiming no models exist. When the focused session's child has finished starting and exposes no models, the chip SHALL state that honestly rather than rendering an empty menu.
+The workbench composer SHALL present the focused session's model selection as a single chip at the composer's bottom-right, offering that session's `available_models`, because a mid-session switch is valid only if the session's execution body accepts the chosen model. The chip SHALL NOT derive its options from the catalog or from another session's `available_models`, and switching a session's model SHALL NOT write the last-used pair remembered for creation. While the focused session's child is starting (the eager start of a placeholder or a re-opened session), the chip SHALL state that startup is in progress rather than claiming no models exist. When the focused session's child has finished starting and exposes no models, the chip SHALL state that honestly rather than rendering an empty menu. The chip SHALL note that its options come from the session's execution body, so an empty provider catalog and a populated chip are not read as a contradiction.
 
 #### Scenario: selector populated before any session
 
@@ -468,7 +499,12 @@ The workbench composer SHALL present the focused session's model selection as a 
 #### Scenario: empty catalog directs the operator to configure one
 
 - **WHEN** the creation dialog opens with an empty or unavailable catalog
-- **THEN** the model area states that no models are configured and directs the operator to Settings → Models, rather than rendering an empty selector
+- **THEN** the model area states that no provider models are configured and directs the operator to Settings → Models, rather than rendering an empty selector
+
+#### Scenario: empty catalog does not imply blocked creation
+
+- **WHEN** the creation dialog opens with an empty provider catalog while the chosen execution body still serves sessions with its own default model
+- **THEN** the indication states that creating now runs on the agent's default model, and the create action remains enabled
 
 #### Scenario: chip without session models is stated honestly
 
@@ -479,6 +515,11 @@ The workbench composer SHALL present the focused session's model selection as a 
 
 - **WHEN** the focused session's child is starting and has not reported models yet
 - **THEN** the chip states that the agent is starting rather than showing "no models available"
+
+#### Scenario: chip names its source
+
+- **WHEN** the operator opens the composer's model chip while no provider catalog is configured
+- **THEN** the chip presents the session's own model options and notes they come from the session's execution body
 
 ### Requirement: Rail project removal entry
 
@@ -606,9 +647,11 @@ Each project SHALL remember the agent most recently used to create a session und
 
 ### Requirement: Pending submissions stack above the composer
 
-The workbench SHALL render the focused session's pending submissions directly above the composer input, in delivery order, without occupying transcript space. Each entry SHALL state its disposition: submissions staged during a spawn SHALL read as combining into the session's first message, and submissions queued behind a running turn SHALL read as waiting, with their position. A submission SHALL NOT appear in the transcript until it starts (or is combined at activation); at that moment it SHALL leave the stack and the transcript SHALL show it as a submission entry.
+The workbench SHALL render the focused session's pending submissions directly above the composer input, in delivery order, without occupying transcript space. Each entry SHALL state its disposition: submissions staged during a spawn SHALL read as combining into the session's first message, and submissions queued behind a running turn SHALL read as waiting, with their position. When the queue is not advancing, the stack SHALL state why — naming the blocking condition (the running turn, or the permission decision the operator owes) and when the wait began — so an idle-looking session with a growing stack is never unexplained. A submission SHALL NOT appear in the transcript until it starts (or is combined at activation); at that moment it SHALL leave the stack and the transcript SHALL show it as a submission entry.
 
 The stack SHALL support removal of any entry and drag-reordering within the entry's own disposition group. Entries carrying priority (`/btw`) SHALL be rendered as priority and SHALL NOT be draggable, and no drag SHALL place a non-priority entry ahead of a priority one. Submitting while entries are pending SHALL append to the stack — it SHALL NOT replace, discard, or silently merge into an existing entry's text.
+
+Rejections of removal or reorder SHALL be handled in two tiers: when the server's post-operation truth has already converged with the operator's intent (a race lost to a concurrent start), the stack SHALL silently reconcile; any other rejection (unknown entry, out-of-range target, priority conflict, or the entry still present after the operation) SHALL surface as a low-severity transient notice naming the entry and the reason — the stack SHALL NEVER fail silently on an operation the server did not perform.
 
 When the session ends or is closed while entries are pending, those entries SHALL be reported as not executed in a single explicit notice naming them (the stack itself disappears with the session, so the notice is the record); the stack SHALL never shrink without an explanation.
 
@@ -642,6 +685,21 @@ When the session ends or is closed while entries are pending, those entries SHAL
 - **WHEN** the focused session fails or is closed while entries are pending
 - **THEN** a notice names those entries as not executed, and the stack clears only together with that notice
 
+#### Scenario: the stack explains a queue that is not advancing
+
+- **WHEN** entries have been pending because the running turn is parked on the operator's permission decision
+- **THEN** the stack names that condition and when the wait began, instead of rendering bare position labels on a session that looks idle
+
+#### Scenario: deterministic rejection is visible
+
+- **WHEN** a remove or reorder is rejected with a typed error (unknown entry, out-of-range, priority conflict) and the server's pending list still contains the entry
+- **THEN** a transient low-severity notice names the entry and the reason, and the stack reconciles to the server's list
+
+#### Scenario: race lost to a concurrent start reconciles silently
+
+- **WHEN** a remove or reorder targets an entry that started its turn between the render and the click, so the server's post-operation list no longer contains it
+- **THEN** the stack silently reconciles to the server's list without a notice
+
 ### Requirement: Workbench renders the focused session as a conversation
 
 The workbench SHALL render the focused session as a conversation between the
@@ -670,6 +728,20 @@ a visible error entry in the conversation naming the failure; the operator
 SHALL NEVER see a submitted message followed by silence with no agent-side
 entry. The error entry's summary label SHALL state the actual failure class
 (such as spawn failure or turn stall) rather than a fixed generic string.
+
+The collapsed affordance of every process fold and second-level fold SHALL be
+a lightweight inline text control — a link-style toggle carrying the fold's
+summary (label and count) — and SHALL NOT be rendered as a large button,
+bordered block, or card chrome. Clicking the affordance SHALL expand that fold
+in place; clicking it again SHALL collapse it.
+
+When the operator expands a second-level entry whose content exceeds the
+presentation's truncation threshold, the body SHALL render the truncated
+portion together with an explicit truncation notice stating how much was
+omitted, plus a "view all" control. The "view all" control SHALL open the
+entry's full content in an isolated overlay outside the conversation's scroll
+container; closing the overlay SHALL remove its content from the DOM so that
+the conversation's scroll surface gains no lasting nodes.
 
 #### Scenario: both sides of the conversation are visible
 
@@ -700,6 +772,28 @@ entry. The error entry's summary label SHALL state the actual failure class
 
 - **WHEN** an agent turn invokes tools
 - **THEN** those invocations are rendered as second-level folds inside their process fold and are distinguishable from the turn's prose
+
+#### Scenario: fold affordance is a lightweight link
+
+- **WHEN** a process fold or a second-level fold renders in its collapsed state
+- **THEN** its affordance is a single inline text control carrying the fold's summary, with no large button, border, or card chrome around it
+
+#### Scenario: clicking the affordance toggles the fold
+
+- **WHEN** the operator clicks a collapsed fold's link affordance
+- **THEN** the fold expands in place to reveal its body
+- **WHEN** the operator clicks the same affordance again
+- **THEN** the fold returns to its collapsed summary
+
+#### Scenario: long entry expands truncated with a view-all escape
+
+- **WHEN** the operator expands a second-level entry whose content exceeds the truncation threshold
+- **THEN** the body shows the truncated portion with a notice stating how much was omitted, and a "view all" control
+
+#### Scenario: view-all overlay is isolated from the conversation scroll
+
+- **WHEN** the operator activates "view all" on a truncated entry
+- **THEN** the full content opens in an overlay outside the conversation's scroll container, and closing it removes that content from the DOM without changing the conversation's scroll layout
 
 #### Scenario: a submission appears when its turn starts
 
@@ -886,6 +980,8 @@ The composer's submit control SHALL reflect the state of the input and the focus
 - the focused session's child is starting (spawn requested or in flight, no live turn yet) with the input non-empty: the control SHALL render a starting affordance that is visually distinct from the queued affordance — the submission is staged for the starting child, and the workbench SHALL NOT present it as queued behind a running turn;
 - when the turn ends (or the cancel completes), the control SHALL return to the send affordance.
 
+"Turn in flight" SHALL mean the core-side truth that a turn occupies the session — a working phase OR a spawn window OR a turn parked on a pending permission request OR the accepted-receipt phase (the operator's submission has been accepted and recorded as the newest transcript entry while no agent output entry has landed yet) — and SHALL NOT be derived from a display-only status slug that renames those states (e.g. waiting). While the turn is in flight only because the session awaits the operator's permission decision, the control SHALL additionally indicate that the session is waiting on the operator, so submitting reads as queueing behind an answerable prompt rather than disappearing into an unexplained queue.
+
 #### Scenario: empty input is disabled
 
 - **WHEN** the input is empty and the focused session has no turn in flight
@@ -906,6 +1002,11 @@ The composer's submit control SHALL reflect the state of the input and the focus
 - **WHEN** the focused session is streaming a turn and the input is empty
 - **THEN** the control renders as a stop affordance; activating it sends the cancel request and the control returns to the send affordance once the turn is no longer in flight
 
+#### Scenario: accepted receipt without agent output offers stop
+
+- **WHEN** the focused session's newest transcript unit is the operator's just-accepted submission, no agent output entry has landed, and the input is empty
+- **THEN** the control renders as a stop affordance; activating it requests cancellation of the accepted turn instead of leaving the operator without a self-service exit
+
 #### Scenario: streaming with text offers queueing
 
 - **WHEN** the focused session is streaming a turn and the input is non-empty
@@ -920,6 +1021,16 @@ The composer's submit control SHALL reflect the state of the input and the focus
 
 - **WHEN** the operator cancels the in-flight turn while pending submissions are queued
 - **THEN** the in-flight turn is interrupted and the pending submissions remain queued
+
+#### Scenario: submission while a permission prompt is parked queues visibly
+
+- **WHEN** the focused session's turn is parked on a pending permission request and the operator submits a message
+- **THEN** the control shows the queued affordance together with an indication that the session waits on the operator's decision, and the submission lands in the pending stack instead of silently displacing the perceived send
+
+#### Scenario: stop stays reachable while parked
+
+- **WHEN** the focused session's turn is parked on a permission request and the input is empty
+- **THEN** the control renders as a stop affordance so the operator can cancel the parked turn without hunting for the approval card
 
 ### Requirement: Workbench layout is resizable
 
@@ -1267,3 +1378,81 @@ Every session presented by the webui SHALL belong to a registered project. Creat
 - **WHEN** the session state is restored or dumped and an entry carries no project directory on a non-Feishu channel
 - **THEN** that entry is dropped with a warning rather than loaded or persisted
 - **AND** internal archive records (`closed-*`, acp-session-mapping) are exempt and keep their original mapping's project identity
+
+### Requirement: Session creation failure is surfaced, not silent
+
+When a creation attempt from the new-session dialog does not produce a session
+— whether the submit is not dispatched (for example the owning project is not
+currently selected) or the backend rejects it — the dialog SHALL present an
+inline error naming the cause, and SHALL NOT close itself as if the creation
+had succeeded. A creation that succeeds SHALL land a visible session row
+under the owning project without requiring the operator to select the project
+first.
+
+#### Scenario: creation with no dispatched request is not silent
+
+- **WHEN** the operator submits the new-session dialog in a state where no
+  creation request is dispatched (for example the owning project is registered
+  but not selected)
+- **THEN** either the request is dispatched normally, or the dialog presents
+  an inline error — in no case does the dialog close with no session created
+  and no feedback
+
+#### Scenario: failed backend creation stays in the dialog
+
+- **WHEN** the backend rejects a creation request
+- **THEN** the dialog stays open with the rejection reason shown inline, and
+  the operator's inputs are preserved for retry
+
+### Requirement: Creation confirmation activates immediately
+
+The session creation dialog SHALL activate its confirmation control on the first
+activation attempt — pointer click or keyboard activation alike — regardless of
+whether the operator interacted with the agent picker or any other control inside
+the dialog beforehand. While a creation request is in flight, the dialog SHALL
+present a busy state on the confirmation control and SHALL ignore further
+activation attempts instead of issuing duplicate creation requests.
+
+#### Scenario: First click after picking an agent creates the session
+
+- **WHEN** the operator opens the creation dialog, selects a non-default agent from
+  the agent picker, and clicks the confirmation control once
+- **THEN** exactly one session creation request is issued and the dialog resolves
+  (closes on success, or stays open with an inline cause on failure)
+- **AND** the confirmation control does not require a second activation
+
+#### Scenario: In-flight creation shows busy state and ignores re-activation
+
+- **WHEN** a creation request has been issued and the operator clicks the
+  confirmation control again before it resolves
+- **THEN** no additional creation request is issued
+- **AND** the control presents a busy (in-flight) state for the duration of the
+  request
+
+### Requirement: Focused session arrivals never badge
+
+While a session is the focused session and the document is visible, its rail
+row SHALL NOT present an unread badge, whatever the stored read anchor
+currently says — the unread badge exists for arrivals in unfocused sessions,
+and a focused session's watched arrivals become read through the transcript
+advancing the shared read anchor (bottom-follow). The suppression SHALL NOT
+apply while the document is hidden: arrivals observed in a background tab
+SHALL present the badge as usual. Re-activating the focused session's row (a
+same-session no-op switch) SHALL re-advance the read anchor to the row's
+current message count, so a badge that appeared while the session was
+unfocused is cleared by the click that focuses it and stays cleared on
+repeated clicks.
+
+#### Scenario: Streaming arrival into the focused session does not badge
+
+- **WHEN** visible reply segments arrive — streamed or via a snapshot
+  refetch — in the focused session while the document is visible
+- **THEN** the session's rail row presents no unread badge
+
+#### Scenario: Repeated focus keeps the badge cleared
+
+- **WHEN** an unfocused session shows an unread badge and the operator clicks
+  its row, then clicks the same row again without switching away
+- **THEN** the first click clears the badge by advancing the stored read
+  anchor to the row's current message count
+- **AND** the repeated same-session click leaves the badge cleared
