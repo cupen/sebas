@@ -1100,7 +1100,9 @@ async fn projects_branch_detects_git_head() {
 }
 
 #[tokio::test]
-async fn projects_branch_404_for_unregistered_path() {
+async fn projects_branch_unreachable_core_answers_503_not_404() {
+    // 46e7e6f：core 不可达时查无此 id ≠ 项目不存在（注册表住在 core 侧），
+    // 停机窗口的 branch 读如实 503，不得对具体项目裁决 404。
     let _env = isolated_projects().await;
     let (_router, _rx, app) = fixture().await;
     let resp = app
@@ -1113,7 +1115,7 @@ async fn projects_branch_404_for_unregistered_path() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
 #[tokio::test]
