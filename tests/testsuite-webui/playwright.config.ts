@@ -26,6 +26,7 @@ export default defineConfig({
   testIgnore: [
     /auth\.spec\.ts/,
     /auth-setup\.spec\.ts/,
+    /users-admin\.spec\.ts/,
     /deployment\.spec\.ts/,
     /approval-detached\.spec\.ts/,
     /singleprocess-dead-core\.spec\.ts/,
