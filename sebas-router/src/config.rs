@@ -942,37 +942,14 @@ impl RouterConfig {
     }
 }
 
-/// provider overlay 文件的 wire 结构（与 sebas_dispatch::crud::FileStore 同一格式）。
-#[derive(Deserialize)]
-struct ProviderOverlay {
-    #[serde(default)]
-    providers: HashMap<String, serde_json::Map<String, serde_json::Value>>,
-    #[serde(default)]
-    deleted: Vec<String>,
-    /// 模型别名：`alias -> { provider, upstream_model? }`。由 admin API /
-    /// 手工编辑写入；引用不存在 provider 的别名在合并期 drop + warn。
-    #[serde(default)]
-    model_aliases: HashMap<String, ModelAliasEntry>,
-}
+// provider overlay 的 wire 结构与别名条目已迁往 `sebas_domain::provider`
+// （add-domain-layer 3.3）：原「与 dispatch 各持一份」的私有副本删除，
+// 路径形状（providers/deleted/model_aliases 三段、字段缺省）逐字不变。
+use sebas_domain::provider::ProviderOverlay;
 
-/// providers.json `model_aliases` 段的单个别名 wire。
-#[derive(Debug, Clone, Deserialize)]
-struct ModelAliasEntry {
-    provider: String,
-    /// 缺省 = 别名即 upstream model（透传）。
-    #[serde(default)]
-    upstream_model: Option<String>,
-}
-
-/// tilde 展开（与 root `src/config.rs` 同款 let-chain 形式）。
-fn expand_tilde(p: &str) -> String {
-    if let Some(rest) = p.strip_prefix("~/")
-        && let Some(home) = dirs::home_dir()
-    {
-        return home.join(rest).to_string_lossy().into_owned();
-    }
-    p.to_string()
-}
+// tilde 展开唯一实现在 `sebas_domain::prim`（add-domain-layer 2.4）；
+// 既有调用点经 `use` 零改动。
+use sebas_domain::prim::expand_tilde;
 
 #[cfg(test)]
 mod tests {

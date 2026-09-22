@@ -234,29 +234,11 @@ pub async fn session_detail(
     // `element_type` 保留 core 的 thinking/tool/error 标记，让前端把回合内
     // 的 thinking 折叠、工具收组、错误单独呈现。时间戳随条目走，前端据此
     // 渲染 flush-left 时间并把未读 seam 锚到稳定身份上。
+    // add-domain-layer 3.4：字段罗列收进唯一 From 转换；遗留类型归一策略
+    // 见 `with_normalized_element_type`。
     let conversation: Vec<ConversationEntryView> = entries
         .iter()
-        .map(|e| ConversationEntryView {
-            position: e.position,
-            kind: e.kind.clone(),
-            element_type: match e.element_type.as_str() {
-                // thinking / tool / error / notice 按原类型透传（conversation-view
-                // 1.1/1.3：前端靠它折叠 thinking、收工具组、渲染错误气泡；
-                // close-acceptance-blind-spots 4.2：notice 透传给前端的中性
-                // 信息条分支，归一成 markdown 会让零输出提示失去可判别语义）；
-                // 未知遗留值归一为 markdown，内容不丢。
-                "thinking" | "tool" | "error" | "notice" => e.element_type.clone(),
-                _ => "markdown".to_string(),
-            },
-            content: e.content.clone(),
-            created_at_unix: e.created_at_unix,
-            // workbench-agent-identity-and-process-folds 1.1：工具条目标题
-            // 原样透传（None = 旧条目，前端回退通用标签）。
-            title: e.title.clone(),
-            // fix-webui-qa-defects 5.2：错误条目的失败分类原样透传（None =
-            // 旧条目，前端回退中性标签）。
-            failure_class: e.failure_class.clone(),
-        })
+        .map(|e| ConversationEntryView::from(e).with_normalized_element_type())
         .collect();
 
     // （round3 7.1 review 补口，与 session_phase_frame 同款合并）泊车维度
@@ -1855,7 +1837,14 @@ pub async fn nodes(State(state): State<WebUiState>) -> Response {
                 if n.id == crate::projects::LOCAL_NODE_ID {
                     continue;
                 }
-                nodes.push(serde_json::to_value(&n).unwrap_or_default());
+                // add-domain-layer 4.1：共享 NodeView 只在 `local = true` 时上
+                // wire（core 通道形状）；HTTP 行形状保持逐字节不变——远端行
+                // 显式补回 `local: false`（旧 `NodeInfo` 的序列化形状）。
+                let mut row = serde_json::to_value(&n).unwrap_or_default();
+                if row.get("local").is_none() {
+                    row["local"] = serde_json::Value::Bool(false);
+                }
+                nodes.push(row);
             }
             (true, serde_json::Value::Null)
         }
@@ -2169,24 +2158,12 @@ pub async fn archive_detail(State(_state): State<WebUiState>, Path(key): Path<St
     crate::archive::cleanup_expired();
     match crate::archive::entry(&key) {
         Some(entry) => {
+            // add-domain-layer 3.4：字段罗列收进唯一 From 转换（归档回看与
+            // 会话详情同一投影，遗留类型归一策略同源）。
             let entries: Vec<ConversationEntryView> = entry
                 .transcript
                 .iter()
-                .map(|e| ConversationEntryView {
-                    position: e.position,
-                    kind: e.kind.clone(),
-                    element_type: match e.element_type.as_str() {
-                        // notice 同步透传（close-acceptance-blind-spots 4.2）：
-                        // 归档回看里的零输出提示保持中性信息条语义。
-                        "thinking" | "tool" | "error" | "notice" => e.element_type.clone(),
-                        _ => "markdown".to_string(),
-                    },
-                    content: e.content.clone(),
-                    created_at_unix: e.created_at_unix,
-                    title: e.title.clone(),
-                    // fix-webui-qa-defects 5.2：失败分类随归档快照透传。
-                    failure_class: e.failure_class.clone(),
-                })
+                .map(|e| ConversationEntryView::from(e).with_normalized_element_type())
                 .collect();
             Json(json!({ "entry": entry, "entries": entries })).into_response()
         }

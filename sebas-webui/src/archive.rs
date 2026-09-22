@@ -16,7 +16,6 @@ use sebas_dispatch::SessionIdentity;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// One archived session entry.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -239,13 +238,9 @@ fn save(entries: &[ArchiveEntry]) -> Result<(), String> {
     Ok(())
 }
 
-/// Return the current unix timestamp in seconds.
-fn now_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
+// 当前 unix 秒（u64 形态）：唯一实现在 `sebas_domain::prim::now_unix`
+// （add-domain-layer 2.5）；u64 形态在此经本地别名换算。
+use sebas_domain::prim as clock;
 
 /// List all archived sessions.
 pub fn list() -> Vec<ArchiveEntry> {
@@ -274,7 +269,7 @@ pub fn archive_session(
     if entries.iter().any(|e| e.session_key == session_key) {
         return Err(format!("会话已归档: {session_key}"));
     }
-    let now = now_unix();
+    let now = u64::try_from(clock::now_unix()).unwrap_or(0);
     let retention_secs = retention_days * 86400;
     let entry = ArchiveEntry {
         session_key: session_key.to_string(),
@@ -326,7 +321,7 @@ pub fn restore_session(session_key: &str) -> Option<ArchiveEntry> {
 /// Remove expired entries from the archive. Returns the number of removed
 /// entries.
 pub fn cleanup_expired() -> usize {
-    let now = now_unix();
+    let now = u64::try_from(clock::now_unix()).unwrap_or(0);
     let mut entries = load();
     let before = entries.len();
     entries.retain(|e| e.retention_deadline > now);

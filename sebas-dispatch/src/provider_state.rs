@@ -12,25 +12,9 @@
 use crate::state_store::{self, DefaultSelection, PersistedState};
 use serde::{Deserialize, Serialize};
 
-/// Provider 路由模式（runtime 决策）：
-/// - `Off`：直连 sebas 自带的 default 模型，跳过 router。
-/// - `Direct { provider }`：把请求路由到名为 `provider` 的 provider，
-///   但不经过 router（直连上游）。
-/// - `Router`：所有请求走 router（router 自己负责选 provider）。
-///
-/// 注意：与 router 内部 `RouterConfig.mode`（`off`/`upstream`）语义
-/// 不完全相同 —— 这里是 sebas 这一侧对 spawn 路径的开关。
-#[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ProviderMode {
-    /// Default = Off（无路由配置时诚实降级）。
-    #[default]
-    Off,
-    Direct {
-        provider: String,
-    },
-    Router,
-}
+// Provider 路由模式词表已迁往 `sebas_domain::provider`（add-domain-layer
+// 3.3，design D5「仍是词表的部分」），原位再导出保持既有路径可解析。
+pub use sebas_domain::provider::ProviderMode;
 
 /// 运行时持久化状态（mode + default_selection 的子集视图）。
 ///

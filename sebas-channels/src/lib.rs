@@ -20,4 +20,8 @@ pub use card::{
     FormField, FormSpec, RichText, SelectOption, TurnChrome,
 };
 pub use event::{ChannelAction, ChannelEvent};
-pub use key::{ChannelKey, ChannelName};
+// 会话键编解码的唯一实现（add-domain-layer 2.2）。
+pub use key::{
+    ChannelKey, ChannelName, decode_session_key, encode_channel_key, encode_session_key,
+    percent_decode,
+};

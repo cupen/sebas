@@ -11,54 +11,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// keeps the rail cheap when many sessions share a project.
 pub const BRANCH_TTL_SECS: u64 = 30;
 
-/// A single registered project.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ProjectEntry {
-    /// Stable wire identifier (`proj-<12hex>`), deterministically derived
-    /// from the canonicalised path (workbench-agent-wire-fix D2). Survives
-    /// restarts and registry rebuilds; the wire never carries the raw path.
-    /// `#[serde(default)]` backfills entries persisted by an older registry.
-    #[serde(default)]
-    pub id: String,
-    pub path: String,
-    pub name: String,
-    pub added_at: u64,
-    /// The agent id most recently used to create a session under this
-    /// project (project-level default agent, workbench-agent-wire-fix D5).
-    /// `None` = the operator has not created a session here yet.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_agent: Option<String>,
-    /// Git branch read lazily; refreshed at most once per `BRANCH_TTL_SECS`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub branch: Option<String>,
-    /// Unix seconds of the last branch probe (0 = never).
-    #[serde(default)]
-    pub branch_at: u64,
-    /// 项目所在的**执行节点**（add-remote-execution-node 3.2）。
-    ///
-    /// 项目身份是 `(节点, 路径)`：同一个路径在两台机器上是**两个项目**，因此 id 也
-    /// 必须随节点不同（见 [`project_id_for_on`]）。`#[serde(default)]` 让旧注册表
-    /// 自动回填为 [`LOCAL_NODE_ID`]——那就是迁移，不需要额外的迁移脚本。
-    #[serde(default = "default_node_id")]
-    pub node_id: String,
-}
-
-/// 本机节点的标识（旧数据与本地注册都用它）。
-pub const LOCAL_NODE_ID: &str = "local";
-
-fn default_node_id() -> String {
-    LOCAL_NODE_ID.to_string()
-}
-
-impl ProjectEntry {
-    /// 是否注册在本机节点上。
-    ///
-    /// 只有本机项目才能做本地文件系统操作（`is_accessible` / 分支探测 / 目录浏览）；
-    /// 远端项目的路径可用性由**节点在 spawn 时**判定（3.3），主控不做本地 stat。
-    pub fn is_local(&self) -> bool {
-        self.node_id == LOCAL_NODE_ID
-    }
-}
+// `ProjectEntry`（注册表 wire 形状）已迁往 `sebas_domain::project`
+// （add-domain-layer 3.5，design D3 原位再导出）；`project_id_for*` 的
+// 派生逻辑仍属 webui（依赖 sha2 与本模块的注册表写入语义），不随迁。
+pub use sebas_domain::project::{ProjectEntry, LOCAL_NODE_ID};
 
 /// Deterministic project id: `proj-` + first 12 hex of SHA-256 over the
 /// canonicalised path. Same path → same id across restarts and registry

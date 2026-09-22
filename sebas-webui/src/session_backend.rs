@@ -18,6 +18,15 @@ use sebas_dispatch::{
     TurnStreamEvent,
 };
 use serde::{Deserialize, Serialize};
+
+// 会话后端的**wire 词表**已迁往 `sebas_domain::session`（add-domain-layer
+// 3.2，design D3 原位再导出）：`SessionRejection` / `PendingReason` /
+// `PermissionNotice` / `PermissionDecision` 的既有路径零改动。
+// `SessionBackend` trait 与 `Reachability` 是本 crate 的缝，不迁。
+pub use sebas_domain::session::{
+    PermissionDecision, PermissionNotice, PendingReason, SessionRejection,
+};
+pub use sebas_domain::node::NodeView as NodeInfo;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast};
@@ -46,104 +55,6 @@ pub enum Reachability {
     Disconnected { cause: String },
 }
 
-/// Typed rejection for a session mutation (spec: rejections name the reason;
-/// nothing is mutated on rejection).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "code", rename_all = "snake_case")]
-pub enum SessionRejection {
-    /// No session exists for the given key.
-    UnknownSession { key: String },
-    /// The requested project directory is not a usable directory.
-    /// Deliberately carries no path details — no existence disclosure.
-    UnusableProjectDir,
-    /// The core is at its session capacity.
-    Capacity { limit: usize },
-    /// The request could not be delivered to the session authority, or the
-    /// targeted surface is not hosted by this backend.（fix-webui-qa-defects
-    /// -round5 1.3）Display 文案如实说「操作不可用」——「核心不可达」的说法
-    /// 只保留给 core.reachability 真实可达性信号。
-    Unavailable { cause: String },
-    /// The targeted execution backend cannot serve the request even though
-    /// the core is reachable (e.g. native without provider credentials), or
-    /// the caller named a backend hint the core does not know.
-    BackendUnavailable { backend: String, cause: String },
-    /// （workbench-turn-queue 5.1，design D5）spawn 窗口 staging 队列已满：
-    /// 提交未被接受、也不顶掉已暂存条目。携带上限，提交面据此可见拒绝。
-    QueueFull { limit: usize },
-    /// （workbench-turn-queue D7）pending submission 管理操作的类型化拒绝。
-    PendingRejected { reason: PendingReason },
-    /// （workbench-interaction-polish 1.1）会话存在但没有在飞 turn——取消
-    /// 无从谈起，如实拒绝而非伪造成功。`key` 是编码会话键（诊断用）。
-    #[serde(rename = "idle_session")]
-    Idle { key: String },
-}
-
-/// pending submission 管理拒绝的具体原因（workbench-turn-queue D7）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PendingReason {
-    /// id 不在待执行栈里，也从未开始过。
-    Unknown,
-    /// 该提交已经开轮（或已被激活合并）——绝不回滚在跑的回合。
-    AlreadyStarted,
-    /// 不能把普通提交移到优先（/btw）提交之前。
-    PriorityConflict,
-    /// 目标位置超出该处置组的范围。
-    OutOfRange,
-}
-
-impl std::fmt::Display for PendingReason {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PendingReason::Unknown => write!(f, "待执行提交不存在"),
-            PendingReason::AlreadyStarted => write!(f, "该提交已开始执行"),
-            PendingReason::PriorityConflict => write!(f, "不能越过优先提交排序"),
-            PendingReason::OutOfRange => write!(f, "目标位置越界"),
-        }
-    }
-}
-
-impl std::fmt::Display for SessionRejection {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SessionRejection::UnknownSession { key } => write!(f, "会话不存在: {key}"),
-            SessionRejection::UnusableProjectDir => {
-                write!(f, "项目目录不可用（不是目录或无法访问）")
-            }
-            SessionRejection::Capacity { limit } => write!(f, "会话数已达上限 {limit}"),
-            // fix-webui-qa-defects-round5 1.3：Unavailable 的文案不再自称
-            // 「核心不可达」——该变体同时承载真实可达性失败（core 通道客户端）
-            // 与语义不可用（不承载队列/注册表/远端放置），后者在 core 可达时
-            // 报「核心不可达」是误导 QA 实锤的文案。「核心不可达」的说法只
-            // 保留给 core.reachability 真实可达性信号（前端 fatal 横幅）。
-            SessionRejection::Unavailable { cause } => write!(f, "操作不可用: {cause}"),
-            SessionRejection::BackendUnavailable { backend, cause } => {
-                write!(f, "执行体不可用: {backend} — {cause}")
-            }
-            SessionRejection::QueueFull { limit } => {
-                write!(f, "待执行队列已满（上限 {limit}）：这条消息没有提交")
-            }
-            SessionRejection::PendingRejected { reason } => write!(f, "{reason}"),
-            SessionRejection::Idle { key } => {
-                write!(f, "会话空闲（无在飞回复，无需取消）: {key}")
-            }
-        }
-    }
-}
-
-/// One gated tool call awaiting an operator decision (webui review card).
-/// `session_id` is the encoded session key; `request_id` equals the kernel's
-/// `tool_use_id` and is what [`SessionBackend::answer_permission`] takes back.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PermissionNotice {
-    pub request_id: String,
-    /// Encoded session key (URL-safe, as used in routes).
-    pub session_id: String,
-    pub tool_name: String,
-    pub args: serde_json::Value,
-    pub reason: String,
-}
-
 /// （workbench-turn-queue 5.2）关闭会话的结果：`discarded_pending` = 随之
 /// 丢弃的未执行待生效提交条数（close 响应携带，绝不静默丢队）。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -151,28 +62,10 @@ pub struct CloseReport {
     pub discarded_pending: usize,
 }
 
-/// 一个执行节点的管理面视图（add-remote-execution-node 8.x）。
-///
-/// 与 core 通道 `NodeLinkOp::ListNodes` 的 `NodeView` 同形（这是**唯一**的
-/// 可用性真源，webui 不另造一份）：`id` / `status` / `last_seen_unix` /
-/// `created_unix`。`local` 是本机条目专用的标记——本机节点不经过注册表
-/// （它是隐式的），但工作台必须能显示它。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NodeInfo {
-    /// 稳定节点标识。
-    pub id: String,
-    /// `online` / `offline` / `revoked`。
-    pub status: String,
-    /// 最后一次成功握手时间（unix 秒）；本机节点为 `None`（无握手概念）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_seen_unix: Option<i64>,
-    /// 首次配对时间（unix 秒）；本机节点为 0。
-    #[serde(default)]
-    pub created_unix: i64,
-    /// 是否为主控本机（隐式节点，永远在线——否则你读不到这个响应）。
-    #[serde(default)]
-    pub local: bool,
-}
+// 一个执行节点的管理面视图：与 core 通道的 `NodeView` 已**合一**为
+// `sebas_domain::node::NodeView`（add-domain-layer 4.1）——`local` 是共享
+// 类型上的独立字段（只在 true 时上 wire），`NodeInfo` 路径经再导出保持
+// 既有调用点零改动。
 
 /// 节点侧路径判定结果（节点 `SessionOp::CheckPath { path }` 的应答形状：
 /// `SessionResult::PathChecked { exists, is_dir, within_workspace }`）。
@@ -203,18 +96,6 @@ pub struct ExecutionBodyStatus {
     pub ok: bool,
     /// 不可用时的原因（如实透传给 UI）。
     pub cause: Option<String>,
-}
-
-/// The operator's answer to a [`PermissionNotice`]. `escalate` = one-shot
-/// elevated retry carrying the operator's stated reason (the session policy
-/// itself never widens).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "decision", rename_all = "snake_case")]
-pub enum PermissionDecision {
-    AllowOnce,
-    AllowSession,
-    Deny,
-    Escalate { reason: String },
 }
 
 /// The seam every session-data source must satisfy.

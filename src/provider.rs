@@ -321,7 +321,7 @@ pub fn item_from_provider(name: &str, p: &sebas_router::config::ProviderConfig) 
 pub fn overlay_path() -> std::path::PathBuf {
     let raw = std::env::var("SEBAS_ROUTER_PROVIDER_OVERLAY")
         .unwrap_or_else(|_| "~/.sebas/providers.json".into());
-    std::path::PathBuf::from(crate::config::expand_tilde(&raw))
+    std::path::PathBuf::from(sebas_domain::prim::expand_tilde(&raw))
 }
 
 /// `/provider` 命令的两张表单（共享同一个 overlay 存储）。

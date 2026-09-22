@@ -12,6 +12,8 @@ sebas-acp = { path = "../sebas-acp" }
 # preset 代码表的只读读取直接复用 `sebas_router::config::presets()`（preset
 # 数据跟随代码，BFF 与 core 读同一张表）。
 sebas-router = { path = "../sebas-router" }
+# 中立共享域层（add-domain-layer）：跨角色域概念的唯一定义处。
+sebas-domain = { path = "../sebas-domain" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # 鉴权：PBKDF2-HMAC-SHA256 密码哈希 + OS CSPRNG（盐 / 会话 token）。
@@ -45,3 +47,4 @@ tokio-tungstenite = "0.30.0"
 tower = { version = "0.5", features = ["util"] }
 # gateway_bff_test 的内存 StateStoreEngine 需要 trait 签名里的 anyhow::Result。
 anyhow = "1"
+

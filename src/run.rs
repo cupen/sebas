@@ -119,7 +119,7 @@ pub async fn run(
     // 那会把重启丢状态的问题推迟到第一次崩溃之后才暴露。
     {
         let raw = std::env::var("SEBAS_STATE_DB").unwrap_or_else(|_| "~/.sebas/sebas.db".into());
-        let expanded = sebas_dispatch::state_store::expand_tilde(&raw);
+        let expanded = sebas_domain::prim::expand_tilde(&raw);
         let path = std::path::PathBuf::from(&expanded);
         match crate::sebas_state::writer::StateWriter::start(path.clone()) {
             Ok(writer) => {

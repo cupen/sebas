@@ -17,7 +17,7 @@ use sebas_node_link::{Hello, NodeAuth, PROTOCOL_VERSION, RejectCode, validate_no
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, watch};
 use tokio_tungstenite::tungstenite::Message;
@@ -444,13 +444,9 @@ where
     }
 }
 
-/// 当前 unix 秒。
-pub fn now_unix() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+// 当前 unix 秒：唯一实现在 `sebas_domain::prim::now_unix`（add-domain-layer
+// 2.5）；经 `pub use` 保持 `crate::node_link::server::now_unix` 路径可用。
+pub use sebas_domain::prim::now_unix;
 
 #[cfg(test)]
 mod tests {

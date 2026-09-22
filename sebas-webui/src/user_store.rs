@@ -28,7 +28,6 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// PBKDF2-HMAC-SHA256 迭代次数（与原 auth.rs 同值：OWASP 建议 SHA256 ≥ 600k，
 /// 这里取折中值——debug 构建无优化下登录耗时仍在秒级；实际值随用户记录入库，
@@ -234,12 +233,8 @@ fn map_constraint(err: rusqlite::Error) -> StoreError {
     }
 }
 
-fn now_unix() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+// 时间戳原语唯一实现在 `sebas_domain::prim`（add-domain-layer 2.5）。
+use sebas_domain::prim::now_unix;
 
 /// 用户名归一：trim 后非空（其余原样入库；唯一性/查找由 NOCASE 列接管）。
 fn validate_username(username: &str) -> Result<String, StoreError> {

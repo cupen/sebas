@@ -28,7 +28,6 @@ use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
 /// 表单回调提交值的归一化：`form_value`（JSON 值表）→ 字符串表。与
@@ -623,7 +622,8 @@ impl<S: CrudStore> CrudForm<S> {
                 }
             }
             None => {
-                let id = format!("{}-{}", self.spec.form_name, now_unix_millis());
+                // 时钟原语唯一实现在 `sebas_domain::prim`（add-domain-layer 2.5）。
+                let id = format!("{}-{}", self.spec.form_name, sebas_domain::prim::now_unix_millis());
                 let mut item = self.item_from_form(Some(id.as_str()), form_value, None);
                 if let Some(f) = &self.normalizer {
                     f(&mut item);
@@ -836,13 +836,6 @@ fn scalar_display(v: &Value) -> String {
             .join(","),
         other => other.to_string(),
     }
-}
-
-fn now_unix_millis() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0)
 }
 
 fn id_of<'a>(item: &'a Item, id_field: &str) -> &'a str {

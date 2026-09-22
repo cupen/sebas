@@ -22,83 +22,20 @@ pub(crate) fn build_session_rows(
     let mut rows: Vec<SessionRow> = infos
         .iter()
         .map(|info| {
-            let status: &'static str = match info.status.as_str() {
-                "active" => {
-                    active += 1;
-                    "active"
-                }
-                "dormant" => {
-                    dormant += 1;
-                    "dormant"
-                }
+            // add-domain-layer 3.4：行字段全部经唯一 From 转换产出，不再
+            // 手写逐字段罗列；这里只补调用方上下文（计数桶 + 聚焦态）。
+            let mut row = SessionRow::from(info);
+            match row.status {
+                "active" => active += 1,
+                "dormant" => dormant += 1,
                 // （session-parallel-liveness-and-unread-polish 1.3）spawn-failed
-                // 不再被吞进 spawning：行上的 raw status 与派生 slug 都必须如实
-                // 呈现失败态（SessionStatus::derive 有专门的 spawn-failed 分支），
-                // 否则失败会话在列表里永远读成 starting——正是「看起来在排队」
-                // 的谎。计数桶沿用 spawning（DashboardData 形状不变）。
-                "spawn-failed" => {
-                    spawning += 1;
-                    "spawn-failed"
-                }
-                _ => {
-                    spawning += 1;
-                    "spawning"
-                }
-            };
-            let is_active = focused
+                // 计数桶沿用 spawning（DashboardData 形状不变）。
+                _ => spawning += 1,
+            }
+            row.is_active = focused
                 .map(|a| a.channel.as_str() == info.channel && a.reference == info.key)
                 .unwrap_or(false);
-            let derived = SessionStatus::derive(status, info.phase.as_deref().unwrap_or(""))
-                // 8.4：有悬空审批的会话**在等**，不是在跑——底层 status 仍是
-                // active，呈现必须是 Waiting。（review 3c 补口）泊车维度本地/
-                // 远端合并：本地读 parked_approvals，远端读 remote 视图。
-                .with_parked_approvals(match info.remote.as_ref() {
-                    Some(r) => r.parked_approvals,
-                    None => info.parked_approvals,
-                });
-            SessionRow {
-                // 8.1 会话归属项目按 `(节点, 路径)`：远端会话的 project_dir 若按
-                // 本机公式算 id，会挂到「本机同路径项目」下（或一个不存在的 id）。
-                project_id: crate::projects::project_id_for_session(info),
-                prompt_preview: info.user_prompt.clone(),
-                // （5.1，design D6）label 随行下发——rail 行命名优先级
-                // label → 首条 prompt 预览 → 短 id 的第一顺位数据源。
-                label: info.label.clone(),
-                current_model: info.current_model.clone(),
-                desired_mode: info.desired_mode.clone(),
-                effective_mode: info.effective_mode.clone(),
-                // （session-parallel-liveness-and-unread-polish 1.3）spawn 失败
-                // 原因随行透传（SessionInfo 同名字段透传；None 不上 wire）。
-                spawn_failure_reason: info.spawn_failure_reason.clone(),
-                available_models: info.available_models.clone(),
-                agent_kind: info.agent_kind.clone(),
-                backend: info.backend.clone(),
-                pending_count: info.pending.len(),
-                encoded_key: encode_channel_key(&info.channel, &info.key),
-                channel: info.channel.clone(),
-                reference: info.key.clone(),
-                session_id_short: info
-                    .session_id
-                    .as_deref()
-                    .map(|s| crate::models::middle_truncate(s, 18)),
-                session_id: info.session_id.clone(),
-                status,
-                status_label: derived.label(),
-                status_slug: derived.slug(),
-                status_glyph: derived.glyph(),
-                last_active: format_relative_time(info.last_active_unix),
-                last_active_unix: info.last_active_unix,
-                is_active,
-                remote: info.remote.clone(),
-                // rail-declutter-unread 1.2：未读徽标的服务端计数随行下发。
-                msg_count: info.msg_count,
-                // （session-slash-commands 2.2）命令表随行透出（composer
-                // 面板数据源；空表不上 wire）。
-                available_commands: info.available_commands.clone(),
-                // fix-pending-queue-liveness 2.3：回合占用事实随行透出（只在
-                // true 时上 wire；缺省 = 前端回退 slug 判定）。
-                turn_engaged: info.turn_engaged,
-            }
+            row
         })
         .collect();
 
@@ -166,23 +103,11 @@ pub(crate) fn session_summary(info: &SessionInfo) -> serde_json::Value {
     summary
 }
 
-/// Encode a (channel, reference) pair for use in URLs.
-pub(crate) fn encode_channel_key(channel: &str, reference: &str) -> String {
-    let raw = format!("{channel}\0{reference}");
-    urlencoding::encode(&raw).into_owned()
-}
-
-/// Encode a ChannelKey for use in URLs.
-pub(crate) fn encode_session_key(key: &ChannelKey) -> String {
-    encode_channel_key(key.channel.as_str(), &key.reference)
-}
-
-/// Decode a URL-encoded ChannelKey.
-pub(crate) fn decode_session_key(encoded: &str) -> Option<ChannelKey> {
-    let decoded = urlencoding::decode(encoded).ok()?;
-    let (channel, reference) = decoded.split_once('\0')?;
-    Some(ChannelKey::new(channel, reference))
-}
+// 会话键编解码唯一实现在 `sebas_channels::key`（add-domain-layer 2.2/2.3）；
+// 既有调用点（`crate::routes::*`）经原位再导出零改动。
+pub(crate) use sebas_channels::key::{
+    decode_session_key, encode_channel_key, encode_session_key,
+};
 
 /// Format a unix timestamp as a relative time string.
 pub(crate) fn format_relative_time(unix_ts: i64) -> String {

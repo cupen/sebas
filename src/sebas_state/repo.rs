@@ -347,6 +347,46 @@ pub struct ProjectRow {
     pub sort_order: i64,
 }
 
+impl ProjectRow {
+    /// ProjectRow → [`ProjectEntry`]（add-domain-layer 3.5，design D6）：
+    /// 两个合法形状之间的**命名显式转换**。
+    ///
+    /// 有损方向（逐项钉在测试里）：DB 形状今天没有节点维度，`node_id`
+    /// 一律回填 `local`（远端条目的家是文件注册表，见 webui api.rs 的
+    /// local-only save 过滤）；`id` 为 NULL（迁移 2 之前的行）回退空串。
+    pub fn to_entry(&self) -> sebas_domain::project::ProjectEntry {
+        sebas_domain::project::ProjectEntry {
+            id: self.id.clone().unwrap_or_default(),
+            path: self.path.clone(),
+            name: self.name.clone(),
+            added_at: u64::try_from(self.added_at).unwrap_or(0),
+            default_agent: self.default_agent.clone(),
+            branch: self.branch.clone(),
+            branch_at: u64::try_from(self.branch_at).unwrap_or(0),
+            node_id: sebas_domain::project::LOCAL_NODE_ID.to_string(),
+        }
+    }
+}
+
+/// [`ProjectEntry`] → `ProjectRow`（add-domain-layer 3.5，design D6）：
+/// 反方向转换。有损方向：`node_id` 无列可载，随 DB 形状消失；
+/// `sort_order` 不属注册表形状，落 DB 缺省 0（与 `add_project` 的
+/// INSERT 缺省一致）。
+impl From<&sebas_domain::project::ProjectEntry> for ProjectRow {
+    fn from(e: &sebas_domain::project::ProjectEntry) -> Self {
+        Self {
+            id: Some(e.id.clone()),
+            path: e.path.clone(),
+            name: e.name.clone(),
+            default_agent: e.default_agent.clone(),
+            branch: e.branch.clone(),
+            branch_at: i64::try_from(e.branch_at).unwrap_or(0),
+            added_at: i64::try_from(e.added_at).unwrap_or(0),
+            sort_order: 0,
+        }
+    }
+}
+
 /// 加载所有项目。
 pub fn load_projects(conn: &mut Connection) -> Result<Vec<ProjectRow>, String> {
     let mut stmt = conn
@@ -845,5 +885,86 @@ mod tests {
 
         let state = load_persisted_state(&mut conn).unwrap();
         assert_eq!(state.mode, ProviderMode::Router);
+    }
+}
+
+// ---- add-domain-layer 3.5：形状钉（ProjectRow / ProjectEntry 双形状） ----
+
+#[cfg(test)]
+mod project_shape_pin_tests {
+    use super::ProjectRow;
+    use sebas_domain::project::{ProjectEntry, LOCAL_NODE_ID};
+
+    fn row() -> ProjectRow {
+        ProjectRow {
+            id: Some("proj-abcdef123456".into()),
+            path: "/data/work".into(),
+            name: "work".into(),
+            default_agent: Some("claude".into()),
+            branch: Some("main".into()),
+            branch_at: 1_700_000_100,
+            added_at: 1_700_000_000,
+            sort_order: 3,
+        }
+    }
+
+    /// DB 形状钉：列顺序/列名即建表事实（sqlite-auto-schema-sync），序列化
+    /// 形状加字段即测试失败（3.5 负向演示的机械载体）。
+    #[test]
+    fn project_row_serialized_shape_is_pinned() {
+        let v = serde_json::to_value(row()).unwrap();
+        let obj = v.as_object().unwrap();
+        let keys: Vec<&str> = obj.keys().map(|k| k.as_str()).collect();
+        assert_eq!(
+            keys,
+            vec![
+                "id", "path", "name", "default_agent", "branch", "branch_at", "added_at",
+                "sort_order"
+            ]
+        );
+        assert_eq!(obj["id"], "proj-abcdef123456");
+        assert_eq!(obj["sort_order"], 3);
+    }
+
+    /// Row → Entry：共享字段保值；node_id 回填 local；NULL id 回退空串。
+    #[test]
+    fn row_to_entry_preserves_shared_fields_and_backfills_node() {
+        let e = row().to_entry();
+        assert_eq!(e.id, "proj-abcdef123456");
+        assert_eq!(e.path, "/data/work");
+        assert_eq!(e.name, "work");
+        assert_eq!(e.default_agent.as_deref(), Some("claude"));
+        assert_eq!(e.branch.as_deref(), Some("main"));
+        assert_eq!(e.branch_at, 1_700_000_100);
+        assert_eq!(e.added_at, 1_700_000_000);
+        assert_eq!(e.node_id, LOCAL_NODE_ID);
+
+        let mut legacy = row();
+        legacy.id = None;
+        assert_eq!(legacy.to_entry().id, "", "迁移 2 之前的 NULL id 回退空串");
+    }
+
+    /// Entry → Row → Entry 往返：注册表形状的字段全部保值（sort_order 是
+    /// Row 独有、node_id 是 Entry 独有——两侧有损性由本测试钉住）。
+    #[test]
+    fn entry_row_round_trip_preserves_registry_shape() {
+        let entry = ProjectEntry {
+            id: "proj-1".into(),
+            path: "/tmp/p".into(),
+            name: "p".into(),
+            added_at: 7,
+            default_agent: None,
+            branch: None,
+            branch_at: 0,
+            node_id: "node-b".into(),
+        };
+        let row = ProjectRow::from(&entry);
+        assert_eq!(row.sort_order, 0, "Entry 无排序语义，落 DB 缺省 0");
+        let back = row.to_entry();
+        assert_eq!(back.id, "proj-1");
+        assert_eq!(back.added_at, 7);
+        // node_id 有损：DB 形状今天没有节点列。
+        assert_eq!(back.node_id, LOCAL_NODE_ID);
+        assert_ne!(back.node_id, entry.node_id);
     }
 }

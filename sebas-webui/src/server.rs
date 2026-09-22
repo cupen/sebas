@@ -1515,6 +1515,8 @@ mod workspace_root_tests {
     use serde_json::Value;
     use std::net::{IpAddr, SocketAddr};
     use tower::ServiceExt;
+    // 项目 id 的 URL 段转义（非会话键编解码）：urlencoding 原样可用。
+    use urlencoding::encode;
 
     fn test_addr() -> SocketAddr {
         SocketAddr::new(IpAddr::from([127, 0, 0, 1]), 12345)
@@ -1761,7 +1763,8 @@ mod workspace_root_tests {
     }
 
     fn enc_key(reference: &str) -> String {
-        urlencoding::encode(&format!("web\0{reference}")).into_owned()
+        // 会话键编码走唯一实现（add-domain-layer 2.3）。
+        sebas_channels::key::encode_channel_key("web", reference)
     }
 
     /// （session-parallel-liveness-and-unread-polish 1.3）spawn 失败 wire 透传：
@@ -2011,16 +2014,13 @@ mod workspace_root_tests {
             )
             .unwrap();
 
-            let uri = format!(
-                "/api/projects/{}/branch",
-                urlencoding::encode(&out_scope.id)
-            );
+            let uri = format!("/api/projects/{}/branch", encode(&out_scope.id));
             let (status, body) = req(app.clone(), "GET", &uri, None).await;
             assert_eq!(status, StatusCode::OK, "{body}");
             assert_eq!(body["accessible"], false, "越界项目按不可达处理: {body}");
             assert_eq!(body["branch"], serde_json::Value::Null, "{body}");
 
-            let uri = format!("/api/projects/{}/branch", urlencoding::encode(&in_scope.id));
+            let uri = format!("/api/projects/{}/branch", encode(&in_scope.id));
             let (status, body) = req(app, "GET", &uri, None).await;
             assert_eq!(status, StatusCode::OK, "{body}");
             assert_eq!(body["accessible"], true, "{body}");
@@ -2400,7 +2400,8 @@ mod restore_route_tests {
             std::env::set_var("SEBAS_ARCHIVE_PATH", dir.join("archive.json"));
         }
         let raw = "web\0web-restore-1";
-        let url_segment = urlencoding::encode(raw).into_owned();
+        // 会话键编码走唯一实现（add-domain-layer 2.3）。
+        let url_segment = sebas_channels::key::encode_channel_key("web", "web-restore-1");
         crate::archive::archive_session(
             raw,
             "/proj",
@@ -2491,7 +2492,8 @@ mod restore_route_tests {
         unsafe {
             std::env::set_var("SEBAS_ARCHIVE_PATH", dir.path().join("archive.json"));
         }
-        let encoded = urlencoding::encode("web\0web-ghost").into_owned();
+        // 会话键编码走唯一实现（add-domain-layer 2.3）。
+        let encoded = sebas_channels::key::encode_channel_key("web", "web-ghost");
         let backend = Arc::new(FakeBackend::new());
         let (status, _) = req(app(backend), "POST", &format!("/api/sessions/{encoded}/restore")).await;
         assert_eq!(status, StatusCode::NOT_FOUND);

@@ -1,0 +1,17 @@
+[package]
+name = "sebas-domain"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# `SessionInfo.usage` 与 `SessionInfo::channel_key` 引用 channels 的中立类型
+# （add-domain-layer 3.1：类型按 D3 原样搬迁，字段类型不换）。
+sebas-channels = { path = "../sebas-channels" }
+# `SessionInfo.available_commands` 引用 ACP 的 `AvailableCommand`（同上）。
+# sebas-acp 本身中立（sebas-node 直接依赖它），不把主控角色拖进依赖图。
+sebas-acp = { path = "../sebas-acp" }
+# `prim::expand_tilde` 的 home 目录解析（Known Folder，不吃 HOME env）。
+dirs = "7"

@@ -1027,14 +1027,10 @@ impl Meta0 {
     }
 }
 
-/// 工作台侧那张审批卡认的是**编码后的会话键**（`routes::encode_session_key`）。
-///
-/// 那张函数是 `pub(crate)`，跨 crate 取不到；这里用同一算法（urlencoded
-/// `channel\0reference`）现算一份，并有测试钉住形状。真源仍然只有一个：两边都
-/// 只是把 `(channel, reference)` 拼成 URL 安全串。
-fn encode_session_key(key: &ChannelKey) -> String {
-    urlencoding::encode(&format!("{}\0{}", key.channel.as_str(), key.reference)).into_owned()
-}
+// 工作台侧那张审批卡认的是**编码后的会话键**。原「同算法现算一份」的
+// 私有副本已删除：会话键编解码唯一实现在 `sebas_channels::key`
+// （add-domain-layer 2.3），这里直接复用。
+use sebas_channels::key::encode_session_key;
 
 /// 节点侧的审批请求 → 工作台的审批通知。
 fn notice_of(key: &ChannelKey, approval: &ParkedApproval) -> PermissionNotice {

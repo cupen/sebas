@@ -1109,14 +1109,9 @@ pub(crate) const LOG_FILTER_QUIET: &str = ",openlark_client=warn";
 /// Default filter when neither RUST_LOG nor [log] level is configured.
 pub(crate) const DEFAULT_LOG_FILTER: &str = "info,openlark_client=warn";
 
-pub fn expand_tilde(p: &str) -> String {
-    if let Some(rest) = p.strip_prefix("~/")
-        && let Some(home) = dirs::home_dir()
-    {
-        return home.join(rest).to_string_lossy().into();
-    }
-    p.to_string()
-}
+// `expand_tilde` 唯一实现在 `sebas_domain::prim`（add-domain-layer 2.4）；
+// 本模块经 `use` 保持既有调用点不变。
+pub use sebas_domain::prim::expand_tilde;
 
 #[cfg(test)]
 mod tests {

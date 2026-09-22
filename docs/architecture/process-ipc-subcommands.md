@@ -280,7 +280,7 @@ follow-up 修正，本文以 `cli.rs` 为准。
 
 ### 3.5 workspace crate 速查
 
-`src/` 里的 `*_cmd.rs` 只是进程的门；实体多在门后一跳的 crate 里。14 个成员
+`src/` 里的 `*_cmd.rs` 只是进程的门；实体多在门后一跳的 crate 里。15 个成员
 （`Cargo.toml` `members`）：
 
 | crate | 一句话职责 |
@@ -293,6 +293,7 @@ follow-up 修正，本文以 `cli.rs` 为准。
 | `sebas-node` | 远程执行节点二进制（`add-remote-execution-node`）：出站 WS 连回主控，在节点机本地承载 ACP 会话；依赖隔离是硬约束——只依赖 `sebas-startup`/`sebas-node-link`/`sebas-acp`，不含任何主控角色实现 |
 | `sebas-acp` | ACP agent 驱动：claude 专用驱动 + 通用 ACP 驱动（`SessionManager`/`AgentDriver`） |
 | `sebas-agent` | 原生 in-process coding agent 内核：LLM 客户端、工具、权限策略、turn 状态机 |
+| `sebas-domain` | 中立共享域层（`add-domain-layer`）：project / session / provider / node 域概念的**唯一定义处**（`SessionInfo`、`TurnEntry`、`SessionEvent`、审批词表、`ProjectEntry`、`NodeView`、`DefaultSelection`/`ProviderMode`）+ 中立原语（`prim::expand_tilde`/`now_unix`）。准入规则：≥2 个 crate 需要且角色中立方可入；叶子依赖图内不得出现 core / webui / router / im 与 `sebas-node`（`tests/domain_leaf_discipline_test.rs` 机械核对），主控与执行节点均可安全依赖；类型经原 crate `pub use` 原位再导出，线格式与磁盘形状逐字节不变（会话键编解码的唯一实现在 `sebas-channels::key`，见 D2） |
 | `sebas-dispatch` | core 内会话分发领域层：`DispatchHandle`、状态库（`state_store`）、卡片状态机/命令/表单 |
 | `sebas-channels` | 通道抽象：`ChannelAdapter` trait + `AdapterRegistry`（core 只依赖这里的类型） |
 | `sebas-ipc` | 跨平台本地 IPC 传输原语（`IpcListener`/`IpcStream`；Unix socket / Windows named pipe），三通道共用 |

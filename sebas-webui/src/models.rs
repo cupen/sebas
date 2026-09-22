@@ -305,6 +305,103 @@ pub struct ConversationEntryView {
     pub failure_class: Option<String>,
 }
 
+/// 唯一显式转换（add-domain-layer 3.4，spec「presentation views no longer
+/// re-list canonical fields」）：`ConversationEntryView` 的字段全部来自
+/// canonical [`sebas_dispatch::TurnEntry`]，经此命名转换产出，不再手写
+/// 逐字段罗列。
+impl From<&sebas_dispatch::TurnEntry> for ConversationEntryView {
+    fn from(t: &sebas_dispatch::TurnEntry) -> Self {
+        Self {
+            position: t.position,
+            kind: t.kind.clone(),
+            element_type: t.element_type.clone(),
+            content: t.content.clone(),
+            created_at_unix: t.created_at_unix,
+            title: t.title.clone(),
+            failure_class: t.failure_class.clone(),
+        }
+    }
+}
+
+impl ConversationEntryView {
+    /// 未知遗留 `element_type` 归一为 markdown、内容不丢；thinking / tool /
+    /// error / notice 原样透传（conversation-view 1.1/1.3、
+    /// close-acceptance-blind-spots 4.2：前端靠它折叠 thinking、收工具组、
+    /// 渲染错误气泡，notice 是零输出提示的中性信息条分支）。
+    pub(crate) fn with_normalized_element_type(mut self) -> Self {
+        if !matches!(
+            self.element_type.as_str(),
+            "thinking" | "tool" | "error" | "notice"
+        ) {
+            self.element_type = "markdown".to_string();
+        }
+        self
+    }
+}
+
+/// 唯一显式转换（add-domain-layer 3.4）：[`SessionRow`] 的行字段全部由
+/// canonical `SessionInfo` 投影产出。`is_active` 是**调用方上下文**（聚焦态
+/// 比较），不属 SessionInfo 本身——转换后由 `build_session_rows` 覆盖。
+impl From<&sebas_dispatch::SessionInfo> for SessionRow {
+    fn from(info: &sebas_dispatch::SessionInfo) -> Self {
+        // raw status 词表（含 spawn-failed 特判，与计数桶语义一致——
+        // DashboardData 的计数由 build_session_rows 读 status 桶统计）。
+        let status: &'static str = match info.status.as_str() {
+            "active" => "active",
+            "dormant" => "dormant",
+            // spawn-failed 不再被吞进 spawning：行上的 raw status 与派生 slug
+            // 都必须如实呈现失败态（SessionStatus::derive 有专门分支）。
+            "spawn-failed" => "spawn-failed",
+            _ => "spawning",
+        };
+        let derived = SessionStatus::derive(status, info.phase.as_deref().unwrap_or(""))
+            // 8.4：有悬空审批的会话**在等**，不是在跑。（review 3c 补口）
+            // 泊车维度本地/远端合并：本地读 parked_approvals，远端读 remote。
+            .with_parked_approvals(match info.remote.as_ref() {
+                Some(r) => r.parked_approvals,
+                None => info.parked_approvals,
+            });
+        Self {
+            encoded_key: crate::routes::encode_channel_key(&info.channel, &info.key),
+            channel: info.channel.clone(),
+            reference: info.key.clone(),
+            session_id: info.session_id.clone(),
+            session_id_short: info
+                .session_id
+                .as_deref()
+                .map(|s| middle_truncate(s, 18)),
+            status,
+            status_label: derived.label(),
+            status_slug: derived.slug(),
+            status_glyph: derived.glyph(),
+            last_active: crate::routes::format_relative_time(info.last_active_unix),
+            last_active_unix: info.last_active_unix,
+            is_active: false,
+            // 8.1 会话归属项目按 `(节点, 路径)`：远端会话的 project_dir 若按
+            // 本机公式算 id，会挂到「本机同路径项目」下。
+            project_id: crate::projects::project_id_for_session(info),
+            prompt_preview: info.user_prompt.clone(),
+            // （5.1，design D6）label 随行下发。
+            label: info.label.clone(),
+            current_model: info.current_model.clone(),
+            available_models: info.available_models.clone(),
+            agent_kind: info.agent_kind.clone(),
+            backend: info.backend.clone(),
+            pending_count: info.pending.len(),
+            remote: info.remote.clone(),
+            desired_mode: info.desired_mode.clone(),
+            effective_mode: info.effective_mode.clone(),
+            // rail-declutter-unread 1.2：未读徽标的服务端计数随行下发。
+            msg_count: info.msg_count,
+            // （session-parallel-liveness-and-unread-polish 1.3）spawn 失败
+            // 原因随行透传；None 不上 wire。
+            spawn_failure_reason: info.spawn_failure_reason.clone(),
+            available_commands: info.available_commands.clone(),
+            turn_engaged: info.turn_engaged,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::SessionStatus;
@@ -429,5 +526,97 @@ mod tests {
         for s in all {
             assert_eq!(s.slug(), s.label().to_lowercase(), "slug must match label");
         }
+    }
+}
+
+#[cfg(test)]
+mod conversion_tests {
+    use super::*;
+
+    fn info() -> sebas_dispatch::SessionInfo {
+        sebas_dispatch::SessionInfo {
+            channel: "web".into(),
+            key: "web-7".into(),
+            session_id: Some("sess_long_id_abcdef".into()),
+            status: "active".into(),
+            phase: Some("OnIt".into()),
+            user_prompt: Some("提示词".into()),
+            last_active_unix: 1_700_000_000,
+            project_dir: Some("/tmp/proj".into()),
+            current_model: Some("m".into()),
+            available_models: Some(vec!["m".into()]),
+            agent_kind: Some("claude".into()),
+            usage: None,
+            backend: Some("acp".into()),
+            pending: vec![],
+            remote: None,
+            desired_mode: "edit".into(),
+            effective_mode: Some("edit".into()),
+            msg_count: 3,
+            available_commands: vec![],
+            turn_engaged: true,
+            spawn_failure_reason: None,
+            parked_approvals: 0,
+            label: Some("标签".into()),
+        }
+    }
+
+    /// add-domain-layer 3.4：行形状由单一 From 转换产出；派生词
+    /// （status/slug/glyph/encoded_key/project_id）逐字钉住。
+    #[test]
+    fn session_row_from_info_projects_every_field() {
+        let row = SessionRow::from(&info());
+        assert_eq!(row.encoded_key, "web%00web-7");
+        assert_eq!(row.channel, "web");
+        assert_eq!(row.reference, "web-7");
+        assert_eq!(row.status, "active");
+        assert_eq!(row.status_slug, "working");
+        assert_eq!(row.status_label, "Working");
+        assert_eq!(row.status_glyph, "▶");
+        assert_eq!(row.session_id_short.as_deref(), Some("sess_long…d_abcdef"));
+        assert!(!row.is_active, "is_active 是调用方上下文，缺省 false");
+        // spawn-failed 的失败态如实投影。
+        let mut failed = info();
+        failed.status = "spawn-failed".into();
+        failed.spawn_failure_reason = Some("炸了".into());
+        let row = SessionRow::from(&failed);
+        assert_eq!(row.status, "spawn-failed");
+        assert_eq!(row.status_slug, "failed");
+        assert_eq!(row.spawn_failure_reason.as_deref(), Some("炸了"));
+    }
+
+    /// 会话行序列化形状（api_endpoints_test 响应形状的单元侧镜像）。
+    #[test]
+    fn session_row_serialized_shape_is_pinned() {
+        let row = SessionRow::from(&info());
+        let v = serde_json::to_value(&row).unwrap();
+        assert_eq!(v["encoded_key"], "web%00web-7");
+        assert_eq!(v["status_slug"], "working");
+        assert_eq!(v["label"], "标签");
+        assert_eq!(v["turn_engaged"], true);
+        // skip_serializing_if：非失败会话的失败原因键不上 wire。
+        assert!(v.get("spawn_failure_reason").is_none());
+        assert!(v.get("available_commands").is_none());
+    }
+
+    /// 对话条目视图与 canonical TurnEntry 逐字段等价。
+    #[test]
+    fn conversation_entry_view_from_turn_entry() {
+        let t = sebas_dispatch::TurnEntry {
+            position: 2,
+            kind: "content".into(),
+            element_type: "tool".into(),
+            content: "📖".into(),
+            created_at_unix: 42,
+            title: Some("Read · a".into()),
+            failure_class: None,
+        };
+        let view = ConversationEntryView::from(&t);
+        assert_eq!(view.position, 2);
+        assert_eq!(view.kind, "content");
+        assert_eq!(view.element_type, "tool");
+        assert_eq!(view.created_at_unix, 42);
+        assert_eq!(view.title.as_deref(), Some("Read · a"));
+        assert!(view.failure_class.is_none());
     }
 }

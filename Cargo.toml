@@ -6,7 +6,7 @@ rust-version = "1.90"
 
 [workspace]
 resolver = "2"
-members = ["sebas-im", "sebas-dispatch", "sebas-feishu", "sebas-acp", "sebas-router", "sebas-webui", "sebas-ipc", "sebas-startup", "sebas-node", "sebas-node-link", "xtask", "sebas-agent", "sebas-channels", "sebas-schema-derive"]
+members = ["sebas-im", "sebas-dispatch", "sebas-feishu", "sebas-acp", "sebas-router", "sebas-webui", "sebas-ipc", "sebas-startup", "sebas-node", "sebas-node-link", "xtask", "sebas-agent", "sebas-channels", "sebas-schema-derive", "sebas-domain"]
 
 # Debug profile: 产物最小化
 [profile.dev]
@@ -41,6 +41,8 @@ sebas-startup = { path = "sebas-startup" }
 sebas-node-link = { path = "sebas-node-link" }
 # 编译期 schema 提取：Row struct 即建表事实源（sqlite-auto-schema-sync D1）。
 sebas-schema-derive = { path = "sebas-schema-derive" }
+# 中立共享域层：跨角色域概念的唯一定义处（add-domain-layer）。
+sebas-domain = { path = "sebas-domain" }
 tokio = { version = "1.40", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

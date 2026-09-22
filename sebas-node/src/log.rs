@@ -236,13 +236,8 @@ impl SessionLog {
     }
 }
 
-/// 当前 unix 秒。
-pub(crate) fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+// 当前 unix 秒：唯一实现在 `sebas_domain::prim::now_unix`（add-domain-layer 2.5）。
+pub(crate) use sebas_domain::prim::now_unix;
 
 /// Windows 文件名非法字符（`:` 是 NTFS 备用数据流分隔符，会话 id 的命名空间
 /// 分隔正好撞上）+ 路径分隔符。`%` 先编码保证整个变换可逆。

@@ -13,6 +13,9 @@ urlencoding = "2"
 tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "sync", "time"] }
 tracing = "0.1"
 serde_json = "1"
+
+# 中立共享域层（add-domain-layer）：跨角色域概念的唯一定义处。
+sebas-domain = { path = "../sebas-domain" }
 reqwest = { version = "0.13", features = ["json", "rustls"], default-features = false }
 
 [dev-dependencies]

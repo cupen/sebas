@@ -15,6 +15,8 @@ sebas-channels = { path = "../sebas-channels" }
 # provider 卡片展示/探测需读内置 preset 表（preset 数据跟随代码）。
 sebas-router = { path = "../sebas-router" }
 sebas-acp = { path = "../sebas-acp" }
+# 中立共享域层（add-domain-layer）：跨角色域概念的唯一定义处。
+sebas-domain = { path = "../sebas-domain" }
 async-trait = "0.1"
 # 仅 provider 探测 `/v1/models` 用，少量依赖；rustls-tls 省掉 native-tls 链接。
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }

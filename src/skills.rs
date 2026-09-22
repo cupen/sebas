@@ -502,7 +502,7 @@ pub fn placement_for(backend_kind: &str, home: &Path) -> Option<Placement> {
 
 /// 家目录解析（sync 投影落点的 home 来源）：env 优先（`HOME` > `USERPROFILE`
 /// ——测试覆写即钉住沙箱，与 `im_cmd` 的 env-first 同款）；缺失回退
-/// `dirs::home_dir()`（与 `config::expand_tilde` 同源；注意 Windows 上它走
+/// `dirs::home_dir()`（与 `sebas_domain::prim::expand_tilde` 同源；注意 Windows 上它走
 /// Known Folder API、不吃 env 覆写，所以 env 检测必须在前面）；再缺失回退
 /// 当前目录。
 pub fn resolve_home() -> PathBuf {

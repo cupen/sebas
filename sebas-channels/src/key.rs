@@ -136,9 +136,139 @@ impl<'de> Deserialize<'de> for ChannelKey {
     }
 }
 
+// ---- 会话键编解码：唯一实现（add-domain-layer 2.2） -----------------------
+//
+// 编码形态：percent-encoded `channel\0reference`（URL-safe，`%00` 是分隔符）。
+// 原 6 份实现（dispatch engine / webui routes / 根 node_link projection /
+// sebas-im frontend / 根 agent_backend 的 JSON 形态 / 本文件此前无编解码）
+// 经逐点审计（等价性结论见 change 任务 2.1 与各调用点注释）后收敛到这里；
+// 解码只按**第一个** NUL 切分——飞书 `chat_id\0thread_id` 这类复合 reference
+// 完整保留在 reference 字段里，`node\0{node}\0{sess}` 嵌套行键也靠首切语义
+// 解析（node_link::projection::row_reference 的既定约定）。
+
+/// Encode a [`ChannelKey`] for URLs / the channel wire: percent-encoded
+/// `channel\0reference`. Unreserved bytes (`A-Z a-z 0-9 - _ . ~`) pass
+/// through; everything else becomes `%XX`（与 urlencoding crate 一致——
+/// 此前 dispatch 的手写 encoder 与 webui 的 urlencoding::encode 输出逐字节
+/// 相同，黄金样本测试钉住）.
+pub fn encode_session_key(key: &ChannelKey) -> String {
+    encode_channel_key(key.channel.as_str(), &key.reference)
+}
+
+/// Encode a bare `(channel, reference)` pair（webui routes 口径的直系后裔）.
+pub fn encode_channel_key(channel: &str, reference: &str) -> String {
+    urlencoding::encode(&format!("{channel}\0{reference}")).into_owned()
+}
+
+/// Decode a percent-encoded `channel\0reference` back into a [`ChannelKey`].
+///
+/// 严格版：percent 解码失败、或解码后不含 NUL 分隔符 → `None`。需要 feishu
+/// 回退的调用方（dispatch 原生桥 / im 卡片）在各自调用点用
+/// [`percent_decode`] 拼装自己的回退策略——策略留在消费方，编解码只有一份。
+pub fn decode_session_key(encoded: &str) -> Option<ChannelKey> {
+    let raw = percent_decode(encoded)?;
+    let (channel, reference) = raw.split_once('\0')?;
+    Some(ChannelKey::new(channel, reference))
+}
+
+/// Percent-decode a string（编解码方案的原语，供回退策略复用）.
+///
+/// **严格**语义（原 dispatch 手写 decoder 的逐字节后裔）：非法转义
+/// （`%` 后不足两位或非 hex）→ `None`；解码结果必须合法 UTF-8。
+pub fn percent_decode(encoded: &str) -> Option<String> {
+    let bytes = encoded.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let hi = hex_val(bytes[i + 1])?;
+                let lo = hex_val(bytes[i + 2])?;
+                out.push(hi << 4 | lo);
+                i += 3;
+            }
+            b'%' => return None,
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// add-domain-layer 2.2：黄金样本逐字节比对（样本 = 收敛前 dispatch
+    /// 手写 percent-encoder 对同一批键的输出，/tmp 黄金转储逐行核对）。
+    #[test]
+    fn encoding_matches_pre_convergence_golden_samples() {
+        let cases = [
+            (ChannelKey::new("web", "web-1"), "web%00web-1"),
+            (ChannelKey::feishu("oc_x", None), "feishu%00oc_x"),
+            (ChannelKey::feishu("oc_x", Some("t1")), "feishu%00oc_x%00t1"),
+            (
+                ChannelKey::new("node", "nodeA\0sess-1"),
+                "node%00nodeA%00sess-1",
+            ),
+            (
+                ChannelKey::new("web", "a b/c?d=e&f+g%"),
+                "web%00a%20b%2Fc%3Fd%3De%26f%2Bg%25",
+            ),
+            (ChannelKey::new("web", "中文引用"), "web%00%E4%B8%AD%E6%96%87%E5%BC%95%E7%94%A8"),
+            (ChannelKey::new("ch", ""), "ch%00"),
+            (
+                ChannelKey::new("web", "tilde~.dash-under_score"),
+                "web%00tilde~.dash-under_score",
+            ),
+        ];
+        for (key, want) in cases {
+            assert_eq!(encode_session_key(&key), want, "key={key}");
+        }
+    }
+
+    #[test]
+    fn decode_round_trips_and_splits_on_first_nul() {
+        let k = ChannelKey::feishu("oc_x", Some("t1"));
+        let d = decode_session_key(&encode_session_key(&k)).unwrap();
+        assert_eq!(d, k, "feishu thread composite must survive");
+
+        // 嵌套行键：只按第一个 NUL 切，channel=node、reference 原样带内层 NUL。
+        let remote = decode_session_key("node%00nodeA%00sess-1").unwrap();
+        assert_eq!(remote.channel_str(), "node");
+        assert_eq!(remote.reference, "nodeA\0sess-1");
+    }
+
+    #[test]
+    fn strict_decode_rejects_garbage_and_nul_free_input() {
+        // 严格口径（webui routes 的既有行为）：无 NUL → None。
+        assert!(decode_session_key("plain-text").is_none());
+        assert!(decode_session_key("").is_none());
+        // 非法转义 → None（原 dispatch 手写 decoder 的严格语义）。
+        assert!(decode_session_key("%ZZ").is_none());
+        assert!(decode_session_key("a%ZZ%00b").is_none());
+        // 尾部截断的转义同样拒绝。
+        assert!(decode_session_key("a%2").is_none());
+    }
+
+    #[test]
+    fn percent_decode_is_the_reusable_primitive() {
+        assert_eq!(percent_decode("a%20b").as_deref(), Some("a b"));
+        assert_eq!(percent_decode("%00").as_deref(), Some("\0"));
+        assert_eq!(percent_decode("%ZZ"), None);
+        assert_eq!(percent_decode("a%2"), None);
+    }
 
     #[test]
     fn feishu_key_composes_thread_into_opaque_reference() {

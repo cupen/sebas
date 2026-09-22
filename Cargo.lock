@@ -2831,6 +2831,7 @@ dependencies = [
  "sebas-agent",
  "sebas-channels",
  "sebas-dispatch",
+ "sebas-domain",
  "sebas-feishu",
  "sebas-im",
  "sebas-ipc",
@@ -2902,6 +2903,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "urlencoding",
 ]
 
 [[package]]
@@ -2914,6 +2916,7 @@ dependencies = [
  "reqwest 0.13.5",
  "sebas-acp",
  "sebas-channels",
+ "sebas-domain",
  "sebas-router",
  "serde",
  "serde_json",
@@ -2921,6 +2924,17 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "sebas-domain"
+version = "0.1.0"
+dependencies = [
+ "dirs 7.0.0",
+ "sebas-acp",
+ "sebas-channels",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2949,6 +2963,7 @@ dependencies = [
  "reqwest 0.13.5",
  "sebas-channels",
  "sebas-dispatch",
+ "sebas-domain",
  "sebas-feishu",
  "sebas-webui",
  "serde_json",
@@ -2977,6 +2992,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hex",
  "sebas-acp",
+ "sebas-domain",
  "sebas-node-link",
  "sebas-startup",
  "serde",
@@ -3008,6 +3024,7 @@ dependencies = [
  "http-body-util",
  "notify",
  "reqwest 0.13.5",
+ "sebas-domain",
  "sebas-ipc",
  "serde",
  "serde_json",
@@ -3055,6 +3072,7 @@ dependencies = [
  "sebas-acp",
  "sebas-channels",
  "sebas-dispatch",
+ "sebas-domain",
  "sebas-feishu",
  "sebas-router",
  "serde",

@@ -9,7 +9,7 @@
 use crate::error::Result;
 use crate::watchdog::EXIT_BIND_FAILED;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, mpsc, oneshot, watch};
 use tracing::{error, info, warn};
 
@@ -99,13 +99,9 @@ pub struct StartupFailureEvent {
 pub type StartupFailureTx = watch::Sender<Option<StartupFailureEvent>>;
 pub type StartupFailureRx = watch::Receiver<Option<StartupFailureEvent>>;
 
-/// 当前时刻的 Unix 秒（失败记录时间戳）。
-pub(crate) fn now_unix_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+// 当前时刻的 Unix 秒（失败记录时间戳）：唯一实现在
+// `sebas_domain::prim::now_unix`（add-domain-layer 2.5）。
+pub(crate) use sebas_domain::prim::now_unix as now_unix_secs;
 
 /// 复用 control 面的期望态命名，避免两套词汇。
 pub use crate::watchdog::control::DesiredState;

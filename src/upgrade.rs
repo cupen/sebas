@@ -85,7 +85,8 @@ pub fn data_dir_for_user(data_dir_cfg: &str, default_home: Option<PathBuf>) -> P
             .unwrap_or_else(|| PathBuf::from("~/.local/share"))
             .join("sebas")
     } else {
-        expand_tilde(data_dir_cfg)
+        // PathBuf 形态：唯一实现在 `sebas_domain::prim`（add-domain-layer 2.4）。
+        PathBuf::from(sebas_domain::prim::expand_tilde(data_dir_cfg))
     }
 }
 
@@ -545,14 +546,8 @@ fn make_relative(base: &Path, target: &Path) -> PathBuf {
     result
 }
 
-pub fn expand_tilde(p: &str) -> PathBuf {
-    if let Some(rest) = p.strip_prefix("~/")
-        && let Some(home) = dirs::home_dir()
-    {
-        return home.join(rest);
-    }
-    PathBuf::from(p)
-}
+// PathBuf 形态的 tilde 展开（add-domain-layer 2.4）：唯一实现在
+// `sebas_domain::prim::expand_tilde`（String），调用点就地转 PathBuf。
 
 /// 把当前二进制 seed 到固定路径 `<data_dir>/bin/sebas`。
 ///
@@ -723,7 +718,7 @@ mod tests {
 
     #[test]
     fn test_expand_tilde() {
-        let expanded = expand_tilde("~/test");
+        let expanded = sebas_domain::prim::expand_tilde("~/test");
         assert!(!expanded.starts_with("~"), "~ 应该被展开");
         assert!(expanded.ends_with("test"), "尾部路径应保留");
     }

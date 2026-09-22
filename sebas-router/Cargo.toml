@@ -20,6 +20,9 @@ chrono = "0.4"
 dirs = "7"
 notify = "8.2.0"
 
+# 中立共享域层（add-domain-layer）：跨角色域概念的唯一定义处。
+sebas-domain = { path = "../sebas-domain" }
+
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1.40", features = ["full"] }

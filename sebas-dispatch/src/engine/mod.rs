@@ -39,7 +39,6 @@ use sebas_channels::key::ChannelKey;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{RwLock, broadcast, mpsc};
 
 /// （workbench-interaction-polish 1.1）`web_cancel_session` 的三态结果。
@@ -210,18 +209,9 @@ pub enum CloseOutcome {
 /// 控制面「自动」mode 词汇（permission-mode-auto-gate）。「本会话不再询问」
 /// 的 mode 语义固定切到该值。
 pub const AUTO_MODE: &str = "auto";
-/// （session-parallel-liveness-and-unread-polish 3.2，design D5b）控制面
-/// 缺省 mode：ask 是「每个受门控动作都要问」的确定性模式，不是「留给
-/// agent 自己猜」。desired_mode 在内存/wire 模型中非空（`String`），旧
-/// 数据（state.json 的 null）在 restore 反序列化点一次性落为 ask——
-/// 迁移是 null 消失的唯一地点，之后任何投影都读到这个值，无读侧回退。
-pub const ASK_MODE: &str = "ask";
-
-/// [`ASK_MODE`] 的 serde 缺省构造器（`#[serde(default = …)]` 形态要求
-/// 同签名的函数）。
-pub fn ask_mode() -> String {
-    ASK_MODE.to_string()
-}
+// 控制面缺省 mode 词表（design D5b）随会话域迁往 `sebas_domain::session`
+// （add-domain-layer 3.1），原位再导出保持既有路径可解析。
+pub use sebas_domain::session::{ask_mode, ASK_MODE};
 
 /// claude 驱动 SetMode 失败时非终态 `Error` 消息的稳定后缀（「…模式未变」，
 /// 见 `sebas-acp/src/claude/driver.rs` 的 SetMode 臂）。dispatch 据此把
@@ -2543,75 +2533,22 @@ fn text_from_caption(c: &Option<String>) -> String {
     c.clone().unwrap_or_default()
 }
 
-pub fn now_unix() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+// ---- 时间戳与会话键编解码：收敛到唯一实现（add-domain-layer 2.3/2.5） ----
 
-/// Encode a `ChannelKey` for URLs / the channel wire: `channel\0reference`
-/// percent-encoded. A channel-prefixed pair round-trips exactly; the feishu
-/// reference keeps its `chat\0thread` composite inside the reference field.
-/// No external dependency — the charset is small (channel names and
-/// references are alnum plus a few separators) so a targeted percent-encoder
-/// suffices.
-pub fn encode_key(key: &ChannelKey) -> String {
-    let raw = format!("{}\0{}", key.channel_str(), key.reference);
-    percent_encode(&raw)
-}
+pub use sebas_domain::prim::now_unix;
 
-/// Decode a percent-encoded `ChannelKey` (inverse of [`encode_key`]).
+/// 编码 `ChannelKey` 为 URL-safe 形态。唯一实现在 `sebas_channels::key`
+/// （add-domain-layer 2.2）；这里仅保留既有公开路径
+/// （`native_dispatch_bridge` 等调用方零改动）。
+pub use sebas_channels::key::encode_session_key as encode_key;
+
+/// 解码 percent-encoded `ChannelKey`。canonical 严格解码之外保留旧的
+/// feishu 回退（无 NUL 分隔的输入整段当飞书 reference）——该回退只对
+/// 非 wire 形态的输入可达（wire 上的键全部出自 [`encode_key`]，必有 NUL），
+/// 收敛后行为与旧手写实现逐字节一致（黄金样本钉）。
 pub fn decode_key(encoded: &str) -> Option<ChannelKey> {
-    let decoded = percent_decode(encoded)?;
-    match decoded.split_once('\0') {
-        Some((channel, reference)) => Some(ChannelKey::new(channel, reference)),
-        None => Some(ChannelKey::feishu(&decoded, None)),
-    }
-}
-
-fn percent_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char);
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
-}
-
-fn percent_decode(s: &str) -> Option<String> {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'%' if i + 2 < bytes.len() => {
-                let hi = hex_val(bytes[i + 1])?;
-                let lo = hex_val(bytes[i + 2])?;
-                out.push(hi << 4 | lo);
-                i += 3;
-            }
-            b'%' => return None,
-            b => {
-                out.push(b);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8(out).ok()
-}
-
-fn hex_val(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
+    sebas_channels::key::decode_session_key(encoded)
+        .or_else(|| Some(ChannelKey::feishu(&sebas_channels::key::percent_decode(encoded)?, None)))
 }
 
 fn extract_session_id(event: &AcpEvent) -> &str {

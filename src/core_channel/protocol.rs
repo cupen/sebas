@@ -263,19 +263,10 @@ pub enum NodeLinkOutcome {
     Failed { cause: String },
 }
 
-/// 节点在管理面上的视图（不含凭据哈希等敏感字段）。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct NodeView {
-    /// 稳定节点标识。
-    pub id: String,
-    /// `online` / `offline` / `revoked`。
-    pub status: String,
-    /// 最后一次成功握手时间（unix 秒）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_seen_unix: Option<i64>,
-    /// 首次配对时间（unix 秒）。
-    pub created_unix: i64,
-}
+// 节点管理面视图已与 webui 的 `NodeInfo` 合一为
+// `sebas_domain::node::NodeView`（add-domain-layer 4.1）；core 通道上的
+// wire 形状逐字节不变（`local: false` 不上 wire）。
+pub use sebas_domain::node::NodeView;
 
 /// One response over the core session channel.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

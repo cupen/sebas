@@ -1403,6 +1403,7 @@ async fn dispatch_node_link(
                     },
                     last_seen_unix: n.last_seen_unix(),
                     created_unix: n.created_unix(),
+                    local: false,
                 })
                 .collect(),
         },

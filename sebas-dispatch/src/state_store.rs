@@ -134,6 +134,10 @@ pub fn engine() -> Option<&'static (dyn StateStoreEngine + Send + Sync)> {
 /// 一条记录：字段名 -> 值。Provider CRUD 用。
 pub type Item = Map<String, Value>;
 
+// provider 状态词表与 overlay wire 形状已迁往 `sebas_domain::provider`
+// （add-domain-layer 3.3，design D5「仍是词表的部分」），原位再导出。
+pub use sebas_domain::provider::{DefaultSelection, ModelAliasEntry};
+
 /// 目标 schema 版本号。`PersistedState::default()` 和 `save()` 都写这个版本。
 pub const STATE_VERSION_V2: u32 = 2;
 /// 旧版 schema：没有 `version` 字段或 version=1 — 只含 mode + default_provider_for_direct。
@@ -153,100 +157,6 @@ pub const STATE_VERSION_V1: u32 = 1;
 /// 动作负责把 overlay 的 `default_model` 同步进 `default_selection.model`（见
 /// `sebas_dispatch::engine::provider_card::handle_set_default_direct` 的 merge helper）。
 ///
-/// wire shape：
-/// ```json
-/// "default_selection": { "provider": "deepseek", "model": "deepseek-chat" }
-/// ```
-///
-/// `model` 缺省 / 显式 None 时不写 `--model`（agent 用自己默认）。
-///
-/// **serde 自定义反序列化**：为了把旧 `default_provider_for_direct: "<name>"`
-/// 形态的 state.json 平滑迁到新形状，`DefaultSelection::deserialize` 同时
-/// 接受：
-/// - 对象 `{"provider": "...", "model": "..."}`（新）
-/// - 字符串 `"<provider>"`（旧 default_provider_for_direct 别名走这条）
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct DefaultSelection {
-    pub provider: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-}
-
-impl DefaultSelection {
-    pub fn new(provider: impl Into<String>) -> Self {
-        Self {
-            provider: provider.into(),
-            model: None,
-        }
-    }
-
-    pub fn with_model(provider: impl Into<String>, model: impl Into<String>) -> Self {
-        Self {
-            provider: provider.into(),
-            model: Some(model.into()),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for DefaultSelection {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        use serde::de::{self, MapAccess, Visitor};
-        use std::fmt::{self, Formatter};
-
-        struct StringOrStruct;
-
-        impl<'de> Visitor<'de> for StringOrStruct {
-            type Value = DefaultSelection;
-
-            fn expecting(&self, f: &mut Formatter) -> fmt::Result {
-                f.write_str(
-                    "string (legacy default_provider_for_direct) or \
-                     object {\"provider\": \"...\", \"model\": \"...\"} \
-                     for DefaultSelection",
-                )
-            }
-
-            fn visit_str<E: de::Error>(self, s: &str) -> Result<Self::Value, E> {
-                Ok(DefaultSelection::new(s))
-            }
-
-            fn visit_string<E: de::Error>(self, s: String) -> Result<Self::Value, E> {
-                Ok(DefaultSelection::new(s))
-            }
-
-            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-                let mut provider: Option<String> = None;
-                let mut model: Option<String> = None;
-                while let Some(key) = map.next_key::<String>()? {
-                    match key.as_str() {
-                        "provider" => provider = Some(map.next_value()?),
-                        "model" => model = Some(map.next_value()?),
-                        _ => {
-                            let _: de::IgnoredAny = map.next_value()?;
-                        }
-                    }
-                }
-                let provider = provider.ok_or_else(|| de::Error::missing_field("provider"))?;
-                Ok(DefaultSelection { provider, model })
-            }
-        }
-
-        deserializer.deserialize_any(StringOrStruct)
-    }
-}
-
-/// 一条模型别名（与 router admin API 的 wire 同形状）。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct ModelAliasEntry {
-    pub provider: String,
-    /// 缺省 = 别名即 upstream model（透传）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub upstream_model: Option<String>,
-}
-
 /// 内存聚合视图：runtime（state.json）+ provider 数据（providers.json）。
 ///
 /// 仅作为 load() 的返回值与 update() 闭包的操作对象；`save()` 会把它**拆开**
@@ -306,15 +216,9 @@ pub fn providers_path() -> PathBuf {
     PathBuf::from(expand_tilde(&raw))
 }
 
-/// 复制 `sebas::config::expand_tilde`（router 不能反向依赖 sebas root）。
-pub fn expand_tilde(p: &str) -> String {
-    if let Some(rest) = p.strip_prefix("~/")
-        && let Some(home) = dirs::home_dir()
-    {
-        return home.join(rest).to_string_lossy().into();
-    }
-    p.to_string()
-}
+// `expand_tilde` 唯一实现在 `sebas_domain::prim`（add-domain-layer 2.4）；
+// 既有调用点经 `use` 零改动。
+pub use sebas_domain::prim::expand_tilde;
 
 /// 在同步代码里等待 engine 的 future。调用点可能位于 tokio worker 线程的
 /// async 上下文中（启动期 provider 表单构建、HTTP handler 的同步桥等），

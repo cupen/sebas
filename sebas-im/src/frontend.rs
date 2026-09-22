@@ -1201,14 +1201,15 @@ fn mode_failure_flip(detail: &str) -> (&'static str, &'static str, String) {
     )
 }
 
-/// wire 上 URL-safe 编码的会话 key → ChannelKey（webui routes 口径的逆）。
+/// wire 上 URL-safe 编码的会话 key → ChannelKey。
+///
+/// 解码走唯一实现 `sebas_channels::key::decode_session_key`
+/// （add-domain-layer 2.3）。feishu 回退是本调用点的**策略**：畸形输入
+/// （解码失败或无 NUL 分隔）不报错、按飞书裸 reference 处理（与旧行为
+/// 逐字节一致——回退时保留 encoded 原文）。
 fn decode_wire_key(encoded: &str) -> ChannelKey {
-    if let Ok(raw) = urlencoding::decode(encoded)
-        && let Some((channel, reference)) = raw.split_once('\0')
-    {
-        return ChannelKey::new(channel, reference);
-    }
-    ChannelKey::new("feishu", encoded)
+    sebas_channels::key::decode_session_key(encoded)
+        .unwrap_or_else(|| ChannelKey::new("feishu", encoded))
 }
 
 /// turn 条目 → 卡片机输入（design D3）。工具调用在 turn 流里已是渲染好的

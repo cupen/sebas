@@ -39,26 +39,10 @@ pub struct StagedSubmission {
     pub text: String,
 }
 
-/// 处置（workbench-turn-queue D1）：`staging` = 并入首条消息；`turn` = 按序
-/// 执行的待执行回合。serde 形状随 `SessionInfo` 上 wire。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PendingDisposition {
-    Staging,
-    Turn,
-}
-
-/// pending submission 的观察视图（design D1）：core 已接受、尚未开始执行的
-/// 一次提交。`position` 是投递序里的下标（staging 先于 turn 队列），每次
-/// 构建视图时重算。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PendingSubmission {
-    pub id: u64,
-    pub text: String,
-    pub position: usize,
-    pub disposition: PendingDisposition,
-    pub priority: bool,
-}
+// `PendingDisposition` / `PendingSubmission` 已迁往 `sebas_domain::session`
+// （add-domain-layer 3.1，design D3 原位再导出）——它们随 `SessionInfo`
+// 上 wire，是会话域的形状而非引擎状态机的一部分。
+pub use sebas_domain::session::{PendingDisposition, PendingSubmission};
 
 /// remove/move 的类型化拒绝（design D7）。`Unknown` = id 不在队列里也从未
 /// 开始；`AlreadyStarted` = 已开轮/已被合并投递；`PriorityConflict` =
@@ -120,45 +104,10 @@ fn next_failed_id() -> String {
     format!("failed-{n}")
 }
 
-/// 会话身份（fix-webui-approval-restore-and-session-identity 3.1/3.2，design
-/// D3）：归档条目携带、恢复重建时原样带回的四项。全 `Option`——旧归档条目
-/// 缺字段时如实回退既有默认（agent 显示回退、模型目录清空），不做数据迁移。
-/// serde-native：跨归档文件与 core session channel 传输。
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionIdentity {
-    /// 创建时绑定的执行后端 kind（`[acp.agents.*]` 配置键）；`None` = 配置默认。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_kind: Option<String>,
-    /// 归档时刻的期望 mode（控制面词汇 ask/edit/allow/auto）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub desired_mode: Option<String>,
-    /// 归档时刻的当前模型 id。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub current_model: Option<String>,
-    /// 归档时刻的可选模型目录。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub available_models: Option<Vec<String>>,
-}
-
-impl SessionIdentity {
-    /// 从 [`Mapping`] 的身份字段取快照（归档路由的数据源）。
-    pub fn of(m: &Mapping) -> Self {
-        Self {
-            agent_kind: m.pending_kind.clone(),
-            desired_mode: Some(m.desired_mode.clone()),
-            current_model: m.current_model.clone(),
-            available_models: m.available_models.clone(),
-        }
-    }
-
-    /// 全空 = 旧归档条目（恢复路径维持现默认，wire 上可省键）。
-    pub fn is_empty(&self) -> bool {
-        self.agent_kind.is_none()
-            && self.desired_mode.is_none()
-            && self.current_model.is_none()
-            && self.available_models.is_none()
-    }
-}
+// `SessionIdentity` 已迁往 `sebas_domain::session`（add-domain-layer 3.1）。
+// 原 `SessionIdentity::of(&Mapping)` 快照构造在全仓无调用点（归档路径由
+// webui::archive 手工构建四项），随迁删除；`is_empty` 在域内保留。
+pub use sebas_domain::session::SessionIdentity;
 
 #[derive(Debug, Clone)]
 pub struct Mapping {
