@@ -140,7 +140,7 @@ impl StateWriter {
             .name("sebas-state-db".into())
             .spawn(move || {
                 // 打开 + schema 同步: open 失败按损坏拒启,
-                // 不兼容由 sync 层重置重建, 这里只区分"就绪/失败"。
+                // 不兼容由 sync 层隔离旧库后重建空 schema, 这里只区分"就绪/失败"。
                 let mut conn =
                     match crate::schema::open_and_sync(&db_path, tables) {
                         Ok((conn, outcome)) => {

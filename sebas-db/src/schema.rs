@@ -12,8 +12,10 @@
 //! 4. 逐注册表 diff 派生列 vs `PRAGMA table_info` (按 SQLite 亲和类型归一
 //!    比较, 避免 `VARCHAR(255)` vs `TEXT` 误报):
 //!    - 缺列且能安全补 (可空, 或非空带常量默认) → `ALTER TABLE ADD COLUMN`;
-//!    - 缺列但补不了 / 类型不符 / 多余列 / 整表缺失 → **重置**: 删 DB 文件
-//!      (含 `-wal`/`-shm`) 按注册 DDL 重建空 schema, WARN 日志写明触发点。
+//!    - 缺列但补不了 / 类型不符 / 多余列 / 整表缺失 → **重置**: 先把旧库文件
+//!      (含 `-wal`/`-shm`) 隔离为 `<path>.reset-<unix>` (改名不删除, 可手工
+//!      恢复), 再按注册 DDL 重建空 schema; WARN 日志写明触发点与隔离路径,
+//!      并明说旧数据未迁入新库 (quarantine-database-reset)。
 //! 5. 全部通过 → 写 `version_format` + `version`。版本**值**不同不触发任何
 //!    动作, 仅随写 meta 更新; 结构对比是唯一重置触发。
 //!
@@ -70,7 +72,7 @@ pub enum SyncOutcome {
     UpToDate,
     /// 缺列已原地补齐。
     Synced { added_columns: usize },
-    /// schema 不兼容, 已删库重建 (原因见 reason)。
+    /// schema 不兼容, 已隔离旧库并重建空 schema (原因见 reason, 隔离路径见日志)。
     Reset { reason: String },
 }
 
@@ -97,18 +99,14 @@ pub fn open_and_sync(
         Ok((conn, outcome)) => Ok((conn, outcome)),
         Err(SyncFail::Fatal(e)) => Err(e),
         Err(SyncFail::Incompatible(reason)) => {
-            warn!(
-                path = %db_path.display(),
-                reason = %reason,
-                "schema 不兼容: 删除状态库(含 -wal/-shm)并按当前 model 重建空 schema"
-            );
-            let conn = reset_and_rebuild(db_path, tables)?;
+            // WARN (触发原因 + 隔离路径 + "未迁入") 由 reset_and_rebuild 打。
+            let (conn, _quarantined) = reset_and_rebuild(db_path, tables, &reason)?;
             Ok((conn, SyncOutcome::Reset { reason }))
         }
     }
 }
 
-/// 对已打开的连接执行同步。不兼容时先关闭连接再返回 (调用方删文件才安全)。
+/// 对已打开的连接执行同步。不兼容时先关闭连接再返回 (调用方隔离旧库才安全)。
 pub fn sync_conn(
     conn: Connection,
     tables: &'static [TableSchema],
@@ -213,25 +211,87 @@ pub fn sync_conn(
     Ok((conn, SyncOutcome::Synced { added_columns }))
 }
 
-/// 重置: 删 DB 文件 (含 `-wal`/`-shm`) 后按注册 DDL 重建空 schema。
-/// 调用点 (open_and_sync) 已保证旧连接关闭; open 失败的损坏路径进不到这里。
+/// 重置: 先把旧库文件 (含 `-wal`/`-shm`) 隔离为 `<path>.reset-<unix>`——
+/// 改名而非删除, 同一时间戳, 可手工恢复 (quarantine-database-reset D2)——
+/// 再按注册 DDL 重建空 schema。返回 (新连接, 实际隔离的文件路径)。
+///
+/// 隔离文件是**重置前的完整库**: 调用点 (sync_conn) 返回 Incompatible 前已
+/// drop 旧连接, 关闭即提交、WAL checkpoint 落盘, 因此最近一次提交在隔离文件
+/// 中可见。旧数据**不迁入**新库 (日志明说), 恢复只能手工进行。调用点已保证
+/// open 失败的损坏路径进不到这里——损坏拒启, 绝不重置。
 pub fn reset_and_rebuild(
     db_path: &Path,
     tables: &'static [TableSchema],
-) -> Result<Connection, String> {
-    for suffix in ["", "-wal", "-shm"] {
-        let file = db_sidecar_path(db_path, suffix);
-        match std::fs::remove_file(&file) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(format!("重置状态库失败: 删除 {} 出错: {e}", file.display())),
-        }
-    }
+    reason: &str,
+) -> Result<(Connection, Vec<PathBuf>), String> {
+    let quarantined = quarantine_db_files(db_path)?;
+    let quarantined_list = quarantined
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    warn!(
+        path = %db_path.display(),
+        reason = %reason,
+        quarantined = %quarantined_list,
+        "schema 不兼容: 旧库(含 -wal/-shm)已隔离未删除, 按当前 model 重建空 schema; \
+         旧数据未迁入新库, 如需找回请手工打开隔离文件恢复"
+    );
 
     let mut conn = conn::open(db_path)
         .map_err(|e| format!("重置后重新打开状态库失败: {}: {e}", db_path.display()))?;
     rebuild_schema(&mut conn, tables)?;
-    Ok(conn)
+    Ok((conn, quarantined))
+}
+
+/// 隔离旧库三件套 (主文件 + `-wal`/`-shm`, 同一时间戳), 返回实际改名成功的
+/// 路径。先隔离 sidecar、最后隔离主文件——中途被打断时主库也不会带着旧
+/// sidecar 复活。
+fn quarantine_db_files(db_path: &Path) -> Result<Vec<PathBuf>, String> {
+    let base = quarantine_base_suffix(db_path, unix_secs());
+    let mut quarantined = Vec::new();
+    for suffix in ["-shm", "-wal", ""] {
+        let file = db_sidecar_path(db_path, suffix);
+        let target = db_sidecar_path(db_path, &format!("{base}{suffix}"));
+        match std::fs::rename(&file, &target) {
+            Ok(()) => quarantined.push(target),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(format!(
+                    "重置状态库失败: 隔离 {} 为 {} 出错: {e}",
+                    file.display(),
+                    target.display()
+                ))
+            }
+        }
+    }
+    Ok(quarantined)
+}
+
+/// 隔离基名后缀: 首选 `.reset-<unix>`; 同一秒内已有重置产物 (任一
+/// `<base>` / `<base>-wal` / `<base>-shm` 存在) 时追加 `-{pid}`, 仍占用再
+/// 追加序号 (design Open Question: 进程号 + 序号)。
+fn quarantine_base_suffix(db_path: &Path, stamp: u64) -> String {
+    let pid = std::process::id();
+    // 惰性候选流 (不得 extend 进 Vec——开放区间的 size_hint 会按上限预分配)。
+    [format!(".reset-{stamp}"), format!(".reset-{stamp}-{pid}")]
+        .into_iter()
+        .chain((1u32..).map(|n| format!(".reset-{stamp}-{pid}-{n}")))
+        .find(|base| !quarantine_base_taken(db_path, base))
+        .expect("无限序号候选中必有未占用者")
+}
+
+fn quarantine_base_taken(db_path: &Path, base: &str) -> bool {
+    ["", "-wal", "-shm"]
+        .iter()
+        .any(|sfx| db_sidecar_path(db_path, &format!("{base}{sfx}")).exists())
+}
+
+fn unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// 按注册 DDL 重建全部表 + 索引, 建 schema_meta 并打版本键 (单事务)。
@@ -390,6 +450,31 @@ mod tests {
             .collect()
     }
 
+    /// 目录下的隔离产物 (`*.reset-*`)。
+    fn quarantine_files_in_dir(dir: &Path) -> Vec<PathBuf> {
+        let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.file_name().unwrap().to_string_lossy().contains(".reset-"))
+            .collect();
+        files.sort();
+        files
+    }
+
+    /// 测试日志捕获的共享缓冲 (fmt subscriber 的 writer)。
+    #[derive(Clone)]
+    struct SharedBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedBuf {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     /// 手工建一张"旧结构" alpha (缺 score 列) —— 模拟"上一个 schema 日期的库"。
     fn seed_legacy_db_without_score(path: &Path) {
         let conn = conn::open(path).unwrap();
@@ -455,19 +540,22 @@ mod tests {
         assert_eq!(score, 0, "旧行的新列应取 DEFAULT 0");
     }
 
+    /// 2.1: 多余列重置 → 原行在隔离文件中存活, 新库为空。
     #[test]
-    fn extra_column_resets_database() {
-        let (_dir, path) = temp_db("extracol.db");
+    fn extra_column_resets_database_with_rows_surviving_in_quarantine() {
+        let (dir, path) = temp_db("extracol.db");
         {
             let (conn, _) = open_and_sync(&path, TEST_TABLES).unwrap();
             conn.execute_batch("ALTER TABLE alpha ADD COLUMN stale TEXT;")
                 .unwrap();
-            // 放一行数据证明重置是"删库重建", 不是保留数据
+            // 放一行数据证明隔离文件保存的是重置前的完整库
             conn.execute(
                 "INSERT INTO alpha (id, name) VALUES ('a1', 'keepme')",
                 [],
             )
             .unwrap();
+            // drop = 关闭 = 提交落盘 (1.2): 此后触发重置, 最近一次提交必须
+            // 在隔离文件中可见。
         }
 
         let (conn, outcome) = open_and_sync(&path, TEST_TABLES).unwrap();
@@ -480,12 +568,125 @@ mod tests {
             "日志要点名触发点: {reason}"
         );
 
+        // 新库: 空 schema, marker 行不迁入, 版本键已打
         assert!(!column_names(&conn, "alpha").iter().any(|c| c == "stale"));
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM alpha", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(count, 0, "重置后是空 schema, marker 行不应幸存");
+        assert_eq!(count, 0, "重置后是空 schema, marker 行不在新库");
         assert_eq!(meta_get(&conn, "version").as_deref(), Some(SCHEMA_VERSION));
+
+        // 隔离文件存在且是重置前的完整库
+        let quarantined = quarantine_files_in_dir(dir.path());
+        assert_eq!(quarantined.len(), 1, "只应隔离主文件: {quarantined:?}");
+        let qconn = conn::open_readonly(&quarantined[0]).unwrap();
+        let name: String = qconn
+            .query_row("SELECT name FROM alpha WHERE id = 'a1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(name, "keepme", "重置前的行应存活在隔离文件中");
+        let qcount: i64 = qconn
+            .query_row("SELECT COUNT(*) FROM alpha", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(qcount, 1);
+        assert!(
+            column_names(&qconn, "alpha").iter().any(|c| c == "stale"),
+            "隔离文件保留重置前的结构"
+        );
+    }
+
+    /// 1.1: 重置隔离三件套 (主文件 + `-wal`/`-shm`) 且用同一时间戳, 新库为
+    /// 空 schema。
+    #[test]
+    fn reset_quarantines_db_file_with_wal_and_shm_under_one_timestamp() {
+        let (dir, path) = temp_db("three.db");
+        // 旧三件套手工摆放 (内容不重要——只被改名, 不会被打开)
+        std::fs::write(&path, b"old db bytes, never opened by reset").unwrap();
+        std::fs::write(db_sidecar_path(&path, "-wal"), b"old wal").unwrap();
+        std::fs::write(db_sidecar_path(&path, "-shm"), b"old shm").unwrap();
+
+        let (conn, quarantined) =
+            reset_and_rebuild(&path, TEST_TABLES, "测试: 三件套隔离").unwrap();
+        assert_eq!(quarantined.len(), 3, "主文件与两个 sidecar 都要隔离: {quarantined:?}");
+
+        // 同一时间戳: 两个 sidecar 的隔离路径 = 主隔离路径 + 同后缀
+        let qmain = quarantined
+            .iter()
+            .find(|p| {
+                let n = p.file_name().unwrap().to_string_lossy();
+                !n.ends_with("-wal") && !n.ends_with("-shm")
+            })
+            .expect("主文件隔离路径");
+        let qname = qmain.file_name().unwrap().to_string_lossy().to_string();
+        assert!(
+            qname.contains(".reset-"),
+            "隔离名形如 <path>.reset-<unix>: {qname}"
+        );
+        for sfx in ["-wal", "-shm"] {
+            let sidecar = db_sidecar_path(qmain, sfx);
+            assert!(
+                quarantined.contains(&sidecar) && sidecar.exists(),
+                "sidecar {sfx} 应随主文件同一时间戳隔离: {quarantined:?}"
+            );
+        }
+        assert!(qmain.exists(), "主隔离文件存在: {qmain:?}");
+        // 新库为空 schema
+        assert_eq!(meta_get(&conn, "version").as_deref(), Some(SCHEMA_VERSION));
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM alpha", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "重建的新库是空 schema");
+        // 隔离产物只在 <db> 同目录, 不碰别处
+        assert_eq!(
+            quarantine_files_in_dir(dir.path()).len(),
+            3,
+            "目录里恰好三个隔离文件"
+        );
+    }
+
+    /// 1.3: 重置日志同时给出触发原因与隔离路径, 并明说数据未迁入新库。
+    #[test]
+    fn reset_log_names_reason_quarantine_path_and_non_migration() {
+        let (dir, path) = temp_db("logcap.db");
+        {
+            let (conn, _) = open_and_sync(&path, TEST_TABLES).unwrap();
+            conn.execute_batch("ALTER TABLE alpha ADD COLUMN stale TEXT;")
+                .unwrap();
+        }
+
+        let buf: std::sync::Arc<std::sync::Mutex<Vec<u8>>> = Default::default();
+        {
+            let captured = SharedBuf(buf.clone());
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::WARN)
+                .with_writer(move || captured.clone())
+                .finish();
+            // 必须全局安装（进程内只此一处）：scoped dispatcher（with_default）
+            // 不参与 callsite interest 的全局缓存——并行的重置测试线程会抢先把
+            // 产品 warn! callsite 注册成 never，scoped subscriber 因此永远收不到
+            // 事件（捕获为空，测试顺序依赖）。全局 subscriber 注册时重建全部
+            // callsite 的 interest，此后首次注册的 callsite 也能看到它，捕获
+            // 因而是确定的。并行的重置测试可能同样写进缓冲，但断言只做
+            // contains，互不干扰。
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("进程内只允许这一处全局 subscriber");
+            let (_conn, outcome) = open_and_sync(&path, TEST_TABLES).unwrap();
+            assert!(
+                matches!(outcome, SyncOutcome::Reset { .. }),
+                "前置: 该场景应触发重置, 实际 {outcome:?}"
+            );
+        }
+        let logs = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+
+        assert!(logs.contains("stale"), "日志要点名触发列: {logs}");
+        let quarantined = quarantine_files_in_dir(dir.path());
+        assert_eq!(quarantined.len(), 1);
+        let qname = quarantined[0].file_name().unwrap().to_string_lossy();
+        assert!(
+            logs.contains(&*qname),
+            "日志要给出隔离路径 {qname}: {logs}"
+        );
+        assert!(logs.contains("未迁入"), "日志要明说数据未迁入新库: {logs}");
     }
 
     #[test]
@@ -592,6 +793,34 @@ mod tests {
         );
     }
 
+    /// 2.2: 未知版本格式 → 隔离而非删除, 隔离文件是可读的旧库。
+    #[test]
+    fn unknown_version_format_quarantines_file_instead_of_deleting() {
+        let (dir, path) = temp_db("badformat2.db");
+        {
+            let (conn, _) = open_and_sync(&path, TEST_TABLES).unwrap();
+            conn.execute(
+                "INSERT INTO alpha (id, name) VALUES ('a1', 'keepme')",
+                [],
+            )
+            .unwrap();
+            meta_set(&conn, "version_format", "semver");
+        }
+        let (_conn, outcome) = open_and_sync(&path, TEST_TABLES).unwrap();
+        assert!(
+            matches!(outcome, SyncOutcome::Reset { .. }),
+            "未知格式应重置, 实际 {outcome:?}"
+        );
+
+        let quarantined = quarantine_files_in_dir(dir.path());
+        assert_eq!(quarantined.len(), 1, "未知格式也应隔离而非删除: {quarantined:?}");
+        let qconn = conn::open_readonly(&quarantined[0]).unwrap();
+        let name: String = qconn
+            .query_row("SELECT name FROM alpha WHERE id = 'a1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(name, "keepme", "隔离文件应能读到重置前的行");
+    }
+
     #[test]
     fn version_value_differs_but_structure_matches_never_resets() {
         let (_dir, path) = temp_db("oldvalue.db");
@@ -644,6 +873,22 @@ mod tests {
         assert_eq!(
             after, garbage,
             "损坏库文件一个字节都不能动 (重置不适用于损坏)"
+        );
+    }
+
+    /// 2.3: 损坏路径绝不产生隔离文件 (重置只属于结构不兼容)。
+    #[test]
+    fn corrupt_db_refusal_produces_no_quarantine_files() {
+        let (dir, path) = temp_db("corrupt2.db");
+        std::fs::write(&path, b"this is definitely not a sqlite database").unwrap();
+
+        assert!(
+            open_and_sync(&path, TEST_TABLES).is_err(),
+            "损坏库必须拒启"
+        );
+        assert!(
+            quarantine_files_in_dir(dir.path()).is_empty(),
+            "损坏路径不得产生任何隔离文件"
         );
     }
 
