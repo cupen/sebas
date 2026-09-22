@@ -280,7 +280,7 @@ follow-up 修正，本文以 `cli.rs` 为准。
 
 ### 3.5 workspace crate 速查
 
-`src/` 里的 `*_cmd.rs` 只是进程的门；实体多在门后一跳的 crate 里。10 个成员
+`src/` 里的 `*_cmd.rs` 只是进程的门；实体多在门后一跳的 crate 里。14 个成员
 （`Cargo.toml` `members`）：
 
 | crate | 一句话职责 |
@@ -290,11 +290,15 @@ follow-up 修正，本文以 `cli.rs` 为准。
 | `sebas-webui` | WebUI dashboard 服务端：axum 路由/SSE/登录鉴权；会话读写全部走 `SessionBackend` seam（进程内或通道客户端），不依赖根 crate |
 | `sebas-im` | IM 服务层：飞书装配入口（`bootstrap`）与交互前端/端口抽象（`frontend`/`port`），经核心会话通道驱动会话 |
 | `sebas-feishu` | 飞书接入：WS 事件、卡片渲染（`sebas_feishu::cards`）、出站 API 客户端 |
+| `sebas-node` | 远程执行节点二进制（`add-remote-execution-node`）：出站 WS 连回主控，在节点机本地承载 ACP 会话；依赖隔离是硬约束——只依赖 `sebas-startup`/`sebas-node-link`/`sebas-acp`，不含任何主控角色实现 |
 | `sebas-acp` | ACP agent 驱动：claude 专用驱动 + 通用 ACP 驱动（`SessionManager`/`AgentDriver`） |
 | `sebas-agent` | 原生 in-process coding agent 内核：LLM 客户端、工具、权限策略、turn 状态机 |
 | `sebas-dispatch` | core 内会话分发领域层：`DispatchHandle`、状态库（`state_store`）、卡片状态机/命令/表单 |
 | `sebas-channels` | 通道抽象：`ChannelAdapter` trait + `AdapterRegistry`（core 只依赖这里的类型） |
 | `sebas-ipc` | 跨平台本地 IPC 传输原语（`IpcListener`/`IpcStream`；Unix socket / Windows named pipe），三通道共用 |
+| `sebas-node-link` | 主控 ↔ 节点的链路契约类型：协议版本、握手、能力清单、拒绝码（两侧共依赖同一份定义，运行时各自实现；兼容性演进规则见 crate 文档） |
+| `sebas-startup` | 统一启动失败退出路径（stderr 末行 + `SEBAS_STARTUP_ERROR_FILE` 摘要 + `EX_TEMPFAIL` 75），主控与节点两个二进制共用的叶子（`fail-fast-on-startup-errors`） |
+| `sebas-schema-derive` | proc-macro crate：`#[derive(SchemaColumns)]` 从 `*Row` struct 提取 SQLite 列元数据——model struct 即建表事实源（`sqlite-auto-schema-sync`） |
 | `xtask` | 构建期工具（模型表更新、文档检查） |
 
 ## 4. 排查指路（走错通道的三种典型症状）
