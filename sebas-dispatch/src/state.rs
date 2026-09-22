@@ -2014,35 +2014,35 @@ mod spawning_settle_tests {
         assert_eq!(redispatched, 2, "两个占位各自重投一次");
 
         // 重投 = 指令重发：空 prompt（激活语义）+ 创建时记住的参数。
-        match first_out(&mut out_rx).await {
-            Out::WebSpawn {
-                key,
-                prompt,
-                project_dir,
-                kind,
-                model,
-                mode,
-            } => {
-                assert_eq!(key.reference, "web-restore-sp");
-                assert_eq!(key.channel_str(), "web");
-                assert_eq!(prompt, "", "重投走激活语义，不带首轮 prompt");
-                assert_eq!(project_dir.as_deref(), Some("/tmp/proj-settle"));
-                assert_eq!(kind.as_deref(), Some("claude"));
-                assert_eq!(model.as_deref(), Some("sonnet-x"));
-                assert_eq!(mode.as_deref(), Some("edit"));
+        // settle_restored_spawning 遍历 HashMap，投递顺序不定——收齐两条后
+        // 按 reference 归位断言，不做顺序假设。
+        let mut spawns = Vec::new();
+        for _ in 0..2 {
+            match first_out(&mut out_rx).await {
+                Out::WebSpawn {
+                    key,
+                    prompt,
+                    project_dir,
+                    kind,
+                    model,
+                    mode,
+                } => spawns.push((key, prompt, project_dir, kind, model, mode)),
+                other => panic!("expected WebSpawn, got {other:?}"),
             }
-            other => panic!("expected WebSpawn, got {other:?}"),
         }
-        match first_out(&mut out_rx).await {
-            Out::WebSpawn {
-                key, kind, model, ..
-            } => {
-                assert_eq!(key.reference, "web-restore-sp-bare");
-                assert_eq!(kind.as_deref(), Some("opencode"));
-                assert_eq!(model, None, "未记模型的占位如实不带 model");
-            }
-            other => panic!("expected WebSpawn, got {other:?}"),
-        }
+        spawns.sort_by(|a, b| a.0.reference.cmp(&b.0.reference));
+        let (key, prompt, project_dir, kind, model, mode) = &spawns[0];
+        assert_eq!(key.reference, "web-restore-sp");
+        assert_eq!(key.channel_str(), "web");
+        assert_eq!(prompt, "", "重投走激活语义，不带首轮 prompt");
+        assert_eq!(project_dir.as_deref(), Some("/tmp/proj-settle"));
+        assert_eq!(kind.as_deref(), Some("claude"));
+        assert_eq!(model.as_deref(), Some("sonnet-x"));
+        assert_eq!(mode.as_deref(), Some("edit"));
+        let (bare_key, _, _, bare_kind, bare_model, _) = &spawns[1];
+        assert_eq!(bare_key.reference, "web-restore-sp-bare");
+        assert_eq!(bare_kind.as_deref(), Some("opencode"));
+        assert!(bare_model.is_none(), "未记模型的占位如实不带 model");
 
         // 占位标记已消费：重新进入 spawn 流程（spec 允许的落定形态），后续
         // 消息在 spawn 窗口内走 staging，不再误判成占位首条消息二次 spawn。
