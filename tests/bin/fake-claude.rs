@@ -288,7 +288,11 @@ impl Io {
                 "dir": dir, "scenario": self.scenario, "msg": v
             }))
             .unwrap();
-            let _ = writeln!(j, "{line}");
+            // O_APPEND 下单条 write 原子——先攒齐整行再一次 write_all，
+            // 多次 writeln! 的分段写会在双子进程并发 append 时交错成坏行。
+            let mut buf = line.into_bytes();
+            buf.push(b'\n');
+            let _ = j.write_all(&buf);
             let _ = j.flush();
         }
     }

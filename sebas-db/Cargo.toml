@@ -1,0 +1,20 @@
+[package]
+name = "sebas-db"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+
+# 持久层 runtime（extract-sebas-db）：连接配方、schema 原语与启动同步、
+# 单写 actor、泛型 Record trait。叶子 crate——不得依赖任何 sebas-* crate
+# （域无关纪律，见根 crate tests/persistence_runtime_test.rs 的机械断言）。
+[dependencies]
+# bundled SQLite（与 workspace 其他 crate 同版本同特性）。
+rusqlite = { version = "0.40", features = ["bundled"] }
+# 单写 actor 的 mpsc / oneshot（仅 sync 原语，不带运行时）。
+tokio = { version = "1.40", features = ["sync"] }
+tracing = "0.1"
+
+[dev-dependencies]
+# actor 单测的 #[tokio::test]（rt + macros 仅测试需要）。
+tokio = { version = "1.40", features = ["rt", "macros"] }
+tempfile = "3"

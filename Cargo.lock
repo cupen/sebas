@@ -2830,11 +2830,13 @@ dependencies = [
  "sebas-acp",
  "sebas-agent",
  "sebas-channels",
+ "sebas-db",
  "sebas-dispatch",
  "sebas-domain",
  "sebas-feishu",
  "sebas-im",
  "sebas-ipc",
+ "sebas-models",
  "sebas-node",
  "sebas-node-link",
  "sebas-router",
@@ -2904,6 +2906,16 @@ dependencies = [
  "serde_json",
  "tokio",
  "urlencoding",
+]
+
+[[package]]
+name = "sebas-db"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2979,6 +2991,19 @@ dependencies = [
  "interprocess",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "sebas-models"
+version = "0.1.0"
+dependencies = [
+ "sebas-db",
+ "sebas-domain",
+ "sebas-schema-derive",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
 ]
 
 [[package]]
@@ -3071,10 +3096,12 @@ dependencies = [
  "rust-embed",
  "sebas-acp",
  "sebas-channels",
+ "sebas-db",
  "sebas-dispatch",
  "sebas-domain",
  "sebas-feishu",
  "sebas-router",
+ "sebas-schema-derive",
  "serde",
  "serde_json",
  "sha2 0.11.0",

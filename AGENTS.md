@@ -35,6 +35,34 @@ bd dolt push            # Push beads data to remote
   2. Exception: few commits and no new feature → rebase onto `main` and
      fast-forward (no merge commit).
 
+## Crate 速查表（持久层与共享层）
+
+| Crate | 定位 |
+|---|---|
+| `sebas-domain` | 中立共享域层：跨角色域概念的唯一定义处（准入：≥2 个 crate 需要 + 角色中立）。 |
+| `sebas-db` | **持久层 runtime**（唯一提供者）：连接配方（WAL + busy_timeout=5s + foreign_keys=ON）、schema 原语与启动同步、单写 actor（`StateWriter`/`StateHandle`）、泛型 `Record` trait。**域无关**：不知道任何域表/域类型；叶子 crate（`cargo tree -p sebas-db` 不得出现 sebas-*，机械断言在 `tests/persistence_runtime_test.rs`）。 |
+| `sebas-models` | core 各表的 **ActiveRecord struct**（一表一 struct、一行一实例）+ 返回 struct 实例的域查询。依赖 `sebas-db`/`sebas-domain`；`sebas-node` 不依赖它（节点依赖图里没有 SQLite）。 |
+| 根 crate `sebas_state` | 域接线：五表注册表（手写 DDL，`CREATE TABLE` 只允许在这里）、`DbStateEngine`（dispatch 端口实现）、`StateWriter` 域包装、PersistedState/CardConfig 存储胶水。 |
+| `sebas-webui` / `sebas-router` | 各自的行 struct 按写入者归属：`User`/`UserRow`（auth.db）在 webui，`UsageRecord`（usage.db）在 router。 |
+
+准入规则（extract-sebas-db，spec `persistence-runtime`）：
+
+1. **任何组件要开 SQLite，连接一律从 `sebas_db::conn` 取**，不得本地拼
+   pragma；schema 同步/版本戳只用 `sebas_db::schema`，工作区内不允许第二份
+   表 diff 或版本机制实现。
+2. **标准 CRUD 零手写 SQL**：表 struct 挂 `#[derive(SchemaColumns,
+   ActiveRecord)]`（生成 save/find/all/delete，复合主键生成 find_by/
+   delete_by），定义在消费方 crate（core 表在 `sebas-models`）；非标准查询
+   （排序、聚合、按非键列条件）可手写 SQL，但必须返回表 struct 实例或标量，
+   禁止 `Map<String, Value>` 式无类型载体。
+3. **模式统一、归属按写入者**：auth.db / usage.db 的模型不进
+   `sebas-models`——同一个 trait + derive 在写入者 crate 内生成 impl；
+   多表原子性经 `StateHandle::exec` 闭包（unit-of-work）表达。
+4. **事务行为调用方自选**：`sebas.db` 走单写线程 + 默认 deferred；
+   auth.db 自持 `Mutex` + `sebas_db::conn::transaction_immediate`——共享层
+   不替调用方改选，也不统一两库的版本机制（`schema_meta` 日期戳 vs
+   `user_version`，统一已推迟）。
+
 ## Frontend/Backend Integration Testing (联调)
 
 Backend changes count as done only after verification against the real

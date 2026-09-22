@@ -1,0 +1,25 @@
+[package]
+name = "sebas-models"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+
+# core 各表的 ActiveRecord struct（extract-sebas-db D2）：一表一 struct、
+# 一行一实例。impl 与 struct 同 crate（孤儿规则），而 impl 依赖 rusqlite——
+# 放 sebas-db 会让 runtime 认识域表，放根 crate 则 webui 够不着，故独立成库。
+# 消费方是 core 与 webui；sebas-node 不依赖它（节点依赖图里没有 SQLite）。
+[dependencies]
+# 持久层 runtime：连接/同步/单写 actor + ActiveRecord 生成代码引用的
+# `::sebas_db::record::Record`。
+sebas-db = { path = "../sebas-db" }
+# `ProjectRow::to_entry` / `From<&ProjectEntry>` 与 runtime_state 的
+# ProviderMode / DefaultSelection 词表。
+sebas-domain = { path = "../sebas-domain" }
+# ActiveRecord 生成器（SchemaColumns + ActiveRecord）。
+sebas-schema-derive = { path = "../sebas-schema-derive" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+
+[dev-dependencies]
+tempfile = "3"

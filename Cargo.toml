@@ -6,7 +6,7 @@ rust-version = "1.90"
 
 [workspace]
 resolver = "2"
-members = ["sebas-im", "sebas-dispatch", "sebas-feishu", "sebas-acp", "sebas-router", "sebas-webui", "sebas-ipc", "sebas-startup", "sebas-node", "sebas-node-link", "xtask", "sebas-agent", "sebas-channels", "sebas-schema-derive", "sebas-domain"]
+members = ["sebas-im", "sebas-dispatch", "sebas-feishu", "sebas-acp", "sebas-router", "sebas-webui", "sebas-ipc", "sebas-startup", "sebas-node", "sebas-node-link", "xtask", "sebas-agent", "sebas-channels", "sebas-schema-derive", "sebas-domain", "sebas-db", "sebas-models"]
 
 # Debug profile: 产物最小化
 [profile.dev]
@@ -43,6 +43,10 @@ sebas-node-link = { path = "sebas-node-link" }
 sebas-schema-derive = { path = "sebas-schema-derive" }
 # 中立共享域层：跨角色域概念的唯一定义处（add-domain-layer）。
 sebas-domain = { path = "sebas-domain" }
+# 持久层 runtime：连接配方 / schema 同步 / 单写 actor 的唯一提供者（extract-sebas-db）。
+sebas-db = { path = "sebas-db" }
+# core 各表的 ActiveRecord struct 与域查询（extract-sebas-db D2）。
+sebas-models = { path = "sebas-models" }
 tokio = { version = "1.40", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

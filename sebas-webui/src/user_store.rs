@@ -4,11 +4,21 @@
 //! # 存储形态
 //!
 //! 独立 SQLite 文件：默认 `~/.sebas/auth.db`，`SEBAS_WEBUI_AUTH_DB` 环境变量
-//! 覆盖（沙箱/测试隔离，与 `SEBAS_STATE_DB` 同一模式）。连接配方复用
-//! `sebas_state/db.rs` 的既有组合：rusqlite bundled、WAL、busy_timeout=5s、
-//! foreign_keys=ON，schema 版本走 `PRAGMA user_version`（当前 = 1）。
+//! 覆盖（沙箱/测试隔离，与 `SEBAS_STATE_DB` 同一模式）。连接配方**取自共享
+//! 持久层**（extract-sebas-db：`sebas_db::conn::open`——rusqlite bundled、
+//! WAL、busy_timeout=5s、foreign_keys=ON），本模块不再手抄 pragma 组合；
+//! schema 版本保留自己的 `PRAGMA user_version` 机制（当前 = 1，design D6：
+//! 版本机制统一已推迟，本 change 不改 auth.db 的兼容性行为）。事务保留
+//! `TransactionBehavior::Immediate` 语义（经 `sebas_db::conn::
+//! transaction_immediate`，design D5：调用方的选择原样保留）。
 //! 单 `Connection` 包在 `std::sync::Mutex` 里同步调用——鉴权流量是每请求
 //! 一次主键查询（进程内 SQLite，µs 级），不值得 spawn_blocking 池。
+//!
+//! # 行映射
+//!
+//! `users` 表一行对应一个 [`UserRow`]（ActiveRecord，标准 CRUD 由 derive
+//! 生成）；服务端内部形状 [`UserRecord`] 与 DB 形状互相转换（角色词表、
+//! hex 盐/哈希的解析在转换处完成，词表外/坏 hex 视为记录损坏）。
 //!
 //! # 密码
 //!
@@ -24,7 +34,9 @@
 //!   非零用户一律拒绝（[`StoreError::AlreadyInitialized`] → 409）。
 
 use crate::rbac::Role;
-use rusqlite::{Connection, OpenFlags, TransactionBehavior};
+use rusqlite::Connection;
+use sebas_db::record::Record;
+use sebas_schema_derive::{ActiveRecord, SchemaColumns};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -165,6 +177,60 @@ pub struct UserInfo {
     pub updated_at_unix: i64,
 }
 
+// ─── DB 行形状（extract-sebas-db 5.2：一表一 struct，标准 CRUD 由 derive 生成）───
+
+/// `users` 表的一行。字段即列（`SCHEMA_SQL` 的形状）；`id` 用 `Option`
+/// 承载自增主键的「未赋值」插入形态（`id = NULL` → SQLite 分配 rowid）。
+#[derive(Debug, Clone, PartialEq, Eq, SchemaColumns, ActiveRecord)]
+#[active_record(table = "users")]
+#[active_record(pk = "id")]
+struct UserRow {
+    id: Option<i64>,
+    username: String,
+    role: String,
+    iterations: i64,
+    salt_hex: String,
+    hash_hex: String,
+    enabled: bool,
+    created_at_unix: i64,
+    updated_at_unix: i64,
+}
+
+impl TryFrom<UserRow> for UserRecord {
+    type Error = StoreError;
+
+    fn try_from(row: UserRow) -> Result<Self, StoreError> {
+        let corrupt = |detail: String| StoreError::CorruptRecord(detail);
+        Ok(UserRecord {
+            id: row.id.ok_or_else(|| corrupt("id 列为 NULL".into()))?,
+            username: row.username,
+            role: row.role.parse().map_err(|e| corrupt(format!("role: {e}")))?,
+            iterations: row.iterations as u32,
+            salt: hex::decode(&row.salt_hex).map_err(|e| corrupt(format!("salt_hex: {e}")))?,
+            hash: hex::decode(&row.hash_hex).map_err(|e| corrupt(format!("hash_hex: {e}")))?,
+            enabled: row.enabled,
+            created_at_unix: row.created_at_unix,
+            updated_at_unix: row.updated_at_unix,
+        })
+    }
+}
+
+impl From<&UserRecord> for UserRow {
+    fn from(r: &UserRecord) -> Self {
+        UserRow {
+            id: Some(r.id),
+            username: r.username.clone(),
+            role: r.role.as_str().to_string(),
+            iterations: r.iterations as i64,
+            salt_hex: hex::encode(&r.salt),
+            hash_hex: hex::encode(&r.hash),
+            enabled: r.enabled,
+            created_at_unix: r.created_at_unix,
+            updated_at_unix: r.updated_at_unix,
+        }
+    }
+}
+
 // ─── 错误 ───────────────────────────────────────────────────────────────────
 
 /// 用户库操作错误。`UsernameTaken` / `LastRoot` / `NotFound` 是 handler 侧
@@ -274,30 +340,18 @@ impl UserStore {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(StoreError::Io)?;
         }
-        let conn = Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
-        )
-        .map_err(StoreError::Sql)?;
-
-        // 与 sebas_state/db.rs 同一配方（design D1）。
-        conn.pragma_update(None, "journal_mode", "wal")
-            .map_err(StoreError::Sql)?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))
-            .map_err(StoreError::Sql)?;
-        conn.pragma_update(None, "foreign_keys", "ON")
-            .map_err(StoreError::Sql)?;
+        // 连接配方取自共享持久层（extract-sebas-db 5.1：WAL + busy_timeout=5s
+        // + foreign_keys=ON），不再手抄 pragma 组合。
+        let conn = sebas_db::conn::open(path).map_err(StoreError::Sql)?;
 
         // user_version 迁移：0（新库）→ 建表；更高版本 = 未来二进制所建，拒绝。
-        let version: i64 = conn
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .map_err(StoreError::Sql)?;
+        // 版本机制保留本库自己的 user_version 语义（design D6，统一已推迟）。
+        let version = sebas_db::conn::user_version(&conn).map_err(StoreError::Sql)?;
         if version > SCHEMA_VERSION {
             return Err(StoreError::IncompatibleVersion(version));
         }
         conn.execute_batch(SCHEMA_SQL).map_err(StoreError::Sql)?;
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)
-            .map_err(StoreError::Sql)?;
+        sebas_db::conn::set_user_version(&conn, SCHEMA_VERSION).map_err(StoreError::Sql)?;
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -318,28 +372,29 @@ impl UserStore {
         })
     }
 
-    /// 全量用户列表（按 id 升序）。**不含哈希字段**（[`UserInfo`] 形状保证）。
+    /// 全量用户列表（按 id 升序——rowid 序）。**不含哈希字段**
+    /// （[`UserInfo`] 形状保证）：行经生成的 `UserRow::all` 读出后再投影。
     pub fn list(&self) -> Result<Vec<UserInfo>, StoreError> {
         self.with_conn(|conn| {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT id, username, role, enabled, created_at_unix, updated_at_unix
-                     FROM users ORDER BY id",
-                )
-                .map_err(StoreError::Sql)?;
-            let rows = stmt
-                .query_map([], |row| {
+            UserRow::all(conn)
+                .map_err(StoreError::Sql)?
+                .into_iter()
+                .map(|row| {
                     Ok(UserInfo {
-                        id: row.get(0)?,
-                        username: row.get(1)?,
-                        role: role_col(row, 2)?,
-                        enabled: row.get::<_, i64>(3)? != 0,
-                        created_at_unix: row.get(4)?,
-                        updated_at_unix: row.get(5)?,
+                        id: row
+                            .id
+                            .ok_or_else(|| StoreError::CorruptRecord("id 列为 NULL".into()))?,
+                        role: row
+                            .role
+                            .parse()
+                            .map_err(|e| StoreError::CorruptRecord(format!("role: {e}")))?,
+                        username: row.username,
+                        enabled: row.enabled,
+                        created_at_unix: row.created_at_unix,
+                        updated_at_unix: row.updated_at_unix,
                     })
                 })
-                .map_err(StoreError::Sql)?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
+                .collect()
         })
     }
 
@@ -349,16 +404,16 @@ impl UserStore {
     }
 
     /// 按用户名取完整记录（大小写不敏感）；不存在返回 `None`。
+    /// username 是 UNIQUE 列而非主键——按非键列条件的查询保留手写 SQL，
+    /// 但行经 [`UserRow`]（`Record::from_row`）解出。
     pub fn get_by_username(&self, username: &str) -> Result<Option<UserRecord>, StoreError> {
         self.with_conn(|conn| {
-            match conn.query_row(
-                "SELECT id, username, role, iterations, salt_hex, hash_hex, enabled,
-                        created_at_unix, updated_at_unix
-                 FROM users WHERE username = ?1",
-                [username],
-                row_record,
-            ) {
-                Ok(record) => Ok(Some(record)),
+            let sql = format!(
+                "SELECT {} FROM users WHERE username = ?1",
+                <UserRow as Record>::COLUMNS.join(", ")
+            );
+            match conn.query_row(&sql, [username], UserRow::from_row) {
+                Ok(row) => Ok(Some(row.try_into()?)),
                 Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
                 Err(e) => Err(StoreError::Sql(e)),
             }
@@ -387,24 +442,20 @@ impl UserStore {
         let ph = hash_password_with(password, iterations);
         let now = now_unix();
         self.with_conn(|conn| {
-            let tx = conn
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(StoreError::Sql)?;
-            tx.execute(
-                "INSERT INTO users
-                     (username, role, iterations, salt_hex, hash_hex, enabled,
-                      created_at_unix, updated_at_unix)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?6)",
-                rusqlite::params![
-                    username,
-                    role.as_str(),
-                    ph.iterations as i64,
-                    hex::encode(&ph.salt),
-                    hex::encode(&ph.hash),
-                    now
-                ],
-            )
-            .map_err(map_constraint)?;
+            let tx = sebas_db::conn::transaction_immediate(conn).map_err(StoreError::Sql)?;
+            // id = None → INSERT 走自增 rowid（NULL 不命中 ON CONFLICT）。
+            let row = UserRow {
+                id: None,
+                username: username.clone(),
+                role: role.as_str().to_string(),
+                iterations: ph.iterations as i64,
+                salt_hex: hex::encode(&ph.salt),
+                hash_hex: hex::encode(&ph.hash),
+                enabled: true,
+                created_at_unix: now,
+                updated_at_unix: now,
+            };
+            row.save(&tx).map_err(map_constraint)?;
             let id = tx.last_insert_rowid();
             tx.commit().map_err(StoreError::Sql)?;
             Ok(UserInfo {
@@ -439,29 +490,25 @@ impl UserStore {
         let ph = hash_password_with(password, iterations);
         let now = now_unix();
         self.with_conn(|conn| {
-            let tx = conn
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(StoreError::Sql)?;
+            let tx = sebas_db::conn::transaction_immediate(conn).map_err(StoreError::Sql)?;
             let count: i64 = tx
                 .query_row("SELECT COUNT(*) FROM users", [], |row| row.get(0))
                 .map_err(StoreError::Sql)?;
             if count > 0 {
                 return Err(StoreError::AlreadyInitialized);
             }
-            tx.execute(
-                "INSERT INTO users
-                     (username, role, iterations, salt_hex, hash_hex, enabled,
-                      created_at_unix, updated_at_unix)
-                 VALUES (?1, 'root', ?2, ?3, ?4, 1, ?5, ?5)",
-                rusqlite::params![
-                    username,
-                    ph.iterations as i64,
-                    hex::encode(&ph.salt),
-                    hex::encode(&ph.hash),
-                    now
-                ],
-            )
-            .map_err(map_constraint)?;
+            let row = UserRow {
+                id: None,
+                username: username.clone(),
+                role: Role::Root.as_str().to_string(),
+                iterations: ph.iterations as i64,
+                salt_hex: hex::encode(&ph.salt),
+                hash_hex: hex::encode(&ph.hash),
+                enabled: true,
+                created_at_unix: now,
+                updated_at_unix: now,
+            };
+            row.save(&tx).map_err(map_constraint)?;
             let id = tx.last_insert_rowid();
             tx.commit().map_err(StoreError::Sql)?;
             Ok(id)
@@ -496,9 +543,7 @@ impl UserStore {
     /// 修改角色。目标是最后一个启用的 root 且在降级 → [`StoreError::LastRoot`]。
     pub fn set_role(&self, user_id: i64, role: Role) -> Result<(), StoreError> {
         self.with_conn(|conn| {
-            let tx = conn
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(StoreError::Sql)?;
+            let tx = sebas_db::conn::transaction_immediate(conn).map_err(StoreError::Sql)?;
             let target = fetch_record(&tx, user_id)?;
             if target.role == Role::Root && role != Role::Root && enabled_root_count(&tx)? <= 1 {
                 return Err(StoreError::LastRoot);
@@ -516,9 +561,7 @@ impl UserStore {
     /// 启用/禁用。禁用最后一个启用的 root → [`StoreError::LastRoot`]。
     pub fn set_enabled(&self, user_id: i64, enabled: bool) -> Result<(), StoreError> {
         self.with_conn(|conn| {
-            let tx = conn
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(StoreError::Sql)?;
+            let tx = sebas_db::conn::transaction_immediate(conn).map_err(StoreError::Sql)?;
             let target = fetch_record(&tx, user_id)?;
             if !enabled && target.role == Role::Root && enabled_root_count(&tx)? <= 1 {
                 return Err(StoreError::LastRoot);
@@ -536,15 +579,12 @@ impl UserStore {
     /// 删除用户。目标是最后一个启用的 root → [`StoreError::LastRoot`]。
     pub fn delete(&self, user_id: i64) -> Result<(), StoreError> {
         self.with_conn(|conn| {
-            let tx = conn
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(StoreError::Sql)?;
+            let tx = sebas_db::conn::transaction_immediate(conn).map_err(StoreError::Sql)?;
             let target = fetch_record(&tx, user_id)?;
             if target.role == Role::Root && enabled_root_count(&tx)? <= 1 {
                 return Err(StoreError::LastRoot);
             }
-            tx.execute("DELETE FROM users WHERE id = ?1", [user_id])
-                .map_err(StoreError::Sql)?;
+            UserRow::delete(&tx, user_id).map_err(StoreError::Sql)?;
             tx.commit().map_err(StoreError::Sql)?;
             Ok(())
         })
@@ -569,17 +609,11 @@ impl UserStore {
 
 /// 事务内按主键取记录（供 LastRoot 判定前的目标读取）。
 fn fetch_record(conn: &Connection, user_id: i64) -> Result<UserRecord, StoreError> {
-    conn.query_row(
-        "SELECT id, username, role, iterations, salt_hex, hash_hex, enabled,
-                created_at_unix, updated_at_unix
-         FROM users WHERE id = ?1",
-        [user_id],
-        row_record,
-    )
-    .map_err(|e| match e {
-        rusqlite::Error::QueryReturnedNoRows => StoreError::NotFound,
-        other => StoreError::Sql(other),
-    })
+    match UserRow::find(conn, user_id) {
+        Ok(Some(row)) => row.try_into(),
+        Ok(None) => Err(StoreError::NotFound),
+        Err(e) => Err(StoreError::Sql(e)),
+    }
 }
 
 /// 当前启用的 root 数（LastRoot 保护的判定基准）。
@@ -590,43 +624,6 @@ fn enabled_root_count(conn: &Connection) -> Result<i64, StoreError> {
         |row| row.get(0),
     )
     .map_err(StoreError::Sql)
-}
-
-fn row_record(row: &rusqlite::Row) -> rusqlite::Result<UserRecord> {
-    Ok(UserRecord {
-        id: row.get(0)?,
-        username: row.get(1)?,
-        role: role_col(row, 2)?,
-        iterations: row.get::<_, i64>(3)? as u32,
-        salt: hex_col(row, 4)?,
-        hash: hex_col(row, 5)?,
-        enabled: row.get::<_, i64>(6)? != 0,
-        created_at_unix: row.get(7)?,
-        updated_at_unix: row.get(8)?,
-    })
-}
-
-/// 读取角色列；词表外视为记录损坏（防御手工改库，不 panic）。
-fn role_col(row: &rusqlite::Row, idx: usize) -> rusqlite::Result<Role> {
-    let raw: String = row.get(idx)?;
-    raw.parse::<Role>().map_err(|e| {
-        rusqlite::Error::FromSqlConversionFailure(
-            idx,
-            rusqlite::types::Type::Text,
-            Box::new(StoreError::CorruptRecord(e.to_string())),
-        )
-    })
-}
-
-fn hex_col(row: &rusqlite::Row, idx: usize) -> rusqlite::Result<Vec<u8>> {
-    let raw: String = row.get(idx)?;
-    hex::decode(raw).map_err(|e| {
-        rusqlite::Error::FromSqlConversionFailure(
-            idx,
-            rusqlite::types::Type::Text,
-            Box::new(StoreError::CorruptRecord(format!("hex decode: {e}"))),
-        )
-    })
 }
 
 // ─── 测试 ──────────────────────────────────────────────────────────────────
@@ -851,6 +848,32 @@ mod tests {
         }
     }
 
+    /// extract-sebas-db 5.3：auth.db 的连接配方断言（与 sebas.db 同形）——
+    /// 配方改由 `sebas_db::conn::open` 提供，三个 pragma 读数与改造前一致。
+    /// journal_mode 持久在文件头，busy_timeout / foreign_keys 是连接级
+    /// pragma——所以在 store 自己的连接上读，不用旁路连接。
+    #[test]
+    fn auth_db_connection_recipe_pragmas_match_shared_layer() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_test_store(dir.path(), "pragma.db");
+        let conn = store.conn.lock().unwrap();
+
+        let journal: String = conn
+            .pragma_query_value(None, "journal_mode", |r| r.get(0))
+            .unwrap();
+        assert_eq!(journal, "wal");
+
+        let timeout: i64 = conn
+            .pragma_query_value(None, "busy_timeout", |r| r.get(0))
+            .unwrap();
+        assert_eq!(timeout, 5000, "busy_timeout must be exactly 5000ms");
+
+        let fk: i64 = conn
+            .pragma_query_value(None, "foreign_keys", |r| r.get(0))
+            .unwrap();
+        assert_eq!(fk, 1, "foreign_keys should be ON");
+    }
+
     /// spec 场景「密码不落明文」：建户/改密后，db 文件字节里检索不到明文，
     /// 且新哈希可验证、旧密码失效。
     #[test]
@@ -1019,8 +1042,9 @@ mod tests {
         let path = dir.path().join("future.db");
         {
             let raw = rusqlite::Connection::open(&path).unwrap();
-            raw.pragma_update(None, "user_version", SCHEMA_VERSION + 1)
-                .unwrap();
+            // extract-sebas-db 5.5：写版本一律经共享原语（语义与原来的
+            // 手写 pragma 调用完全一致——只是不再在本 crate 自建连接机制）。
+            sebas_db::conn::set_user_version(&raw, SCHEMA_VERSION + 1).unwrap();
         }
         let err = UserStore::open_with_iterations(&path, 1000).unwrap_err();
         assert!(

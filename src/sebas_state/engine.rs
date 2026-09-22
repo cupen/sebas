@@ -1,6 +1,10 @@
 //! DB 引擎实现 StateStoreEngine trait。
 //!
-//! 通过 `StateHandle` 将 async 请求派发到 DB 写者线程。
+//! 通过 `StateHandle` 将 async 请求派发到 DB 写者线程。存储侧动作经
+//! `sebas_models` 的 ActiveRecord / 域查询完成（extract-sebas-db 4.3：
+//! 在 `handle.exec` 闭包里调用生成的方法）；dispatch 的端口 trait 与
+//! `MemoryEngine` 测试替身不变——ActiveRecord 是存储侧实现模式，不是
+//! 跨进程 API 的变化（design D3b）。
 
 use crate::sebas_state::writer::StateHandle;
 use sebas_dispatch::state_store::{PersistedState, StateStoreEngine};
@@ -61,7 +65,7 @@ impl StateStoreEngine for DbStateEngine {
     async fn load_projects(&self) -> Result<Vec<Value>, String> {
         self.handle
             .exec(|conn| {
-                crate::sebas_state::repo::load_projects(conn).map(|rows| {
+                sebas_models::project::load_projects(conn).map(|rows| {
                     rows.into_iter()
                         .map(|r| serde_json::to_value(&r).unwrap_or_default())
                         .collect()
@@ -71,12 +75,12 @@ impl StateStoreEngine for DbStateEngine {
     }
 
     async fn save_projects(&self, projects: Vec<Value>) -> Result<(), String> {
-        let rows: Vec<crate::sebas_state::repo::ProjectRow> = projects
+        let rows: Vec<sebas_models::project::ProjectRow> = projects
             .into_iter()
             .filter_map(|v| serde_json::from_value(v).ok())
             .collect();
         self.handle
-            .exec(move |conn| crate::sebas_state::repo::save_projects(conn, &rows))
+            .exec(move |conn| sebas_models::project::save_projects(conn, &rows))
             .await?;
         sebas_dispatch::state_store::notify_change("projects");
         Ok(())
@@ -87,7 +91,7 @@ impl StateStoreEngine for DbStateEngine {
         let agent = agent.to_string();
         self.handle
             .exec(move |conn| {
-                crate::sebas_state::repo::set_project_default_agent(conn, &id, &agent)
+                sebas_models::project::set_project_default_agent(conn, &id, &agent)
             })
             .await?;
         sebas_dispatch::state_store::notify_change("projects");
@@ -98,7 +102,7 @@ impl StateStoreEngine for DbStateEngine {
         let p = path.to_string();
         let n = name.to_string();
         self.handle
-            .exec(move |conn| crate::sebas_state::repo::add_project(conn, &p, &n, added_at))
+            .exec(move |conn| sebas_models::project::add_project(conn, &p, &n, added_at))
             .await?;
         sebas_dispatch::state_store::notify_change("projects");
         Ok(())
@@ -108,7 +112,7 @@ impl StateStoreEngine for DbStateEngine {
         let p = path.to_string();
         let removed = self
             .handle
-            .exec(move |conn| crate::sebas_state::repo::remove_project(conn, &p))
+            .exec(move |conn| sebas_models::project::remove_project(conn, &p))
             .await?;
         if removed {
             sebas_dispatch::state_store::notify_change("projects");

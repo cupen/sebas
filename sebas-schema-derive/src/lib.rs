@@ -1,10 +1,10 @@
 //! `#[derive(SchemaColumns)]`: 编译期从 struct 字段提取 SQLite 列元数据。
 //!
 //! model struct 即 schema 的单一事实源 (sqlite-auto-schema-sync D1)。挂在
-//! `sebas` 主 crate 的 `*Row` struct 上, 为其生成:
+//! 任意 crate 的 `*Row` struct 上, 为其生成:
 //!
 //! ```ignore
-//! fn schema_columns() -> &'static [crate::sebas_state::migration::SchemaColumn]
+//! fn schema_columns() -> &'static [::sebas_db::schema::SchemaColumn]
 //! ```
 //!
 //! # 类型映射
@@ -33,19 +33,41 @@
 //! - `not_null` 且无常量默认值。
 //! - 类型不在映射内。
 //!
-//! 注意: 生成的代码引用 `crate::sebas_state::migration::SchemaColumn`,
-//! 因此本 derive 只能在 `sebas` 主 crate 内使用 (proc-macro crate 不能
+//! 注意: 生成的代码引用 `::sebas_db::schema::SchemaColumn`（extract-sebas-db
+//! D3——共享持久层 crate 是唯一的元数据落点），因此使用方只需依赖
+//! `sebas-db`；derive 首次可在工作区任意 crate 使用 (proc-macro crate 不能
 //! 导出普通类型, SchemaColumn 无法定义在本 crate)。
+//!
+//! # `#[derive(ActiveRecord)]`
+//!
+//! 在 `SchemaColumns`（列元数据）之上生成对象风格 CRUD（design D3/D3b）：
+//!
+//! - `impl ::sebas_db::record::Record for T`（表名、主键、`to_params` /
+//!   `from_row`——runtime 侧泛型 actor 门面只认识这个 trait）；
+//! - 固有方法 `save(&mut Connection)`（按主键 upsert）/ `all(conn)`，以及
+//!   单列主键的 `find(conn, pk)` / `delete(conn, pk)`，或复合主键的
+//!   `find_by(conn, k…)` / `delete_by(conn, k…)`。
+//!
+//! 表名与主键由辅助属性声明（主键约束本身仍只在注册 DDL 里表达，这里只是
+//! CRUD 的定位键）：
+//!
+//! ```ignore
+//! #[derive(SchemaColumns, ActiveRecord)]
+//! #[active_record(table = "session_map")]
+//! #[active_record(pk = "chat_id")]
+//! #[active_record(pk = "thread_id")]
+//! struct SessionMapRow { … }
+//! ```
 
 use proc_macro::TokenStream;
-use quote::quote;
+use quote::{format_ident, quote};
 use syn::parse_macro_input;
 use syn::spanned::Spanned;
 
-/// 生成代码里引用的 `SchemaColumn` 类型路径 (sebas 主 crate)。
-const META_PATH: &str = "crate :: sebas_state :: migration :: SchemaColumn";
+/// 生成代码里引用的 `SchemaColumn` 类型路径（共享持久层 crate sebas-db）。
+const META_PATH: &str = ":: sebas_db :: schema :: SchemaColumn";
 
-/// 单列元数据, 与 `sebas_state::migration::SchemaColumn` 字段一一对应。
+/// 单列元数据, 与 `sebas_db::schema::SchemaColumn` 字段一一对应。
 #[derive(Debug)]
 struct ColumnMeta {
     name: String,
@@ -56,6 +78,12 @@ struct ColumnMeta {
 
 /// 解析并校验 struct, 返回派生列清单。拒绝路径返回带字段定位的错误。
 fn analyze(input: &syn::DeriveInput) -> syn::Result<Vec<ColumnMeta>> {
+    analyze_with_fields(input).map(|cols| cols.into_iter().map(|(meta, _)| meta).collect())
+}
+
+/// 同 [`analyze`], 但同时返回列对应的字段 ident（ActiveRecord 生成
+/// `to_params` / `from_row` 时需要按字段引用）。
+fn analyze_with_fields(input: &syn::DeriveInput) -> syn::Result<Vec<(ColumnMeta, syn::Ident)>> {
     let struct_name = &input.ident;
     let fields = match &input.data {
         syn::Data::Struct(data) => match &data.fields {
@@ -78,8 +106,13 @@ fn analyze(input: &syn::DeriveInput) -> syn::Result<Vec<ColumnMeta>> {
     let mut columns = Vec::new();
     let mut errors: Option<syn::Error> = None;
     for field in fields {
+        let field_ident = field
+            .ident
+            .as_ref()
+            .expect("命名字段必有 ident")
+            .clone();
         match analyze_field(field) {
-            Ok(meta) => columns.push(meta),
+            Ok(meta) => columns.push((meta, field_ident)),
             Err(e) => match &mut errors {
                 Some(prev) => prev.combine(e),
                 None => errors = Some(e),
@@ -293,6 +326,207 @@ pub fn derive_schema_columns(input: TokenStream) -> TokenStream {
     }
 }
 
+// ---- #[derive(ActiveRecord)]（extract-sebas-db 3.2, design D3/D3b）----
+
+/// ActiveRecord 的辅助属性集合：表名 + 主键列（按 DDL 顺序）。
+#[derive(Debug)]
+struct ActiveRecordMeta {
+    table: String,
+    pks: Vec<String>,
+}
+
+/// 解析 `#[active_record(table = "…")]` / `#[active_record(pk = "…")]`。
+fn parse_active_record_meta(input: &syn::DeriveInput) -> syn::Result<ActiveRecordMeta> {
+    let struct_name = &input.ident;
+    let mut table: Option<String> = None;
+    let mut pks: Vec<String> = Vec::new();
+    for attr in &input.attrs {
+        if !attr.path().is_ident("active_record") {
+            continue;
+        }
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("table") {
+                if table.is_some() {
+                    return Err(syn::Error::new(
+                        meta.path.span(),
+                        format!("`{struct_name}`: table 只能声明一次"),
+                    ));
+                }
+                table = Some(meta.value()?.parse::<syn::LitStr>()?.value());
+            } else if meta.path.is_ident("pk") {
+                pks.push(meta.value()?.parse::<syn::LitStr>()?.value());
+            } else {
+                return Err(syn::Error::new(
+                    meta.path.span(),
+                    format!(
+                        "字段 `{struct_name}`: 未知的 #[active_record] 键, 支持 table/pk \
+                         (如 #[active_record(table = \"t\", pk = \"id\")])"
+                    ),
+                ));
+            }
+            Ok(())
+        })?;
+    }
+    let table = table.ok_or_else(|| {
+        syn::Error::new(
+            input.ident.span(),
+            format!(
+                "`{struct_name}`: ActiveRecord 需要 #[active_record(table = \"…\")] 声明表名"
+            ),
+        )
+    })?;
+    if pks.is_empty() {
+        return Err(syn::Error::new(
+            input.ident.span(),
+            format!(
+                "`{struct_name}`: ActiveRecord 需要至少一个 #[active_record(pk = \"…\")] \
+                 声明主键列（主键约束本身仍只在注册 DDL 里表达）"
+            ),
+        ));
+    }
+    Ok(ActiveRecordMeta { table, pks })
+}
+
+/// 生成 `impl Record` + 固有 CRUD。单列主键生成 `find` / `delete`；复合主键
+/// 生成 `find_by` / `delete_by`（按全部键列）。
+fn expand_active_record(input: &syn::DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let columns = analyze_with_fields(input)?;
+    let meta = parse_active_record_meta(input)?;
+    let struct_name = &input.ident;
+
+    // pk 列必须真实存在于 struct 字段（列名可被 #[column(name)] 改写）。
+    let mut pk_field_idents: Vec<syn::Ident> = Vec::new();
+    for pk in &meta.pks {
+        let (_, ident) = columns
+            .iter()
+            .find(|(col, _)| &col.name == pk)
+            .ok_or_else(|| {
+                syn::Error::new(
+                    input.ident.span(),
+                    format!(
+                        "`{struct_name}`: #[active_record(pk = \"{pk}\")] 不在字段/列清单里"
+                    ),
+                )
+            })?;
+        pk_field_idents.push(ident.clone());
+    }
+
+    let table = &meta.table;
+    let pk_names = &meta.pks;
+    let col_names: Vec<&str> = columns.iter().map(|(col, _)| col.name.as_str()).collect();
+    let field_idents: Vec<&syn::Ident> = columns.iter().map(|(_, ident)| ident).collect();
+    let indices: Vec<syn::Index> = (0..columns.len()).map(syn::Index::from).collect();
+
+    let record_impl = quote! {
+        #[automatically_derived]
+        impl ::sebas_db::record::Record for #struct_name {
+            const TABLE: &'static str = #table;
+            const PK_COLUMNS: &'static [&'static str] = &[#(#pk_names),*];
+            const COLUMNS: &'static [&'static str] = &[#(#col_names),*];
+
+            fn to_params(&self) -> ::std::vec::Vec<&dyn ::sebas_db::rusqlite::ToSql> {
+                ::std::vec![#(&self.#field_idents as &dyn ::sebas_db::rusqlite::ToSql),*]
+            }
+
+            fn pk_params(&self) -> ::std::vec::Vec<&dyn ::sebas_db::rusqlite::ToSql> {
+                ::std::vec![#(&self.#pk_field_idents as &dyn ::sebas_db::rusqlite::ToSql),*]
+            }
+
+            fn from_row(
+                row: &::sebas_db::rusqlite::Row<'_>,
+            ) -> ::sebas_db::rusqlite::Result<Self> {
+                ::std::result::Result::Ok(Self {
+                    #(#field_idents: row.get(#indices)?),*
+                })
+            }
+        }
+    };
+
+    let save_and_all = quote! {
+        /// 由 `#[derive(ActiveRecord)]` 生成: 按主键 upsert 本行。
+        /// 取 `&Connection`：`&mut Connection` 自动转借，`&Transaction` 经
+        /// Deref 也可直接传入（rusqlite 的 Transaction 无 DerefMut）。
+        pub fn save(
+            &self,
+            conn: &::sebas_db::rusqlite::Connection,
+        ) -> ::sebas_db::rusqlite::Result<()> {
+            ::sebas_db::record::save(conn, self)
+        }
+
+        /// 由 `#[derive(ActiveRecord)]` 生成: 取全表行（顺序未定义）。
+        pub fn all(
+            conn: &::sebas_db::rusqlite::Connection,
+        ) -> ::sebas_db::rusqlite::Result<::std::vec::Vec<Self>> {
+            ::sebas_db::record::all(conn)
+        }
+    };
+
+    let find_delete = if pk_names.len() == 1 {
+        quote! {
+            /// 由 `#[derive(ActiveRecord)]` 生成: 按单列主键取一行。
+            pub fn find(
+                conn: &::sebas_db::rusqlite::Connection,
+                pk: impl ::sebas_db::rusqlite::ToSql,
+            ) -> ::sebas_db::rusqlite::Result<Option<Self>> {
+                ::sebas_db::record::find(conn, pk)
+            }
+
+            /// 由 `#[derive(ActiveRecord)]` 生成: 按单列主键删一行。
+            pub fn delete(
+                conn: &::sebas_db::rusqlite::Connection,
+                pk: impl ::sebas_db::rusqlite::ToSql,
+            ) -> ::sebas_db::rusqlite::Result<bool> {
+                ::sebas_db::record::delete::<Self, _>(conn, pk)
+            }
+        }
+    } else {
+        // 复合主键: 每个键列一个参数，按 #[active_record(pk)] 声明顺序。
+        let key_params: Vec<syn::Ident> = (0..pk_names.len())
+            .map(|i| format_ident!("key_{}", i))
+            .collect();
+        let key_casts: Vec<proc_macro2::TokenStream> = key_params
+            .iter()
+            .map(|k| quote! { &#k as &dyn ::sebas_db::rusqlite::ToSql })
+            .collect();
+        quote! {
+            /// 由 `#[derive(ActiveRecord)]` 生成: 按全部主键列取一行
+            /// （复合主键；键列含 NULL 时 SQL 等值比较不命中——与手写 SQL 一致）。
+            pub fn find_by(
+                conn: &::sebas_db::rusqlite::Connection,
+                #(#key_params: impl ::sebas_db::rusqlite::ToSql),*
+            ) -> ::sebas_db::rusqlite::Result<Option<Self>> {
+                ::sebas_db::record::find_by::<Self>(conn, &[#(#key_casts),*])
+            }
+
+            /// 由 `#[derive(ActiveRecord)]` 生成: 按全部主键列删一行（复合主键）。
+            pub fn delete_by(
+                conn: &::sebas_db::rusqlite::Connection,
+                #(#key_params: impl ::sebas_db::rusqlite::ToSql),*
+            ) -> ::sebas_db::rusqlite::Result<bool> {
+                ::sebas_db::record::delete_by::<Self>(conn, &[#(#key_casts),*])
+            }
+        }
+    };
+
+    Ok(quote! {
+        #record_impl
+
+        impl #struct_name {
+            #save_and_all
+            #find_delete
+        }
+    })
+}
+
+#[proc_macro_derive(ActiveRecord, attributes(active_record))]
+pub fn derive_active_record(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as syn::DeriveInput);
+    match expand_active_record(&input) {
+        Ok(ts) => ts.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,7 +579,10 @@ mod tests {
         let ts = expand(&input).expect("生成成功");
         let code = flat(&ts);
         assert!(code.contains("implT{"), "应生成 impl 块: {code}");
-        assert!(code.contains("constfnschema_columns()->&'static[crate::sebas_state::migration::SchemaColumn]"));
+        assert!(
+            code.contains("constfnschema_columns()->&'static[::sebas_db::schema::SchemaColumn]"),
+            "生成路径应指向共享持久层 crate: {code}"
+        );
         assert!(code.contains(r#"name:"id""#));
         assert!(code.contains(r#"affinity:"TEXT""#));
         assert!(code.contains(r#"default:Some("0")"#));
@@ -401,5 +638,109 @@ mod tests {
         assert!(analyze(&tuple).is_err());
         let enumeration = parse("enum E { A }");
         assert!(analyze(&enumeration).is_err());
+    }
+
+    // ---- ActiveRecord（extract-sebas-db 3.2）----
+
+    fn expand_ar(src: &str) -> syn::Result<proc_macro2::TokenStream> {
+        expand_active_record(&parse(src))
+    }
+
+    /// 单列主键：生成 Record impl + 固有 save/all/find/delete。
+    #[test]
+    fn active_record_single_pk_generates_inherent_crud() {
+        let ts = expand_ar(
+            r#"
+            #[active_record(table = "alpha")]
+            #[active_record(pk = "id")]
+            struct T { id: String, n: i64 }
+            "#,
+        )
+        .expect("生成成功");
+        let code = flat(&ts);
+        assert!(code.contains("impl::sebas_db::record::RecordforT"), "{code}");
+        assert!(code.contains(r#"constTABLE:&'staticstr="alpha""#));
+        assert!(code.contains(r#"constPK_COLUMNS:&'static[&'staticstr]=&["id"]"#));
+        assert!(code.contains(r#"constCOLUMNS:&'static[&'staticstr]=&["id","n"]"#));
+        // 单列主键 → find / delete
+        assert!(code.contains("pubfnfind("), "{code}");
+        assert!(code.contains("pubfndelete("), "{code}");
+        assert!(code.contains("pubfnsave(&self,conn:&::sebas_db::rusqlite::Connection"), "{code}");
+        assert!(code.contains("pubfnall("), "{code}");
+        // 复合主键形态不应出现
+        assert!(!code.contains("find_by"), "单列主键不应生成 find_by: {code}");
+    }
+
+    /// 复合主键：find_by / delete_by（按全部键列），不出 find/delete。
+    #[test]
+    fn active_record_composite_pk_generates_find_by_and_delete_by() {
+        let ts = expand_ar(
+            r#"
+            #[active_record(table = "session_map_like")]
+            #[active_record(pk = "k1")]
+            #[active_record(pk = "k2")]
+            struct T { k1: String, k2: Option<String>, v: i64 }
+            "#,
+        )
+        .expect("生成成功");
+        let code = flat(&ts);
+        assert!(code.contains(r#"[#],"#) || code.contains(r#"PK_COLUMNS:&'static[&'staticstr]=&["k1","k2"]"#), "{code}");
+        assert!(code.contains("pubfnfind_by(conn:&::sebas_db::rusqlite::Connection,key_0:impl::sebas_db::rusqlite::ToSql,key_1:impl::sebas_db::rusqlite::ToSql)"), "{code}");
+        assert!(code.contains("pubfndelete_by("), "{code}");
+        assert!(!code.contains("pubfnfind("), "复合主键不应生成单列 find: {code}");
+        assert!(!code.contains("pubfndelete("), "复合主键不应生成单列 delete: {code}");
+    }
+
+    #[test]
+    fn active_record_missing_table_is_compile_error() {
+        let err = expand_ar("#[active_record(pk = \"id\")] struct T { id: String }")
+            .expect_err("缺 table 应拒绝");
+        assert!(err.to_string().contains("table"));
+    }
+
+    #[test]
+    fn active_record_missing_pk_is_compile_error() {
+        let err = expand_ar(r#"#[active_record(table = "t")] struct T { id: String }"#)
+            .expect_err("缺 pk 应拒绝");
+        assert!(err.to_string().contains("pk"));
+    }
+
+    #[test]
+    fn active_record_unknown_pk_column_is_compile_error() {
+        let err = expand_ar(
+            r#"
+            #[active_record(table = "t")]
+            #[active_record(pk = "nope")]
+            struct T { id: String }
+            "#,
+        )
+        .expect_err("pk 不在列里应拒绝");
+        assert!(err.to_string().contains("nope"));
+    }
+
+    #[test]
+    fn active_record_unknown_key_is_compile_error() {
+        let err = expand_ar(
+            r#"
+            #[active_record(table = "t")]
+            #[active_record(primary_key = "id")]
+            struct T { id: String }
+            "#,
+        )
+        .expect_err("未知键应拒绝");
+        assert!(err.to_string().contains("active_record"));
+    }
+
+    #[test]
+    fn active_record_rejects_unsupported_type_too() {
+        let err = expand_ar(
+            r#"
+            #[active_record(table = "t")]
+            #[active_record(pk = "id")]
+            struct T { id: u8 }
+            "#,
+        )
+        .expect_err("类型映射错误同样适用");
+        assert!(err.to_string().contains("id"));
     }
 }

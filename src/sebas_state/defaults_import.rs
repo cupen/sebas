@@ -6,10 +6,13 @@
 //! core 首次启动时把它的值导入 `settings` 域（`default_selection`，与
 //! provider 数据同事务落盘），随后写 `settings` 表的 `defaults_imported`
 //! 标记行；标记在场即不再读该文件（哪怕它被旧二进制重新写回）。
+//!
+//! extract-sebas-db：导入的库内动作（标记行、runtime_state RMW）经
+//! `sebas_models::runtime_state` 的域查询完成，本模块只管文件与调度。
 
-use crate::sebas_state::repo;
 use crate::sebas_state::writer::StateHandle;
 use sebas_dispatch::state_store::DefaultSelection;
+use sebas_models::runtime_state;
 
 /// legacy defaults.json 路径：与 providers.json 同目录同名派生（与旧 router
 /// admin 的 `defaults_path` 同一规则：overlay 路径 set_file_name）。
@@ -46,7 +49,10 @@ pub async fn import_legacy_defaults_from(
     handle: &StateHandle,
     path: &std::path::Path,
 ) -> Result<bool, String> {
-    if handle.exec(repo::defaults_import_done).await? {
+    if handle
+        .exec(runtime_state::defaults_import_done)
+        .await?
+    {
         return Ok(false);
     }
     let parsed = std::fs::read_to_string(path)
@@ -61,7 +67,7 @@ pub async fn import_legacy_defaults_from(
                 "legacy defaults.json 存在但无法解析（provider 缺失或 JSON 损坏），跳过导入"
             );
         }
-        handle.exec(repo::mark_defaults_imported).await?;
+        handle.exec(runtime_state::mark_defaults_imported).await?;
         return Ok(false);
     };
     let provider = legacy.provider.trim().to_string();
@@ -74,7 +80,7 @@ pub async fn import_legacy_defaults_from(
         None => DefaultSelection::new(provider),
     };
     let imported = handle
-        .exec(move |conn| repo::import_defaults_once(conn, selection))
+        .exec(move |conn| runtime_state::import_defaults_once(conn, selection))
         .await?;
     if imported {
         tracing::info!(

@@ -14,6 +14,10 @@ sebas-acp = { path = "../sebas-acp" }
 sebas-router = { path = "../sebas-router" }
 # 中立共享域层（add-domain-layer）：跨角色域概念的唯一定义处。
 sebas-domain = { path = "../sebas-domain" }
+# 持久层 runtime（extract-sebas-db）：连接配方与 ActiveRecord 生成代码的
+# 落点（auth.db 不再手抄 pragma 组合）。
+sebas-db = { path = "../sebas-db" }
+sebas-schema-derive = { path = "../sebas-schema-derive" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # 鉴权：PBKDF2-HMAC-SHA256 密码哈希 + OS CSPRNG（盐 / 会话 token）。
