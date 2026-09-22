@@ -338,7 +338,8 @@ requirement），子功能 = 二层 `test.describe`，一行 = 一条用例；�
 | 首启 root 引导 | 校验与建户 | creating root enters the workbench and the session survives reload | `auth-setup.spec.ts` | 鉴权与访问旅程「首启 root 引导」 |
 | 首启 root 引导 | 校验与建户 | a second setup POST is refused after root exists (409) | `auth-setup.spec.ts` | 鉴权与访问旅程「首启 root 引导」 |
 | agent 对话覆盖 | 首回合往返与重载恢复 | composer submit → reply → done → reload restores | `session-roundtrip.spec.ts` | agent 对话覆盖「首回合往返」、会话核心旅程「重载恢复」 |
-| agent 对话覆盖 | 流式分批 | chunks arrive in batches and the turn converges to done | `streaming.spec.ts` | agent 对话覆盖「流式分批渲染」 |
+| agent 对话覆盖 | 流式分批 | chunks arrive in batches and the turn converges to done | `streaming.spec.ts` | agent 对话覆盖「流式分批渲染」⁸（聚合半边：服务端 API oracle 轮询 5 个 chunk 条目 + 回合结束后 DOM 一气泡） |
+| agent 对话覆盖 | 流式分批 | incremental reply text reaches the DOM while the turn is still running | `conversation-streaming.spec.ts` | agent 对话覆盖「流式分批渲染」⁸（实时半边：placeholder + composer 提交，50ms 轮询 DOM 与 `status_slug`，DOM 有增量正文时会话仍 running；`retries: 0` 零固定 sleep） |
 | agent 对话覆盖 | 多轮连续 | 4.1 two consecutive rounds append in order and survive reload | `dialog.spec.ts` | agent 对话覆盖「同会话多轮连续」 |
 | agent 对话覆盖 | 输入守卫 | 4.2 empty and blank input creates no turn, session stays usable | `dialog.spec.ts` | agent 对话覆盖「composer 输入守卫」 |
 | agent 对话覆盖 | 输入守卫 | 4.2 special-char long text round-trips without loss or console errors | `dialog.spec.ts` | agent 对话覆盖「composer 输入守卫」 |
@@ -484,6 +485,28 @@ requirement），子功能 = 二层 `test.describe`，一行 = 一条用例；�
 > review-card 的 sessionPhase，round3 7.1 的 waiting 退避在默认形态下被 detail
 > 遮死。修复（detail 补同款 remote 二选一合并）落地前 approval-reconcile 7.1 以
 > fulfill detail 的舞台绕行，落地后已拆舞台直跑真实投影。
+>
+> ⁸ add-conversation-streaming-journey（2026-09-22）：对话流实时性从「服务端 API
+> 瞬态」升级为「浏览器 DOM 中途硬断言」。`streaming.spec.ts` 保留其**聚合口径**
+> （多 chunk 合并为一气泡 + 回合结束收敛，API 为主 oracle）；新增
+> `conversation-streaming.spec.ts` 承担**实时口径**——沙箱第三驱动 agent
+> `[acp.agents.claude-stream]`（fake-claude `--delta-gap-ms 500`，帧间静默
+> < driver 控制探针的 1.5s 应答预算）确定性构造「回合进行中」窗口，用例建
+> placeholder → 深链 → composer 提交 → 50ms 轮询 focused conversation 的 DOM 与
+> 服务端 `status_slug`，断言「增量正文已上屏」发生在会话进入终态之前，再收敛
+> done；该 spec 局部 `retries: 0`、零固定 sleep。两份用例职责分离、同锚
+> `agent 对话覆盖「流式分批渲染」`。实施实测时间线（`drip` 触发）：DOM 增量正文
+> +22ms 上屏（status=working，文本仅 `drip0`）vs done +1310ms——上屏早于终态
+> 约 1.29s，且是部分正文。
+>
+> 进程级半边补测（`tests/testsuite_e2e_test.rs`，不入浏览器套件）：
+> `claude_delta_gap_spreads_ws_frame_arrivals_over_time`（drip + `--delta-gap-ms 700`：
+> webui `/ws` 的 `turn.append` 到达时刻随时间散开——首末 content 帧到达差 ≥0.5s，
+> 且回合照常收敛 Done，坐实 spec「间隔落在挂起探测预算内」）与
+> `claude_delta_gap_spaces_the_default_scenario_deltas`（默认场景两段文本在 700ms
+> 间隔下必落**两个**独立帧；N=0 时两段背靠背并成一帧，故该判据把「flag 生效 vs
+> 缺省」钉死）。二者与浏览器 DOM 用例互补：浏览器证「回合中 DOM 已上屏」，进程级
+> 证「帧本身就是随时间到达的」，与前端渲染管线解耦。
 
 原「浏览器级 UI 渲染」豁免条目：workbench 首屏、审批卡片操作、登录页闭环等
 浏览器面由本套件覆盖（豁免范围收窄为「飞书端卡片渲染」等其余条目）。

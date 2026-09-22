@@ -542,6 +542,19 @@ path = "{fake}"
 args = ["--scenario", "empty", "--slow-ms", "800"]
 sessions_dir = "{cfg}/claude-empty-sessions"
 work_dir = "{cfg}/work"
+
+# add-conversation-streaming-journey：第三个 claude 驱动 agent（id =
+# `claude-stream`）。`--delta-gap-ms 500` 让桩按 500ms 间隔逐段发正文 delta
+# （相邻帧间静默 < driver 的 1.5s 挂起探测预算）——浏览器旅程「对话流实时
+# 上屏」（conversation-streaming.spec.ts）以流式触发词 `drip` 提交，得到 3 段
+# 正文（drip0/1/2）的确定性「回合进行中」窗口：placeholder 建会话 →
+# composer 提交 → 会话仍 running 时 DOM 已见增量正文。
+[acp.agents.claude-stream]
+driver = "claude"
+path = "{fake}"
+args = ["--delta-gap-ms", "500"]
+sessions_dir = "{cfg}/claude-stream-sessions"
+work_dir = "{cfg}/work"
 {fakeacp_toml}
 [dispatch]
 state_file = "{cfg}/sessions.json"

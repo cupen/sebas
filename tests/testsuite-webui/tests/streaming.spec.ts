@@ -2,7 +2,16 @@
  * Journey 3.3 — streamed turn as ONE conversation turn (spec: 流式分批渲染,
  * evolved by workbench-conversation-view 2.1).
  *
- * 功能：agent 对话覆盖 / 子功能：流式回合
+ * 功能：agent 对话覆盖 / 子功能：流式分批
+ *
+ * 职责分工（add-conversation-streaming-journey 4.3，design D3）：本用例只承担
+ * 「**聚合口径**」——多 chunk（5 段文本 delta）回合结束后在 DOM 合成 ONE
+ * assistant 气泡、内容按到达序拼接、会话收敛 Done；主 oracle 是**服务端 API**
+ * 的 5 个 chunk 条目，`working` 瞬态只作 annotation（调度抖动的 CI 箱可能把
+ * 整个回合塞进一个 poll 间隙，硬断言会假红）。**实时性**（回合进行中 DOM 已
+ * 增量上屏）由新 spec `conversation-streaming.spec.ts` 以浏览器 DOM 硬断言
+ * 承担（placeholder + composer 起点的 50ms 轮询、`retries: 0`）——两处口径
+ * 不重复：本文件管「一回合=一气泡」，新文件管「回合进行中即上屏」。
  *
  * The "stream" trigger makes fake-claude emit 5 text chunks, pause 800ms,
  * then finish. We spawn with the trigger and open the page immediately.
@@ -26,7 +35,7 @@ test.describe('agent 对话覆盖', () => {
     collector = new ErrorCollector(page)
   })
 
-  test.describe('流式回合', () => {
+  test.describe('流式分批', () => {
     test('5 streamed chunks land as ONE assistant turn bubble and converge to done', async ({
       page,
     }) => {

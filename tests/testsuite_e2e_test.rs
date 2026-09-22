@@ -3991,6 +3991,267 @@ async fn claude_turn_streams_multiple_frames_to_the_webui() {
     );
 }
 
+/// add-conversation-streaming-journey（进程级补测，后端侧活性）：`--delta-gap-ms`
+/// 让桩的文本 delta **按墙钟时间散开**发出，driver → core channel → webui 逐帧
+/// 转推，因此 webui `/ws` 上 `turn.append` 的**到达时刻**随时间散开，而非收尾
+/// 一次性整块。这是浏览器 DOM 用例（`conversation-streaming.spec.ts`）的后端侧
+/// 互补：浏览器侧证「增量正文在回合中已上屏」，此处证「帧本身就是随时间到的」，
+/// 与前端渲染管线无关。
+///
+/// 判别力/余量：`drip` 触发词的缺省段间静默是 400ms；本用例把 `--delta-gap-ms`
+/// 调到 700ms，断言首/末增量帧的到达差 ≥ 0.5s——背靠背会塌进同一 250ms 合并窗
+/// （到达差 ≈0），故该阈值足以区分「随时间散开」与「一次整块」。阈值不追硬边界：
+/// 700ms 间隔正常给出 ~1.4s，即便合并窗被负载拖到吃掉一整个 gap 仍有 ~0.7s；
+/// 「flag 生效 vs 缺省 400ms」的更锐判别由姊妹用例
+/// `claude_delta_gap_spaces_the_default_scenario_deltas` 的整帧计数承担
+/// （默认场景 N=0 时两段必然并成一帧）。帧间静默 700ms 仍小于 driver 控制探针
+/// 的 1.5s 应答预算（`sebas-acp/src/claude/driver.rs` 的 `timeout(1500ms, probe)`），
+/// 回合须照常收敛 Done——这也是增量 spec「间隔落在挂起探测预算内」的进程级证据。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn claude_delta_gap_spreads_ws_frame_arrivals_over_time() {
+    let sb = Sandbox::new("testsuite_e2e", "delta-gap-spread");
+    // 桩的段间静默 700ms（缺省 0 = 背靠背；drip 触发词缺省 400ms）。
+    sb.append_acp_args(&["--delta-gap-ms", "700"]);
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    // 同既有 drip 用例：先订阅、等 `session.resync`（订阅上线的信号）再建会话。
+    let mut ws: WsStream = ws_connect(&sb.webui_url()).await;
+    let _ = tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            let ev = next_ws_frame(&mut ws).await;
+            if ev["method"] == "session.resync" {
+                break;
+            }
+        }
+    })
+    .await;
+
+    let project_id = scene_project_id(&cli, &sb).await;
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "drip", "agent": "claude" }),
+    )
+    .await
+    .expect("create session");
+    assert_eq!(status, 201, "create session: {body}");
+    let key = body["key"].as_str().expect("key").to_string();
+    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+
+    // 状态收敛由 HTTP 轮询判定（与既有 drip 用例同款：claude kind 收尾无
+    // transcript 标记帧）。
+    let (done_tx, mut done_rx) = tokio::sync::oneshot::channel::<serde_json::Value>();
+    let poll_cli = cli.clone();
+    let poll_url = detail_url.clone();
+    tokio::spawn(async move {
+        loop {
+            if let Ok(v) = poll_cli.get(&poll_url).send().await
+                && let Ok(j) = v.json::<serde_json::Value>().await
+                && j["status_slug"].as_str() == Some("done")
+            {
+                let _ = done_tx.send(j);
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    });
+
+    // 记录每个 content `turn.append` 帧的**到达时刻**与文本。
+    let mut arrivals: Vec<(tokio::time::Instant, Vec<String>)> = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => {
+                panic!("timed out waiting for the delta-gap turn; arrivals so far: {arrivals:?}")
+            }
+            done = &mut done_rx => {
+                let done = done.expect("done watcher alive");
+                assert_eq!(
+                    done["status_slug"].as_str(),
+                    Some("done"),
+                    "turn must end Done even with 700ms frame silence: {done}"
+                );
+                break;
+            }
+            ev = next_ws_frame(&mut ws) => {
+                if ev["method"] == "turn.append" && ev["params"]["session_id"] == key.as_str() {
+                    let texts = append_frame_texts(&ev);
+                    if !texts.is_empty() {
+                        arrivals.push((tokio::time::Instant::now(), texts));
+                    }
+                }
+            }
+        }
+    }
+
+    // 收尾竞速窗口：最后一个 content 帧可能与 done 同时就绪（250ms 合并窗的
+    // 冲刷略迟于状态翻转），短暂排水补齐内容对账。
+    let drain_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        match tokio::time::timeout_at(drain_deadline, next_ws_frame(&mut ws)).await {
+            Ok(ev) => {
+                if ev["method"] == "turn.append" && ev["params"]["session_id"] == key.as_str() {
+                    let texts = append_frame_texts(&ev);
+                    if !texts.is_empty() {
+                        arrivals.push((tokio::time::Instant::now(), texts));
+                    }
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    // 内容对账：3 段正文、按序、逐字各一次（与既有 drip 用例同款）。
+    let all: String = arrivals
+        .iter()
+        .flat_map(|(_, texts)| texts.iter().cloned())
+        .collect();
+    assert_eq!(
+        all, "drip0 drip1 drip2 ",
+        "chunks must arrive in order, each exactly once: {arrivals:?}"
+    );
+    assert!(
+        arrivals.len() >= 2,
+        "the turn must arrive as multiple frames: {arrivals:?}"
+    );
+
+    // 时间散开（本用例的核心断言）：首末 content 帧的**到达差** ≥ 500ms——帧是
+    // 随时间到的，不是收尾一次整块（背靠背会塌进同一 250ms 合并窗，到差≈0）。
+    // 阈值刻意留足余量：700ms 间隔下正常 ~1.4s；即便合并窗被负载拖到吃掉一整
+    // 个 gap（首两段并成一帧），仍有 ~0.7s。**不追硬边界**——「flag 生效 vs
+    // 缺省 400ms」的判别由下面默认场景用例的整帧计数承担（N=0 必然并成一帧）。
+    let first = arrivals.first().expect("at least one arrival").0;
+    let last = arrivals.last().expect("at least one arrival").0;
+    let spread = last.duration_since(first);
+    assert!(
+        spread >= Duration::from_millis(500),
+        "chunk arrivals must spread over time with --delta-gap-ms 700 (>=0.5s first->last), got {spread:?}: {arrivals:?}"
+    );
+    let _ = ws.close(None).await;
+}
+
+/// add-conversation-streaming-journey（进程级补测，默认场景半边）：`--delta-gap-ms`
+/// 的作用面是**默认场景**（`emit_default_text` 的两段 "hello "/"world"）与 drip
+/// 触发词前两段间距。缺省（0）时两段背靠背发出、落在同一 250ms 合并窗里，webui
+/// 面通常只见**一帧**；本用例置 700ms，断言两段正文以**两个分开的帧**、相隔
+/// ≥ 400ms 到达——这是 task 1.1「默认场景相邻文本 delta 之间 sleep N」经 argv
+/// 到桩、再经整条后端链路可见的进程级证据（桩单测只覆盖到 stdout 帧序/时序）。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn claude_delta_gap_spaces_the_default_scenario_deltas() {
+    let sb = Sandbox::new("testsuite_e2e", "delta-gap-default");
+    sb.append_acp_args(&["--delta-gap-ms", "700"]);
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    let mut ws: WsStream = ws_connect(&sb.webui_url()).await;
+    let _ = tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            let ev = next_ws_frame(&mut ws).await;
+            if ev["method"] == "session.resync" {
+                break;
+            }
+        }
+    })
+    .await;
+
+    // "gap please" 不是任何触发词 → 走 default 场景（hello/world 两段）。
+    let project_id = scene_project_id(&cli, &sb).await;
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "gap please", "agent": "claude" }),
+    )
+    .await
+    .expect("create session");
+    assert_eq!(status, 201, "create session: {body}");
+    let key = body["key"].as_str().expect("key").to_string();
+    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+
+    let (done_tx, mut done_rx) = tokio::sync::oneshot::channel::<serde_json::Value>();
+    let poll_cli = cli.clone();
+    let poll_url = detail_url.clone();
+    tokio::spawn(async move {
+        loop {
+            if let Ok(v) = poll_cli.get(&poll_url).send().await
+                && let Ok(j) = v.json::<serde_json::Value>().await
+                && j["status_slug"].as_str() == Some("done")
+            {
+                let _ = done_tx.send(j);
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    });
+
+    let mut arrivals: Vec<(tokio::time::Instant, Vec<String>)> = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => {
+                panic!("timed out waiting for the default-scenario turn; arrivals so far: {arrivals:?}")
+            }
+            done = &mut done_rx => {
+                let done = done.expect("done watcher alive");
+                assert_eq!(done["status_slug"].as_str(), Some("done"), "turn must end Done: {done}");
+                break;
+            }
+            ev = next_ws_frame(&mut ws) => {
+                if ev["method"] == "turn.append" && ev["params"]["session_id"] == key.as_str() {
+                    let texts = append_frame_texts(&ev);
+                    if !texts.is_empty() {
+                        arrivals.push((tokio::time::Instant::now(), texts));
+                    }
+                }
+            }
+        }
+    }
+
+    let drain_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        match tokio::time::timeout_at(drain_deadline, next_ws_frame(&mut ws)).await {
+            Ok(ev) => {
+                if ev["method"] == "turn.append" && ev["params"]["session_id"] == key.as_str() {
+                    let texts = append_frame_texts(&ev);
+                    if !texts.is_empty() {
+                        arrivals.push((tokio::time::Instant::now(), texts));
+                    }
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    let all: String = arrivals
+        .iter()
+        .flat_map(|(_, texts)| texts.iter().cloned())
+        .collect();
+    assert_eq!(
+        all, "hello world",
+        "default scenario text must be intact and each chunk once: {arrivals:?}"
+    );
+    assert!(
+        arrivals.len() >= 2,
+        "with --delta-gap-ms 700 the two default-scenario deltas must land in separate frames (0 = back-to-back coalesced): {arrivals:?}"
+    );
+    let spread = arrivals
+        .last()
+        .expect("arrivals")
+        .0
+        .duration_since(arrivals.first().expect("arrivals").0);
+    assert!(
+        spread >= Duration::from_millis(400),
+        "the two default-scenario deltas must be temporally separated, got {spread:?}: {arrivals:?}"
+    );
+    let _ = ws.close(None).await;
+}
+
 /// fix-webui-streaming-liveness 6.2：native 会话在 webui 面逐 delta 到达。
 /// SSE 假上游按 400ms 间隔吐 4 个 text_delta——native pump 逐 delta 落账并
 /// 广播（不再攒到回合边界整块 flush），webui WS 在「🗒 turn summary」收尾帧

@@ -42,7 +42,8 @@ pnpm --dir tests/testsuite-webui exec playwright test
 | 首启 root 引导 | 校验与建户 | creating root enters the workbench and the session survives reload | `auth-setup.spec.ts` | 鉴权与访问旅程「首启 root 引导」 |
 | 首启 root 引导 | 校验与建户 | a second setup POST is refused after root exists (409) | `auth-setup.spec.ts` | 鉴权与访问旅程「首启 root 引导」 |
 | agent 对话覆盖 | 首回合往返与重载恢复 | composer submit → reply → done → reload restores | `session-roundtrip.spec.ts` | agent 对话覆盖「首回合往返」、会话核心旅程「重载恢复」 |
-| agent 对话覆盖 | 流式分批 | chunks arrive in batches and the turn converges to done | `streaming.spec.ts` | agent 对话覆盖「流式分批渲染」 |
+| agent 对话覆盖 | 流式分批 | chunks arrive in batches and the turn converges to done | `streaming.spec.ts` | agent 对话覆盖「流式分批渲染」⁷（聚合半边：API oracle + 回合结束一气泡） |
+| agent 对话覆盖 | 流式分批 | incremental reply text reaches the DOM while the turn is still running | `conversation-streaming.spec.ts` | agent 对话覆盖「流式分批渲染」⁷（实时半边：placeholder + composer 提交，DOM 有增量正文时会话仍 running；`retries: 0`） |
 | agent 对话覆盖 | 多轮连续 | 4.1 two consecutive rounds append in order and survive reload | `dialog.spec.ts` | agent 对话覆盖「同会话多轮连续」 |
 | agent 对话覆盖 | 输入守卫 | 4.2 empty and blank input creates no turn, session stays usable | `dialog.spec.ts` | agent 对话覆盖「composer 输入守卫」 |
 | agent 对话覆盖 | 输入守卫 | 4.2 special-char long text round-trips without loss or console errors | `dialog.spec.ts` | agent 对话覆盖「composer 输入守卫」 |
@@ -140,6 +141,21 @@ pnpm --dir tests/testsuite-webui exec playwright test
 > 死亡旅程独占 `playwright.dead-core.config.ts`（端口 9895，
 > `TESTSUITE_ALLOW_CORE_DEATH=1` 让 harness 不因子进程死亡抢跑清场；core 一死
 > 同 config 其余用例全部失联，故不重试、不与主套件混跑）。
+>
+> ⁷ add-conversation-streaming-journey（2026-09-22）：对话流实时性与聚合拆成
+> 两条用例、同锚 `agent 对话覆盖「流式分批渲染」`。`streaming.spec.ts` 保留
+> **聚合口径**（5 个 chunk 合并成一气泡、回合结束收敛；服务端 API 为主 oracle），
+> 其头部注释已说明分工。新增 `conversation-streaming.spec.ts` 承担**实时口径**：
+> 沙箱第三驱动 agent `claude-stream`（fake-claude `--delta-gap-ms 500`）
+> 确定性构造「回合进行中」窗口；用例建 0-turn placeholder → 深链 → composer
+> 提交（观测起点早于回合开始），50ms 轮询 focused conversation 的 DOM 与
+> `status_slug`，断言增量正文上屏发生在终态之前，再收敛 done。该 spec 局部
+> `retries: 0`、零固定 sleep——实现缺陷不得被 retry 掩盖。实测时间线（`drip`
+> 触发）：DOM 增量正文 +22ms 上屏（status=working，文本仅 `drip0`）、done
+> +1310ms。后端侧活性（`/ws` 帧到达随时间散开）由进程级 e2e
+> `claude_delta_gap_spreads_ws_frame_arrivals_over_time` /
+> `claude_delta_gap_spaces_the_default_scenario_deltas` 互补承载（见
+> `tests/acceptance/COVERAGE.md` ⁸）。
 
 能力矩阵账本见 `tests/acceptance/COVERAGE.md` 的 `testsuite-webui-browser` 一节。
 

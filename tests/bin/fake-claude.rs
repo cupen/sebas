@@ -20,8 +20,21 @@
 //! Flags (argv, not env — env races under cargo test parallelism):
 //!   fake-claude-cli [scenario] [--loop] [--slow-ms N] [--hang-on-init]
 //!                   [--delay-init-ms N] [--journal PATH] [--resume-fails]
+//!                   [--delta-gap-ms N]
 //!   scenario: hello (default) | bash | deny | thinking（位置形态，既有兼容；
 //!   全集与键值形式 `--scenario <name>` 说明见下）
+//!
+//!   --delta-gap-ms N（add-conversation-streaming-journey 1.1）：默认场景
+//!   （hello/default）相邻文本 delta 之间的静默毫秒数；缺省 `0` = 现行行为
+//!   （背靠背发出）。N>0 时逐段发出、段间 sleep N 毫秒——「回合进行中」窗口
+//!   的确定性构造器（浏览器 e2e 在会话仍 running 时于 DOM 观测增量正文）。
+//!   N>0 同时覆盖 "drip" 触发词的前两段间距（缺省 400ms）。
+//!   **预算约束（按路径不同）**：driver 看门狗每秒发一次控制探针，探针
+//!   **应答超时 1.5s**（`sebas-acp/src/claude/driver.rs:477`），悬空即判子进程
+//!   死亡；**挂起探测**是另一回事，默认 5 分钟（`driver.rs:498-502`，可用
+//!   `SEBAS_HANG_TIMEOUT_SECS` 覆盖）。`drip` 触发词段间先 sleep 再 pump，
+//!   故其 `gap` 必须 < 1.5s；默认场景的 `sleep_delta_gap` 每 50ms pump 一次，
+//!   不受 1.5s 约束。推荐 N=500。
 //!   （close-acceptance-blind-spots 1.2）全模型行为 mock 场景集（键值形式
 //!   `--scenario <name>` 选择，未指定 = 现行缺省行为）：
 //!   - default：现行缺省行为（hello 的同义词——正文增量流式多段文本 delta
@@ -64,11 +77,15 @@
 
 use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
+use std::time::{Duration, Instant};
 
 struct Flags {
     scenario: String,
     loop_mode: bool,
     slow_ms: u64,
+    /// （add-conversation-streaming-journey 1.1）默认场景相邻文本 delta 之间
+    /// 的静默毫秒数（`--delta-gap-ms N`）。`0` = 完全现行行为（背靠背）。
+    delta_gap_ms: u64,
     /// （close-acceptance-blind-spots 1.2）`--delay-ms N` 全局延迟参数：
     /// slow 场景在**任何输出之前**静默 N 毫秒（静默期照常应答控制探针）。
     delay_ms: u64,
@@ -142,6 +159,7 @@ fn parse_flags_from(args: &[String]) -> Flags {
         scenario: "hello".into(),
         loop_mode: false,
         slow_ms: 0,
+        delta_gap_ms: 0,
         delay_ms: 0,
         hang_on_init: false,
         ignore_interrupt: false,
@@ -177,6 +195,13 @@ fn parse_flags_from(args: &[String]) -> Flags {
             "--load-fails" => f.resume_fails = true,
             "--slow-ms" => {
                 f.slow_ms = args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(0);
+                i += 1;
+            }
+            "--delta-gap-ms" => {
+                // （add-conversation-streaming-journey 1.1）默认场景文本 delta
+                // 之间的静默；非数值回落 0（与 --slow-ms 同款宽容语义）。
+                // 预算约束见模块文档：帧间静默必须 < 1.5s 挂起探测超时。
+                f.delta_gap_ms = args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(0);
                 i += 1;
             }
             "--delay-ms" => {
@@ -241,7 +266,9 @@ fn parse_flags_from(args: &[String]) -> Flags {
 }
 
 struct Io {
-    out: io::StdoutLock<'static>,
+    /// 帧汇：生产路径 = stdout（`Box<dyn Write>` 便于单测注入可回读的替身，
+    /// add-conversation-streaming-journey 1.2 的帧序/时序断言）。
+    out: Box<dyn Write>,
     journal: Option<std::fs::File>,
     /// （close-acceptance-blind-spots 1.2）所用场景名——journal 逐行携带
     /// `scenario` 字段，供 e2e 断言「跑的就是这个场景」。
@@ -302,7 +329,7 @@ fn main() {
             .expect("open journal")
     });
     let mut io = Io {
-        out: Box::leak(Box::new(io::stdout())).lock(),
+        out: Box::new(Box::leak(Box::new(io::stdout())).lock()),
         journal,
         scenario: flags.scenario.clone(),
     };
@@ -603,15 +630,26 @@ fn stream_turn(
 /// of one block at completion. Between chunks the watchdog probe (and any
 /// other pending control_request) is answered exactly like the main loop
 /// would, mirroring the real CLI's concurrent control/stream processing.
+///
+/// （add-conversation-streaming-journey 1.1）`--delta-gap-ms N>0` 时前两段间距
+/// 改用 N（缺省 0 = 现行 400ms 不变）——本触发词因此成为「可配置时间间隔」
+/// 的浏览器旅程数据源；最终 150ms 收尾停顿不变。**预算**：本函数每段后先
+/// sleep 再 pump，故 `gap`（含 150ms 收尾）必须 < 1.5s 探针应答超时
+/// （`driver.rs:477`）；N=500 安全。
 fn drip_turn(flags: &mut Flags, io: &mut Io, stdin_rx: &std::sync::mpsc::Receiver<String>) {
     let sid = flags.session_id.clone();
+    let gap = if flags.delta_gap_ms > 0 {
+        flags.delta_gap_ms
+    } else {
+        400
+    };
     for i in 0..3 {
         emit_assistant_text(io, &sid, &format!("drip{i} "), reported_model(flags));
-        // Between chunks: 400ms gaps put each chunk in its own coalescing
-        // window. The final pause is a short 150ms — just enough for the last
+        // Between chunks: gaps put each chunk in its own coalescing window
+        // (250ms). The final pause is a short 150ms — just enough for the last
         // window to flush before the turn completes, keeping the whole
-        // scenario ≈0.95s, well inside the watchdog probe's 1.5s deadline.
-        let pause = if i + 1 < 3 { 400 } else { 150 };
+        // scenario well inside the watchdog probe's 1.5s deadline.
+        let pause = if i + 1 < 3 { gap } else { 150 };
         std::thread::sleep(std::time::Duration::from_millis(pause));
         pump_controls(stdin_rx, io, flags);
     }
@@ -688,15 +726,18 @@ fn run_scenario(
     stdin_rx: &std::sync::mpsc::Receiver<String>,
     hook_counter: &mut u64,
 ) {
-    let sid = &flags.session_id;
+    // sid 取自本地克隆（而非 `&flags.session_id`）：默认场景要同时可变借用
+    // flags（`--delta-gap-ms` 的段间 sleep 需 pump 控制探针）。
+    let sid_owned = flags.session_id.clone();
+    let sid = sid_owned.as_str();
     match flags.scenario.as_str() {
         "hello" | "default" => {
             // default = 现行缺省行为（close-acceptance-blind-spots 1.2）：
             // 多段文本 delta 的正文增量流式由缺省行为覆盖——两个 text_delta
             // 帧之后收尾，消费者观察到「分段到达、逐字各一次」。
-            let model = reported_model(flags);
-            emit_assistant_text(io, sid, "hello ", model);
-            emit_assistant_text(io, sid, "world", model);
+            // （add-conversation-streaming-journey 1.1）`--delta-gap-ms N>0`
+            // 时两段之间 sleep N（缺省 0 = 现行背靠背行为不变）。
+            emit_default_text(flags, io, stdin_rx);
             settle_pause(flags);
             io.emit(&result_frame(sid, "success", false));
         }
@@ -843,6 +884,50 @@ fn run_scenario(
 fn settle_pause(flags: &Flags) {
     if flags.slow_ms > 0 {
         std::thread::sleep(std::time::Duration::from_millis(flags.slow_ms));
+    }
+}
+
+/// （add-conversation-streaming-journey 1.1）默认场景的两段正文——相邻文本
+/// delta 之间按 `--delta-gap-ms` 静默（0 = 背靠背，现行行为不变）。返回每段
+/// text delta 写出的时刻：单测据此断言「N=0 帧序与现行一致 / N>0 相邻文本帧
+/// 时间差 >= N」（1.2），不依赖对 stdout 的黑盒计时。
+fn emit_default_text(
+    flags: &mut Flags,
+    io: &mut Io,
+    stdin_rx: &std::sync::mpsc::Receiver<String>,
+) -> Vec<Instant> {
+    let segments = ["hello ", "world"];
+    let mut stamps = Vec::with_capacity(segments.len());
+    for (i, seg) in segments.iter().enumerate() {
+        if i > 0 {
+            sleep_delta_gap(flags, io, stdin_rx);
+        }
+        let model = reported_model(flags).to_string();
+        let sid = flags.session_id.clone();
+        stamps.push(Instant::now());
+        emit_assistant_text(io, &sid, seg, &model);
+    }
+    stamps
+}
+
+/// （add-conversation-streaming-journey 1.1）`--delta-gap-ms N` 的段间静默：
+/// 50ms 切片 sleep，**每片都 pump 应答** driver 的看门狗控制探针，因此不受
+/// 1.5s 探针应答超时约束（`driver.rs:477`）——只受默认 5 分钟挂起探测约束
+/// （`driver.rs:498-502`）。与 `drip_turn` 的差别正在这里：后者先 sleep 再
+/// pump，其 gap 必须 < 1.5s。
+fn sleep_delta_gap(
+    flags: &mut Flags,
+    io: &mut Io,
+    stdin_rx: &std::sync::mpsc::Receiver<String>,
+) {
+    if flags.delta_gap_ms == 0 {
+        return;
+    }
+    let deadline = Instant::now() + Duration::from_millis(flags.delta_gap_ms);
+    while Instant::now() < deadline {
+        let left = deadline.saturating_duration_since(Instant::now());
+        std::thread::sleep(left.min(Duration::from_millis(50)));
+        pump_controls(stdin_rx, io, flags);
     }
 }
 
@@ -1115,5 +1200,119 @@ mod scenario_flag_tests {
             "1",
         ]));
         assert_eq!(f.scenario, "empty");
+    }
+}
+
+#[cfg(test)]
+mod delta_gap_tests {
+    //! add-conversation-streaming-journey 1.2：桩「按时间间隔发 delta」的行为
+    //! 单测——`N=0` 时帧序与现行一致（背靠背、无额外停顿）；`N>0` 时相邻文本
+    //! delta 的时间差 `>= N`，且帧序不变（delta, assistant 交替）。
+
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// 可回读的帧汇：`Io.out` 的测试替身（生产路径是 stdout）。
+    #[derive(Clone, Default)]
+    struct SharedSink(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for SharedSink {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn argv(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn frames(sink: &SharedSink) -> Vec<Value> {
+        let raw = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
+        raw.lines().map(|l| serde_json::from_str(l).unwrap()).collect()
+    }
+
+    /// stream_event 帧携带的文本 delta 序列（每段正文的首帧）。
+    fn delta_texts(frames: &[Value]) -> Vec<String> {
+        frames
+            .iter()
+            .filter(|f| f["type"] == "stream_event")
+            .filter_map(|f| f.pointer("/event/delta/text").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn frame_types(frames: &[Value]) -> Vec<String> {
+        frames
+            .iter()
+            .map(|f| f["type"].as_str().unwrap_or("").to_string())
+            .collect()
+    }
+
+    /// 跑一次默认场景的正文段发射（不 settle、不发 result），返回帧与每段
+    /// text delta 的写出时刻。
+    fn run(flags_args: &[&str]) -> (Vec<Value>, Vec<Instant>) {
+        let mut flags = parse_flags_from(&argv(flags_args));
+        let sink = SharedSink::default();
+        let mut io = Io {
+            out: Box::new(sink.clone()),
+            journal: None,
+            scenario: "hello".into(),
+        };
+        let (_tx, rx) = std::sync::mpsc::channel::<String>();
+        let stamps = emit_default_text(&mut flags, &mut io, &rx);
+        (frames(&sink), stamps)
+    }
+
+    /// `N=0`（缺省）：默认场景仍是「hello 」「world」背靠背两段，帧序
+    /// delta→assistant→delta→assistant（完全现行行为），不引入额外停顿。
+    #[test]
+    fn zero_gap_keeps_the_current_frame_order_and_timing() {
+        let (frames, stamps) = run(&[]);
+        assert_eq!(delta_texts(&frames), vec!["hello ", "world"]);
+        assert_eq!(
+            frame_types(&frames),
+            vec!["stream_event", "assistant", "stream_event", "assistant"]
+        );
+        assert_eq!(stamps.len(), 2, "one stamp per text segment");
+        let elapsed = stamps[1].duration_since(stamps[0]);
+        assert!(
+            elapsed < Duration::from_millis(50),
+            "N=0 must stay back-to-back, got {elapsed:?}"
+        );
+    }
+
+    /// `N=250`：帧序与文本不变，但相邻文本 delta 的时间差 `>= N`。
+    #[test]
+    fn positive_gap_spaces_adjacent_text_deltas_at_least_n() {
+        let (frames, stamps) = run(&["--delta-gap-ms", "250"]);
+        assert_eq!(delta_texts(&frames), vec!["hello ", "world"]);
+        assert_eq!(
+            frame_types(&frames),
+            vec!["stream_event", "assistant", "stream_event", "assistant"]
+        );
+        let elapsed = stamps[1].duration_since(stamps[0]);
+        assert!(
+            elapsed >= Duration::from_millis(250),
+            "gap must be >= N, got {elapsed:?}"
+        );
+    }
+
+    /// 参数解析：缺省 0（= 现行行为），显式值读取，非数值回落 0
+    /// （与 `--slow-ms` 同款宽容语义）。
+    #[test]
+    fn delta_gap_ms_parses_and_defaults_to_zero() {
+        assert_eq!(parse_flags_from(&argv(&[])).delta_gap_ms, 0);
+        assert_eq!(
+            parse_flags_from(&argv(&["--delta-gap-ms", "500"])).delta_gap_ms,
+            500
+        );
+        assert_eq!(
+            parse_flags_from(&argv(&["--delta-gap-ms", "abc"])).delta_gap_ms,
+            0
+        );
     }
 }

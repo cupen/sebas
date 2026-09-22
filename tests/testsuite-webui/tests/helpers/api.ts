@@ -160,7 +160,8 @@ export async function getSession(
 export async function createSession(
   request: APIRequestContext,
   opts: {
-    prompt: string
+    /** `null` = 0-turn placeholder（不 spawn 子进程，首条消息才开轮）。 */
+    prompt: string | null
     projectId?: string | null
     agent?: string
     /** 权限模式（add-agent-mode-selection）：`ask`/`edit`/`allow`/`auto`。 */
