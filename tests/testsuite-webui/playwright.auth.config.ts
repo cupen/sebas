@@ -10,8 +10,8 @@ const REPO_ROOT = path.resolve(import.meta.dirname, '../..')
 /**
  * Auth-on form of the suite (task 3.8): same harness, TESTSUITE_AUTH=1 → the
  * sandbox comes up on port 9898 with the unified test account admin/admin
- * provisioned in the sandbox-local auth.db (SEBAS_WEBUI_AUTH_DB). Only
- * auth.spec.ts runs here.
+ * provisioned in the sandbox-local auth.db (SEBAS_WEBUI_AUTH_DB). auth.spec.ts
+ * and users-admin.spec.ts run here.
  */
 process.env.TESTSUITE_AUTH = '1'
 // Same default the harness script derives for port 9898; the keep-on-fail
@@ -22,7 +22,9 @@ const WEBUI_PORT = 9898
 
 export default defineConfig({
   testDir: './tests',
-  testMatch: /auth\.spec\.ts/,
+  // users-admin.spec.ts 与 auth.spec.ts 共用本装配（都需要 auth-on + 预置
+  // admin）——users-admin 是 2026-09-23 验收补的 Users 管理闭环旅程。
+  testMatch: /auth\.spec\.ts|users-admin\.spec\.ts/,
   timeout: 30_000,
   retries: 1,
   workers: 1,

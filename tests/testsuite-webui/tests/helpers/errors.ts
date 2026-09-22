@@ -48,6 +48,13 @@ export class ErrorCollector {
       // and missing candidates answer 400 BY DESIGN (the journey asserts the
       // honest inline reason and the disabled submit, not network silence).
       if (text.includes('400') && /\/api\/fs\/browse-dirs/.test(url)) return
+      // Intentional users-admin rejections (users-admin journey): the
+      // duplicate-username create answers 409 (NOCASE uniqueness) and the
+      // last-enabled-root disable/delete answer 400 BY DESIGN — the journey
+      // asserts the honest inline copy (user-create-error / user-action /
+      // user-delete-error), not network silence.
+      if (text.includes('409') && /\/api\/users$/.test(url)) return
+      if (text.includes('400') && /\/api\/users\//.test(url)) return
       // Intentional typed-rejection probe (5.2 release journey): deciding a
       // parked request that a stop already released answers 404 on the
       // review-card's own POST — the card honestly degrades to expired.

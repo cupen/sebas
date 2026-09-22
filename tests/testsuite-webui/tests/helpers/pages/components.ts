@@ -360,6 +360,7 @@ export class SettingsModal {
       | 'Models'
       | 'Skills'
       | 'Services'
+      | 'Users'
       | 'Appearance'
       | 'About'
       | 'Env Vars',
