@@ -334,10 +334,13 @@ impl AcpConfig {
     }
 }
 
+/// persist-session-map 3.3（design D5）：`[dispatch]` 段显式拒绝未知键——
+/// 退休的 `state_file` 残留在配置里会以未知键**报错**启动失败，而不是
+/// 「能解析但不生效」的假键（后者会让操作员误以为配置仍生效）。与 `[acp]`
+/// 段同一裁决；无发布版，滚动升级兼容不是约束。
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DispatchConfig {
-    #[serde(default = "default_state_file")]
-    pub state_file: String,
     #[serde(default = "default_channel_buffer")]
     pub channel_buffer: usize,
     #[serde(default = "default_max_concurrent")]
@@ -354,7 +357,6 @@ pub struct DispatchConfig {
 impl Default for DispatchConfig {
     fn default() -> Self {
         Self {
-            state_file: default_state_file(),
             channel_buffer: default_channel_buffer(),
             max_concurrent_sessions: default_max_concurrent(),
             turn_stall_timeout: default_turn_stall_timeout(),
@@ -362,9 +364,6 @@ impl Default for DispatchConfig {
     }
 }
 
-fn default_state_file() -> String {
-    "~/.config/sebas/sessions.json".into()
-}
 fn default_channel_buffer() -> usize {
     256
 }
@@ -985,13 +984,12 @@ impl Config {
     /// validate pure config on hosts without a claude binary. `run::run`
     /// calls this before touching the network or spawning anything.
     ///
-    /// 1. 目录可写性：state_file 父目录、media.download_dir、log.file 父
-    ///    目录（缺失则创建；创建/探测失败 → 友好 Config 错误，不 panic）。
+    /// 1. 目录可写性：media.download_dir、log.file 父目录（缺失则创建；
+    ///    创建/探测失败 → 友好 Config 错误，不 panic）。persist-session-map
+    ///    3.3：state_file 父目录检查随该键退休——会话映射落在状态库，无
+    ///    独立文件。
     /// 2. ACP 子进程二进制可达：绝对路径查存在+可执行位；裸名字扫 PATH。
     pub fn validate_runtime(&self) -> Result<()> {
-        if let Some(parent) = std::path::Path::new(&self.dispatch.state_file).parent() {
-            check_dir_writable(parent, "router.state_file 父目录")?;
-        }
         check_dir_writable(
             std::path::Path::new(&self.media.download_dir),
             "media.download_dir",
@@ -1006,7 +1004,6 @@ impl Config {
     }
 
     fn with_expanded_paths(mut self) -> Self {
-        self.dispatch.state_file = expand_tilde(&self.dispatch.state_file);
         if let Some(ref f) = self.service.core.secret_file {
             self.service.core.secret_file = Some(expand_tilde(f));
         }

@@ -101,7 +101,7 @@ both live in tasks.py — the old `scripts/*sandbox*.sh` harnesses were removed
    and override **all** defaults that would fall back to the real `~/.sebas`:
 
    - config `-c` path (no sandbox-safe default exists), with
-     `[dispatch] state_file`, `[media] download_dir`,
+     `[media] download_dir`,
      `[acp.agents.<name>] sessions_dir` / `work_dir`,
      `[service.core] channel_path`, `[skills] dir` (defaults to the real
      `~/.agents/skills` — pin it or `GET /api/skills` scans the operator's
@@ -113,6 +113,9 @@ both live in tasks.py — the old `scripts/*sandbox*.sh` harnesses were removed
      `SEBAS_WEBUI_AUTH_DB` (below). Left alone with zero users, a loopback
      webui stops at the first-run setup page (whoever hits it first creates
      root) and the user store would land in the real `~/.sebas`;
+     (persist-session-map: `[dispatch] state_file` is **retired** — the
+     session map lives in the state store's `projects.db`; a leftover
+     `state_file` key is rejected as unknown at parse time)
    - `[workspace] root` pointing at the sandbox dir (node processes:
      `[node] workspace_root` or env `SEBAS_WORKSPACE_ROOT`). It is the single
      boundary for project register/list, session detail/message/switch, and
@@ -231,8 +234,9 @@ addr=127.0.0.1:<port>`，router 侧用自定义 provider（`[provider.fake]` 哑
    work_dir = "<SB>/work"
    # args = ["--scenario", "thinking"]            # 键值形式示例
 
-   [dispatch]
-   state_file = "<SB>/sessions.json"
+   # persist-session-map：`[dispatch] state_file` 已退休——会话映射落
+   # 状态库（projects.db 的 session_map 表，随 SEBAS_STATE_DIR 派生），
+   # 残留该键会在解析期以未知键报错。
 
    [media]
    download_dir = "<SB>/downloads"

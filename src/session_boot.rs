@@ -15,7 +15,6 @@ use sebas_acp::claude::manager::SessionManager;
 use sebas_acp::claude::session::{AcpCommand, AcpEvent};
 use sebas_channels::ChannelKey;
 use sebas_dispatch::engine::DispatchHandle;
-use sebas_dispatch::state::SessionMap;
 use sebas_router::config::RouterConfig;
 use std::sync::Arc;
 use std::time::Duration;
@@ -291,40 +290,6 @@ pub async fn acp_resume_and_activate(
         .activate(key, session_id.clone(), new_acp_session_id, model_info)
         .await;
     Ok((session_id, pending, rx, outcome.resumed))
-}
-
-/// Restore the session map from the state file (openspec/specs/session-lifecycle/spec.md):
-/// - missing or empty file → empty table (first boot; an empty file is a
-///   harmless leftover, not corruption);
-/// - valid JSON → entries come back `Dormant`, eligible for lazy respawn;
-/// - corrupt JSON → quarantine the file to `<path>.corrupt-<unix>` and
-///   boot with an empty table instead of refusing to start.
-///
-/// `capacity` wires `[dispatch] max_concurrent_sessions` into the map.
-pub fn restore_session_map(state_file: &str, capacity: usize) -> SessionMap {
-    let state_raw = std::fs::read_to_string(state_file).unwrap_or_else(|_| "{}".into());
-    match state_raw.trim() {
-        "" => SessionMap::with_capacity(capacity),
-        raw => match SessionMap::restore_json_with_capacity(raw, capacity) {
-            Ok(m) => m,
-            Err(e) => {
-                let unix = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                let quarantined = format!("{state_file}.corrupt-{unix}");
-                warn!(
-                    ?e,
-                    path = %state_file,
-                    "session state file is corrupt; quarantining and starting fresh"
-                );
-                if let Err(re) = std::fs::rename(state_file, &quarantined) {
-                    warn!(?re, path = %quarantined, "failed to quarantine corrupt state file");
-                }
-                SessionMap::with_capacity(capacity)
-            }
-        },
-    }
 }
 
 /// Flush prompts queued during spawn as ONE ContinueSession (one-by-one

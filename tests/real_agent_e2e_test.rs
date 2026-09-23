@@ -204,9 +204,6 @@ work_dir = "{work}"
 driver = "acp"
 command = ["opencode", "acp"]
 
-[dispatch]
-state_file = "{state_file}"
-
 [media]
 download_dir = "{downloads}"
 
@@ -233,7 +230,6 @@ usage_file = "{usage}"
 "#,
             claude_sessions = fs_string(&path.join("claude-sessions")),
             work = fs_string(&path.join("work")),
-            state_file = fs_string(&path.join("sessions.json")),
             downloads = fs_string(&path.join("downloads")),
             overlay = fs_string(&path.join("providers.json")),
             usage = fs_string(&path.join("router-usage.jsonl")),

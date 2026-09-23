@@ -1364,9 +1364,147 @@ async fn graceful_exit_removes_channel_socket() {
         !sb.channel_path.exists(),
         "channel socket must be removed on graceful exit"
     );
+    // persist-session-map：会话映射按变更落库（projects.db），关停快照与
+    // 独立映射文件退休——优雅退出后**不得**存在 sessions.json
+    // （state-store「No separate session-map file exists」）。
     assert!(
-        sb.state_file.exists(),
-        "session state must be dumped on graceful exit"
+        !sb.path.join("sessions.json").exists(),
+        "no separate session-map file may be written on shutdown"
+    );
+}
+
+/// persist-session-map 核心收益的**进程级**旅程（session-lifecycle「Unclean
+/// exit keeps the mapping」+ state-store「Session map survives unclean
+/// exit」）：会话经 HTTP 创建并对客户端可见（回合完成 = 每次变更已按变更
+/// 落库），core 随即被 SIGKILL——**无任何关停路径参与**——重启后映射完整。
+/// 分两段各自断言：杀后先直读 projects.db 钉「提交即持久」（SIGKILL 下库中
+/// 已有该行），再重启 core 钉「恢复正确」（同一会话身份 + desired_mode 原
+/// 样、恢复条目 Dormant、无独立映射文件）。旧实现（关停 dump）下同一旅程
+/// 在杀后段即失败：库中无行、重启后会话消失。
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn sigkill_committed_session_map_survives_restart() {
+    let sb = Sandbox::new("testsuite_e2e", "sigkill-session-map");
+    let cli = http_client();
+    let mut core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    // 1) 建会话（desired mode = edit，fake-claude 完成一回合）。
+    let project_id = scene_project_id(&cli, &sb).await;
+    let (status, resp) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({
+            "project_id": project_id,
+            "prompt": "hello",
+            "agent": "claude",
+            "mode": "edit",
+        }),
+    )
+    .await
+    .expect("create session");
+    assert_eq!(status, 201, "create session: {resp}");
+    let encoded = resp["key"].as_str().expect("encoded session key").to_string();
+    let detail_url = format!("{}/api/sessions/{encoded}", sb.webui_url());
+    let hint = sb.path.clone();
+    let done = wait_for(
+        "the session turn to reach done (mapping observable = committed)",
+        Duration::from_secs(30),
+        &hint,
+        {
+            let cli = cli.clone();
+            let url = detail_url.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+                    let slug = v["status_slug"].as_str()?;
+                    (slug == "done").then_some(v)
+                })
+            }
+        },
+    )
+    .await;
+    let reference = done["reference"].as_str().expect("raw reference").to_string();
+    let session_id_before = done["session_id"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .expect("active session carries a routing id")
+        .to_string();
+
+    // 2) SIGKILL：非优雅退出，不经任何关停路径。
+    core.kill().await.expect("SIGKILL core");
+
+    // 3) 杀后直读状态库：已提交行就在 projects.db（提交即持久，不靠关停），
+    //    且独立映射文件从未被创建。
+    {
+        use sebas_db::schema::open_and_sync;
+        let projects_db = sb.path.join("projects.db");
+        let mut conn = open_and_sync(&projects_db, sebas::sebas_state::repo::PROJECTS_TABLES)
+            .expect("reopen sandbox projects.db")
+            .0;
+        let rows = sebas_models::session_map::load_session_map(&mut conn)
+            .expect("load session_map after SIGKILL");
+        let row = rows
+            .iter()
+            .find(|r| r.thread_id.as_deref() == Some(reference.as_str()))
+            .expect("committed mapping row survives the unclean exit on disk");
+        assert_eq!(row.session_id, session_id_before, "session identity durable");
+        assert_eq!(row.desired_mode, "edit", "desired mode durable");
+    }
+    assert!(
+        !sb.path.join("sessions.json").exists(),
+        "no separate session-map file may exist across an unclean exit"
+    );
+
+    // 4) 重启 core：会话仍列出，detail 可达，身份与 desired_mode 不回退，
+    //    恢复条目按 session-lifecycle 落 Dormant。
+    let _core2 = sb.spawn_core();
+    wait_reachable(&cli, &sb).await;
+    let restored = wait_for(
+        "the killed session to be listed again after restart",
+        Duration::from_secs(30),
+        &hint,
+        {
+            let cli = cli.clone();
+            let list_url = format!("{}/api/sessions", sb.webui_url());
+            let reference = reference.clone();
+            move || {
+                let cli = cli.clone();
+                let list_url = list_url.clone();
+                let reference = reference.clone();
+                Box::pin(async move {
+                    listed_row_by_reference(&cli, &list_url, &reference).await
+                })
+            }
+        },
+    )
+    .await;
+    assert_eq!(
+        restored["session_id"].as_str(),
+        Some(session_id_before.as_str()),
+        "restored mapping keeps the committed session identity"
+    );
+    let detail = cli
+        .get(&detail_url)
+        .send()
+        .await
+        .expect("detail after restart")
+        .json::<serde_json::Value>()
+        .await
+        .expect("detail json");
+    assert_eq!(
+        detail["desired_mode"].as_str(),
+        Some("edit"),
+        "desired mode survives the unclean exit"
+    );
+    assert_eq!(
+        detail["status_slug"].as_str(),
+        Some("dormant"),
+        "restored entries become Dormant (lazy respawn)"
     );
 }
 
@@ -6489,33 +6627,41 @@ async fn unknown_scenario_arg_fails_the_turn_loudly() {
 
 // ── close-acceptance-blind-spots 盲区 4：重启 spawning 收敛（组 3）──
 
-/// 在 core 启动前，往 dispatch 状态文件播种一条 0-turn 占位记录（v2 结构化
-/// 键，web 通道）：恢复后即 spawning 相位会话——事故里「spawning 状态被持久
-/// 化后进程退出」的盘面形态。`project_dir` 指向沙箱内已存在的 work 目录（无
-/// 项目归属的 web 行会被 restore 直接丢弃；**规范化**路径——沙箱在深 checkout
-/// 下以短符号链接使用，服务端的 workspace-root 越界检查按规范化形态比对）。
+/// 在 core 启动前，往状态库（projects.db 的 session_map 表）播种一条
+/// 0-turn 占位行（web 通道）：恢复后即 spawning 相位会话——事故里
+/// 「spawning 相位被持久化后进程退出」的盘面形态。persist-session-map：
+/// 恢复源是状态库，不再是 dispatch 状态文件。`project_dir` 指向沙箱内已
+/// 存在的 work 目录（无项目归属的 web 行会被恢复直接丢弃；**规范化**
+/// 路径——沙箱在深 checkout 下以短符号链接使用，服务端的 workspace-root
+/// 越界检查按规范化形态比对）。
 fn seed_spawning_placeholder(sb: &Sandbox, reference: &str, kind: &str) {
-    use sebas_channels::ChannelKey;
+    use sebas_db::schema::open_and_sync;
+    use sebas_models::session_map::SessionMapRow;
     let work = sb.path.join("work");
     let canonical = support::forward_slash(
         &std::fs::canonicalize(&work).unwrap_or(work),
     );
-    let disk_key =
-        serde_json::to_string(&ChannelKey::new("web", reference)).expect("key serializes");
-    let mut state = serde_json::Map::new();
-    state.insert(
-        disk_key,
-        serde_json::json!({
-            "session_id": "",
-            "last_active_unix": 1_758_000_000,
-            "awaiting_first_prompt": true,
-            "pending_kind": kind,
-            "desired_mode": "ask",
-            "project_dir": canonical,
-        }),
-    );
-    std::fs::write(&sb.state_file, serde_json::Value::Object(state).to_string())
-        .expect("seed dispatch state file");
+    let projects_db = sb.path.join("projects.db");
+    let mut conn = open_and_sync(&projects_db, sebas::sebas_state::repo::PROJECTS_TABLES)
+        .expect("open sandbox projects.db for seeding")
+        .0;
+    let row = SessionMapRow {
+        chat_id: "web".into(),
+        thread_id: Some(reference.to_string()),
+        session_id: String::new(),
+        last_active_unix: 1_758_000_000,
+        project_dir: Some(canonical),
+        acp_session_id: None,
+        current_model: None,
+        pending_kind: Some(kind.to_string()),
+        pending_model: None,
+        pending_mode: None,
+        desired_mode: "ask".into(),
+        label: None,
+        prompt_preview: None,
+        awaiting_first_prompt: true,
+    };
+    row.save(&conn).expect("seed session_map row");
 }
 
 /// `GET /api/sessions` 里按 reference 找行，返回该行（None = 尚未列出）。
@@ -6533,7 +6679,7 @@ async fn listed_row_by_reference(
 }
 
 /// 重启不留僵尸 spawning（重投激活分支，close-acceptance-blind-spots 3.2）：
-/// dispatch 状态文件里播一个 spawning 相位（0-turn 占位）的会话条目 → 起 core
+/// 状态库（session_map 表）里播一个 spawning 相位（0-turn 占位）的会话条目 → 起 core
 /// → 恢复路径重投 spawn 指令（design D2 重投优先）→ 该会话离开 spawning 相位，
 /// 以创建时记住的 agent（fake-claude 桩）完成 fresh spawn 激活 → active。
 #[tokio::test]

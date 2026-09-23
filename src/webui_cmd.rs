@@ -777,9 +777,6 @@ mod auth_gate_tests {
 app_id = ""
 app_secret = ""
 
-[dispatch]
-state_file = "{dir}/state.json"
-
 [media]
 download_dir = "{dir}/media"
 

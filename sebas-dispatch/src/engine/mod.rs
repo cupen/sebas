@@ -770,8 +770,8 @@ impl DispatchHandle {
     /// 重启 spawning 收敛（close-acceptance-blind-spots 盲区 4，design D2
     /// 重投优先）：core 启动恢复状态后对恢复出的 spawning 相位会话一次性落定。
     ///
-    /// 恢复（`SessionMap::restore_json`）能产生的 spawning 只有一种形态——
-    /// 0-turn 占位（盘上 `session_id=""` + `awaiting_first_prompt=true`，重启后
+    /// 恢复（`SessionMap::restore_rows`）能产生的 spawning 只有一种形态——
+    /// 0-turn 占位（行上 `session_id=""` + `awaiting_first_prompt=true`，重启后
     /// 仍是等待首条消息的空会话）；真实 spawn-in-flight 不入盘，本就不会出现在
     /// 恢复面。不落定时它就是事故里的那种僵尸：相位永远停在 spawning，无人
     /// 收敛。落定 = 按既定 spawn 流程**重投指令**（经 [`Self::web_activate_session`]，
@@ -1032,9 +1032,8 @@ impl DispatchHandle {
         }
     }
 
-    pub async fn dump_json(&self) -> serde_json::Result<String> {
-        self.map.dump_json().await
-    }
+    // persist-session-map 3.1：`dump_json`（关停快照）随文件持久化一并退休
+    // ——映射持久化改为生命周期事件处按变更落库（state.rs 的 persist_upsert）。
 
     /// Record the root card message_id for a session. Called from the outbound
     /// pump after the first `send_card` returns its message_id.

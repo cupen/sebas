@@ -90,13 +90,28 @@ pub static PROJECTS_TABLES: &[TableSchema] = &[
         columns: sebas_models::project::ProjectRow::schema_columns(),
     },
     TableSchema {
+        // persist-session-map 1.1：按会话映射的完整目标形状重建。键列 =
+        // ChannelKey 身份（chat_id = channel，thread_id = reference），主键
+        // 仍为 `(chat_id, thread_id)`（1.3：按会话键寻址语义不变）；其余列
+        // 承载 Mapping 的持久化字段（desired_mode / awaiting_first_prompt
+        // 非空且无常量默认——旧形状库打开时按隔离重置处理，见
+        // sebas_models::session_map 模块文档）。
         name: "session_map",
         create_ddl: "CREATE TABLE session_map (
-            chat_id          TEXT NOT NULL,
-            thread_id        TEXT,
-            session_id       TEXT NOT NULL,
-            last_active_unix INTEGER NOT NULL,
-            project_dir      TEXT,
+            chat_id               TEXT NOT NULL,
+            thread_id             TEXT,
+            session_id            TEXT NOT NULL,
+            last_active_unix      INTEGER NOT NULL,
+            project_dir           TEXT,
+            acp_session_id        TEXT,
+            current_model         TEXT,
+            pending_kind          TEXT,
+            pending_model         TEXT,
+            pending_mode          TEXT,
+            desired_mode          TEXT NOT NULL,
+            label                 TEXT,
+            prompt_preview        TEXT,
+            awaiting_first_prompt INTEGER NOT NULL,
             PRIMARY KEY (chat_id, thread_id)
         );",
         columns: sebas_models::session_map::SessionMapRow::schema_columns(),
@@ -582,6 +597,15 @@ mod tests {
                     ("session_id", "TEXT"),
                     ("last_active_unix", "INTEGER"),
                     ("project_dir", "TEXT"),
+                    ("acp_session_id", "TEXT"),
+                    ("current_model", "TEXT"),
+                    ("pending_kind", "TEXT"),
+                    ("pending_model", "TEXT"),
+                    ("pending_mode", "TEXT"),
+                    ("desired_mode", "TEXT"),
+                    ("label", "TEXT"),
+                    ("prompt_preview", "TEXT"),
+                    ("awaiting_first_prompt", "INTEGER"),
                 ],
             ),
         ];
@@ -691,9 +715,17 @@ mod active_record_tests {
         assert_eq!(
             upsert_sql::<SessionMapRow>(),
             "INSERT INTO session_map (chat_id, thread_id, session_id, last_active_unix, \
-             project_dir) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(chat_id, thread_id) \
+             project_dir, acp_session_id, current_model, pending_kind, pending_model, \
+             pending_mode, desired_mode, label, prompt_preview, awaiting_first_prompt) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
+             ON CONFLICT(chat_id, thread_id) \
              DO UPDATE SET session_id = excluded.session_id, \
-             last_active_unix = excluded.last_active_unix, project_dir = excluded.project_dir"
+             last_active_unix = excluded.last_active_unix, project_dir = excluded.project_dir, \
+             acp_session_id = excluded.acp_session_id, current_model = excluded.current_model, \
+             pending_kind = excluded.pending_kind, pending_model = excluded.pending_model, \
+             pending_mode = excluded.pending_mode, desired_mode = excluded.desired_mode, \
+             label = excluded.label, prompt_preview = excluded.prompt_preview, \
+             awaiting_first_prompt = excluded.awaiting_first_prompt"
         );
 
         // find / delete 的 SQL 形状同样来自生成器（单列主键形态）。
@@ -797,24 +829,133 @@ mod active_record_tests {
     fn session_map_row_save_find_by_round_trip() {
         let (_dir, mut conn) = projects_db();
         let row = SessionMapRow {
-            chat_id: "ch1".into(),
-            thread_id: Some("th1".into()),
+            chat_id: "web".into(),
+            thread_id: Some("web-1".into()),
             session_id: "s1".into(),
             last_active_unix: 99,
             project_dir: Some("/tmp/p".into()),
+            acp_session_id: Some("acp-1".into()),
+            current_model: Some("m1".into()),
+            pending_kind: Some("claude".into()),
+            pending_model: None,
+            pending_mode: Some("edit".into()),
+            desired_mode: "edit".into(),
+            label: Some("重构计划".into()),
+            prompt_preview: None,
+            awaiting_first_prompt: false,
         };
         row.save(&conn).unwrap();
         // 复合主键：find_by / delete_by（按全部键列）。
         assert_eq!(
-            SessionMapRow::find_by(&conn, "ch1", Some("th1")).unwrap().unwrap(),
+            SessionMapRow::find_by(&conn, "web", Some("web-1")).unwrap().unwrap(),
             row
         );
         assert_eq!(
             session_map::load_session_map(&mut conn).unwrap(),
             vec![row.clone()]
         );
-        assert!(SessionMapRow::delete_by(&conn, "ch1", Some("th1")).unwrap());
-        assert!(SessionMapRow::find_by(&conn, "ch1", Some("th1")).unwrap().is_none());
+        // upsert 更新分支：同键覆盖（按变更落盘就是同一键的反复 upsert）。
+        let mut updated = row.clone();
+        updated.session_id = "s2".into();
+        updated.desired_mode = "auto".into();
+        updated.awaiting_first_prompt = true;
+        updated.save(&conn).unwrap();
+        assert_eq!(
+            session_map::load_session_map(&mut conn).unwrap(),
+            vec![updated]
+        );
+        assert!(SessionMapRow::delete_by(&conn, "web", Some("web-1")).unwrap());
+        assert!(SessionMapRow::find_by(&conn, "web", Some("web-1")).unwrap().is_none());
+        assert!(session_map::load_session_map(&mut conn).unwrap().is_empty());
+    }
+
+    /// persist-session-map 1.4：改造前的 5 列 session_map 库在新注册表下
+    /// 打开 → 隔离重置（非原地补列）——隔离文件可打开且含旧行（
+    /// quarantine-database-reset 语义：改名留痕，可手工恢复）。
+    #[test]
+    fn old_shape_session_map_db_resets_and_quarantines_old_rows() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("projects.db");
+        {
+            // 手工搭出「改造前的库」：旧 5 列 session_map + 现行 projects 表
+            // + 规范的 schema_meta 版本键（与旧代码打点一致）。
+            let conn = sebas_db::conn::open(&db_path).unwrap();
+            conn.execute_batch(&format!(
+                "CREATE TABLE projects (
+                    path        TEXT PRIMARY KEY,
+                    name        TEXT NOT NULL,
+                    branch      TEXT,
+                    branch_at   INTEGER NOT NULL DEFAULT 0,
+                    added_at    INTEGER NOT NULL,
+                    sort_order  INTEGER NOT NULL DEFAULT 0,
+                    id          TEXT,
+                    default_agent TEXT
+                );
+                CREATE UNIQUE INDEX idx_projects_id ON projects(id);
+                CREATE TABLE session_map (
+                    chat_id          TEXT NOT NULL,
+                    thread_id        TEXT,
+                    session_id       TEXT NOT NULL,
+                    last_active_unix INTEGER NOT NULL,
+                    project_dir      TEXT,
+                    PRIMARY KEY (chat_id, thread_id)
+                );
+                CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                INSERT INTO schema_meta (key, value) VALUES
+                    ('version_format', 'date'),
+                    ('version', '{}');
+                INSERT INTO session_map (chat_id, thread_id, session_id, last_active_unix, project_dir)
+                    VALUES ('oc_old', NULL, 's-old', 100, '/tmp/p');",
+                sebas_db::schema::SCHEMA_VERSION
+            ))
+            .unwrap();
+        }
+
+        // 新注册表打开：desired_mode / awaiting_first_prompt 缺列且非空无默认
+        // → Incompatible → 隔离重置。
+        let (mut conn, outcome) = open_and_sync(&db_path, PROJECTS_TABLES).unwrap();
+        assert!(
+            matches!(outcome, sebas_db::schema::SyncOutcome::Reset { .. }),
+            "旧形状库应触发重置, 实际 {outcome:?}"
+        );
+        // 新表是空的（数据未迁入）。
+        assert!(session_map::load_session_map(&mut conn).unwrap().is_empty());
+
+        // 1.3 验收（经 sebas-db 的同步原语间接断言——表结构 diff 原语只允许
+        // 在 sebas-db 出现，见 tests/persistence_runtime_test.rs 的机械门禁）：
+        // 重开 UpToDate 证明重建 DDL 与注册表逐列自洽；`SessionMapRow::all`
+        // （按全列清单 SELECT）在实表上成功证明既有 5 列都在；主键
+        // (chat_id, thread_id) 的位次由 golden upsert 的
+        // `ON CONFLICT(chat_id, thread_id)` 钉住。
+        let (_conn, outcome2) = open_and_sync(&db_path, PROJECTS_TABLES).unwrap();
+        assert_eq!(
+            outcome2,
+            sebas_db::schema::SyncOutcome::UpToDate,
+            "重建 schema 与注册表逐列自洽"
+        );
+        assert!(session_map::load_session_map(&mut conn).unwrap().is_empty());
+
+        // 隔离文件可打开且含旧行。
+        let quarantined: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .map(|n| n.to_string_lossy().starts_with("projects.db.reset-"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(quarantined.len(), 1, "恰好一个隔离主文件: {quarantined:?}");
+        let old_conn = sebas_db::conn::open(&quarantined[0]).unwrap();
+        let old_sid: String = old_conn
+            .query_row(
+                "SELECT session_id FROM session_map WHERE chat_id = 'oc_old'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(old_sid, "s-old", "隔离文件含重置前的旧行");
     }
 }
 

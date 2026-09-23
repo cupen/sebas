@@ -12,8 +12,7 @@
 //! `sebas::run::{...}` 路径，拆模块不牵动调用方。
 
 pub use crate::session_boot::{
-    acp_resume_and_activate, acp_spawn_and_activate, flush_pending_prompts, restore_session_map,
-    spawn_acp_pump,
+    acp_resume_and_activate, acp_spawn_and_activate, flush_pending_prompts, spawn_acp_pump,
 };
 pub use crate::ws_loop::{DispatchEventHandler, ingest_feishu_frame};
 
@@ -108,11 +107,6 @@ pub async fn run(
         );
     }
 
-    let map = restore_session_map(
-        &cfg.dispatch.state_file,
-        cfg.dispatch.max_concurrent_sessions,
-    );
-
     // 5.5: 初始化状态库 (add-state-store)；single-state-dir D2/D5：core 的
     // 库按增长特征拆成 settings.db（providers/model_aliases/settings，有界）
     // 与 projects.db（projects/session_map，增长），两库各开一次、路径由
@@ -123,6 +117,10 @@ pub async fn run(
     // 不可用则**该域降级并如实报告**（state-store spec「unavailability is
     // reported, not hidden」）——项目面每个操作返回点名原因的 typed
     // rejection，设置面照常工作，不拿空表冒充现状。
+    // persist-session-map：会话映射的恢复源从 `[dispatch] state_file` 改为
+    // 状态库——放在 init_engine 之后（恢复读的就是 projects.db），映射空表
+    // /条目不可读绝不阻塞启动（session-lifecycle「Restart recovery with
+    // corruption tolerance」；库本身打不开归状态库的损坏规则管辖）。
     {
         // 退休变量提示（single-state-dir 6.1）：SEBAS_STATE_DB 随单库退休，
         // 不再被读取；残留值只提示，不改变任何行为。
@@ -190,6 +188,29 @@ pub async fn run(
         // settings_writer 在此 drop：写者线程由引擎持有的 handle 克隆续命
         // （全部 sender 关闭才退出），与既有形态一致。
     }
+
+    // 会话映射从状态库恢复（persist-session-map 2.1）：空表 → 空表启动；
+    // 条目不可读（不可寻址行）→ 告警 + 跳过，恢复的条目一律 Dormant/占位，
+    // 供惰性 respawn（openspec/specs/session-lifecycle/spec.md）。`capacity`
+    // 接线 `[dispatch] max_concurrent_sessions`。
+    let map = match sebas_dispatch::state_store::engine() {
+        Some(engine) => match engine.load_session_map().await {
+            Ok(rows) => sebas_dispatch::state::SessionMap::restore_rows(
+                rows,
+                cfg.dispatch.max_concurrent_sessions,
+            ),
+            Err(e) => {
+                warn!(error = %e, "session map 读取失败：以空表启动（不阻塞启动）");
+                sebas_dispatch::state::SessionMap::with_capacity(
+                    cfg.dispatch.max_concurrent_sessions,
+                )
+            }
+        },
+        None => {
+            warn!("state store 未初始化：会话映射以空表启动");
+            sebas_dispatch::state::SessionMap::with_capacity(cfg.dispatch.max_concurrent_sessions)
+        }
+    };
 
     // close-acceptance-blind-spots 盲区 2：env posture 启动告警——继承自
     // shell 且不被 cover 语义覆盖的 ANTHROPIC_* 逐变量 WARN 点名（只报告，
@@ -623,25 +644,11 @@ pub async fn run(
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 
-    // Snapshot state BEFORE killing children (openspec/specs/acp-driver/spec.md order: dump, then
-    // shutdown_children). Dumping after kill_all would race the pumps'
-    // teardown (terminal events strip mappings) and would lose the whole
-    // snapshot if a child hangs the kill — the restored mappings are what
-    // lazy respawn (openspec/specs/session-lifecycle/spec.md) works from.
-    // fail-fast-on-startup-errors：这是 ready 之后的优雅关闭路径——dump 失败
-    // 只告警不外抛，避免运行期失败冒充启动失败、污染退出码 75 的语义。
-    let json = match router.dump_json().await {
-        Ok(json) => Some(json),
-        Err(e) => {
-            warn!(?e, "failed to dump session state on shutdown");
-            None
-        }
-    };
-    if let Some(json) = json
-        && let Err(e) = std::fs::write(&cfg.dispatch.state_file, json)
-    {
-        warn!(?e, "failed to persist session state");
-    }
+    // persist-session-map 3.1：关停快照（`dump_json` → `[dispatch]
+    // state_file`）已退休——映射在每次生命周期事件处按变更落库，关停顺序
+    // 不再决定什么能活下来（session-lifecycle「Snapshot precedes shutdown
+    // kill」）。关停路径不再写任何会话映射文件，也不再有独立映射文件
+    // （state-store「No separate session-map file exists」）。
 
     // Signal all live sessions to cancel and reap their child processes.
     mgr.kill_all().await;

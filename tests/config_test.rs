@@ -153,10 +153,35 @@ app_secret = "sec"
 owner_id = "ou_x"
 "#;
     let cfg = Config::parse(toml).unwrap();
+    // persist-session-map 3.3：sessions.json 默认键退休；tilde 展开断言落在
+    // 仍带 `~` 的既有默认（media download_dir = ~/.cache/sebas/downloads）
+    // 上——with_expanded_paths 在 parse 末尾跑，`~` 展开为 HOME 下绝对路径。
     assert!(
-        cfg.dispatch
-            .state_file
-            .starts_with(&std::env::var("HOME").unwrap_or_default())
+        cfg.media
+            .download_dir
+            .starts_with(&std::env::var("HOME").unwrap_or_default()),
+        "default download_dir must expand ~: {}",
+        cfg.media.download_dir
+    );
+}
+
+/// persist-session-map 3.3：`[dispatch] state_file` 键已退休（不留过渡期，
+/// design D5）——残留该键的配置以**未知键**解析错误拒绝（deny_unknown_fields，
+/// 比「能解析但不生效」的假键诚实）；错误信息点名键名。
+#[test]
+fn retired_dispatch_state_file_key_is_rejected() {
+    let toml = r#"
+[feishu]
+app_id = ""
+app_secret = ""
+
+[dispatch]
+state_file = "/tmp/leftover/sessions.json"
+"#;
+    let err = Config::parse(toml).unwrap_err().to_string();
+    assert!(
+        err.contains("state_file"),
+        "unknown-key error must name the retired key: {err}"
     );
 }
 
@@ -179,20 +204,16 @@ app_secret = "sec"
 driver = "claude"
 path = "{bin}"
 
-[dispatch]
-state_file = "{}/state/sessions.json"
-
 [media]
 download_dir = "{}/dl"
 
 [log]
 file = "{}/logs/sebas.log"
 "#,
-        dir_toml, dir_toml, dir_toml
+        dir_toml, dir_toml
     );
     let cfg = Config::parse(&toml).unwrap();
     cfg.validate_runtime().expect("runtime checks pass");
-    assert!(dir.join("state").is_dir(), "state parent created");
     assert!(dir.join("dl").is_dir(), "download dir created");
     assert!(dir.join("logs").is_dir(), "log parent created");
     let _ = std::fs::remove_dir_all(&dir);

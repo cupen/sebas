@@ -1,7 +1,6 @@
 use crate::error::DispatchError;
 use sebas_channels::ChannelKey;
-use serde::de::Error as _;
-use serde::{Deserialize, Serialize};
+use sebas_models::session_map::SessionMapRow;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -62,7 +61,7 @@ pub enum PendingOpError {
 /// `Dormant` is the inverse: a mapping restored from the state file after a
 /// daemon restart — the session_id is known but no child process is alive.
 /// The first inbound text lazily respawns it (openspec/specs/session-lifecycle/spec.md); `Dormant` never
-/// appears at runtime except via `restore_json`.
+/// appears at runtime only via `restore_rows` (state-store restore).
 ///
 /// fail-fast-on-startup-errors（webui spec delta）：spawn 失败的会话不再被
 /// 静默拆除（Removed），而是保留为 `SpawnFailed` 终态——会话在列表/详情里
@@ -131,10 +130,10 @@ pub struct Mapping {
     /// （add-agent-mode-selection）操作者期望的会话 mode：创建请求携带、
     /// 中途切换立即更新，快照暴露给前端。（
     /// session-parallel-liveness-and-unread-polish 3.2，design D5b）**非空**
-    /// `String`：缺省即 `ask`（`ASK_MODE`），不再有 `None` 路径——state.json、
-    /// 内存、wire、UI 四层对 ask 的表达是同一份字符串；旧数据的 null 在
-    /// `MappingDto` 反序列化点（restore 即启动迁移）一次性落为 ask，迁移是
-    /// null 消失的唯一地点，此后任何投影都读到迁移后的值，无读侧回退。
+    /// `String`：缺省即 `ask`（`ASK_MODE`），不再有 `None` 路径——状态库行、
+    /// 内存、wire、UI 四层对 ask 的表达是同一份字符串；persist-session-map
+    /// 后行即持久化形状（无 serde 中间层），null 形态不存在，任何投影都读
+    /// 到同一值，无读侧回退。
     pub desired_mode: String,
     /// （add-agent-mode-selection）执行体回报的**实际生效** mode（本机 =
     /// spawn argv 实际应用值 / `ModeChanged` 事件；远端 = 节点回报）。
@@ -149,8 +148,7 @@ pub struct Mapping {
     pub acp_session_id: Option<String>,
     /// 会话当前的模型 id（add-acp-model-selection）：spawn 时由 driver 上报的
     /// configOptions 填充；SetModel 成功后更新。`None` = agent 无模型选项。
-    /// 内存层字段；`add-state-store` 落地后收编为其 sessions 表 `current_model`
-    /// 列（review R1）——本 change 先落内存/MappingDto 层。
+    /// 随映射落状态库（session_map.current_model 列）。
     pub current_model: Option<String>,
     /// 该 ACP 会话可选的模型 id 列表（来自 agent 的 configOptions）。webui
     /// 创建会话下拉的数据源；`None`/空 = 无模型选择面。
@@ -163,13 +161,13 @@ pub struct Mapping {
     pub available_commands: Vec<sebas_acp::AvailableCommand>,
     /// （fix-webui-approval-restore-and-session-identity 5.1，design D6）操作者
     /// 设置的会话 label。`None` = 未设置（命名回退首条 prompt 预览 / 短 id）。
-    /// 随 MappingDto 落盘——label 跨重启保持。
+    /// 随映射行落库——label 跨重启保持。
     pub label: Option<String>,
     /// （fix-webui-qa-defects-round4 1.2/3.1）命名来源迁移位：首条 prompt 预览。
     /// 活跃会话的预览以卡态（`user_prompt`）为准；本字段在卡态不存在时兜底
     /// ——归档恢复（快照元数据迁移）与 terminal teardown（卡态丢弃前迁出），
     /// 两处都靠它保住 rail 行名不退化为短 id。`None` = 无迁移来源（旧行为）。
-    /// 随 MappingDto 落盘。
+    /// 随映射行落库。
     pub prompt_preview: Option<String>,
 }
 
@@ -638,40 +636,59 @@ impl SessionMap {
         mode: Option<String>,
         awaiting_first_prompt: bool,
     ) -> Result<BeginSpawn, DispatchError> {
-        let mut g = self.inner.write().await;
-        match g.get(&key) {
-            Some(m) if matches!(m.state, MappingState::Spawning { .. }) => {
-                Ok(BeginSpawn::AlreadySpawning)
-            }
-            Some(_) => {
-                self.clear_queue(&key).await;
-                g.insert(
-                    key,
-                    Mapping::spawning_with(kind, model, mode, awaiting_first_prompt),
-                );
-                Ok(BeginSpawn::ReplacedActive)
-            }
-            None => {
-                if g.len() >= self.capacity {
-                    return Err(DispatchError::Capacity(self.capacity));
+        let outcome = {
+            let mut g = self.inner.write().await;
+            match g.get(&key) {
+                Some(m) if matches!(m.state, MappingState::Spawning { .. }) => {
+                    Ok(BeginSpawn::AlreadySpawning)
                 }
-                g.insert(
-                    key,
-                    Mapping::spawning_with(kind, model, mode, awaiting_first_prompt),
-                );
-                Ok(BeginSpawn::Fresh)
+                Some(_) => {
+                    self.clear_queue(&key).await;
+                    g.insert(
+                        key.clone(),
+                        Mapping::spawning_with(kind, model, mode, awaiting_first_prompt),
+                    );
+                    Ok(BeginSpawn::ReplacedActive)
+                }
+                None => {
+                    if g.len() >= self.capacity {
+                        return Err(DispatchError::Capacity(self.capacity));
+                    }
+                    g.insert(
+                        key.clone(),
+                        Mapping::spawning_with(kind, model, mode, awaiting_first_prompt),
+                    );
+                    Ok(BeginSpawn::Fresh)
+                }
             }
+        };
+        // 0-turn 占位随创建落库（会话创建事件，persist-session-map 2.2）；
+        // in-flight 占位非持久形态（persist_upsert 内跳过）——被替换的旧
+        // 已提交行原样保留，activate 成功时以新会话行覆盖（crash 中间态
+        // 恢复出的是替换前的映射）。
+        if matches!(
+            outcome,
+            Ok(BeginSpawn::Fresh) | Ok(BeginSpawn::ReplacedActive)
+        ) {
+            self.persist_upsert(&key).await;
         }
+        outcome
     }
 
     /// （add-agent-mode-selection）记录操作者期望的 mode（中途切换）。与
     /// `set_current_model` 同一模式：仅改映射，publish 由 engine 层调用方
     /// 完成。（3.2，D5b）desired 非空：切换必须给出四个控制面词之一。
     pub async fn set_desired_mode(&self, key: &ChannelKey, mode: String) {
-        let mut g = self.inner.write().await;
-        if let Some(m) = g.get_mut(key) {
-            m.desired_mode = mode;
+        {
+            let mut g = self.inner.write().await;
+            if let Some(m) = g.get_mut(key) {
+                m.desired_mode = mode;
+            } else {
+                return;
+            }
         }
+        // 模式变更即落库（persist-session-map 2.2）。
+        self.persist_upsert(key).await;
     }
 
     /// （add-agent-mode-selection）记录执行体回报的实际生效 mode（本机 =
@@ -681,6 +698,8 @@ impl SessionMap {
         if let Some(m) = g.get_mut(key) {
             m.effective_mode = mode;
         }
+        // 不落库：effective_mode 是执行体回报的运行时事实，不在持久形状里
+        // （重启后如实呈现 None，由下一次回报重建）。
     }
 
     /// Flip Spawning -> Active and drain queued prompts (returned in order).
@@ -699,48 +718,54 @@ impl SessionMap {
         acp_session_id: Option<String>,
         model: Option<sebas_acp::AcpModelInfo>,
     ) -> Vec<String> {
-        let mut g = self.inner.write().await;
-        match g.get_mut(key) {
-            Some(m) => {
-                m.last_active_unix = crate::engine::now_unix();
-                let mut next = MappingState::Active { session_id };
-                // 写入映射：新会话/成功 resume 的 acp_session_id 落盘给后续
-                // resume 使用；把旧字段就地一起换掉（D4：load 失败时旧映射
-                // 保持不动——本次 activate 携带的是新会话的 id）。
-                std::mem::swap(&mut m.state, &mut next);
-                let staged: Vec<StagedSubmission> = match next {
-                    MappingState::Spawning { pending, .. } => pending,
-                    MappingState::Active { .. }
-                    | MappingState::Dormant { .. }
-                    | MappingState::SpawnFailed { .. } => Vec::new(),
-                };
-                // 合并即投递：这些 id 从此对 remove/move 类型化拒绝为
-                // AlreadyStarted（D2/D7）。delivered 是叶子锁，inner 写锁内
-                // 写入符合既定锁序。
-                {
-                    let mut delivered = self.delivered.lock().unwrap();
-                    delivered
-                        .entry(key.clone())
-                        .or_default()
-                        .extend(staged.iter().map(|s| s.id));
+        let drained = {
+            let mut g = self.inner.write().await;
+            match g.get_mut(key) {
+                Some(m) => {
+                    m.last_active_unix = crate::engine::now_unix();
+                    let mut next = MappingState::Active { session_id };
+                    // 写入映射：新会话/成功 resume 的 acp_session_id 落盘给后续
+                    // resume 使用；把旧字段就地一起换掉（D4：load 失败时旧映射
+                    // 保持不动——本次 activate 携带的是新会话的 id）。
+                    std::mem::swap(&mut m.state, &mut next);
+                    let staged: Vec<StagedSubmission> = match next {
+                        MappingState::Spawning { pending, .. } => pending,
+                        MappingState::Active { .. }
+                        | MappingState::Dormant { .. }
+                        | MappingState::SpawnFailed { .. } => Vec::new(),
+                    };
+                    // 合并即投递：这些 id 从此对 remove/move 类型化拒绝为
+                    // AlreadyStarted（D2/D7）。delivered 是叶子锁，inner 写锁内
+                    // 写入符合既定锁序。
+                    {
+                        let mut delivered = self.delivered.lock().unwrap();
+                        delivered
+                            .entry(key.clone())
+                            .or_default()
+                            .extend(staged.iter().map(|s| s.id));
+                    }
+                    m.acp_session_id = acp_session_id;
+                    m.current_model = model.as_ref().map(|info| info.current.clone());
+                    m.available_models = model.map(|info| info.options);
+                    staged.into_iter().map(|s| s.text).collect()
                 }
-                m.acp_session_id = acp_session_id;
-                m.current_model = model.as_ref().map(|info| info.current.clone());
-                m.available_models = model.map(|info| info.options);
-                staged.into_iter().map(|s| s.text).collect()
+                None => {
+                    tracing::warn!(
+                        ?key,
+                        "activate without placeholder; inserting fresh mapping"
+                    );
+                    let mut mapping = Mapping::active_with_acp(session_id, acp_session_id);
+                    mapping.current_model = model.as_ref().map(|info| info.current.clone());
+                    mapping.available_models = model.map(|info| info.options);
+                    g.insert(key.clone(), mapping);
+                    Vec::new()
+                }
             }
-            None => {
-                tracing::warn!(
-                    ?key,
-                    "activate without placeholder; inserting fresh mapping"
-                );
-                let mut mapping = Mapping::active_with_acp(session_id, acp_session_id);
-                mapping.current_model = model.as_ref().map(|info| info.current.clone());
-                mapping.available_models = model.map(|info| info.options);
-                g.insert(key.clone(), mapping);
-                Vec::new()
-            }
-        }
+        };
+        // 会话创建/恢复成功即落库（persist-session-map 2.2）：Active 行以同
+        // 一会话键 upsert——替换 spawn 窗口前保留的旧已提交行。
+        self.persist_upsert(key).await;
+        drained
     }
 
     /// Spawn failed（fail-fast-on-startup-errors 3.1）：Spawning 占位不再被
@@ -772,21 +797,32 @@ impl SessionMap {
     }
 
     pub async fn insert(&self, key: ChannelKey, mapping: Mapping) -> Result<(), DispatchError> {
-        let mut g = self.inner.write().await;
-        if !g.contains_key(&key) && g.len() >= self.capacity {
-            return Err(DispatchError::Capacity(self.capacity));
+        {
+            let mut g = self.inner.write().await;
+            if !g.contains_key(&key) && g.len() >= self.capacity {
+                return Err(DispatchError::Capacity(self.capacity));
+            }
+            g.insert(key.clone(), mapping);
         }
-        g.insert(key, mapping);
+        // 归档重建等路径的整映射插入同样按变更落库。
+        self.persist_upsert(&key).await;
         Ok(())
     }
 
     /// Set the project_dir on an existing mapping. Used by WebUI to record
     /// the working directory after spawning a project session.
     pub async fn set_project_dir(&self, key: &ChannelKey, project_dir: Option<String>) {
-        let mut g = self.inner.write().await;
-        if let Some(m) = g.get_mut(key) {
-            m.project_dir = project_dir;
+        {
+            let mut g = self.inner.write().await;
+            if let Some(m) = g.get_mut(key) {
+                m.project_dir = project_dir;
+            } else {
+                return;
+            }
         }
+        // project_dir 是非飞书会话的从属不变量（0-turn 占位的 spawn 目标）
+        // ——置定即落库；这也是占位行通常的首次落库点（创建时无项目不落）。
+        self.persist_upsert(key).await;
     }
 
     pub async fn get(&self, key: &ChannelKey) -> Option<Mapping> {
@@ -806,10 +842,16 @@ impl SessionMap {
     /// 成功（ModelChanged）后调用，快照 API 立即反映新模型。无映射时 no-op。
     /// 不更新 available_models（模型列表来自 spawn 时的 configOptions）。
     pub async fn set_current_model(&self, key: &ChannelKey, model_id: String) {
-        let mut g = self.inner.write().await;
-        if let Some(m) = g.get_mut(key) {
-            m.current_model = Some(model_id);
+        {
+            let mut g = self.inner.write().await;
+            if let Some(m) = g.get_mut(key) {
+                m.current_model = Some(model_id);
+            } else {
+                return;
+            }
         }
+        // 模型变更即落库（persist-session-map 2.2）。
+        self.persist_upsert(key).await;
     }
 
     /// 设置/清空会话 label（fix-webui-approval-restore-and-session-identity
@@ -817,14 +859,21 @@ impl SessionMap {
     /// 任何映射状态都可命名——0-turn 占位（无 session_id）同样可以（label 是
     /// 操作者自由输入）。无映射时返回 `false`（调用方转 UnknownSession）。
     pub async fn set_label(&self, key: &ChannelKey, label: Option<String>) -> bool {
-        let mut g = self.inner.write().await;
-        match g.get_mut(key) {
-            Some(m) => {
-                m.label = label;
-                true
+        let hit = {
+            let mut g = self.inner.write().await;
+            match g.get_mut(key) {
+                Some(m) => {
+                    m.label = label;
+                    true
+                }
+                None => false,
             }
-            None => false,
+        };
+        // label 变更即落库（persist-session-map 2.2）；无映射时无事可做。
+        if hit {
+            self.persist_upsert(key).await;
         }
+        hit
     }
 
     /// （session-slash-commands 2.1）物化 agent 广告的会话命令表：
@@ -847,7 +896,7 @@ impl SessionMap {
     /// (acp-session-mapping D4: "原映射保留在存储，旧会话仍可被未来 load
     /// 寻址，不因一次失败而抹除"). The record is parked under a deterministic
     /// synthesized `closed-<hash(session_id)>` key so it survives a daemon
-    /// restart in `dump_json` yet stays out of the user's chat keys (a
+    /// restart in the state store yet stays out of the user's chat keys (a
     /// `closed-*` chat can never collide with a web/feishu key, and the WebUI
     /// session list already renders Dormant rows). Idempotent: the same
     /// session id reuses the same archive key instead of duplicating rows.
@@ -866,31 +915,38 @@ impl SessionMap {
         let mut h = DefaultHasher::new();
         session_id.hash(&mut h);
         let archive_key = ChannelKey::new("web", format!("closed-{:016x}", h.finish()));
-        let mut g = self.inner.write().await;
-        // 已存在则只补 last_active——不覆盖已记录的 acp_session_id。
-        match g.get_mut(&archive_key) {
-            Some(m) => {
-                m.last_active_unix = crate::engine::now_unix();
-            }
-            None => {
-                let mut m = Mapping::dormant(session_id.to_string(), crate::engine::now_unix());
-                m.acp_session_id = acp_session_id;
-                // 身份随记录一起留存（源映射可能已经被替换/移除，取到就带上）。
-                if let Some(src) = g.get(source) {
-                    m.project_dir = src.project_dir.clone();
-                    m.pending_kind = src.pending_kind.clone();
-                    m.pending_model = src.pending_model.clone();
-                    m.pending_mode = src.pending_mode.clone();
-                    m.desired_mode = src.desired_mode.clone();
-                    m.current_model = src.current_model.clone();
+        {
+            let mut g = self.inner.write().await;
+            // 已存在则只补 last_active——不覆盖已记录的 acp_session_id。
+            match g.get_mut(&archive_key) {
+                Some(m) => {
+                    m.last_active_unix = crate::engine::now_unix();
                 }
-                if g.len() < self.capacity {
-                    g.insert(archive_key, m);
-                } else {
-                    tracing::warn!(%session_id, "session map at capacity; cannot archive closed mapping");
+                None => {
+                    let mut m =
+                        Mapping::dormant(session_id.to_string(), crate::engine::now_unix());
+                    m.acp_session_id = acp_session_id;
+                    // 身份随记录一起留存（源映射可能已经被替换/移除，取到就带上）。
+                    if let Some(src) = g.get(source) {
+                        m.project_dir = src.project_dir.clone();
+                        m.pending_kind = src.pending_kind.clone();
+                        m.pending_model = src.pending_model.clone();
+                        m.pending_mode = src.pending_mode.clone();
+                        m.desired_mode = src.desired_mode.clone();
+                        m.current_model = src.current_model.clone();
+                    }
+                    if g.len() < self.capacity {
+                        g.insert(archive_key.clone(), m);
+                    } else {
+                        tracing::warn!(%session_id, "session map at capacity; cannot archive closed mapping");
+                        return;
+                    }
                 }
             }
         }
+        // 归档记录同样按变更落库（acp-session-mapping D4「原映射保留在存储」
+        // 的存储从此就是状态库本身）。
+        self.persist_upsert(&archive_key).await;
     }
 
     pub async fn lookup_key_by_session(&self, session_id: &str) -> Option<ChannelKey> {
@@ -903,13 +959,20 @@ impl SessionMap {
     }
 
     pub async fn remove_by_session(&self, session_id: &str) {
-        let mut g = self.inner.write().await;
-        if let Some(k) = g
-            .iter()
-            .find(|(_, m)| m.session_id() == Some(session_id))
-            .map(|(k, _)| k.clone())
-        {
-            g.remove(&k);
+        let removed = {
+            let mut g = self.inner.write().await;
+            let found = g
+                .iter()
+                .find(|(_, m)| m.session_id() == Some(session_id))
+                .map(|(k, _)| k.clone());
+            if let Some(k) = &found {
+                g.remove(k);
+            }
+            found
+        };
+        if let Some(k) = removed {
+            // 映射被移除（非退役）：持久行一并删除——重启后不得复活。
+            self.persist_remove(&k).await;
             // Session torn down: drop queued turns so they never drain into a
             // future session for the same chat key.
             self.clear_queue(&k).await;
@@ -934,34 +997,42 @@ impl SessionMap {
         session_id: &str,
         prompt_preview: Option<String>,
     ) -> Option<ChannelKey> {
-        let mut g = self.inner.write().await;
-        let retired = if let Some((k, m)) = g
-            .iter_mut()
-            .find(|(_, m)| m.session_id() == Some(session_id))
-        {
-            if m.prompt_preview.is_none()
-                && prompt_preview.as_deref().is_some_and(|p| !p.is_empty())
+        let retired = {
+            let mut g = self.inner.write().await;
+            let retired = if let Some((k, m)) = g
+                .iter_mut()
+                .find(|(_, m)| m.session_id() == Some(session_id))
             {
-                m.prompt_preview = prompt_preview;
-            }
-            m.last_active_unix = crate::engine::now_unix();
-            if matches!(m.state, MappingState::Active { .. }) {
-                if let MappingState::Active { session_id: sid } = &m.state {
-                    m.state = MappingState::Dormant {
-                        session_id: sid.clone(),
-                    };
+                if m.prompt_preview.is_none()
+                    && prompt_preview.as_deref().is_some_and(|p| !p.is_empty())
+                {
+                    m.prompt_preview = prompt_preview;
                 }
-                Some(k.clone())
+                m.last_active_unix = crate::engine::now_unix();
+                if matches!(m.state, MappingState::Active { .. }) {
+                    if let MappingState::Active { session_id: sid } = &m.state {
+                        m.state = MappingState::Dormant {
+                            session_id: sid.clone(),
+                        };
+                    }
+                    Some(k.clone())
+                } else {
+                    None
+                }
             } else {
                 None
+            };
+            if let Some(k) = &retired {
+                // 与 remove_by_session 同款清理：队列与投递记录随活跃绑定消失。
+                self.turn_queue.write().await.remove(k);
+                self.delivered.lock().unwrap().remove(k);
             }
-        } else {
-            None
+            retired
         };
         if let Some(k) = &retired {
-            // 与 remove_by_session 同款清理：队列与投递记录随活跃绑定消失。
-            self.turn_queue.write().await.remove(k);
-            self.delivered.lock().unwrap().remove(k);
+            // 退役即落库（persist-session-map 2.2）：Active→Dormant 的记录
+            // 以 Dormant 行覆盖持久层，重启后按记录保留。
+            self.persist_upsert(k).await;
         }
         retired
     }
@@ -970,8 +1041,13 @@ impl SessionMap {
     /// Used by the WebUI close path to drop Spawning placeholders that have
     /// no session_id (so `remove_by_session` cannot find them).
     pub async fn remove_by_key(&self, key: &ChannelKey) {
-        let mut g = self.inner.write().await;
-        if g.remove(key).is_some() {
+        let removed = {
+            let mut g = self.inner.write().await;
+            g.remove(key).is_some()
+        };
+        if removed {
+            // 关闭即删行（persist-session-map 2.2）——重启后不得复活。
+            self.persist_remove(key).await;
             self.clear_queue(key).await;
         }
     }
@@ -1175,8 +1251,6 @@ impl SessionMap {
         Err(PendingOpError::Unknown)
     }
 
-    /// Persist Active AND Dormant entries; Spawning placeholders are never
-    /// persisted (their child is tied to this process).
     /// Return a snapshot of all current mappings. Used by the WebUI to render
     /// the session list. Returns a `Vec<(ChannelKey, Mapping)>` so callers
     /// can iterate without holding the lock.
@@ -1185,150 +1259,77 @@ impl SessionMap {
         g.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
     }
 
-    /// Persist Active AND Dormant entries; Spawning placeholders are never
-    /// persisted (their child is tied to this process).
-    ///
-    /// On-disk format (v2, "structured keys"): every map key is the compact
-    /// JSON string of the full `ChannelKey` object,
-    /// `"{\"channel\":\"feishu\",\"reference\":\"oc_x\\u0000t1\"}"`. The core
-    /// never splits the reference — the feishu adapter owns the `chat\0thread`
-    /// composite encoding. [`SessionMap::restore_json`] still reads the
-    /// legacy v1 flat keys (`"oc_x"`, `"oc_x\0t1"`) and promotes them to the
-    /// feishu channel.
-    pub async fn dump_json(&self) -> serde_json::Result<String> {
-        let g = self.inner.read().await;
-        let mut out = serde_json::Map::new();
-        for (k, m) in g.iter() {
-            // 0-turn 占位没有 routing id，但占位身份必须活过重启
-            // （workbench-agent-wire-fix spec：placeholder marker survives
-            // restart）——以空 session_id + awaiting_first_prompt=true 落盘。
-            let is_placeholder = matches!(
-                &m.state,
-                MappingState::Spawning {
-                    awaiting_first_prompt: true,
-                    ..
-                }
+    // ---- 会话映射持久化（persist-session-map）：按变更落盘 ----
+    //
+    // 映射写入状态库（projects.db 的 session_map 表，ActiveRecord 行 =
+    // [`SessionMapRow`]）。生命周期事件处一次 upsert（[SessionMap::persist_upsert]
+    // 经单写 actor 串行提交）或删除（[SessionMap::persist_remove]）；**不再有
+    // 关停快照**——SIGKILL 只丢未提交的那一笔（openspec/specs/session-lifecycle
+    // 的 per-mutation 持久性）。
+    //
+    // 触发面（2.2）：创建（0-turn 占位与 web_spawn 记账）、activate（spawn/
+    // resume 成功）、模型/模式/label/project_dir 变更、归档记录、退役
+    // （retire_to_record）与移除（remove_by_session / remove_by_key）。
+    // in-flight spawn 占位与 SpawnFailed 终态**不写**（非持久形态：state-store
+    // spec「Spawn placeholders are never written」）——既有已提交行原样保留，
+    // crash 后恢复的是上一次已提交的映射。
+
+    /// 持久化 `key` 当前的映射（若处于可持久形态）。经全局 state store
+    /// 引擎提交；引擎未初始化（单测夹具）时 no-op。写失败只告警——内存
+    /// 映射不受影响，重启按上一次已提交状态恢复。
+    async fn persist_upsert(&self, key: &ChannelKey) {
+        let Some(engine) = crate::state_store::engine() else {
+            return;
+        };
+        // 行的组装在短读锁内完成，绝不跨 await 持锁（叶子锁纪律）。
+        let row = {
+            let g = self.inner.read().await;
+            g.get(key).and_then(|m| session_map_row(key, m))
+        };
+        let Some(row) = row else { return };
+        if let Err(e) = engine.save_session_entry(row).await {
+            tracing::warn!(
+                error = %e,
+                "session map 落库失败（内存映射不受影响，重启按上次已提交状态恢复）"
             );
-            if let Some(sid) = m.persisted_id().or(is_placeholder.then_some("")) {
-                // 「会话必须从属于项目」（同 restore 的判据，双向兜底）：内存里
-                // 若出现无项目归属的非飞书会话，绝不落盘——它不该存在，落盘只会
-                // 把幽灵行喂给下一轮 restore。warn 留痕，不静默。
-                if !is_internal_archive_key(k.reference.as_str())
-                    && !mapping_may_lack_project(k.channel.as_str(), m.project_dir.as_deref())
-                {
-                    tracing::warn!(
-                        channel = %k.channel,
-                        reference = %k.reference,
-                        "dump: 跳过无项目归属的会话（非飞书通道必须属于项目）"
-                    );
-                    continue;
-                }
-                // `serde_json::Map` keys are strings; the ChannelKey's own
-                // serde produces an object, so we stringify that object as the
-                // map key (self-consistent with `restore_json`'s parser).
-                let key_str =
-                    serde_json::to_string(k).expect("ChannelKey serializes to a JSON object");
-                let dto = MappingDto {
-                    session_id: sid.to_string(),
-                    last_active_unix: m.last_active_unix,
-                    acp_session_id: m.acp_session_id.clone(),
-                    current_model: m.current_model.clone(),
-                    pending_kind: m.pending_kind.clone(),
-                    pending_model: m.pending_model.clone(),
-                    pending_mode: m.pending_mode.clone(),
-                    desired_mode: m.desired_mode.clone(),
-                    project_dir: m.project_dir.clone(),
-                    label: m.label.clone(),
-                    prompt_preview: m.prompt_preview.clone(),
-                    awaiting_first_prompt: is_placeholder,
-                };
-                out.insert(
-                    key_str,
-                    serde_json::to_value(&dto).expect("MappingDto serializes"),
-                );
-            }
         }
-        serde_json::to_string(&out)
     }
 
-    pub fn restore_json(s: &str) -> serde_json::Result<Self> {
-        Self::restore_json_with_capacity(s, usize::MAX)
+    /// 从状态库删除 `key` 的映射行（映射被显式移除时）。
+    async fn persist_remove(&self, key: &ChannelKey) {
+        let Some(engine) = crate::state_store::engine() else {
+            return;
+        };
+        if let Err(e) = engine
+            .delete_session_entry(key.channel_str().to_string(), Some(key.reference.clone()))
+            .await
+        {
+            tracing::warn!(error = %e, "session map 行删除失败");
+        }
     }
 
-    /// Restore from the on-disk shape. Every entry comes back `Dormant`:
-    /// its child process died with the previous daemon, so the mapping is
-    /// only good for a lazy respawn (openspec/specs/session-lifecycle/spec.md) — routing treats it as
-    /// dead until the first inbound text respawns it.
-    ///
-    /// Keys are parsed by [`parse_disk_key`]: structured v2 keys (the compact
-    /// `ChannelKey` object JSON string), plus legacy v1 flat keys (`oc_x`,
-    /// `oc_x\0t1`) which become feishu-channel references.
-    pub fn restore_json_with_capacity(s: &str, capacity: usize) -> serde_json::Result<Self> {
-        let raw: serde_json::Map<String, serde_json::Value> = serde_json::from_str(s)?;
-        let mut map = HashMap::with_capacity(raw.len());
-        for (key_str, v) in raw {
-            let key = parse_disk_key(&key_str).ok_or_else(|| {
-                serde_json::Error::custom(format!("unparseable session state key {key_str:?}"))
-            })?;
-            let dto: MappingDto = serde_json::from_value(v).map_err(|e| {
-                serde_json::Error::custom(format!("bad entry for {key_str:?}: {e}"))
-            })?;
-            // 「会话必须从属于项目」：非飞书通道的持久化行必须带 project_dir，
-            // 缺项目的旧行直接**丢弃**（操作者拍板：历史数据可整片删）——
-            // 不迁移、不猜归属、不留一个没有可见面的幽灵会话。
-            if !is_internal_archive_key(key.reference.as_str())
-                && !mapping_may_lack_project(key.channel.as_str(), dto.project_dir.as_deref())
-            {
-                tracing::warn!(
-                    channel = %key.channel,
-                    reference = %key.reference,
-                    "restore: 丢弃无项目归属的会话（非飞书通道必须属于项目）"
-                );
-                continue;
+    /// 从状态库行恢复（core 启动；persist-session-map 2.1）。空表 = 空表
+    /// 启动；不可寻址的行（缺会话键）按「映射条目不可读」如实告警并跳过
+    /// ——**绝不因会话映射而拒绝启动**。每个条目一律回到 `Dormant`（或
+    /// 0-turn 占位）：子进程已随上一个 daemon 死亡，映射只用于惰性 respawn。
+    pub fn restore_rows(rows: Vec<SessionMapRow>, capacity: usize) -> Self {
+        let mut map = HashMap::with_capacity(rows.len());
+        for row in rows {
+            if let Some((key, m)) = mapping_from_row(row) {
+                map.insert(key, m);
             }
-            let mut m = if dto.awaiting_first_prompt && dto.session_id.is_empty() {
-                // 0-turn 占位（workbench-agent-wire-fix D1）：重启后仍是等待
-                // 首条消息的占位，首条消息照常触发 spawn。
-                Mapping::spawning_with(
-                    dto.pending_kind.clone(),
-                    dto.pending_model.clone(),
-                    dto.pending_mode.clone(),
-                    true,
-                )
-            } else {
-                Mapping::dormant(dto.session_id, dto.last_active_unix)
-            };
-            // Legacy records (no `acp_session_id` field) restore as
-            // `None` — a later resume falls back to fresh (D4).
-            m.acp_session_id = dto.acp_session_id;
-            // 上次模型（内存层字段；state-store 落地后转 sessions 表列）。
-            m.current_model = dto.current_model;
-            // 创建时绑定的执行后端 kind（add-composer-agent-binding）；
-            // 旧文件无该字段 → None → UI 显示默认 kind。
-            m.pending_kind = dto.pending_kind;
-            m.pending_model = dto.pending_model;
-            // 创建时请求的 mode 与操作者期望的 mode（add-agent-mode-selection）；
-            // 旧文件无该字段 → None → agent 默认行为。
-            m.pending_mode = dto.pending_mode;
-            m.desired_mode = dto.desired_mode;
-            // （5.1，design D6）操作者 label：旧文件无字段 → None（命名回退不变）。
-            m.label = dto.label;
-            // （round4 3.1）命名来源迁移位：旧文件无字段 → None（回退不变）。
-            m.prompt_preview = dto.prompt_preview;
-            m.project_dir = dto.project_dir;
-            map.insert(key, m);
         }
-        Ok(Self {
+        Self {
             inner: Arc::new(RwLock::new(map)),
             turn_queue: Arc::new(RwLock::new(HashMap::new())),
             next_id: Arc::new(std::sync::Mutex::new(HashMap::new())),
             delivered: Arc::new(std::sync::Mutex::new(HashMap::new())),
             capacity,
-        })
+        }
     }
 }
 
-/// 「会话必须从属于项目」的唯一判据（dump / restore 双向共用）：飞书会话是
+/// 「会话必须从属于项目」的唯一判据（写库 / 恢复双向共用）：飞书会话是
 /// 例外——它们由聊天发起，本就没有项目目录，只在飞书面呈现；其余通道
 /// （web 等）必须带非空 `project_dir`。
 fn mapping_may_lack_project(channel: &str, project_dir: Option<&str>) -> bool {
@@ -1338,30 +1339,111 @@ fn mapping_may_lack_project(channel: &str, project_dir: Option<&str>) -> bool {
     !project_dir.map(str::trim).unwrap_or("").is_empty()
 }
 
+/// 一个映射 + 它的会话键 → 状态库行（persist-session-map D2：一行即一个
+/// 实例）。非持久形态（in-flight spawn 占位、SpawnFailed）返回 `None`——
+/// 调用方跳过写库，已提交行原样保留；违反「会话必须从属于项目」的非飞书
+/// 映射同样跳过（debug 留痕——常规流程里占位先创建、project_dir 稍后置定，
+/// 此时的跳过是时序事实；真正异常的无项目行由恢复侧 warn 兜底）。
+pub fn session_map_row(key: &ChannelKey, m: &Mapping) -> Option<SessionMapRow> {
+    let is_placeholder = matches!(
+        &m.state,
+        MappingState::Spawning {
+            awaiting_first_prompt: true,
+            ..
+        }
+    );
+    // Active/Dormant 用各自的 id；0-turn 占位落空串占位行。
+    let session_id = match m.persisted_id() {
+        Some(sid) => sid.to_string(),
+        None if is_placeholder => String::new(),
+        None => return None,
+    };
+    if !is_internal_archive_key(key.reference.as_str())
+        && !mapping_may_lack_project(key.channel_str(), m.project_dir.as_deref())
+    {
+        tracing::debug!(
+            channel = %key.channel_str(),
+            reference = %key.reference,
+            "persist: 跳过无项目归属的会话（非飞书通道必须属于项目）"
+        );
+        return None;
+    }
+    Some(SessionMapRow {
+        chat_id: key.channel_str().to_string(),
+        thread_id: Some(key.reference.clone()),
+        session_id,
+        last_active_unix: m.last_active_unix,
+        project_dir: m.project_dir.clone(),
+        acp_session_id: m.acp_session_id.clone(),
+        current_model: m.current_model.clone(),
+        pending_kind: m.pending_kind.clone(),
+        pending_model: m.pending_model.clone(),
+        pending_mode: m.pending_mode.clone(),
+        desired_mode: m.desired_mode.clone(),
+        label: m.label.clone(),
+        prompt_preview: m.prompt_preview.clone(),
+        awaiting_first_prompt: is_placeholder,
+    })
+}
+
+/// 一条状态库行 → (会话键, 恢复后的映射)。不可寻址的行（缺会话键 /
+/// 违反项目从属不变量）返回 `None` 并告警——恢复侧跳过，绝不阻塞启动。
+pub fn mapping_from_row(row: SessionMapRow) -> Option<(ChannelKey, Mapping)> {
+    let reference = match row.thread_id.as_deref() {
+        Some(r) if !r.is_empty() => r.to_string(),
+        _ => {
+            tracing::warn!(
+                chat_id = %row.chat_id,
+                "session_map 行缺会话键（thread_id 空），跳过恢复"
+            );
+            return None;
+        }
+    };
+    let key = ChannelKey::new(row.chat_id.as_str(), reference);
+    if !is_internal_archive_key(key.reference.as_str())
+        && !mapping_may_lack_project(key.channel_str(), row.project_dir.as_deref())
+    {
+        tracing::warn!(
+            channel = %key.channel_str(),
+            reference = %key.reference,
+            "restore: 丢弃无项目归属的会话（非飞书通道必须属于项目）"
+        );
+        return None;
+    }
+    let m = if row.awaiting_first_prompt && row.session_id.is_empty() {
+        // 0-turn 占位（workbench-agent-wire-fix D1）：重启后仍是等待首条
+        // 消息的占位，首条消息照常触发 spawn。
+        let mut m = Mapping::spawning_with(
+            row.pending_kind.clone(),
+            row.pending_model.clone(),
+            row.pending_mode.clone(),
+            true,
+        );
+        m.desired_mode = row.desired_mode.clone();
+        m.project_dir = row.project_dir.clone();
+        m.label = row.label.clone();
+        m.prompt_preview = row.prompt_preview.clone();
+        m
+    } else {
+        let mut m = Mapping::dormant(row.session_id, row.last_active_unix);
+        m.acp_session_id = row.acp_session_id;
+        m.current_model = row.current_model;
+        m.pending_kind = row.pending_kind;
+        m.pending_model = row.pending_model;
+        m.pending_mode = row.pending_mode;
+        m.desired_mode = row.desired_mode;
+        m.project_dir = row.project_dir;
+        m.label = row.label;
+        m.prompt_preview = row.prompt_preview;
+        m
+    };
+    Some((key, m))
+}
+
 /// 内部归档记录键（`closed-<hash>`）：不是会话，是「原映射保留在存储」的
 /// 存储记录（acp-session-mapping D4），因此不受「会话必须从属于项目」约束。
 fn is_internal_archive_key(reference: &str) -> bool {
     reference.starts_with("closed-")
-}
-
-/// Parse one session-state map key into a [`ChannelKey`]:
-///
-/// 1. **Structured (v2)**: a JSON object string `{"channel","reference"}`
-///    (the exact shape `dump_json` writes) — used verbatim.
-/// 2. **Legacy (v1)**: a bare flat key — `"oc_x"` or `"oc_x\0t1"` — whose
-///    `chat\0thread` composite is now the feishu channel's opaque reference
-///    (`ChannelKey::feishu` keeps the composite byte-identical, so the
-///    reference round-trips unchanged).
-///
-/// Real feishu chat ids never start with `{`, so the structured-vs-legacy
-/// discrimination is unambiguous in practice.
-fn parse_disk_key(key_str: &str) -> Option<ChannelKey> {
-    if let Ok(k) = serde_json::from_str::<ChannelKey>(key_str) {
-        return Some(k);
-    }
-    // Legacy flat key → feishu channel with the raw string as its reference
-    // (`chat\0thread` composite preserved inside the reference, adapter-owned).
-    Some(ChannelKey::feishu(key_str, None))
 }
 
 impl Default for SessionMap {
@@ -1370,166 +1452,160 @@ impl Default for SessionMap {
     }
 }
 
-/// Legacy on-disk shape, extended with the real ACP session id
-/// (acp-session-mapping D3; the `add-state-store` SQLite sessions table takes
-/// this same column later — review R1) and with the 0-turn placeholder
-/// marker (workbench-agent-wire-fix D1: a placeholder survives a restart so
-/// its first post-restart message still spawns the child).
-#[derive(Serialize, Deserialize)]
-struct MappingDto {
-    /// Live routing id; the empty string marks a 0-turn placeholder
-    /// (`awaiting_first_prompt = true`, no child has ever existed).
-    session_id: String,
-    last_active_unix: i64,
-    /// The agent's real ACP session id (native-ACP agents). `#[serde(default)]`
-    /// keeps legacy `state.json` files (no field) readable → `None`.
-    #[serde(default)]
-    acp_session_id: Option<String>,
-    /// 上次生效的模型 id（add-acp-model-selection；`add-state-store` 的
-    /// `current_model` 列收编前先落这里）。`#[serde(default)]` 兼容旧文件。
-    #[serde(default)]
-    current_model: Option<String>,
-    /// 创建时绑定的执行后端 kind（add-composer-agent-binding；`None` =
-    /// 默认 kind）。`#[serde(default)]` 兼容旧文件。
-    #[serde(default)]
-    pending_kind: Option<String>,
-    /// 创建时请求的模型 id（0-turn 占位记住，首条消息触发 spawn 时消费）。
-    /// `#[serde(default)]` 兼容旧文件。
-    #[serde(default)]
-    pending_model: Option<String>,
-    /// 创建时请求的 mode（0-turn 占位记住，首条消息触发 spawn 时消费；
-    /// add-agent-mode-selection）。`#[serde(default)]` 兼容旧文件。
-    #[serde(default)]
-    pending_mode: Option<String>,
-    /// 操作者期望的会话 mode（重启后快照仍可显示）。（3.2，D5b）**非空**
-    /// `String`：反序列化即启动迁移点——旧文件缺字段或显式 `null` 一律落为
-    /// `ask`（[`crate::engine::ASK_MODE`]），restore 之后的内存里不再有
-    /// null；下次 `dump_json` 落盘即写回 `"ask"`（幂等）。这是 null 消失的
-    /// 唯一地点，不做任何读侧投影。
-    #[serde(
-        default = "crate::engine::ask_mode",
-        deserialize_with = "deserialize_desired_mode"
-    )]
-    pub desired_mode: String,
-    /// 该项目记住的默认会话目录（0-turn 占位的 project_dir，spawn 时用）。
-    /// `#[serde(default)]` 兼容旧文件。
-    #[serde(default)]
-    project_dir: Option<String>,
-    /// 操作者设置的会话 label（5.1，design D6）。`#[serde(default)]` 兼容
-    /// 旧文件（无字段 → None，命名回退首条 prompt 预览）。
-    #[serde(default)]
-    label: Option<String>,
-    /// （fix-webui-qa-defects-round4 3.1）首条 prompt 预览（命名来源迁移位，
-    /// 1.2 terminal teardown / 3.1 归档恢复写入）。`#[serde(default)]` 兼容
-    /// 旧文件（无字段 → None，命名回退不变）。
-    #[serde(default)]
-    prompt_preview: Option<String>,
-    /// 0-turn 占位标记（workbench-agent-wire-fix D1）。`true` + 空
-    /// `session_id` = 重启后仍是等待首条消息的占位。`#[serde(default)]`
-    /// 兼容旧文件（旧记录一律视为非占位）。
-    #[serde(default)]
-    awaiting_first_prompt: bool,
-}
-
-/// （3.2，design D5b）`desired_mode` 的反序列化迁移点：旧文件该字段可能是
-/// 显式 `null`（Option 时代的落盘形态）。null 与缺字段同罪——一律落为
-/// `ask`。restore 在 core 启动时执行一次，幂等：已是合法词的值原样保留，
-/// 之后每次 dump 都写回普通字符串，null 不会再出现在盘上。
-fn deserialize_desired_mode<'de, D>(d: D) -> Result<String, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let opt: Option<String> = serde::Deserialize::deserialize(d)?;
-    Ok(opt.unwrap_or_else(crate::engine::ask_mode))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// fix-webui-approval-restore-and-session-identity 5.1：label 随
-    /// MappingDto 落盘 → restore 保留；旧文件（无字段）→ None（命名回退
-    /// 不变）。
+    /// fix-webui-approval-restore-and-session-identity 5.1：label 随映射行
+    /// 落库 → 恢复保留；无 label 的行恢复为 None（命名回退不变）。
     #[tokio::test]
-    async fn label_round_trips_through_disk_shape() {
-        let map = SessionMap::new();
+    async fn label_round_trips_through_row_shape() {
         let key = ChannelKey::new("web", "web-label");
         let mut m = Mapping::dormant("s-label", 1);
         m.project_dir = Some("/tmp/proj-label".into());
         m.label = Some("重构计划".into());
-        map.insert(key.clone(), m).await.unwrap();
-        let json = map.dump_json().await.unwrap();
-        assert!(json.contains("\"label\""), "label must be persisted: {json}");
+        let row = session_map_row(&key, &m).expect("persistable");
+        assert_eq!(row.label.as_deref(), Some("重构计划"), "label must be persisted");
 
-        let restored = SessionMap::restore_json(&json).unwrap();
-        let back = restored.get(&key).await.unwrap();
+        let (back_key, back) = mapping_from_row(row).expect("addressable");
+        assert_eq!(back_key, key);
         assert_eq!(back.label.as_deref(), Some("重构计划"));
 
-        // 旧文件无 label 字段 → None。
-        let legacy_key = serde_json::to_string(&ChannelKey::new("web", "web-old")).unwrap();
-        let legacy_json = format!(
-            r#"{{"{k}": {{"session_id":"s-old","last_active_unix":1,"project_dir":"/tmp/p"}}}}"#,
-            k = legacy_key.replace('"', "\\\"")
-        );
-        let bare = SessionMap::restore_json(&legacy_json).unwrap();
-        let old_key = ChannelKey::new("web", "web-old");
-        let old_m = bare.get(&old_key).await.unwrap();
-        assert_eq!(old_m.label, None, "legacy records restore without a label");
+        // 无 label 的行 → None。
+        let bare = SessionMapRow {
+            chat_id: "web".into(),
+            thread_id: Some("web-old".into()),
+            session_id: "s-old".into(),
+            last_active_unix: 1,
+            project_dir: Some("/tmp/p".into()),
+            acp_session_id: None,
+            current_model: None,
+            pending_kind: None,
+            pending_model: None,
+            pending_mode: None,
+            desired_mode: crate::engine::ask_mode(),
+            label: None,
+            prompt_preview: None,
+            awaiting_first_prompt: false,
+        };
+        let (_, old_m) = mapping_from_row(bare).unwrap();
+        assert_eq!(old_m.label, None, "bare rows restore without a label");
     }
 
-    /// add-composer-agent-binding 1.2：pending_kind 落盘 → 重载保留；
-    /// 旧文件（无该字段）→ None（UI 回退默认 kind 标签）。
+    /// add-composer-agent-binding 1.2：pending_kind 随映射行落库 → 恢复保留；
+    /// 无该字段的行 → None（UI 回退默认 kind 标签）。
     #[tokio::test]
-    async fn pending_kind_round_trips_through_disk_shape() {
-        let map = SessionMap::new();
+    async fn pending_kind_round_trips_through_row_shape() {
+        let key = ChannelKey::new("web", "web-kind");
         let mut m = Mapping::dormant("s1", 1);
         m.pending_kind = Some("claude".into());
-        // web 会话必须从属于项目（否则 dump 按不变量跳过它）。
+        // web 会话必须从属于项目（否则写库按不变量跳过它）。
         m.project_dir = Some("/tmp/proj-kind".into());
-        map.insert(ChannelKey::new("web", "web-kind"), m)
-            .await
-            .unwrap();
-        let mut bare = Mapping::dormant("s2", 2);
-        bare.pending_kind = None;
-        bare.project_dir = Some("/tmp/proj-bare".into());
-        map.insert(ChannelKey::new("web", "web-bare"), bare)
-            .await
-            .unwrap();
-
-        let json = map.dump_json().await.unwrap();
-        assert!(
-            json.contains("\"pending_kind\":\"claude\""),
-            "dump carries pending_kind, got: {json}"
-        );
-
-        let restored = SessionMap::restore_json(&json).unwrap();
+        let row = session_map_row(&key, &m).expect("persistable");
         assert_eq!(
-            restored
-                .get(&ChannelKey::new("web", "web-kind"))
-                .await
-                .unwrap()
-                .pending_kind
-                .as_deref(),
+            row.pending_kind.as_deref(),
+            Some("claude"),
+            "row carries pending_kind"
+        );
+        let (_, restored) = mapping_from_row(row).unwrap();
+        assert_eq!(
+            restored.pending_kind.as_deref(),
             Some("claude"),
             "restore keeps the bound kind"
         );
-        assert_eq!(
-            restored
-                .get(&ChannelKey::new("web", "web-bare"))
-                .await
-                .unwrap()
-                .pending_kind,
-            None,
-        );
+
+        let bare_key = ChannelKey::new("web", "web-bare");
+        let mut bare = Mapping::dormant("s2", 2);
+        bare.pending_kind = None;
+        bare.project_dir = Some("/tmp/proj-bare".into());
+        let (_, restored_bare) = mapping_from_row(session_map_row(&bare_key, &bare).unwrap())
+            .unwrap();
+        assert_eq!(restored_bare.pending_kind, None);
     }
 
+    /// 非持久形态（in-flight 占位 / SpawnFailed）不产出行——已提交行原样
+    /// 保留到 activate 覆盖（persist-session-map：占位不落盘）。
     #[tokio::test]
-    async fn legacy_record_without_pending_kind_restores_as_none() {
-        let json = r#"{"oc_legacy":{"session_id":"s-old","last_active_unix":1}}"#;
-        let map = SessionMap::restore_json(json).unwrap();
-        let key = ChannelKey::feishu("oc_legacy", None);
-        let m = map.get(&key).await.unwrap();
-        assert_eq!(m.pending_kind, None, "legacy files read as default kind");
+    async fn non_persistable_states_yield_no_row() {
+        let key = ChannelKey::feishu("oc_np", None);
+        // in-flight spawn 占位（awaiting_first_prompt = false）。
+        let inflight = Mapping::spawning();
+        assert!(session_map_row(&key, &inflight).is_none());
+        // SpawnFailed 终态。
+        let mut failed = Mapping::dormant("s-f", 1);
+        failed.state = MappingState::SpawnFailed {
+            session_id: "failed-1".into(),
+            reason: "boom".into(),
+        };
+        assert!(session_map_row(&key, &failed).is_none());
+        // Active / Dormant / 0-turn 占位可持久。
+        assert!(session_map_row(&key, &Mapping::active("s-a")).is_some());
+        assert!(session_map_row(&key, &Mapping::dormant("s-d", 1)).is_some());
+        let placeholder =
+            Mapping::spawning_with(Some("claude".into()), None, None, true);
+        let row = session_map_row(&key, &placeholder).unwrap();
+        assert_eq!(row.session_id, "", "占位行落空 session_id");
+        assert!(row.awaiting_first_prompt);
+    }
+
+    /// 「会话必须从属于项目」：无项目的非飞书映射跳过写库/恢复；归档键
+    /// （closed-*）与飞书会话豁免。
+    #[tokio::test]
+    async fn project_ownership_invariant_gates_rows() {
+        let key = ChannelKey::new("web", "web-orphan");
+        let m = Mapping::dormant("s1", 1);
+        assert!(
+            session_map_row(&key, &m).is_none(),
+            "无项目的 web 行不得写库"
+        );
+        // 恢复侧同样丢弃（warn + None）。
+        let orphan_row = SessionMapRow {
+            chat_id: "web".into(),
+            thread_id: Some("web-orphan".into()),
+            session_id: "s1".into(),
+            last_active_unix: 1,
+            project_dir: None,
+            acp_session_id: None,
+            current_model: None,
+            pending_kind: None,
+            pending_model: None,
+            pending_mode: None,
+            desired_mode: crate::engine::ask_mode(),
+            label: None,
+            prompt_preview: None,
+            awaiting_first_prompt: false,
+        };
+        assert!(mapping_from_row(orphan_row).is_none());
+        // 飞书豁免。
+        let feishu = ChannelKey::feishu("oc_x", None);
+        assert!(session_map_row(&feishu, &Mapping::dormant("s2", 2)).is_some());
+    }
+
+    /// 不可寻址的行（缺会话键）恢复时被跳过——映射条目不可读 → 空表 +
+    /// 告警，绝不阻塞启动（session-lifecycle 恢复要求）。
+    #[tokio::test]
+    async fn unaddressable_rows_are_skipped_not_fatal() {
+        let rows = vec![SessionMapRow {
+            chat_id: "web".into(),
+            thread_id: None,
+            session_id: "s1".into(),
+            last_active_unix: 1,
+            project_dir: Some("/tmp/p".into()),
+            acp_session_id: None,
+            current_model: None,
+            pending_kind: None,
+            pending_model: None,
+            pending_mode: None,
+            desired_mode: crate::engine::ask_mode(),
+            label: None,
+            prompt_preview: None,
+            awaiting_first_prompt: false,
+        }];
+        let map = SessionMap::restore_rows(rows, 8);
+        assert!(
+            map.snapshot_all().await.is_empty(),
+            "不可寻址行跳过后为空表"
+        );
     }
 
     // ── workbench-turn-queue 3.1：per-key 单调 id、顺序稳定、drain 后失效 ──
@@ -1870,56 +1946,33 @@ mod desired_mode_migration_tests {
     use super::*;
     use crate::engine::ASK_MODE;
 
-    /// （session-parallel-liveness-and-unread-polish 3.2，design D5b）启动
-    /// 迁移：旧 state.json 的 `desired_mode: null`（Option 时代落盘形态）在
-    /// restore 反序列化点一次性落为 `"ask"`；缺字段的更老记录同样落 ask。
-    /// 幂等：restore 后再次 dump 的盘上值是普通字符串，null 不再出现。
+    /// （session-parallel-liveness-and-unread-polish 3.2，D5b）desired_mode
+    /// 是非空控制面词：行原样携带、恢复原样读回——盘上不再有 null 形态
+    /// （persist-session-map：映射持久化形状即行，无 serde 中间层）。
     #[tokio::test]
-    async fn legacy_null_desired_mode_migrates_to_ask_on_restore() {
-        // 盘上旧行同样带 project_dir——新不变量下无项目的 web 行会被清退，
-        // 本用例钉的是 desired_mode 迁移，故给足项目归属。
-        let json = r#"{
-            "{\"channel\":\"web\",\"reference\":\"web-null\"}":
-                {"session_id":"s1","last_active_unix":1,"project_dir":"/tmp/p1","desired_mode":null},
-            "{\"channel\":\"web\",\"reference\":\"web-missing\"}":
-                {"session_id":"s2","last_active_unix":1,"project_dir":"/tmp/p2"},
-            "{\"channel\":\"web\",\"reference\":\"web-explicit\"}":
-                {"session_id":"s3","last_active_unix":1,"project_dir":"/tmp/p3","desired_mode":"auto"}
-        }"#;
-        let map = SessionMap::restore_json(json).unwrap();
-
+    async fn desired_mode_round_trips_verbatim_through_rows() {
         let k = |r: &str| ChannelKey::new("web", r);
+        let mut migrated = Mapping::dormant("s1", 1);
+        migrated.project_dir = Some("/tmp/p1".into());
+        migrated.desired_mode = ASK_MODE.to_string();
+        let mut explicit = Mapping::dormant("s2", 1);
+        explicit.project_dir = Some("/tmp/p2".into());
+        explicit.desired_mode = "auto".to_string();
+
+        let rows = vec![
+            session_map_row(&k("web-null"), &migrated).unwrap(),
+            session_map_row(&k("web-explicit"), &explicit).unwrap(),
+        ];
+        let map = SessionMap::restore_rows(rows, 8);
         assert_eq!(
             map.get(&k("web-null")).await.unwrap().desired_mode,
             ASK_MODE,
-            "显式 null → ask（一次性迁移）"
-        );
-        assert_eq!(
-            map.get(&k("web-missing")).await.unwrap().desired_mode,
-            ASK_MODE,
-            "缺字段的老记录 → ask"
+            "ask 词原样往返"
         );
         assert_eq!(
             map.get(&k("web-explicit")).await.unwrap().desired_mode,
             "auto",
             "已是合法词的值原样保留"
-        );
-
-        // 幂等：迁移后的 dump 的 desired_mode 不再是 null，restore 回来仍是
-        // 迁移后的值。
-        let dumped = map.dump_json().await.unwrap();
-        assert!(
-            !dumped.contains(r#""desired_mode":null"#),
-            "迁移后的盘上 desired_mode 不得再为 null: {dumped}"
-        );
-        let again = SessionMap::restore_json(&dumped).unwrap();
-        assert_eq!(
-            again.get(&k("web-null")).await.unwrap().desired_mode,
-            ASK_MODE
-        );
-        assert_eq!(
-            again.get(&k("web-explicit")).await.unwrap().desired_mode,
-            "auto"
         );
     }
 
@@ -1949,45 +2002,45 @@ mod spawning_settle_tests {
     use crate::engine::{DispatchHandle, Out};
     use std::time::Duration;
 
-    /// 模拟一份「实例在 spawning 相位退出」留下的状态文件（v2 结构化键）：
-    /// 两个 0-turn 占位（恢复后即 spawning 相位会话，一个带完整创建参数、
-    /// 一个只有 kind）+ 一个普通 dormant 会话（对照：落定不得误伤）。
-    fn seeded_state_json() -> String {
-        let disk_key =
-            |r: &str| serde_json::to_string(&ChannelKey::new("web", r)).expect("key serializes");
-        let mut state = serde_json::Map::new();
-        state.insert(
-            disk_key("web-restore-sp"),
-            serde_json::json!({
-                "session_id": "",
-                "last_active_unix": 10,
-                "awaiting_first_prompt": true,
-                "pending_kind": "claude",
-                "pending_model": "sonnet-x",
-                "pending_mode": "edit",
-                "desired_mode": "edit",
-                "project_dir": "/tmp/proj-settle",
-            }),
-        );
-        state.insert(
-            disk_key("web-restore-sp-bare"),
-            serde_json::json!({
-                "session_id": "",
-                "last_active_unix": 11,
-                "awaiting_first_prompt": true,
-                "pending_kind": "opencode",
-                "project_dir": "/tmp/proj-settle",
-            }),
-        );
-        state.insert(
-            disk_key("web-restore-dormant"),
-            serde_json::json!({
-                "session_id": "s-old",
-                "last_active_unix": 12,
-                "project_dir": "/tmp/proj-settle",
-            }),
-        );
-        serde_json::Value::Object(state).to_string()
+    /// 模拟一份「实例在 spawning 相位退出」留下的状态库行（projects.db 的
+    /// session_map 表）：两个 0-turn 占位（恢复后即 spawning 相位会话，一个
+    /// 带完整创建参数、一个只有 kind）+ 一个普通 dormant 会话（对照：落定
+    /// 不得误伤）。
+    fn seeded_state_rows() -> Vec<SessionMapRow> {
+        let base = |chat: &str, thread: &str| SessionMapRow {
+            chat_id: chat.into(),
+            thread_id: Some(thread.into()),
+            session_id: String::new(),
+            last_active_unix: 0,
+            project_dir: None,
+            acp_session_id: None,
+            current_model: None,
+            pending_kind: None,
+            pending_model: None,
+            pending_mode: None,
+            desired_mode: crate::engine::ask_mode(),
+            label: None,
+            prompt_preview: None,
+            awaiting_first_prompt: false,
+        };
+        let mut placeholder = base("web", "web-restore-sp");
+        placeholder.last_active_unix = 10;
+        placeholder.awaiting_first_prompt = true;
+        placeholder.pending_kind = Some("claude".into());
+        placeholder.pending_model = Some("sonnet-x".into());
+        placeholder.pending_mode = Some("edit".into());
+        placeholder.desired_mode = "edit".into();
+        placeholder.project_dir = Some("/tmp/proj-settle".into());
+        let mut bare = base("web", "web-restore-sp-bare");
+        bare.last_active_unix = 11;
+        bare.awaiting_first_prompt = true;
+        bare.pending_kind = Some("opencode".into());
+        bare.project_dir = Some("/tmp/proj-settle".into());
+        let mut dormant = base("web", "web-restore-dormant");
+        dormant.last_active_unix = 12;
+        dormant.session_id = "s-old".into();
+        dormant.project_dir = Some("/tmp/proj-settle".into());
+        vec![placeholder, bare, dormant]
     }
 
     async fn first_out(rx: &mut tokio::sync::mpsc::Receiver<Out>) -> Out {
@@ -2004,7 +2057,7 @@ mod spawning_settle_tests {
     /// 幂等：重复落定不再二次投递（在飞占位走 AlreadyStarting）。
     #[tokio::test]
     async fn restored_spawning_placeholders_redispatch_spawn_instructions() {
-        let map = SessionMap::restore_json(&seeded_state_json()).unwrap();
+        let map = SessionMap::restore_rows(seeded_state_rows(), usize::MAX);
         // 前置事实：恢复面确实有 spawning 相位会话（占位）。
         let sp_key = ChannelKey::new("web", "web-restore-sp");
         assert!(map.get(&sp_key).await.unwrap().awaiting_first_prompt());
@@ -2074,7 +2127,7 @@ mod spawning_settle_tests {
     /// spawning 终态——绝不留无人收敛的 spawning 僵尸。
     #[tokio::test]
     async fn failed_redispatch_lands_synthetic_error_and_terminal_state() {
-        let map = SessionMap::restore_json(&seeded_state_json()).unwrap();
+        let map = SessionMap::restore_rows(seeded_state_rows(), usize::MAX);
         let (router, mut out_rx) = DispatchHandle::new(map);
         assert_eq!(router.settle_restored_spawning().await, 2);
 

@@ -15,6 +15,7 @@
 
 use crate::sebas_state::writer::StateHandle;
 use sebas_dispatch::state_store::{PersistedState, StateStoreEngine};
+use sebas_models::session_map::SessionMapRow;
 use serde_json::Value;
 
 /// 基于 SQLite 的状态存储引擎（两库双写者）。
@@ -159,6 +160,43 @@ impl StateStoreEngine for DbStateEngine {
         }
         Ok(removed)
     }
+
+    // ---- 会话映射（persist-session-map 2.1）：生产读写路径 ----
+    //
+    // 读经 `sebas_models::session_map::load_session_map`（恢复），写/删经
+    // ActiveRecord 生成的 upsert / `delete_by`（按变更落库，无手写 SQL），
+    // 全部经 projects 库的单写 actor 串行提交。projects 库不可用时如实
+    // 拒绝（typed rejection 点名原因），不拿空表冒充现状。
+
+    async fn load_session_map(&self) -> Result<Vec<SessionMapRow>, String> {
+        self.projects()?
+            .exec(sebas_models::session_map::load_session_map)
+            .await
+    }
+
+    async fn save_session_entry(&self, entry: SessionMapRow) -> Result<(), String> {
+        self.projects()?
+            .exec(move |conn| entry.save(conn).map_err(|e| e.to_string()))
+            .await?;
+        sebas_dispatch::state_store::notify_change("sessions");
+        Ok(())
+    }
+
+    async fn delete_session_entry(
+        &self,
+        chat_id: String,
+        thread_id: Option<String>,
+    ) -> Result<(), String> {
+        self.projects()?
+            .exec(move |conn| {
+                SessionMapRow::delete_by(conn, &chat_id, &thread_id)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            })
+            .await?;
+        sebas_dispatch::state_store::notify_change("sessions");
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -209,5 +247,50 @@ mod tests {
         assert!(engine.load_settings().await.unwrap().is_some());
         let state = engine.load_persisted_state().await;
         assert_eq!(state.mode, sebas_dispatch::provider_state::ProviderMode::Off);
+    }
+
+    /// persist-session-map 2.1/2.2：会话映射的引擎读写经 projects 库单写
+    /// actor 提交——保存即提交（响应返回前库中可见），删除后读回为空；
+    /// 提交走 ActiveRecord（无手写 SQL）。不可用的 projects 库如实拒绝。
+    #[tokio::test]
+    async fn session_map_entries_round_trip_through_the_engine() {
+        let dir = tempdir().unwrap();
+        let settings = StateWriter::start_settings(dir.path().join("settings.db")).unwrap();
+        let projects = StateWriter::start_projects(dir.path().join("projects.db")).unwrap();
+        let engine = DbStateEngine::with_projects(settings.handle().clone(), projects.handle().clone());
+
+        let entry = SessionMapRow {
+            chat_id: "web".into(),
+            thread_id: Some("web-persist".into()),
+            session_id: "sess-1".into(),
+            last_active_unix: 42,
+            project_dir: Some("/tmp/persist".into()),
+            acp_session_id: Some("acp-1".into()),
+            current_model: None,
+            pending_kind: Some("claude".into()),
+            pending_model: None,
+            pending_mode: None,
+            desired_mode: "edit".into(),
+            label: Some("映射行".into()),
+            prompt_preview: None,
+            awaiting_first_prompt: false,
+        };
+        engine.save_session_entry(entry.clone()).await.unwrap();
+
+        // 同键覆盖（按变更落库 = 反复 upsert）。
+        let mut updated = entry.clone();
+        updated.session_id = "sess-2".into();
+        engine.save_session_entry(updated).await.unwrap();
+
+        let rows = engine.load_session_map().await.unwrap();
+        assert_eq!(rows.len(), 1, "同键覆盖不产生第二行");
+        assert_eq!(rows[0].session_id, "sess-2");
+        assert_eq!(rows[0].desired_mode, "edit");
+
+        engine
+            .delete_session_entry("web".into(), Some("web-persist".into()))
+            .await
+            .unwrap();
+        assert!(engine.load_session_map().await.unwrap().is_empty());
     }
 }

@@ -556,9 +556,6 @@ args = ["--delta-gap-ms", "500"]
 sessions_dir = "{cfg}/claude-stream-sessions"
 work_dir = "{cfg}/work"
 {fakeacp_toml}
-[dispatch]
-state_file = "{cfg}/sessions.json"
-
 [media]
 download_dir = "{cfg}/downloads"
 
@@ -1025,9 +1022,6 @@ driver = "claude"
 path = "claude"
 sessions_dir = "{cfg}/claude-sessions"
 work_dir = "{cfg}/work"
-
-[dispatch]
-state_file = "{cfg}/sessions.json"
 
 [media]
 download_dir = "{cfg}/downloads"

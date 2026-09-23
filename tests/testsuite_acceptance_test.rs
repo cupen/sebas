@@ -109,10 +109,10 @@ async fn session_lifecycle_journey() {
     assert!(!second.is_empty(), "second turn must produce output");
 
     // 3) Shutdown the core, then bring it back: the session mapping must
-    //    survive via the persisted state (restart-recovery semantics).
-    //    Restoring requires a GRACEFUL exit (the state dump happens on
-    //    shutdown); Windows has no portable graceful signal for a child, so
-    //    the restore segment is unix-gated like the graceful-exit coverage.
+    //    survive via the state store (persist-session-map: per-mutation
+    //    writes to projects.db). The SIGTERM segment stays unix-gated only
+    //    for the portable-kill helper below, not because restore needs a
+    //    graceful exit — per-mutation persistence no longer depends on one.
     #[cfg(unix)]
     let hint = sb.path.clone();
     #[cfg(unix)]
@@ -147,9 +147,11 @@ async fn session_lifecycle_journey() {
             exited.contains("exit status: 0") || exited.contains("exit code: 0"),
             "graceful exit: {exited}"
         );
+        // persist-session-map：映射按变更已落库（projects.db），关停不再写
+        // 任何独立映射文件——重启恢复不依赖优雅退出。
         assert!(
-            sb.state_file.exists(),
-            "router state file must be dumped on graceful exit"
+            !sb.path.join("sessions.json").exists(),
+            "no separate session-map file may be written on shutdown"
         );
 
         let mut core2 = sb.spawn_core();

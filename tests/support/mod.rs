@@ -322,7 +322,6 @@ pub struct Sandbox {
     /// independent of the checkout depth (sun_path caps unix socket paths
     /// at 108 bytes; deep `target/tests/…` trees overflow it).
     pub channel_path: PathBuf,
-    pub state_file: PathBuf,
     pub core_log: PathBuf,
     pub webui_log: PathBuf,
     /// Router 子进程日志（独立进程形态：`sebas router --config … --debug`）。
@@ -353,7 +352,6 @@ impl Sandbox {
         let router_port = free_port();
         let config_path = path.join("config.toml");
         let channel_path = path.join("core-channel.sock");
-        let state_file = path.join("sessions.json");
         let core_log = path.join("core.log");
         let webui_log = path.join("webui.log");
         let router_log = path.join("router.log");
@@ -375,9 +373,6 @@ driver = "claude"
 path = "{fake_claude}"
 sessions_dir = "{}"
 work_dir = "{}"
-
-[dispatch]
-state_file = "{}"
 
 [media]
 download_dir = "{}"
@@ -418,7 +413,6 @@ usage_file = "{}"
 "#,
             forward_slash(&path.join("claude-sessions")),
             forward_slash(&path.join("work")),
-            forward_slash(&state_file),
             forward_slash(&path.join("downloads")),
             forward_slash(&path),
             forward_slash(&path.join("agents-skills")),
@@ -433,7 +427,6 @@ usage_file = "{}"
             config_path,
             webui_port,
             channel_path,
-            state_file,
             core_log,
             webui_log,
             router_log,
@@ -777,14 +770,18 @@ usage_file = "{}"
     /// fix-pending-queue-liveness：把 `[dispatch] turn_stall_timeout`（秒）
     /// 写进沙箱 config——停滞看门狗的短阈值供 e2e 快速周转。必须在 spawn
     /// 之前调用。
+    ///
+    /// persist-session-map 后基础模板不再携带 `[dispatch]` 段（其唯一键
+    /// `state_file` 已退休）——补丁在段缺失时自己长出该段（`turn_stall_timeout`
+    /// 是已知键，`deny_unknown_fields` 不拒绝）。
     pub fn set_turn_stall_timeout(&self, secs: u64) {
         let toml = std::fs::read_to_string(&self.config_path).expect("read config");
         let needle = "[dispatch]\n";
-        assert!(
-            toml.contains(needle),
-            "[dispatch] section not found in config"
-        );
-        let patched = toml.replace(needle, &format!("{needle}turn_stall_timeout = {secs}\n"));
+        let patched = if toml.contains(needle) {
+            toml.replacen(needle, &format!("{needle}turn_stall_timeout = {secs}\n"), 1)
+        } else {
+            format!("{needle}turn_stall_timeout = {secs}\n\n{toml}")
+        };
         assert_ne!(toml, patched, "turn_stall_timeout patch did not apply");
         std::fs::write(&self.config_path, patched).expect("write config");
     }

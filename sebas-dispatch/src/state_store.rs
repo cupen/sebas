@@ -58,6 +58,7 @@
 //! broken-overlay self-heal 负责。
 
 use crate::provider_state::ProviderMode;
+use sebas_models::session_map::SessionMapRow;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
@@ -81,6 +82,32 @@ pub trait StateStoreEngine: Send + Sync {
     async fn remove_project(&self, path: &str) -> Result<bool, String>;
     /// 记录项目级默认 agent（workbench-agent-wire-fix 2.6）。按稳定 id 定位。
     async fn set_project_default_agent(&self, id: &str, agent: &str) -> Result<(), String>;
+
+    // ---- 会话映射（persist-session-map 2.1）：按变更持久化到状态库 ----
+    //
+    // 默认实现只服务未覆盖它们的既有测试替身（它们的被测面不含会话映射）；
+    // 生产实现必须如实落库（`DbStateEngine`），绝不拿默认 no-op 冒充成功。
+
+    /// 加载全部持久化映射行（core 启动恢复用；空库 → 空表）。
+    async fn load_session_map(&self) -> Result<Vec<SessionMapRow>, String> {
+        let _ = self;
+        Ok(Vec::new())
+    }
+
+    /// 按变更保存一条映射（upsert，主键 = 会话键）。响应返回前即已提交
+    /// （state-store「Mutation durability」）。
+    async fn save_session_entry(&self, entry: SessionMapRow) -> Result<(), String> {
+        tracing::debug!(chat_id = %entry.chat_id, "session entry save hit the no-op engine default");
+        let _ = entry;
+        Ok(())
+    }
+
+    /// 删除一条映射（会话被移除而非退役时）。
+    async fn delete_session_entry(&self, chat_id: String, thread_id: Option<String>) -> Result<(), String> {
+        tracing::debug!(chat_id = %chat_id, "session entry delete hit the no-op engine default");
+        let _ = (chat_id, thread_id);
+        Ok(())
+    }
 }
 
 /// 全局状态存储引擎 (add-state-store)。

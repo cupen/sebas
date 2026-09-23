@@ -1,10 +1,13 @@
 //! 路由 id ↔ 真实 ACP session id 映射的持久化语义
 //! (openspec/changes/add-acp-session-id-mapping，spec 场景 1–3)：
 //!
-//! - 建 ACP 会话 → 映射写入 state（`dump_json` 携带 `acp_session_id`）；
-//! - 旧 state 无 `acp_session_id` → 读为 `None` 不报错；
+//! - 建 ACP 会话 → 映射写入状态库行（`session_map_row` 携带 `acp_session_id`）；
+//! - 无 `acp_session_id` 的行 → 读为 `None` 不报错；
 //! - 无映射/resume load 被拒 → 诚实回退 fresh（`resumed=false`）；
 //! - load 失败 → 原映射保留在存储（D4），新会话以新 routing id 落地。
+//!
+//! persist-session-map：持久化形状是 projects.db 的 `SessionMapRow`（按变更
+//! 落库），不再是 JSON 文件——重启模拟用 行↔映射 转换 + `restore_rows`。
 //!
 //! 全过程走 `sebas::run::acp_spawn_and_activate` / `acp_resume_and_activate`
 //! （生产调用面） + 真实 `fake-acp-agent` mock（`session/new` 回
@@ -13,7 +16,8 @@
 use sebas_acp::claude::manager::SessionManager;
 use sebas_channels::{ChannelEvent, ChannelKey};
 use sebas_dispatch::engine::{DispatchHandle, Out};
-use sebas_dispatch::state::{MappingState, SessionMap};
+use sebas_dispatch::state::{session_map_row, MappingState, SessionMap};
+use sebas_models::session_map::SessionMapRow;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -36,6 +40,26 @@ fn key() -> ChannelKey {
     // feishu 通道的 channel-neutral key（decouple-feishu-channel 后 router
     // 入站/操作走 ChannelKey；feishu SessionKey 由 adapter 负责转换）。
     ChannelKey::feishu("oc_acp_map", None)
+}
+
+/// 一行持久化映射（无独立 ACP id 的形态）。
+fn dormant_row(session_id: &str) -> SessionMapRow {
+    SessionMapRow {
+        chat_id: "feishu".into(),
+        thread_id: Some("oc_acp_map".into()),
+        session_id: session_id.into(),
+        last_active_unix: 1,
+        project_dir: None,
+        acp_session_id: None,
+        current_model: None,
+        pending_kind: None,
+        pending_model: None,
+        pending_mode: None,
+        desired_mode: sebas_dispatch::engine::ask_mode(),
+        label: None,
+        prompt_preview: None,
+        awaiting_first_prompt: false,
+    }
 }
 
 fn acp_manager() -> SessionManager {
@@ -125,11 +149,13 @@ async fn acp_spawn_persists_real_session_id_mapping() {
         Some(real.as_str()),
         "routing id ↔ real ACP session id persisted on the mapping"
     );
-    // dump_json 落盘携带 acp_session_id（重启后 resume 可读）。
-    let json = map.dump_json().await.unwrap();
-    assert!(
-        json.contains(&format!("\"acp_session_id\":\"{real}\"")),
-        "state dump carries acp_session_id, got: {json}"
+    // 状态库行携带 acp_session_id（重启后 resume 可读）。
+    let row = session_map_row(&key(), &map.get(&key()).await.unwrap())
+        .expect("active mapping is persistable");
+    assert_eq!(
+        row.acp_session_id.as_deref(),
+        Some(real.as_str()),
+        "session_map row carries acp_session_id"
     );
 
     mgr.kill(&sid).await;
@@ -137,11 +163,10 @@ async fn acp_spawn_persists_real_session_id_mapping() {
 
 #[tokio::test]
 async fn resume_without_mapped_session_id_falls_back_to_fresh() {
-    // 旧记录：有 routing id、无 acp_session_id（上库版本/无独立 id 的 agent）。
+    // 旧行：有 routing id、无 acp_session_id（无独立 id 的 agent）。
     // resume 时驱动用 routing id 尝试 load；agent 拒绝（load-fails）→
     // 诚实回退 fresh（resumed=false、新 routing id + 新真实 id）。
-    let json = r#"{"oc_acp_map":{"session_id":"s-gone","last_active_unix":1}}"#;
-    let map = SessionMap::restore_json(json).unwrap();
+    let map = SessionMap::restore_rows(vec![dormant_row("s-gone")], usize::MAX);
     let (router, _out_rx) = DispatchHandle::new(map.clone());
     let mgr = Arc::new(acp_manager());
 
@@ -168,7 +193,7 @@ async fn resume_without_mapped_session_id_falls_back_to_fresh() {
 
 #[tokio::test]
 async fn acp_resume_uses_mapped_real_id_after_restart() {
-    // 建会话 → dump → restore（模拟 daemon 重启）→ resume：
+    // 建会话 → 行化 → restore_rows（模拟 daemon 重启）→ resume：
     // 映射的 acp_session_id 让 resume 用真实 id 发 session/load（非 routing id）。
     let map = SessionMap::new();
     let (router, _out_rx) = DispatchHandle::new(map.clone());
@@ -176,12 +201,13 @@ async fn acp_resume_uses_mapped_real_id_after_restart() {
 
     let sid = spawn_fresh(&mgr, &router, &map, "load-ok").await;
     let real = mgr.get_acp_session_id(&sid).await.unwrap();
-    mgr.kill(&sid).await; // 会话结束；映射仍是 Active，dump 可持久化。
-    let json = map.dump_json().await.unwrap();
-    assert!(json.contains(&format!("\"acp_session_id\":\"{real}\"")));
+    mgr.kill(&sid).await; // 会话结束；映射仍是 Active，行化可持久化。
+    let row = session_map_row(&key(), &map.get(&key()).await.unwrap())
+        .expect("active mapping is persistable");
+    assert_eq!(row.acp_session_id.as_deref(), Some(real.as_str()));
 
     // 重启：restore 后映射成 Dormant，acp_session_id 保留。
-    let map2 = SessionMap::restore_json(&json).unwrap();
+    let map2 = SessionMap::restore_rows(vec![row], usize::MAX);
     let m = map2.get(&key()).await.unwrap();
     assert!(matches!(m.state, MappingState::Dormant { .. }));
     assert_eq!(m.acp_session_id.as_deref(), Some(real.as_str()));
@@ -252,8 +278,9 @@ async fn load_failure_keeps_original_mapping_in_state() {
     let sid = spawn_fresh(&mgr, &router, &map, "load-ok").await;
     let real = mgr.get_acp_session_id(&sid).await.unwrap();
     mgr.kill(&sid).await;
-    let json = map.dump_json().await.unwrap();
-    let map2 = SessionMap::restore_json(&json).unwrap();
+    let row = session_map_row(&key(), &map.get(&key()).await.unwrap())
+        .expect("active mapping is persistable");
+    let map2 = SessionMap::restore_rows(vec![row], usize::MAX);
 
     let mgr2 = Arc::new(acp_manager());
     let (router2, _out_rx2) = DispatchHandle::new(map2.clone());
@@ -272,37 +299,45 @@ async fn load_failure_keeps_original_mapping_in_state() {
     );
     assert_eq!(m_new.acp_session_id.as_deref(), Some(new_real.as_str()));
 
-    // D4：原映射作为 dormant 归档记录保留在存储（closed-* 键），dump 里
-    // 同时存在新会话记录与旧 routing id 的归档记录。
-    let json_after = map2.dump_json().await.unwrap();
-    assert!(
-        json_after.contains(&format!("\"acp_session_id\":\"{real}\"")),
-        "old real id preserved in storage, got: {json_after}"
+    // D4：原映射作为 dormant 归档记录保留在存储（closed-* 键）。存储即
+    // 映射内的归档记录行——快照里同时存在新会话记录与旧 routing id 的
+    // 归档记录，且归档行可再行化（可被写库）。
+    let snapshot = map2.snapshot_all().await;
+    let archived = snapshot
+        .iter()
+        .find(|(k, _)| k.reference.starts_with("closed-"))
+        .expect("old routing id archived under a closed-* dormant key");
+    let archived_row =
+        session_map_row(&archived.0, &archived.1).expect("archive record is persistable");
+    assert_eq!(
+        archived_row.acp_session_id.as_deref(),
+        Some(real.as_str()),
+        "old real id preserved in storage"
     );
-    assert!(
-        json_after.contains("\"closed-"),
-        "old routing id archived under a closed-* dormant key, got: {json_after}"
-    );
-    assert!(
-        json_after.contains(&format!("\"session_id\":\"{sid}\"")),
-        "old routing id still addressable in storage, got: {json_after}"
+    assert_eq!(
+        archived_row.session_id, sid,
+        "old routing id still addressable in storage"
     );
 
     mgr2.kill(&sid2).await;
 }
 
 #[tokio::test]
-async fn legacy_state_without_acp_session_id_restores_as_none() {
-    // 旧 state.json（无 acp_session_id 字段）读为 None、不报错
-    // （tasks 2.1 验证项；serde default）。
-    let json = r#"{"oc_legacy":{"session_id":"s-legacy","last_active_unix":7}}"#;
-    let map = SessionMap::restore_json(json).unwrap();
+async fn row_without_acp_session_id_restores_as_none() {
+    // 无 acp_session_id 的行读为 None、不报错（tasks 2.1 验证项）。
+    let map = SessionMap::restore_rows(vec![dormant_row("s-legacy")], usize::MAX);
     let m = map
-        .get(&ChannelKey::feishu("oc_legacy", None))
+        .get(&ChannelKey::feishu("oc_acp_map", None))
         .await
         .unwrap();
     assert_eq!(m.acp_session_id, None);
-    // round-trip：dump 后再 restore 依旧合法。
-    let json2 = map.dump_json().await.unwrap();
-    let _ = SessionMap::restore_json(&json2).unwrap();
+    // round-trip：行化后再恢复依旧合法。
+    let row = session_map_row(
+        &ChannelKey::feishu("oc_acp_map", None),
+        &map.get(&ChannelKey::feishu("oc_acp_map", None))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let _ = SessionMap::restore_rows(vec![row], usize::MAX);
 }

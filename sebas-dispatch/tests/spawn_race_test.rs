@@ -1,13 +1,24 @@
 //! D8: two texts racing a slow spawn must yield exactly one SpawnAcp; the
-//! second is queued and drained by activate(). Dump keeps the MappingDto shape (structured ChannelKey keys now).
+//! second is queued and drained by activate(). persist-session-map：映射的
+//! 持久化形状是状态库行（`session_map_row`，非持久形态过滤不变）。
 
 use sebas_channels::{ChannelEvent, ChannelKey};
 use sebas_dispatch::engine::{DispatchHandle, Out};
-use sebas_dispatch::state::{Mapping, MappingState, SessionMap, TextRoute};
+use sebas_dispatch::state::{Mapping, MappingState, SessionMap, TextRoute, session_map_row};
+use sebas_models::session_map::SessionMapRow;
 use std::time::Duration;
 
 fn key() -> ChannelKey {
     ChannelKey::feishu("oc_race", None)
+}
+
+/// 快照 → 状态库行（与写库路径同一过滤：非持久形态不产出行）。
+async fn rows_of(map: &SessionMap) -> Vec<SessionMapRow> {
+    map.snapshot_all()
+        .await
+        .iter()
+        .filter_map(|(k, m)| session_map_row(k, m))
+        .collect()
 }
 
 #[tokio::test]
@@ -161,7 +172,7 @@ async fn pending_queue_capped_at_16() {
 }
 
 #[tokio::test]
-async fn dump_filters_spawning_and_persists_mapping_dto() {
+async fn rows_filter_spawning_and_persist_the_persistable() {
     let map = SessionMap::new();
     map.route_text(key(), "m".into()).await.unwrap();
     let active_key = ChannelKey::feishu("oc_active", None);
@@ -169,17 +180,21 @@ async fn dump_filters_spawning_and_persists_mapping_dto() {
         .await
         .unwrap();
 
-    let json = map.dump_json().await.unwrap();
-    assert!(!json.contains("oc_race"), "spawning entry leaked into dump");
-    assert!(json.contains("oc_active"));
-    // MappingDto shape unchanged: {"session_id": ..., "last_active_unix": ...}.
-    assert!(json.contains("\"session_id\":\"s9\""));
-    assert!(!json.contains("Spawning") && !json.contains("spawning"));
+    let rows = rows_of(&map).await;
+    let active_row = rows.iter().find(|r| r.thread_id.as_deref() == Some("oc_active"));
+    let race_row = rows.iter().find(|r| r.thread_id.as_deref() == Some("oc_race"));
+    assert!(active_row.is_some(), "active mapping persists");
+    assert!(race_row.is_none(), "spawning entry must not produce a row");
+    assert_eq!(active_row.unwrap().session_id, "s9");
+    assert!(
+        !rows.iter().any(|r| r.awaiting_first_prompt),
+        "in-flight placeholder identity never appears"
+    );
 
     // Round-trip through restore: entries come back Dormant
     // (openspec/specs/session-lifecycle/spec.md) —
     // dead child, eligible for lazy respawn, not live routing.
-    let restored = SessionMap::restore_json(&json).unwrap();
+    let restored = SessionMap::restore_rows(rows, usize::MAX);
     let m = restored.get(&active_key).await.expect("restored");
     assert!(matches!(m.state, MappingState::Dormant { .. }));
     assert_eq!(m.session_id(), None);
@@ -404,10 +419,10 @@ async fn placeholder_without_kind_or_model_still_spawns_on_first_message() {
 }
 
 /// workbench-agent-wire-fix spec「placeholder marker survives restart」：
-/// 0-turn 占位落盘后重启（restore），仍以占位身份出现，首条消息照常
+/// 0-turn 占位持久化后重启（restore），仍以占位身份出现，首条消息照常
 /// SpawnNew；普通 spawn-in-flight 条目依旧不入盘。
 #[tokio::test]
-async fn placeholder_marker_survives_dump_restore_round_trip() {
+async fn placeholder_marker_survives_persist_restore_round_trip() {
     let map = SessionMap::new();
     let ph = web_key("ph-roundtrip");
     let in_flight = web_key("inflight-roundtrip");
@@ -433,13 +448,17 @@ async fn placeholder_marker_survives_dump_restore_round_trip() {
         .await
         .unwrap();
 
-    let json = map.dump_json().await.unwrap();
+    let rows = rows_of(&map).await;
+    let ph_row = rows.iter().find(|r| r.thread_id.as_deref() == Some("web-ph-roundtrip"));
+    let inflight_row = rows
+        .iter()
+        .find(|r| r.thread_id.as_deref() == Some("web-inflight-roundtrip"));
     assert!(
-        json.contains("ph-roundtrip") && !json.contains("inflight-roundtrip"),
+        ph_row.is_some() && inflight_row.is_none(),
         "placeholder persists; in-flight spawn stays filtered"
     );
 
-    let restored = SessionMap::restore_json(&json).unwrap();
+    let restored = SessionMap::restore_rows(rows, usize::MAX);
     let m = restored.get(&ph).await.expect("placeholder restored");
     match &m.state {
         MappingState::Spawning {
@@ -571,11 +590,11 @@ async fn web_spawn_followup_during_spawn_window_queues_not_double_spawns() {
     assert_eq!(pending.len(), 1, "message staged in the spawn window");
     assert_eq!(pending[0].text, "race");
 
-    // in-flight（非占位）不入盘：spawn 窗口内 dump 仍过滤该条目。
-    let json = map.dump_json().await.unwrap();
+    // in-flight（非占位）不落库：spawn 窗口内行化仍过滤该条目。
+    let rows = rows_of(&map).await;
     assert!(
-        !json.contains(&key.reference),
-        "prompted spawn is not a placeholder; must stay filtered, got: {json}"
+        !rows.iter().any(|r| r.thread_id.as_deref() == Some(key.reference.as_str())),
+        "prompted spawn is not a placeholder; must stay filtered, got: {rows:?}"
     );
 
     // 激活时 drain 队列。

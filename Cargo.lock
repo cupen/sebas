@@ -2930,6 +2930,7 @@ dependencies = [
  "sebas-acp",
  "sebas-channels",
  "sebas-domain",
+ "sebas-models",
  "sebas-router",
  "serde",
  "serde_json",

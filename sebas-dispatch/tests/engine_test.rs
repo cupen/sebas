@@ -69,11 +69,28 @@ async fn existing_session_dispatches_continue() {
 
 #[tokio::test]
 async fn dormant_mapping_emits_spawn_resume() {
-    // Restored state file → Dormant mapping; the first text must emit
+    // Restored state store rows → Dormant mapping; the first text must emit
     // SpawnResume (lazy respawn, openspec/specs/session-lifecycle/spec.md),
     // not SendAcp into the void.
-    let json = r#"{"oc_x":{"session_id":"sess-old","last_active_unix":1}}"#;
-    let map = SessionMap::restore_json(json).unwrap();
+    let map = SessionMap::restore_rows(
+        vec![sebas_models::session_map::SessionMapRow {
+            chat_id: "feishu".into(),
+            thread_id: Some("oc_x".into()),
+            session_id: "sess-old".into(),
+            last_active_unix: 1,
+            project_dir: None,
+            acp_session_id: None,
+            current_model: None,
+            pending_kind: None,
+            pending_model: None,
+            pending_mode: None,
+            desired_mode: sebas_dispatch::engine::ask_mode(),
+            label: None,
+            prompt_preview: None,
+            awaiting_first_prompt: false,
+        }],
+        usize::MAX,
+    );
     let k = ChannelKey::feishu("oc_x", None);
 
     let (router, mut out_rx) = DispatchHandle::new(map.clone());

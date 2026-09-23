@@ -17,6 +17,9 @@ sebas-router = { path = "../sebas-router" }
 sebas-acp = { path = "../sebas-acp" }
 # 中立共享域层（add-domain-layer）：跨角色域概念的唯一定义处。
 sebas-domain = { path = "../sebas-domain" }
+# session_map 表的 ActiveRecord 行（persist-session-map 1.2：行与映射持久化
+# 形状合一；映射 ↔ 行的转换在本 crate，行定义在 models）。
+sebas-models = { path = "../sebas-models" }
 async-trait = "0.1"
 # 仅 provider 探测 `/v1/models` 用，少量依赖；rustls-tls 省掉 native-tls 链接。
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }

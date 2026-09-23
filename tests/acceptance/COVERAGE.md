@@ -226,7 +226,7 @@ CLI、真实模型跑分、watchdog spawn-fail 进程级注入等）不变。
 | | 变更持久性 | ✅ | state_store 测试 |
 | | store 不可用诚实降级 | ✅ | state_store 测试 |
 | | 损坏 store 不静默重置 | ✅ | state_store 测试 |
-| | Runtime state boundaries for persisted session state（retire-session-persistence 补行）| ✅ | `state_persistence_test`（allowlist/占位不落盘、会话图落 `[dispatch] state_file` 快照语义）；`spawn_race_test::dump_filters_spawning_and_persists_mapping_dto` |
+| | Runtime state boundaries for persisted session state（retire-session-persistence 补行；persist-session-map 修订：映射入状态库**按变更落库**，关停快照与独立映射文件退休）| ✅ | 占位/非持久形态不落库：`spawn_race_test::rows_filter_spawning_and_persist_the_persistable`、`placeholder_marker_survives_persist_restore_round_trip`；按变更落库 + 信号后库中映射完整 + sessions.json 全程不存在：`sigterm_cleanup_test`（SIGTERM/SIGKILL 各一例）；E `graceful_exit_removes_channel_socket`（优雅退出后无 sessions.json）、E `sigkill_committed_session_map_survives_restart`（SIGKILL → projects.db 行完整 → 重启恢复原身份与 desired_mode）；J: lifecycle（重启段）|
 | webui (projects 面) | 项目注册降级如实提示 | ✅ | sebas-webui `session_endpoints_test`（`projects_add_degraded_when_core_unreachable`：201 + `degraded.cause`；正常路径无标记）；browser `deployment.spec.ts`（加项目降级提示，harden-core-channel-deployment）；前端 `project-rail.test.ts`（降级 hint 三态）|
 
 > ④ 的「webui (projects 面)」按主 spec 界定收 webui capability 下直接归属项目管理面
@@ -561,7 +561,7 @@ requirement 级残留：**0 条**（五簇复核 2026-09-11 收口）。本期�
 
 1. **native 会话状态卡在 Queued**：native 回合完成（turn summary 已写、模型调用已完成），但 `src/native_router_bridge.rs` 从不设置 phase=DONE，workbench 状态恒为 "Queued"（models.rs derive：active+"" → Queued）。建议立项修复后，`native_agent_turn_via_router_journey` 的断言可升级为 status_slug=done。
 2. **（unify-router-process-shape 后已消解）~~`run --router` 忽略 `SEBAS_ROUTER_LISTEN`~~**：内嵌形态删除，router 只以独立进程运行（`[router] listen` 是唯一地址来源，进程级可预注入 `SEBAS_AGENT_ROUTER_URL`）。native 仍走 `SEBAS_AGENT_PROVIDER_BASE_URL` 直连路径（本套件已覆盖）。
-3. **会话状态落盘仅在优雅退出**：硬杀（TerminateProcess）不产生状态转储；Windows 无便携优雅信号，故重启恢复段 unix 门控。
+3. **（persist-session-map 后已消解）~~会话状态落盘仅在优雅退出~~**：硬杀丢映射的根因是「持久化只发生在关停快照」；映射改为**按变更落库**（projects.db）后，非优雅退出不再丢已提交映射——E `sigkill_committed_session_map_survives_restart` 钉住（杀后库中行完整 + 重启恢复）；Windows 无便携优雅信号不再是恢复正确性的前提。
 4. **路由状态已入 SQLite**：`[router] state_file`（sessions.json）不再是重启恢复的活性来源，state store DB（sebas.db）承担持久化——矩阵断言已按此更新。
 5. **restore 不复活会话**（二期浏览器旅程发现）：`archive` 先 close（mapping + transcript 丢弃），`restore` 只删归档条目；恢复后详情页如实 404（`sessions.spec.ts` 2.2 已按此诚实语义断言）。与 project-session-actions「History 点击恢复可写」条文不一致，产品语义变更另立项。
 6. **无模型会话 set_model 是终态杀伤**（二期浏览器旅程发现）：webui 只投递（200 ok），Claude 驱动以终态 Error 应答 SetModel，会话被拆除（`models.spec.ts` 3.2 已按终态诚实断言）。正向模型切换需驱动模型面（configOptions 透出 + ModelChanged），待另立项。

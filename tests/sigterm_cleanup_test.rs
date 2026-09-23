@@ -1,247 +1,279 @@
-//! Integration test: SIGTERM must cleanly shut down a running `sebas`
-//! daemon, reap its `fake-claude` ACP child, and persist the session
-//! state file. Gated by `#[ignore]` so plain `cargo test --workspace`
-//! skips it; opt in with `-- --ignored`.
+//! Signal survival for the persisted session map (persist-session-map 4.2).
 //!
-//! Two design notes that explain why this test is structured unusually:
+//! persist-session-map 把映射持久化改为**按变更落库**（生命周期事件处一次
+//! upsert，经单写 actor 提交），关停快照已退休——因此「SIGTERM 后状态文件
+//! 被 dump」的旧断言不再成立，取而代之的是两条更强的语义：
 //!
-//! 1. **No live Feishu.** The test config uses empty `app_id`/`app_secret`
-//!    plus an empty `owner_id` so sebas skips owner filtering. The HTTP
-//!    token fetch and the WebSocket handshake will both fail. To avoid
-//!    `sebas` exiting early (it would otherwise try to talk to
-//!    `https://open.feishu.cn/...` and exit non-zero before reaching the
-//!    select loop), we set two test affordances:
+//! - **SIGTERM（优雅退出）**：每个已提交映射在事件返回时已 durable 于状态库
+//!   （state-store「Mutation durability」）；关停路径不写任何文件，重启读回
+//!   全部映射（含 session_id 与 desired_mode）。
+//! - **SIGKILL（非优雅退出）**：落库不依赖任何关停动作——进程直接消失，
+//!   已提交映射同样在库中；重启后映射完整。旧实现下同一用例失败（dump 只
+//!   发生在关停），这是本 change 的核心收益。
 //!
-//!      * `SEBAS_TEST_FAKE_TOKEN=1` substitutes a stub token, so the
-//!        startup HTTP call to Feishu auth is skipped.
-//!      * `SEBAS_TEST_SPAWN_SESSION=1` mints one fake-claude session at
-//!        startup, so a child is alive as a direct descendant of the
-//!        sebas pid by the time we send SIGTERM.
-//!
-//!    Both env vars are read in `src/run.rs`; production callers never
-//!    set them, so the test path is dormant outside this test.
-//!
-//! 2. **Config file location.** The daemon is started via the explicit
-//!    `run` subcommand, whose `--config` defaults to `./config.toml`.
-//!    This test lays the config at that default path and spawns the
-//!    daemon with `current_dir` set to the same temp dir, giving the
-//!    test full control over the file contents without juggling paths.
-//!
-//! 3. **Child must be running long enough to be our child.** Spawning
-//!    the ACP subprocess inside `acp-claude::SessionManager` takes
-//!    ~50-200 ms. We sleep 1.2 s after `spawn()` returns so the child
-//!    is registered under our pid before we send SIGTERM. Sleep budget
-//!    is bounded (≤ 2 s) so the test stays cheap.
-//!
-//! The test is skipped (not failed) when `target/debug/fake-claude` is
-//! missing, since building that binary is the responsibility of the
-//! workspace's regular `cargo build --workspace`.
+//! 两个用例都是单元级模拟（工程纪律：不要求真 kill 子进程的进程级测试）：
+//! 经生产写入路径（SessionMap 生命周期钩子 + 全局 `DbStateEngine` →
+//! projects.db）落库后，**不经任何关停路径**另开裸连接重开同一库读回断言；
+//! 进程级旅程由 `invoke testsuite-e2e` / `testsuite-acceptance` 的重启旅程
+//! 覆盖。全局引擎是进程级 OnceLock：两个用例经串行锁共享同一沙箱库，
+//! 各用独立会话键互不串扰。
 
-#[cfg(unix)]
-use std::path::{Path, PathBuf};
-// Windows keeps only the PathBuf half: the workspace_target_debug helper
-// compiles there (D4, .exe-aware binary resolution) but the SIGTERM journey
-// itself stays unix-gated, so `Path` has no user.
-#[cfg(windows)]
-use std::path::PathBuf;
-#[cfg(unix)]
-use std::time::Duration;
-
-#[cfg(unix)]
 mod support;
-#[cfg(unix)]
+
+use sebas::sebas_state::writer::StateWriter;
+use sebas_channels::ChannelKey;
+use sebas_dispatch::state::{Mapping, SessionMap};
+use sebas_models::session_map::SessionMapRow;
+use std::path::{Path, PathBuf};
 use support::TestDir;
 
-/// Locate the workspace `target/debug` directory by walking up from
-/// `CARGO_MANIFEST_DIR` (the `sebas` crate root). Assumes the standard
-/// cargo workspace layout (`target/debug` at the workspace root). The
-/// platform difference lives at the call site (`.exe` suffix on Windows,
-/// D4); this lookup itself is identical everywhere.
-#[cfg(any(unix, windows))]
-fn workspace_target_debug() -> PathBuf {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-        .expect("CARGO_MANIFEST_DIR is always set during cargo test");
-    PathBuf::from(manifest_dir).join("target").join("debug")
+/// 全局引擎初始化（进程级 OnceLock 只能一次）+ 沙箱目录：写者线程随进程
+/// 退出；TestDir 有意 forget（目录活在测试进程全程，归 `cargo clean` 清）。
+fn shared() -> &'static PathBuf {
+    use std::sync::OnceLock;
+    static STATE_DIR: OnceLock<PathBuf> = OnceLock::new();
+    static INIT: std::sync::Once = std::sync::Once::new();
+    let dir = STATE_DIR.get_or_init(|| {
+        let d = TestDir::new("sigterm_cleanup", "state");
+        let path = d.path().to_path_buf();
+        std::mem::forget(d);
+        path
+    });
+    INIT.call_once(|| {
+        let settings = StateWriter::start_settings(dir.join("settings.db")).expect("settings");
+        let projects = StateWriter::start_projects(dir.join("projects.db")).expect("projects");
+        sebas_dispatch::state_store::init_engine(Box::new(
+            sebas::sebas_state::engine::DbStateEngine::with_projects(
+                settings.handle().clone(),
+                projects.handle().clone(),
+            ),
+        ));
+        // 引擎持有 handle 克隆，写者线程随全局引擎续命；writer 壳保活与否
+        // 无关紧要——与 run.rs 的生产装配同一形态。
+        std::mem::forget((settings, projects));
+    });
+    dir
 }
 
-/// Write a minimal `config.toml` into `dir` for the spawned sebas to
-/// pick up via its default `./config.toml` lookup. The state file path
-/// and the agent sessions directory are baked into the config so the
-/// daemon writes to the same on-disk locations the test inspects.
-/// `sessions_dir` lives under `target/tests/` (NOT `/tmp`) so a stray
-/// `cargo clean` removes it along with build artefacts.
-#[cfg(unix)]
-fn write_config_in(dir: &Path, state_path: &Path, fake_claude_path: &str, sessions_dir: &Path) {
-    let path = dir.join("config.toml");
-    let body = format!(
-        r#"[feishu]
-app_id = "fake-app-id"
-app_secret = "fake-app-secret"
-owner_id = ""
+static TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-[acp.agents.claude]
-driver = "claude"
-path = {fake_claude_path:?}
-sessions_dir = {sessions_dir:?}
-idle_kill_secs = 60
-
-[dispatch]
-state_file = {state_path:?}
-channel_buffer = 16
-max_concurrent_sessions = 4
-
-[log]
-level = "info"
-"#,
-        fake_claude_path = fake_claude_path,
-        state_path = state_path.display().to_string(),
-        sessions_dir = sessions_dir.display().to_string(),
-    );
-    std::fs::write(&path, body).expect("write config.toml");
+/// 「重启后」的读回面：另开裸 SQLite 连接读 session_map 全表——独立于
+/// 全局引擎的写者句柄，等价于新进程重新打开库。
+fn read_rows(db: &PathBuf) -> Vec<SessionMapRow> {
+    let mut conn = sebas_db::conn::open(db).expect("reopen projects.db");
+    sebas_models::session_map::load_session_map(&mut conn).expect("load session_map")
 }
 
-#[cfg(unix)]
+/// 沙箱内 web 会话键（带项目归属，满足「会话必须从属于项目」写库不变量）。
+fn web_key(reference: &str) -> ChannelKey {
+    ChannelKey::new("web", reference)
+}
+
+/// SIGTERM 用例：会话创建 → 模式/模型/label 变更（每次变更返回即已提交）
+/// → 进程优雅退出（不写任何文件）→ 重开库读回：映射完整（session_id +
+/// desired_mode + label + current_model），且状态目录里**从未出现**
+/// sessions.json（state-store「No separate session-map file exists」）。
 #[tokio::test]
-#[ignore = "opt-in integration test; run with: cargo test --workspace -- sigterm_cleanup -- --ignored --nocapture"]
-async fn sigterm_cleans_up_child_and_persists_state() {
-    // ---- 1. Locate binaries in the workspace target dir. -----------------
-    let target_dir = workspace_target_debug();
-    let exe_suffix = if cfg!(windows) { ".exe" } else { "" };
-    let sebas_bin = target_dir.join(format!("sebas{exe_suffix}"));
-    let fake_claude_bin = target_dir.join(format!("fake-claude{exe_suffix}"));
-    if !sebas_bin.exists() || !fake_claude_bin.exists() {
-        eprintln!(
-            "skipping: required binaries missing ({}, {})",
-            sebas_bin.display(),
-            fake_claude_bin.display()
-        );
-        return;
+async fn sigterm_committed_mappings_survive_graceful_shutdown() {
+    let _guard = TEST_SERIAL.lock().unwrap();
+    let dir = shared();
+    let projects_db = dir.join("projects.db");
+    let map = SessionMap::new();
+    let key = web_key("web-sigterm");
+
+    // 会话创建且对客户端可见（activate 完成 = 快照已暴露 Active 映射）。
+    map.begin_spawn_with(key.clone(), Some("claude".into()), None, None, false)
+        .await
+        .unwrap();
+    map.set_project_dir(&key, Some("/tmp/sigterm-proj".into()))
+        .await;
+    map.activate(&key, "sess-term-1".into(), None, None).await;
+
+    // 中途变更（每次返回即已提交——state-store「Mutation durability」）。
+    map.set_desired_mode(&key, "edit".into()).await;
+    map.set_current_model(&key, "m-term".into()).await;
+    map.set_label(&key, Some("优雅退出".into())).await;
+
+    // 响应返回前库中已可见（2.4：未提交的变更不会落库，提交的立即落库）。
+    {
+        let engine = sebas_dispatch::state_store::engine().expect("engine");
+        let rows = engine.load_session_map().await.unwrap();
+        let row = rows
+            .iter()
+            .find(|r| r.thread_id.as_deref() == Some("web-sigterm"));
+        let row = row.expect("mapping committed before shutdown");
+        assert_eq!(row.session_id, "sess-term-1");
+        assert_eq!(row.desired_mode, "edit");
     }
 
-    // ---- 2. Lay down a temp working directory containing both the config
-    //         and the state file. Pre-populate the state file with a known
-    //         mapping so we can verify the daemon re-serialises it on exit
-    //         (rather than trampling the restore path). All scratch lives
-    //         under `target/tests/sebas/sigterm_cleanup/` so a stray `cargo
-    //         clean` removes it; nothing is written to /tmp or $HOME.
-    let work_dir = TestDir::new("sigterm_cleanup", "work");
-    let sessions_dir = TestDir::new("sigterm_cleanup", "sessions");
-    let state_path = work_dir.path().join("sessions.json");
-    let pre_mapping = serde_json::json!({
-        "test-sigterm-pre": {
-            "session_id": "sess-pre-populated-1",
-            "last_active_unix": 1700000000i64,
-        }
-    });
-    std::fs::write(
-        &state_path,
-        serde_json::to_string(&pre_mapping).expect("serialise pre-populated state"),
+    // 优雅退出 = 直接结束进程；关停路径没有任何写动作（快照已退休）。
+    drop(map);
+
+    // 重开库读回：全部已提交字段完整。
+    let rows = read_rows(&projects_db);
+    let row = rows
+        .iter()
+        .find(|r| r.thread_id.as_deref() == Some("web-sigterm"))
+        .expect("mapping survives graceful shutdown");
+    assert_eq!(row.session_id, "sess-term-1");
+    assert_eq!(row.desired_mode, "edit");
+    assert_eq!(row.label.as_deref(), Some("优雅退出"));
+    assert_eq!(row.current_model.as_deref(), Some("m-term"));
+    assert_eq!(row.project_dir.as_deref(), Some("/tmp/sigterm-proj"));
+
+    // 全程无独立会话映射文件。
+    assert!(
+        !dir.join("sessions.json").exists(),
+        "no separate session-map file may exist"
+    );
+}
+
+/// 生命周期逐事件落库（persist-session-map 2.2）：创建/退役/归档/移除
+/// 各触发一次提交，库中行与内存映射一致；非持久形态不落库。
+#[tokio::test]
+async fn lifecycle_mutations_are_each_committed() {
+    let _guard = TEST_SERIAL.lock().unwrap();
+    let dir = shared();
+    let projects_db = dir.join("projects.db");
+    let map = SessionMap::new();
+    let key = web_key("web-lifecycle");
+
+    // 创建（0-turn 占位，带项目归属）→ 占位行。
+    map.begin_spawn_with(
+        key.clone(),
+        Some("claude".into()),
+        None,
+        Some("ask".into()),
+        true,
     )
-    .expect("write state file");
-    write_config_in(
-        work_dir.path(),
-        &state_path,
-        fake_claude_bin.to_str().unwrap(),
-        sessions_dir.path(),
-    );
+    .await
+    .unwrap();
+    map.set_project_dir(&key, Some("/tmp/lifecycle-proj".into()))
+        .await;
+    let find = |rows: &[SessionMapRow], reference: &str| {
+        rows.iter()
+            .find(|r| r.thread_id.as_deref() == Some(reference))
+            .cloned()
+    };
+    let rows = read_rows(&projects_db);
+    let placeholder = find(&rows, "web-lifecycle").expect("placeholder row committed at create");
+    assert_eq!(placeholder.session_id, "");
+    assert!(placeholder.awaiting_first_prompt);
 
-    // ---- 3. Spawn sebas with cwd=work_dir so it picks up our config. -----
-    let mut child = tokio::process::Command::new(&sebas_bin)
-        .arg("core")
-        .current_dir(work_dir.path())
-        .env("SEBAS_TEST_FAKE_TOKEN", "1")
-        .env("SEBAS_TEST_SPAWN_SESSION", "1")
-        .env("RUST_LOG", "info,sebas=debug,acp_claude=debug")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn sebas");
-    let pid = child.id().expect("child has a pid");
+    // spawn 成功激活 → 同键覆盖为 Active 行。
+    map.activate(&key, "sess-lc-1".into(), None, None).await;
+    let rows = read_rows(&projects_db);
+    let active = find(&rows, "web-lifecycle").expect("active row overwrites the placeholder");
+    assert_eq!(active.session_id, "sess-lc-1");
+    assert!(!active.awaiting_first_prompt);
 
-    // ---- 4. Wait long enough for the ACP child to be spawned and ---------
-    //         registered under our pid. Bounded ≤ 2 s per brief.
-    tokio::time::sleep(Duration::from_millis(1200)).await;
-
-    // Sanity: at least one fake-claude child must be alive under sebas
-    // before we send SIGTERM, or this test would degenerate into a
-    // "vacuous pgrep" assertion.
-    let pre_pgrep = tokio::process::Command::new("pgrep")
-        .args(["-P", &pid.to_string(), "fake-claude"])
-        .output()
+    // 优雅退役（terminal teardown）→ 行翻 Dormant，命名来源随行迁移。
+    let retired_key = map
+        .retire_to_record("sess-lc-1", Some("首条预览".into()))
         .await
-        .expect("pgrep pre");
-    let pre_children = String::from_utf8_lossy(&pre_pgrep.stdout).into_owned();
-    assert!(
-        !pre_children.trim().is_empty(),
-        "expected fake-claude child of sebas pid {} before SIGTERM, got none",
-        pid
-    );
-    eprintln!(
-        "pre-SIGTERM fake-claude pids under {}: {:?}",
-        pid, pre_children
-    );
+        .expect("active mapping retires");
+    assert_eq!(retired_key, key);
+    let rows = read_rows(&projects_db);
+    let dormant = find(&rows, "web-lifecycle").expect("retired row stays as dormant");
+    assert_eq!(dormant.session_id, "sess-lc-1");
+    assert_eq!(dormant.prompt_preview.as_deref(), Some("首条预览"));
 
-    // ---- 5. Send SIGTERM and wait for clean exit. ------------------------
-    // Use libc::kill directly: `libc` is already a runtime dep of sebas,
-    // and we don't need the full `nix` crate for a single signal call.
-    let rc = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+    // fallback 归档（resume load 被拒）→ closed-* 归档行落库。
+    map.preserve_closed_mapping(&key, "sess-lc-1", Some("acp-lc".into()))
+        .await;
+    let rows = read_rows(&projects_db);
+    let archive = rows
+        .iter()
+        .find(|r| r.thread_id.as_deref().is_some_and(|t| t.starts_with("closed-")))
+        .expect("archive record row committed")
+        .clone();
+    assert_eq!(archive.session_id, "sess-lc-1");
+    assert_eq!(archive.acp_session_id.as_deref(), Some("acp-lc"));
+
+    // 移除（按 key 关闭；按 session 拆除）→ 行删除，重启不复活。
+    map.remove_by_key(&key).await;
+    let rows = read_rows(&projects_db);
+    assert!(
+        find(&rows, "web-lifecycle").is_none(),
+        "removed mapping must not survive a restart"
+    );
+    let archive_key = ChannelKey::new(
+        archive.chat_id.as_str(),
+        archive.thread_id.clone().expect("archive reference"),
+    );
+    map.remove_by_key(&archive_key).await;
+    let rows = read_rows(&projects_db);
+    assert!(
+        !rows
+            .iter()
+            .any(|r| r.thread_id.as_deref().is_some_and(|t| t.starts_with("closed-"))),
+        "archived row is removable too"
+    );
+    // 活跃映射经 remove_by_session 拆除（terminal 事件路径）→ 删行。
+    map.insert(
+        ChannelKey::new("web", "web-lc-2"),
+        {
+            let mut m = Mapping::active("sess-lc-2");
+            m.project_dir = Some("/tmp/lifecycle-proj".into());
+            m
+        },
+    )
+    .await
+    .unwrap();
+    let rows = read_rows(&projects_db);
+    assert!(find(&rows, "web-lc-2").is_some(), "inserted active row");
+    map.remove_by_session("sess-lc-2").await;
+    let rows = read_rows(&projects_db);
+    assert!(find(&rows, "web-lc-2").is_none(), "torn-down mapping deleted");
+}
+
+/// SIGKILL 用例：会话创建后**不调用任何关停/退役路径**，进程直接消失——
+/// 已提交映射不依赖快照，重开库读回仍在（含 session_id 与 desired_mode），
+/// 恢复侧按行原样重建映射。
+#[tokio::test]
+async fn sigkill_committed_mappings_survive_unclean_exit() {
+    let _guard = TEST_SERIAL.lock().unwrap();
+    let dir = shared();
+    let projects_db = dir.join("projects.db");
+    let map = SessionMap::new();
+    let key = web_key("web-sigkill");
+
+    map.begin_spawn_with(
+        key.clone(),
+        Some("claude".into()),
+        Some("sonnet-x".into()),
+        Some("auto".into()),
+        true,
+    )
+    .await
+    .unwrap();
+    map.set_project_dir(&key, Some("/tmp/sigkill-proj".into()))
+        .await;
+    // 首条消息触发真实 spawn → activate：0-turn 占位行被 Active 行覆盖。
+    map.activate(&key, "sess-kill-1".into(), None, None).await;
+
+    // SIGKILL：无 retire、无 remove、无关停——直接丢弃整个进程内状态。
+    drop(map);
+
+    // 重启（重开库读回）：0-turn 占位消失，Active 行（覆盖后的最新已提交
+    // 状态）保留全部身份字段。
+    let rows = read_rows(&projects_db);
+    let row = rows
+        .iter()
+        .find(|r| r.thread_id.as_deref() == Some("web-sigkill"))
+        .expect("mapping survives an unclean exit")
+        .clone();
+    assert_eq!(row.session_id, "sess-kill-1");
+    assert_eq!(row.desired_mode, "auto");
+    assert_eq!(row.pending_model.as_deref(), Some("sonnet-x"));
+    assert!(!row.awaiting_first_prompt, "激活后占位身份已被消费");
+    // 恢复侧读回同一行 → 映射（含身份）原样重建。
+    let (back_key, back) =
+        sebas_dispatch::state::mapping_from_row(row).expect("addressable row");
+    assert_eq!(back_key, key);
     assert_eq!(
-        rc,
-        0,
-        "kill(SIGTERM) failed: errno={}",
-        std::io::Error::last_os_error()
-    );
-
-    let status = tokio::time::timeout(Duration::from_secs(10), child.wait())
-        .await
-        .expect("sebas should exit within 10 s of SIGTERM")
-        .expect("child.wait");
-    assert!(
-        status.success(),
-        "sebas did not exit cleanly on SIGTERM: {:?}",
-        status
-    );
-
-    // ---- 6. Verify the fake-claude child is gone. ------------------------
-    // Give the kernel a moment to deliver the SIGKILL that `kill_all`
-    // cascades down via `cancel_tx` → `CancelNotification` → SDK drops
-    // the child process.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    let post_pgrep = tokio::process::Command::new("pgrep")
-        .args(["-P", &pid.to_string(), "fake-claude"])
-        .output()
-        .await
-        .expect("pgrep post");
-    let post_children = String::from_utf8_lossy(&post_pgrep.stdout).into_owned();
-    eprintln!(
-        "post-SIGTERM fake-claude pids under {}: {:?}",
-        pid, post_children
-    );
-    assert!(
-        post_children.trim().is_empty(),
-        "fake-claude still alive after sebas exit: {:?}",
-        post_children
-    );
-
-    // ---- 7. Verify the state file was persisted. ------------------------
-    // The pre-populated entry must still be there (restore + dump round-
-    // trip); additionally, the spawned test session should have minted
-    // a `session_id` mapping.
-    let state_text = std::fs::read_to_string(&state_path).expect("state file readable");
-    eprintln!("post-SIGTERM state file contents:\n{state_text}");
-    let json: serde_json::Value = serde_json::from_str(&state_text).expect("state file is JSON");
-    let obj = json.as_object().expect("state file root is an object");
-    assert!(
-        obj.values().any(|v| {
-            v.get("session_id")
-                .and_then(|s| s.as_str())
-                .is_some_and(|s| s == "sess-pre-populated-1")
-        }),
-        "pre-populated mapping lost across restart; state file: {state_text}"
-    );
-    assert!(
-        obj.values().any(|v| v.get("session_id").is_some()),
-        "no session_id mapping found in state file: {state_text}"
+        back.transcript_id(),
+        Some("sess-kill-1"),
+        "恢复的映射仍以原会话 id 寻址转录"
     );
 }
