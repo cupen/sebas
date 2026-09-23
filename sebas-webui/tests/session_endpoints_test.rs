@@ -16,6 +16,8 @@ use sebas_webui::projects;
 use std::sync::Arc;
 use tower::ServiceExt;
 
+mod common;
+
 fn key(id: &str) -> ChannelKey {
     ChannelKey::feishu(&format!("oc_{id}"), None)
 }
@@ -463,43 +465,29 @@ async fn spa_fallback_serves_entry_for_client_routes() {
 
 // ---- Project API integration tests ----
 
-/// Project API tests serialize on this lock because `SEBAS_PROJECTS_PATH` is
-/// process-global env state; the guard below restores it even on panic.
+/// Project API tests serialize on this lock: the core state store is a
+/// process-global engine shared by every test in this binary, so per-test
+/// isolation means "hold the lock, then reset the in-memory registry".
+///
+/// `migrate-project-registry` deleted the `projects.json` file backend and
+/// retired `SEBAS_PROJECTS_PATH`; the old per-test env redirection is dead.
 static PROJECTS_TEST_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 static PROJECTS_TEST_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-struct ProjectsEnvGuard {
+/// Serializes project API tests and resets the shared in-memory project
+/// registry to empty, so each test observes exactly the projects it registers.
+struct ProjectsGuard {
     _lock: tokio::sync::MutexGuard<'static, ()>,
-    prev: Option<String>,
-    path: std::path::PathBuf,
 }
 
-impl Drop for ProjectsEnvGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-        match &self.prev {
-            Some(p) => unsafe { std::env::set_var("SEBAS_PROJECTS_PATH", p) },
-            None => unsafe { std::env::remove_var("SEBAS_PROJECTS_PATH") },
-        }
-    }
-}
-
-/// Points `SEBAS_PROJECTS_PATH` at a unique throwaway file so project API
-/// tests never touch the real `~/.sebas/projects.json`.
-async fn isolated_projects() -> ProjectsEnvGuard {
+/// Install the in-memory state store and clear its project registry; the
+/// returned guard keeps the per-binary serialization lock for the test.
+async fn isolated_projects() -> ProjectsGuard {
     let lock = PROJECTS_TEST_LOCK.lock().await;
-    let n = PROJECTS_TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("sebas-projects-test-{n}.json"));
-    let prev = std::env::var("SEBAS_PROJECTS_PATH").ok();
-    unsafe {
-        std::env::set_var("SEBAS_PROJECTS_PATH", &path);
-    }
-    ProjectsEnvGuard {
-        _lock: lock,
-        prev,
-        path,
-    }
+    common::init();
+    common::reset_projects();
+    ProjectsGuard { _lock: lock }
 }
 
 /// Add 后从列表反查稳定项目 id（workbench-agent-wire-fix 2.5 测试助手）。
@@ -624,8 +612,9 @@ async fn projects_add_and_list() {
 /// workbench-agent-wire-fix「Project-level default agent」（随 2026-09-11
 /// 覆盖复核入账）：会话创建把所用 agent 记为该项目的 default_agent——
 /// 跟随最近一次使用、项目间互不串、没用过的项目如实无记录。写路径经
-/// create_session 的 state_mutate（此 fixture 无状态库引擎 → 文件注册表
-/// 回退支路）；composer 的预选反应由前端 workbench-composer 单测覆盖。
+/// create_session 的 state_mutate（migrate-project-registry 5.1：core 状态库
+/// 是唯一落点，本 fixture 经 `common` 的内存引擎承载）；composer 的预选反应
+/// 由前端 workbench-composer 单测覆盖。
 #[tokio::test]
 async fn project_default_agent_follows_last_use() {
     let _env = isolated_projects().await;
@@ -1103,10 +1092,11 @@ async fn projects_branch_detects_git_head() {
 async fn projects_branch_unreachable_core_answers_503_not_404() {
     // 46e7e6f：core 不可达时查无此 id ≠ 项目不存在（注册表住在 core 侧），
     // 停机窗口的 branch 读如实 503，不得对具体项目裁决 404。
-    let _env = isolated_projects().await;
-    let (_router, _rx, app) = fixture().await;
+    // migrate-project-registry 5.1：不可达必须由**真的不可达**的后端驱动
+    // （`core_down_app` 的 state_snapshot 返回 None）。进程内 fixture 的引擎
+    // 已初始化、快照可读——那不是停机窗口，会如实 404。
+    let app = core_down_app();
     let resp = app
-        .clone()
         .oneshot(
             Request::builder()
                 .uri("/api/projects/never-registered/branch")
@@ -2028,7 +2018,8 @@ async fn web_and_feishu_sessions_are_peers_in_one_snapshot() {
     assert_eq!(summary["total_sessions"], 2);
 }
 
-// ---- harden-core-channel-deployment 4.2: degraded marker on project add ----
+// ---- harden-core-channel-deployment 4.2 / migrate-project-registry 5.1:
+// ---- honest project-surface degradation (no file fallback, no degraded 201) ----
 
 /// A SessionBackend whose state store always fails and whose reachability
 /// reports a cause — simulates the detached webui with the core down.
@@ -2318,22 +2309,50 @@ impl sebas_webui::session_backend::SessionBackend for StateStoreOkBackend {
     async fn reachability(&self) -> sebas_webui::session_backend::Reachability {
         sebas_webui::session_backend::Reachability::Reachable
     }
-    async fn state_mutate(&self, _domain: &str, _payload: serde_json::Value) -> Result<(), String> {
-        Ok(())
+    /// 状态库可用形态：与 `InProcessBackend` 同源，经全局引擎读写 projects
+    /// 域（`common::init()` 装入的内存引擎），使「健康 store 的注册往返」
+    /// 走真实路径而非桩。
+    async fn state_snapshot(&self, domain: &str) -> Option<serde_json::Value> {
+        let engine = sebas_dispatch::state_store::engine()?;
+        match domain {
+            "projects" => {
+                let projects = engine.load_projects().await.ok()?;
+                Some(serde_json::json!({ "projects": projects }))
+            }
+            _ => None,
+        }
+    }
+    async fn state_mutate(&self, domain: &str, payload: serde_json::Value) -> Result<(), String> {
+        let engine = sebas_dispatch::state_store::engine()
+            .ok_or_else(|| "state store 未初始化".to_string())?;
+        match domain {
+            "projects" => sebas_dispatch::state_store::project_mutation(engine, &payload).await,
+            other => Err(format!("unknown domain: {other}")),
+        }
     }
 }
 
-/// 核心不可达时注册项目：201 + `degraded.cause`（本地注册表路径）。
+/// 核心不可达时注册项目：**拒绝**（503 + 如实 cause），绝不 201 + `degraded`
+/// 标记、绝不落文件替代（migrate-project-registry 5.1 删除了文件回退）。
+///
+/// 用 `FakeBackend` 摆出停机窗口的形状：projects 域读得到（空表）、写被拒、
+/// 可达性报不可达——这样既断言「注册被拒且 cause 点名不可用」，又能读列表
+/// 证明被拒的注册没有在任何地方留下项目。
 #[tokio::test]
-async fn projects_add_degraded_when_core_unreachable() {
-    let _env = isolated_projects().await;
-    let app = core_down_app();
-    let dir = std::env::temp_dir().join("projects-test-degraded-add");
+async fn projects_add_refused_when_core_unreachable() {
+    let fake = sebas_webui::session_backend::FakeBackend::new();
+    fake.set_state_domain("projects", Some(serde_json::json!({ "projects": [] })));
+    fake.set_state_mutate_ok(false);
+    fake.set_reachable(false, "socket absent");
+    let backend: Arc<dyn sebas_webui::SessionBackend> = Arc::new(fake);
+    let app = projects_app(backend);
+    let dir = std::env::temp_dir().join("projects-test-refused-add");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let path_str = dir.to_string_lossy().to_string();
 
     let resp = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -2348,21 +2367,180 @@ async fn projects_add_degraded_when_core_unreachable() {
         .unwrap();
     assert_eq!(
         resp.status(),
-        StatusCode::CREATED,
-        "degraded local add still 201"
+        StatusCode::SERVICE_UNAVAILABLE,
+        "store 不可达时注册必须被拒，绝不 201"
     );
     let body: serde_json::Value =
         serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
-    assert_eq!(
-        body["degraded"]["cause"].as_str(),
-        Some("socket absent"),
-        "degraded marker must carry the honest cause: {body}"
+    let error = body["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("状态库不可达"),
+        "cause 必须点名项目面不可用: {body}"
+    );
+    assert!(
+        error.contains("socket absent"),
+        "cause 必须如实透传不可达原因: {body}"
+    );
+    assert!(
+        body.get("degraded").is_none(),
+        "旧 degraded 标记已按设计删除，不得回流: {body}"
+    );
+
+    // 被拒的注册没有留下任何项目（无文件回退）：列表仍为空。
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/projects")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+    assert!(
+        body["projects"].as_array().unwrap().is_empty(),
+        "被拒的注册不得出现在列表: {body}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// 核心正常（状态库可用）时注册项目：响应不带 degraded 标记。
+/// migrate-project-registry 5.1：**变更入口**同样诚实——移除与重排读不到状态
+/// 库时报 503 + cause，绝不把「读不到」当成「项目不存在」（404）或「列表为
+/// 空」。重排尤其危险：照空列表写回等于抹掉注册表。
+#[tokio::test]
+async fn projects_mutations_answer_503_when_store_unreachable() {
+    let fake = std::sync::Arc::new(sebas_webui::session_backend::FakeBackend::new());
+    // 域缺省 = state_snapshot 对该域返回 None（真源不可达），mutate 也被拒。
+    fake.set_state_mutate_ok(false);
+    let backend: Arc<dyn sebas_webui::SessionBackend> = fake.clone();
+    let app = projects_app(backend);
+
+    // 移除：503（不是 404「project not found」）。
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/projects/proj-doesnotmatter/remove")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "store 不可达时移除必须 503，不得报 404"
+    );
+    let body: serde_json::Value =
+        serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("状态库不可达"),
+        "cause 必须点名不可用: {body}"
+    );
+
+    // 重排：503，且**没有**把空表写回去（写通道也被拒）。
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/projects/reorder")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "ids": ["proj-a"] }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "store 不可达时重排必须 503"
+    );
+    // 域仍不可读——没有被「读不到 → 空表 → save」的路子污染。
+    assert!(
+        sebas_webui::SessionBackend::state_snapshot(&*fake, "projects")
+            .await
+            .is_none(),
+        "被拒的重排不得在不可达期间写入任何东西"
+    );
+}
+
+/// migrate-project-registry 5.2：状态库恢复后，同一个 backend 的下一次请求
+/// **重新读库**并清除 unavailable——降级态不粘滞、不缓存（没有「曾经不可达
+/// 就一直不可达」的粘性，也没有拿旧的空列表冒充现状）。
+#[tokio::test]
+async fn projects_unavailable_clears_when_store_comes_back() {
+    let fake = std::sync::Arc::new(sebas_webui::session_backend::FakeBackend::new());
+    // 停机窗口：域读不到 → 503 + cause。
+    fake.set_state_domain("projects", None);
+    let backend: Arc<dyn sebas_webui::SessionBackend> = fake.clone();
+    let app = projects_app(backend);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/projects")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value =
+        serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("状态库不可达"),
+        "unavailable 必须给出 cause: {body}"
+    );
+
+    // store 回来（库里有项目）：同一个 app 的下一次请求必须重新读库。
+    fake.set_state_domain(
+        "projects",
+        Some(serde_json::json!({ "projects": [{
+            "id": "proj-recovered0001",
+            "path": "/tmp/recovered",
+            "name": "recovered",
+            "branch_at": 0,
+            "added_at": 1,
+            "sort_order": 0,
+            "node_id": "local",
+        }]})),
+    );
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/projects")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "恢复后必须重新读库并清除 unavailable"
+    );
+    let body: serde_json::Value =
+        serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+    assert_eq!(body["projects"].as_array().unwrap().len(), 1);
+    assert_eq!(body["projects"][0]["path"], "/tmp/recovered");
+}
+
+/// 核心正常（状态库可用）时注册项目：普通 201、无 degraded 标记，且注册
+/// 真的落进状态库（列表可见）。
 #[tokio::test]
 async fn projects_add_status_store_path_has_no_degraded_marker() {
     let _env = isolated_projects().await;
@@ -2374,6 +2552,7 @@ async fn projects_add_status_store_path_has_no_degraded_marker() {
     let path_str = dir.to_string_lossy().to_string();
 
     let resp = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -2392,6 +2571,25 @@ async fn projects_add_status_store_path_has_no_degraded_marker() {
     assert!(
         body.get("degraded").is_none(),
         "status-store path must not carry a degraded marker: {body}"
+    );
+    assert_eq!(body["path"].as_str(), Some(path_str.as_str()));
+
+    // 健康路径的写入真的落库：列表读回同一条。
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/projects")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body: serde_json::Value =
+        serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+    assert_eq!(
+        body["projects"].as_array().unwrap().len(),
+        1,
+        "健康 store 的注册必须落库: {body}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

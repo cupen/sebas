@@ -30,6 +30,7 @@
   - 备注：`is_active`（聚焦态）属调用方上下文，由 build_session_rows 转换后覆盖；遗留 element_type 归一（未知→markdown）表达为 `with_normalized_element_type` 后随转换，行为不变。api_endpoints_test 无改动通过。
 - [x] 3.5 补形状钉测试：`ProjectRow` ↔ `ProjectEntry` 双向转换与两侧序列化形状各钉一个测试；验证：新增测试通过，且人为给一侧加字段时测试失败（在 PR 描述里附一次失败演示）
   - 备注：ProjectEntry 已迁 `sebas_domain::project`（webui 原位再导出）；ProjectRow 因 `SchemaColumns` derive 硬编码生成路径 `crate::sebas_state::migration::SchemaColumn` 只能留根 crate——「同 crate 相邻」收敛为「转换与 ProjectRow 同 crate 相邻」（根 repo.rs）。Row→Entry 为命名方法 `to_entry()`（orphan rule 不允许 root 为外域类型实现 From）；Entry→Row 为 `From`。失败演示：临时给 ProjectRow 加 `ghost_new_field` → E0063 缺字段编译错误（spec「fails to compile or its pinning test fails」的编译分支）→ 还原。
+  - 后续（本条记录的归属已被两个后续 change 取代，按 D5「放置规则」读）：`ProjectRow` 已由 `extract-sebas-db` 迁往 `sebas-models`（derive 生成路径随之修正），`ProjectEntry` 已由 `migrate-project-registry` 合并为 `ProjectRow` 的再导出别名——所以「两个形状 + 双向转换」不再是现状，**唯一形态**落在拥有 `projects` 表的 crate。`sebas-domain::project` 的残留（重复常量 + id 派生）按新放置规则退役，见 D5 与 beads `sebas-fdfg`（已落地）。
 
 ## 4. 显式重声明收口
 

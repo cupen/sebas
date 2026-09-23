@@ -1,12 +1,14 @@
 ## Purpose
 
-Establishes the neutral shared domain layer: the single place where cross-role domain concepts (project records, session identity and status, session key encoding, provider and model descriptors, session events, turn entries, approval decisions) are defined, so that the control plane and the execution node share one definition and one implementation instead of each carrying its own copy. This capability is an architectural contract, not user-facing behavior: it constrains the workspace's shape so that later changes can reuse the layer rather than duplicate it again.
+Establishes the neutral shared domain layer: the single place where cross-role domain concepts — session identity and status, session key encoding, provider and model descriptors, session events, turn entries, approval decisions, and the neutral primitives they need — are defined, so that the control plane and the execution node share one definition and one implementation instead of each carrying its own copy. A concept whose one canonical form is also a persisted row (the project record is the first) is defined once in the crate that owns the table instead, and the layer carries no copy of it; that placement rule is part of this contract, so that "one definition" never decays into "one definition plus a shadow copy in the layer". This capability is an architectural contract, not user-facing behavior: it constrains the workspace's shape so that later changes can reuse the layer rather than duplicate it again.
 
 ## ADDED Requirements
 
 ### Requirement: Single canonical definition per shared domain concept
 
-The system SHALL define each shared domain concept — project record, session identity and status, session key encoding, provider and model descriptors, session events, turn entries, approval decisions — in exactly one place, and every consumer SHALL use that definition rather than declaring its own. A consumer MAY re-export the canonical definition to preserve its existing public surface, but SHALL NOT redeclare the type or re-list its fields.
+The system SHALL define each shared domain concept — session identity and status, session key encoding, provider and model descriptors, session events, turn entries, approval decisions — in exactly one place, and every consumer SHALL use that definition rather than declaring its own. A consumer MAY re-export the canonical definition to preserve its existing public surface, but SHALL NOT redeclare the type or re-list its fields.
+
+The workspace SHALL place each concept by its persistence nature. A concept whose single canonical form serves as both the domain object and a persisted row SHALL be defined in the crate that owns that table (today the project record, in the ActiveRecord crate), together with the rule that derives its identity; the neutral layer SHALL NOT keep a parallel copy of such a concept — not the type, not a re-listed field set, and not a constant that duplicates a column default or a storage key. A concept with no persisted form SHALL remain in the neutral layer.
 
 #### Scenario: session key encoding has exactly one implementation
 
@@ -31,9 +33,17 @@ The system SHALL define each shared domain concept — project record, session i
 - **WHEN** a presentation view carries fields that also exist on the canonical type for the same concept
 - **THEN** those fields are produced by one explicit conversion from the canonical type, not by a hand-written field-by-field listing
 
+#### Scenario: a table-backed concept lives with its table
+
+- **WHEN** a shared domain concept has exactly one canonical form that serves as both the domain object and a persisted row, as the project record does
+- **THEN** that definition lives in the crate owning the table, next to the identity rule that derives the row's stable id
+- **AND** the neutral layer declares no type, field listing, or constant of the same concept
+- **AND** concepts with no persisted form stay in the neutral layer
+- **AND** a duplicated constant standing in for a persisted column's default is removed rather than kept in sync by a test
+
 ### Requirement: Neutral leaf dependency
 
-The shared domain layer SHALL be a leaf crate depending only on neutral primitives. It SHALL NOT depend on any control-plane role implementation (the core, web UI, router, or IM layer) and SHALL NOT depend on the execution node. It SHALL be usable by both the control plane and the execution node without either pulling in the other.
+The shared domain layer SHALL be a leaf crate depending only on neutral primitives. It SHALL NOT depend on any control-plane role implementation (the core, web UI, router, or IM layer) and SHALL NOT depend on the execution node. It SHALL NOT depend on the persistence runtime, and SHALL NOT absorb a concept whose canonical form is a persisted row — the layer stays usable by a role that cannot link the persistence runtime. It SHALL be usable by both the control plane and the execution node without either pulling in the other.
 
 #### Scenario: the shared layer carries no role implementation
 
@@ -51,6 +61,13 @@ The shared domain layer SHALL be a leaf crate depending only on neutral primitiv
 - **WHEN** any crate (root binary, web UI, dispatch, router, IM, node) needs a shared domain concept
 - **THEN** it obtains that concept from the shared layer through a normal path dependency
 - **AND** no crate is forced to copy a definition because the original is unreachable
+
+#### Scenario: the shared layer does not take on persistence
+
+- **WHEN** a concept's canonical form is a persisted row
+- **THEN** the shared layer neither defines nor re-declares it, and adds no persistence runtime dependency to carry one
+- **AND** the shared layer's dependency graph still contains no SQLite runtime
+- **AND** a role that cannot link the persistence runtime keeps obtaining its own persistence-free concepts from the shared layer
 
 #### Scenario: a shared protocol crate can be built on the layer without a cycle
 

@@ -975,6 +975,106 @@ impl SessionBackend for InProcessBackend {
 
 // ─── Fake backend for tests (task 2.3) ─────────────────────────────────────
 
+/// migrate-project-registry 6.2：测试用项目条目（规范记录的 wire 形状）。
+///
+/// 注册表已无文件后端（5.1 删除了文件回退），route 层测试构造「升级前遗留的
+/// 越界项目」「远端项目」时不能再往 `projects.json` 里塞——改由这里的条目
+/// 直接落进 FakeBackend 的 projects 域。
+fn project_entry_json(node_id: &str, path: &str) -> serde_json::Value {
+    let name = std::path::Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string());
+    serde_json::json!({
+        "id": crate::projects::project_id_for_on(node_id, path),
+        "path": path,
+        "name": name,
+        "branch_at": 0,
+        "added_at": 0,
+        "sort_order": 0,
+        "node_id": node_id,
+    })
+}
+
+/// migrate-project-registry 6.2：projects 域的**内存 mutation 语义**，与
+/// `sebas_dispatch::state_store::project_mutation` 对齐（add 按 path 去重、
+/// remove 按 path、save/reorder 全量替换）。
+///
+/// route 层测试要的是「POST 之后列表真的变了」；旧的 no-op 桩在文件后端删除
+/// 后会让「注册 → 列表」往返断言失去意义。
+fn apply_project_mutation(
+    domains: &mut HashMap<String, Option<serde_json::Value>>,
+    payload: &serde_json::Value,
+) -> Result<(), String> {
+    let op = payload
+        .get("op")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let slot = domains
+        .entry("projects".to_string())
+        .or_insert_with(|| Some(serde_json::json!({ "projects": [] })));
+    if slot.is_none() {
+        *slot = Some(serde_json::json!({ "projects": [] }));
+    }
+    let list = slot
+        .as_mut()
+        .and_then(|v| v.get_mut("projects"))
+        .and_then(|p| p.as_array_mut())
+        .expect("projects array");
+    match op {
+        "add" => {
+            let path = payload
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "add: 缺少 path 字段".to_string())?;
+            if list
+                .iter()
+                .any(|p| p.get("path").and_then(serde_json::Value::as_str) == Some(path))
+            {
+                return Err(format!("项目已注册: {path}"));
+            }
+            let node_id = payload
+                .get("node_id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(crate::projects::LOCAL_NODE_ID);
+            let name = payload
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let mut entry = project_entry_json(node_id, path);
+            if let Some(obj) = entry.as_object_mut() {
+                obj.insert("name".into(), serde_json::json!(name));
+                obj.insert("sort_order".into(), serde_json::json!(list.len() as i64));
+            }
+            list.push(entry);
+            Ok(())
+        }
+        "remove" => {
+            let path = payload
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "remove: 缺少 path 字段".to_string())?;
+            let before = list.len();
+            list.retain(|p| p.get("path").and_then(serde_json::Value::as_str) != Some(path));
+            if list.len() == before {
+                Err(format!("项目不存在: {path}"))
+            } else {
+                Ok(())
+            }
+        }
+        "save" | "reorder" => {
+            *list = payload
+                .get("projects")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            Ok(())
+        }
+        other => Err(format!("未知的 projects 子操作: {other}")),
+    }
+}
+
 /// Fake backend for tests: settable session set, in-memory transcript,
 /// and an "unreachable" mode. No child process, no socket.
 pub struct FakeBackend {
@@ -1150,6 +1250,41 @@ impl FakeBackend {
     pub fn set_state_mutate_ok(&self, ok: bool) {
         self.state_mutate_ok
             .store(ok, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// migrate-project-registry 6.2（route 层测试用）：把 projects 域置为
+    /// 「已接线且可用」的空注册表——POST/GET 走真实状态源，而不是降级路径。
+    ///
+    /// 注册表已无文件后端（5.1 删除了文件回退），route 层测试需要一个可增删的
+    /// 内存状态源来覆盖「注册 → 列表」往返。
+    pub fn enable_projects_store(&self) {
+        self.set_state_domain("projects", Some(serde_json::json!({ "projects": [] })));
+        self.set_state_mutate_ok(true);
+    }
+
+    /// migrate-project-registry 6.2（route 层测试用）：绕过 API 的路径执法，
+    /// 直接落一条注册表条目——用于构造「升级前遗留」的越界本机项目与远端
+    /// 项目。返回该条目 id。
+    pub fn seed_project(&self, node_id: &str, path: &str) -> String {
+        let entry = project_entry_json(node_id, path);
+        let id = entry
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let mut domains = self.state_domains.lock().expect("state domain lock");
+        let slot = domains
+            .entry("projects".to_string())
+            .or_insert_with(|| Some(serde_json::json!({ "projects": [] })));
+        if slot.is_none() {
+            *slot = Some(serde_json::json!({ "projects": [] }));
+        }
+        slot.as_mut()
+            .and_then(|v| v.get_mut("projects"))
+            .and_then(|p| p.as_array_mut())
+            .expect("projects array")
+            .push(entry);
+        id
     }
 
     /// add-fetch-models：注入某个 provider 的抓取结果（route 层测试用）。
@@ -1493,14 +1628,19 @@ impl SessionBackend for FakeBackend {
     }
 
     async fn state_mutate(&self, domain: &str, payload: serde_json::Value) -> Result<(), String> {
-        let _ = (domain, payload);
-        if self
+        if !self
             .state_mutate_ok
             .load(std::sync::atomic::Ordering::SeqCst)
         {
-            return Ok(());
+            return Err("state store 不可用".into());
         }
-        Err("state store 不可用".into())
+        // migrate-project-registry 6.2：projects 域是真实的内存状态源（其余
+        // 域维持 no-op——那些测试只断言调用成败，不断言快照变化）。
+        if domain == "projects" {
+            let mut domains = self.state_domains.lock().expect("state domain lock");
+            return apply_project_mutation(&mut domains, &payload);
+        }
+        Ok(())
     }
 
     async fn fetch_provider_models(&self, provider: &str) -> Result<Vec<String>, String> {

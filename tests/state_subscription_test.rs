@@ -155,7 +155,7 @@ async fn mutation_delivers_change_notification_on_subscription() {
         .await
         .expect("save settings");
     engine
-        .add_project("/tmp/proj", "proj", 1700000000)
+        .add_project("local", "/tmp/proj", "proj", 1700000000)
         .await
         .expect("add project");
 

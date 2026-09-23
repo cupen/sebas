@@ -35,14 +35,20 @@ fn committed_mutation_survives_writer_restart() {
                 .expect("save settings");
         });
 
-        // projects: add + 读回。
+        // projects: add + 读回。两条：一条本机、一条**远程节点**——远程项目
+        // 必须和本机项目一样落在库里（migrate-project-registry 3.3：旧实现
+        // 里远程条目只存在于 projects.json，库里根本不存在）。
         rt.block_on(async {
             engine
-                .add_project("/tmp/persist-proj", "persist-proj", 1700000000)
+                .add_project("local", "/tmp/persist-proj", "persist-proj", 1700000000)
                 .await
-                .expect("add project");
+                .expect("add local project");
+            engine
+                .add_project("node-1", "/srv/remote-proj", "remote-proj", 1700000001)
+                .await
+                .expect("add remote project");
             let list = engine.load_projects().await.expect("load projects");
-            assert_eq!(list.len(), 1, "mutation must be visible before teardown");
+            assert_eq!(list.len(), 2, "mutation must be visible before teardown");
         });
 
         // 写者 drop = 进程结束（mutation 已提交，DB 已持久）。
@@ -66,14 +72,78 @@ fn committed_mutation_survives_writer_restart() {
             assert!(settings.is_some(), "settings must survive restart");
         });
 
-        // project 在。
+        // project 在——本机与远程都在，且节点归属原样（3.3）。
         rt.block_on(async {
             let list = engine.load_projects().await.expect("load projects");
-            assert_eq!(list.len(), 1, "project must survive restart");
-            assert_eq!(list[0]["path"], "/tmp/persist-proj");
-            assert_eq!(list[0]["name"], "persist-proj");
+            assert_eq!(list.len(), 2, "both projects must survive restart");
+            let local = list
+                .iter()
+                .find(|p| p.path == "/tmp/persist-proj")
+                .expect("本机项目必须存活");
+            assert_eq!(local.name, "persist-proj");
+            assert_eq!(local.node_id, "local");
+            let remote = list
+                .iter()
+                .find(|p| p.path == "/srv/remote-proj")
+                .expect("远程节点项目必须存活（旧实现只在文件里）");
+            assert_eq!(remote.name, "remote-proj");
+            assert_eq!(remote.node_id, "node-1", "节点归属必须随重启保留");
         });
     }
+}
+
+/// migrate-project-registry 4.1：**不做遗留导入**。状态目录里放一份「有远程
+/// 项目」的 `projects.json`（旧实现的独家存储），库为空——打开引擎后库必须
+/// 仍然为空，远程项目**不出现**在列表里（也不出现任何导入标记）：文件不再
+/// 被读取，库是唯一权威。
+#[test]
+fn legacy_projects_file_is_not_imported() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings_path = dir.path().join("settings.db");
+    let projects_path = dir.path().join("projects.db");
+
+    // 旧实现的落点：状态目录下的 projects.json，含一条远程项目。
+    std::fs::write(
+        dir.path().join("projects.json"),
+        serde_json::json!({
+            "version": 1,
+            "projects": [{
+                "id": "proj-legacyremote",
+                "path": "/srv/legacy-remote",
+                "name": "legacy-remote",
+                "node_id": "node-legacy",
+                "branch_at": 0,
+                "added_at": 1,
+                "sort_order": 0,
+            }],
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let settings = StateWriter::start(settings_path).unwrap();
+    let projects = StateWriter::start_projects(projects_path).unwrap();
+    let engine = sebas::sebas_state::engine::DbStateEngine::with_projects(
+        settings.handle().clone(),
+        projects.handle().clone(),
+    );
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    let list = rt.block_on(async { engine.load_projects().await.expect("load projects") });
+    assert!(
+        list.is_empty(),
+        "库为空时不得从 projects.json 导入任何条目: {list:?}"
+    );
+    // 文件仍在原地、未被改写（没有「已导入」标记，也没有被清空）。
+    let raw = std::fs::read_to_string(dir.path().join("projects.json")).unwrap();
+    assert!(
+        raw.contains("legacy-remote"),
+        "文件不得被读取方改写/清空"
+    );
+    assert!(
+        !raw.contains("imported"),
+        "不得引入任何导入标记键"
+    );
 }
 
 /// providers/aliases 同契约：save_persisted_state 后重启，providers + deleted

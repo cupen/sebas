@@ -58,13 +58,22 @@ impl sebas_dispatch::state_store::StateStoreEngine for MemoryEngine {
     async fn save_settings(&self, _cfg: serde_json::Value) -> Result<(), String> {
         Ok(())
     }
-    async fn load_projects(&self) -> Result<Vec<serde_json::Value>, String> {
+    async fn load_projects(&self) -> Result<Vec<sebas_models::project::ProjectRow>, String> {
         Ok(Vec::new())
     }
-    async fn save_projects(&self, _projects: Vec<serde_json::Value>) -> Result<(), String> {
+    async fn save_projects(
+        &self,
+        _projects: Vec<sebas_models::project::ProjectRow>,
+    ) -> Result<(), String> {
         Ok(())
     }
-    async fn add_project(&self, _path: &str, _name: &str, _added_at: i64) -> Result<(), String> {
+    async fn add_project(
+        &self,
+        _node_id: &str,
+        _path: &str,
+        _name: &str,
+        _added_at: i64,
+    ) -> Result<(), String> {
         Ok(())
     }
     async fn remove_project(&self, _path: &str) -> Result<bool, String> {

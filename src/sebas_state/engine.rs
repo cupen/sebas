@@ -15,6 +15,7 @@
 
 use crate::sebas_state::writer::StateHandle;
 use sebas_dispatch::state_store::{PersistedState, StateStoreEngine};
+use sebas_models::project::ProjectRow;
 use sebas_models::session_map::SessionMapRow;
 use serde_json::Value;
 
@@ -103,25 +104,13 @@ impl StateStoreEngine for DbStateEngine {
         Ok(())
     }
 
-    async fn load_projects(&self) -> Result<Vec<Value>, String> {
-        self.projects()?
-            .exec(|conn| {
-                sebas_models::project::load_projects(conn).map(|rows| {
-                    rows.into_iter()
-                        .map(|r| serde_json::to_value(&r).unwrap_or_default())
-                        .collect()
-                })
-            })
-            .await
+    async fn load_projects(&self) -> Result<Vec<ProjectRow>, String> {
+        self.projects()?.exec(sebas_models::project::load_projects).await
     }
 
-    async fn save_projects(&self, projects: Vec<Value>) -> Result<(), String> {
-        let rows: Vec<sebas_models::project::ProjectRow> = projects
-            .into_iter()
-            .filter_map(|v| serde_json::from_value(v).ok())
-            .collect();
+    async fn save_projects(&self, projects: Vec<ProjectRow>) -> Result<(), String> {
         self.projects()?
-            .exec(move |conn| sebas_models::project::save_projects(conn, &rows))
+            .exec(move |conn| sebas_models::project::save_projects(conn, &projects))
             .await?;
         sebas_dispatch::state_store::notify_change("projects");
         Ok(())
@@ -139,11 +128,18 @@ impl StateStoreEngine for DbStateEngine {
         Ok(())
     }
 
-    async fn add_project(&self, path: &str, name: &str, added_at: i64) -> Result<(), String> {
+    async fn add_project(
+        &self,
+        node_id: &str,
+        path: &str,
+        name: &str,
+        added_at: i64,
+    ) -> Result<(), String> {
+        let n = node_id.to_string();
         let p = path.to_string();
-        let n = name.to_string();
+        let nm = name.to_string();
         self.projects()?
-            .exec(move |conn| sebas_models::project::add_project(conn, &p, &n, added_at))
+            .exec(move |conn| sebas_models::project::add_project(conn, &n, &p, &nm, added_at))
             .await?;
         sebas_dispatch::state_store::notify_change("projects");
         Ok(())
@@ -231,7 +227,10 @@ mod tests {
             err.contains(&format!("{}", blocked.display())) || err.contains("初始化失败"),
             "错误要点名原因: {err}"
         );
-        assert!(engine.add_project("/tmp/p", "p", 1).await.is_err());
+        assert!(engine
+            .add_project("local", "/tmp/p", "p", 1)
+            .await
+            .is_err());
         assert!(engine.remove_project("/tmp/p").await.is_err());
         assert!(engine
             .set_project_default_agent("proj-x", "claude")

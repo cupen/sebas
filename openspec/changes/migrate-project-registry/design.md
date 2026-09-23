@@ -55,6 +55,14 @@
 
 `webui` spec 要求归档「persist to its own file, separate from the project registry and the core state store」。无发布版意味着这条要求**可以直接改**，不再是障碍；但归档条目含完整转录，体积、保留期与清理策略仍需独立设计，所以它与项目注册不同批。**触发条件**：需要库级查询/备份历史转录时。
 
+### D7 稳定 id 的落库时机与项目概念的归属（收口补记）
+
+**事实（收口实测）**：`id` 在合并后仍**只在读路径回填**（`add_project` 落 `id: None`）。后果在 7.2/7.3 首跑暴露：`POST /api/projects` 的 201 响应缺 `id`（e2e 助手 `scene_project_id` 直接 panic，42 例红），且按 id 寻址的**项目级默认 agent** 写入 `UPDATE … WHERE id = ?` 匹配 0 行却返回 `Ok`——正是本仓禁止的「假装成功」。移除 / 重排虽按 `path` 落库，也要先按 id 反查条目，同样被这个空洞打穿。
+
+**已落地**：`(节点, 规范化路径) → proj-<12hex>` 的派生收敛为**唯一实现**（`sebas-webui::projects::project_id_for_on` 变为薄委托），`add_project` **落库时即写入 id**。`id` 的**公式与拼写不变**（Non-Goals「不改项目 id 语义」仍然成立），变的只是「什么时候算出来、存在哪」。读路径（列表 / 单条 / 用于读改写的取数）统一回填，容忍迁移前 id 为 NULL 的旧行；重排落库后自愈。收敛成一份实现的理由是硬的：落库的 id 与界面寻址的 id 必须是同一个值，两处各写一份哈希，漂移时不会有编译器或形状钉发现，症状恰好是「按 id 的写静默落空」。
+
+**归属（按 `add-domain-layer` 的放置规则修订）**：实现时把唯一实现放在了 `sebas-domain::project::project_id_for_on`。按 `shared-domain-layer` 补记的**放置规则**——「唯一形态既是域对象又是持久化行」的概念定义在**拥有该表的 crate**，中立层不得保留同类副本——项目记录的**身份规则应当与记录同处**，即 `sebas-models::project::project_id_for_on`，落在 `ProjectRow` 旁边。依据：`sebas-domain::project` 的内容在 crate 外**零必要消费者**——`LOCAL_NODE_ID` 无人使用（`sebas_models::project::LOCAL_NODE_ID` 是活的那份），id 派生只被 `sebas-models` 与 `sebas-webui` 使用，**两者都含 SQLite**；`sebas-node` 对 domain 的全部依赖只有 `prim::now_unix`（2 处），因此移动不破坏节点隔离。**本 change 不再改动**（它已收口、且该移动属重构而非本 change 的目标）：`sebas-domain::project` 的退役（删重复常量、`project_id_for_on` 迁入 `sebas-models`、`LOCAL_NODE_ID` 单一来源）**随后单独落地**，见 beads `sebas-fdfg`——本 change 归档时该模块已不存在，`sebas_models::project::project_id_for_on` 是唯一实现。
+
 ## Risks / Trade-offs
 
 - **[开发机旧库被重置，项目列表清空一次]** → 接受（无发布版）；`quarantine-database-reset` 落地后那次重置会隔离旧库、可手工恢复。

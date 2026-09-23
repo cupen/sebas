@@ -58,6 +58,7 @@
 //! broken-overlay self-heal 负责。
 
 use crate::provider_state::ProviderMode;
+use sebas_models::project::ProjectRow;
 use sebas_models::session_map::SessionMapRow;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -72,12 +73,19 @@ pub trait StateStoreEngine: Send + Sync {
     async fn save_persisted_state(&self, state: PersistedState) -> anyhow::Result<()>;
     async fn load_settings(&self) -> Result<Option<serde_json::Value>, String>;
     async fn save_settings(&self, cfg: serde_json::Value) -> Result<(), String>;
-    /// Load projects as JSON Value (array of project rows).
-    async fn load_projects(&self) -> Result<Vec<serde_json::Value>, String>;
+    /// Load projects (migrate-project-registry 2.2：类型化规范记录，
+    /// 不再走 serde_json::Value 往返)。
+    async fn load_projects(&self) -> Result<Vec<ProjectRow>, String>;
     /// Save projects (replace all).
-    async fn save_projects(&self, projects: Vec<serde_json::Value>) -> Result<(), String>;
-    /// Add a project entry.
-    async fn add_project(&self, path: &str, name: &str, added_at: i64) -> Result<(), String>;
+    async fn save_projects(&self, projects: Vec<ProjectRow>) -> Result<(), String>;
+    /// Add a project entry（节点维度进存储：本地 `local`，远端节点名）。
+    async fn add_project(
+        &self,
+        node_id: &str,
+        path: &str,
+        name: &str,
+        added_at: i64,
+    ) -> Result<(), String>;
     /// Remove a project by path.
     async fn remove_project(&self, path: &str) -> Result<bool, String>;
     /// 记录项目级默认 agent（workbench-agent-wire-fix 2.6）。按稳定 id 定位。
@@ -728,9 +736,13 @@ pub async fn settings_mutation(
 }
 
 /// projects 域 mutation 分发：payload 用 `op` 字段区分子操作。
-/// - `{"op": "add", "path": "...", "name": "..."}` → 新增（added_at 取当前时间）
+/// - `{"op": "add", "path": "...", "name": "...", "node_id"?}` → 新增（缺省
+///   `local`；migrate-project-registry 3.1 起携带节点维度，added_at 取当前时间）
 /// - `{"op": "remove", "path": "..."}` → 删除（不存在返回错误）
-/// - `{"op": "save", "projects": [...]}` → 全量替换
+/// - `{"op": "save", "projects": [...]}` → 全量替换（规范记录形状）
+/// - `{"op": "reorder", "projects": [...]}` → 顺序重排（带 `sort_order` 列的
+///   规范记录形状；语义与 save 相同——顺序即 `sort_order` 列，未知 id 落为
+///   add_time 顺序尾部是 webui 侧构造 next 列表时完成的）
 pub async fn project_mutation(
     engine: &(dyn StateStoreEngine + Send + Sync),
     payload: &Value,
@@ -746,11 +758,16 @@ pub async fn project_mutation(
                 .get("name")
                 .and_then(Value::as_str)
                 .ok_or_else(|| "add: 缺少 name 字段".to_string())?;
+            let node_id = payload
+                .get("node_id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(sebas_models::project::LOCAL_NODE_ID);
             let added_at = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
-            engine.add_project(path, name, added_at).await
+            engine.add_project(node_id, path, name, added_at).await
         }
         "remove" => {
             let path = payload
@@ -763,12 +780,18 @@ pub async fn project_mutation(
                 Err(e) => Err(e),
             }
         }
-        "save" => {
-            let projects = payload
+        "save" | "reorder" => {
+            let projects: Vec<ProjectRow> = payload
                 .get("projects")
                 .and_then(Value::as_array)
                 .cloned()
-                .unwrap_or_default();
+                .unwrap_or_default()
+                .into_iter()
+                .map(|v| {
+                    serde_json::from_value::<ProjectRow>(v)
+                        .map_err(|e| format!("{op}: 项目记录形状不符: {e}"))
+                })
+                .collect::<Result<_, _>>()?;
             engine.save_projects(projects).await
         }
         // workbench-agent-wire-fix 2.6：项目级默认 agent（按稳定 id）。

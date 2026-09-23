@@ -6980,6 +6980,14 @@ async fn single_state_dir_journey_pins_every_state_location() {
         files.iter().all(|f| !f.ends_with("/sebas.db") && f != "sebas.db"),
         "the retired single-DB file name must never appear: {files:?}"
     );
+    // migrate-project-registry 7.1：注册表落 `projects.db`，**`projects.json`
+    // 全程未被创建**（独立 webui 拓扑下也不许有第二个存储：文件回退已删除）。
+    assert!(
+        files
+            .iter()
+            .all(|f| !f.ends_with("/projects.json") && f != "projects.json"),
+        "the retired project-registry file must never be created: {files:?}"
+    );
     // 1) 两库在场且域分离。
     let settings_db = sb.path.join("settings.db");
     let projects_db = sb.path.join("projects.db");
@@ -7027,6 +7035,22 @@ async fn single_state_dir_journey_pins_every_state_location() {
             .query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
             .unwrap();
         assert!(n >= 1, "project row must live in projects.db");
+        // 节点的正式列与稳定 id 都在库里（migrate-project-registry 1.1/2.4）：
+        // id 是移除/重排/项目级默认 agent 的寻址键，落库时就该有值——只在读
+        // 路径回填会让按 id 的 UPDATE 全部匹配 0 行却返回 Ok（假装成功）。
+        let (id, node_id, path): (Option<String>, String, String) = conn
+            .query_row(
+                "SELECT id, node_id, path FROM projects ORDER BY added_at LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert!(path.contains("state-dir"), "registered scene project row: {path}");
+        assert_eq!(node_id, "local", "本机项目落 node_id = local");
+        assert!(
+            id.as_deref().is_some_and(|i| i.starts_with("proj-")),
+            "注册即落库稳定 id（不得留 NULL 等读路径回填）: {id:?}"
+        );
     }
 }
 

@@ -124,13 +124,16 @@ both live in tasks.py — the old `scripts/*sandbox*.sh` harnesses were removed
    - env: **one state-directory variable** (`SEBAS_STATE_DIR`, single-state-dir)
      pins every state location — the layered databases `settings.db`
      (providers / model_aliases / settings) and `projects.db` (projects /
-     session_map), plus `auth.db`, `archive.json`, `projects.json`,
+     session_map), plus `auth.db`, `archive.json`,
      `services.json` and `nodes.json` all derive as fixed filenames inside it.
      Per-file variables (`SEBAS_SETTINGS_DB`, `SEBAS_PROJECTS_DB`,
      `SEBAS_WEBUI_AUTH_DB`, `SEBAS_ROUTER_USAGE_DB`, `SEBAS_ARCHIVE_PATH`,
-     `SEBAS_PROJECTS_PATH`, `SEBAS_SERVICES_FILE`) are optional explicit
+     `SEBAS_SERVICES_FILE`) are optional explicit
      overrides — no longer mandatory pins. `SEBAS_STATE_DB` is **retired**:
      exporting it changes nothing (startup logs a warning if it is set).
+     `SEBAS_PROJECTS_PATH` is **retired** too (migrate-project-registry): the
+     project registry lives in `projects.db`, there is no `projects.json` any
+     more, and exporting the variable changes nothing.
      Still pin `SEBAS_STATE_FILE` (default `~/.sebas/state.json`) and
      `SEBAS_ROUTER_PROVIDER_OVERLAY` (default `~/.sebas/providers.json`) —
      those two legacy files are not retired yet (retire-legacy-state-json),
@@ -279,7 +282,7 @@ addr=127.0.0.1:<port>`，router 侧用自定义 provider（`[provider.fake]` 哑
    with no `SEBAS_CORE_SECRET` — auto-arm writes the generated key to
    `<SB>/core.secret` and clients discover it. single-state-dir 起状态 env
    只需 `SEBAS_STATE_DIR` 一个（两库 settings.db / projects.db 与
-   auth.db / archive.json / projects.json / services.json / nodes.json 全部
+   auth.db / archive.json / services.json / nodes.json 全部
    由它派生；`SEBAS_STATE_FILE` / `SEBAS_ROUTER_PROVIDER_OVERLAY` 照旧钉，
    两个 legacy 文件尚未退休）：
 

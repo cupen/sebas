@@ -1523,14 +1523,7 @@ mod workspace_root_tests {
     }
 
     fn app_with_workspace_root(root: std::path::PathBuf) -> Router {
-        build_router_with_workspace_root(
-            Arc::new(FakeBackend::new()),
-            RouterInfo::default(),
-            CardConfig::default(),
-            Arc::new(crate::agent_kinds::ConfigAgentKindProvider::new(Vec::new())),
-            Arc::new(AuthHandle::disabled()),
-            root,
-        )
+        app_on_backend(Arc::new(FakeBackend::new()), root)
     }
 
     async fn req(
@@ -1559,30 +1552,17 @@ mod workspace_root_tests {
         (status, v)
     }
 
-    /// 项目注册走文件注册表降级路径（FakeBackend 无 state_mutate 覆写），
-    /// env 是进程级的：与 projects.rs 测试共用同一把串行锁，用完恢复。
-    /// 锁跨 await 是刻意的——正是要把整个异步测试体串行化。
-    #[allow(clippy::await_holding_lock)]
-    async fn with_registry_env<F, R>(f: F) -> R
-    where
-        F: AsyncFnOnce() -> R,
-    {
-        let _g = crate::projects::test_env_lock();
-        let prev = std::env::var("SEBAS_PROJECTS_PATH").ok();
-        let registry = tempfile::tempdir().unwrap();
-        // SAFETY: test_env_lock 保证进程内注册表相关测试串行。
-        unsafe {
-            std::env::set_var("SEBAS_PROJECTS_PATH", registry.path().join("p.json"));
-        }
-        let r = f().await;
-        // SAFETY: 同上。
-        unsafe {
-            match prev {
-                Some(p) => std::env::set_var("SEBAS_PROJECTS_PATH", p),
-                None => std::env::remove_var("SEBAS_PROJECTS_PATH"),
-            }
-        }
-        r
+    /// 在给定后端上装配 app（migrate-project-registry 6.2）：注册表已无文件
+    /// 后端，测试要能自己持住 `FakeBackend` 来播种 projects 域。
+    fn app_on_backend(backend: Arc<FakeBackend>, root: std::path::PathBuf) -> Router {
+        build_router_with_workspace_root(
+            backend,
+            RouterInfo::default(),
+            CardConfig::default(),
+            Arc::new(crate::agent_kinds::ConfigAgentKindProvider::new(Vec::new())),
+            Arc::new(AuthHandle::disabled()),
+            root,
+        )
     }
 
     #[tokio::test]
@@ -1599,19 +1579,17 @@ mod workspace_root_tests {
 
     #[tokio::test]
     async fn project_add_accepts_path_inside_workspace_root() {
-        with_registry_env(|| async {
-            let t = two_trees();
-            let app = app_with_workspace_root(t.allowed.path().to_path_buf());
-            let dir = t.allowed.path().join("proj");
-            std::fs::create_dir_all(&dir).unwrap();
-            // 回显的是 canonicalize_plain 的普通形（Windows 无 \\?\ 前缀）。
-            let canonical = crate::fs::canonicalize_plain(&dir).expect("canonicalize proj dir");
-            let body = serde_json::json!({ "path": dir.to_str().unwrap() });
-            let (status, resp) = req(app, "POST", "/api/projects", Some(body.to_string())).await;
-            assert_eq!(status, StatusCode::CREATED, "resp: {resp}");
-            assert_eq!(resp["path"].as_str(), Some(canonical.as_str()));
-        })
-        .await;
+        let t = two_trees();
+        let (app, backend) = app_and_backend_with_workspace_root(t.allowed.path().to_path_buf());
+        backend.enable_projects_store();
+        let dir = t.allowed.path().join("proj");
+        std::fs::create_dir_all(&dir).unwrap();
+        // 回显的是 canonicalize_plain 的普通形（Windows 无 \\?\ 前缀）。
+        let canonical = crate::fs::canonicalize_plain(&dir).expect("canonicalize proj dir");
+        let body = serde_json::json!({ "path": dir.to_str().unwrap() });
+        let (status, resp) = req(app, "POST", "/api/projects", Some(body.to_string())).await;
+        assert_eq!(status, StatusCode::CREATED, "resp: {resp}");
+        assert_eq!(resp["path"].as_str(), Some(canonical.as_str()));
     }
 
     // ── 2.1 注册执法：越界与「不存在且越界」同文案（不借 400 探测存在性）──
@@ -1643,94 +1621,78 @@ mod workspace_root_tests {
 
     #[tokio::test]
     async fn projects_list_hides_out_of_scope_local_project_keeps_in_scope_and_remote() {
-        with_registry_env(|| async {
-            let t = two_trees();
-            let app = app_with_workspace_root(t.allowed.path().to_path_buf());
-            // 界内项目经 API 注册（FakeBackend 走文件注册表降级路径）。
-            let dir = t.allowed.path().join("in-scope");
-            std::fs::create_dir_all(&dir).unwrap();
-            let body = serde_json::json!({ "path": dir.to_str().unwrap() });
-            let (status, _) =
-                req(app.clone(), "POST", "/api/projects", Some(body.to_string())).await;
-            assert_eq!(status, StatusCode::CREATED);
-            // 越界历史项目（升级前遗留、新二进制注册不进来的形态）直接落注册表；
-            // 远端项目同入注册表（不受主控 root 辖区约束）。
-            let legacy = crate::projects::add_on(
-                crate::projects::LOCAL_NODE_ID,
-                t.outside.path().to_str().unwrap(),
-            )
-            .expect("seed legacy out-of-scope entry");
-            let remote =
-                crate::projects::add_on("dev-box", "/srv/repo").expect("seed remote entry");
+        let t = two_trees();
+        let (app, backend) = app_and_backend_with_workspace_root(t.allowed.path().to_path_buf());
+        backend.enable_projects_store();
+        // 界内项目经 API 注册（注册走状态库，不再有文件注册表降级路径）。
+        let dir = t.allowed.path().join("in-scope");
+        std::fs::create_dir_all(&dir).unwrap();
+        let body = serde_json::json!({ "path": dir.to_str().unwrap() });
+        let (status, _) = req(app.clone(), "POST", "/api/projects", Some(body.to_string())).await;
+        assert_eq!(status, StatusCode::CREATED);
+        // 越界历史项目（升级前遗留、新二进制注册不进来的形态）直接落注册表；
+        // 远端项目同入注册表（不受主控 root 辖区约束）。
+        let legacy = backend.seed_project(
+            crate::projects::LOCAL_NODE_ID,
+            t.outside.path().to_str().unwrap(),
+        );
+        let remote = backend.seed_project("dev-box", "/srv/repo");
 
-            let (_, list) = req(app, "GET", "/api/projects", None).await;
-            let ids: Vec<&str> = list["projects"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter_map(|p| p["id"].as_str())
-                .collect();
-            assert!(
-                !ids.contains(&legacy.id.as_str()),
-                "越界本机项目必须隐藏: {ids:?}"
-            );
-            assert!(
-                ids.contains(&remote.id.as_str()),
-                "远端项目不受主控 root 影响: {ids:?}"
-            );
-            assert_eq!(ids.len(), 2, "界内本机项目 + 远端项目在列: {ids:?}");
-        })
-        .await;
+        let (_, list) = req(app, "GET", "/api/projects", None).await;
+        let ids: Vec<&str> = list["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p["id"].as_str())
+            .collect();
+        assert!(
+            !ids.contains(&legacy.as_str()),
+            "越界本机项目必须隐藏: {ids:?}"
+        );
+        assert!(
+            ids.contains(&remote.as_str()),
+            "远端项目不受主控 root 影响: {ids:?}"
+        );
+        assert_eq!(ids.len(), 2, "界内本机项目 + 远端项目在列: {ids:?}");
     }
 
     #[tokio::test]
     async fn projects_list_hides_all_local_projects_when_root_unresolvable() {
-        with_registry_env(|| async {
-            let t = two_trees();
-            // 先用可解析的根注册一个界内项目。
-            let app = app_with_workspace_root(t.allowed.path().to_path_buf());
-            let dir = t.allowed.path().join("in-scope");
-            std::fs::create_dir_all(&dir).unwrap();
-            let body = serde_json::json!({ "path": dir.to_str().unwrap() });
-            let (status, _) =
-                req(app.clone(), "POST", "/api/projects", Some(body.to_string())).await;
-            assert_eq!(status, StatusCode::CREATED);
-            let remote = crate::projects::add_on("dev-box", "/srv/repo").unwrap();
+        let t = two_trees();
+        // 先用可解析的根注册一个界内项目。
+        let (app, backend) = app_and_backend_with_workspace_root(t.allowed.path().to_path_buf());
+        backend.enable_projects_store();
+        let dir = t.allowed.path().join("in-scope");
+        std::fs::create_dir_all(&dir).unwrap();
+        let body = serde_json::json!({ "path": dir.to_str().unwrap() });
+        let (status, _) = req(app, "POST", "/api/projects", Some(body.to_string())).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let remote = backend.seed_project("dev-box", "/srv/repo");
 
-            // root 被删/移走（不可解析）→ 本机项目全部隐藏（fail-closed），
-            // 远端项目仍在列。
-            let ghost = t.allowed.path().join("__ghost_root__");
-            let app = app_with_workspace_root(ghost);
-            let (_, list) = req(app, "GET", "/api/projects", None).await;
-            let projects = list["projects"].as_array().unwrap();
-            assert!(
-                projects.iter().all(|p| {
-                    p["node_id"]
-                        .as_str()
-                        .unwrap_or(crate::projects::LOCAL_NODE_ID)
-                        != crate::projects::LOCAL_NODE_ID
-                }),
-                "root 不可解析时本机项目必须全部隐藏: {list}"
-            );
-            let ids: Vec<&str> = projects.iter().filter_map(|p| p["id"].as_str()).collect();
-            assert_eq!(ids, [remote.id.as_str()], "只剩远端项目: {ids:?}");
-        })
-        .await;
+        // root 被删/移走（不可解析）→ 本机项目全部隐藏（fail-closed），
+        // 远端项目仍在列。同一个后端、只换 root：注册表是后端状态，不是文件。
+        let ghost = t.allowed.path().join("__ghost_root__");
+        let app = app_on_backend(backend, ghost);
+        let (_, list) = req(app, "GET", "/api/projects", None).await;
+        let projects = list["projects"].as_array().unwrap();
+        assert!(
+            projects.iter().all(|p| {
+                p["node_id"]
+                    .as_str()
+                    .unwrap_or(crate::projects::LOCAL_NODE_ID)
+                    != crate::projects::LOCAL_NODE_ID
+            }),
+            "root 不可解析时本机项目必须全部隐藏: {list}"
+        );
+        let ids: Vec<&str> = projects.iter().filter_map(|p| p["id"].as_str()).collect();
+        assert_eq!(ids, [remote.as_str()], "只剩远端项目: {ids:?}");
     }
 
     // ── 2.3 会话面执法 ────────────────────────────────────────────────────
 
     fn app_and_backend_with_workspace_root(root: std::path::PathBuf) -> (Router, Arc<FakeBackend>) {
         let backend = Arc::new(FakeBackend::new());
-        let app = build_router_with_workspace_root(
-            backend.clone(),
-            RouterInfo::default(),
-            CardConfig::default(),
-            Arc::new(crate::agent_kinds::ConfigAgentKindProvider::new(Vec::new())),
-            Arc::new(AuthHandle::disabled()),
-            root,
-        );
-        (app, backend)
+        (app_on_backend(backend.clone(), root), backend)
     }
 
     /// 本机会话行（`remote: None`）：`project_dir` 即会话绑定的项目目录。
@@ -1956,77 +1918,65 @@ mod workspace_root_tests {
 
     #[tokio::test]
     async fn create_with_out_of_scope_project_id_is_rejected_without_spawning() {
-        with_registry_env(|| async {
-            let t = two_trees();
-            let (app, backend) =
-                app_and_backend_with_workspace_root(t.allowed.path().to_path_buf());
-            // 越界历史项目（升级前遗留）直接落注册表。
-            let legacy = crate::projects::add_on(
-                crate::projects::LOCAL_NODE_ID,
-                t.outside.path().to_str().unwrap(),
-            )
-            .unwrap();
-            let body = serde_json::json!({ "project_id": legacy.id, "agent": "claude" });
-            let (status, resp) =
-                req(app.clone(), "POST", "/api/sessions", Some(body.to_string())).await;
-            assert_eq!(status, StatusCode::BAD_REQUEST, "{resp}");
-            assert!(
-                resp["error"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .contains("超出允许范围"),
-                "{resp}"
-            );
-            assert!(
-                backend.snapshot().await.is_empty(),
-                "携越界项目的 create 不得产生任何会话"
-            );
+        let t = two_trees();
+        let (app, backend) = app_and_backend_with_workspace_root(t.allowed.path().to_path_buf());
+        backend.enable_projects_store();
+        // 越界历史项目（升级前遗留）直接落注册表。
+        let legacy = backend.seed_project(
+            crate::projects::LOCAL_NODE_ID,
+            t.outside.path().to_str().unwrap(),
+        );
+        let body = serde_json::json!({ "project_id": legacy, "agent": "claude" });
+        let (status, resp) = req(app.clone(), "POST", "/api/sessions", Some(body.to_string())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{resp}");
+        assert!(
+            resp["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("超出允许范围"),
+            "{resp}"
+        );
+        assert!(
+            backend.snapshot().await.is_empty(),
+            "携越界项目的 create 不得产生任何会话"
+        );
 
-            // 反例：界内项目照常创建 0-turn 占位。
-            let dir = t.allowed.path().join("in-scope");
-            std::fs::create_dir_all(&dir).unwrap();
-            let inside =
-                crate::projects::add_on(crate::projects::LOCAL_NODE_ID, dir.to_str().unwrap())
-                    .unwrap();
-            let body = serde_json::json!({ "project_id": inside.id, "agent": "claude" });
-            let (status, resp) = req(app, "POST", "/api/sessions", Some(body.to_string())).await;
-            assert_eq!(status, StatusCode::CREATED, "{resp}");
-        })
-        .await;
+        // 反例：界内项目照常创建 0-turn 占位。
+        let dir = t.allowed.path().join("in-scope");
+        std::fs::create_dir_all(&dir).unwrap();
+        let inside = backend.seed_project(crate::projects::LOCAL_NODE_ID, dir.to_str().unwrap());
+        let body = serde_json::json!({ "project_id": inside, "agent": "claude" });
+        let (status, resp) = req(app, "POST", "/api/sessions", Some(body.to_string())).await;
+        assert_eq!(status, StatusCode::CREATED, "{resp}");
     }
 
     #[tokio::test]
     async fn branch_probe_reports_out_of_scope_project_as_inaccessible() {
-        with_registry_env(|| async {
-            let t = two_trees();
-            let app = app_with_workspace_root(t.allowed.path().to_path_buf());
-            // 界内 git 项目（对照：可达 + 分支可读）。
-            let inside = t.allowed.path().join("repo");
-            std::fs::create_dir_all(inside.join(".git")).unwrap();
-            std::fs::write(inside.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
-            let in_scope =
-                crate::projects::add_on(crate::projects::LOCAL_NODE_ID, inside.to_str().unwrap())
-                    .unwrap();
-            // 越界遗留项目：目录真实存在，但探测必须按不可达处理（不暴露存在性）。
-            let out_scope = crate::projects::add_on(
-                crate::projects::LOCAL_NODE_ID,
-                t.outside.path().to_str().unwrap(),
-            )
-            .unwrap();
+        let t = two_trees();
+        let (app, backend) = app_and_backend_with_workspace_root(t.allowed.path().to_path_buf());
+        backend.enable_projects_store();
+        // 界内 git 项目（对照：可达 + 分支可读）。
+        let inside = t.allowed.path().join("repo");
+        std::fs::create_dir_all(inside.join(".git")).unwrap();
+        std::fs::write(inside.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        let in_scope = backend.seed_project(crate::projects::LOCAL_NODE_ID, inside.to_str().unwrap());
+        // 越界遗留项目：目录真实存在，但探测必须按不可达处理（不暴露存在性）。
+        let out_scope = backend.seed_project(
+            crate::projects::LOCAL_NODE_ID,
+            t.outside.path().to_str().unwrap(),
+        );
 
-            let uri = format!("/api/projects/{}/branch", encode(&out_scope.id));
-            let (status, body) = req(app.clone(), "GET", &uri, None).await;
-            assert_eq!(status, StatusCode::OK, "{body}");
-            assert_eq!(body["accessible"], false, "越界项目按不可达处理: {body}");
-            assert_eq!(body["branch"], serde_json::Value::Null, "{body}");
+        let uri = format!("/api/projects/{}/branch", encode(&out_scope));
+        let (status, body) = req(app.clone(), "GET", &uri, None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["accessible"], false, "越界项目按不可达处理: {body}");
+        assert_eq!(body["branch"], serde_json::Value::Null, "{body}");
 
-            let uri = format!("/api/projects/{}/branch", encode(&in_scope.id));
-            let (status, body) = req(app, "GET", &uri, None).await;
-            assert_eq!(status, StatusCode::OK, "{body}");
-            assert_eq!(body["accessible"], true, "{body}");
-            assert_eq!(body["branch"], "main", "{body}");
-        })
-        .await;
+        let uri = format!("/api/projects/{}/branch", encode(&in_scope));
+        let (status, body) = req(app, "GET", &uri, None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["accessible"], true, "{body}");
+        assert_eq!(body["branch"], "main", "{body}");
     }
 
     /// 两个互不为邻的 tempdir 树：`allowed/`（有子目录）与 `outside/`。
@@ -2154,14 +2104,25 @@ mod system_dir_denylist_tests {
     }
 
     fn app_with_workspace_root(root: std::path::PathBuf) -> Router {
+        app_on_backend(Arc::new(FakeBackend::new()), root)
+    }
+
+    /// 在给定后端上装配 app（migrate-project-registry 6.2）：注册表已无文件
+    /// 后端，测试要能自己持住 `FakeBackend` 来播种 projects 域。
+    fn app_on_backend(backend: Arc<FakeBackend>, root: std::path::PathBuf) -> Router {
         build_router_with_workspace_root(
-            Arc::new(FakeBackend::new()),
+            backend,
             RouterInfo::default(),
             CardConfig::default(),
             Arc::new(crate::agent_kinds::ConfigAgentKindProvider::new(Vec::new())),
             Arc::new(AuthHandle::disabled()),
             root,
         )
+    }
+
+    fn app_and_backend_with_workspace_root(root: std::path::PathBuf) -> (Router, Arc<FakeBackend>) {
+        let backend = Arc::new(FakeBackend::new());
+        (app_on_backend(backend.clone(), root), backend)
     }
 
     async fn req(
@@ -2190,56 +2151,24 @@ mod system_dir_denylist_tests {
         (status, v)
     }
 
-    /// 与 workspace_root_tests 同款：注册走文件注册表降级路径，env 进程级，
-    /// 共用同一把串行锁，用完恢复。
-    #[allow(clippy::await_holding_lock)]
-    async fn with_registry_env<F, R>(f: F) -> R
-    where
-        F: AsyncFnOnce() -> R,
-    {
-        let _g = crate::projects::test_env_lock();
-        let prev = std::env::var("SEBAS_PROJECTS_PATH").ok();
-        let registry = tempfile::tempdir().unwrap();
-        // SAFETY: test_env_lock 保证进程内注册表相关测试串行。
-        unsafe {
-            std::env::set_var("SEBAS_PROJECTS_PATH", registry.path().join("p.json"));
-        }
-        let r = f().await;
-        // SAFETY: 同上。
-        unsafe {
-            match prev {
-                Some(p) => std::env::set_var("SEBAS_PROJECTS_PATH", p),
-                None => std::env::remove_var("SEBAS_PROJECTS_PATH"),
-            }
-        }
-        r
-    }
-
     /// 2.3 主场景：workspace root=`/` 时——名单目录精确命中 400 点名入参
     /// （不含服务端解析形），根内普通目录照常 201。tempdir 都在 /tmp 之下，
     /// 按「子树放行」语义天然是合法注册位。
     #[tokio::test]
     async fn project_add_rejects_denylisted_dir_but_accepts_subtree() {
-        with_registry_env(|| async {
-            let app = app_with_workspace_root(std::path::PathBuf::from("/"));
-            let body = serde_json::json!({ "path": "/usr" });
-            let (status, resp) =
-                req(app.clone(), "POST", "/api/projects", Some(body.to_string())).await;
-            assert_eq!(status, StatusCode::BAD_REQUEST, "resp: {resp}");
-            let msg = resp["error"].as_str().unwrap_or_default();
-            assert!(msg.contains("系统目录不可注册"), "got: {msg}");
-            assert!(msg.contains("/usr"), "must name the caller input: {msg}");
+        let (app, backend) = app_and_backend_with_workspace_root(std::path::PathBuf::from("/"));
+        backend.enable_projects_store();
+        let body = serde_json::json!({ "path": "/usr" });
+        let (status, resp) = req(app.clone(), "POST", "/api/projects", Some(body.to_string())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "resp: {resp}");
+        let msg = resp["error"].as_str().unwrap_or_default();
+        assert!(msg.contains("系统目录不可注册"), "got: {msg}");
+        assert!(msg.contains("/usr"), "must name the caller input: {msg}");
 
-            let legit = tempfile::tempdir().unwrap();
-            let body = serde_json::json!({ "path": legit.path().to_str().unwrap() });
-            let (status, _) = req(app, "POST", "/api/projects", Some(body.to_string())).await;
-            assert_eq!(
-                status,
-                StatusCode::CREATED,
-                "subtree of /tmp registers fine"
-            );
-        })
-        .await;
+        let legit = tempfile::tempdir().unwrap();
+        let body = serde_json::json!({ "path": legit.path().to_str().unwrap() });
+        let (status, _) = req(app, "POST", "/api/projects", Some(body.to_string())).await;
+        assert_eq!(status, StatusCode::CREATED, "subtree of /tmp registers fine");
     }
 
     /// 2.3 判定先行次序：root 收窄到普通 tempdir 后，root 外的系统目录
@@ -2284,39 +2213,33 @@ mod system_dir_denylist_tests {
     /// 解析形替换后的文案。
     #[tokio::test]
     async fn project_add_traversal_and_root_forms_rejected_naming_raw_input() {
-        with_registry_env(|| async {
-            let app = app_with_workspace_root(std::path::PathBuf::from("/"));
-            for raw in ["/tmp/../etc", "/tmp/..", "//usr", "/"] {
-                let body = serde_json::json!({ "path": raw });
-                let (status, resp) =
-                    req(app.clone(), "POST", "/api/projects", Some(body.to_string())).await;
-                assert_eq!(status, StatusCode::BAD_REQUEST, "raw={raw} resp: {resp}");
-                let msg = resp["error"].as_str().unwrap_or_default();
-                assert!(msg.contains("系统目录不可注册"), "raw={raw} got: {msg}");
-                assert!(msg.contains(raw), "must name the raw input {raw}: {msg}");
-            }
-        })
-        .await;
+        let app = app_with_workspace_root(std::path::PathBuf::from("/"));
+        for raw in ["/tmp/../etc", "/tmp/..", "//usr", "/"] {
+            let body = serde_json::json!({ "path": raw });
+            let (status, resp) =
+                req(app.clone(), "POST", "/api/projects", Some(body.to_string())).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "raw={raw} resp: {resp}");
+            let msg = resp["error"].as_str().unwrap_or_default();
+            assert!(msg.contains("系统目录不可注册"), "raw={raw} got: {msg}");
+            assert!(msg.contains(raw), "must name the raw input {raw}: {msg}");
+        }
     }
 
     /// 2.1 副作用（spec「no project SHALL be registered」）：名单 400 之外
     /// 列表必须保持空——拒绝路径不得在任何降级分支落注册记录。
     #[tokio::test]
     async fn project_add_denylist_rejection_creates_no_project() {
-        with_registry_env(|| async {
-            let app = app_with_workspace_root(std::path::PathBuf::from("/"));
-            let body = serde_json::json!({ "path": "/usr" });
-            let (status, _) =
-                req(app.clone(), "POST", "/api/projects", Some(body.to_string())).await;
-            assert_eq!(status, StatusCode::BAD_REQUEST);
-            let (_, list) = req(app, "GET", "/api/projects", None).await;
-            let projects = list["projects"].as_array().expect("projects array");
-            assert!(
-                projects.is_empty(),
-                "rejected registration must leave no project: {list}"
-            );
-        })
-        .await;
+        let (app, backend) = app_and_backend_with_workspace_root(std::path::PathBuf::from("/"));
+        backend.enable_projects_store();
+        let body = serde_json::json!({ "path": "/usr" });
+        let (status, _) = req(app.clone(), "POST", "/api/projects", Some(body.to_string())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (_, list) = req(app, "GET", "/api/projects", None).await;
+        let projects = list["projects"].as_array().expect("projects array");
+        assert!(
+            projects.is_empty(),
+            "rejected registration must leave no project: {list}"
+        );
     }
 
     /// 1.x round-trip 契约在「起点自身在名单上」的退化形态（root=`/`）下仍

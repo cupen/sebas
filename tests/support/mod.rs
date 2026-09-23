@@ -443,7 +443,7 @@ usage_file = "{}"
     ///
     /// single-state-dir：状态落点收敛为**一个目录变量**——`SEBAS_STATE_DIR`
     /// 派生全部落点（settings.db / projects.db / auth.db / archive.json /
-    /// projects.json / services.json / nodes.json），逐文件变量降级为显式
+    /// services.json / nodes.json），逐文件变量降级为显式
     /// 覆盖，不再需要逐个钉。仍钉 `SEBAS_STATE_FILE` /
     /// `SEBAS_ROUTER_PROVIDER_OVERLAY`：两文件尚未退休
     /// （retire-legacy-state-json 的范围），降级回退路径仍在读它们。

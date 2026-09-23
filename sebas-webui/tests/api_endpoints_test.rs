@@ -16,6 +16,8 @@ use serde_json::Value;
 use std::sync::Arc;
 use tower::ServiceExt;
 
+mod common;
+
 fn key(id: &str) -> ChannelKey {
     ChannelKey::feishu(&format!("oc_{id}"), None)
 }
@@ -63,40 +65,24 @@ async fn fixture() -> (
     (router, rx, app)
 }
 
-/// 注册表 env 隔离守卫 + 临时项目注册（「会话必须从属于项目」：创建会话的
-/// 用例都要先有一个已注册项目）。
-struct ProjectsEnvGuard {
+/// 项目隔离守卫（「会话必须从属于项目」：创建会话的用例都要先有一个已注册
+/// 项目）：进程级串行 + 重置内存注册表。
+///
+/// `migrate-project-registry` 删除了 `projects.json` 文件后端、退休了
+/// `SEBAS_PROJECTS_PATH`——隔离不再靠 env 重定向，而是 `common` 的内存引擎
+/// 加一次 per-test 重置。
+struct ProjectsGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
-    prev: Option<String>,
-    path: std::path::PathBuf,
-}
-
-impl Drop for ProjectsEnvGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-        match &self.prev {
-            Some(p) => unsafe { std::env::set_var("SEBAS_PROJECTS_PATH", p) },
-            None => unsafe { std::env::remove_var("SEBAS_PROJECTS_PATH") },
-        }
-    }
 }
 
 static PROJECTS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static PROJECTS_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-fn isolated_projects() -> ProjectsEnvGuard {
+fn isolated_projects() -> ProjectsGuard {
     let lock = PROJECTS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let n = PROJECTS_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("sebas-api-projects-{n}.json"));
-    let prev = std::env::var("SEBAS_PROJECTS_PATH").ok();
-    unsafe {
-        std::env::set_var("SEBAS_PROJECTS_PATH", &path);
-    }
-    ProjectsEnvGuard {
-        _lock: lock,
-        prev,
-        path,
-    }
+    common::init();
+    common::reset_projects();
+    ProjectsGuard { _lock: lock }
 }
 
 /// 注册一个临时目录为项目并返回稳定 id。

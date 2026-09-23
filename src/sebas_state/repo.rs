@@ -74,17 +74,27 @@ pub static SETTINGS_TABLES: &[TableSchema] = &[
 /// 不变（`migrate-project-registry` 负责目标形状重建；本 change 只换库）。
 pub static PROJECTS_TABLES: &[TableSchema] = &[
     TableSchema {
+        // migrate-project-registry 1.1：按目标形状重建。节点维度是正式列
+        // （`node_id` NOT NULL DEFAULT 'local'）——**旧形状库不走重置**：
+        // 有自描述版本键的库缺列由 sqlite-auto-schema-sync 原地补齐，旧行的
+        // node_id 取默认 'local' 即自动归到本机节点（无迁移脚本；实测见
+        // tests/persistence_runtime_integration_test.rs 的
+        // added_column_reads_back_at_default_through_generated_crud）。只有
+        // 无版本键的更老迁移链库才走隔离重置（`sebas_db::schema` 的通用规则，
+        // 与 `quarantine-database-reset` 一致）。列顺序与
+        // `ProjectRow::COLUMNS` 一致（同步以注册列 diff，非 DDL 文本）。
+        // 主键 `path` 与 `id` 唯一索引语义不变（1.3）。
         name: "projects",
         create_ddl: "CREATE TABLE projects (
+            id          TEXT,
             path        TEXT PRIMARY KEY,
             name        TEXT NOT NULL,
-            branch      TEXT,
             branch_at   INTEGER NOT NULL DEFAULT 0,
             added_at    INTEGER NOT NULL,
             sort_order  INTEGER NOT NULL DEFAULT 0,
-            -- workbench-agent-wire-fix 2.4: 迁移 2 追加的列, 放在末尾
-            id            TEXT,
-            default_agent TEXT
+            node_id       TEXT NOT NULL DEFAULT 'local',
+            default_agent TEXT,
+            branch        TEXT
         );
         CREATE UNIQUE INDEX idx_projects_id ON projects(id);",
         columns: sebas_models::project::ProjectRow::schema_columns(),
@@ -305,6 +315,106 @@ mod tests {
         (dir, conn)
     }
 
+    /// `migrate-project-registry` 1.3：`projects` 表的物理形状与约束钉——
+    /// 既有 8 列一列不少、主键仍是 `path`、`id` 唯一、新增的 `node_id` 是正式
+    /// 列（`NOT NULL DEFAULT 'local'`，旧行取默认即自动归本机）。
+    ///
+    /// 走**行为**断言而不是内省 SQLite 的列元数据表（表结构 diff 原语）：那是
+    /// 持久层 runtime 的能力，只允许出现在 `sebas-db`（机械守卫见
+    /// `tests/persistence_runtime_test.rs::table_diffing_exists_only_in_sebas_db`）。
+    /// 列清单与顺序由 [`registered_tables_match_baseline_columns`]（注册基线）
+    /// 与 `generated_upsert_sql_matches_golden_samples`（生成 SQL 的逐字列序）
+    /// 钉住；这里钉「SQLite 真建出来的表怎么表现」。
+    #[test]
+    fn projects_table_shape_and_primary_key_are_pinned() {
+        let (_dir, conn) = projects_db();
+        let count = |conn: &Connection| -> i64 {
+            conn.query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
+                .unwrap()
+        };
+
+        // 既有 8 列 + node_id 全部可按名写入：缺任何一列这条 INSERT 就会报
+        // 「no such column」——「一列不少」的行为等价断言。
+        conn.execute(
+            "INSERT INTO projects \
+             (id, path, name, branch_at, added_at, sort_order, node_id, default_agent, branch) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                "proj-legacy0001",
+                "/w/legacy",
+                "legacy",
+                7i64,
+                11i64,
+                3i64,
+                "local",
+                "claude",
+                "main"
+            ],
+        )
+        .expect("既有 8 列 + node_id 必须都建出来了");
+        assert_eq!(count(&conn), 1);
+        // 写进去的 8 个既有列可按名原样读回（列名拼写不变）。
+        let (name, branch, sort_order, agent): (String, String, i64, String) = conn
+            .query_row(
+                "SELECT name, branch, sort_order, default_agent FROM projects WHERE path = '/w/legacy'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (name.as_str(), branch.as_str(), sort_order, agent.as_str()),
+            ("legacy", "main", 3, "claude"),
+            "既有列必须原样往返"
+        );
+
+        // 主键是 path：同 path 再插一行（不同 id）必须冲突。
+        let dup_path = conn.execute(
+            "INSERT INTO projects (id, path, name, added_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params!["proj-other0001", "/w/legacy", "again", 1i64],
+        );
+        assert!(dup_path.is_err(), "path 必须是主键（同 path 不得并存）");
+
+        // id 唯一：同 id 不同 path 必须冲突（idx_projects_id 仍是唯一索引）。
+        let dup_id = conn.execute(
+            "INSERT INTO projects (id, path, name, added_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params!["proj-legacy0001", "/w/other", "other", 1i64],
+        );
+        assert!(dup_id.is_err(), "id 必须唯一（idx_projects_id 唯一索引）");
+
+        // node_id 有默认 'local'：省略该列的插入成功，读回本机节点。
+        conn.execute(
+            "INSERT INTO projects (id, path, name, added_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params!["proj-default0001", "/w/defaulted", "defaulted", 2i64],
+        )
+        .expect("省略 node_id 的插入应成功（该列有默认值）");
+        let node: String = conn
+            .query_row(
+                "SELECT node_id FROM projects WHERE path = '/w/defaulted'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(node, "local", "node_id 默认值必须是 local（旧行自动归本机）");
+
+        // node_id NOT NULL：显式 NULL 必须被拒。
+        let null_node = conn.execute(
+            "INSERT INTO projects (id, path, name, added_at, node_id) \
+             VALUES (?1, ?2, ?3, ?4, NULL)",
+            rusqlite::params!["proj-null0001", "/w/nullnode", "nullnode", 3i64],
+        );
+        assert!(null_node.is_err(), "node_id 必须 NOT NULL");
+
+        // 其余必填列语义不变：name 显式 NULL 被拒。
+        assert!(
+            conn.execute(
+                "INSERT INTO projects (id, path, name, added_at) VALUES (?1, ?2, NULL, ?3)",
+                rusqlite::params!["proj-name0001", "/w/noname", 4i64],
+            )
+            .is_err(),
+            "name 必须 NOT NULL"
+        );
+    }
+
     #[test]
     fn load_empty_db_returns_default_state() {
         let (_dir, mut conn) = settings_db();
@@ -389,8 +499,8 @@ mod tests {
         let now = 1000;
 
         // 添加
-        sebas_models::project::add_project(&mut conn, "/tmp/p1", "p1", now).unwrap();
-        sebas_models::project::add_project(&mut conn, "/tmp/p2", "p2", now + 1).unwrap();
+        sebas_models::project::add_project(&mut conn, "local", "/tmp/p1", "p1", now).unwrap();
+        sebas_models::project::add_project(&mut conn, "local", "/tmp/p2", "p2", now + 1).unwrap();
 
         let projects = sebas_models::project::load_projects(&mut conn).unwrap();
         assert_eq!(projects.len(), 2);
@@ -413,8 +523,8 @@ mod tests {
         let (_dir, mut conn) = projects_db();
         let now = 1000;
 
-        sebas_models::project::add_project(&mut conn, "/tmp/p1", "p1", now).unwrap();
-        sebas_models::project::add_project(&mut conn, "/tmp/p2", "p2", now + 1).unwrap();
+        sebas_models::project::add_project(&mut conn, "local", "/tmp/p1", "p1", now).unwrap();
+        sebas_models::project::add_project(&mut conn, "local", "/tmp/p2", "p2", now + 1).unwrap();
 
         // 全量替换
         sebas_models::project::save_projects(&mut conn, &[]).unwrap();
@@ -506,7 +616,7 @@ mod tests {
         }
         {
             let (mut conn, _) = open_and_sync(&projects_path, PROJECTS_TABLES).unwrap();
-            sebas_models::project::add_project(&mut conn, "/tmp/p", "p", 1).unwrap();
+            sebas_models::project::add_project(&mut conn, "local", "/tmp/p", "p", 1).unwrap();
         }
 
         // 模拟 projects.db 的结构漂移（多余列 → 下次 open 触发隔离重置）。
@@ -582,11 +692,12 @@ mod tests {
                     ("id", "TEXT"),
                     ("path", "TEXT"),
                     ("name", "TEXT"),
-                    ("default_agent", "TEXT"),
-                    ("branch", "TEXT"),
                     ("branch_at", "INTEGER"),
                     ("added_at", "INTEGER"),
                     ("sort_order", "INTEGER"),
+                    ("node_id", "TEXT"),
+                    ("default_agent", "TEXT"),
+                    ("branch", "TEXT"),
                 ],
             ),
             (
@@ -705,12 +816,12 @@ mod active_record_tests {
         );
         assert_eq!(
             upsert_sql::<ProjectRow>(),
-            "INSERT INTO projects (id, path, name, default_agent, branch, branch_at, \
-             added_at, sort_order) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+            "INSERT INTO projects (id, path, name, branch_at, added_at, sort_order, \
+             node_id, default_agent, branch) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
              ON CONFLICT(path) DO UPDATE SET id = excluded.id, name = excluded.name, \
-             default_agent = excluded.default_agent, branch = excluded.branch, \
              branch_at = excluded.branch_at, added_at = excluded.added_at, \
-             sort_order = excluded.sort_order"
+             sort_order = excluded.sort_order, node_id = excluded.node_id, \
+             default_agent = excluded.default_agent, branch = excluded.branch"
         );
         assert_eq!(
             upsert_sql::<SessionMapRow>(),
@@ -810,6 +921,7 @@ mod active_record_tests {
             id: Some("proj-1".into()),
             path: "/tmp/p".into(),
             name: "p".into(),
+            node_id: sebas_models::project::LOCAL_NODE_ID.into(),
             default_agent: Some("claude".into()),
             branch: Some("main".into()),
             branch_at: 10,
@@ -1039,7 +1151,7 @@ mod writer_wiring_tests {
             projects.handle().clone(),
         );
         engine
-            .add_project("/tmp/two-db", "two-db", 1)
+            .add_project(sebas_models::project::LOCAL_NODE_ID, "/tmp/two-db", "two-db", 1)
             .await
             .unwrap();
         engine

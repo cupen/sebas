@@ -34,6 +34,11 @@
 //! `SEBAS_STATE_DB` 随单库退休：不再被任何解析路径读取（导出与否行为完全
 //! 一致），[`retired_env_vars_present`] 供启动日志对残留值给出明确提示。
 //!
+//! `SEBAS_PROJECTS_PATH` 随 `migrate-project-registry` 退休：项目注册表落
+//! `projects.db` 的 `projects` 表，**没有** `projects.json` 这个文件，覆盖
+//! 变量同样不再被读取。逻辑名仍留在映射表里（[`StatePath::ProjectRegistry`]），
+//! 但它不再指向任何会被写入或读取的落点。
+//!
 //! # 测试纪律
 //!
 //! 环境变量是进程全局的；本模块测试用互斥锁串行并在用例前后保存/恢复。
@@ -49,6 +54,10 @@ pub const LEGACY_HOME_VAR: &str = "SEBAS_HOME";
 
 /// 已退休的单库变量（`sebas.db` 不复存在）：不被读取，出现时只提示。
 pub const RETIRED_STATE_DB_VAR: &str = "SEBAS_STATE_DB";
+
+/// 已退休的项目注册表覆盖变量（`migrate-project-registry`：注册表落
+/// `projects.db`，`projects.json` 不复存在）：不被读取，出现时只提示。
+pub const RETIRED_PROJECTS_PATH_VAR: &str = "SEBAS_PROJECTS_PATH";
 
 /// 按用途分层的数据库（写入者见模块文档分层规则第一级）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,7 +114,10 @@ pub enum StatePath {
     UsageDb,
     /// WebUI 会话归档登记册（含完整转录）。
     Archive,
-    /// WebUI 项目注册表（文件形态；`migrate-project-registry` 处理表形状）。
+    /// WebUI 项目注册表逻辑名。`migrate-project-registry` 后注册表落在
+    /// `projects.db` 的 `projects` 表：本行只为逻辑名表完整保留，**文件已
+    /// 退休**（无写入者、无读取者），覆盖变量也已退休（见
+    /// [`RETIRED_PROJECTS_PATH_VAR`]）。
     ProjectRegistry,
     /// 节点链路注册表。显式覆盖走既有配置键 `[node_link] registry_file`
     /// （优先级不变），无环境变量。
@@ -144,8 +156,9 @@ impl StatePath {
         }
     }
 
-    /// 逐文件覆盖变量；`None` = 显式覆盖走配置键（[`StatePath::NodeRegistry`]
-    /// 的 `[node_link] registry_file`）。
+    /// 逐文件覆盖变量；`None` = 无环境变量入口——显式覆盖走配置键
+    /// （[`StatePath::NodeRegistry`] 的 `[node_link] registry_file`），或该
+    /// 覆盖变量已退休（[`StatePath::ProjectRegistry`]）。
     pub fn override_var(self) -> Option<&'static str> {
         match self {
             StatePath::SettingsDb => Some(Database::Settings.override_var()),
@@ -153,7 +166,8 @@ impl StatePath {
             StatePath::AuthDb => Some(Database::Auth.override_var()),
             StatePath::UsageDb => Some(Database::Usage.override_var()),
             StatePath::Archive => Some("SEBAS_ARCHIVE_PATH"),
-            StatePath::ProjectRegistry => Some("SEBAS_PROJECTS_PATH"),
+            // 退休：注册表落 projects.db，没有 projects.json 可覆盖。
+            StatePath::ProjectRegistry => None,
             StatePath::NodeRegistry => None,
             StatePath::ServicesOverride => Some("SEBAS_SERVICES_FILE"),
         }
@@ -198,7 +212,7 @@ pub fn state_dir() -> PathBuf {
 /// 检出当前进程环境里**已退休仍被导出**的变量（启动日志提示用；只报告，
 /// 不读取其值——退休变量的语义是「无效果」）。
 pub fn retired_env_vars_present() -> Vec<&'static str> {
-    [RETIRED_STATE_DB_VAR]
+    [RETIRED_STATE_DB_VAR, RETIRED_PROJECTS_PATH_VAR]
         .into_iter()
         .filter(|v| std::env::var(v).is_ok())
         .collect()
@@ -228,7 +242,7 @@ mod tests {
                 "SEBAS_WEBUI_AUTH_DB",
                 "SEBAS_ROUTER_USAGE_DB",
                 "SEBAS_ARCHIVE_PATH",
-                "SEBAS_PROJECTS_PATH",
+                RETIRED_PROJECTS_PATH_VAR,
                 "SEBAS_SERVICES_FILE",
             ];
             let saved = vars
@@ -293,7 +307,7 @@ mod tests {
                 StatePath::ProjectRegistry,
                 None,
                 "projects.json",
-                Some("SEBAS_PROJECTS_PATH"),
+                None,
             ),
             // 节点注册表的显式覆盖是配置键 [node_link] registry_file，
             // 不设环境变量（优先级不变，任务 4.2）。
@@ -536,6 +550,57 @@ mod tests {
             "退休变量在场必须可被检出"
         );
         unsafe { std::env::remove_var(RETIRED_STATE_DB_VAR) };
+        assert!(retired_env_vars_present().is_empty());
+    }
+
+    /// `migrate-project-registry` 6.1：`SEBAS_PROJECTS_PATH` 退休——导出它
+    /// 与不导出行为完全一致（注册表落 `projects.db`，没有 projects.json 可
+    /// 指向），且启动提示器会点名残留值。
+    #[test]
+    fn retired_projects_path_var_has_no_effect_on_any_resolution() {
+        let _g = EnvGuard::clean();
+        let pin = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(STATE_DIR_VAR, pin.path()) };
+        let all = [
+            StatePath::SettingsDb,
+            StatePath::ProjectsDb,
+            StatePath::AuthDb,
+            StatePath::UsageDb,
+            StatePath::Archive,
+            StatePath::ProjectRegistry,
+            StatePath::NodeRegistry,
+            StatePath::ServicesOverride,
+        ];
+        let without: Vec<PathBuf> = all.iter().map(|p| p.resolve()).collect();
+
+        // 导出退休变量（指向一个别处的 projects.json）：逐路径与不导出一致。
+        unsafe {
+            std::env::set_var(
+                RETIRED_PROJECTS_PATH_VAR,
+                elsewhere.path().join("projects.json"),
+            )
+        };
+        let with: Vec<PathBuf> = all.iter().map(|p| p.resolve()).collect();
+        assert_eq!(with, without, "退休变量不得改变任何落点");
+        assert!(
+            !with.iter().any(|p| p.starts_with(elsewhere.path())),
+            "退休变量不得把任何落点搬到它指的地方: {with:?}"
+        );
+        // 项目注册表逻辑名不再有覆盖入口，且落点仍在钉住的目录内。
+        assert_eq!(StatePath::ProjectRegistry.override_var(), None);
+        assert_eq!(
+            StatePath::ProjectRegistry.resolve(),
+            pin.path().join("projects.json")
+        );
+
+        // 提示器检出残留值（启动日志据此点名）。
+        assert_eq!(
+            retired_env_vars_present(),
+            vec![RETIRED_PROJECTS_PATH_VAR],
+            "退休变量在场必须可被检出"
+        );
+        unsafe { std::env::remove_var(RETIRED_PROJECTS_PATH_VAR) };
         assert!(retired_env_vars_present().is_empty());
     }
 

@@ -2,9 +2,11 @@
 //! session presentation (add-remote-execution-node 8.1/8.2/8.4/8.5).
 //!
 //! Drives the endpoints in-process against the `FakeBackend` so the node
-//! registry is an injected source (never the host's real node link), and the
-//! remote project registry is redirected to a throwaway file (never the
-//! operator's `~/.sebas/projects.json`).
+//! registry is an injected source (never the host's real node link). The
+//! project registry is the backend's in-memory `projects` domain
+//! (`enable_projects_store`), wired per test instance — `migrate-project-
+//! registry` deleted the `projects.json` file backend and retired
+//! `SEBAS_PROJECTS_PATH`.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -18,12 +20,8 @@ use sebas_webui::server::build_router_with_workspace_root;
 use sebas_webui::session_backend::{NodeInfo, PathCheck};
 use sebas_webui::{SessionBackend, build_router, session_backend::FakeBackend};
 use serde_json::Value;
-use std::path::PathBuf;
-use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
+use std::sync::Arc;
 use tower::ServiceExt;
-
-/// 进程级 `SEBAS_PROJECTS_PATH` 的测试串行锁（env 是进程全局的）。
-static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 const LOCAL: &str = "local";
 
@@ -47,28 +45,24 @@ fn local_node() -> NodeInfo {
     }
 }
 
-/// 挂载带注入节点的 app；`projects_path` 为 None 时不重定向注册表（只读用例）。
-async fn app_with(
-    nodes: Option<Vec<NodeInfo>>,
-    projects_path: Option<PathBuf>,
-) -> (axum::Router, Arc<FakeBackend>) {
-    app_with_root(nodes, projects_path, None).await
+/// 挂载带注入节点的 app。`FakeBackend` 的 projects 域接线为「已注册且可写」
+/// 的空注册表：migrate-project-registry 删除文件后端后，注册往返必须走真实
+/// 状态源，而不是降级路径。
+async fn app_with(nodes: Option<Vec<NodeInfo>>) -> (axum::Router, Arc<FakeBackend>) {
+    app_with_root(nodes, None).await
 }
 
 /// 同 [`app_with`]，但可把 workspace root 钉到指定目录（add-workspace-root：
 /// 本机注册路径必须落在根内——注册临时目录的用例把根钉到该临时目录）。
 async fn app_with_root(
     nodes: Option<Vec<NodeInfo>>,
-    projects_path: Option<PathBuf>,
     workspace_root: Option<&std::path::Path>,
 ) -> (axum::Router, Arc<FakeBackend>) {
-    if let Some(p) = projects_path {
-        unsafe { std::env::set_var("SEBAS_PROJECTS_PATH", p) };
-    }
     let map = SessionMap::new();
     let (router, _rx) = DispatchHandle::new(map);
     let backend = Arc::new(FakeBackend::new());
     backend.set_nodes(nodes);
+    backend.enable_projects_store();
     let dyn_backend: Arc<dyn SessionBackend> = backend.clone();
     let app = match workspace_root {
         Some(root) => build_router_with_workspace_root(
@@ -85,10 +79,6 @@ async fn app_with_root(
     };
     let _ = router;
     (app, backend)
-}
-
-fn cleanup_projects_env() {
-    unsafe { std::env::remove_var("SEBAS_PROJECTS_PATH") };
 }
 
 async fn send(
@@ -112,16 +102,11 @@ async fn send(
     (status, json)
 }
 
-fn guard() -> MutexGuard<'static, ()> {
-    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 // ── GET /api/nodes ────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn nodes_always_lists_the_local_node_as_online() {
-    let _g = guard();
-    let (app, _backend) = app_with(Some(vec![]), None).await;
+    let (app, _backend) = app_with(Some(vec![])).await;
     let (status, body) = send(&app, "GET", "/api/nodes", None).await;
     assert_eq!(status, StatusCode::OK);
     let nodes = body["nodes"].as_array().unwrap();
@@ -130,14 +115,12 @@ async fn nodes_always_lists_the_local_node_as_online() {
     assert_eq!(nodes[0]["status"], "online");
     assert_eq!(nodes[0]["local"], true);
     assert_eq!(body["remote_available"], true);
-    cleanup_projects_env();
 }
 
 #[tokio::test]
 async fn nodes_reports_registry_unavailable_instead_of_no_nodes() {
-    let _g = guard();
     // `None` = 后端不承载注册表 → 明确区别于「注册表可达但没有节点」。
-    let (app, _backend) = app_with(None, None).await;
+    let (app, _backend) = app_with(None).await;
     let (status, body) = send(&app, "GET", "/api/nodes", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
@@ -146,13 +129,11 @@ async fn nodes_reports_registry_unavailable_instead_of_no_nodes() {
     );
     assert!(body["cause"].as_str().is_some_and(|c| !c.is_empty()));
     assert_eq!(body["nodes"].as_array().unwrap().len(), 1, "本机仍在列");
-    cleanup_projects_env();
 }
 
 #[tokio::test]
 async fn nodes_lists_remote_entries_with_status_and_last_seen() {
-    let _g = guard();
-    let (app, _backend) = app_with(Some(vec![node("dev-box", "offline")]), None).await;
+    let (app, _backend) = app_with(Some(vec![node("dev-box", "offline")])).await;
     let (status, body) = send(&app, "GET", "/api/nodes", None).await;
     assert_eq!(status, StatusCode::OK);
     let nodes = body["nodes"].as_array().unwrap();
@@ -160,21 +141,14 @@ async fn nodes_lists_remote_entries_with_status_and_last_seen() {
     let remote = nodes.iter().find(|n| n["id"] == "dev-box").unwrap();
     assert_eq!(remote["status"], "offline");
     assert!(remote["last_seen_unix"].is_i64());
-    cleanup_projects_env();
 }
 
 // ── POST /api/projects with a node dimension (8.1) ────────────────────────
 
 #[tokio::test]
 async fn registering_on_a_named_node_is_validated_by_that_node() {
-    let _g = guard();
-    let dir = tempfile::tempdir().unwrap();
-    let registry = dir.path().join("projects.json");
-    let (app, backend) = app_with(
-        Some(vec![local_node(), node("dev-box", "online")]),
-        Some(registry),
-    )
-    .await;
+    let (app, backend) =
+        app_with(Some(vec![local_node(), node("dev-box", "online")])).await;
     backend.set_path_check(
         "dev-box",
         "/srv/repo",
@@ -201,19 +175,12 @@ async fn registering_on_a_named_node_is_validated_by_that_node() {
     let projects = list["projects"].as_array().unwrap();
     assert_eq!(projects.len(), 1);
     assert_eq!(projects[0]["node_id"], "dev-box");
-    cleanup_projects_env();
 }
 
 #[tokio::test]
 async fn node_side_rejection_names_the_node_path_and_problem() {
-    let _g = guard();
-    let dir = tempfile::tempdir().unwrap();
-    let registry = dir.path().join("projects.json");
-    let (app, backend) = app_with(
-        Some(vec![local_node(), node("dev-box", "online")]),
-        Some(registry),
-    )
-    .await;
+    let (app, backend) =
+        app_with(Some(vec![local_node(), node("dev-box", "online")])).await;
     // 节点说路径不存在（界内）——本用例专测「不存在」文案，containment 判定
     // 置 true；越界拒绝另有专测（node_judged_out_of_workspace_...）。
     backend.set_path_check(
@@ -242,21 +209,14 @@ async fn node_side_rejection_names_the_node_path_and_problem() {
     // 注册被拒 → 一个项目都没建。
     let (_, list) = send(&app, "GET", "/api/projects", None).await;
     assert!(list["projects"].as_array().unwrap().is_empty());
-    cleanup_projects_env();
 }
 
 // ── Node-side containment (add-workspace-root 2.4) ───────────────────────
 
 #[tokio::test]
 async fn node_judged_out_of_workspace_rejects_registration() {
-    let _g = guard();
-    let dir = tempfile::tempdir().unwrap();
-    let registry = dir.path().join("projects.json");
-    let (app, backend) = app_with(
-        Some(vec![local_node(), node("dev-box", "online")]),
-        Some(registry),
-    )
-    .await;
+    let (app, backend) =
+        app_with(Some(vec![local_node(), node("dev-box", "online")])).await;
     // 节点自判：路径存在、是目录，但越出**该节点**的 workspace root。
     backend.set_path_check(
         "dev-box",
@@ -284,19 +244,12 @@ async fn node_judged_out_of_workspace_rejects_registration() {
     // 注册被拒 → 一个项目都没建。
     let (_, list) = send(&app, "GET", "/api/projects", None).await;
     assert!(list["projects"].as_array().unwrap().is_empty());
-    cleanup_projects_env();
 }
 
 #[tokio::test]
 async fn legacy_node_answer_without_within_workspace_field_still_admits() {
-    let _g = guard();
-    let dir = tempfile::tempdir().unwrap();
-    let registry = dir.path().join("projects.json");
-    let (app, backend) = app_with(
-        Some(vec![local_node(), node("dev-box", "online")]),
-        Some(registry),
-    )
-    .await;
+    let (app, backend) =
+        app_with(Some(vec![local_node(), node("dev-box", "online")])).await;
     // 老节点应答没有 within_workspace 字段：serde 缺省 true → 放行。
     let check: PathCheck = serde_json::from_value(serde_json::json!({
         "exists": true,
@@ -317,19 +270,12 @@ async fn legacy_node_answer_without_within_workspace_field_still_admits() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "body={body}");
-    cleanup_projects_env();
 }
 
 #[tokio::test]
 async fn registering_on_an_offline_node_is_refused_with_the_node_named() {
-    let _g = guard();
-    let dir = tempfile::tempdir().unwrap();
-    let registry = dir.path().join("projects.json");
-    let (app, _backend) = app_with(
-        Some(vec![local_node(), node("dev-box", "offline")]),
-        Some(registry),
-    )
-    .await;
+    let (app, _backend) =
+        app_with(Some(vec![local_node(), node("dev-box", "offline")])).await;
     let (status, body) = send(
         &app,
         "POST",
@@ -339,15 +285,11 @@ async fn registering_on_an_offline_node_is_refused_with_the_node_named() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "body={body}");
     assert!(body["error"].as_str().unwrap().contains("dev-box"));
-    cleanup_projects_env();
 }
 
 #[tokio::test]
 async fn registering_on_an_unknown_node_is_refused() {
-    let _g = guard();
-    let dir = tempfile::tempdir().unwrap();
-    let registry = dir.path().join("projects.json");
-    let (app, _backend) = app_with(Some(vec![local_node()]), Some(registry)).await;
+    let (app, _backend) = app_with(Some(vec![local_node()])).await;
     let (status, body) = send(
         &app,
         "POST",
@@ -357,19 +299,12 @@ async fn registering_on_an_unknown_node_is_refused() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
     assert!(body["error"].as_str().unwrap().contains("ghost"));
-    cleanup_projects_env();
 }
 
 #[tokio::test]
 async fn node_check_unavailable_is_not_reported_as_a_bad_path() {
-    let _g = guard();
-    let dir = tempfile::tempdir().unwrap();
-    let registry = dir.path().join("projects.json");
-    let (app, _backend) = app_with(
-        Some(vec![local_node(), node("dev-box", "online")]),
-        Some(registry),
-    )
-    .await;
+    let (app, _backend) =
+        app_with(Some(vec![local_node(), node("dev-box", "online")])).await;
     // 未注入 path check → 后端默认「不能向节点发起路径校验」。
     let (status, body) = send(
         &app,
@@ -382,18 +317,15 @@ async fn node_check_unavailable_is_not_reported_as_a_bad_path() {
     let msg = body["error"].as_str().unwrap();
     assert!(msg.contains("无法"), "未如实说明校验未完成: {msg}");
     assert!(!msg.contains("不是目录") && !msg.contains("路径不存在"));
-    cleanup_projects_env();
 }
 
 #[tokio::test]
 async fn local_registration_without_a_node_keeps_the_implicit_behavior() {
-    let _g = guard();
     let dir = tempfile::tempdir().unwrap();
-    let registry = dir.path().join("projects.json");
     // add-workspace-root：本机注册必须落在 workspace root 内——把根钉到
     // 临时目录本身，`repo` 即在界内；缺省节点 = 本机的隐式行为不变。
     let (app, _backend) =
-        app_with_root(Some(vec![local_node()]), Some(registry), Some(dir.path())).await;
+        app_with_root(Some(vec![local_node()]), Some(dir.path())).await;
     let project_dir = dir.path().join("repo");
     std::fs::create_dir_all(&project_dir).unwrap();
 
@@ -406,7 +338,6 @@ async fn local_registration_without_a_node_keeps_the_implicit_behavior() {
     .await;
     assert_eq!(status, StatusCode::CREATED, "body={body}");
     assert_eq!(body["node_id"], LOCAL, "缺省落到本机节点: {body}");
-    cleanup_projects_env();
 }
 
 // ── Remote session rows: waiting ≠ running, node/mode surfaced ────────────
@@ -453,8 +384,7 @@ fn remote_session() -> SessionInfo {
 
 #[tokio::test]
 async fn remote_session_rows_carry_node_mode_and_wait_when_parked() {
-    let _g = guard();
-    let (app, backend) = app_with(Some(vec![local_node(), node("dev-box", "online")]), None).await;
+    let (app, backend) = app_with(Some(vec![local_node(), node("dev-box", "online")])).await;
     backend.set_sessions(vec![remote_session()]).await;
 
     let (status, body) = send(&app, "GET", "/api/sessions", None).await;
@@ -482,13 +412,11 @@ async fn remote_session_rows_carry_node_mode_and_wait_when_parked() {
         remote_id,
         sebas_webui::projects::project_id_for_on("dev-box", "/srv/repo")
     );
-    cleanup_projects_env();
 }
 
 #[tokio::test]
 async fn a_working_remote_session_without_parked_approvals_still_reads_working() {
-    let _g = guard();
-    let (app, backend) = app_with(Some(vec![local_node(), node("dev-box", "online")]), None).await;
+    let (app, backend) = app_with(Some(vec![local_node(), node("dev-box", "online")])).await;
     let mut info = remote_session();
     info.remote.as_mut().unwrap().parked_approvals = 0;
     backend.set_sessions(vec![info]).await;
@@ -496,7 +424,6 @@ async fn a_working_remote_session_without_parked_approvals_still_reads_working()
     let (_, body) = send(&app, "GET", "/api/sessions", None).await;
     let row = &body["recent_sessions"][0];
     assert_eq!(row["status_slug"], "working");
-    cleanup_projects_env();
 }
 
 // ── Session creation carries the project's node into the seam (8.1 wiring) ──
@@ -509,8 +436,7 @@ fn remote_project_state() -> Value {
 
 #[tokio::test]
 async fn session_creation_passes_the_projects_node_to_the_seam() {
-    let _g = guard();
-    let (app, backend) = app_with(Some(vec![local_node(), node("dev-box", "online")]), None).await;
+    let (app, backend) = app_with(Some(vec![local_node(), node("dev-box", "online")])).await;
     backend.set_state_domain("projects", Some(remote_project_state()));
     let (status, body) = send(
         &app,
@@ -525,16 +451,14 @@ async fn session_creation_passes_the_projects_node_to_the_seam() {
         Some("dev-box"),
         "项目的 node_id 必须传到 SessionBackend::spawn_with"
     );
-    cleanup_projects_env();
 }
 
 #[tokio::test]
 async fn local_project_session_creation_passes_local() {
-    let _g = guard();
     // add-workspace-root 2.3：携本机项目的 create 必须落在 workspace root 内——
     // 把根钉到临时目录，项目路径取其子目录（占位创建不触盘，路径无需存在）。
     let dir = tempfile::tempdir().unwrap();
-    let (app, backend) = app_with_root(Some(vec![local_node()]), None, Some(dir.path())).await;
+    let (app, backend) = app_with_root(Some(vec![local_node()]), Some(dir.path())).await;
     backend.set_state_domain(
         "projects",
         Some(serde_json::json!({ "projects": [
@@ -551,13 +475,11 @@ async fn local_project_session_creation_passes_local() {
     assert_eq!(status, StatusCode::CREATED);
     // 本机项目显式带 "local"：行为与今日逐字一致（不是 None）。
     assert_eq!(backend.last_spawn_node().as_deref(), Some(LOCAL));
-    cleanup_projects_env();
 }
 
 #[tokio::test]
 async fn remote_project_placeholder_is_honestly_rejected() {
-    let _g = guard();
-    let (app, backend) = app_with(Some(vec![local_node(), node("dev-box", "online")]), None).await;
+    let (app, backend) = app_with(Some(vec![local_node(), node("dev-box", "online")])).await;
     backend.set_state_domain("projects", Some(remote_project_state()));
     let (status, body) = send(
         &app,
@@ -571,5 +493,4 @@ async fn remote_project_placeholder_is_honestly_rejected() {
     let msg = body["error"].as_str().unwrap();
     assert!(msg.contains("占位"), "未说明拒绝的是什么: {msg}");
     assert!(msg.contains("第一条输入"), "未指出正确做法: {msg}");
-    cleanup_projects_env();
 }

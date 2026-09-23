@@ -18,6 +18,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
+mod common;
+
 async fn spawn_server() -> (
     String,
     tokio::sync::mpsc::Receiver<sebas_dispatch::engine::Out>,
@@ -55,40 +57,24 @@ async fn spawn_app(backend: Arc<dyn sebas_webui::SessionBackend>) -> String {
     format!("http://{addr}")
 }
 
-/// 注册表 env（`SEBAS_PROJECTS_PATH`）的隔离守卫：本文件的旅程要注册项目，
-/// 绝不能碰操作员真实注册表（进程级串行，防并发测试互相改写 env）。
-struct ProjectsEnvGuard {
+/// 项目注册表的隔离守卫：本文件的旅程要注册项目，注册表是进程级共享的
+/// core 状态库——串行 + 每次重置为空，绝不能串味。
+///
+/// `migrate-project-registry` 删除了 `projects.json` 文件后端、退休了
+/// `SEBAS_PROJECTS_PATH`：隔离不再靠 env 重定向，而是 `common` 的内存引擎
+/// 加一次 per-test 重置。
+struct ProjectsGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
-    prev: Option<String>,
-    path: std::path::PathBuf,
-}
-
-impl Drop for ProjectsEnvGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-        match &self.prev {
-            Some(p) => unsafe { std::env::set_var("SEBAS_PROJECTS_PATH", p) },
-            None => unsafe { std::env::remove_var("SEBAS_PROJECTS_PATH") },
-        }
-    }
 }
 
 static PROJECTS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static PROJECTS_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-fn isolated_projects() -> ProjectsEnvGuard {
+fn isolated_projects() -> ProjectsGuard {
     let lock = PROJECTS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let n = PROJECTS_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("sebas-ws-projects-{n}.json"));
-    let prev = std::env::var("SEBAS_PROJECTS_PATH").ok();
-    unsafe {
-        std::env::set_var("SEBAS_PROJECTS_PATH", &path);
-    }
-    ProjectsEnvGuard {
-        _lock: lock,
-        prev,
-        path,
-    }
+    common::init();
+    common::reset_projects();
+    ProjectsGuard { _lock: lock }
 }
 
 /// 注册一个临时目录为项目并返回稳定 id。「会话必须从属于项目」：经 WebUI

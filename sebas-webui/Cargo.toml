@@ -14,6 +14,9 @@ sebas-acp = { path = "../sebas-acp" }
 sebas-router = { path = "../sebas-router" }
 # 中立共享域层（add-domain-layer）：跨角色域概念的唯一定义处。
 sebas-domain = { path = "../sebas-domain" }
+# migrate-project-registry 2.1：规范项目记录（ProjectRow=ProjectEntry）在
+# core 各表 ActiveRecord 之家，webui 经 serde 形状消费。
+sebas-models = { path = "../sebas-models" }
 # 持久层 runtime（extract-sebas-db）：连接配方与 ActiveRecord 生成代码的
 # 落点（auth.db 不再手抄 pragma 组合）。
 sebas-db = { path = "../sebas-db" }

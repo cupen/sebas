@@ -26,11 +26,32 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 const SECRET: &str = "state-contract-secret";
 
+/// migrate-project-registry 2.1：项目记录已合一为 `ProjectRow`（存储 + 线同一
+/// 形状），fake engine 的注册表也随之改持类型化记录。
+fn project_row(
+    node_id: &str,
+    path: &str,
+    name: &str,
+    added_at: i64,
+) -> sebas_models::project::ProjectRow {
+    sebas_models::project::ProjectRow {
+        id: None,
+        path: path.to_string(),
+        name: name.to_string(),
+        branch_at: 0,
+        added_at,
+        sort_order: 0,
+        node_id: node_id.to_string(),
+        default_agent: None,
+        branch: None,
+    }
+}
+
 /// fake engine 的可检视内部状态（各用例用独立 path 键位，避免并行互踩）。
 #[derive(Default)]
 struct FakeStateInner {
     settings: std::sync::Mutex<Option<serde_json::Value>>,
-    projects: std::sync::Mutex<Vec<serde_json::Value>>,
+    projects: std::sync::Mutex<Vec<sebas_models::project::ProjectRow>>,
     /// add-fetch-models 1.2/1.3：providers 域条目 + 落盘次数计数。load/save
     /// 具备真实读写语义，「抓取不落盘」由保存计数与序列化快照逐字节比对断言。
     providers: std::sync::Mutex<BTreeMap<String, serde_json::Value>>,
@@ -149,35 +170,42 @@ impl sebas_dispatch::state_store::StateStoreEngine for FakeStateEngineImpl {
         *self.inner.settings.lock().unwrap() = Some(cfg);
         Ok(())
     }
-    async fn load_projects(&self) -> Result<Vec<serde_json::Value>, String> {
+    async fn load_projects(&self) -> Result<Vec<sebas_models::project::ProjectRow>, String> {
         Ok(self.inner.projects.lock().unwrap().clone())
     }
-    async fn save_projects(&self, projects: Vec<serde_json::Value>) -> Result<(), String> {
+    async fn save_projects(
+        &self,
+        projects: Vec<sebas_models::project::ProjectRow>,
+    ) -> Result<(), String> {
         *self.inner.projects.lock().unwrap() = projects;
         Ok(())
     }
-    async fn add_project(&self, path: &str, name: &str, added_at: i64) -> Result<(), String> {
+    async fn add_project(
+        &self,
+        node_id: &str,
+        path: &str,
+        name: &str,
+        added_at: i64,
+    ) -> Result<(), String> {
         let mut g = self.inner.projects.lock().unwrap();
-        if g.iter()
-            .any(|p| p.get("path").and_then(|v| v.as_str()) == Some(path))
-        {
+        if g.iter().any(|p| p.path == path) {
             return Err(format!("add: project '{path}' 已存在"));
         }
-        g.push(serde_json::json!({"path": path, "name": name, "added_at": added_at}));
+        g.push(project_row(node_id, path, name, added_at));
         Ok(())
     }
     async fn remove_project(&self, path: &str) -> Result<bool, String> {
         let mut g = self.inner.projects.lock().unwrap();
         let before = g.len();
-        g.retain(|p| p.get("path").and_then(|v| v.as_str()) != Some(path));
+        g.retain(|p| p.path != path);
         Ok(g.len() != before)
     }
     async fn set_project_default_agent(&self, id: &str, agent: &str) -> Result<(), String> {
         let mut g = self.inner.projects.lock().unwrap();
         let mut updated = false;
         for p in g.iter_mut() {
-            if p.get("id").and_then(|v| v.as_str()) == Some(id) {
-                p["default_agent"] = serde_json::json!(agent);
+            if p.id.as_deref() == Some(id) {
+                p.default_agent = Some(agent.to_string());
                 updated = true;
             }
         }
@@ -198,7 +226,7 @@ async fn state_snapshot_returns_current() {
         .projects
         .lock()
         .unwrap()
-        .push(serde_json::json!({"path": "/tmp/state-snap-proj", "name": "snap", "added_at": 1}));
+        .push(project_row("local", "/tmp/state-snap-proj", "snap", 1));
     let dir = tempfile::tempdir().unwrap();
     let core = start_core(dir.path()).await;
     let backend = CoreChannelBackend::new(core.path.clone(), SECRET.into());
@@ -291,7 +319,7 @@ async fn state_mutation_rejected_does_not_silently_swallow() {
         .projects
         .lock()
         .unwrap()
-        .push(serde_json::json!({"path": "/tmp/state-rej-proj", "name": "rej", "added_at": 1}));
+        .push(project_row("local", "/tmp/state-rej-proj", "rej", 1));
     let dir = tempfile::tempdir().unwrap();
     let core = start_core(dir.path()).await;
     let backend = CoreChannelBackend::new(core.path.clone(), SECRET.into());

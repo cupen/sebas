@@ -454,7 +454,7 @@ def _cfg_path(path):
 def _sandbox_env(work, secret=True):
     """Full env isolation: **one state-directory variable** pins every state
     location (single-state-dir) — settings.db / projects.db / auth.db /
-    archive.json / projects.json / services.json / nodes.json all derive from
+    archive.json / services.json / nodes.json all derive from
     SEBAS_STATE_DIR, so per-file vars are no longer mandatory pins (they stay
     honored as explicit overrides). `SEBAS_STATE_FILE` /
     `SEBAS_ROUTER_PROVIDER_OVERLAY` are still pinned until
@@ -1121,7 +1121,7 @@ def smoke_real(c, timeout=120, keep=False):
     env.update(
         {
             # single-state-dir：一个目录变量钉住全部状态落点（settings.db /
-            # projects.db / auth.db / archive.json / projects.json 全在 work 内）。
+            # projects.db / auth.db / archive.json 全在 work 内）。
             # smoke 场景 HOME 继承真实主目录（claude CLI 要自己的凭据），
             # 所以状态目录必须显式钉住。
             "SEBAS_STATE_DIR": work,

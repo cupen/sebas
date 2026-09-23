@@ -56,6 +56,10 @@ router ──▶ protocol ──▶ dispatch ──▶ router      ← 环
 - 不进 domain：`src/sebas_state/{db,migration,writer,repo}.rs` 的 SQLite 连接配方、schema 注册表、迁移 diff、单写线程 actor——全部留给 `extract-sebas-db`；各表的 ActiveRecord struct 归 `sebas-models`（同 change D2 的分界）。
 - **overlay 读取器放 domain 的理由**：router 必须够得着它（今日靠复制 `ProviderOverlay`），而它是角色中立的；放 `sebas-db` 也可行但会与 change 3 的时序纠缠——change 1 的验收要求 router 的复制消失，不该等 change 3。**已知代价**：JSON 文件持久化的归属因此横跨两个 crate，`extract-sebas-db` 可再迁（记录在 change 3 的 Context，不在此强求）。
 
+**放置规则（收口补记）**：D5 的「域对象的形状进 domain」需要按**持久化性质**分岔——当一个域概念的**唯一形态既是域对象、又是持久化行**时，它定义在**拥有该表的 crate**（`sebas-models`），并连同派生其身份的规则一起放；中立层**不得**保留同名副本：不是类型，不是字段清单，**也不是替列的默认值/存储键站岗的重复常量**。`migrate-project-registry` 已按此把项目记录合并为 `sebas_models::project::ProjectRow`（`ProjectEntry` 即其别名，见该 change 的设计）。补记的触发事实：合并完成后 `sebas-domain::project` 只剩两样东西——`LOCAL_NODE_ID`（crate 外**零消费者**，是 `sebas_models::project::LOCAL_NODE_ID` 的死副本，此前还靠一个字符串相等测试维持同步）与只被 `sebas-models`/`sebas-webui`（**两个都含 SQLite**）使用的 id 派生。它的退役是该规则的直接推论，**已落地**（beads `sebas-fdfg`：`project_id_for_on` 随记录迁入 `sebas-models`、`LOCAL_NODE_ID` 单一来源、`sebas-domain::project` 与 `sebas-domain` 的 `sha2` 依赖一并删除）。
+
+**为什么不能反过来「都用 `sebas-models` 建模领域对象」**：`sebas-models` 经 `sebas-db` 链入 rusqlite（`cargo tree -p sebas-models` 命中 2 条），而 `sebas-node` 今天命中 **0**——整体搬迁会破坏 spec「Neutral leaf dependency」的「adopting the shared layer does not break node isolation」场景。且多数共享概念**根本没有表**（`SessionEvent` / `TurnStreamEvent` / `SessionRejection` / `PermissionDecision` / `ProviderMode` / `StatePath` / `NodeView` / `prim`），做不成 ActiveRecord struct。故本规则是**双向**的：有表的随表走，无表的留中立层；只有「唯一形态 = 域对象 = 持久行」这一个交集按拥有表的 crate 归属。（顺带：`sebas-node` 对 domain 的全部依赖只有 `prim::now_unix` 两处，移动项目概念不会波及节点。）
+
 ### D6 本 change 不合并 `ProjectRow`/`ProjectEntry`（合并交给 `migrate-project-registry`），也不合并 `SessionInfo`/`SessionRow`
 
 本 change 的零变化基线（spec「Wire and on-disk compatibility preserved」）不允许改磁盘形状或线格式，而合并这两个形状必然要改其一。因此本 change 只做**同 crate 相邻 + 双向显式转换 + 两侧形状各钉一个测试**——这恰好也是让后续合并成为机械操作的前置。
@@ -63,6 +67,8 @@ router ──▶ protocol ──▶ dispatch ──▶ router      ← 环
 **推迟的触发条件已变**：原文写的是「需要统一存储形状时，必须先有 schema 版本 bump 与迁移路径——即等 `harden-schema-migration` 落地之后」。**产品尚未发布**，该门槛消失：改 schema 的代价只剩开发机上一次重置。因此项目记录的合并**已指派给 `migrate-project-registry`**（它本来就要重建 `projects` 表以加入节点维度），本 change 不再持有它。
 
 `SessionInfo` / `SessionRow` 的合并不做：`SessionRow` 承载展示派生（`status_label` / `status_glyph` / `encoded_key`），合并会把展示关注点塞进共享域类型。正确形态是「规范类型 + 一处转换」，即本 change 已在要求里写下的规则。
+
+**落地追踪**：`migrate-project-registry` **已执行** `ProjectRow`/`ProjectEntry` 的合并——`sebas_models::project::ProjectRow` 是规范记录、同时是 `projects` 表的 ActiveRecord struct，`ProjectEntry` 降为它的再导出别名；线/盘两侧形状分别由 `project_record_serialized_shape_is_pinned` 与 `schema_columns_match_target_shape` 钉住。因此 D6 的指派已完成，本 change 的推迟理由（零变化基线）也不再适用于项目记录。合并后的域侧残留（`sebas-domain::project` 的死常量与 id 派生）按 D5「放置规则」**已退役**（beads `sebas-fdfg`）；`SessionInfo`/`SessionRow` 的结论不变。
 
 ### D7 `expand_tilde` / `now_unix` 落 `sebas-domain::prim`，承认这是轻微异味
 

@@ -12,14 +12,18 @@ rust-version = "1.90"
 # 持久层 runtime：连接/同步/单写 actor + ActiveRecord 生成代码引用的
 # `::sebas_db::record::Record`。
 sebas-db = { path = "../sebas-db" }
-# `ProjectRow::to_entry` / `From<&ProjectEntry>` 与 runtime_state 的
-# ProviderMode / DefaultSelection 词表。
+# runtime_state 的 ProviderMode / DefaultSelection 词表（仍是词表的部分——
+# `ProjectRow` ↔ `ProjectEntry` 的转换已随两者合并消失，不再是这里的理由）。
 sebas-domain = { path = "../sebas-domain" }
 # ActiveRecord 生成器（SchemaColumns + ActiveRecord）。
 sebas-schema-derive = { path = "../sebas-schema-derive" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
+# `project_id_for_on`：项目记录的稳定 id 派生（sha256 → `proj-<12hex>`）。
+# 该规则随项目记录同处（add-domain-layer D5「放置规则」：唯一形态既是域对象
+# 又是持久行的概念，定义在拥有该表的 crate），故依赖落在这里而非中立层。
+sha2 = "0.11"
 
 [dev-dependencies]
 tempfile = "3"

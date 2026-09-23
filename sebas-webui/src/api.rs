@@ -1063,8 +1063,12 @@ pub async fn create_session(
         Err(msg) => return api_error(StatusCode::BAD_REQUEST, msg),
     };
     let (project_dir, node) = {
-        let entry = projects_from_backend(&state)
-            .await
+        // store 不可达 ≠ 「未知 project_id」：前者是 503 + cause，后者才是 400。
+        let entries = match projects_or_unavailable(&state, "无法确认项目是否已注册").await {
+            Ok(entries) => entries,
+            Err(resp) => return resp,
+        };
+        let entry = entries
             .into_iter()
             .find(|p| p.get("id").and_then(|v| v.as_str()) == Some(project_id));
         let Some(p) = entry else {
@@ -1147,17 +1151,12 @@ pub async fn create_session(
     };
     state.backend.set_focus(Some(key.clone())).await;
     // 2.6：项目级默认 agent——该项目下最近一次创建会话所用的 agent，
-    // 下次在该项目创建会话时 composer 预选它。状态库优先，文件注册表回退。
-    // （项目必填，故这里无条件落。）
+    // 下次在该项目创建会话时 composer 预选它。
+    // migrate-project-registry 5.1：状态库是唯一落点。这里的写入失败**不**
+    // 回退文件、也不假装成功（旧实现落 `projects.json`）；它只是预选记忆，
+    // 不影响本次已创建的会话，失败由项目面的 unavailable 如实呈现。
     let payload = json!({ "op": "set_default_agent", "id": project_id, "agent": req.agent });
-    if state
-        .backend
-        .state_mutate("projects", payload)
-        .await
-        .is_err()
-    {
-        crate::projects::set_default_agent(project_id, &req.agent);
-    }
+    let _ = state.backend.state_mutate("projects", payload).await;
     let encoded = encode_session_key(&key);
     (StatusCode::CREATED, Json(json!({ "key": encoded }))).into_response()
 }
@@ -1536,44 +1535,30 @@ fn filter_out_of_scope_local_projects(
         .collect()
 }
 
-/// 从 backend 读取项目列表（DB 引擎 / core 通道）。backend 不可达时回退
-/// 本地文件注册表（webui 进程独占视图，spec 未约束其降级语义）。
-/// 返回 JSON 数组（ProjectRow / ProjectEntry 形状，前端兼容）。
-///
-/// add-remote-execution-node 8.1：**远端项目只在文件注册表里**。core 状态库的
-/// `projects` 表（`ProjectRow`）没有节点列，`add_project(path,name,added_at)`
-/// 也接不住节点维度——远端条目写进去就等于丢节点。因此这里把文件注册表里
-/// **非本机**的条目并进列表（本机条目仍以状态库为准，避免复活已删除的项目）。
-async fn projects_from_backend(state: &WebUiState) -> Vec<serde_json::Value> {
-    projects_from_backend_with_reachability(state).await.0
+/// 读项目列表，**严格区分**「store 不可达」（Err → 503 + cause）与「没有
+/// 项目」（Ok(vec![])）。读改写的调用点（移除 / 重排 / 以 project_id 建会话）
+/// 必须走这里：把不可达报成「未找到」会误导操作员去排查一个不存在的问题，
+/// 而重排更危险——按空列表写回等于抹掉注册表。
+async fn projects_or_unavailable(
+    state: &WebUiState,
+    what: &str,
+) -> Result<Vec<serde_json::Value>, Response> {
+    match state.backend.state_snapshot("projects").await {
+        Some(v) => Ok(normalize_project_rows(v)),
+        None => {
+            tracing::warn!("projects 状态库不可达：项目面呈现 unavailable（不回退任何文件）");
+            Err(projects_unavailable(what))
+        }
+    }
 }
 
-/// 同 [`projects_from_backend`],外加「core 是否可达」。不可达时列表来自
-/// webui 本地文件回退——单进程形态里本地注册表即事实源,回退语义一致;
-/// detached 拓扑下项目注册表住在 core 侧,本地回退查无 id 不等于「项目
-/// 不存在」,调用方（branch 端点）据此应答 503(不可达)而非 404(不存在)
-/// ——停机窗口的 branch 读不该被记成针对具体项目的裁决。
-async fn projects_from_backend_with_reachability(
-    state: &WebUiState,
-) -> (Vec<serde_json::Value>, bool) {
-    let mut projects = if let Some(v) = state.backend.state_snapshot("projects").await {
-        v.get("projects")
-            .and_then(serde_json::Value::as_array)
-            .cloned()
-            .unwrap_or_default()
-    } else {
-        // 回退：webui 本地文件注册表（list() 自带 id 回填）。
-        return (
-            crate::projects::list()
-                .into_iter()
-                .map(|e| serde_json::to_value(&e).unwrap_or_default())
-                .collect(),
-            false,
-        );
-    };
-    // 节点维度 + 稳定 id 回填（workbench-agent-wire-fix 2.4；8.1 起 id 按
-    // `(节点, 路径)` 派生）：旧行没有 node_id → 本机；id 空 → 按 node 重算。
-    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+/// 规范化 wire 条目：`node_id` 缺省回填 `local`、空 `id` 按 `(节点, 路径)`
+/// 重算（迁移前旧行的读取容错；新行的 id 在落库时就写好）。
+///
+/// **每一条读路径都必须过这里**（列表、单条反查、用于读改写的取数）：id 是
+/// 移除 / 重排 / 项目级默认 agent 的寻址键，任何一条路径漏回填就会让界面拿到
+/// 不带 id 的条目，而那些操作会静默落空。
+fn normalize_project_entries(mut projects: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
     for p in projects.iter_mut() {
         let node = p
             .get("node_id")
@@ -1596,25 +1581,48 @@ async fn projects_from_backend_with_reachability(
                 );
             }
         }
-        if let Some(path) = path {
-            seen.insert((node, path));
-        }
     }
-    // 文件注册表里的远端条目并进来（状态库装不下节点维度）。
-    for entry in crate::projects::list() {
-        if entry.is_local() || seen.contains(&(entry.node_id.clone(), entry.path.clone())) {
-            continue;
-        }
-        projects.push(serde_json::to_value(&entry).unwrap_or_default());
-    }
-    (projects, true)
+    projects
 }
 
-/// GET /api/projects — list all registered projects（状态库优先，文件回退）。
+/// 规范化一份 `{"projects": [...]}` 快照。
+fn normalize_project_rows(v: serde_json::Value) -> Vec<serde_json::Value> {
+    normalize_project_entries(
+        v.get("projects")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default(),
+    )
+}
+
+/// 项目面的「store 不可达」降级应答（migrate-project-registry 5.1，
+/// state-store「Unavailable store degrades honestly」）：显式 unavailable +
+/// cause，绝不拿文件派生列表冒充现状。
+fn projects_unavailable(cause: &str) -> Response {
+    api_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        format!("core 状态库不可达，项目注册表不可用: {cause}"),
+    )
+}
+
+/// GET /api/projects — list all registered projects（core 状态库唯一权威）。
 /// add-workspace-root 2.2：越界的本机项目从列表隐藏（fail-closed：root 不可
 /// 解析时本机项目全部隐藏 + warn）。
+/// migrate-project-registry 5.1：store 不可达时呈现 unavailable + cause，
+/// 不回退文件派生列表。
 pub async fn projects_list(State(state): State<WebUiState>) -> Response {
-    let projects = projects_from_backend(&state).await;
+    let snapshot = state.backend.state_snapshot("projects").await;
+    let Some(v) = snapshot else {
+        return projects_unavailable("项目列表读取失败");
+    };
+    let projects = v
+        .get("projects")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    // 回填 node_id / id（旧行）——id 是界面的寻址键，列表里缺它就等于项目
+    // 在 rail 上不能移除、不能重排。
+    let projects = normalize_project_entries(projects);
     let projects = filter_out_of_scope_local_projects(projects, &state.workspace_root);
     Json(json!({ "projects": projects })).into_response()
 }
@@ -1680,50 +1688,52 @@ pub async fn projects_add(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "unnamed".to_string());
     // 重复检查按 `(节点, 路径)`：同一路径在另一台机器上是另一个项目。
-    if projects_from_backend(&state).await.iter().any(|p| {
-        p.get("path").and_then(|v| v.as_str()) == Some(canonical.as_str())
-            && p.get("node_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or(crate::projects::LOCAL_NODE_ID)
-                == crate::projects::LOCAL_NODE_ID
-    }) {
+    let existing = state.backend.state_snapshot("projects").await;
+    let Some(existing) = existing else {
+        return projects_unavailable("无法确认项目是否已注册");
+    };
+    if existing
+        .get("projects")
+        .and_then(|v| v.as_array())
+        .unwrap_or(&vec![])
+        .iter()
+        .any(|p| {
+            p.get("path").and_then(|v| v.as_str()) == Some(canonical.as_str())
+                && p.get("node_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(crate::projects::LOCAL_NODE_ID)
+                    == crate::projects::LOCAL_NODE_ID
+        })
+    {
         return api_error(StatusCode::CONFLICT, format!("项目已注册: {path}"));
     }
-    // backend 可用 → 状态库（响应不带 degraded）；不可用 → 文件注册表降级，
-    // 响应携带 `degraded: {cause}`（harden-core-channel-deployment 4.2/D7：
-    // 老前端忽略新字段，无破坏；两者皆失败的 503 语义不变）。cause 取
-    // reachability 的如实上报。
-    let mut degraded: Option<serde_json::Value> = None;
-    if state
+    // 状态库是唯一落点（migrate-project-registry 5.1）：写入失败如实拒绝，
+    // 不落任何本地文件替代。
+    if let Err(e) = state
         .backend
         .state_mutate(
             "projects",
             json!({ "op": "add", "path": canonical.clone(), "name": name.clone() }),
         )
         .await
-        .is_err()
     {
-        // 状态库路径失败：先探因（核心不可达？），再落本地注册表。
-        // A1.1：三类不可达的 cause 都如实透传（kind 判别由 payload 层承担，
-        // 这里只需要人类可读原因）。
         let cause = match state.backend.reachability().await {
-            crate::session_backend::Reachability::Reachable => "状态库写入失败".into(),
+            crate::session_backend::Reachability::Reachable => e,
             crate::session_backend::Reachability::StartupFailed { cause }
             | crate::session_backend::Reachability::AuthRejected { cause }
             | crate::session_backend::Reachability::Disconnected { cause } => cause,
         };
-        if crate::projects::add(&canonical).is_ok() {
-            degraded = Some(json!({ "cause": cause }));
-        } else {
-            return api_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "无法注册项目（状态库与本地均失败）",
-            );
-        }
+        return projects_unavailable(&cause);
     }
     // 返回新条目（从列表反查，保证与数据源一致；按 `(节点, 路径)` 命中本机那条）。
-    let entry = projects_from_backend(&state)
+    // 反查同样过规范化：id 在落库时已写好，这里保证任何来源的条目都带 id，
+    // 否则调用方拿到的 201 响应会缺 `id`，后续按 id 寻址全落空。
+    let entry = state
+        .backend
+        .state_snapshot("projects")
         .await
+        .map(normalize_project_rows)
+        .unwrap_or_default()
         .into_iter()
         .find(|p| {
             p.get("path").and_then(|v| v.as_str()) == Some(canonical.as_str())
@@ -1732,11 +1742,15 @@ pub async fn projects_add(
                     .unwrap_or(crate::projects::LOCAL_NODE_ID)
                     == crate::projects::LOCAL_NODE_ID
         })
-        .unwrap_or_else(|| json!({ "path": canonical, "name": name }));
-    let mut entry = entry;
-    if let Some(d) = degraded {
-        entry["degraded"] = d;
-    }
+        .unwrap_or_else(|| {
+            let node = crate::projects::LOCAL_NODE_ID;
+            json!({
+                "id": crate::projects::project_id_for_on(node, &canonical),
+                "path": canonical,
+                "name": name,
+                "node_id": node,
+            })
+        });
     (StatusCode::CREATED, Json(entry)).into_response()
 }
 
@@ -1799,25 +1813,66 @@ async fn projects_add_remote(state: &WebUiState, node_id: &str, path: &str) -> R
         }
     }
     // 重复检查按 `(节点, 路径)`。
-    if projects_from_backend(state).await.iter().any(|p| {
-        p.get("path").and_then(|v| v.as_str()) == Some(path)
-            && p.get("node_id").and_then(|v| v.as_str()) == Some(node_id)
-    }) {
+    let existing = state.backend.state_snapshot("projects").await;
+    let Some(existing) = existing else {
+        return projects_unavailable("无法确认远端项目是否已注册");
+    };
+    if existing
+        .get("projects")
+        .and_then(|v| v.as_array())
+        .unwrap_or(&vec![])
+        .iter()
+        .any(|p| {
+            p.get("path").and_then(|v| v.as_str()) == Some(path)
+                && p.get("node_id").and_then(|v| v.as_str()) == Some(node_id)
+        })
+    {
         return api_error(
             StatusCode::CONFLICT,
             format!("项目已注册: {node_id}:{path}"),
         );
     }
-    // 远端条目只能落 webui 文件注册表：core 状态库的 projects 表没有节点列
-    // （`add_project` 接不住 node_id），写进去会变成一条本机幻影项目。
-    match crate::projects::add_on(node_id, path) {
-        Ok(entry) => (
+    // 远端条目与本地同库同路（migrate-project-registry 3.1：节点维度是持久
+    // 列，add op 原生携带 node_id）——不再有「文件注册表是远端条目的家」。
+    if let Err(e) = state
+        .backend
+        .state_mutate(
+            "projects",
+            json!({ "op": "add", "path": path, "name": remote_project_name(path), "node_id": node_id }),
+        )
+        .await
+    {
+        return projects_unavailable(&e);
+    }
+    // 返回新条目（从库反查，保证与数据源一致）。
+    let entry = state
+        .backend
+        .state_snapshot("projects")
+        .await
+        .and_then(|v| v.get("projects").and_then(|p| p.as_array()).cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .find(|p| {
+            p.get("path").and_then(|v| v.as_str()) == Some(path)
+                && p.get("node_id").and_then(|v| v.as_str()) == Some(node_id)
+        });
+    match entry {
+        Some(entry) => (StatusCode::CREATED, Json(entry)).into_response(),
+        None => (
             StatusCode::CREATED,
-            Json(serde_json::to_value(&entry).unwrap_or_default()),
+            Json(json!({ "path": path, "node_id": node_id })),
         )
             .into_response(),
-        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
+}
+
+/// 远端项目条目的名称派生（路径最后一段；与本地注册的 file_name 语义一致）。
+fn remote_project_name(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "unnamed".to_string())
 }
 
 /// GET /api/nodes — 执行节点可用性（add-remote-execution-node 8.2）。
@@ -1874,8 +1929,12 @@ pub async fn projects_remove(State(state): State<WebUiState>, Path(id): Path<Str
         Ok(d) => d.into_owned(),
         Err(_) => return api_error(StatusCode::BAD_REQUEST, "invalid id encoding"),
     };
-    let Some(entry) = projects_from_backend(&state)
-        .await
+    // store 不可达 ≠ 「project not found」：前者 503 + cause，后者 404。
+    let entries = match projects_or_unavailable(&state, "无法确认项目是否已注册").await {
+        Ok(entries) => entries,
+        Err(resp) => return resp,
+    };
+    let Some(entry) = entries
         .into_iter()
         .find(|p| p.get("id").and_then(|v| v.as_str()) == Some(id.as_str()))
     else {
@@ -1905,6 +1964,7 @@ pub async fn projects_remove(State(state): State<WebUiState>, Path(id): Path<Str
             crate::projects::project_id_for_session(info).as_deref() == Some(id.as_str())
         })
         .count();
+    let _ = &node;
     if live_sessions > 0 {
         return (
             StatusCode::CONFLICT,
@@ -1918,15 +1978,8 @@ pub async fn projects_remove(State(state): State<WebUiState>, Path(id): Path<Str
         )
             .into_response();
     }
-    // 远端：只处理文件注册表。
-    if node != crate::projects::LOCAL_NODE_ID {
-        return match crate::projects::remove_by_id(&id) {
-            Ok(true) => Json(json!({ "status": "removed" })).into_response(),
-            Ok(false) => api_error(StatusCode::NOT_FOUND, "project not found"),
-            Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e),
-        };
-    }
-    // 先试状态库；失败（不存在或不可达）再试文件。
+    // 本地与远端同库同路（migrate-project-registry 3.1）：按 path 删，库是
+    // 唯一权威；不存在 → 404，库不可达 → unavailable，不落任何文件替代。
     match state
         .backend
         .state_mutate("projects", json!({ "op": "remove", "path": path }))
@@ -1935,19 +1988,9 @@ pub async fn projects_remove(State(state): State<WebUiState>, Path(id): Path<Str
         Ok(()) => Json(json!({ "status": "removed" })).into_response(),
         Err(e) => {
             if e.contains("不存在") {
-                // 状态库没有 → 试文件注册表。
-                match crate::projects::remove_by_id(&id) {
-                    Ok(true) => Json(json!({ "status": "removed" })).into_response(),
-                    Ok(false) => api_error(StatusCode::NOT_FOUND, "project not found"),
-                    Err(_) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "remove failed"),
-                }
+                api_error(StatusCode::NOT_FOUND, "project not found")
             } else {
-                // 状态库不可达 → 回退文件。
-                match crate::projects::remove_by_id(&id) {
-                    Ok(true) => Json(json!({ "status": "removed" })).into_response(),
-                    Ok(false) => api_error(StatusCode::NOT_FOUND, "project not found"),
-                    Err(_) => api_error(StatusCode::SERVICE_UNAVAILABLE, e),
-                }
+                projects_unavailable(&e)
             }
         }
     }
@@ -1967,7 +2010,12 @@ pub async fn projects_reorder(
     Json(req): Json<ReorderRequest>,
 ) -> Response {
     // 读当前列表 → 按新顺序重排（未知 id 落地为 add_time 顺序尾部）→ save。
-    let mut projects = projects_from_backend(&state).await;
+    // store 不可达时拒绝：按空列表写回 = 抹掉注册表，绝不能拿「读不到」当
+    // 「没有项目」。
+    let mut projects = match projects_or_unavailable(&state, "无法读取项目列表以重排").await {
+        Ok(projects) => projects,
+        Err(resp) => return resp,
+    };
     let mut by_id: std::collections::HashMap<String, serde_json::Value> = projects
         .drain(..)
         .map(|p| {
@@ -1998,63 +2046,26 @@ pub async fn projects_reorder(
         .collect();
     tail.sort_by_key(|(t, _)| *t);
     next.extend(tail.into_iter().map(|(_, v)| v));
-    // 重写 sort_order 为列表序号（状态库 save 语义）。
+    // 重写 sort_order 为列表序号（状态库 save 语义），全部条目（本地+远端）
+    // 一次 save——节点维度是持久列，远端条目不会落成幻影本机项目。
     for (i, entry) in next.iter_mut().enumerate() {
         if let Some(obj) = entry.as_object_mut() {
             obj.insert("sort_order".into(), json!(i as i64));
         }
     }
-    // 状态库优先；不可达时回退文件注册表 reorder。
-    //
-    // 8.1：只把**本机**条目发给状态库。core 的 projects 表没有节点列
-    // （`ProjectRow` / `add_project` 都装不下 node_id），把远端条目一起 save 会
-    // 把它们落成同路径的**本机**项目——一条凭空出现的本地条目。远端顺序改由
-    // 文件注册表承载（它本来就是远端条目的家）。
-    let local_entries: Vec<serde_json::Value> = next
-        .iter()
-        .filter(|v| {
-            v.get("node_id")
-                .and_then(|x| x.as_str())
-                .unwrap_or(crate::projects::LOCAL_NODE_ID)
-                == crate::projects::LOCAL_NODE_ID
-        })
-        .cloned()
-        .collect();
-    let remote_ids: Vec<String> = next
-        .iter()
-        .filter(|v| {
-            v.get("node_id")
-                .and_then(|x| x.as_str())
-                .unwrap_or(crate::projects::LOCAL_NODE_ID)
-                != crate::projects::LOCAL_NODE_ID
-        })
-        .filter_map(|v| v.get("id").and_then(|x| x.as_str()).map(str::to_string))
-        .collect();
-    let via_backend = state
+    let result = state
         .backend
         .state_mutate(
             "projects",
-            json!({ "op": "save", "projects": local_entries.clone() }),
+            serde_json::json!({
+                "op": "reorder",
+                "projects": next,
+            }),
         )
-        .await
-        .is_ok();
-    if !remote_ids.is_empty() {
-        // 顺序落文件注册表；失败不改变响应（顺序是呈现细节，不静默改状态）。
-        if let Err(e) = crate::projects::reorder(&remote_ids) {
-            tracing::warn!(error = %e, "远端项目顺序落文件注册表失败");
-        }
-    }
-    if via_backend {
-        return Json(json!({ "projects": next })).into_response();
-    }
-    // 文件回退：把 next 形状转回 ProjectEntry 数组。
-    let entries: Vec<crate::projects::ProjectEntry> = next
-        .iter()
-        .filter_map(|v| serde_json::from_value(v.clone()).ok())
-        .collect();
-    match crate::projects::save_ordered(&entries) {
-        Ok(()) => Json(json!({ "projects": entries })).into_response(),
-        Err(e) => api_error(StatusCode::SERVICE_UNAVAILABLE, e),
+        .await;
+    match result {
+        Ok(()) => Json(json!({ "projects": next })).into_response(),
+        Err(e) => projects_unavailable(&e),
     }
 }
 
@@ -2066,17 +2077,18 @@ pub async fn projects_branch(State(state): State<WebUiState>, Path(id): Path<Str
         Ok(d) => d.into_owned(),
         Err(_) => return api_error(StatusCode::BAD_REQUEST, "invalid id encoding"),
     };
-    let (projects, backend_reachable) = projects_from_backend_with_reachability(&state).await;
+    let snapshot = state.backend.state_snapshot("projects").await;
+    let Some(snapshot) = snapshot else {
+        // 注册表住在 core 侧：库不可达时查无此 id ≠ 项目不存在——如实 503，
+        // 让前端把停机窗口的读降级为「不可达」，而不是针对具体项目裁决「not
+        // found」（migrate-project-registry 5.1：也不回退文件派生列表）。
+        return crate::routes::err_503_core_unreachable();
+    };
+    let projects = normalize_project_rows(snapshot);
     let entry = projects
         .iter()
         .find(|p| p.get("id").and_then(|v| v.as_str()) == Some(id.as_str()));
     let Some(entry) = entry else {
-        // core 不可达时本地回退查无此 id ≠ 项目不存在（detached 拓扑的注册表
-        // 住在 core 侧）——如实 503，让前端把停机窗口的读降级为「不可达」，
-        // 而不是针对具体项目裁决「not found」。
-        if !backend_reachable {
-            return crate::routes::err_503_core_unreachable();
-        }
         return api_error(StatusCode::NOT_FOUND, "project not found");
     };
     let Some(project_path) = entry

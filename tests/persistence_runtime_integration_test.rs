@@ -127,9 +127,10 @@ fn shared_recipe_enforces_foreign_keys_on_a_second_database() {
 // ---- R4：缺列补齐后，旧行经生成的 CRUD 读回、新字段取默认值 ----
 
 /// 场景「Adding a column updates the mapping, not call sites」：存量库缺
-/// `id` / `default_agent` / `sort_order` 三列（可空 / 可空 / 带默认），启动
-/// 同步原地补列后，`ProjectRow::find` 读回旧行——新字段取默认值，call site
-/// （find 签名与调用形状）零变化。
+/// `id` / `default_agent` / `sort_order` / `node_id` 四列（可空 / 可空 /
+/// 带默认 / 带默认 `'local'`），启动同步原地补列后，`ProjectRow::find` 读回
+/// 旧行——新字段取默认值（`node_id` 回填 `local` 即项目身份的迁移），call
+/// site（find 签名与调用形状）零变化。
 #[test]
 fn added_column_reads_back_at_default_through_generated_crud() {
     let dir = tempdir().unwrap();
@@ -165,13 +166,14 @@ fn added_column_reads_back_at_default_through_generated_crud() {
         sebas_db::schema::open_and_sync(&path, LEGACY_PROJECTS_TABLE).unwrap();
     assert_eq!(
         outcome,
-        SyncOutcome::Synced { added_columns: 3 },
-        "三个缺列都应原地补齐"
+        SyncOutcome::Synced { added_columns: 4 },
+        "四个缺列都应原地补齐"
     );
 
     // 生成的 CRUD 读回旧行：既有字段保值，新字段取默认（id/default_agent
-    // 可空 → None；sort_order 带 DEFAULT 0 → 0）。find 的调用形状与列扩张
-    // 前完全一致——call site 未动。
+    // 可空 → None；sort_order 带 DEFAULT 0 → 0；node_id 带 DEFAULT 'local'
+    // → `local`，即旧行自动归到本机节点，不需要迁移脚本）。find 的调用形状
+    // 与列扩张前完全一致——call site 未动。
     let row = ProjectRow::find(&conn, "/legacy/p").unwrap().expect("旧行应可读");
     assert_eq!(row.path, "/legacy/p");
     assert_eq!(row.name, "legacy");
@@ -181,12 +183,18 @@ fn added_column_reads_back_at_default_through_generated_crud() {
     assert_eq!(row.id, None, "补出的可空列读回 None");
     assert_eq!(row.default_agent, None, "补出的可空列读回 None");
     assert_eq!(row.sort_order, 0, "带默认的补列读回 DEFAULT 0");
+    assert_eq!(
+        row.node_id,
+        sebas_models::project::LOCAL_NODE_ID,
+        "补出的 node_id 回填本机标识（旧行归本机即迁移）"
+    );
 
     // 补列后的行可整体 save（upsert 全列写）→ find 全等。
     let updated = ProjectRow {
         id: Some("proj-legacy".into()),
         path: "/legacy/p".into(),
         name: "legacy".into(),
+        node_id: "local".into(),
         default_agent: Some("claude".into()),
         branch: Some("main".into()),
         branch_at: 42,
