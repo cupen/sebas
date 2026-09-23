@@ -262,7 +262,9 @@ usage_file = "{usage}"
     /// `$HOME`; only sebas's own state is sandboxed.
     fn envs(&self) -> Vec<(&'static str, String)> {
         vec![
-            ("SEBAS_STATE_DB", fs_string(&self.path.join("sebas.db"))),
+            // single-state-dir：一个目录变量钉住全部状态落点（HOME 有意继承
+            // ——agent CLI 需要自己的凭据；sebas 的状态全在目录内）。
+            ("SEBAS_STATE_DIR", fs_string(&self.path)),
             ("SEBAS_STATE_FILE", fs_string(&self.path.join("state.json"))),
             (
                 "SEBAS_ROUTER_PROVIDER_OVERLAY",

@@ -452,27 +452,27 @@ def _cfg_path(path):
 
 
 def _sandbox_env(work, secret=True):
-    """Full env isolation: every default that would fall back to the real
-    ~/.sebas is redirected into the throwaway dir. `secret=False` (detached
-    dual-process mode) omits SEBAS_CORE_SECRET entirely — the core then
-    auto-arms from a generated key file and clients discover it (D2/D3,
+    """Full env isolation: **one state-directory variable** pins every state
+    location (single-state-dir) — settings.db / projects.db / auth.db /
+    archive.json / projects.json / services.json / nodes.json all derive from
+    SEBAS_STATE_DIR, so per-file vars are no longer mandatory pins (they stay
+    honored as explicit overrides). `SEBAS_STATE_FILE` /
+    `SEBAS_ROUTER_PROVIDER_OVERLAY` are still pinned until
+    retire-legacy-state-json retires those fallback files. `HOME` stays pinned
+    for everything still resolved via home (skills sync targets). `secret=False`
+    (detached dual-process mode) omits SEBAS_CORE_SECRET entirely — the core
+    then auto-arms from a generated key file and clients discover it (D2/D3,
     harden-core-channel-deployment 5.4)."""
     env = dict(os.environ)
     env.update(
         {
-            "SEBAS_STATE_DB": os.path.join(work, "sebas.db"),
+            # single-state-dir：钉一个目录 = 钉住全部状态落点。漏钉某个
+            # 逐文件变量的「越界」风险随派生规则一起消失。
+            "SEBAS_STATE_DIR": work,
+            # state.json / providers.json 尚未退休（retire-legacy-state-json
+            # 的范围），降级回退路径仍在读——照旧钉进沙箱。
             "SEBAS_STATE_FILE": os.path.join(work, "state.json"),
             "SEBAS_ROUTER_PROVIDER_OVERLAY": os.path.join(work, "providers.json"),
-            # WebUI 用户库（SQLite；add-webui-multiuser-rbac）：bootstrap_auth
-            # 与 webui-passwd 都从这里取路径。auth 关闭时无人打开它，设着只是
-            # 让任何 stray 的建户调用也落不进真实 ~/.sebas。
-            "SEBAS_WEBUI_AUTH_DB": os.path.join(work, "auth.db"),
-            "SEBAS_PROJECTS_PATH": os.path.join(work, "projects.json"),
-            # archive.json derives from SEBAS_HOME ($HOME/.sebas) — without
-            # this the sandbox READ AND REWROTE the operator's real archive
-            # (test sessions landed in it, 93-entry pollution, 2026-09-12).
-            "SEBAS_HOME": work,
-            "SEBAS_ARCHIVE_PATH": os.path.join(work, "archive.json"),
             # add-agent-skills：skills sync 的 backend 落点（claude →
             # ~/.claude/skills）经 `skills::resolve_home()` 的 env-first
             # （HOME > USERPROFILE > Known Folder）解析——不钉 HOME，webui 的
@@ -1043,7 +1043,7 @@ channel_path = "{cfg}/core-channel.sock"
 
 [service.webui]
 enabled = false          # bare core owns the webui via --webui-port
-auth = false             # 登录免了；SEBAS_WEBUI_AUTH_DB 已钉进沙箱
+auth = false             # 登录免了；用户库随 SEBAS_STATE_DIR 落进沙箱
 # 无 [router] / [provider.*]：provider 模式保持 Off，claude 经继承的
 # ANTHROPIC_* env 直连真实上游——与真实部署的默认路径一致。
 """
@@ -1126,13 +1126,13 @@ def smoke_real(c, timeout=120, keep=False):
     env = dict(os.environ)
     env.update(
         {
-            "SEBAS_STATE_DB": os.path.join(work, "sebas.db"),
+            # single-state-dir：一个目录变量钉住全部状态落点（settings.db /
+            # projects.db / auth.db / archive.json / projects.json 全在 work 内）。
+            # smoke 场景 HOME 继承真实主目录（claude CLI 要自己的凭据），
+            # 所以状态目录必须显式钉住。
+            "SEBAS_STATE_DIR": work,
             "SEBAS_STATE_FILE": os.path.join(work, "state.json"),
             "SEBAS_ROUTER_PROVIDER_OVERLAY": os.path.join(work, "providers.json"),
-            "SEBAS_WEBUI_AUTH_DB": os.path.join(work, "auth.db"),
-            "SEBAS_PROJECTS_PATH": os.path.join(work, "projects.json"),
-            "SEBAS_HOME": work,
-            "SEBAS_ARCHIVE_PATH": os.path.join(work, "archive.json"),
         }
     )
     env.pop("SEBAS_CORE_SECRET", None)  # auto-arm 写 <work>/core.secret

@@ -394,7 +394,8 @@ pub struct NodeLinkConfig {
     /// 监听地址（须为 `IP:PORT`；不接受域名，避免启动期解析歧义）。
     #[serde(default = "default_node_link_listen")]
     pub listen: String,
-    /// 节点注册表文件；缺省为 config 文件同目录下的 `nodes.json`。
+    /// 节点注册表文件；缺省为状态目录下的 `nodes.json`（single-state-dir
+    /// 4.2，从 config 文件同目录迁来——唯一默认位置变化的落点）。
     #[serde(default)]
     pub registry_file: Option<String>,
     /// 首次启动（无节点且无待用 token）自动签发的配对 token 的有效期（秒）。
@@ -414,20 +415,16 @@ impl Default for NodeLinkConfig {
     }
 }
 
-/// 注册表路径推导：显式键优先，否则落在 config 文件同目录（与 core.secret 同款取舍）。
+/// 注册表路径推导（single-state-dir 4.2）：显式配置键优先（优先级不变，
+/// tilde 展开），否则落在**状态目录**下的 `nodes.json`（此前默认是 config
+/// 文件同目录——那是唯一发生迁移的落点，design D7）。
 pub fn node_link_registry_path(
     registry_file: Option<&str>,
-    config_path: &std::path::Path,
+    _config_path: &std::path::Path,
 ) -> std::path::PathBuf {
     match registry_file {
         Some(p) if !p.trim().is_empty() => std::path::PathBuf::from(expand_tilde(p)),
-        _ => {
-            let dir = config_path
-                .parent()
-                .filter(|d| !d.as_os_str().is_empty())
-                .unwrap_or_else(|| std::path::Path::new("."));
-            dir.join("nodes.json")
-        }
+        _ => sebas_domain::state_paths::StatePath::NodeRegistry.resolve(),
     }
 }
 
@@ -1636,15 +1633,37 @@ bootstrap_token_ttl_secs = 120
         );
     }
 
+    /// single-state-dir 4.2：无配置键时 nodes.json 从**状态目录**派生
+    /// （「配置键 > 目录派生 > 默认」中的后两级——目录派生就是状态目录
+    /// 解析，未设变量时落在默认 ~/.sebas）。这是唯一发生迁移的落点
+    /// （此前默认是 config 文件同目录）。
     #[test]
-    fn node_link_registry_defaults_next_to_the_config_file() {
+    fn node_link_registry_defaults_inside_the_state_dir() {
+        let pin = tempfile::tempdir().unwrap();
+        let saved = std::env::var_os("SEBAS_STATE_DIR");
+        unsafe { std::env::set_var("SEBAS_STATE_DIR", pin.path()) };
         let cfg = Config::parse("[node_link]\nenabled = true\n").expect("config parses");
+        let derived = cfg.node_link.registry_path(std::path::Path::new("/etc/sebas/config.toml"));
+        match &saved {
+            Some(v) => unsafe { std::env::set_var("SEBAS_STATE_DIR", v) },
+            None => unsafe { std::env::remove_var("SEBAS_STATE_DIR") },
+        }
         assert_eq!(
-            cfg.node_link
-                .registry_path(std::path::Path::new("/etc/sebas/config.toml")),
-            std::path::PathBuf::from("/etc/sebas/nodes.json"),
-            "缺省落在 config 文件同目录（与 core.secret 同款取舍）"
+            derived,
+            pin.path().join("nodes.json"),
+            "缺省落在状态目录（映射表派生）"
         );
+
+        // 未设任何变量时派生落在默认状态目录 ~/.sebas（迁移后的新位置）。
+        let saved = std::env::var_os("SEBAS_STATE_DIR");
+        unsafe { std::env::remove_var("SEBAS_STATE_DIR") };
+        let derived = cfg.node_link.registry_path(std::path::Path::new("/etc/sebas/config.toml"));
+        match &saved {
+            Some(v) => unsafe { std::env::set_var("SEBAS_STATE_DIR", v) },
+            None => unsafe { std::env::remove_var("SEBAS_STATE_DIR") },
+        }
+        let expected = sebas_domain::state_paths::StatePath::NodeRegistry.resolve();
+        assert_eq!(derived, expected, "目录派生与映射表一致");
     }
 
     #[test]

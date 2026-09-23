@@ -64,6 +64,27 @@
 
 这一项写进任务，且是「先核对、后拆」的顺序。
 
+**核对结论（实现时完成，任务 2.1/2.2 验收）**：
+
+写事务枚举（事务 → 涉及表 → 所属库；逐个判定后**没有任何一个写事务横跨两库**）：
+
+| # | 写事务 / 写操作 | 涉及表 | 所属库 |
+|---|---|---|---|
+| 1 | `save_persisted_state`（单事务，repo.rs） | providers + model_aliases + settings(runtime_state) | settings.db |
+| 2 | `import_defaults_once`（单事务） | settings(runtime_state + defaults_imported) | settings.db |
+| 3 | `save_settings`（CardConfig upsert） | settings | settings.db |
+| 4 | `save_projects`（全量替换，单事务） | projects | projects.db |
+| 5 | `add_project` / `remove_project` / `set_project_default_agent` / `update_project_branch` | projects | projects.db |
+| 6 | `save_session_map`（全量替换，单事务） | session_map | projects.db |
+| 7 | user_store 的 immediate 事务（setup_root / 增删改用户） | users | auth.db（写入者 webui） |
+| 8 | 各库 open 时的 schema 同步 / 补列 / 隔离重建 | 该库全部表 | 各自库内单事务 |
+
+快照读核对：core 通道的 state 快照（`core_channel/server.rs` `snapshot_domain` /
+`state_snapshot_all`）今天**已经是多次独立查询**——providers 域走
+`load_persisted_state`，projects 域走 `load_projects`，sessions 域走 router
+内存快照；webui 的 `session_backend` 同样是分开的两读。拆库不使跨域一致性
+变差，也不需要任何跨库机制。
+
 ### D5 每个库独立：独立 open、独立策略、独立版本与隔离
 
 两个库各走一次 `sebas-db` 的 open（各自 WAL、各自 `busy_timeout`、各自 schema 注册表与版本戳）。**收益**：重置 `projects.db`（例如 schema 演进）不影响 `settings.db`；反之亦然。**代价**：两次 open 与两份注册表——由 `sebas-db` 承担，不新增自建配方。

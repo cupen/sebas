@@ -1,8 +1,8 @@
 //! ServiceManager：受管服务句柄表 + 期望状态三层合成 + persist 落盘。
 //!
-//! 三层（design.md D5）：config 默认 → `~/.sebas/services.json` 覆盖 →
-//! 运行时 ServiceSet 覆盖。监督本体在 supervisor.rs 的每服务 task；
-//! 本模块负责聚合查询与期望态翻译。
+//! 三层（design.md D6）：config 默认 → 状态目录派生的 services.json
+//! （`SEBAS_SERVICES_FILE` 可覆盖）→ 运行时 ServiceSet 覆盖。监督本体在
+//! supervisor.rs 的每服务 task；本模块负责聚合查询与期望态翻译。
 
 use crate::config::ServiceWebUiConfig;
 use crate::watchdog::control::DesiredState;
@@ -337,6 +337,7 @@ mod tests {
     use super::*;
     use crate::error::SebasError;
     use crate::watchdog::supervisor::{ServiceSpawner, SpawnedInstance};
+    use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
@@ -584,6 +585,155 @@ port = 9798
         }
         assert!(service_from_str("feishu").is_none());
         assert!(service_from_str("").is_none());
+    }
+
+    // ── single-state-dir 5.1/5.2：落点收编 + 越界回归 ──
+
+    /// 本组用例的进程级 env 串行锁（动 HOME / SEBAS_STATE_DIR 全局变量）。
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// env 钉住 + 保存/恢复护栏。
+    struct PinnedEnv {
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl PinnedEnv {
+        /// 状态目录 = pin，操作员主目录 = fake_home，无逐文件覆盖。
+        fn pin(pin: &Path, fake_home: &Path) -> Self {
+            let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let vars: &[&'static str] = &[
+                "SEBAS_STATE_DIR",
+                "SEBAS_HOME",
+                "HOME",
+                "SEBAS_SERVICES_FILE",
+            ];
+            let saved = vars.iter().map(|v| (*v, std::env::var_os(v))).collect();
+            unsafe {
+                std::env::set_var("SEBAS_STATE_DIR", pin);
+                std::env::set_var("HOME", fake_home);
+                std::env::remove_var("SEBAS_HOME");
+                std::env::remove_var("SEBAS_SERVICES_FILE");
+            }
+            Self { saved, _lock: lock }
+        }
+    }
+
+    impl Drop for PinnedEnv {
+        fn drop(&mut self) {
+            for (v, prev) in &self.saved {
+                match prev {
+                    Some(val) => unsafe { std::env::set_var(v, val) },
+                    None => unsafe { std::env::remove_var(v) },
+                }
+            }
+        }
+    }
+
+    /// 目录清单 + mtime 快照（越界比对用）。
+    fn dir_footprint(dir: &Path) -> Vec<(String, Option<std::time::SystemTime>)> {
+        fn walk(dir: &Path, out: &mut Vec<(String, Option<std::time::SystemTime>)>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for e in entries.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                let mtime = e.metadata().ok().and_then(|m| m.modified().ok());
+                out.push((name, mtime));
+                if e.path().is_dir() {
+                    walk(&e.path(), out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(dir, &mut out);
+        out.sort();
+        out
+    }
+
+    /// 5.2 越界回归：钉住状态目录并完整跑一次覆盖层生命周期——注册（读
+    /// 覆盖层）→ 覆盖层写入（ServiceSet 的落盘动作）→ 管理器销毁重建（
+    /// watchdog 重启）→ 覆盖层读回。全程 fake 操作员主目录（`HOME` 指向
+    /// 一次性目录）**未被创建或修改**（清单 + mtime 存在性比对），落点在
+    /// 钉住的目录内。
+    #[tokio::test]
+    async fn pinned_lifecycle_never_touches_operator_home() {
+        let pin_dir = tempfile::tempdir().unwrap();
+        let fake_home = tempfile::tempdir().unwrap();
+        let _env = PinnedEnv::pin(pin_dir.path(), fake_home.path());
+
+        let operator_sebas = fake_home.path().join(".sebas");
+        let before = dir_footprint(fake_home.path());
+
+        // ── 启动：watchdog 以派生落点建管理器（run_watchdog 的装配形态）。
+        let persist = crate::watchdog::services_persist_path_for_test();
+        assert_eq!(persist, pin_dir.path().join("services.json"));
+        let mgr = ServiceManager::new(persist.clone());
+        mgr.register(fast_spec(ServiceName::WebUi), false);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // ── 覆盖层写入（ServiceSet persist=true 的终点是 watchdog 自己）。
+        mgr.set_desired(ServiceName::WebUi, DesiredState::Enabled, true)
+            .await
+            .unwrap();
+        assert!(
+            persist.exists(),
+            "覆盖层必须落在钉住的目录内: {}",
+            persist.display()
+        );
+        mgr.shutdown_all().await;
+
+        // ── 停止/重启：新管理器从文件读回覆盖（重启后仍生效）。
+        let read = ServiceManager::read_persisted(&persist);
+        assert_eq!(
+            read.get(&ServiceName::WebUi),
+            Some(&DesiredState::Enabled),
+            "runtime 覆盖在 watchdog 重启后仍生效"
+        );
+
+        // ── 越界比对：操作员主目录未被创建/修改。
+        assert!(
+            !operator_sebas.exists(),
+            "操作员真实配置目录不得被创建: {}",
+            operator_sebas.display()
+        );
+        assert_eq!(
+            dir_footprint(fake_home.path()),
+            before,
+            "fake 操作员主目录的清单与 mtime 逐项未变"
+        );
+    }
+
+    /// 5.1 验收的读写行为半边：落点收编后，覆盖层的读取/写入行为与改造前
+    /// 完全一致（三层合成 + ServiceSet 落盘语义不变）。
+    #[tokio::test]
+    async fn derived_persist_path_keeps_read_write_semantics() {
+        let pin_dir = tempfile::tempdir().unwrap();
+        let fake_home = tempfile::tempdir().unwrap();
+        let _env = PinnedEnv::pin(pin_dir.path(), fake_home.path());
+
+        let persist = crate::watchdog::services_persist_path_for_test();
+        let mgr = ServiceManager::new(persist.clone());
+        // config 层关（webui 默认不启用）：无覆盖时快照 = config 层初值。
+        mgr.register(fast_spec(ServiceName::WebUi), false);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let snap = mgr.snapshot(ServiceName::WebUi).await.unwrap();
+        assert_eq!(snap.state, ServiceState::Disabled, "无覆盖 → config 层初值");
+
+        // ServiceSet 落盘：文件内容形状不变（{"webui":"on"}）。
+        mgr.set_desired(ServiceName::WebUi, DesiredState::Enabled, true)
+            .await
+            .unwrap();
+        let raw = std::fs::read_to_string(&persist).unwrap();
+        assert!(raw.contains("webui") && raw.contains("on"), "{raw}");
+        let read = ServiceManager::read_persisted(&persist);
+        assert_eq!(
+            initial_desired(false, read.get(&ServiceName::WebUi).copied()),
+            DesiredState::Enabled,
+            "file 覆盖层翻掉 config 初值——三层合成语义不变"
+        );
+
+        mgr.shutdown_all().await;
     }
 
     // 占位使用 SebasError import（NopSpawner 返回类型别名保持简洁）。

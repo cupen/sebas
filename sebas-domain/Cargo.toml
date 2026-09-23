@@ -15,3 +15,7 @@ sebas-channels = { path = "../sebas-channels" }
 sebas-acp = { path = "../sebas-acp" }
 # `prim::expand_tilde` 的 home 目录解析（Known Folder，不吃 HOME env）。
 dirs = "7"
+
+[dev-dependencies]
+# 状态目录测试的一次性目录（state_paths 测试隔离进程级 env）。
+tempfile = "3"

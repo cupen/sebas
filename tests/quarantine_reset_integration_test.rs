@@ -7,8 +7,8 @@
 //!    不兼容 → 隔离后重建、写者照常就绪服务」此前只有单元级（直调
 //!    open_and_sync）。场景「Incompatible structure resets the database」。
 //! 2. **真域注册表层**：根 crate 域接线（`sebas_state::writer::StateWriter`
-//!    + 五表 `REGISTERED_TABLES`）。单测用的是中性夹具表 `alpha`；这里证明
-//!    未知 version_format 触发的重置隔离旧库、按**真实 DDL** 重建、真实
+//!    + settings 库 `SETTINGS_TABLES`）。单测用的是中性夹具表 `alpha`；这里
+//!    证明未知 version_format 触发的重置隔离旧库、按**真实 DDL** 重建、真实
 //!    ActiveRecord 行照常读写。场景「Unknown version format resets the
 //!    database」+「A quarantined database is recoverable」。
 //! 3. **隔离命名唯一性**（design Open Question：同一秒多次重置 → 追加
@@ -23,13 +23,24 @@ use sebas::sebas_state::writer::StateWriter;
 use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 
-// ---- 夹具：与根注册表 providers 同形的单表 DDL（列来自 struct）----
+// ---- 夹具：与根注册表 providers 同形的单表 DDL（single-state-dir 3.2 的
+// ---- 类型化列；列来自 struct）----
 
 static PROVIDERS_TABLE: &[TableSchema] = &[TableSchema {
     name: "providers",
     create_ddl: "CREATE TABLE providers (
         id          TEXT PRIMARY KEY,
-        config      TEXT NOT NULL,
+        name        TEXT,
+        preset      TEXT,
+        base_url_anthropic        TEXT,
+        base_url_openai_chat      TEXT,
+        base_url_openai_responses TEXT,
+        api_key     TEXT,
+        api_key_env TEXT,
+        default_model TEXT,
+        protocol    TEXT,
+        models      TEXT,
+        model_map   TEXT,
         deleted     INTEGER NOT NULL DEFAULT 0,
         created_at  INTEGER NOT NULL,
         updated_at  INTEGER NOT NULL
@@ -39,13 +50,13 @@ static PROVIDERS_TABLE: &[TableSchema] = &[TableSchema {
 }];
 
 fn provider_row(id: &str) -> ProviderRow {
-    ProviderRow {
-        id: id.into(),
-        config: "{}".into(),
-        deleted: 0,
-        created_at: 1,
-        updated_at: 1,
-    }
+    let mut row = ProviderRow::from_item(
+        id,
+        &serde_json::from_value(serde_json::json!({"preset": "anthropic"})).unwrap(),
+    );
+    row.created_at = 1;
+    row.updated_at = 1;
+    row
 }
 
 /// 目录下的隔离产物（`*.reset-*`），排序后返回。
@@ -73,7 +84,17 @@ fn seed_db_with_stale_column(path: &Path, marker_id: &str) {
     conn.execute_batch(
         "CREATE TABLE providers (
             id          TEXT PRIMARY KEY,
-            config      TEXT NOT NULL,
+            name        TEXT,
+            preset      TEXT,
+            base_url_anthropic        TEXT,
+            base_url_openai_chat      TEXT,
+            base_url_openai_responses TEXT,
+            api_key     TEXT,
+            api_key_env TEXT,
+            default_model TEXT,
+            protocol    TEXT,
+            models      TEXT,
+            model_map   TEXT,
             deleted     INTEGER NOT NULL DEFAULT 0,
             created_at  INTEGER NOT NULL,
             updated_at  INTEGER NOT NULL,
@@ -86,8 +107,8 @@ fn seed_db_with_stale_column(path: &Path, marker_id: &str) {
     )
     .unwrap();
     conn.execute(
-        "INSERT INTO providers (id, config, deleted, created_at, updated_at, stale)
-         VALUES (?1, '{}', 0, 1, 1, 'pre-reset')",
+        "INSERT INTO providers (id, preset, deleted, created_at, updated_at, stale)
+         VALUES (?1, 'anthropic', 0, 1, 1, 'pre-reset')",
         rusqlite::params![marker_id],
     )
     .unwrap();
@@ -144,8 +165,8 @@ async fn writer_actor_resets_incompatible_db_leaving_recoverable_quarantine() {
 
 // ---- 2. 真域注册表层：未知版本格式 → 隔离 + 真实 DDL 重建 ----
 
-/// 「Unknown version format resets the database」的域层行为面：真实五表
-/// 注册表（域接线 `StateWriter::start` → `REGISTERED_TABLES`）打开一个
+/// 「Unknown version format resets the database」的域层行为面：settings 库
+/// 真实注册表（域接线 `StateWriter::start` → `SETTINGS_TABLES`）打开一个
 /// `version_format` 被改成未知值的库——隔离而非删除、按真实 DDL 重建、
 /// provider 行在重建后的 schema 上照常 save/find。
 #[tokio::test]
@@ -222,8 +243,8 @@ fn consecutive_resets_keep_every_quarantine_copy_distinct_and_readable() {
         conn.execute_batch("ALTER TABLE providers ADD COLUMN stale2 TEXT NOT NULL DEFAULT '';")
             .unwrap();
         conn.execute(
-            "INSERT INTO providers (id, config, deleted, created_at, updated_at)
-             VALUES ('r2', '{}', 0, 1, 1)",
+            "INSERT INTO providers (id, preset, deleted, created_at, updated_at)
+             VALUES ('r2', 'anthropic', 0, 1, 1)",
             [],
         )
         .unwrap();

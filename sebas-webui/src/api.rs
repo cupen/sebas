@@ -438,7 +438,8 @@ impl EnvVarKind {
 
 /// 策划清单的静态条目（design D1）：名字、人读解释、分类、未设置时的默认值
 /// 说明。清单迁自前端硬编码表（settings-modal.ts 的 ENV_VARS，描述文案原样
-/// 保留）+ 补遗漏的 `SEBAS_STATE_DB`；未设置默认值与各读取点逐一核对
+/// 保留）；single-state-dir 起以 `SEBAS_STATE_DIR`（状态目录）替代退休的
+/// `SEBAS_STATE_DB`。未设置默认值与各读取点逐一核对
 /// （sebas-router config.rs、sebas-dispatch state_store.rs、acp claude
 /// driver、run.rs）。内部管道与测试专用变量（`SEBAS_IPC`、
 /// `SEBAS_CORE_SOCKET` 等）不在表内，即整体不出现（design Non-Goals）。
@@ -476,10 +477,10 @@ const ENV_VAR_SPECS: &[EnvVarSpec] = &[
         unset_default: Some("~/.sebas/state.json"),
     },
     EnvVarSpec {
-        name: "SEBAS_STATE_DB",
-        what: "State store DB path",
+        name: "SEBAS_STATE_DIR",
+        what: "State directory: every state file/DB derives from it (per-file vars override)",
         kind: EnvVarKind::Plain,
-        unset_default: Some("~/.sebas/sebas.db"),
+        unset_default: Some("~/.sebas"),
     },
     // 凭据类（*_PASSWORD / *_SECRET）一律 set_unset：
     // 值不出现在响应的任何字段（design D2）。
@@ -2793,21 +2794,21 @@ mod env_endpoint_tests {
     #[tokio::test]
     async fn plain_unset_item_notes_default_and_empty_reads_unset() {
         let _lock = ENV_LOCK.lock().await;
-        let _db = EnvGuard::set("SEBAS_STATE_DB", None);
+        let _db = EnvGuard::set("SEBAS_STATE_DIR", None);
         let _log = EnvGuard::set("SEBAS_LOG_LEVEL", Some(""));
         let app = app();
         let (status, body) = get_env(&app).await;
         assert_eq!(status, StatusCode::OK);
 
         // 未设置 → value=null、set=false，解释携带默认值说明。
-        let db = item(&body, "SEBAS_STATE_DB");
+        let db = item(&body, "SEBAS_STATE_DIR");
         assert_shape(db);
         assert_eq!(db["kind"], "plain");
         assert_eq!(db["value"], serde_json::Value::Null);
         assert_eq!(db["set"], false);
         let what = db["what"].as_str().unwrap();
         assert!(what.contains("未设置"), "{what}");
-        assert!(what.contains("~/.sebas/sebas.db"), "{what}");
+        assert!(what.contains("~/.sebas"), "{what}");
 
         // 空串视同未设置（与各读取点的空值忽略语义一致）。
         let log = item(&body, "SEBAS_LOG_LEVEL");
@@ -2872,7 +2873,8 @@ mod env_endpoint_tests {
             .iter()
             .map(|i| i["name"].as_str().unwrap())
             .collect();
-        // 清单全量钉死（含补入的 SEBAS_STATE_DB）：增删条目须显式过这里。
+        // 清单全量钉死（single-state-dir：SEBAS_STATE_DB 退休，
+        // SEBAS_STATE_DIR 上位）：增删条目须显式过这里。
         assert_eq!(
             names,
             [
@@ -2880,7 +2882,7 @@ mod env_endpoint_tests {
                 "SEBAS_ROUTER_LISTEN",
                 "SEBAS_ROUTER_PROVIDER_OVERLAY",
                 "SEBAS_STATE_FILE",
-                "SEBAS_STATE_DB",
+                "SEBAS_STATE_DIR",
                 "SEBAS_WEBUI_PASSWORD",
                 "SEBAS_CONTROL_SECRET",
                 "SEBAS_LOG_LEVEL",

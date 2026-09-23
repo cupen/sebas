@@ -28,6 +28,8 @@
 //! - [`node`]：执行节点的管理面视图（NodeView，core 通道与 webui 共用）；
 //! - [`prim`]：中立原语（路径展开、时间戳）——轻微异味，design D7 承认；
 //!   增长到需要自己的依赖时拆出。
+//! - [`state_paths`]：状态路径映射表（single-state-dir）——逻辑名 → 所属库
+//!   → 文件名 → 覆盖变量的唯一规则表，全部落点从单一状态目录派生。
 //!
 //! 模块划分是实现便利（design「Open Questions」），不改变准入规则。
 //!
@@ -42,3 +44,4 @@ pub mod prim;
 pub mod project;
 pub mod provider;
 pub mod session;
+pub mod state_paths;

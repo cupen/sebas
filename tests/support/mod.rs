@@ -447,18 +447,22 @@ usage_file = "{}"
     /// operator's real `~/.sebas` (AGENTS.md sandbox rule 1). `None` omits
     /// `SEBAS_CORE_SECRET` entirely — the no-secret assembly journeys
     /// (auto-arm + secret-file discovery) need a genuinely unset env.
+    ///
+    /// single-state-dir：状态落点收敛为**一个目录变量**——`SEBAS_STATE_DIR`
+    /// 派生全部落点（settings.db / projects.db / auth.db / archive.json /
+    /// projects.json / services.json / nodes.json），逐文件变量降级为显式
+    /// 覆盖，不再需要逐个钉。仍钉 `SEBAS_STATE_FILE` /
+    /// `SEBAS_ROUTER_PROVIDER_OVERLAY`：两文件尚未退休
+    /// （retire-legacy-state-json 的范围），降级回退路径仍在读它们。
+    /// `HOME` 钉进沙箱（skills sync 的落点等仍经 home 解析）。
     fn envs(&self, secret: Option<&str>) -> Vec<(&'static str, String)> {
         let mut envs = vec![
-            // 项目注册表默认落在**操作者的** `~/.sebas/projects.json`
-            // （`sebas-webui::projects`：`SEBAS_PROJECTS_PATH` → `SEBAS_HOME` →
-            // `$HOME`）。沙箱必须改道：远端项目注册旅程会真的写这个文件，漏了
-            // 这一条就会去动操作者的注册表（本套件在只读文件系统上跑时才发现，
-            // 报的是"写临时文件失败"而不是"写错了地方"）。
+            // 状态目录：一个变量钉住全部落点（single-state-dir）。派生值与
+            // 映射表取同源（不用新增硬编码）。
             (
-                "SEBAS_PROJECTS_PATH",
-                forward_slash(&self.path.join("projects.json")),
+                "SEBAS_STATE_DIR",
+                forward_slash(&self.path),
             ),
-            ("SEBAS_STATE_DB", forward_slash(&self.path.join("sebas.db"))),
             (
                 "SEBAS_STATE_FILE",
                 forward_slash(&self.path.join("state.json")),
@@ -466,21 +470,6 @@ usage_file = "{}"
             (
                 "SEBAS_ROUTER_PROVIDER_OVERLAY",
                 forward_slash(&self.path.join("providers.json")),
-            ),
-            // WebUI 用户库（add-webui-multiuser-rbac）：auth = false 时无人
-            // 打开它，钉进沙箱是纵深防御——任何开启 auth 或调 webui-passwd
-            // 的变体都不会写到操作者的真实 ~/.sebas/auth.db。
-            (
-                "SEBAS_WEBUI_AUTH_DB",
-                forward_slash(&self.path.join("auth.db")),
-            ),
-            // archive.json falls back to SEBAS_HOME ($HOME/.sebas) — pin both
-            // into the sandbox: without this the suites read AND rewrote the
-            // operator's real archive (93-entry test pollution, 2026-09-12).
-            ("SEBAS_HOME", forward_slash(&self.path)),
-            (
-                "SEBAS_ARCHIVE_PATH",
-                forward_slash(&self.path.join("archive.json")),
             ),
             // add-agent-skills：skills sync 的 backend 落点（claude →
             // ~/.claude/skills）经 `skills::resolve_home()` 的 env-first

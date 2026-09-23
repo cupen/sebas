@@ -3,8 +3,9 @@
 //!
 //! # 存储形态
 //!
-//! 独立 SQLite 文件：默认 `~/.sebas/auth.db`，`SEBAS_WEBUI_AUTH_DB` 环境变量
-//! 覆盖（沙箱/测试隔离，与 `SEBAS_STATE_DB` 同一模式）。连接配方**取自共享
+//! 独立 SQLite 文件：默认状态目录下的 `auth.db`（`SEBAS_WEBUI_AUTH_DB`
+//! 环境变量覆盖，沙箱/测试隔离；落点解析见 [`default_auth_db`]）。连接
+//! 配方**取自共享
 //! 持久层**（extract-sebas-db：`sebas_db::conn::open`——rusqlite bundled、
 //! WAL、busy_timeout=5s、foreign_keys=ON），本模块不再手抄 pragma 组合；
 //! schema 版本保留自己的 `PRAGMA user_version` 机制（当前 = 1，design D6：
@@ -66,17 +67,11 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE INDEX IF NOT EXISTS idx_users_enabled_root ON users(role, enabled);
 ";
 
-/// 用户库路径：`SEBAS_WEBUI_AUTH_DB` 优先，否则 `~/.sebas/auth.db`。
+/// 用户库路径（single-state-dir 4.1，映射表 `StatePath::AuthDb`）：
+/// `SEBAS_WEBUI_AUTH_DB` 优先，否则状态目录派生（默认 `~/.sebas/auth.db`，
+/// 与改造前逐字相等）。覆盖值展开 `~/` 前缀。
 pub fn default_auth_db() -> PathBuf {
-    if let Ok(p) = std::env::var("SEBAS_WEBUI_AUTH_DB")
-        && !p.is_empty()
-    {
-        return PathBuf::from(p);
-    }
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".sebas")
-        .join("auth.db")
+    sebas_domain::state_paths::StatePath::AuthDb.resolve()
 }
 
 // ─── 密码哈希原语（自原 auth.rs 平移，实现不变） ─────────────────────────────

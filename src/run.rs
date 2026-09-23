@@ -113,39 +113,82 @@ pub async fn run(
         cfg.dispatch.max_concurrent_sessions,
     );
 
-    // 5.5: 初始化状态库 DB (add-state-store)。
-    // fail-fast-on-startup-errors 任务 1.3：DB 不可写是启动失败（spec
-    // core-session-channel delta 明列），不再静默退回文件存储假装能跑——
-    // 那会把重启丢状态的问题推迟到第一次崩溃之后才暴露。
+    // 5.5: 初始化状态库 (add-state-store)；single-state-dir D2/D5：core 的
+    // 库按增长特征拆成 settings.db（providers/model_aliases/settings，有界）
+    // 与 projects.db（projects/session_map，增长），两库各开一次、路径由
+    // 状态目录映射表派生（SEBAS_STATE_DIR > SEBAS_HOME > ~/.sebas，逐库
+    // 变量可显式覆盖）。
+    // fail-fast-on-startup-errors 任务 1.3：settings 库不可写是启动失败
+    // （它是配置主干，没有它 provider/settings 域无从谈起）；projects 库
+    // 不可用则**该域降级并如实报告**（state-store spec「unavailability is
+    // reported, not hidden」）——项目面每个操作返回点名原因的 typed
+    // rejection，设置面照常工作，不拿空表冒充现状。
     {
-        let raw = std::env::var("SEBAS_STATE_DB").unwrap_or_else(|_| "~/.sebas/sebas.db".into());
-        let expanded = sebas_domain::prim::expand_tilde(&raw);
-        let path = std::path::PathBuf::from(&expanded);
-        match crate::sebas_state::writer::StateWriter::start(path.clone()) {
-            Ok(writer) => {
-                let engine = Box::new(crate::sebas_state::engine::DbStateEngine::new(
-                    writer.handle().clone(),
-                ));
-                // make-core-own-provider-data 1.4：legacy defaults.json 一次性
-                // 导入 settings 域（标记在场即永不读该文件）。放在 init_engine
-                // 之前——经同一 writer 句柄串行提交，不与后续引擎写并发。
-                if let Err(e) = crate::sebas_state::defaults_import::import_legacy_defaults_once(
-                    writer.handle(),
-                )
-                .await
-                {
-                    tracing::warn!(error = %e, "legacy defaults 导入阶段失败（不阻断启动）");
+        // 退休变量提示（single-state-dir 6.1）：SEBAS_STATE_DB 随单库退休，
+        // 不再被读取；残留值只提示，不改变任何行为。
+        let retired = sebas_domain::state_paths::retired_env_vars_present();
+        for var in retired {
+            tracing::warn!(
+                "{var} 已退休：sebas.db 不复存在，该变量不会被读取。\
+                 状态落点改由 SEBAS_STATE_DIR（状态目录）派生，逐库覆盖变量 \
+                 （SEBAS_SETTINGS_DB / SEBAS_PROJECTS_DB / SEBAS_WEBUI_AUTH_DB / \
+                 SEBAS_ROUTER_USAGE_DB）按需显式设置。"
+            );
+        }
+
+        let settings_path = sebas_domain::state_paths::Database::Settings.resolve();
+        let projects_path = sebas_domain::state_paths::Database::Projects.resolve();
+
+        let settings_writer =
+            match crate::sebas_state::writer::StateWriter::start_settings(settings_path.clone()) {
+                Ok(writer) => writer,
+                Err(e) => {
+                    return Err(crate::error::SebasError::Config(format!(
+                        "settings.db 不可写 ({}): {e}",
+                        settings_path.display()
+                    )));
                 }
-                sebas_dispatch::state_store::init_engine(engine);
-                tracing::info!(path = %path.display(), "state store DB initialized");
+            };
+        // legacy defaults.json 一次性导入 settings 域（make-core-own-provider-data
+        // 1.4：标记在场即永不读该文件）。放在 init_engine 之前——经同一 writer
+        // 句柄串行提交，不与后续引擎写并发。
+        if let Err(e) = crate::sebas_state::defaults_import::import_legacy_defaults_once(
+            settings_writer.handle(),
+        )
+        .await
+        {
+            tracing::warn!(error = %e, "legacy defaults 导入阶段失败（不阻断启动）");
+        }
+
+        let engine = match crate::sebas_state::writer::StateWriter::start_projects(
+            projects_path.clone(),
+        ) {
+            Ok(projects_writer) => {
+                Box::new(crate::sebas_state::engine::DbStateEngine::with_projects(
+                    settings_writer.handle().clone(),
+                    projects_writer.handle().clone(),
+                )) as Box<dyn sebas_dispatch::state_store::StateStoreEngine + Send + Sync>
             }
             Err(e) => {
-                return Err(crate::error::SebasError::Config(format!(
-                    "state store DB 不可写 ({}): {e}",
-                    path.display()
-                )));
+                tracing::error!(
+                    path = %projects_path.display(),
+                    error = %e,
+                    "projects.db 打不开：项目域降级（操作将如实拒绝），设置域照常"
+                );
+                Box::new(crate::sebas_state::engine::DbStateEngine::with_unavailable_projects(
+                    settings_writer.handle().clone(),
+                    format!("{} ({})", projects_path.display(), e),
+                )) as Box<dyn sebas_dispatch::state_store::StateStoreEngine + Send + Sync>
             }
-        }
+        };
+        sebas_dispatch::state_store::init_engine(engine);
+        tracing::info!(
+            settings = %settings_path.display(),
+            projects = %projects_path.display(),
+            "state store DBs initialized (settings.db + projects.db)"
+        );
+        // settings_writer 在此 drop：写者线程由引擎持有的 handle 克隆续命
+        // （全部 sender 关闭才退出），与既有形态一致。
     }
 
     // close-acceptance-blind-spots 盲区 2：env posture 启动告警——继承自

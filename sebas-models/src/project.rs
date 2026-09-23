@@ -113,17 +113,33 @@ pub fn save_projects(conn: &mut Connection, projects: &[ProjectRow]) -> Result<(
 }
 
 /// 添加一个项目（已存在同 path 时静默跳过——注册表幂等语义）。
+///
+/// single-state-dir 3.6：标准 CRUD 经生成的 `find`/`save` 组合——单写线程
+/// 串行执行下 find→save 与 `ON CONFLICT DO NOTHING` 等价（不存在并发插队
+/// 窗口），不再保留手写 INSERT。
 pub fn add_project(
     conn: &mut Connection,
     path: &str,
     name: &str,
     added_at: i64,
 ) -> Result<(), String> {
-    conn.execute(
-        "INSERT INTO projects (path, name, branch, branch_at, added_at, sort_order) VALUES (?1, ?2, NULL, 0, ?3, 0)
-         ON CONFLICT(path) DO NOTHING",
-        sebas_db::rusqlite::params![path, name, added_at],
-    )
+    if ProjectRow::find(conn, path)
+        .map_err(|e| format!("查询项目 {path} 失败: {e}"))?
+        .is_some()
+    {
+        return Ok(());
+    }
+    ProjectRow {
+        id: None,
+        path: path.to_string(),
+        name: name.to_string(),
+        default_agent: None,
+        branch: None,
+        branch_at: 0,
+        added_at,
+        sort_order: 0,
+    }
+    .save(conn)
     .map_err(|e| format!("添加项目 {path} 失败: {e}"))?;
     Ok(())
 }

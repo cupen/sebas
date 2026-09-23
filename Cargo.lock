@@ -2948,6 +2948,7 @@ dependencies = [
  "sebas-channels",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

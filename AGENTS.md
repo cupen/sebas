@@ -58,7 +58,8 @@ bd dolt push            # Push beads data to remote
 3. **模式统一、归属按写入者**：auth.db / usage.db 的模型不进
    `sebas-models`——同一个 trait + derive 在写入者 crate 内生成 impl；
    多表原子性经 `StateHandle::exec` 闭包（unit-of-work）表达。
-4. **事务行为调用方自选**：`sebas.db` 走单写线程 + 默认 deferred；
+4. **事务行为调用方自选**：settings.db / projects.db（single-state-dir 分层
+   库）走单写线程 + 默认 deferred；
    auth.db 自持 `Mutex` + `sebas_db::conn::transaction_immediate`——共享层
    不替调用方改选，也不统一两库的版本机制（`schema_meta` 日期戳 vs
    `user_version`，统一已推迟）。
@@ -117,18 +118,21 @@ both live in tasks.py — the old `scripts/*sandbox*.sh` harnesses were removed
      boundary for project register/list, session detail/message/switch, and
      browse-dirs; left unset it falls back to the process cwd with a startup
      warn, and sandbox journeys break in confusing ways;
-   - env: five files that would otherwise default into the real `~/.sebas`
-     — all mandatory: `SEBAS_STATE_DB` (SQLite, default `~/.sebas/sebas.db`
-     — the easy one to miss: without it the sandbox opens the real DB even
-     with everything else sandboxed), `SEBAS_STATE_FILE` (default
-     `~/.sebas/state.json`), `SEBAS_ROUTER_PROVIDER_OVERLAY` (default
-     `~/.sebas/providers.json`), `SEBAS_WEBUI_AUTH_DB` (WebUI user
-     store, default `~/.sebas/auth.db`; nothing opens it while
-     `auth = false`, pin it anyway so any provisioning stays sandbox-local),
-     and `SEBAS_ARCHIVE_PATH` (WebUI 归档文件, default
-     `<SEBAS_STATE_DB 目录>/archive.json` — 钉了 state DB 即随迁，仍建议
-     显式钉进 `<SB>` 作防御纵深；旧 `~/.sebas/archive.json` 只作迁移源,
-     显式设置后不再触碰).
+   - env: **one state-directory variable** (`SEBAS_STATE_DIR`, single-state-dir)
+     pins every state location — the layered databases `settings.db`
+     (providers / model_aliases / settings) and `projects.db` (projects /
+     session_map), plus `auth.db`, `archive.json`, `projects.json`,
+     `services.json` and `nodes.json` all derive as fixed filenames inside it.
+     Per-file variables (`SEBAS_SETTINGS_DB`, `SEBAS_PROJECTS_DB`,
+     `SEBAS_WEBUI_AUTH_DB`, `SEBAS_ROUTER_USAGE_DB`, `SEBAS_ARCHIVE_PATH`,
+     `SEBAS_PROJECTS_PATH`, `SEBAS_SERVICES_FILE`) are optional explicit
+     overrides — no longer mandatory pins. `SEBAS_STATE_DB` is **retired**:
+     exporting it changes nothing (startup logs a warning if it is set).
+     Still pin `SEBAS_STATE_FILE` (default `~/.sebas/state.json`) and
+     `SEBAS_ROUTER_PROVIDER_OVERLAY` (default `~/.sebas/providers.json`) —
+     those two legacy files are not retired yet (retire-legacy-state-json),
+     and their fallback paths still read them. Keep `HOME` pinned for paths
+     still resolved via home (skills sync targets).
      Do **not** set `SEBAS_CORE_SECRET`: the core
      auto-arms (generates a key, writes it to `<config dir>/core.secret`,
      0600) and clients discover it from that file on every connect attempt —
@@ -136,21 +140,21 @@ both live in tasks.py — the old `scripts/*sandbox*.sh` harnesses were removed
 
    Provisioning a WebUI login user (only needed when `auth` stays on):
    either `sebas webui-passwd --user <name> [--password-stdin|--password]
-   [--role root|admin|member|viewer]` against the pinned
-   `SEBAS_WEBUI_AUTH_DB` (first user defaults to root, later ones to
-   member), or export `SEBAS_WEBUI_USER` + `SEBAS_WEBUI_PASSWORD` before
-   starting the webui (bootstraps root at first start, idempotent on
+   [--role root|admin|member|viewer]` against the state-dir-derived
+   `auth.db` (`SEBAS_WEBUI_AUTH_DB` overrides; first user defaults to root,
+   later ones to member), or export `SEBAS_WEBUI_USER` + `SEBAS_WEBUI_PASSWORD`
+   before starting the webui (bootstraps root at first start, idempotent on
    restart). Login is always username + password — the retired single-field
    token / JSON credentials file forms no longer exist.
 
 2. Run the two halves exactly as the watchdog would:
 
    ```bash
-   SEBAS_STATE_DB=… SEBAS_STATE_FILE=… \
-     SEBAS_ROUTER_PROVIDER_OVERLAY=… SEBAS_ARCHIVE_PATH=… \
+   SEBAS_STATE_DIR=/tmp/sebas-itest SEBAS_STATE_FILE=/tmp/sebas-itest/state.json \
+     SEBAS_ROUTER_PROVIDER_OVERLAY=/tmp/sebas-itest/providers.json \
      target/debug/sebas core -c /tmp/sebas-itest/config.toml         # core
-   SEBAS_STATE_DB=… SEBAS_STATE_FILE=… \
-     SEBAS_ROUTER_PROVIDER_OVERLAY=… SEBAS_ARCHIVE_PATH=… \
+   SEBAS_STATE_DIR=/tmp/sebas-itest SEBAS_STATE_FILE=/tmp/sebas-itest/state.json \
+     SEBAS_ROUTER_PROVIDER_OVERLAY=/tmp/sebas-itest/providers.json \
      target/debug/sebas webui -c /tmp/sebas-itest/config.toml        # webui
    ```
 
@@ -162,6 +166,23 @@ both live in tasks.py — the old `scripts/*sandbox*.sh` harnesses were removed
 4. Clean up: SIGTERM the core (graceful exit removes the channel socket and
    dumps state — itself worth asserting), stop the webui and the standalone
    router process, delete the sandbox dir, and confirm the ports are free.
+
+### services.json：越界点已修，仍是文件（single-state-dir D6 例外说明）
+
+watchdog 的服务期望态覆盖层 `services.json` 此前硬编码 `~/.sebas/services.json`
+（无 env、无配置键）——是「今天就无法被钉进沙箱」的越界点。single-state-dir
+已把它收编进状态目录映射表：默认 `<SEBAS_STATE_DIR>/services.json` 派生，
+`SEBAS_SERVICES_FILE` 可显式覆盖——钉住状态目录即钉住它，漏钉风险消失。
+
+它**仍是普通文件**、不进任何库：写入者是 watchdog 自己（ServiceSet 的终点是
+watchdog 的 control RPC socket，core 不在路径上），而 `settings.db` 的写入者
+是 core——并入即违反「一个文件一个写入者」，且会让监督者的记忆依赖被监督者
+的心跳（core 挂掉时恰恰最需要记录 `router: off`）。它是操作员配置（与
+config.toml 同类），watchdog 对它只做「启动时读、ServiceSet 时写」，不引入
+持久层。**验证方式**：`src/watchdog/services.rs` 的
+`pinned_lifecycle_never_touches_operator_home`（钉住状态目录跑完整覆盖层
+生命周期，断言 fake 操作员主目录的清单与 mtime 逐项未变）+
+`src/watchdog.rs` 的落点派生两条单测。
 
 ### Sandbox debug recipe (proven end-to-end, agent-runnable)
 
@@ -234,9 +255,9 @@ addr=127.0.0.1:<port>`，router 侧用自定义 provider（`[provider.fake]` 哑
    [service.webui]
    enabled = false          # bare core owns the webui via --webui-port
    auth = false             # 登录免了：零用户 + 默认开的 auth 会停在首启
-                            # 设置页，且 auth.db 落进真实 ~/.sebas——沙箱内
-                            # 要么显式关，要么把 SEBAS_WEBUI_AUTH_DB 钉进
-                            # 沙箱并建户（webui-passwd / env 引导）
+                            # 设置页——沙箱内要么显式关，要么把用户库
+                            # （状态目录下的 auth.db，SEBAS_WEBUI_AUTH_DB 可
+                            # 覆盖）建上户（webui-passwd / env 引导）
 
    # [router] / [provider.*] 都是可选段——纯会话核心不写它们也能启动。
    # --debug 下省略 [provider.*] 也行：内置 test provider 在 parse 之后注入，
@@ -252,20 +273,22 @@ addr=127.0.0.1:<port>`，router 侧用自定义 provider（`[provider.fake]` 哑
 2. Start the two processes（unify-router-process-shape：router 只以独立进程
    `sebas router --config <path> [--debug]` 运行，core 旗标里没有 router）
    with no `SEBAS_CORE_SECRET` — auto-arm writes the generated key to
-   `<SB>/core.secret` and clients discover it:
+   `<SB>/core.secret` and clients discover it. single-state-dir 起状态 env
+   只需 `SEBAS_STATE_DIR` 一个（两库 settings.db / projects.db 与
+   auth.db / archive.json / projects.json / services.json / nodes.json 全部
+   由它派生；`SEBAS_STATE_FILE` / `SEBAS_ROUTER_PROVIDER_OVERLAY` 照旧钉，
+   两个 legacy 文件尚未退休）：
 
    ```bash
    cargo build
-   SEBAS_STATE_DB="<SB>/sebas.db" \
+   SEBAS_STATE_DIR="<SB>" \
      SEBAS_STATE_FILE="<SB>/state.json" \
      SEBAS_ROUTER_PROVIDER_OVERLAY="<SB>/providers.json" \
-     SEBAS_ARCHIVE_PATH="<SB>/archive.json" \
      target/debug/sebas core -c "<SB>/config.toml" \
      --webui --webui-port 9877 > "<SB>/core.log" 2>&1
-   SEBAS_STATE_DB="<SB>/sebas.db" \
+   SEBAS_STATE_DIR="<SB>" \
      SEBAS_STATE_FILE="<SB>/state.json" \
      SEBAS_ROUTER_PROVIDER_OVERLAY="<SB>/providers.json" \
-     SEBAS_ARCHIVE_PATH="<SB>/archive.json" \
      target/debug/sebas router -c "<SB>/config.toml" \
      --debug > "<SB>/router.log" 2>&1 &
    ```
@@ -326,8 +349,9 @@ env posture 结论。
   或 `{"api_key_env": "变量名"}`）——指向真实 `~/.sebas` 之下会被拒绝。
 - **拓扑**：AGENTS.md 沙箱菜谱的最简单进程形态——单进程 bare core
   （`--webui --webui-port 9877`）+ 真实 `claude` CLI（PATH 查找）。全部状态
-  路径（config、dispatch、media、acp、workspace、skills、channel、五件套
-  env）钉进一次性目录 `sebas-smoke-*`，跑完即毁（`--keep` 留现场调试）。
+  路径（config、dispatch、media、acp、workspace、skills、channel、
+  `SEBAS_STATE_DIR` + 两个未退休的 legacy env）钉进一次性目录
+  `sebas-smoke-*`，跑完即毁（`--keep` 留现场调试）。
   不起独立 router：凭据走继承 env（provider 模式 Off），router 不在回合路径
   上，省掉真实凭据落盘。
 - **用法**：预置凭据后 `invoke smoke-real`（`--timeout 120` 单回合轮询上限，

@@ -7,10 +7,11 @@
 //!
 //! Persistence uses the same atomic tmp+rename pattern as `projects.rs`.
 //!
-//! polish-workbench-walkthrough-ux 1.1：归档文件路径收敛——解析顺序为
-//! `SEBAS_ARCHIVE_PATH` → `<SEBAS_STATE_DB 目录>/archive.json` → 旧
-//! `$HOME/.sebas/archive.json`（仅迁移源）。钉定 state 目录的部署（沙箱
-//! 尤其）随之钉定归档文件；旧路径只读降级语义见 [`migrate_once`]。
+//! polish-workbench-walkthrough-ux 1.1 + single-state-dir 4.1：归档文件路径
+//! 收敛——解析顺序为 `SEBAS_ARCHIVE_PATH`（显式覆盖）> 状态目录派生
+//! （`sebas_domain::state_paths`：`SEBAS_STATE_DIR` > `SEBAS_HOME` >
+//! `~/.sebas` + `archive.json`）。旧路径只作迁移源/降级读写位，语义见
+//! [`migrate_once`]。
 
 use sebas_dispatch::SessionIdentity;
 use serde::{Deserialize, Serialize};
@@ -88,24 +89,11 @@ fn legacy_default_path() -> PathBuf {
     home.join("archive.json")
 }
 
-/// state DB 所在目录（`SEBAS_STATE_DB` 的父目录）。未设置/无父目录 → None。
-fn state_db_dir() -> Option<PathBuf> {
-    std::env::var("SEBAS_STATE_DB")
-        .ok()
-        .map(PathBuf::from)
-        .and_then(|p| p.parent().map(Path::to_path_buf))
-}
-
-/// resolved 归档路径（不含降级回退）：`SEBAS_ARCHIVE_PATH` >
-/// `<SEBAS_STATE_DB 目录>/archive.json` > 旧默认路径。
+/// resolved 归档路径：`SEBAS_ARCHIVE_PATH`（显式覆盖）> 状态目录派生
+/// （single-state-dir 4.1：映射表 `StatePath::Archive`——优先级、默认值
+/// 都在映射表一处）。
 fn resolved_archive_path() -> PathBuf {
-    match std::env::var("SEBAS_ARCHIVE_PATH") {
-        Ok(p) => PathBuf::from(p),
-        Err(_) => match state_db_dir() {
-            Some(dir) => dir.join("archive.json"),
-            None => legacy_default_path(),
-        },
-    }
+    sebas_domain::state_paths::StatePath::Archive.resolve()
 }
 
 /// 当前生效的归档路径：迁移失败降级后 = 旧路径；否则 = resolved 路径。
@@ -487,41 +475,50 @@ mod tests {
         }
     }
 
-    /// 1.1 三级解析：显式 `SEBAS_ARCHIVE_PATH` 最高优先。
+    /// 1.1 三级解析：显式 `SEBAS_ARCHIVE_PATH` 最高优先（single-state-dir
+    /// D1：逐文件覆盖 > 状态目录 > 默认）。
     #[test]
     fn explicit_override_wins_resolution() {
         let _lock = ARCHIVE_TEST_LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join("sebas-archive-test/override_wins");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        let state_pin = std::env::temp_dir().join("sebas-archive-test/override_wins_state");
         set_env("SEBAS_ARCHIVE_PATH", Some(dir.join("override.json").to_str().unwrap()));
-        set_env("SEBAS_STATE_DB", Some(dir.join("state").join("sebas.db").to_str().unwrap()));
+        set_env("SEBAS_STATE_DIR", Some(state_pin.to_str().unwrap()));
         assert_eq!(resolved_archive_path(), dir.join("override.json"));
         set_env("SEBAS_ARCHIVE_PATH", None);
-        set_env("SEBAS_STATE_DB", None);
+        set_env("SEBAS_STATE_DIR", None);
     }
 
-    /// 1.1 无 override 时归档跟随 `SEBAS_STATE_DB` 所在目录。
+    /// single-state-dir 4.1：无 override 时归档跟随**状态目录**（映射表
+    /// `StatePath::Archive` 派生——`SEBAS_STATE_DIR` 钉住即归档在内）。
     #[test]
-    fn state_db_dir_pins_the_archive() {
+    fn state_dir_pins_the_archive() {
         let _lock = ARCHIVE_TEST_LOCK.lock().unwrap();
-        let dir = std::env::temp_dir().join("sebas-archive-test/state_db_pin");
+        let dir = std::env::temp_dir().join("sebas-archive-test/state_dir_pin");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         set_env("SEBAS_ARCHIVE_PATH", None);
-        set_env("SEBAS_STATE_DB", Some(dir.join("sebas.db").to_str().unwrap()));
+        set_env("SEBAS_STATE_DIR", Some(dir.to_str().unwrap()));
         assert_eq!(resolved_archive_path(), dir.join("archive.json"));
-        set_env("SEBAS_STATE_DB", None);
+        set_env("SEBAS_STATE_DIR", None);
     }
 
-    /// 1.1 无 `SEBAS_STATE_DB` 时回退旧默认路径（legacy 形态）。
+    /// single-state-dir 4.1 验收：无任何变量时与改造前逐字相等——默认
+    /// 落点是 `SEBAS_HOME`（或 `$HOME/.sebas`）下的 archive.json（旧三级
+    /// 解析的第二、三级收敛为同一个默认状态目录）。
     #[test]
-    fn no_state_db_falls_back_to_legacy_default() {
+    fn no_env_at_all_resolves_to_the_same_default_as_before() {
         let _lock = ARCHIVE_TEST_LOCK.lock().unwrap();
         set_env("SEBAS_ARCHIVE_PATH", None);
-        set_env("SEBAS_STATE_DB", None);
+        set_env("SEBAS_STATE_DIR", None);
         set_env("SEBAS_HOME", Some("/tmp/sebas-archive-test/home"));
-        assert_eq!(resolved_archive_path(), PathBuf::from("/tmp/sebas-archive-test/home/archive.json"));
+        // 改造前：legacy_default_path() = $SEBAS_HOME/archive.json。
+        assert_eq!(
+            resolved_archive_path(),
+            PathBuf::from("/tmp/sebas-archive-test/home/archive.json")
+        );
         set_env("SEBAS_HOME", None);
     }
 

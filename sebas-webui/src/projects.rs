@@ -1,4 +1,5 @@
-//! Project registry: `~/.sebas/projects.json`, WebUI-owned.
+//! Project registry: `projects.json` under the state directory
+//! (`single-state-dir` mapping; WebUI-owned).
 //!
 //! Each entry is a directory path the operator registered as a project.
 //! Atomic writes via tmp + rename + fsync, matching `state_store` pattern.
@@ -105,20 +106,12 @@ pub fn node_check_unavailable(node_id: &str, path: &str, cause: &str) -> String 
     format!("无法在节点 {node_id} 上校验路径 {path}: {cause}")
 }
 
-fn default_path() -> PathBuf {
-    let home = std::env::var("SEBAS_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-            PathBuf::from(home).join(".sebas")
-        });
-    home.join("projects.json")
-}
-
+/// 注册表落点（single-state-dir 4.1，映射表 `StatePath::ProjectRegistry`）：
+/// `SEBAS_PROJECTS_PATH`（显式覆盖）> 状态目录派生（`SEBAS_STATE_DIR` >
+/// `SEBAS_HOME` > `~/.sebas` + `projects.json`）。不设任何变量时与改造前
+/// 逐字相等（默认一直在 `~/.sebas/projects.json`）。
 fn registry_path() -> PathBuf {
-    std::env::var("SEBAS_PROJECTS_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| default_path())
+    sebas_domain::state_paths::StatePath::ProjectRegistry.resolve()
 }
 
 fn load() -> Vec<ProjectEntry> {

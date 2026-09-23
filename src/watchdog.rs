@@ -42,12 +42,18 @@ fn create_control_secret() -> String {
     format!("{pid:x}-{ts:x}")
 }
 
-/// `~/.sebas/services.json`（期望态 persist 层）。
+/// watchdog 服务期望态覆盖层（`services.json`）的落点（single-state-dir
+/// 5.1）：从状态目录派生（`SEBAS_STATE_DIR` > `SEBAS_HOME` > `~/.sebas`），
+/// `SEBAS_SERVICES_FILE` 可显式覆盖。此前它硬编码在 `~/.sebas`、无 env 无
+/// 配置键——是「今天就无法被钉进沙箱」的越界点；本文件的性质仍是操作员
+/// 配置（design D6：watchdog 不引入持久层），只是落点收编进映射表。
 fn services_persist_path() -> std::path::PathBuf {
-    dirs::home_dir()
-        .unwrap_or_default()
-        .join(".sebas")
-        .join("services.json")
+    sebas_domain::state_paths::StatePath::ServicesOverride.resolve()
+}
+
+#[cfg(test)]
+pub(crate) fn services_persist_path_for_test() -> std::path::PathBuf {
+    services_persist_path()
 }
 
 /// watchdog 自身的日志初始化。`run_watchdog` 只拿到 `WatchdogConfig`（不含
@@ -627,5 +633,83 @@ mod tests {
         assert!(err.is_err(), "no backup should fail rollback");
 
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    // ── single-state-dir 5.1：services.json 落点从状态目录派生 ──
+
+    /// 本组用例的进程级 env 串行锁（动 HOME / SEBAS_STATE_DIR 全局变量）。
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct EnvPin {
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl EnvPin {
+        /// 钉住状态目录与 HOME（fake 操作员主目录），清掉全部逐文件覆盖。
+        fn pin(state_dir: &std::path::Path, fake_home: &std::path::Path) -> Self {
+            let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let vars: &[&'static str] = &[
+                "SEBAS_STATE_DIR",
+                "SEBAS_HOME",
+                "HOME",
+                "SEBAS_SERVICES_FILE",
+            ];
+            let saved = vars
+                .iter()
+                .map(|v| (*v, std::env::var_os(v)))
+                .collect();
+            unsafe {
+                std::env::set_var("SEBAS_STATE_DIR", state_dir);
+                std::env::set_var("HOME", fake_home);
+                std::env::remove_var("SEBAS_HOME");
+                std::env::remove_var("SEBAS_SERVICES_FILE");
+            }
+            Self { saved, _lock: lock }
+        }
+    }
+
+    impl Drop for EnvPin {
+        fn drop(&mut self) {
+            for (v, prev) in &self.saved {
+                match prev {
+                    Some(val) => unsafe { std::env::set_var(v, val) },
+                    None => unsafe { std::env::remove_var(v) },
+                }
+            }
+        }
+    }
+
+    /// 钉住状态目录后 services.json 的落点在目录内；不再依赖 `~/.sebas`。
+    #[test]
+    fn services_persist_path_derives_inside_pinned_state_dir() {
+        let pin_dir = tempfile::tempdir().unwrap();
+        let fake_home = tempfile::tempdir().unwrap();
+        let _env = EnvPin::pin(pin_dir.path(), fake_home.path());
+
+        let path = services_persist_path();
+        assert_eq!(
+            path,
+            pin_dir.path().join("services.json"),
+            "落点 = 状态目录 + 固定文件名"
+        );
+        assert!(
+            !path.starts_with(fake_home.path()),
+            "落点不得依赖操作员主目录"
+        );
+    }
+
+    /// 显式覆盖优先于目录派生（watchdog spec「explicit override still
+    /// wins」）：`SEBAS_SERVICES_FILE` 指向别处时用别处。
+    #[test]
+    fn services_persist_path_explicit_override_wins() {
+        let pin_dir = tempfile::tempdir().unwrap();
+        let fake_home = tempfile::tempdir().unwrap();
+        let _env = EnvPin::pin(pin_dir.path(), fake_home.path());
+        let elsewhere = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("SEBAS_SERVICES_FILE", elsewhere.path().join("svc.json"))
+        };
+        assert_eq!(services_persist_path(), elsewhere.path().join("svc.json"));
     }
 }

@@ -26,8 +26,9 @@
 //! - **加列规则**: 新列要么可空 (`Option<T>`), 要么带常量默认值
 //!   (`#[column(default = "...")]`); 非空无默认的缺列无法原地补, 会触发重置。
 //! - SQL 里 INSERT/UPDATE 一律显式列名, 禁止 `INSERT INTO t VALUES(...)`。
-//! - 约束 (PRIMARY KEY/UNIQUE/REFERENCES) 与索引只表达在 `REGISTERED_TABLES`
-//!   的手写 DDL 里; struct 只描述列名/类型/默认值/可空性。
+//! - 约束 (PRIMARY KEY/UNIQUE/REFERENCES) 与索引只表达在 `SETTINGS_TABLES`
+//!   / `PROJECTS_TABLES`（single-state-dir 拆库注册表）的手写 DDL 里;
+//!   struct 只描述列名/类型/默认值/可空性。
 
 pub mod defaults_import;
 pub mod engine;

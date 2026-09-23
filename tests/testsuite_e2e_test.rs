@@ -6672,3 +6672,455 @@ async fn restarted_spawning_session_failed_redispatch_lands_synthetic_error() {
     )
     .await;
 }
+
+// ══ single-state-dir：一个状态目录钉住全部状态落点（进程级核验）══
+//
+// 对照 openspec/changes/single-state-dir/specs/ 三个增量里此前只有单元级
+// 或一次性人工验收（任务 8.3 等价执行）的场景，把机械断言固化成进程级 e2e：
+//
+// - cli-service「one variable relocates every state file」+「no state write
+//   escapes the derived directory」：完整 core 旅程（健康、项目注册、
+//   provider put、fake-claude 回合、SIGTERM 优雅退出）后断言每个状态产物
+//   都在钉住的目录内、fake 主目录（HOME 钉进沙箱）下无 `.sebas`、退休名
+//   `sebas.db` 无处出现；
+// - state-store「bounded configuration is separated from growing user
+//   data」：providers 行物理落在 settings.db、projects 行物理落在
+//   projects.db，且两库各自只装自己域的表（拆库的证据不止解析函数）；
+// - cli-service「the retired database variable has no effect」：导出
+//   `SEBAS_STATE_DB` 后分层库照常从状态目录解析，启动日志点名提示、退休
+//   路径从不被创建；
+// - state-store「Environment override relocates the database」：逐库覆盖
+//   只搬走那一个库，其余照常在状态目录内。
+
+/// 沙箱内全部普通文件（递归，排序后返回相对路径字符串）。
+fn state_dir_walk(dir: &std::path::Path) -> Vec<String> {
+    fn walk(dir: &std::path::Path, prefix: &str, out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let rel = format!("{prefix}{name}");
+            if e.path().is_dir() {
+                walk(&e.path(), &format!("{rel}/"), out);
+            } else {
+                out.push(rel);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, "", &mut out);
+    out.sort();
+    out
+}
+
+/// 只读打开一个 SQLite 库并对 `sqlite_master` 计数指定表。
+fn state_dir_table_count(db: &std::path::Path, tables: &[&str]) -> usize {
+    let conn = rusqlite::Connection::open_with_flags(
+        db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap_or_else(|e| panic!("open {}: {e}", db.display()));
+    let mut hits = 0;
+    for t in tables {
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?1",
+                [t],
+                |r| r.get(0),
+            )
+            .unwrap_or_else(|e| panic!("sqlite_master probe {t} in {}: {e}", db.display()));
+        hits += usize::try_from(n).unwrap();
+    }
+    hits
+}
+
+/// 等会话回合到 Done，返回会话详情（轮询 /api/sessions/{key}）。
+async fn state_dir_wait_done(
+    cli: &reqwest::Client,
+    sb: &Sandbox,
+    key: &str,
+) -> serde_json::Value {
+    let url = format!("{}/api/sessions/{key}", sb.webui_url());
+    let hint = sb.path.clone();
+    wait_for("session turn to reach Done", Duration::from_secs(30), &hint, move || {
+        let cli = cli.clone();
+        let url = url.clone();
+        Box::pin(async move {
+            let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+            (v["status_slug"].as_str() == Some("done")).then_some(v)
+        })
+    })
+    .await
+}
+
+/// cli-service「one variable relocates every state file」+「no state write
+/// escapes the derived directory」的旅程级机械化（任务 8.3 的常驻自动化版）：
+/// 只钉 `SEBAS_STATE_DIR`（HOME 一并钉进沙箱 = fake 操作员主目录）跑完整
+/// core 旅程，随后断言——
+/// 1. 两库都在目录内且**域分离**：settings.db 只装 providers/model_aliases/
+///    settings 三表，projects.db 只装 projects/session_map 两表；
+/// 2. 写进的数据落在正确的库里：provider 行在 settings.db，project 行在
+///    projects.db（bounded config vs growing user data 的文件级证据）；
+/// 3. fake 主目录下没有 `.sebas`（任何经 HOME 兜底的写都会落在
+///    `<沙箱>/.sebas`，其不存在 = 无一处逃逸派生目录）；
+/// 4. 退休名 `sebas.db` 无处出现；
+/// 5. SIGTERM 优雅退出移除 channel socket。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn single_state_dir_journey_pins_every_state_location() {
+    let sb = Sandbox::new("testsuite_e2e", "state-dir");
+    let cli = http_client();
+    let mut core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    // 项目注册（core projects.db 的 add 写入）。
+    let project_id = scene_project_id(&cli, &sb).await;
+    assert!(!project_id.is_empty(), "project registered");
+
+    // provider put（core settings.db 的 PersistedState 事务写入）。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/providers", sb.webui_url()),
+        serde_json::json!({
+            "name": "pinned",
+            "protocol": "anthropic",
+            "base_url_anthropic": "http://127.0.0.1:9",
+            "api_key": "sk-sandbox-dummy"
+        }),
+    )
+    .await
+    .expect("create provider");
+    assert_eq!(status, 201, "provider create: {body}");
+
+    // fake-claude 会话回合（完整旅程）。
+    let (s, resp) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "project_id": project_id, "prompt": "hello", "agent": "claude" }),
+    )
+    .await
+    .expect("create session");
+    assert_eq!(s, 201, "create session: {resp}");
+    let key = resp["key"].as_str().expect("session key").to_string();
+    let detail = state_dir_wait_done(&cli, &sb, &key).await;
+    assert_eq!(detail["status_slug"], "done", "turn must complete");
+
+    // SIGTERM core：优雅退出（state-store 通道生命周期）。
+    #[cfg(unix)]
+    {
+        let pid = core.id().expect("core pid");
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+    }
+    #[cfg(not(unix))]
+    core.kill().await.expect("kill core");
+    let _ = core.wait().await;
+    assert!(
+        !sb.channel_path.exists(),
+        "graceful exit must remove the channel socket"
+    );
+
+    // ── 机械断言：全部状态产物都在钉住的目录内 ──
+    let files = state_dir_walk(&sb.path);
+    // 3) 无 `.sebas`：HOME 钉在沙箱，HOME 兜底的任何写都会露形为
+    //    `<沙箱>/.sebas/...`——其不存在 = 旅程中没有一处状态逃出派生目录。
+    assert!(
+        files.iter().all(|f| !f.starts_with(".sebas/")),
+        "no state may escape into a home-relative .sebas: {files:?}"
+    );
+    // 4) 退休名从不被创建（任何层级、任何子目录）。
+    assert!(
+        files.iter().all(|f| !f.ends_with("/sebas.db") && f != "sebas.db"),
+        "the retired single-DB file name must never appear: {files:?}"
+    );
+    // 1) 两库在场且域分离。
+    let settings_db = sb.path.join("settings.db");
+    let projects_db = sb.path.join("projects.db");
+    assert!(settings_db.exists(), "settings.db must exist in the state dir");
+    assert!(projects_db.exists(), "projects.db must exist in the state dir");
+    assert_eq!(
+        state_dir_table_count(&settings_db, &["providers", "model_aliases", "settings"]),
+        3,
+        "settings.db carries exactly the bounded configuration tables"
+    );
+    assert_eq!(
+        state_dir_table_count(&settings_db, &["projects", "session_map"]),
+        0,
+        "settings.db must not carry any user-data tables"
+    );
+    assert_eq!(
+        state_dir_table_count(&projects_db, &["projects", "session_map"]),
+        2,
+        "projects.db carries exactly the growing user-data tables"
+    );
+    assert_eq!(
+        state_dir_table_count(&projects_db, &["providers", "model_aliases", "settings"]),
+        0,
+        "projects.db must not carry any configuration tables"
+    );
+    // 2) 数据落在正确的库里。
+    {
+        let conn = rusqlite::Connection::open_with_flags(
+            &settings_db,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM providers WHERE id = 'pinned'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "provider row must live in settings.db");
+    }
+    {
+        let conn = rusqlite::Connection::open_with_flags(
+            &projects_db,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
+            .unwrap();
+        assert!(n >= 1, "project row must live in projects.db");
+    }
+}
+
+/// cli-service「the retired database variable has no effect」（任务 6.1 的
+/// 进程级固化）：导出 `SEBAS_STATE_DB` 启动 core——分层库照常从状态目录
+/// 解析并创建、退休路径从不被创建、启动日志对残留值给出点名提示。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn retired_state_db_var_is_warned_and_ignored() {
+    let sb = Sandbox::new("testsuite_e2e", "retired-var");
+    let retired_path = sb.path.join("sebas.db");
+    let retired = retired_path.to_string_lossy().into_owned();
+    let cli = http_client();
+    let _core = sb.spawn_core_extra(&[("SEBAS_STATE_DB", &retired)]);
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    // 退休变量被点名提示（run.rs 的启动 warn）。
+    let hint = sb.path.clone();
+    let log = sb.core_log.clone();
+    wait_for("core logs the retired-variable warning", Duration::from_secs(10), &hint, move || {
+        let log = log.clone();
+        Box::pin(async move {
+            let text = std::fs::read_to_string(&log).ok()?;
+            (text.contains("SEBAS_STATE_DB") && text.contains("退休")).then_some(())
+        })
+    })
+    .await;
+
+    // 退休路径从不被创建；分层库照常解析。
+    assert!(
+        !retired_path.exists(),
+        "the retired variable's path must never be created: {}",
+        retired_path.display()
+    );
+    assert!(sb.path.join("settings.db").exists(), "settings.db resolves from the state dir");
+    assert!(sb.path.join("projects.db").exists(), "projects.db resolves from the state dir");
+}
+
+/// state-store「Environment override relocates the database」的进程级：
+/// `SEBAS_PROJECTS_DB` 只搬走 projects.db——项目注册的真实写入落在覆盖
+/// 路径上，派生路径不再建库，settings.db 与其余落点照常在状态目录内。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn projects_db_override_relocates_only_that_database() {
+    let sb = Sandbox::new("testsuite_e2e", "projects-override");
+    let elsewhere = sb.path.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).expect("mkdir elsewhere");
+    let override_path = elsewhere.join("proj.db");
+    let override_str = override_path.to_string_lossy().into_owned();
+
+    let cli = http_client();
+    let mut core = sb.spawn_core_extra(&[("SEBAS_PROJECTS_DB", &override_str)]);
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    // 项目注册：经 core 通道写 projects 域——写的就是覆盖路径上的库。
+    let project_id = scene_project_id(&cli, &sb).await;
+    assert!(!project_id.is_empty(), "project registered");
+
+    #[cfg(unix)]
+    {
+        let pid = core.id().expect("core pid");
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+    }
+    #[cfg(not(unix))]
+    core.kill().await.expect("kill core");
+    let _ = core.wait().await;
+
+    // 覆盖路径收到真实的库（projects 表里是刚注册的行）。
+    assert!(override_path.exists(), "the override path owns the projects db");
+    {
+        let conn = rusqlite::Connection::open_with_flags(
+            &override_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
+            .unwrap();
+        assert!(n >= 1, "registered project must land in the relocated db");
+    }
+    // 派生路径不再建库；settings.db 照常在状态目录内。
+    assert!(
+        !sb.path.join("projects.db").exists(),
+        "the derived projects.db must not be created when overridden"
+    );
+    assert!(sb.path.join("settings.db").exists(), "settings.db stays in the state dir");
+}
+
+/// watchdog spec「sandboxed watchdog does not touch the operator's
+/// directory」+「a runtime override survives a watchdog restart」+「the
+/// watchdog acquires no persistence layer」+「core still ignores the
+/// override layer」的进程级旅程：监督形态下经 webui admin 控制面（HTTP，
+/// 非浏览器）做 ServiceSet——services.json 落在状态目录内且是普通 JSON
+/// 文件（非 SQLite）；core 的停用请求被拒、core 子进程照常存活；watchdog
+/// 重启后 router 的期望态从文件读回、spawn 决策照旧。
+#[cfg(target_os = "linux")] // find_child_pid 走 /proc/<pid>/cmdline
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn watchdog_service_override_lives_in_state_dir_and_survives_restart() {
+    let sb = Sandbox::new("testsuite_e2e", "watchdog-state-dir");
+    sb.enable_supervised_core();
+    // 控制socket（control.sock）按 XDG_RUNTIME_DIR 解析——钉进沙箱。
+    let xdg_run = sb.path.join("xdg-run");
+    std::fs::create_dir_all(&xdg_run).expect("mkdir xdg-run");
+    let xdg = support::forward_slash(&xdg_run);
+    let cfg = support::forward_slash(&sb.config_path);
+    let cli = http_client();
+    // 不带 --debug：router 初值 = config 开关（默认关）→ 初始无 router 子进程，
+    // 让「enable 持久化 + 重启后读回」有干净的起点。
+    let mut watchdog = sb.spawn(
+        &["run", "-c", &cfg],
+        &sb.core_secret,
+        &[("XDG_RUNTIME_DIR", &xdg)],
+        &sb.core_log,
+    );
+    wait_reachable(&cli, &sb).await;
+    let watchdog_pid = watchdog.id().expect("watchdog pid");
+    let hint = sb.path.clone();
+
+    // admin 控制面在场（standalone webui 持 ControlRpcAdminAdapter）。
+    let services_url = format!("{}/api/admin/services", sb.webui_url());
+    let services: serde_json::Value = cli
+        .get(&services_url)
+        .send()
+        .await
+        .expect("GET admin services")
+        .json()
+        .await
+        .expect("admin services json");
+    assert_eq!(
+        services["adapter_ok"], true,
+        "the supervised webui must carry the control adapter: {services}"
+    );
+
+    // 初始无 router 子进程（config 默认关、无覆盖层）。
+    assert!(
+        find_child_pid(watchdog_pid, "router").is_none(),
+        "router must not spawn while its desired state is off"
+    );
+
+    // ServiceSet(router on, persist)：写覆盖层 + 拉起 router 子进程。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{services_url}/router/enable"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("enable router");
+    assert_eq!(status, 200, "router enable: {body}");
+
+    // 覆盖层落在状态目录内（派生落点——不是操作员配置目录）。
+    let services_json = sb.path.join("services.json");
+    wait_for("services.json to appear in the state dir", Duration::from_secs(10), &hint, {
+        let services_json = services_json.clone();
+        move || {
+            let services_json = services_json.clone();
+            Box::pin(async move { services_json.exists().then_some(()) })
+        }
+    })
+    .await;
+    let raw = std::fs::read_to_string(&services_json).expect("read services.json");
+    // 普通文件、非任何数据库形态（watchdog 不引入持久层）。
+    assert!(
+        !raw.starts_with("SQLite format 3"),
+        "the override layer must stay a plain file"
+    );
+    let table: serde_json::Value = serde_json::from_str(&raw).expect("services.json parses");
+    assert_eq!(table["router"], "on", "recorded override: {table}");
+
+    // router 子进程被拉起。
+    wait_for("router child to spawn", Duration::from_secs(20), &hint, {
+        move || {
+            let pid = find_child_pid(watchdog_pid, "router");
+            Box::pin(async move { pid.map(|p| p as u64) })
+        }
+    })
+    .await;
+
+    let (core_status, core_body) = post_json(
+        &cli,
+        &format!("{services_url}/core/disable"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("disable core");
+    assert_ne!(
+        core_status, 200,
+        "core must reject being disabled via the override layer: {core_body}"
+    );
+    assert!(
+        core_body["error"].as_str().is_some_and(|e| !e.is_empty()),
+        "the rejection must name its cause: {core_body}"
+    );
+    assert!(
+        find_child_pid(watchdog_pid, "core").is_some(),
+        "core must stay supervised"
+    );
+
+    // watchdog 重启：router 的期望态从 services.json 读回——spawn 决策照旧。
+    unsafe { libc::kill(watchdog_pid as libc::pid_t, libc::SIGTERM) };
+    let _ = watchdog.wait().await;
+    // 旧 webui 子进程随监督关闭退出——等端口真正释放再起新 watchdog。
+    wait_for("old webui port to be released", Duration::from_secs(15), &hint, {
+        let cli = cli.clone();
+        let url = format!("{}/health", sb.webui_url());
+        move || {
+            let cli = cli.clone();
+            let url = url.clone();
+            Box::pin(async move { cli.get(&url).send().await.is_err().then_some(()) })
+        }
+    })
+    .await;
+
+    let watchdog2 = sb.spawn(
+        &["run", "-c", &cfg],
+        &sb.core_secret,
+        &[("XDG_RUNTIME_DIR", &xdg)],
+        &sb.core_log,
+    );
+    wait_reachable(&cli, &sb).await;
+    let watchdog2_pid = watchdog2.id().expect("watchdog2 pid");
+    let _router_pid = wait_for("router child respawned from the override file", Duration::from_secs(20), &hint, {
+        move || {
+            let pid = find_child_pid(watchdog2_pid, "router");
+            Box::pin(async move { pid.map(|p| p as u64) })
+        }
+    })
+    .await;
+    // core 子进程照常无条件拉起（覆盖层从未被写入 core，重启后也不读它）。
+    assert!(
+        find_child_pid(watchdog2_pid, "core").is_some(),
+        "core must be spawned unconditionally after restart"
+    );
+
+    // 全程无 `.sebas` 逃逸（HOME 钉在沙箱）。
+    let files = state_dir_walk(&sb.path);
+    assert!(
+        files.iter().all(|f| !f.starts_with(".sebas/")),
+        "watchdog must not write outside the state dir: {files:?}"
+    );
+}

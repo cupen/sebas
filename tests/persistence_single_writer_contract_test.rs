@@ -10,9 +10,10 @@
 //!   的多语句写入单元对并发读者**整体可见**——读者永远看不到单元写了一半的
 //!   中间态（两条同代行不会一新一旧）；
 //! - R3/R4 的端到端组合面：根 crate 的**域接线**（`sebas_state::writer::
-//!   StateWriter` + 五表注册表）驱动 sebas-db actor，`StateHandle` 类型化门面
+//!   StateWriter` + 域注册表）驱动 sebas-db actor，`StateHandle` 类型化门面
 //!   对 `sebas-models` 的 ActiveRecord 行做 save/find/all/delete 全往返——
-//!   单元测试用的是中性夹具表，这里补真域形状；
+//!   单元测试用的是中性夹具表，这里补真域形状（projects 行走 projects 库
+//!   写者，single-state-dir 分层）；
 //! - R1「A second database does not re-implement the recipe」的行为面：auth.db
 //!   （第二个库）在**多连接并发写**下靠共享配方的 busy_timeout=5s + WAL +
 //!   Immediate 事务入口全部成功——pragma 读数断言（user_store 单测）之外的
@@ -87,7 +88,7 @@ async fn commands_apply_one_at_a_time_and_each_caller_gets_its_own_result() {
 #[tokio::test]
 async fn reader_never_observes_a_torn_multi_statement_unit() {
     let dir = tempdir().unwrap();
-    let writer = StateWriter::start(dir.path().join("torn.db")).unwrap();
+    let writer = StateWriter::start_projects(dir.path().join("projects.db")).unwrap();
     let handle = writer.handle().clone();
 
     let row = |path: &str, generation: i64| ProjectRow {
@@ -169,13 +170,13 @@ async fn reader_never_observes_a_torn_multi_statement_unit() {
 
 // ---- R3/R4：类型化门面经域接线全往返（真域注册表 + sebas-models 行）----
 
-/// 根 crate 的 `StateWriter::start(db_path)`（域接线）→ sebas-db actor →
-/// `sebas-models` 的 `ProjectRow`：save（插入/覆盖两分支）、find（命中/未
-/// 命中）、all、delete（命中/再删）全走单写线程。
+/// 根 crate 的 `StateWriter::start_projects(db_path)`（域接线）→ sebas-db
+/// actor → `sebas-models` 的 `ProjectRow`：save（插入/覆盖两分支）、find
+/// （命中/未命中）、all、delete（命中/再删）全走单写线程。
 #[tokio::test]
 async fn typed_facade_round_trips_domain_rows_through_domain_wiring() {
     let dir = tempdir().unwrap();
-    let writer = StateWriter::start(dir.path().join("facade-domain.db")).unwrap();
+    let writer = StateWriter::start_projects(dir.path().join("facade-projects.db")).unwrap();
     let handle = writer.handle().clone();
 
     let row = ProjectRow {

@@ -9,16 +9,22 @@ use sebas::sebas_state::writer::StateWriter;
 use sebas_dispatch::state_store::StateStoreEngine;
 
 /// 写一条 settings + 一条 project → 关闭写者（模拟进程结束）→
-/// 重新打开同一 DB → 数据仍在。
+/// 重新打开同一对 DB → 数据仍在。single-state-dir 起 settings 与 projects
+/// 分属两库——两个写者各开一次（run.rs 的生产装配形态）。
 #[test]
 fn committed_mutation_survives_writer_restart() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("persist.db");
+    let settings_path = dir.path().join("settings.db");
+    let projects_path = dir.path().join("projects.db");
 
     // 第一次生命周期：写者 + 引擎。
     {
-        let writer = StateWriter::start(path.clone()).unwrap();
-        let engine = sebas::sebas_state::engine::DbStateEngine::new(writer.handle().clone());
+        let settings = StateWriter::start(settings_path.clone()).unwrap();
+        let projects = StateWriter::start_projects(projects_path.clone()).unwrap();
+        let engine = sebas::sebas_state::engine::DbStateEngine::with_projects(
+            settings.handle().clone(),
+            projects.handle().clone(),
+        );
 
         // settings（空对象 = 合法 CardConfig）。
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -40,13 +46,18 @@ fn committed_mutation_survives_writer_restart() {
         });
 
         // 写者 drop = 进程结束（mutation 已提交，DB 已持久）。
-        drop(writer);
+        drop(settings);
+        drop(projects);
     }
 
-    // 第二次生命周期：重新打开同一 DB。
+    // 第二次生命周期：重新打开同一对 DB。
     {
-        let writer = StateWriter::start(path.clone()).unwrap();
-        let engine = sebas::sebas_state::engine::DbStateEngine::new(writer.handle().clone());
+        let settings = StateWriter::start(settings_path.clone()).unwrap();
+        let projects = StateWriter::start_projects(projects_path.clone()).unwrap();
+        let engine = sebas::sebas_state::engine::DbStateEngine::with_projects(
+            settings.handle().clone(),
+            projects.handle().clone(),
+        );
         let rt = tokio::runtime::Runtime::new().unwrap();
 
         // settings 在。

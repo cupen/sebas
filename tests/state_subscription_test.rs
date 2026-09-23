@@ -66,20 +66,31 @@ async fn start_core(dir: &std::path::Path) -> TestCore {
     panic!("core session channel socket never appeared");
 }
 
+/// 两库写者的存活句柄（drop = 写者线程退出）。
+struct Writers {
+    _settings: StateWriter,
+    _projects: StateWriter,
+}
+
 /// 初始化全局状态引擎（本进程独占，仅第一次调用真实初始化）。
-/// 返回 StateWriter 保持写者线程存活（借自进程级 OnceLock）。
+/// 返回保持写者线程存活的句柄（借自进程级 OnceLock）。single-state-dir：
+/// settings 与 projects 分属两库——两个写者各开一次。
 /// 两个测试通过 `TEST_SERIAL` 串行执行，共享同一全局 engine/DB。
-fn init_state_engine(dir: &std::path::Path) -> &'static StateWriter {
+fn init_state_engine(dir: &std::path::Path) -> &'static Writers {
     use std::sync::OnceLock;
-    static WRITER: OnceLock<StateWriter> = OnceLock::new();
+    static WRITERS: OnceLock<Writers> = OnceLock::new();
     if sebas_dispatch::state_store::engine().is_none() {
-        let path = dir.join("state.db");
-        let writer = StateWriter::start(path).expect("state writer starts");
-        let engine = Box::new(DbStateEngine::new(writer.handle().clone()));
+        let settings = StateWriter::start(dir.join("settings.db")).expect("settings writer starts");
+        let projects =
+            StateWriter::start_projects(dir.join("projects.db")).expect("projects writer starts");
+        let engine = Box::new(DbStateEngine::with_projects(
+            settings.handle().clone(),
+            projects.handle().clone(),
+        ));
         sebas_dispatch::state_store::init_engine(engine);
-        let _ = WRITER.set(writer);
+        let _ = WRITERS.set(Writers { _settings: settings, _projects: projects });
     }
-    WRITER.get().expect("writer initialized")
+    WRITERS.get().expect("writer initialized")
 }
 
 /// 进程级串行锁：全局 engine 只能初始化一次（OnceLock），测试间共享

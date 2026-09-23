@@ -5,6 +5,14 @@
 //! 一表一 struct）；连接/同步/单写 actor 在 [`sebas_db`]。本文件剩下的
 //! 自由函数只覆盖**引用角色类型的胶水**——`PersistedState`（sebas-dispatch）
 //! 与 `CardConfig`（sebas-feishu）进不了 sebas-models 的依赖清单。
+//!
+//! single-state-dir D2/D5：core 的库按**增长特征**分成两个——
+//! [`SETTINGS_TABLES`]（providers / model_aliases / settings，有界系统配置）
+//! 与 [`PROJECTS_TABLES`]（projects / session_map，增长的用户数据）。两库
+//! 各开一次连接、各有一份注册表与版本戳；`save_persisted_state` 的三表
+//! 事务全部落在 settings.db 内，**没有任何写事务横跨两库**（design D4
+//! 枚举表）。项目/会话映射的存储胶水在 `projects_glue`（经
+//! `sebas_models::project` 的域查询与 ActiveRecord）。
 
 use rusqlite::Connection;
 use sebas_db::schema::TableSchema;
@@ -14,20 +22,26 @@ use sebas_models::runtime_state::{self, RuntimeStateRow};
 
 // ---- Table schemas (sqlite-auto-schema-sync) ----
 
-/// 五表注册清单: (表名, 首建/重建 DDL, 派生列) (sqlite-auto-schema-sync D2)。
-///
-/// - DDL 只在"建新库/重置"时执行, 与 v2 基线逐字对齐 (列名/类型/默认值/
-///   约束/索引); 日常同步只对比派生列 vs `PRAGMA table_info`。
-/// - 结构性约束 (PRIMARY KEY / UNIQUE / REFERENCES) 与索引只能表达在 DDL:
-///   这类列在 struct 里没有非空默认, 缺列场景由 sync 判为不可原地补列 → 重置。
-/// - 列清单来自 `sebas-models` 的行 struct（extract-sebas-db 4.1——derive
-///   首次在根 crate 之外工作）。
-pub static REGISTERED_TABLES: &[TableSchema] = &[
+/// settings.db 注册清单（有界系统配置）：providers / model_aliases /
+/// settings。DDL 只在"建新库/重置"时执行, 与注册列逐一对应; 日常同步只
+/// 对比派生列 vs `PRAGMA table_info`。providers 已扁平化为类型化列
+/// （single-state-dir 3.2，列名与既有 provider JSON 键对齐）。
+pub static SETTINGS_TABLES: &[TableSchema] = &[
     TableSchema {
         name: "providers",
         create_ddl: "CREATE TABLE providers (
             id          TEXT PRIMARY KEY,
-            config      TEXT NOT NULL,       -- JSON blob
+            name        TEXT,
+            preset      TEXT,
+            base_url_anthropic        TEXT,
+            base_url_openai_chat      TEXT,
+            base_url_openai_responses TEXT,
+            api_key     TEXT,
+            api_key_env TEXT,
+            default_model TEXT,
+            protocol    TEXT,
+            models      TEXT,            -- JSON 文本（id/tags 条目数组）
+            model_map   TEXT,            -- JSON 文本（对象）
             deleted     INTEGER NOT NULL DEFAULT 0,
             created_at  INTEGER NOT NULL,
             updated_at  INTEGER NOT NULL
@@ -54,6 +68,11 @@ pub static REGISTERED_TABLES: &[TableSchema] = &[
         );",
         columns: sebas_models::setting::SettingRow::schema_columns(),
     },
+];
+
+/// projects.db 注册清单（增长的用户数据）：projects / session_map。表形状
+/// 不变（`migrate-project-registry` 负责目标形状重建；本 change 只换库）。
+pub static PROJECTS_TABLES: &[TableSchema] = &[
     TableSchema {
         name: "projects",
         create_ddl: "CREATE TABLE projects (
@@ -63,7 +82,7 @@ pub static REGISTERED_TABLES: &[TableSchema] = &[
             branch_at   INTEGER NOT NULL DEFAULT 0,
             added_at    INTEGER NOT NULL,
             sort_order  INTEGER NOT NULL DEFAULT 0,
-            -- workbench-agent-wire-fix 2.4: 迁移 2 追加的列, 放在末尾与 v2 布局一致
+            -- workbench-agent-wire-fix 2.4: 迁移 2 追加的列, 放在末尾
             id            TEXT,
             default_agent TEXT
         );
@@ -84,33 +103,29 @@ pub static REGISTERED_TABLES: &[TableSchema] = &[
     },
 ];
 
-// ---- PersistedState 域的存储侧胶水 ----
+// ---- PersistedState 域的存储侧胶水（settings.db）----
 
-/// 从 DB 加载 provider 数据, 构造 `sebas_dispatch::state_store::PersistedState`。
+/// 从 settings.db 加载 provider 数据, 构造
+/// `sebas_dispatch::state_store::PersistedState`。
 ///
 /// 读取 providers 表(含软删) + model_aliases 表 + settings 的 runtime 状态,
-/// 经 `sebas_models` 的行 struct 出入（extract-sebas-db D3b：无类型载体出局）。
+/// 经 `sebas_models` 的行 struct 出入。providers 的 wire 形状经
+/// `ProviderRow::to_item` 还原（类型化列 ↔ JSON 键一一对应）。
 pub fn load_persisted_state(
     conn: &mut Connection,
 ) -> Result<sebas_dispatch::state_store::PersistedState, String> {
     use sebas_dispatch::state_store::PersistedState;
     use std::collections::BTreeMap;
 
-    // 读 providers 表 (含软删)——行经 ProviderRow。
-    let mut providers: BTreeMap<String, sebas_dispatch::crud::Item> = BTreeMap::new();
+    // 读 providers 表 (含软删)——行经 ProviderRow，wire 形状经 to_item。
+    let mut providers: BTreeMap<String, sebas_dispatch::state_store::Item> = BTreeMap::new();
     let mut deleted: Vec<String> = Vec::new();
     for row in ProviderRow::all(conn).map_err(|e| format!("查询 providers 失败: {e}"))? {
         if row.deleted != 0 {
             deleted.push(row.id);
         } else {
-            match serde_json::from_str::<sebas_dispatch::crud::Item>(&row.config) {
-                Ok(item) => {
-                    providers.insert(row.id, item);
-                }
-                Err(e) => {
-                    tracing::warn!(provider = %row.id, error = %e, "failed to parse provider config JSON, skipping");
-                }
-            }
+            let item = row.to_item();
+            providers.insert(row.id, item);
         }
     }
 
@@ -142,10 +157,12 @@ pub fn load_persisted_state(
     })
 }
 
-/// 保存 PersistedState 到 DB。
+/// 保存 PersistedState 到 settings.db。
 ///
 /// 写入 providers 表 (upsert + 软删) + model_aliases + 运行时状态到 settings
-/// 表，全部经 ActiveRecord 的 `save()`，单事务提交。
+/// 表，全部经 ActiveRecord 的 `save()`，**单事务单连接**——providers/
+/// aliases/runtime_state 同属有界系统配置，事务完整地落在 settings 库内，
+/// 不触达 projects.db（design D3/D4，任务 2.3 有单测钉住）。
 pub fn save_persisted_state(
     conn: &mut Connection,
     state: &sebas_dispatch::state_store::PersistedState,
@@ -163,32 +180,19 @@ pub fn save_persisted_state(
 
     let now = sebas_domain::prim::now_unix();
 
-    // 写 providers (非软删)
+    // 写 providers (非软删)——Item 经 from_item 折进类型化列。
     for (id, item) in &state.providers {
-        let config =
-            serde_json::to_string(item).map_err(|e| format!("序列化 provider {id} 失败: {e}"))?;
-        ProviderRow {
-            id: id.clone(),
-            config,
-            deleted: 0,
-            created_at: now,
-            updated_at: now,
-        }
-        .save(&tx)
-        .map_err(|e| format!("写入 provider {id} 失败: {e}"))?;
+        ProviderRow::from_item(id, item)
+            .save(&tx)
+            .map_err(|e| format!("写入 provider {id} 失败: {e}"))?;
     }
 
-    // 写 deleted providers (软删)
+    // 写 deleted providers (软删)——墓碑行只留 id。
     for id in &state.deleted {
-        ProviderRow {
-            id: id.clone(),
-            config: "{}".to_string(),
-            deleted: 1,
-            created_at: now,
-            updated_at: now,
-        }
-        .save(&tx)
-        .map_err(|e| format!("写入 deleted provider {id} 失败: {e}"))?;
+        let mut row = ProviderRow::from_item(id, &serde_json::Map::new());
+        row.deleted = 1;
+        row.save(&tx)
+            .map_err(|e| format!("写入 deleted provider {id} 失败: {e}"))?;
     }
 
     // 写 model_aliases (add-state-store 5.3：随状态库流转)
@@ -265,20 +269,30 @@ mod tests {
     use sebas_db::schema::open_and_sync;
     use sebas_dispatch::provider_state::ProviderMode;
     use sebas_dispatch::state_store::{DefaultSelection, PersistedState};
-    use sebas_models::project;
     use std::collections::BTreeMap;
     use tempfile::tempdir;
 
-    fn setup_db() -> (tempfile::TempDir, Connection) {
+    /// settings.db（三表注册表）连接。
+    fn settings_db() -> (tempfile::TempDir, Connection) {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("test.db");
-        let conn = open_and_sync(&path, REGISTERED_TABLES).unwrap().0;
+        let conn = open_and_sync(&dir.path().join("settings.db"), SETTINGS_TABLES)
+            .unwrap()
+            .0;
+        (dir, conn)
+    }
+
+    /// projects.db（两表注册表）连接。
+    fn projects_db() -> (tempfile::TempDir, Connection) {
+        let dir = tempdir().unwrap();
+        let conn = open_and_sync(&dir.path().join("projects.db"), PROJECTS_TABLES)
+            .unwrap()
+            .0;
         (dir, conn)
     }
 
     #[test]
     fn load_empty_db_returns_default_state() {
-        let (_dir, mut conn) = setup_db();
+        let (_dir, mut conn) = settings_db();
         let state = load_persisted_state(&mut conn).unwrap();
         assert!(state.providers.is_empty());
         assert!(state.deleted.is_empty());
@@ -286,16 +300,22 @@ mod tests {
         assert_eq!(state.default_selection, None);
     }
 
+    /// 3.2 验收：providers 的 wire 形状（Item）经 save/load 往返与写入时
+    /// 一致——类型化列对 channel 形状透明。
     #[test]
-    fn save_and_load_provider_state_round_trips() {
-        let (_dir, mut conn) = setup_db();
+    fn save_and_load_provider_state_round_trips_wire_shape() {
+        let (_dir, mut conn) = settings_db();
 
-        let mut item = serde_json::Map::new();
-        item.insert("name".into(), serde_json::Value::String("deepseek".into()));
-        item.insert(
-            "preset".into(),
-            serde_json::Value::String("deepseek".into()),
-        );
+        let item = serde_json::from_value::<serde_json::Map<String, serde_json::Value>>(
+            serde_json::json!({
+                "name": "deepseek",
+                "preset": "deepseek",
+                "base_url_openai_chat": "https://api.deepseek.com",
+                "api_key": "sk-x",
+                "models": [{"id": "deepseek-chat", "tags": []}],
+            }),
+        )
+        .unwrap();
 
         let original = PersistedState {
             version: 2,
@@ -312,7 +332,11 @@ mod tests {
         let loaded = load_persisted_state(&mut conn).unwrap();
 
         assert_eq!(loaded.providers.len(), 1);
-        assert!(loaded.providers.contains_key("deepseek"));
+        assert_eq!(
+            loaded.providers.get("deepseek"),
+            original.providers.get("deepseek"),
+            "provider wire 形状经类型化列往返逐字段一致"
+        );
         assert!(loaded.deleted.contains(&"openai".to_string()));
         assert_eq!(
             loaded.mode,
@@ -328,7 +352,7 @@ mod tests {
 
     #[test]
     fn load_settings_round_trips() {
-        let (_dir, mut conn) = setup_db();
+        let (_dir, mut conn) = settings_db();
         let cfg = sebas_feishu::cards::CardConfig::default();
         save_settings(&mut conn, &cfg).unwrap();
         let loaded = load_settings(&mut conn).unwrap();
@@ -337,52 +361,55 @@ mod tests {
 
     #[test]
     fn load_settings_absent_returns_none() {
-        let (_dir, mut conn) = setup_db();
+        let (_dir, mut conn) = settings_db();
         let loaded = load_settings(&mut conn).unwrap();
         assert!(loaded.is_none());
     }
 
+    /// 3.1 验收：projects / session_map 在 projects.db（PROJECTS_TABLES）
+    /// 上照常工作——两库拆分后项目域的存储胶水不依赖 settings 库。
     #[test]
-    fn projects_crud() {
-        let (_dir, mut conn) = setup_db();
+    fn projects_crud_on_projects_db() {
+        let (_dir, mut conn) = projects_db();
         let now = 1000;
 
         // 添加
-        project::add_project(&mut conn, "/tmp/p1", "p1", now).unwrap();
-        project::add_project(&mut conn, "/tmp/p2", "p2", now + 1).unwrap();
+        sebas_models::project::add_project(&mut conn, "/tmp/p1", "p1", now).unwrap();
+        sebas_models::project::add_project(&mut conn, "/tmp/p2", "p2", now + 1).unwrap();
 
-        let projects = project::load_projects(&mut conn).unwrap();
+        let projects = sebas_models::project::load_projects(&mut conn).unwrap();
         assert_eq!(projects.len(), 2);
 
         // 删除
-        assert!(project::remove_project(&mut conn, "/tmp/p1").unwrap());
-        let projects = project::load_projects(&mut conn).unwrap();
+        assert!(sebas_models::project::remove_project(&mut conn, "/tmp/p1").unwrap());
+        let projects = sebas_models::project::load_projects(&mut conn).unwrap();
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].name, "p2");
 
         // 更新分支
-        project::update_project_branch(&mut conn, "/tmp/p2", Some("main"), now + 10).unwrap();
-        let projects = project::load_projects(&mut conn).unwrap();
+        sebas_models::project::update_project_branch(&mut conn, "/tmp/p2", Some("main"), now + 10)
+            .unwrap();
+        let projects = sebas_models::project::load_projects(&mut conn).unwrap();
         assert_eq!(projects[0].branch.as_deref(), Some("main"));
     }
 
     #[test]
     fn save_projects_replaces_all() {
-        let (_dir, mut conn) = setup_db();
+        let (_dir, mut conn) = projects_db();
         let now = 1000;
 
-        project::add_project(&mut conn, "/tmp/p1", "p1", now).unwrap();
-        project::add_project(&mut conn, "/tmp/p2", "p2", now + 1).unwrap();
+        sebas_models::project::add_project(&mut conn, "/tmp/p1", "p1", now).unwrap();
+        sebas_models::project::add_project(&mut conn, "/tmp/p2", "p2", now + 1).unwrap();
 
         // 全量替换
-        project::save_projects(&mut conn, &[]).unwrap();
-        let projects = project::load_projects(&mut conn).unwrap();
+        sebas_models::project::save_projects(&mut conn, &[]).unwrap();
+        let projects = sebas_models::project::load_projects(&mut conn).unwrap();
         assert!(projects.is_empty());
     }
 
     #[test]
     fn update_persisted_state_rmw() {
-        let (_dir, mut conn) = setup_db();
+        let (_dir, mut conn) = settings_db();
 
         update_persisted_state(&mut conn, |s| {
             s.mode = ProviderMode::Router;
@@ -393,18 +420,130 @@ mod tests {
         assert_eq!(state.mode, ProviderMode::Router);
     }
 
-    // ---- registered_tables_match_v2_baseline_columns（4.5 基线，迁移前既有）----
+    // ---- 任务 2.3 验收：save_persisted_state 只触达 settings 库的连接 ----
+
+    /// 该事务运行在**只有三张 settings 表**的连接上：若它引用 projects /
+    /// session_map，语句会因缺表当场失败——「事务只触达 settings 库的连接」
+    /// 由这个构造直接钉住（design D4：providers + model_aliases +
+    /// runtime_state 同落 settings.db，不跨库）。
+    #[test]
+    fn save_persisted_state_touches_only_the_settings_connection() {
+        let (dir, mut conn) = settings_db();
+
+        let state = PersistedState {
+            version: 2,
+            providers: BTreeMap::from([(
+                "deepseek".into(),
+                serde_json::from_value(serde_json::json!({"preset": "deepseek"})).unwrap(),
+            )]),
+            deleted: vec!["openai".into()],
+            mode: ProviderMode::Router,
+            default_selection: Some(DefaultSelection::new("deepseek")),
+            model_aliases: BTreeMap::from([(
+                "my-claude".into(),
+                sebas_dispatch::state_store::ModelAliasEntry {
+                    provider: "deepseek".into(),
+                    upstream_model: Some("claude-sonnet-4".into()),
+                },
+            )]),
+        };
+        save_persisted_state(&mut conn, &state).unwrap();
+
+        // 三张表都有数据；同连接上不存在任何 projects 域表。
+        // providers = 1 行在用 + 1 行墓碑（deleted provider）。
+        let providers: i64 = conn
+            .query_row("SELECT COUNT(*) FROM providers", [], |r| r.get(0))
+            .unwrap();
+        let aliases: i64 = conn
+            .query_row("SELECT COUNT(*) FROM model_aliases", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(providers, 2, "1 行在用 + 1 行墓碑");
+        assert_eq!(aliases, 1);
+        let runtime = runtime_state::load_runtime_state(&mut conn);
+        assert_eq!(runtime.0, ProviderMode::Router);
+        let project_tables: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' \
+                 AND name IN ('projects','session_map')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(project_tables, 0, "settings 库里没有 projects 域表");
+        let _ = dir;
+    }
+
+    // ---- 3.3 验收（跨库半边）：重置 projects.db 不影响 settings.db ----
+
+    /// projects.db 因 schema 漂移被隔离重建后，settings.db 的值原样健在
+    /// （spec「resetting user data leaves configuration intact」）。
+    #[test]
+    fn resetting_projects_db_leaves_settings_db_intact() {
+        let sdir = tempdir().unwrap();
+        let pdir = tempdir().unwrap();
+        let settings_path = sdir.path().join("settings.db");
+        let projects_path = pdir.path().join("projects.db");
+
+        // 两库各开一次并各写一份数据。
+        {
+            let (mut conn, _) = open_and_sync(&settings_path, SETTINGS_TABLES).unwrap();
+            save_settings(&mut conn, &sebas_feishu::cards::CardConfig::default()).unwrap();
+        }
+        {
+            let (mut conn, _) = open_and_sync(&projects_path, PROJECTS_TABLES).unwrap();
+            sebas_models::project::add_project(&mut conn, "/tmp/p", "p", 1).unwrap();
+        }
+
+        // 模拟 projects.db 的结构漂移（多余列 → 下次 open 触发隔离重置）。
+        {
+            let conn = sebas_db::conn::open(&projects_path).unwrap();
+            conn.execute_batch("ALTER TABLE projects ADD COLUMN stale TEXT;")
+                .unwrap();
+        }
+
+        // 重开 projects.db → 重置（隔离重建空 schema）。
+        let (_, outcome) = open_and_sync(&projects_path, PROJECTS_TABLES).unwrap();
+        assert!(
+            matches!(outcome, sebas_db::schema::SyncOutcome::Reset { .. }),
+            "结构漂移应触发 projects.db 重置, 实际 {outcome:?}"
+        );
+
+        // settings.db 完全不受影响：重开后配置仍在。
+        let (mut conn, outcome) = open_and_sync(&settings_path, SETTINGS_TABLES).unwrap();
+        assert_eq!(
+            outcome,
+            sebas_db::schema::SyncOutcome::UpToDate,
+            "settings.db 未被牵连"
+        );
+        assert!(
+            load_settings(&mut conn).unwrap().is_some(),
+            "settings 在 projects.db 重置后存活"
+        );
+    }
+
+    // ---- registered_tables_match_v2_baseline_columns（4.5 基线的拆库版）----
 
     #[test]
-    fn registered_tables_match_v2_baseline_columns() {
-        // 派生列与 v2 基线对齐的一次性护栏: 列名 + 亲和逐一核对
-        // （4.5：迁移前后基线一致——行 struct 迁 sebas-models 后列元数据不变）
-        let want: &[(&str, &[(&str, &str)])] = &[
+    fn registered_tables_match_baseline_columns() {
+        // 派生列与基线对齐的护栏: 列名 + 亲和逐一核对。
+        // providers 基线是 single-state-dir 3.2 的扁平化列（与 provider
+        // JSON 键对齐）；其余四表与迁移前逐字一致。
+        let settings: &[(&str, &[(&str, &str)])] = &[
             (
                 "providers",
                 &[
                     ("id", "TEXT"),
-                    ("config", "TEXT"),
+                    ("name", "TEXT"),
+                    ("preset", "TEXT"),
+                    ("base_url_anthropic", "TEXT"),
+                    ("base_url_openai_chat", "TEXT"),
+                    ("base_url_openai_responses", "TEXT"),
+                    ("api_key", "TEXT"),
+                    ("api_key_env", "TEXT"),
+                    ("default_model", "TEXT"),
+                    ("protocol", "TEXT"),
+                    ("models", "TEXT"),
+                    ("model_map", "TEXT"),
                     ("deleted", "INTEGER"),
                     ("created_at", "INTEGER"),
                     ("updated_at", "INTEGER"),
@@ -420,6 +559,8 @@ mod tests {
                 ],
             ),
             ("settings", &[("key", "TEXT"), ("value", "TEXT")]),
+        ];
+        let projects: &[(&str, &[(&str, &str)])] = &[
             (
                 "projects",
                 &[
@@ -444,16 +585,32 @@ mod tests {
                 ],
             ),
         ];
-        for (table, cols) in want {
-            let reg = REGISTERED_TABLES
-                .iter()
-                .find(|t| t.name == *table)
-                .unwrap();
-            assert_eq!(reg.columns.len(), cols.len(), "表 {table} 列数不一致");
-            for (col, (name, affinity)) in reg.columns.iter().zip(*cols) {
-                assert_eq!(col.name, *name, "表 {table} 列名不一致");
-                assert_eq!(col.affinity, *affinity, "表 {table} 列 {name} 亲和不一致");
+        for (registry, tables) in [(SETTINGS_TABLES, settings), (PROJECTS_TABLES, projects)] {
+            for (table, cols) in tables {
+                let reg = registry.iter().find(|t| t.name == *table).unwrap();
+                assert_eq!(reg.columns.len(), cols.len(), "表 {table} 列数不一致");
+                for (col, (name, affinity)) in reg.columns.iter().zip(*cols) {
+                    assert_eq!(col.name, *name, "表 {table} 列名不一致");
+                    assert_eq!(col.affinity, *affinity, "表 {table} 列 {name} 亲和不一致");
+                }
             }
+        }
+    }
+
+    /// 分层不变量：两份注册表各管各的表，无交叠、合并后恰好六表
+    /// （settings 三表 + projects 两表，schema_meta 由 runtime 自管）。
+    #[test]
+    fn registries_are_disjoint_and_complete() {
+        let mut seen = Vec::new();
+        for t in SETTINGS_TABLES.iter().chain(PROJECTS_TABLES.iter()) {
+            assert!(!seen.contains(&t.name), "表 {} 被注册了两次", t.name);
+            seen.push(t.name);
+        }
+        for expected in ["providers", "model_aliases", "settings"] {
+            assert!(SETTINGS_TABLES.iter().any(|t| t.name == expected));
+        }
+        for expected in ["projects", "session_map"] {
+            assert!(PROJECTS_TABLES.iter().any(|t| t.name == expected));
         }
     }
 }
@@ -462,7 +619,7 @@ mod tests {
 
 #[cfg(test)]
 mod active_record_tests {
-    use super::REGISTERED_TABLES;
+    use super::{PROJECTS_TABLES, SETTINGS_TABLES};
     use rusqlite::Connection;
     use sebas_db::record::{delete_sql, select_sql, upsert_sql};
     use sebas_db::schema::open_and_sync;
@@ -472,9 +629,17 @@ mod active_record_tests {
     use sebas_models::setting::SettingRow;
     use tempfile::tempdir;
 
-    fn db() -> (tempfile::TempDir, Connection) {
+    fn settings_db() -> (tempfile::TempDir, Connection) {
         let dir = tempdir().unwrap();
-        let conn = open_and_sync(&dir.path().join("ar.db"), REGISTERED_TABLES)
+        let conn = open_and_sync(&dir.path().join("ar-settings.db"), SETTINGS_TABLES)
+            .unwrap()
+            .0;
+        (dir, conn)
+    }
+
+    fn projects_db() -> (tempfile::TempDir, Connection) {
+        let dir = tempdir().unwrap();
+        let conn = open_and_sync(&dir.path().join("ar-projects.db"), PROJECTS_TABLES)
             .unwrap()
             .0;
         (dir, conn)
@@ -483,14 +648,24 @@ mod active_record_tests {
     /// 黄金样本（3.3）：生成的 upsert SQL 与既有仓储语义的规范化形态逐字
     /// 一致——`INSERT INTO t (全列) VALUES (?1..?n) ON CONFLICT(主键)
     /// DO UPDATE SET 非键列 = excluded.非键列`。逐表钉死，SQL 形状漂移即红。
+    /// providers 的列清单是 single-state-dir 3.2 的扁平化形状。
     #[test]
     fn generated_upsert_sql_matches_golden_samples() {
         assert_eq!(
             upsert_sql::<ProviderRow>(),
-            "INSERT INTO providers (id, config, deleted, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(id) DO UPDATE SET \
-             config = excluded.config, deleted = excluded.deleted, \
-             created_at = excluded.created_at, updated_at = excluded.updated_at"
+            "INSERT INTO providers (id, name, preset, base_url_anthropic, \
+             base_url_openai_chat, base_url_openai_responses, api_key, api_key_env, \
+             default_model, protocol, models, model_map, deleted, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15) \
+             ON CONFLICT(id) DO UPDATE SET name = excluded.name, preset = excluded.preset, \
+             base_url_anthropic = excluded.base_url_anthropic, \
+             base_url_openai_chat = excluded.base_url_openai_chat, \
+             base_url_openai_responses = excluded.base_url_openai_responses, \
+             api_key = excluded.api_key, api_key_env = excluded.api_key_env, \
+             default_model = excluded.default_model, protocol = excluded.protocol, \
+             models = excluded.models, model_map = excluded.model_map, \
+             deleted = excluded.deleted, created_at = excluded.created_at, \
+             updated_at = excluded.updated_at"
         );
         assert_eq!(
             upsert_sql::<ModelAliasRow>(),
@@ -535,10 +710,20 @@ mod active_record_tests {
     /// 往返全等（3.3）：每张表一个 save → find/all → 字段全等 → 删除用例。
     #[test]
     fn provider_row_save_find_round_trip() {
-        let (_dir, conn) = db();
+        let (_dir, conn) = settings_db();
         let row = ProviderRow {
             id: "p1".into(),
-            config: r#"{"preset":"deepseek"}"#.into(),
+            name: Some("p1".into()),
+            preset: Some("deepseek".into()),
+            base_url_anthropic: None,
+            base_url_openai_chat: Some("https://x".into()),
+            base_url_openai_responses: None,
+            api_key: Some("sk-x".into()),
+            api_key_env: None,
+            default_model: None,
+            protocol: None,
+            models: Some(r#"[{"id":"m","tags":[]}]"#.into()),
+            model_map: None,
             deleted: 0,
             created_at: 100,
             updated_at: 200,
@@ -557,15 +742,12 @@ mod active_record_tests {
 
     #[test]
     fn model_alias_row_save_find_round_trip() {
-        let (_dir, conn) = db();
+        let (_dir, conn) = settings_db();
         // model_aliases.provider 有 REFERENCES providers(id) 外键：先落 provider。
-        let provider = ProviderRow {
-            id: "anthropic".into(),
-            config: "{}".into(),
-            deleted: 0,
-            created_at: 1,
-            updated_at: 1,
-        };
+        let provider = ProviderRow::from_item(
+            "anthropic",
+            &serde_json::from_value(serde_json::json!({"preset": "anthropic"})).unwrap(),
+        );
         provider.save(&conn).unwrap();
         let row = ModelAliasRow {
             alias: "my-claude".into(),
@@ -581,7 +763,7 @@ mod active_record_tests {
 
     #[test]
     fn setting_row_save_find_round_trip() {
-        let (_dir, conn) = db();
+        let (_dir, conn) = settings_db();
         let row = SettingRow { key: "k".into(), value: "v".into() };
         row.save(&conn).unwrap();
         assert_eq!(SettingRow::find(&conn, "k").unwrap().unwrap(), row);
@@ -591,7 +773,7 @@ mod active_record_tests {
 
     #[test]
     fn project_row_save_find_round_trip() {
-        let (_dir, mut conn) = db();
+        let (_dir, mut conn) = projects_db();
         let row = ProjectRow {
             id: Some("proj-1".into()),
             path: "/tmp/p".into(),
@@ -613,7 +795,7 @@ mod active_record_tests {
 
     #[test]
     fn session_map_row_save_find_by_round_trip() {
-        let (_dir, mut conn) = db();
+        let (_dir, mut conn) = projects_db();
         let row = SessionMapRow {
             chat_id: "ch1".into(),
             thread_id: Some("th1".into()),
@@ -637,29 +819,129 @@ mod active_record_tests {
 }
 
 // 下沉说明：StateWriter 的启动接入点在 src/run.rs（经本模块的域接线包装）；
-// 以下断言钉住「writer 走根注册表 + sebas-db actor」的组合形态。
+// 以下断言钉住「writer 走根注册表 + sebas-db actor」的组合形态，以及
+// single-state-dir 3.1 的两库落点（映射表派生路径 + 各自注册表）。
 #[cfg(test)]
 mod writer_wiring_tests {
     use crate::sebas_state::writer::StateWriter;
+    use sebas_dispatch::state_store::StateStoreEngine;
     use tempfile::tempdir;
 
+    /// 两库各自 open：settings.db 拿到三张表 + schema_meta，projects.db
+    /// 拿到两张表 + schema_meta；文件名按映射表落点。
     #[tokio::test]
-    async fn domain_writer_boots_actor_and_syncs_domain_schema() {
+    async fn domain_writers_boot_two_databases_with_their_own_registries() {
         let dir = tempdir().unwrap();
-        let writer = StateWriter::start(dir.path().join("wiring.db")).unwrap();
-        let count: i64 = writer
+        let settings_path = dir.path().join("settings.db");
+        let projects_path = dir.path().join("projects.db");
+
+        let settings =
+            StateWriter::start_settings(settings_path.clone()).expect("settings writer");
+        let projects =
+            StateWriter::start_projects(projects_path.clone()).expect("projects writer");
+
+        let settings_tables: Vec<String> = settings
             .handle()
             .exec(|conn| {
-                conn.query_row(
-                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN \
-                     ('providers','model_aliases','settings','projects','session_map','schema_meta')",
-                    [],
-                    |r| r.get(0),
-                )
-                .map_err(|e| e.to_string())
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name",
+                    )
+                    .map_err(|e| e.to_string())?;
+                let rows = stmt
+                    .query_map([], |r| r.get::<_, String>(0))
+                    .map_err(|e| e.to_string())?;
+                rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
             })
             .await
             .unwrap();
-        assert_eq!(count, 6, "五张域表 + schema_meta 都应被同步创建");
+        for expected in ["providers", "model_aliases", "settings", "schema_meta"] {
+            assert!(
+                settings_tables.iter().any(|t| t == expected),
+                "settings.db 缺表 {expected}: {settings_tables:?}"
+            );
+        }
+        assert!(
+            !settings_tables.iter().any(|t| t == "projects"),
+            "settings.db 不得再装 projects 表"
+        );
+
+        let projects_tables: Vec<String> = projects
+            .handle()
+            .exec(|conn| {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name",
+                    )
+                    .map_err(|e| e.to_string())?;
+                let rows = stmt
+                    .query_map([], |r| r.get::<_, String>(0))
+                    .map_err(|e| e.to_string())?;
+                rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+            })
+            .await
+            .unwrap();
+        for expected in ["projects", "session_map", "schema_meta"] {
+            assert!(
+                projects_tables.iter().any(|t| t == expected),
+                "projects.db 缺表 {expected}: {projects_tables:?}"
+            );
+        }
+        assert!(
+            !projects_tables.iter().any(|t| t == "providers"),
+            "projects.db 不得装 settings 域表"
+        );
+
+        // 引擎接两库：项目域经 projects.db、设置域经 settings.db。
+        let engine = crate::sebas_state::engine::DbStateEngine::with_projects(
+            settings.handle().clone(),
+            projects.handle().clone(),
+        );
+        engine
+            .add_project("/tmp/two-db", "two-db", 1)
+            .await
+            .unwrap();
+        engine
+            .save_settings(serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(engine.load_projects().await.unwrap().len(), 1);
+        assert!(engine.load_settings().await.unwrap().is_some());
+    }
+
+    /// 两库的版本戳各自独立（3.3）：schema_meta 各自打各自的键，任一库
+    /// 重置只重写自己的 meta。
+    #[tokio::test]
+    async fn each_database_stamps_its_own_version_keys() {
+        let dir = tempdir().unwrap();
+        let settings = StateWriter::start_settings(dir.path().join("settings.db")).unwrap();
+        let projects = StateWriter::start_projects(dir.path().join("projects.db")).unwrap();
+        for (handle, name) in [
+            (settings.handle(), "settings.db"),
+            (projects.handle(), "projects.db"),
+        ] {
+            let (format, version): (String, String) = handle
+                .exec(|conn| {
+                    let format: String = conn
+                        .query_row(
+                            "SELECT value FROM schema_meta WHERE key='version_format'",
+                            [],
+                            |r| r.get(0),
+                        )
+                        .map_err(|e| e.to_string())?;
+                    let version: String = conn
+                        .query_row(
+                            "SELECT value FROM schema_meta WHERE key='version'",
+                            [],
+                            |r| r.get(0),
+                        )
+                        .map_err(|e| e.to_string())?;
+                    Ok((format, version))
+                })
+                .await
+                .unwrap();
+            assert_eq!(format, "date", "{name} 的 version_format");
+            assert_eq!(version, sebas_db::schema::SCHEMA_VERSION, "{name} 的版本");
+        }
     }
 }

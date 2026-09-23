@@ -26,7 +26,17 @@ static FIXTURE_TABLES: &[TableSchema] = &[
         name: "providers",
         create_ddl: "CREATE TABLE providers (
             id          TEXT PRIMARY KEY,
-            config      TEXT NOT NULL,
+            name        TEXT,
+            preset      TEXT,
+            base_url_anthropic        TEXT,
+            base_url_openai_chat      TEXT,
+            base_url_openai_responses TEXT,
+            api_key     TEXT,
+            api_key_env TEXT,
+            default_model TEXT,
+            protocol    TEXT,
+            models      TEXT,
+            model_map   TEXT,
             deleted     INTEGER NOT NULL DEFAULT 0,
             created_at  INTEGER NOT NULL,
             updated_at  INTEGER NOT NULL
@@ -66,6 +76,18 @@ fn synced_db(name: &str) -> (tempfile::TempDir, rusqlite::Connection) {
     (dir, conn)
 }
 
+
+/// 类型化 providers 行夹具（single-state-dir 3.2 扁平化列形态）。
+fn typed_provider_row(id: &str) -> ProviderRow {
+    let mut row = ProviderRow::from_item(
+        id,
+        &serde_json::from_value(serde_json::json!({"preset": "anthropic"})).unwrap(),
+    );
+    row.created_at = 1;
+    row.updated_at = 1;
+    row
+}
+
 // ---- R1：第二库经共享配方拿到 foreign_keys=ON（行为级，不只 pragma 读数）----
 
 /// 共享配方打开的第二库，外键约束真实生效：引用不存在的 provider 的别名
@@ -89,14 +111,7 @@ fn shared_recipe_enforces_foreign_keys_on_a_second_database() {
     );
 
     // 对照组：provider 在场时同一形状插入成功。
-    ProviderRow {
-        id: "anthropic".into(),
-        config: "{}".into(),
-        deleted: 0,
-        created_at: 1,
-        updated_at: 1,
-    }
-    .save(&conn)
+    typed_provider_row("anthropic").save(&conn)
     .unwrap();
     ModelAliasRow {
         alias: "my-claude".into(),
@@ -191,24 +206,8 @@ fn added_column_reads_back_at_default_through_generated_crud() {
 fn alias_domain_query_returns_struct_instances_filtered_and_ordered() {
     let (_dir, mut conn) = synced_db("aliases.db");
 
-    ProviderRow {
-        id: "p1".into(),
-        config: "{}".into(),
-        deleted: 0,
-        created_at: 1,
-        updated_at: 1,
-    }
-    .save(&conn)
-    .unwrap();
-    ProviderRow {
-        id: "p2".into(),
-        config: "{}".into(),
-        deleted: 0,
-        created_at: 1,
-        updated_at: 1,
-    }
-    .save(&conn)
-    .unwrap();
+    typed_provider_row("p1").save(&conn).unwrap();
+    typed_provider_row("p2").save(&conn).unwrap();
 
     // 故意乱序插入（c, a, b）+ 另一 provider 的干扰行。
     for (alias, provider, upstream, created) in [
