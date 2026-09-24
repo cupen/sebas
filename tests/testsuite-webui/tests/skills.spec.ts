@@ -219,12 +219,18 @@ test.describe('Skills 仓', () => {
         '1 written · 0 overwritten · 0 deleted · 1 private',
       )
 
-      // fakeacp / claude-empty / claude-stream 无落点：如实报告而不是静默
-      // 跳过。（claude-empty 是空回合 notice 旅程加入沙箱的第二驱动 agent，
-      // claude-stream 是对话流实时上屏旅程加入的第三驱动 agent——方言表只认
-      // claude/codex，它们自然落在 no-placement 清单里。）
+      // fakeacp / claude-empty / claude-stream / claude-thinking 无落点：如实
+      // 报告而不是静默跳过。（claude-empty 是空回合 notice 旅程加入沙箱的
+      // 第二驱动 agent，claude-stream 是对话流实时上屏旅程加入的第三驱动
+      // agent，claude-thinking 是 ACP 思考折叠旅程加入的第四驱动 agent——
+      // 方言表只认 claude/codex，它们自然落在 no-placement 清单里。）
+      //
+      // 注意：本清单**硬编码**沙箱装配（tasks.py 的 `[acp.agents.*]`）里的
+      // 无落点 agent 名。新增驱动 agent 会让这里失败——那是**有意的绊线**：
+      // 它逼人确认新 agent 确实无落点，而不是被静默忽略。历史上已因此更新过
+      // 三次（claude-empty / claude-stream / claude-thinking）。
       await expect(panel.locator('.skills-sync-noplace')).toContainText(
-        'no placement: claude-empty, claude-stream, fakeacp',
+        'no placement: claude-empty, claude-stream, claude-thinking, fakeacp',
       )
 
       // 投影真的落进了沙箱内的落点目录；私产字节不动。
