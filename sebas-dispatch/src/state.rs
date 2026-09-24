@@ -1,5 +1,6 @@
 use crate::error::DispatchError;
 use sebas_channels::ChannelKey;
+use sebas_domain::session::{SessionMode, SessionPhase};
 use sebas_models::session_map::SessionMapRow;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -98,6 +99,22 @@ pub enum MappingState {
 /// SpawnFailed transcript 的合成 id 计数器（进程内唯一即可；不入盘）。
 static FAILED_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+impl MappingState {
+    /// 该映射状态对外可见的**会话相位**（type-session-vocabularies 2.2）。
+    ///
+    /// 返回共享 [`SessionPhase`] 而不是字符串字面量：取值拼写与原字面量逐字
+    /// 一致（`active` / `dormant` / `spawning` / `spawn-failed`），但新增一个
+    /// `MappingState` 变体会让这里**编译失败**（穷尽匹配），而不是静默漏映射。
+    pub fn phase(&self) -> SessionPhase {
+        match self {
+            Self::Active { .. } => SessionPhase::Active,
+            Self::Dormant { .. } => SessionPhase::Dormant,
+            Self::Spawning { .. } => SessionPhase::Spawning,
+            Self::SpawnFailed { .. } => SessionPhase::SpawnFailed,
+        }
+    }
+}
+
 fn next_failed_id() -> String {
     let n = FAILED_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     format!("failed-{n}")
@@ -127,18 +144,16 @@ pub struct Mapping {
     /// 消息触发 spawn 时消费）。词汇 = 控制面 `ask`/`edit`/`allow`/`auto`；
     /// `None` = agent 默认行为（wire 不携带 mode）。
     pub pending_mode: Option<String>,
-    /// （add-agent-mode-selection）操作者期望的会话 mode：创建请求携带、
-    /// 中途切换立即更新，快照暴露给前端。（
-    /// session-parallel-liveness-and-unread-polish 3.2，design D5b）**非空**
-    /// `String`：缺省即 `ask`（`ASK_MODE`），不再有 `None` 路径——状态库行、
-    /// 内存、wire、UI 四层对 ask 的表达是同一份字符串；persist-session-map
-    /// 后行即持久化形状（无 serde 中间层），null 形态不存在，任何投影都读
-    /// 到同一值，无读侧回退。
-    pub desired_mode: String,
+    /// （type-session-vocabularies 2.4）操作者期望的会话 mode：类型化为共享的
+    /// [`SessionMode`]（不再是本层自持的 ad-hoc `String`）。**非空**：缺省即
+    /// `ask`（[`SessionMode::Ask`]），不再有 `None` 路径。持久行仍以拼写
+    /// （projects.db 的 `desired_mode TEXT`）落盘——磁盘形状不在本 change 的
+    /// 改动面内，转换点唯一（`persist_upsert`）。
+    pub desired_mode: SessionMode,
     /// （add-agent-mode-selection）执行体回报的**实际生效** mode（本机 =
     /// spawn argv 实际应用值 / `ModeChanged` 事件；远端 = 节点回报）。
     /// `None` = 执行体未声称任何 mode 生效（如实呈现 desired/effective 差异）。
-    pub effective_mode: Option<String>,
+    pub effective_mode: Option<SessionMode>,
     /// The agent's real ACP session id when it differs from the routing id
     /// (native-ACP agents, e.g. opencode; the `session/new` id on a fresh
     /// spawn, the loaded conversation id on a successful resume). `None` for
@@ -267,7 +282,10 @@ impl Mapping {
             // D5b：占位的 desired mode 非空——创建请求未点名时缺省 ask（
             // spawn argv 是否带 flag 由 pending_mode 决定，与 CLI 默认语义
             // 等价，快照上永远有确定的控制面词）。
-            desired_mode: mode.unwrap_or_else(crate::engine::ask_mode),
+            desired_mode: mode
+                .as_deref()
+                .map(SessionMode::from_wire)
+                .unwrap_or(SessionMode::Ask),
             effective_mode: None,
             acp_session_id: None,
             current_model: None,
@@ -678,7 +696,7 @@ impl SessionMap {
     /// （add-agent-mode-selection）记录操作者期望的 mode（中途切换）。与
     /// `set_current_model` 同一模式：仅改映射，publish 由 engine 层调用方
     /// 完成。（3.2，D5b）desired 非空：切换必须给出四个控制面词之一。
-    pub async fn set_desired_mode(&self, key: &ChannelKey, mode: String) {
+    pub async fn set_desired_mode(&self, key: &ChannelKey, mode: SessionMode) {
         {
             let mut g = self.inner.write().await;
             if let Some(m) = g.get_mut(key) {
@@ -693,7 +711,7 @@ impl SessionMap {
 
     /// （add-agent-mode-selection）记录执行体回报的实际生效 mode（本机 =
     /// spawn argv 应用值 / `ModeChanged`；远端 = 节点回报）。
-    pub async fn set_effective_mode(&self, key: &ChannelKey, mode: Option<String>) {
+    pub async fn set_effective_mode(&self, key: &ChannelKey, mode: Option<SessionMode>) {
         let mut g = self.inner.write().await;
         if let Some(m) = g.get_mut(key) {
             m.effective_mode = mode;
@@ -1379,7 +1397,7 @@ pub fn session_map_row(key: &ChannelKey, m: &Mapping) -> Option<SessionMapRow> {
         pending_kind: m.pending_kind.clone(),
         pending_model: m.pending_model.clone(),
         pending_mode: m.pending_mode.clone(),
-        desired_mode: m.desired_mode.clone(),
+        desired_mode: m.desired_mode.as_str().to_string(),
         label: m.label.clone(),
         prompt_preview: m.prompt_preview.clone(),
         awaiting_first_prompt: is_placeholder,
@@ -1419,7 +1437,7 @@ pub fn mapping_from_row(row: SessionMapRow) -> Option<(ChannelKey, Mapping)> {
             row.pending_mode.clone(),
             true,
         );
-        m.desired_mode = row.desired_mode.clone();
+        m.desired_mode = SessionMode::from_wire(&row.desired_mode);
         m.project_dir = row.project_dir.clone();
         m.label = row.label.clone();
         m.prompt_preview = row.prompt_preview.clone();
@@ -1431,7 +1449,7 @@ pub fn mapping_from_row(row: SessionMapRow) -> Option<(ChannelKey, Mapping)> {
         m.pending_kind = row.pending_kind;
         m.pending_model = row.pending_model;
         m.pending_mode = row.pending_mode;
-        m.desired_mode = row.desired_mode;
+        m.desired_mode = SessionMode::from_wire(&row.desired_mode);
         m.project_dir = row.project_dir;
         m.label = row.label;
         m.prompt_preview = row.prompt_preview;
@@ -1483,7 +1501,7 @@ mod tests {
             pending_kind: None,
             pending_model: None,
             pending_mode: None,
-            desired_mode: crate::engine::ask_mode(),
+            desired_mode: crate::engine::ask_mode().as_str().to_string(),
             label: None,
             prompt_preview: None,
             awaiting_first_prompt: false,
@@ -1570,7 +1588,7 @@ mod tests {
             pending_kind: None,
             pending_model: None,
             pending_mode: None,
-            desired_mode: crate::engine::ask_mode(),
+            desired_mode: crate::engine::ask_mode().as_str().to_string(),
             label: None,
             prompt_preview: None,
             awaiting_first_prompt: false,
@@ -1596,7 +1614,7 @@ mod tests {
             pending_kind: None,
             pending_model: None,
             pending_mode: None,
-            desired_mode: crate::engine::ask_mode(),
+            desired_mode: crate::engine::ask_mode().as_str().to_string(),
             label: None,
             prompt_preview: None,
             awaiting_first_prompt: false,
@@ -1954,10 +1972,10 @@ mod desired_mode_migration_tests {
         let k = |r: &str| ChannelKey::new("web", r);
         let mut migrated = Mapping::dormant("s1", 1);
         migrated.project_dir = Some("/tmp/p1".into());
-        migrated.desired_mode = ASK_MODE.to_string();
+        migrated.desired_mode = ASK_MODE.into();
         let mut explicit = Mapping::dormant("s2", 1);
         explicit.project_dir = Some("/tmp/p2".into());
-        explicit.desired_mode = "auto".to_string();
+        explicit.desired_mode = "auto".into();
 
         let rows = vec![
             session_map_row(&k("web-null"), &migrated).unwrap(),
@@ -1966,12 +1984,12 @@ mod desired_mode_migration_tests {
         let map = SessionMap::restore_rows(rows, 8);
         assert_eq!(
             map.get(&k("web-null")).await.unwrap().desired_mode,
-            ASK_MODE,
+            SessionMode::from(ASK_MODE),
             "ask 词原样往返"
         );
         assert_eq!(
             map.get(&k("web-explicit")).await.unwrap().desired_mode,
-            "auto",
+            SessionMode::Auto,
             "已是合法词的值原样保留"
         );
     }
@@ -1980,17 +1998,17 @@ mod desired_mode_migration_tests {
     /// desired_mode 都是缺省 ask，绝不出现空路径。
     #[tokio::test]
     async fn mapping_constructors_default_to_ask() {
-        assert_eq!(Mapping::active("s").desired_mode, ASK_MODE);
-        assert_eq!(Mapping::dormant("s", 0).desired_mode, ASK_MODE);
-        assert_eq!(Mapping::spawning().desired_mode, ASK_MODE);
+        assert_eq!(Mapping::active("s").desired_mode, SessionMode::Ask);
+        assert_eq!(Mapping::dormant("s", 0).desired_mode, SessionMode::Ask);
+        assert_eq!(Mapping::spawning().desired_mode, SessionMode::Ask);
         // 创建请求未点名 mode 的占位同样落 ask（D5b：0-turn 占位行真源即 ask）。
         assert_eq!(
             Mapping::spawning_with(None, None, None, true).desired_mode,
-            ASK_MODE
+            SessionMode::Ask
         );
         assert_eq!(
             Mapping::spawning_with(None, None, Some("edit".into()), true).desired_mode,
-            "edit"
+            SessionMode::Edit
         );
     }
 }
@@ -2018,7 +2036,7 @@ mod spawning_settle_tests {
             pending_kind: None,
             pending_model: None,
             pending_mode: None,
-            desired_mode: crate::engine::ask_mode(),
+            desired_mode: crate::engine::ask_mode().as_str().to_string(),
             label: None,
             prompt_preview: None,
             awaiting_first_prompt: false,
@@ -2151,12 +2169,12 @@ mod spawning_settle_tests {
         // 合成错误条目在会话投影（合成 transcript id 名下）可读。
         let turns = router.session_turns(&key, 0).await.expect("transcript");
         assert_eq!(turns.len(), 1, "合成错误条目恰好一条");
-        assert_eq!(turns[0].element_type, "error");
+        assert_eq!(turns[0].element_type, sebas_domain::session::TurnElementType::Error);
         assert!(turns[0].content.contains("spawn failed"));
 
         // 对外状态面不再是 spawning。
         let info = router.session_info_for(&key).await.expect("session info");
-        assert_eq!(info.status, "spawn-failed");
+        assert_eq!(info.status, SessionPhase::SpawnFailed);
         assert_eq!(info.spawn_failure_reason.as_deref(), Some(reason));
     }
 }

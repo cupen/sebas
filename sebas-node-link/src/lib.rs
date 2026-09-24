@@ -291,94 +291,29 @@ pub enum Frame {
 ///
 /// 语义是**节点的解释**，执行体可以更细；执行体做不到的模式必须如实上报做不到，
 /// 而不是假装生效（见 `Spawned.mode` 与 `effective_mode`）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionMode {
-    /// 每个受门控的动作都要问（**缺省**；`auto` 永远不是缺省）。
-    #[default]
-    Ask,
-    /// 编辑类动作放行，其它受门控动作仍要问。
-    Edit,
-    /// 受门控动作一律放行，但仍留审计。
-    Allow,
-    /// 完全不门控；必须留审计痕迹（谁在什么时候把它打开过）。
-    Auto,
-}
+///
+/// （type-session-vocabularies 2.4 / design D4）定义已移入 `sebas-domain`
+/// （链路契约不该是域概念的家；依赖方向也要求如此），此处**原位再导出**：
+/// `sebas_node_link::SessionMode` 这条公开路径与全部线拼写、固有方法
+/// （`parse` / `as_str` / `allows_without_asking` / `is_ungated`）都不变。
+pub use sebas_domain::vocabulary::{GateCategory, SessionMode};
 
-/// 动作类别：门控的粒度。节点只做粗分类，执行体可以更细。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GateCategory {
-    /// 写文件 / 打补丁。
-    Edit,
-    /// 执行命令。
-    Execute,
-    /// 其它可能改变机器的动作。
-    Other,
-}
-
-impl SessionMode {
-    /// 稳定字符串（日志、审计与测试断言用）。
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            SessionMode::Ask => "ask",
-            SessionMode::Edit => "edit",
-            SessionMode::Allow => "allow",
-            SessionMode::Auto => "auto",
-        }
-    }
-
-    /// 解析：**不认识的模式返回 `None`**（调用方据此如实拒绝，而不是悄悄降级）。
-    pub fn parse(raw: &str) -> Option<Self> {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "ask" => Some(SessionMode::Ask),
-            "edit" => Some(SessionMode::Edit),
-            "allow" => Some(SessionMode::Allow),
-            "auto" => Some(SessionMode::Auto),
-            _ => None,
-        }
-    }
-
-    /// 该模式是否对这类动作**直接放行、不问**。
-    pub fn allows_without_asking(&self, category: GateCategory) -> bool {
-        match self {
-            SessionMode::Ask => false,
-            SessionMode::Edit => matches!(category, GateCategory::Edit),
-            SessionMode::Allow | SessionMode::Auto => true,
-        }
-    }
-
-    /// 该模式是否完全不门控（`auto` 是唯一一个）。
-    pub fn is_ungated(&self) -> bool {
-        matches!(self, SessionMode::Auto)
-    }
-}
+/// 会话相位：控制面与执行节点共用的**同一**封闭词汇（type-session-vocabularies
+/// 2.2 / design D1）。两侧各只发自己角色的子集，但取值集与拼写是同一份定义。
+pub use sebas_domain::vocabulary::SessionPhase;
 
 /// 审批决定。
 ///
-/// 只有三档：`escalate`（带理由的一次性放行）是**原生内核专属**，在 ACP 路径上降级为
-/// `allow_once`（unify-permission-approval-vocabulary）；节点链路因此不承载它。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ApprovalDecision {
-    /// 只放行这一次。
-    AllowOnce,
-    /// 本会话内放行同类动作。
-    AllowSession,
-    /// 拒绝。
-    Deny,
-}
-
-impl ApprovalDecision {
-    /// 稳定字符串。
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            ApprovalDecision::AllowOnce => "allow_once",
-            ApprovalDecision::AllowSession => "allow_session",
-            ApprovalDecision::Deny => "deny",
-        }
-    }
-}
+/// （type-session-vocabularies 3.1）**唯一**共享定义
+/// [`sebas_domain::vocabulary::PermissionDecision`] 的四值（`allow_once` /
+/// `allow_session` / `deny` / `escalate`）。节点链路今天只承载前三档：
+/// `escalate`（带理由的一次性放行）是**原生内核专属**，在 ACP / 节点路径上
+/// 降级为 `allow_once`（unify-permission-approval-vocabulary 的既有语义，本
+/// change 不改）。类型化后**发送集不变**——控制面发给节点的仍只是那三个值。
+///
+/// 线形状仍是**裸字符串**（`"allow_once"`，见 [`SessionOp::ApprovalAnswer`] 的
+/// `#[serde(with)]`），不是 `{"decision": ...}` 信封。
+pub use sebas_domain::vocabulary::PermissionDecision as ApprovalDecision;
 
 /// 一个悬空的审批请求（对账用：主控缺席期间 park 的请求，返回后要能全部看见）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -510,6 +445,10 @@ pub enum SessionOp {
         /// 请求标识。
         request_id: String,
         /// 决定。
+        ///
+        /// （type-session-vocabularies 3.1）共享四值类型的**裸字符串**形状
+        /// （`"allow_once"`）——与合一前逐字节一致。
+        #[serde(with = "sebas_domain::vocabulary::bare_decision")]
         decision: ApprovalDecision,
     },
     /// 列出本节点当前**悬空**的审批请求（对账用）。
@@ -729,8 +668,9 @@ pub enum SessionEvent {
     State {
         /// 目标会话。
         session_id: String,
-        /// 相位名（字符串：控制面必须容忍它不认识的相位）。
-        phase: String,
+        /// 相位名（共享 [`SessionPhase`]：控制面必须容忍它不认识的相位——
+        /// 未知取值落到 `Unknown` 并原样保留，不丢帧）。
+        phase: SessionPhase,
         /// 补充说明（成因等）。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
@@ -841,8 +781,8 @@ pub struct LogEntry {
 pub struct SessionSummary {
     /// 会话 id（控制面发行）。
     pub session_id: String,
-    /// 相位名。
-    pub phase: String,
+    /// 相位名（共享 [`SessionPhase`]；未知取值落到 `Unknown` 而非报错）。
+    pub phase: SessionPhase,
     /// 实际生效的执行体 kind。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_kind: Option<String>,
@@ -852,11 +792,11 @@ pub struct SessionSummary {
     /// **实际生效**的 mode（节点真正在强制/遵守的那个）。无法强制 mode 的执行体
     /// 如实回报 `None`（「没有可声称生效的 mode」），而不是把期望值回显成已生效。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mode: Option<String>,
+    pub mode: Option<SessionMode>,
     /// 控制面持有的**期望** mode。两者不同即说明执行体无法强制期望值——
     /// 界面与对账据此如实呈现差异，而不是把期望值回显成已生效。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub desired_mode: Option<String>,
+    pub desired_mode: Option<SessionMode>,
     /// **实际生效**的 provider profile（7.1）：节点本地 profile 名，或
     /// `control-plane-router`（经主控 router 出网）；未选择 → `None`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1275,11 +1215,12 @@ mod tests {
             SessionMode::Allow,
             SessionMode::Auto,
         ] {
+            let spelling = mode.as_str().to_string();
             let json = serde_json::to_string(&mode).unwrap();
             assert_eq!(serde_json::from_str::<SessionMode>(&json).unwrap(), mode);
-            assert_eq!(SessionMode::parse(mode.as_str()), Some(mode));
+            assert_eq!(SessionMode::parse(&spelling), Some(mode.clone()));
             // 大小写与空白容错。
-            assert_eq!(SessionMode::parse(&format!("  {} ", mode.as_str())), Some(mode));
+            assert_eq!(SessionMode::parse(&format!("  {spelling} ")), Some(mode));
         }
         assert_eq!(SessionMode::parse("yolo"), None, "不认识的模式必须被如实拒绝");
         assert_eq!(SessionMode::parse(""), None);
@@ -1366,12 +1307,26 @@ mod tests {
         }
     }
 
+    /// 审批决定的**链路线拼写**是裸字符串，且与共享类型的标签一致
+    /// （type-session-vocabularies 3.1：类型合一，节点链路的线形状不变）。
+    ///
+    /// 注意：`ApprovalDecision` 现在是共享类型 `PermissionDecision` 的再导出，
+    /// 它**独立**序列化时是控制面/WebUI 的 `{"decision": …}` 信封；节点链路的
+    /// 裸字符串形状由 `SessionOp::ApprovalAnswer.decision` 上的
+    /// `#[serde(with = "…bare_decision")]` 承载——所以线断言必须走真实的
+    /// wire 路径（下面的 `SessionOp`），而不是裸类型。
     #[test]
     fn approval_decisions_have_stable_wire_names() {
-        assert_eq!(
-            serde_json::to_string(&ApprovalDecision::AllowSession).unwrap(),
-            "\"allow_session\""
-        );
+        let op = SessionOp::ApprovalAnswer {
+            session_id: "s-1".into(),
+            request_id: "s-1:req-1".into(),
+            decision: ApprovalDecision::AllowSession,
+        };
+        let value = serde_json::to_value(&op).unwrap();
+        assert_eq!(value["decision"], "allow_session");
+        assert!(value["decision"].is_string(), "节点链路的决定必须是裸字符串");
+        assert_eq!(serde_json::from_value::<SessionOp>(value).unwrap(), op);
+
         assert_eq!(ApprovalDecision::Deny.as_str(), "deny");
     }
 
@@ -1464,11 +1419,11 @@ mod tests {
     fn a_summary_can_report_the_pinned_material_version() {
         let summary = SessionSummary {
             session_id: "s-1".into(),
-            phase: "active".into(),
+            phase: SessionPhase::Active,
             agent_kind: Some("echo".into()),
             model: None,
-            mode: Some("ask".into()),
-            desired_mode: Some("ask".into()),
+            mode: Some(SessionMode::Ask),
+            desired_mode: Some(SessionMode::Ask),
             provider: Some("anthropic".into()),
             desired_provider: Some("anthropic".into()),
             provider_cause: None,
@@ -1631,3 +1586,6 @@ mod tests {
         assert!(RejectCode::Unknown.is_permanent());
     }
 }
+
+#[cfg(test)]
+mod golden_tests;

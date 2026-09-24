@@ -55,7 +55,7 @@ fn dormant_row(session_id: &str) -> SessionMapRow {
         pending_kind: None,
         pending_model: None,
         pending_mode: None,
-        desired_mode: sebas_dispatch::engine::ask_mode(),
+        desired_mode: sebas_dispatch::engine::ask_mode().as_str().to_string(),
         label: None,
         prompt_preview: None,
         awaiting_first_prompt: false,

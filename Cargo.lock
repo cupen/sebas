@@ -2866,6 +2866,7 @@ dependencies = [
  "async-trait",
  "cc-agent-sdk",
  "futures",
+ "sebas-domain",
  "serde",
  "serde_json",
  "tempfile",
@@ -2888,6 +2889,7 @@ dependencies = [
  "libc",
  "regex",
  "reqwest 0.13.5",
+ "sebas-domain",
  "serde",
  "serde_json",
  "tempfile",
@@ -2945,7 +2947,6 @@ name = "sebas-domain"
 version = "0.1.0"
 dependencies = [
  "dirs 7.0.0",
- "sebas-acp",
  "sebas-channels",
  "serde",
  "serde_json",
@@ -3037,6 +3038,7 @@ dependencies = [
 name = "sebas-node-link"
 version = "0.1.0"
 dependencies = [
+ "sebas-domain",
  "serde",
  "serde_json",
 ]

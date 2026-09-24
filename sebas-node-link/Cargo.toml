@@ -6,9 +6,13 @@ rust-version = "1.90"
 
 # 链路契约 crate（add-remote-execution-node D0）：**只放两侧都要懂的类型**——
 # 协议版本、握手、能力清单、拒绝码。主控与节点各有一份运行时实现，本 crate 两边
-# 都依赖它，从而不必复制粘贴协议定义。它同样不得依赖任何主控角色实现。
+# 都依赖它，从而不必复制粘贴协议定义。它同样不得依赖任何主控角色实现
+# （`sebas-domain` 是中立的共享域层，不是角色实现——type-session-vocabularies
+# 2.4/3.1 依 design D4/D5 把会话模式与审批决定的**唯一定义**放在那里，本 crate
+# 原位再导出，公开路径与线形状不变）。
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sebas-domain = { path = "../sebas-domain" }
 
 [dev-dependencies]

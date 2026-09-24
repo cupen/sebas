@@ -13,6 +13,7 @@ use crate::cards_ui;
 use crate::commands::{Command, RouterAction, parse_command};
 use crate::settings;
 use sebas_acp::claude::session::{AcpCommand, Decision};
+use sebas_domain::session::{SessionMode, SessionPhase};
 use sebas_channels::card::ChannelCard;
 use sebas_channels::{ChannelAction, ChannelEvent, ChannelKey};
 use serde_json::Value;
@@ -443,9 +444,15 @@ impl DispatchHandle {
         let mut lines = vec!["当前会话:".to_string()];
         for (i, (sk, m)) in sessions.iter().enumerate() {
             let (sid, label) = match &m.state {
-                MappingState::Active { session_id } => (session_id.as_str(), "active"),
-                MappingState::Spawning { .. } => ("(spawning)", "spawning"),
-                MappingState::Dormant { session_id } => (session_id.as_str(), "dormant"),
+                MappingState::Active { session_id } => {
+                    (session_id.as_str(), SessionPhase::Active.as_str())
+                }
+                MappingState::Spawning { .. } => ("(spawning)", SessionPhase::Spawning.as_str()),
+                MappingState::Dormant { session_id } => {
+                    (session_id.as_str(), SessionPhase::Dormant.as_str())
+                }
+                // 这是**展示标签**而非相位词：spawn 失败在这里刻意缩写成 "failed"
+                // （不是相位拼写 "spawn-failed"），故保留字面量。
                 MappingState::SpawnFailed { .. } => ("(spawn-failed)", "failed"),
             };
             let thread = thread_label(&sk.reference);
@@ -624,9 +631,33 @@ impl DispatchHandle {
         let decision = match action.decision.as_deref() {
             Some("allow_once") => Decision::AllowOnce,
             Some("allow_session") => Decision::AllowSession,
-            // Fail closed: unknown or missing decision is a deny.
-            _ => Decision::Deny,
+            Some("deny") => Decision::Deny,
+            // 缺答仍然 fail closed（与既有语义逐字一致）。
+            None => Decision::Deny,
+            // （type-session-vocabularies 3.1）本 build 不认识的词**不再被硬当
+            // 成 deny 悄悄结案**：落到 `Unknown` 并在下面当场挡下（spec：
+            // 未知决定可被呈现，但不得解除泊车审批）。
+            Some(other) => Decision::Unknown(other.to_string()),
         };
+        // 无法解释的决定不得解除泊车审批：挡在消费卡与发 Reply 之前。但 spec 同时
+        // 要求未知决定被**呈现**（"the unknown decision is surfaced"）——`HelpText`
+        // 在 dispatch 层是 no-op（等于静默丢弃，见 `no_session_reply` 的说明），
+        // 所以按错误回复约定发 `PlainText`；不 take 泊车卡片记录、不发 PermissionReply。
+        if decision.is_unknown() {
+            tracing::warn!(
+                decision = decision.as_str(),
+                "unrecognized permission decision; refusing to resolve the parked approval"
+            );
+            self.emit(Out::PlainText {
+                key: key.clone(),
+                content: format!(
+                    "无法解释的审批决定 `{}`：未生效，该审批仍然悬空。请重新点击卡片上的有效选项。",
+                    decision.as_str()
+                ),
+            })
+            .await;
+            return;
+        }
         // Stale click = no tracked perm-card entry (already resolved by a
         // prior click, or the click raced the dispatcher's msg_id record).
         // We still send the PermissionReply below — the bridge drops replies
@@ -664,6 +695,11 @@ impl DispatchHandle {
             let (label, theme) = match decision {
                 Decision::AllowOnce => ("✅ 已允许（仅此一次）".to_string(), "blue"),
                 Decision::Deny => ("❌ 已拒绝".to_string(), "blue"),
+                // 卡片面不提供 escalate；真到了这里也如实翻成一次性放行
+                // （执行体侧会把它降级为 allow_once）。
+                Decision::Escalate { .. } => ("✅ 已允许（仅此一次）".to_string(), "blue"),
+                // 上面已挡住未知决定，这里不可能到达；穷尽匹配要求表态。
+                Decision::Unknown(_) => ("❓ 无法解释的决定（未生效）".to_string(), "orange"),
                 Decision::AllowSession => match self
                     .issue_auto_mode_switch(&entry, request_id.as_deref().unwrap_or_default())
                     .await
@@ -724,7 +760,7 @@ impl DispatchHandle {
             return Err("会话不可达".into());
         };
         self.map
-            .set_desired_mode(&entry.key, super::AUTO_MODE.to_string())
+            .set_desired_mode(&entry.key, SessionMode::Auto)
             .await;
         self.auto_mode_switches
             .record(

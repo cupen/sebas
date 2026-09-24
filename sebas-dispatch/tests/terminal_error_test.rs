@@ -61,7 +61,7 @@ async fn terminal_error_retires_binding_and_marks_card() {
         .session_info_for(&key)
         .await
         .expect("retired session stays listed");
-    assert_eq!(info.status, "dormant", "retired row reports dormant");
+    assert_eq!(info.status, "dormant".into(), "retired row reports dormant");
 }
 
 #[tokio::test]
@@ -225,7 +225,7 @@ async fn refusal_error_synthesizes_a_classified_transcript_entry() {
     let turns = router.session_turns(&key, 0).await.expect("mapping exists");
     let err = turns
         .iter()
-        .find(|t| t.element_type == "error")
+        .find(|t| t.element_type == "error".into())
         .expect("a refused turn must leave a visible error entry");
     assert!(
         err.content.contains("I cannot help with that request."),
@@ -264,7 +264,7 @@ async fn mode_unchanged_error_does_not_duplicate_an_error_entry() {
 
     let turns = router.session_turns(&key, 0).await.expect("mapping exists");
     assert!(
-        !turns.iter().any(|t| t.element_type == "error"),
+        !turns.iter().any(|t| t.element_type == "error".into()),
         "the mode-unchanged marker error must not synthesize a duplicate error entry: {turns:?}"
     );
 }
@@ -296,7 +296,7 @@ async fn terminal_error_also_lands_a_classified_entry() {
     let turns = router.session_turns(&key, 0).await.expect("mapping still up");
     let err = turns
         .iter()
-        .find(|t| t.element_type == "error")
+        .find(|t| t.element_type == "error".into())
         .expect("terminal error must land a transcript entry");
     assert_eq!(err.content, "agent process exited");
     assert_eq!(
@@ -335,7 +335,7 @@ async fn escalation_kill_keeps_the_session_browsable() {
         .iter()
         .find(|i| i.key == key.reference)
         .expect("escalation kill must keep the session listed");
-    assert_eq!(row.status, "dormant");
+    assert_eq!(row.status, "dormant".into());
 
     // 详情（transcript）可回看，末尾是携带升级原因的 error 条目。
     let turns = router
@@ -344,7 +344,7 @@ async fn escalation_kill_keeps_the_session_browsable() {
         .expect("transcript must remain retrievable");
     let err = turns
         .iter()
-        .find(|t| t.element_type == "error")
+        .find(|t| t.element_type == "error".into())
         .expect("the killed turn must be finalized with a visible error entry");
     assert!(
         err.content.contains("agent hung"),
@@ -358,7 +358,7 @@ async fn escalation_kill_keeps_the_session_browsable() {
         match ev {
             sebas_dispatch::engine::SessionEvent::Removed { .. } => saw_removed = true,
             sebas_dispatch::engine::SessionEvent::Updated { session } => {
-                if session.status == "dormant" {
+                if session.status == "dormant".into() {
                     saw_updated = true;
                 }
             }

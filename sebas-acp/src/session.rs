@@ -68,18 +68,11 @@ pub struct AcpModelInfo {
 /// 一条 agent 自广告的斜杠命令（session-slash-commands D1）。`name` 是提交时
 /// 的命令词（`/name`），`description` 是面板说明，`hint` 是参数提示
 /// （claude 的 `argumentHint` / ACP 的 `UnstructuredCommandInput.hint`）。
-/// 字段全部 `#[serde(default)]`：来源形状随 CLI/agent 版本漂移，缺字段反
-/// 序列化为空值而不是报错（防御性映射的落点，上游映射函数保证不产生缺
-/// name 的条目）。
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-pub struct AvailableCommand {
-    #[serde(default)]
-    pub name: String,
-    #[serde(default)]
-    pub description: String,
-    #[serde(default)]
-    pub hint: Option<String>,
-}
+///
+/// （type-session-vocabularies）定义已移入 `sebas-domain::session`（断开
+/// `sebas-domain → sebas-acp` 依赖边，使共享审批决定类型能被本 crate 取用），
+/// 此处 `pub use` 原位再导出：字段、serde 属性与公开路径不变。
+pub use sebas_domain::session::AvailableCommand;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -119,13 +112,13 @@ pub enum AcpCommand {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "decision", rename_all = "snake_case")]
-pub enum Decision {
-    AllowOnce,
-    AllowSession,
-    Deny,
-}
+/// （type-session-vocabularies 3.2）审批决定收敛为**唯一**共享定义
+/// [`sebas_domain::session::PermissionDecision`]（四值 + 未知值路径），此处原位
+/// 再导出（`Decision` 别名保住既有路径）。ACP 侧**没有** escalate 等价物：
+/// 该值由边界降级为 `allow_once` 并记日志（`agent-driver` spec 明写这是层间
+/// 唯一的语义适配），本 change 不改语义。线形状仍是 `{"decision": …}` 信封。
+pub use sebas_domain::session::PermissionDecision;
+pub use sebas_domain::session::PermissionDecision as Decision;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TurnUsage {

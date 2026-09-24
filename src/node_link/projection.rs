@@ -32,6 +32,9 @@ use crate::node_link::placement::{PlacementError, RemoteSessionId};
 use crate::node_link::server::ConnectionObserver;
 use sebas_channels::ChannelKey;
 use sebas_dispatch::{RemoteSessionView, SessionEvent, SessionInfo, TurnEntry};
+use sebas_domain::vocabulary::{
+    CardPhase, SessionMode, SessionPhase, TurnElementType, TurnKind,
+};
 use sebas_node_link::{
     ApprovalDecision, LogEntry, ParkedApproval, SessionEvent as NodeEvent, SessionOp, SessionResult,
 };
@@ -63,11 +66,6 @@ pub fn row_reference(node_id: &str, session_id: &str) -> String {
 pub fn parse_reference(reference: &str) -> Option<(&str, &str)> {
     let rest = reference.strip_prefix("node\0")?;
     rest.split_once('\0')
-}
-
-/// 节点上报的相位是否意味着「已经结束」（与 `fleet` 同一判据）。
-fn is_terminal_phase(phase: &str) -> bool {
-    matches!(phase, "terminated" | "closed" | "exited" | "failed")
 }
 
 /// 一个远端会话的**呈现**元数据（节点的事实里没有的那部分）。
@@ -237,7 +235,8 @@ impl RemoteProjection {
                 let view = fleet.view(session_id);
                 (
                     view.and_then(|v| v.terminated().map(str::to_string)),
-                    view.map(|v| v.phase().to_string()).unwrap_or_default(),
+                    view.map(|v| v.phase().clone())
+                        .unwrap_or_else(|| SessionPhase::Unknown(String::new())),
                 )
             };
             match dead {
@@ -317,10 +316,10 @@ impl RemoteProjection {
                 let mut metas = self.meta.lock().await;
                 let entry = metas.entry(summary.session_id.clone()).or_default();
                 if let Some(v) = summary.desired_mode.clone() {
-                    entry.desired_mode = Some(v);
+                    entry.desired_mode = Some(v.as_str().to_string());
                 }
                 if let Some(v) = summary.mode.clone() {
-                    entry.effective_mode = Some(v);
+                    entry.effective_mode = Some(v.as_str().to_string());
                 }
                 if let Some(v) = summary.agent_kind.clone() {
                     entry.agent_kind = Some(v);
@@ -339,7 +338,7 @@ impl RemoteProjection {
             }
             let mut ids = Vec::new();
             for summary in &sessions {
-                let terminal = is_terminal_phase(&summary.phase);
+                let terminal = summary.phase.is_terminal();
                 let session_id = summary.session_id.clone();
                 if terminal {
                     let cause = format!("节点上报相位 {}", summary.phase);
@@ -798,6 +797,11 @@ impl RemoteProjection {
         request_id: &str,
         decision: PermissionDecision,
     ) -> Result<bool, NodeLinkError> {
+        // 未知决定不得被翻译成任何结论（尤其不得翻成 `deny`）送出去——那等于用一条
+        // 没读懂的决定解决了节点上的泊车审批。挡在投递之前，节点上的审批保持悬空。
+        let decision = approval_decision(decision).ok_or_else(|| NodeLinkError::Transport {
+            cause: format!("决定 {request_id} 的取值不是本 build 能解释的，已拒绝投递"),
+        })?;
         let session_id =
             self.session_of_request(request_id)
                 .await
@@ -810,7 +814,7 @@ impl RemoteProjection {
                 SessionOp::ApprovalAnswer {
                     session_id: session_id.clone(),
                     request_id: request_id.to_string(),
-                    decision: approval_decision(decision),
+                    decision,
                 },
             )
             .await?;
@@ -876,17 +880,17 @@ impl RemoteProjection {
             SessionLifecycle::Live { .. } => {
                 if parked > 0 {
                     // 在等人批 → **不是**在跑（spec：等待不得呈现为运行中）。
-                    ("dormant", None, "online", None)
-                } else if node_phase == "active" {
-                    ("active", Some("OnIt".to_string()), "online", None)
-                } else if is_terminal_phase(node_phase) {
-                    ("dormant", Some("DONE".to_string()), "online", None)
+                    (SessionPhase::Dormant, None, "online", None)
+                } else if matches!(node_phase, SessionPhase::Active) {
+                    (SessionPhase::Active, Some(CardPhase::OnIt), "online", None)
+                } else if node_phase.is_terminal() {
+                    (SessionPhase::Dormant, Some(CardPhase::Done), "online", None)
                 } else {
-                    ("dormant", None, "online", None)
+                    (SessionPhase::Dormant, None, "online", None)
                 }
             }
             SessionLifecycle::NodeOffline { node_id } => (
-                "dormant",
+                SessionPhase::Dormant,
                 None,
                 "offline",
                 Some(
@@ -897,8 +901,8 @@ impl RemoteProjection {
                 ),
             ),
             SessionLifecycle::Terminated { cause: why } => (
-                "dormant",
-                Some("CrossMark".to_string()),
+                SessionPhase::Dormant,
+                Some(CardPhase::CrossMark),
                 "terminated",
                 Some(why.clone()),
             ),
@@ -917,7 +921,7 @@ impl RemoteProjection {
             channel,
             key: row_reference(&node_id, session_id),
             session_id: Some(session_id.to_string()),
-            status: status.to_string(),
+            status,
             phase,
             user_prompt: meta.prompt.clone(),
             last_active_unix,
@@ -934,15 +938,16 @@ impl RemoteProjection {
             // desired 非空：节点侧未点名时落控制面缺省词 ask。
             desired_mode: meta
                 .desired_mode
-                .clone()
+                .as_deref()
+                .map(SessionMode::from_wire)
                 .unwrap_or_else(sebas_dispatch::engine::ask_mode),
-            effective_mode: meta.effective_mode.clone(),
+            effective_mode: meta.effective_mode.as_deref().map(SessionMode::from_wire),
             remote: Some(RemoteSessionView {
                 node_id,
                 node_status: node_status.to_string(),
                 node_cause: cause,
-                desired_mode: meta.desired_mode.clone(),
-                effective_mode: meta.effective_mode.clone(),
+                desired_mode: meta.desired_mode.as_deref().map(SessionMode::from_wire),
+                effective_mode: meta.effective_mode.as_deref().map(SessionMode::from_wire),
                 parked_approvals: parked as u32,
                 desired_provider: meta.desired_provider.clone(),
                 provider: meta.provider.clone(),
@@ -963,7 +968,7 @@ impl RemoteProjection {
             // fix-pending-queue-liveness 2.3：远端行的回合占用事实——节点流
             // 活跃（OnIt）或在等审批即占用。远端队列不归本进程（Non-goal：
             // 不动远端节点会话），保守取这两个可见事实。
-            turn_engaged: parked > 0 || node_phase == "active",
+            turn_engaged: parked > 0 || matches!(node_phase, SessionPhase::Active),
         })
     }
 }
@@ -1047,14 +1052,19 @@ fn notice_of(key: &ChannelKey, approval: &ParkedApproval) -> PermissionNotice {
 ///
 /// 两套词表是**同一个决定**的两种拼写（`AllowOnce`/`allow`），这里显式翻译而不是
 /// 靠 serde 变体名碰巧对上——拼错会变成"点允许却什么都没发生"。
-fn approval_decision(decision: PermissionDecision) -> ApprovalDecision {
+///
+/// 本 build 不认识的取值 → `None`：**不得**把它翻成 `deny` 送出去（那等于用一个
+/// 没读懂的决定解决了一条泊车审批，spec `agent-driver` 明禁）。调用方据此拒绝投递。
+fn approval_decision(decision: PermissionDecision) -> Option<ApprovalDecision> {
     match decision {
-        PermissionDecision::AllowOnce => ApprovalDecision::AllowOnce,
-        PermissionDecision::AllowSession => ApprovalDecision::AllowSession,
-        PermissionDecision::Deny => ApprovalDecision::Deny,
+        PermissionDecision::AllowOnce => Some(ApprovalDecision::AllowOnce),
+        PermissionDecision::AllowSession => Some(ApprovalDecision::AllowSession),
+        PermissionDecision::Deny => Some(ApprovalDecision::Deny),
         // 升级（escalate）在节点侧没有对应语义：**不假装是允许**，落到拒绝，
         // 由控制面把"升级"当成本地动作处理（节点只有 allow/deny 两种结论）。
-        PermissionDecision::Escalate { .. } => ApprovalDecision::Deny,
+        PermissionDecision::Escalate { .. } => Some(ApprovalDecision::Deny),
+        // 未知取值：不翻译、不投递（见上）。
+        PermissionDecision::Unknown(_) => None,
     }
 }
 
@@ -1090,8 +1100,8 @@ pub fn turn_entry_of(entry: &LogEntry) -> TurnEntry {
     };
     TurnEntry {
         position: entry.seq,
-        kind: kind.into(),
-        element_type: element_type.into(),
+        kind: TurnKind::from_wire(kind),
+        element_type: TurnElementType::from_wire(element_type),
         content: entry.text.clone(),
         created_at_unix: entry.at_unix.max(0) as u64,
         // 节点日志无结构化标题来源（workbench-agent-identity-and-process-folds）。
@@ -1168,6 +1178,47 @@ mod tests {
     use super::*;
     use sebas_node_link::{GateCategory, LogEntry, SessionMode};
 
+    /// （type-session-vocabularies 3.3，design D5）**core channel → 节点**边界的
+    /// 发送集必须与合一前一致：节点协议只承载三值（无 `escalate` 等价物），
+    /// `escalate` 落到 `deny`（不假装是允许），未知取值**不投递**（`None`）。
+    #[test]
+    fn node_boundary_send_set_is_unchanged() {
+        use std::collections::BTreeSet;
+        let sent: BTreeSet<String> = [
+            PermissionDecision::AllowOnce,
+            PermissionDecision::AllowSession,
+            PermissionDecision::Deny,
+            PermissionDecision::Escalate {
+                reason: "needs human".into(),
+            },
+        ]
+        .into_iter()
+        .filter_map(|d| approval_decision(d).map(|a| a.as_str().to_string()))
+        .collect();
+        assert_eq!(
+            sent,
+            BTreeSet::from([
+                "allow_once".to_string(),
+                "allow_session".to_string(),
+                "deny".to_string(),
+            ]),
+            "节点边界发送集变了——统一类型不得静默扩大发送面（design D5）"
+        );
+        // escalate 在节点侧没有对应语义：落 deny（既有行为，逐字保留）。
+        assert_eq!(
+            approval_decision(PermissionDecision::Escalate {
+                reason: "x".into()
+            })
+            .map(|d| d.as_str().to_string()),
+            Some("deny".to_string())
+        );
+        // 未知取值不得翻译成任何决定投递出去（那会解除一条泊车审批）。
+        assert_eq!(
+            approval_decision(PermissionDecision::Unknown("yolo".into())),
+            None
+        );
+    }
+
     fn log_entry(seq: u64, kind: &str, text: &str, at_unix: i64) -> LogEntry {
         LogEntry {
             seq,
@@ -1219,8 +1270,8 @@ mod tests {
         assert_eq!(remote.node_id, "dev-box");
         assert_eq!(remote.node_status, "online");
         assert_eq!(remote.node_cause, None);
-        assert_eq!(remote.desired_mode.as_deref(), Some("ask"));
-        assert_eq!(remote.effective_mode.as_deref(), Some("ask"));
+        assert_eq!(remote.desired_mode, Some(SessionMode::Ask));
+        assert_eq!(remote.effective_mode, Some(SessionMode::Ask));
         assert_eq!(remote.parked_approvals, 0);
         assert_eq!(row.project_dir.as_deref(), Some("/srv/repo"));
         assert_eq!(row.session_id.as_deref(), Some("proj-a:1"));
@@ -1235,7 +1286,7 @@ mod tests {
             },
         )
         .await;
-        assert_eq!(p.row(&key).await.unwrap().status, "active");
+        assert_eq!(p.row(&key).await.unwrap().status, "active".into());
     }
 
     #[tokio::test]
@@ -1273,7 +1324,7 @@ mod tests {
                 .unwrap()
                 .is_alive()
         );
-        assert_eq!(row.status, "dormant", "看不见的时候不该显示成在跑");
+        assert_eq!(row.status, "dormant".into(), "看不见的时候不该显示成在跑");
 
         // 节点回来：成因清掉，视图重新变为在线。
         p.set_node_online("dev-box").await;
@@ -1295,7 +1346,7 @@ mod tests {
             },
         )
         .await;
-        assert_eq!(p.row(&key).await.unwrap().status, "active");
+        assert_eq!(p.row(&key).await.unwrap().status, "active".into());
 
         // 一条受门控动作停住了：节点上报请求，控制面还没决定。
         p.apply_node_event(
@@ -1316,7 +1367,7 @@ mod tests {
             "悬空请求数要能数出来"
         );
         assert_eq!(
-            row.status, "dormant",
+            row.status, "dormant".into(),
             "在等人批的会话不得呈现为运行中（spec：等待 ≠ 运行中）"
         );
         assert_eq!(p.parked("proj-a:1").await.len(), 1, "请求本身要可达");
@@ -1333,7 +1384,7 @@ mod tests {
         )
         .await;
         let row = p.row(&key).await.unwrap();
-        assert_eq!(row.status, "active");
+        assert_eq!(row.status, "active".into());
         assert_eq!(row.remote.unwrap().parked_approvals, 0);
     }
 
@@ -1363,7 +1414,7 @@ mod tests {
             "终止成因来自节点：{:?}",
             remote.node_cause
         );
-        assert_eq!(row.status, "dormant");
+        assert_eq!(row.status, "dormant".into());
         // 终止的成因来自节点，措辞不该与「暂时联系不上」混为一谈。
         assert!(
             p.fleet
@@ -1390,8 +1441,8 @@ mod tests {
         let turns = p.turns("proj-a:1", 1).await;
         assert_eq!(turns.len(), 2);
         assert_eq!(turns[0].position, 1);
-        assert_eq!(turns[0].kind, "prompt");
-        assert_eq!(turns[1].kind, "content");
+        assert_eq!(turns[0].kind, "prompt".into());
+        assert_eq!(turns[1].kind, "content".into());
         assert_eq!(
             turns[1].created_at_unix, 1_700_000_010,
             "时间戳取条目落账时的时间，不是『现在』——否则回拉旧历史会被标成刚发生"
@@ -1432,13 +1483,13 @@ mod tests {
     #[test]
     fn turn_kinds_map_honestly() {
         let e = turn_entry_of(&log_entry(7, "error", "boom", 5));
-        assert_eq!(e.element_type, "error");
-        assert_eq!(e.kind, "content");
+        assert_eq!(e.element_type, "error".into());
+        assert_eq!(e.kind, "content".into());
         let e = turn_entry_of(&log_entry(8, "thinking", "hmm", 5));
-        assert_eq!(e.element_type, "thinking");
+        assert_eq!(e.element_type, "thinking".into());
         // 节点的运行日志（审计/审批/状态）不丢弃：它们是节点写下的人类可读整句。
         let e = turn_entry_of(&log_entry(9, "audit", "mode=ask 放行 bash", 5));
-        assert_eq!(e.element_type, "markdown");
+        assert_eq!(e.element_type, "markdown".into());
         assert_eq!(e.content, "mode=ask 放行 bash");
     }
 

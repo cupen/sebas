@@ -1219,7 +1219,7 @@ async fn create_session_with_project_dir_binds_to_path() {
     let infos = router.session_info_snapshot().await;
     let new_info = infos
         .iter()
-        .find(|i| i.channel == "web" && i.key.starts_with("web-") && i.status == "spawning")
+        .find(|i| i.channel == "web" && i.key.starts_with("web-") && i.status == "spawning".into())
         .expect("new web-spawned session info present");
     assert_eq!(
         new_info.project_dir.as_deref(),

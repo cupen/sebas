@@ -1,5 +1,6 @@
 //! Data models for the WebUI dashboard.
 
+use sebas_domain::session::{CardPhase, SessionPhase};
 use serde::Serialize;
 
 /// The operator-facing status of a session: one of six words, derived from
@@ -35,20 +36,30 @@ impl SessionStatus {
     /// card state for the session yet. An active session with no phase is
     /// Queued, not Working: the child process exists but has not produced
     /// anything, and claiming otherwise would be a lie the operator acts on.
-    pub fn derive(state: &str, phase: &str) -> Self {
-        match state {
-            "spawning" => Self::Starting,
-            "dormant" => Self::Dormant,
+    pub fn derive(phase: &SessionPhase, card: Option<&CardPhase>) -> Self {
+        // （type-session-vocabularies 2.3）入参是共享类型而非字符串：新增一个
+        // `SessionPhase` / `CardPhase` 取值会让这里**编译失败**（穷尽匹配），
+        // 不再静默落进字符串兜底。取值与派生词表的对应关系逐字未变。
+        match phase {
+            SessionPhase::Spawning => Self::Starting,
+            SessionPhase::Dormant => Self::Dormant,
             // fail-fast-on-startup-errors：spawn 失败的会话诚实呈现为 Failed
             // （而非继续假装 Starting/Queued）。
-            "spawn-failed" => Self::Failed,
-            // "active", plus any unknown state, falls through to the phase.
-            _ => match phase {
-                "OnIt" => Self::Working,
-                "DONE" => Self::Done,
-                "CrossMark" => Self::Failed,
-                // "Get" (received) and empty both mean "nothing yet".
-                _ => Self::Queued,
+            SessionPhase::SpawnFailed => Self::Failed,
+            // Active，以及其余一切相位（含未知取值），都落到卡相位上。
+            SessionPhase::Active
+            | SessionPhase::Idle
+            | SessionPhase::WaitingApproval
+            | SessionPhase::Exited
+            | SessionPhase::Closed
+            | SessionPhase::Terminated
+            | SessionPhase::Failed
+            | SessionPhase::Unknown(_) => match card {
+                Some(CardPhase::OnIt) => Self::Working,
+                Some(CardPhase::Done) => Self::Done,
+                Some(CardPhase::CrossMark) => Self::Failed,
+                // "Get"（已接收）、未知卡相位、以及无卡态都表示「还没有东西」。
+                Some(CardPhase::Get) | Some(CardPhase::Unknown(_)) | None => Self::Queued,
             },
         }
     }
@@ -313,8 +324,8 @@ impl From<&sebas_dispatch::TurnEntry> for ConversationEntryView {
     fn from(t: &sebas_dispatch::TurnEntry) -> Self {
         Self {
             position: t.position,
-            kind: t.kind.clone(),
-            element_type: t.element_type.clone(),
+            kind: t.kind.as_str().to_string(),
+            element_type: t.element_type.as_str().to_string(),
             content: t.content.clone(),
             created_at_unix: t.created_at_unix,
             title: t.title.clone(),
@@ -330,8 +341,11 @@ impl ConversationEntryView {
     /// 渲染错误气泡，notice 是零输出提示的中性信息条分支）。
     pub(crate) fn with_normalized_element_type(mut self) -> Self {
         if !matches!(
-            self.element_type.as_str(),
-            "thinking" | "tool" | "error" | "notice"
+            sebas_domain::session::TurnElementType::from_wire(&self.element_type),
+            sebas_domain::session::TurnElementType::Thinking
+                | sebas_domain::session::TurnElementType::Tool
+                | sebas_domain::session::TurnElementType::Error
+                | sebas_domain::session::TurnElementType::Notice
         ) {
             self.element_type = "markdown".to_string();
         }
@@ -346,15 +360,24 @@ impl From<&sebas_dispatch::SessionInfo> for SessionRow {
     fn from(info: &sebas_dispatch::SessionInfo) -> Self {
         // raw status 词表（含 spawn-failed 特判，与计数桶语义一致——
         // DashboardData 的计数由 build_session_rows 读 status 桶统计）。
-        let status: &'static str = match info.status.as_str() {
-            "active" => "active",
-            "dormant" => "dormant",
+        let status: &'static str = match info.status {
+            SessionPhase::Active => "active",
+            SessionPhase::Dormant => "dormant",
             // spawn-failed 不再被吞进 spawning：行上的 raw status 与派生 slug
             // 都必须如实呈现失败态（SessionStatus::derive 有专门分支）。
-            "spawn-failed" => "spawn-failed",
-            _ => "spawning",
+            SessionPhase::SpawnFailed => "spawn-failed",
+            // 其余相位（含未知取值）都归入 spawning——既有的字符串兜底语义
+            // 逐字保留，但现在是穷尽匹配：新增相位必须在这里表态。
+            SessionPhase::Spawning
+            | SessionPhase::Idle
+            | SessionPhase::WaitingApproval
+            | SessionPhase::Exited
+            | SessionPhase::Closed
+            | SessionPhase::Terminated
+            | SessionPhase::Failed
+            | SessionPhase::Unknown(_) => "spawning",
         };
-        let derived = SessionStatus::derive(status, info.phase.as_deref().unwrap_or(""))
+        let derived = SessionStatus::derive(&info.status, info.phase.as_ref())
             // 8.4：有悬空审批的会话**在等**，不是在跑。（review 3c 补口）
             // 泊车维度本地/远端合并：本地读 parked_approvals，远端读 remote。
             .with_parked_approvals(match info.remote.as_ref() {
@@ -389,8 +412,11 @@ impl From<&sebas_dispatch::SessionInfo> for SessionRow {
             backend: info.backend.clone(),
             pending_count: info.pending.len(),
             remote: info.remote.clone(),
-            desired_mode: info.desired_mode.clone(),
-            effective_mode: info.effective_mode.clone(),
+            desired_mode: info.desired_mode.as_str().to_string(),
+            effective_mode: info
+                .effective_mode
+                .as_ref()
+                .map(|m| m.as_str().to_string()),
             // rail-declutter-unread 1.2：未读徽标的服务端计数随行下发。
             msg_count: info.msg_count,
             // （session-parallel-liveness-and-unread-polish 1.3）spawn 失败
@@ -405,6 +431,61 @@ impl From<&sebas_dispatch::SessionInfo> for SessionRow {
 #[cfg(test)]
 mod tests {
     use super::SessionStatus;
+    use sebas_domain::session::{CardPhase, SessionPhase};
+
+    /// （type-session-vocabularies 4.3）**重构前写下的转录**回归：黄金样本里的
+    /// 7 条条目（覆盖全部六种 `element_type` + 一条 prompt）反序列化后逐条渲染，
+    /// 渲染结果必须与重构前逐条一致。
+    ///
+    /// 这是「读取既有转录」的机械闸门：词汇类型化只许改类型，不许改渲染。比对
+    /// 输出随测试打印（`cargo test -- --nocapture`）。
+    #[test]
+    fn golden_transcript_renders_unchanged() {
+        use super::ConversationEntryView;
+        let doc: serde_json::Value = serde_json::from_str(include_str!(
+            "../../sebas-domain/src/golden_session_vocabulary.json"
+        ))
+        .expect("黄金样本是合法 JSON");
+        let entries = doc["turn_entries"].as_array().expect("turn_entries 数组");
+
+        // 重构前的渲染基线 `(kind, element_type)`。
+        let baseline = [
+            ("prompt", "markdown"),
+            ("content", "markdown"),
+            ("content", "thinking"),
+            ("content", "tool"),
+            ("content", "error"),
+            ("content", "notice"),
+            // `permission_mode_result` 不是会话条目：渲染归一为 markdown（既有行为，
+            // 该条目由 handle_mode_result_entry 消费）。
+            ("content", "markdown"),
+        ];
+        assert_eq!(entries.len(), baseline.len(), "黄金转录条目数变了");
+
+        let mut compared = Vec::new();
+        for (sample, (want_kind, want_element)) in entries.iter().zip(baseline) {
+            let entry: sebas_dispatch::TurnEntry =
+                serde_json::from_value(sample.clone()).expect("转录条目可反序列化");
+            let view = ConversationEntryView::from(&entry).with_normalized_element_type();
+            compared.push(format!(
+                "pos={} raw={:<22} rendered=({}, {})",
+                entry.position,
+                sample["element_type"].as_str().unwrap_or("?"),
+                view.kind,
+                view.element_type
+            ));
+            assert_eq!(view.kind, want_kind, "kind 渲染变了:\n{}", compared.join("\n"));
+            assert_eq!(
+                view.element_type,
+                want_element,
+                "element_type 渲染变了:\n{}",
+                compared.join("\n")
+            );
+            assert_eq!(view.content, entry.content, "内容不得丢");
+        }
+        // 比对输出（`--nocapture` 可见）。
+        eprintln!("重构前转录渲染比对：\n{}", compared.join("\n"));
+    }
 
     /// Every input the router can produce, including the two that used to
     /// leak a Feishu reaction name onto the screen (`Get`, `OnIt`) and the
@@ -412,17 +493,21 @@ mod tests {
     #[test]
     fn derives_every_status_row() {
         let cases = [
-            ("spawning", "", SessionStatus::Starting),
-            ("active", "Get", SessionStatus::Queued),
-            ("active", "OnIt", SessionStatus::Working),
-            ("active", "DONE", SessionStatus::Done),
-            ("active", "CrossMark", SessionStatus::Failed),
-            ("active", "", SessionStatus::Queued),
-            ("dormant", "", SessionStatus::Dormant),
+            (SessionPhase::Spawning, None, SessionStatus::Starting),
+            (SessionPhase::Active, Some(CardPhase::Get), SessionStatus::Queued),
+            (SessionPhase::Active, Some(CardPhase::OnIt), SessionStatus::Working),
+            (SessionPhase::Active, Some(CardPhase::Done), SessionStatus::Done),
+            (
+                SessionPhase::Active,
+                Some(CardPhase::CrossMark),
+                SessionStatus::Failed,
+            ),
+            (SessionPhase::Active, None, SessionStatus::Queued),
+            (SessionPhase::Dormant, None, SessionStatus::Dormant),
         ];
         for (state, phase, want) in cases {
             assert_eq!(
-                SessionStatus::derive(state, phase),
+                SessionStatus::derive(&state, phase.as_ref()),
                 want,
                 "state={state:?} phase={phase:?}"
             );
@@ -434,11 +519,11 @@ mod tests {
     #[test]
     fn mapping_state_outranks_a_stale_phase() {
         assert_eq!(
-            SessionStatus::derive("dormant", "OnIt"),
+            SessionStatus::derive(&SessionPhase::Dormant, Some(&CardPhase::OnIt)),
             SessionStatus::Dormant
         );
         assert_eq!(
-            SessionStatus::derive("spawning", "OnIt"),
+            SessionStatus::derive(&SessionPhase::Spawning, Some(&CardPhase::OnIt)),
             SessionStatus::Starting
         );
     }

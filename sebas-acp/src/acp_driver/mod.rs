@@ -145,6 +145,20 @@ impl AgentDriver for AcpDriver {
                                 Ok(d) => d,
                                 Err(_) => Decision::Deny,
                             };
+                            // escalate 降级与未知决定都要留痕（spec：降级必须被
+                            // 记录；无法解释的决定不得被静默当成放行）。
+                            if let Decision::Escalate { reason } = &decision {
+                                tracing::warn!(
+                                    %reason,
+                                    "ACP has no escalate equivalent, falling back to AllowOnce"
+                                );
+                            }
+                            if decision.is_unknown() {
+                                tracing::warn!(
+                                    decision = decision.as_str(),
+                                    "unrecognized permission decision on the ACP boundary; failing closed as Deny"
+                                );
+                            }
                             let response = map_decision(&decision, &request.options);
                             responder.respond(response)?;
                             Ok(())
@@ -533,7 +547,12 @@ fn map_decision(
     let wanted = match decision {
         Decision::AllowOnce => PermissionOptionKind::AllowOnce,
         Decision::AllowSession => PermissionOptionKind::AllowAlways,
-        Decision::Deny => PermissionOptionKind::RejectOnce,
+        // ACP 没有 escalate 等价物 → 降级为 allow_once（agent-driver spec 明写
+        // 这是层间唯一的语义适配；降级理由在调用点记日志）。
+        Decision::Escalate { .. } => PermissionOptionKind::AllowOnce,
+        // 未知决定**不得**被当成放行：fail closed 按拒绝处理（调用点已记
+        // 「无法解释的决定」警告，故不是静默解决）。
+        Decision::Deny | Decision::Unknown(_) => PermissionOptionKind::RejectOnce,
     };
     if let Some(opt) = options.iter().find(|o| o.kind == wanted) {
         return RequestPermissionResponse::new(RequestPermissionOutcome::Selected(
@@ -543,7 +562,7 @@ fn map_decision(
     // No exact match: deny is honest (Cancelled), allow falls back to the
     // first offered option rather than silently failing.
     match decision {
-        Decision::Deny => {
+        Decision::Deny | Decision::Unknown(_) => {
             RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled)
         }
         _ => options

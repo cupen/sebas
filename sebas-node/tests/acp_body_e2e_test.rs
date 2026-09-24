@@ -238,7 +238,7 @@ fn a_real_child_without_declared_enforcement_reports_no_effective_mode() {
         "节点配置没声明能强制 → 如实回「没有可声称生效的 mode」"
     );
     let (summary, ..) = host.snapshot("s-1").unwrap();
-    assert_eq!(summary.desired_mode.as_deref(), Some("ask"));
+    assert_eq!(summary.desired_mode, Some(sebas_node_link::SessionMode::Ask));
     assert_eq!(summary.mode, None, "期望与实际不同，差异可见");
 }
 

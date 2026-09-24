@@ -18,7 +18,7 @@ use sebas_agent::llm::{
     AnthropicMessagesClient, LlmClient, LlmError, LlmRequest, LlmTurn, StreamEvent,
 };
 use sebas_agent::policy::SandboxMode;
-use sebas_agent::policy::{ApprovalAnswer, Approver, ApproverHub, PolicyConfig, PolicyEngine};
+use sebas_agent::policy::{Approver, ApproverHub, PolicyConfig, PolicyEngine};
 use sebas_agent::session::{AgentEvent, SessionConfig, SessionHandle, SessionManager};
 use sebas_agent::tools::ToolRegistry;
 use sebas_channels::ChannelKey;
@@ -72,8 +72,8 @@ impl NativeSession {
     fn push_entry(&mut self, element_type: &str, content: String) -> TurnEntry {
         let entry = TurnEntry {
             position: self.transcript.len() as u64,
-            kind: "content".into(),
-            element_type: element_type.into(),
+            kind: sebas_domain::session::TurnKind::Content,
+            element_type: sebas_domain::session::TurnElementType::from_wire(element_type),
             content,
             created_at_unix: chrono::Utc::now().timestamp().max(0) as u64,
             title: None,
@@ -96,7 +96,7 @@ impl NativeSession {
             channel: key.channel_str().to_string(),
             key: key.reference.clone(),
             session_id: Some(self.handle.key.clone()),
-            status: "active".into(),
+            status: sebas_domain::session::SessionPhase::Active,
             phase: None,
             user_prompt: Some(self.prompt.clone()),
             last_active_unix: chrono::Utc::now().timestamp(),
@@ -726,13 +726,18 @@ impl SessionBackend for NativeAgentBackend {
     }
 
     async fn answer_permission(&self, request_id: &str, decision: PermissionDecision) -> bool {
-        let answer = match decision {
-            PermissionDecision::AllowOnce => ApprovalAnswer::AllowOnce,
-            PermissionDecision::AllowSession => ApprovalAnswer::AllowSession,
-            PermissionDecision::Deny => ApprovalAnswer::Deny,
-            PermissionDecision::Escalate { reason } => ApprovalAnswer::Escalate { reason },
-        };
-        self.hub.answer(request_id, answer)
+        // 决定词汇已合一（type-session-vocabularies 3.2）：这里不再有手写桥，
+        // `PermissionDecision` 与 `ApprovalAnswer` 是**同一个**类型，直投即可。
+        // 未知取值**不得**静默解决泊车审批（spec `agent-driver`）→ 如实拒绝投递，
+        // 待决请求保持悬空。
+        if !decision.is_answerable() {
+            eprintln!(
+                "agent_backend: 审批 {request_id} 收到未知决定 {:?}，已拒绝投递（审批保持悬空）",
+                decision.as_str()
+            );
+            return false;
+        }
+        self.hub.answer(request_id, decision)
     }
 }
 

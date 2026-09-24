@@ -238,7 +238,7 @@ async fn handle_spawn_resume_without_feishu(
     // 是新建的，`--permission-mode` 必须随 argv 重新下发，否则恢复出来的
     // 会话回退到 CLI 默认（映射字段随 state.json 持久化）。
     let resume_mode = router.map.get(&key).await.map(|m| m.desired_mode);
-    let command = resume_command_with_mode(&kind, command, resume_mode.as_deref());
+    let command = resume_command_with_mode(&kind, command, resume_mode.as_ref().map(|m| m.as_str()));
     let (session_id, pending, rx, resumed) = match acp_resume_and_activate(
         mgr,
         router,
@@ -274,13 +274,14 @@ async fn handle_spawn_resume_without_feishu(
     // 映射值 → effective 如实记录（claude 且确有映射时）。
     if kind == "claude"
         && resume_mode
-            .as_deref()
+            .as_ref()
+            .map(|m| m.as_str())
             .map(mode_to_permission_flag)
             .flatten()
             .is_some()
     {
         router
-            .apply_mode_changed(session_id.as_str(), resume_mode.as_deref())
+            .apply_mode_changed(session_id.as_str(), resume_mode.as_ref().map(|m| m.as_str()))
             .await;
     }
     router.seed_card(session_id.clone(), prompt.clone()).await;

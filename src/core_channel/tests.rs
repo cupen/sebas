@@ -239,7 +239,7 @@ async fn subscription_delivers_every_mutation_after_the_snapshot() {
             } if session.channel_key() == key => saw_created = true,
             SessionStreamFrame::Event {
                 event: SessionEvent::Updated { session },
-            } if session.channel_key() == key && session.status == "active" => {
+            } if session.channel_key() == key && session.status == "active".into() => {
                 saw_updated = true;
                 break;
             }
@@ -257,7 +257,7 @@ async fn subscription_delivers_every_mutation_after_the_snapshot() {
     let snap = core.handle.session_info_snapshot().await;
     assert!(
         snap.iter()
-            .any(|s| s.channel_key() == key && s.status == "active")
+            .any(|s| s.channel_key() == key && s.status == "active".into())
     );
 }
 
@@ -281,7 +281,7 @@ async fn backend_methods_reach_the_right_handlers() {
         .expect("spawn");
     let snap = backend.snapshot().await;
     assert_eq!(snap.len(), 1);
-    assert_eq!(snap[0].status, "spawning");
+    assert_eq!(snap[0].status, "spawning".into());
     // 服务端 canonicalize project_dir 后存储（5.5）；Windows verbatim 前缀
     // 被还原为 plain 形（add-workspace-root：会话面执法与项目注册表必须同域
     // 比较，`\\?\` 形会让 `VerbatimDisk` ≠ `Disk` 恒假、误判越界）。
@@ -305,7 +305,7 @@ async fn backend_methods_reach_the_right_handlers() {
         .activate(&channel_key, "s-live".into(), None, None)
         .await;
     let snap = backend.snapshot().await;
-    assert_eq!(snap[0].status, "active");
+    assert_eq!(snap[0].status, "active".into());
     assert_eq!(snap[0].session_id.as_deref(), Some("s-live"));
 
     // message to the live session → Ok.
@@ -362,7 +362,7 @@ async fn backend_methods_reach_the_right_handlers() {
     // 收尾且无任何可见输出条目（只有 prompt），投影因此多一条
     // element_type = "notice" 的中性提示——回合在时间线上不再无声消失。
     assert_eq!(all.len(), 4);
-    assert_eq!(all[1].element_type, "notice");
+    assert_eq!(all[1].element_type, "notice".into());
     assert!(all[1].content.contains("回合已结束且无输出"));
     let tail = backend.turns(key.clone(), 3).await.unwrap();
     assert_eq!(tail.len(), 1);
@@ -411,7 +411,7 @@ async fn create_placeholder_wires_a_zero_turn_session() {
     // 占位在快照里可见（spawning、带 project_dir），且没有 spawn 指令发出。
     let snap = backend.snapshot().await;
     assert_eq!(snap.len(), 1);
-    assert_eq!(snap[0].status, "spawning");
+    assert_eq!(snap[0].status, "spawning".into());
     // 服务端会 canonicalize project_dir 并还原 Windows verbatim 前缀（plain
     // 形，add-workspace-root：与项目注册表同域比较，理由见
     // backend_methods_reach_the_right_handlers 处注释）。
@@ -793,7 +793,7 @@ async fn ensure_message_spawns_unknown_key_and_message_still_rejects() {
     );
     assert_eq!(snap[0].channel, "feishu");
     assert!(snap[0].key.contains("oc_ensure_test"));
-    assert_eq!(snap[0].status, "spawning");
+    assert_eq!(snap[0].status, "spawning".into());
 
     // 已知 key：EnsureMessage 等价 Message → Ok（spawning 中入站按 Enqueued
     // 排队语义处理，不报错——与 feishu 入站文本路径一致）。
@@ -1511,7 +1511,7 @@ async fn ensure_message_unknown_key_auto_creates() {
     let snap = backend.snapshot().await;
     assert_eq!(snap.len(), 1, "exactly one session created: {snap:?}");
     assert!(snap[0].key.contains("oc_a2_ensure_new"));
-    assert_eq!(snap[0].status, "spawning");
+    assert_eq!(snap[0].status, "spawning".into());
 }
 
 /// dormant 会话经 EnsureMessage 懒复活：Ok + 快照状态从 dormant 变为
@@ -1534,7 +1534,7 @@ async fn ensure_message_dormant_resumes() {
         .unwrap();
     let before = backend.snapshot().await;
     assert_eq!(
-        before[0].status, "dormant",
+        before[0].status, "dormant".into(),
         "fixture starts dormant: {before:?}"
     );
 
@@ -1546,7 +1546,7 @@ async fn ensure_message_dormant_resumes() {
     let after = backend.snapshot().await;
     assert_eq!(after.len(), 1, "same session, resumed in place: {after:?}");
     assert_eq!(
-        after[0].status, "spawning",
+        after[0].status, "spawning".into(),
         "dormant claimed → spawning: {after:?}"
     );
 }

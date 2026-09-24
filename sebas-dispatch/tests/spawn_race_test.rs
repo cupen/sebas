@@ -143,7 +143,7 @@ async fn fail_spawn_keeps_the_sessions_project_and_agent() {
         Some("auto"),
         "失败不改请求的 mode"
     );
-    assert_eq!(m.desired_mode, "auto", "失败不改期望 mode");
+    assert_eq!(m.desired_mode, "auto".into(), "失败不改期望 mode");
 }
 
 #[tokio::test]
@@ -366,15 +366,15 @@ async fn fail_spawn_surfaces_error_inline_and_keeps_session_visible() {
         .iter()
         .find(|i| i.key == key.reference)
         .expect("session kept");
-    assert_eq!(info.status, "spawn-failed");
+    assert_eq!(info.status, "spawn-failed".into());
     assert!(info.session_id.is_none());
 
     // transcript 经合成 id 可读：一条带原因的 error 事件（kind 归 agent 侧
     // content，element_type 才是渲染类型——workbench-conversation-view 1.3）。
     let turns = router.session_turns(&key, 0).await.expect("turns readable");
-    let errors: Vec<_> = turns.iter().filter(|e| e.element_type == "error").collect();
+    let errors: Vec<_> = turns.iter().filter(|e| e.element_type == "error".into()).collect();
     assert_eq!(errors.len(), 1, "exactly one error entry: {turns:?}");
-    assert!(errors[0].kind == "content");
+    assert!(errors[0].kind == "content".into());
     assert!(
         errors[0].content.contains("spawn failed")
             && errors[0].content.contains("agent binary missing"),
@@ -521,8 +521,8 @@ async fn web_spawn_with_kind_exposes_agent_kind_in_session_info() {
         .find(|i| i.key == key.reference)
         .expect("spawning session listed");
     assert_eq!(info.agent_kind.as_deref(), Some("opencode"));
-    assert_eq!(info.desired_mode, "edit");
-    assert_eq!(info.status, "spawning");
+    assert_eq!(info.desired_mode, "edit".into());
+    assert_eq!(info.status, "spawning".into());
 
     // spawn 后不清除（SessionInfo.agent_kind 的既有语义）：激活后仍可展示。
     map.activate(&key, "s1".into(), None, None).await;
@@ -553,7 +553,7 @@ async fn web_spawn_without_kind_keeps_agent_kind_none() {
         .find(|i| i.key == key.reference)
         .expect("spawning session listed");
     assert_eq!(info.agent_kind, None);
-    assert_eq!(info.desired_mode, sebas_dispatch::engine::ASK_MODE);
+    assert_eq!(info.desired_mode.as_str(), sebas_dispatch::engine::ASK_MODE);
 }
 
 /// 真实 spawn 不是 0-turn 占位（D1）：prompt 已随 Out::WebSpawn 直达，

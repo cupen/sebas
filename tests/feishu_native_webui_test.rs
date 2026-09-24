@@ -100,7 +100,7 @@ async fn feishu_native_session_appears_in_webui_snapshot() {
     .expect("native feishu session should appear in webui snapshot");
     assert_eq!(row.channel, "feishu");
     assert_eq!(row.key, "oc_native_webui");
-    assert_eq!(row.status, "active");
+    assert_eq!(row.status, "active".into());
 
     // transcript 可读：工具轨迹 + 收尾文本最终出现在 turn 流。轮询至 deadline，
     // 超时也把当前的 transcript 打出来便于诊断。

@@ -658,9 +658,13 @@ pub(crate) fn count_active_routed(mode: &ProviderMode, sessions: &[SessionInfo])
 ///   Failed（终态 phase）、Dormant（无活子进程）、spawn-failed（终态）。
 /// - 归档会话不在 live 快照里，天然不计。
 fn is_active_routed_session(s: &SessionInfo) -> bool {
-    match s.status.as_str() {
-        "spawning" => true,
-        "active" => s.phase.as_deref() == Some(sebas_dispatch::card_state::phase::WORKING),
+    // 相位与卡相位都是**共享类型**（type-session-vocabularies 2.2/2.3）：类型化
+    // match 取代字符串比较，新增相位时这里会编译失败而不是静默落 `_`。
+    match s.status {
+        sebas_domain::session::SessionPhase::Spawning => true,
+        sebas_domain::session::SessionPhase::Active => {
+            s.phase == Some(sebas_domain::session::CardPhase::OnIt)
+        }
         _ => false,
     }
 }
@@ -1586,8 +1590,8 @@ mod tests {
             channel: "web".into(),
             key: format!("k-{status}-{phase:?}"),
             session_id: None,
-            status: status.into(),
-            phase: phase.map(str::to_string),
+            status: sebas_domain::session::SessionPhase::from(status),
+            phase: phase.map(sebas_domain::session::CardPhase::from),
             user_prompt: None,
             last_active_unix: 0,
             project_dir: None,

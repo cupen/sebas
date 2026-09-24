@@ -1,0 +1,135 @@
+{
+  "note": "type-session-vocabularies 1.4 golden samples, generated from the pre-change tree",
+  "session_phase_spellings": [
+    "spawning",
+    "active",
+    "dormant",
+    "spawn-failed",
+    "idle",
+    "waiting_approval",
+    "exited",
+    "closed",
+    "terminated",
+    "failed"
+  ],
+  "card_phase_spellings": [
+    "Get",
+    "OnIt",
+    "DONE",
+    "CrossMark"
+  ],
+  "session_mode_spellings": [
+    "ask",
+    "edit",
+    "allow",
+    "auto"
+  ],
+  "turn_kind_spellings": [
+    "prompt",
+    "content"
+  ],
+  "element_type_spellings": [
+    "markdown",
+    "thinking",
+    "tool",
+    "error",
+    "notice",
+    "permission_mode_result"
+  ],
+  "turn_entries": [
+    {
+      "position": 0,
+      "kind": "prompt",
+      "element_type": "markdown",
+      "content": "hello",
+      "created_at_unix": 0
+    },
+    {
+      "position": 1,
+      "kind": "content",
+      "element_type": "markdown",
+      "content": "body",
+      "created_at_unix": 0
+    },
+    {
+      "position": 2,
+      "kind": "content",
+      "element_type": "thinking",
+      "content": "think",
+      "created_at_unix": 0
+    },
+    {
+      "position": 3,
+      "kind": "content",
+      "element_type": "tool",
+      "content": "tool",
+      "created_at_unix": 0
+    },
+    {
+      "position": 4,
+      "kind": "content",
+      "element_type": "error",
+      "content": "boom",
+      "created_at_unix": 0
+    },
+    {
+      "position": 5,
+      "kind": "content",
+      "element_type": "notice",
+      "content": "empty turn",
+      "created_at_unix": 0
+    },
+    {
+      "position": 6,
+      "kind": "content",
+      "element_type": "permission_mode_result",
+      "content": "{\"request_id\":\"r1\",\"ok\":false,\"mode\":\"auto\",\"detail\":\"nope\"}",
+      "created_at_unix": 0
+    }
+  ],
+  "remote_session_views": [
+    {
+      "node_id": "node-1",
+      "node_status": "online",
+      "desired_mode": "ask",
+      "effective_mode": "ask",
+      "parked_approvals": 0
+    },
+    {
+      "node_id": "node-1",
+      "node_status": "online",
+      "desired_mode": "edit",
+      "effective_mode": "edit",
+      "parked_approvals": 0
+    },
+    {
+      "node_id": "node-1",
+      "node_status": "online",
+      "desired_mode": "allow",
+      "effective_mode": "allow",
+      "parked_approvals": 0
+    },
+    {
+      "node_id": "node-1",
+      "node_status": "online",
+      "desired_mode": "auto",
+      "effective_mode": "auto",
+      "parked_approvals": 0
+    }
+  ],
+  "permission_decisions": [
+    {
+      "decision": "allow_once"
+    },
+    {
+      "decision": "allow_session"
+    },
+    {
+      "decision": "deny"
+    },
+    {
+      "decision": "escalate",
+      "reason": "needs a sudo prompt"
+    }
+  ]
+}

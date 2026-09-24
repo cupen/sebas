@@ -248,7 +248,7 @@ pub async fn session_detail(
         .remote
         .as_ref()
         .map_or(info.parked_approvals, |r| r.parked_approvals);
-    let derived = SessionStatus::derive(&info.status, info.phase.as_deref().unwrap_or(""))
+    let derived = SessionStatus::derive(&info.status, info.phase.as_ref())
         .with_parked_approvals(parked);
 
     let mut data = json!({
@@ -2227,7 +2227,7 @@ pub async fn archive_session(State(state): State<WebUiState>, Path(key): Path<St
     // 归档条目携带会话身份——手里有完整 SessionInfo，四项一并落档。
     let identity = sebas_dispatch::SessionIdentity {
         agent_kind: info.agent_kind.clone(),
-        desired_mode: Some(info.desired_mode.clone()),
+        desired_mode: Some(info.desired_mode.as_str().to_string()),
         current_model: info.current_model.clone(),
         available_models: info.available_models.clone(),
     };
@@ -2409,7 +2409,7 @@ fn session_phase_frame(info: &SessionInfo) -> crate::events::SessionPhaseFrame {
         .remote
         .as_ref()
         .map_or(info.parked_approvals, |r| r.parked_approvals);
-    let derived = SessionStatus::derive(&info.status, info.phase.as_deref().unwrap_or(""))
+    let derived = SessionStatus::derive(&info.status, info.phase.as_ref())
         .with_parked_approvals(parked);
     crate::events::SessionPhaseFrame {
         status_slug: derived.slug().to_string(),

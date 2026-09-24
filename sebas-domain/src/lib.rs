@@ -57,3 +57,7 @@ pub mod prim;
 pub mod provider;
 pub mod session;
 pub mod state_paths;
+pub mod vocabulary;
+
+#[cfg(test)]
+mod golden_tests;

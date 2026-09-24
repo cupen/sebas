@@ -2,7 +2,7 @@
 //! 缺 rid/未知 decision，slash 转发臂，Media 组合 prompt，dispatch_acp_event
 //! 全事件类型，MsgIdMap 存取，terminal error 清理。
 
-use sebas_acp::claude::session::{AcpCommand, AcpEvent, Decision};
+use sebas_acp::claude::session::{AcpCommand, AcpEvent};
 use sebas_channels::{ChannelAction, ChannelEvent, ChannelKey};
 use sebas_dispatch::engine::{DispatchHandle, Out, compose_media_prompt};
 use sebas_dispatch::state::{Mapping, SessionMap};
@@ -115,8 +115,14 @@ async fn button_cb_missing_request_id_gets_help() {
     assert!(matches!(next_out(&mut out_rx).await, Out::HelpText { .. }));
 }
 
+/// （type-session-vocabularies 3.3）未知决定**不得**被硬当成 deny 悄悄结案。
+///
+/// 改动前这里断言的是「未知词 → PermissionReply{Deny}」——那等于用一条没读懂的决定
+/// 解决了泊车审批，spec `agent-driver` 明禁（"no parked approval is silently resolved
+/// by a decision that could not be interpreted"）。现在的契约是：未知决定被**呈现**
+/// 给操作者，泊车审批保持悬空，且不向执行体发出任何 PermissionReply。
 #[tokio::test]
-async fn button_cb_unknown_decision_fails_closed_to_deny() {
+async fn button_cb_unknown_decision_is_surfaced_without_resolving_the_approval() {
     let map = SessionMap::new();
     map.insert(key(), Mapping::active("s1")).await.unwrap();
     let (router, mut out_rx) = DispatchHandle::new(map);
@@ -142,27 +148,34 @@ async fn button_cb_unknown_decision_fails_closed_to_deny() {
             },
         })
         .await;
-    // First Out is the in-place flip (UpdateCardByMsgId); drain until SendAcp.
-    let out = loop {
-        let got = next_out(&mut out_rx).await;
-        if matches!(got, Out::SendAcp { .. }) {
-            break got;
-        }
-    };
-    match out {
-        Out::SendAcp { cmd, .. } => match cmd {
-            AcpCommand::PermissionReply {
-                decision,
-                request_id,
-                ..
-            } => {
-                assert!(matches!(decision, Decision::Deny));
-                assert_eq!(request_id, "r9");
-            }
-            other => panic!("expected PermissionReply, got {other:?}"),
-        },
-        other => panic!("expected SendAcp, got {other:?}"),
-    }
+
+    let outs = drain(&mut out_rx).await;
+    // ① 被呈现：操作者必须看到「这个决定我没读懂」，而不是零反馈。
+    assert!(
+        outs.iter().any(|o| matches!(
+            o,
+            Out::PlainText { content, .. } if content.contains("yolo")
+        )),
+        "未知决定必须被呈现（PlainText），不得静默丢弃：{outs:?}"
+    );
+    // ② 不解除审批：不得把未知值翻译成任何决定发给执行体。
+    assert!(
+        !outs.iter().any(|o| matches!(o, Out::SendAcp { .. })),
+        "未知决定不得翻译成 PermissionReply 发给执行体：{outs:?}"
+    );
+    // ③ 卡片不得被翻成「已拒绝」——那是把没读懂的决定当成结论。
+    assert!(
+        !outs.iter().any(|o| matches!(
+            o,
+            Out::UpdateCardByMsgId { .. }
+        )),
+        "未知决定不得翻转泊车卡片结案：{outs:?}"
+    );
+    // ④ 泊车记录未被消费：审批仍悬空，操作者可以重新点一个有效选项。
+    assert!(
+        router.take_perm_card("r9").await.is_some(),
+        "未知决定不得消费泊车卡片记录（审批必须保持悬空）"
+    );
 }
 
 // ---------- slash 转发臂 ----------

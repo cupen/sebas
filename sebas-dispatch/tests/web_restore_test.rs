@@ -46,14 +46,14 @@ async fn restore_rebuilds_dormant_mapping_with_full_transcript() {
     // 快照可见，状态 dormant，project_dir 沿用。
     let snap = router.session_info_snapshot().await;
     assert_eq!(snap.len(), 1, "restored session must appear in the snapshot");
-    assert_eq!(snap[0].status, "dormant");
+    assert_eq!(snap[0].status, "dormant".into());
     assert_eq!(snap[0].project_dir.as_deref(), Some("/proj"));
     assert_eq!(snap[0].session_id.as_deref(), Some("old-sid"));
 
     // detail（turns）完整：全部 N 条条目按序可见。
     let turns = router.session_turns(&key, 0).await.expect("mapping exists");
     assert_eq!(turns.len(), 3, "all archived entries must be visible");
-    assert_eq!(turns[0].kind, "prompt");
+    assert_eq!(turns[0].kind, "prompt".into());
     assert_eq!(turns[0].content, "hello");
     assert_eq!(turns[1].content, "world");
     // 错误条目的失败分类随回放保留。
@@ -133,7 +133,7 @@ async fn restore_with_empty_transcript_still_rebuilds_the_mapping() {
         .await
         .expect("restore must succeed");
     let info = router.session_info_for(&key).await.expect("mapping exists");
-    assert_eq!(info.status, "dormant");
+    assert_eq!(info.status, "dormant".into());
     assert!(router.session_turns(&key, 0).await.unwrap().is_empty());
 }
 

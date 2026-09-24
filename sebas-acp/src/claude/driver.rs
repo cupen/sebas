@@ -859,7 +859,19 @@ fn permission_hook(
                 Ok(Decision::AllowOnce) | Ok(Decision::AllowSession) => {
                     allow_output("allowed by sebas user")
                 }
-                Ok(Decision::Deny) | Err(_) => deny_output("denied by sebas user"),
+                // claude CLI 的 hook 输出没有 escalate 等价物 → 降级为 allow_once
+                // 并记日志（agent-driver spec：层间唯一的语义适配）。
+                Ok(Decision::Escalate { reason }) => {
+                    tracing::warn!(
+                        %reason,
+                        "claude driver has no escalate equivalent, falling back to allow_once"
+                    );
+                    allow_output("allowed by sebas user")
+                }
+                // 未知决定 fail closed 成拒绝（不静默当成放行）。
+                Ok(Decision::Deny) | Ok(Decision::Unknown(_)) | Err(_) => {
+                    deny_output("denied by sebas user")
+                }
             };
             waiting.store(false, Ordering::SeqCst);
             out

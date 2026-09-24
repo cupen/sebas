@@ -11,6 +11,7 @@ use sebas_dispatch::card_state::{CardState, phase};
 use sebas_dispatch::cards_ui;
 use sebas_dispatch::commands::{Command, parse_command};
 use sebas_dispatch::{SessionEvent, SessionInfo, TurnEntry};
+use sebas_domain::session::{CardPhase, SessionPhase, TurnElementType, TurnKind};
 use sebas_feishu::adapter::{render_channel_card_frame, render_standalone_card};
 use sebas_feishu::client::{FeishuApiError, FeishuClient, TokenManager};
 use sebas_feishu::events::SessionKey;
@@ -39,8 +40,8 @@ struct SessionView {
     session_id: Option<String>,
     /// 当前轮的 user prompt（新 prompt = 新卡片轮）。
     prompt: String,
-    status: String,
-    phase: Option<String>,
+    status: SessionPhase,
+    phase: Option<CardPhase>,
     usage: AppUsage,
     card: CardState,
     /// 当前卡片的飞书 message_id（in-place PATCH 引用）。
@@ -598,7 +599,7 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
         let id = view_id(&key);
         let mut views = self.views.write().await;
         let Some(view) = views.get_mut(&id) else {
-            if info.status == "spawning" || info.session_id.is_some() {
+            if info.status == SessionPhase::Spawning || info.session_id.is_some() {
                 // 新视图首见 = 新轮起点：先提升归属（终态角标落点 = 触发
                 // 本轮的消息）再入册（feishu-turn-badges）。
                 drop(views);
@@ -627,7 +628,7 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
         self.promote_turn_msg(&id, new_turn).await;
         // 相位变化 → root 卡 reaction 换挡。
         if view.phase != info.phase
-            && let Some(emoji) = info.phase.as_deref()
+            && let Some(emoji) = info.phase.as_ref().map(|p| p.as_str())
             && let Some(msg_id) = view.card_msg_id.as_deref()
         {
             let plan = self.reactions.plan(&id, emoji).await;
@@ -653,7 +654,7 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
         // 终态相位（feishu-turn-badges）：✅/❌ 叠挂到触发当轮的用户消息上
         // ——卡片换挡只覆盖卡面。快速完成的轮次终态可能先于首卡到达，
         // 标记不依赖 card_msg_id。
-        if let Some(emoji) = info.phase.as_deref()
+        if let Some(emoji) = info.phase.as_ref().map(|p| p.as_str())
             && matches!(emoji, phase::DONE | phase::FAILED)
             && let Some(target) = self
                 .turn_msgs
@@ -708,7 +709,11 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
                 let views = self.views.read().await;
                 views
                     .values()
-                    .filter(|v| !v.frozen && v.session_id.is_some() && v.status == "active")
+                    .filter(|v| {
+                        !v.frozen
+                            && v.session_id.is_some()
+                            && v.status == SessionPhase::Active
+                    })
                     .map(|v| (v.key.clone(), v.last_pos))
                     .collect()
             };
@@ -730,12 +735,12 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
         let mut dirty = false;
         for entry in entries {
             view.last_pos = entry.position + 1;
-            if entry.kind == "prompt" {
+            if entry.kind == TurnKind::Prompt {
                 continue; // prompt 已在 Created/Updated 时 seed
             }
             // permission-mode-auto-gate 事件契约：自动模式切换失败条目不进
             // 正文，而是驱动对应权限卡的就地失败翻面（放行仍在、如实呈现）。
-            if entry.element_type == "permission_mode_result" {
+            if entry.element_type == TurnElementType::PermissionModeResult {
                 self.handle_mode_result_entry(&key, &entry).await;
                 continue;
             }
@@ -920,9 +925,14 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
                 .await
                 .get(&id)
                 .and_then(|v| v.phase.clone());
-            let first_badge = match phase_now.as_deref() {
-                Some(p @ (phase::DONE | phase::FAILED)) => p,
-                _ => phase::SEED,
+            // 卡相位是类型化词汇，badge 仍是飞书 reaction 拼写。
+            let first_badge: &'static str = match phase_now {
+                Some(CardPhase::Done) => phase::DONE,
+                Some(CardPhase::CrossMark) => phase::FAILED,
+                Some(CardPhase::Get)
+                | Some(CardPhase::OnIt)
+                | Some(CardPhase::Unknown(_))
+                | None => phase::SEED,
             };
             if self.reactions.plan(&id, first_badge).await == ReactPlan::ReactOnly
                 && let Ok(rid) = self
@@ -1038,7 +1048,9 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
                 s.user_prompt
                     .clone()
                     .unwrap_or_else(|| "(无 prompt)".into()),
-                s.session_id.clone().unwrap_or_else(|| "spawning".into()),
+                s.session_id
+                    .clone()
+                    .unwrap_or_else(|| SessionPhase::Spawning.as_str().to_string()),
             ));
         }
         self.send_text(key, lines.join("\n")).await;
@@ -1166,6 +1178,12 @@ fn click_flip_state(
         ),
         PermissionDecision::Deny => ("已拒绝", "red", "该工具调用已被拒绝。".into()),
         PermissionDecision::Escalate { reason } => ("已升级", "orange", reason.clone()),
+        // 无法解释的决定：如实呈现，不假装已处理（spec agent-driver）。
+        PermissionDecision::Unknown(raw) => (
+            "无法解释的决定",
+            "grey",
+            format!("无法解释的决定 {raw:?}：未生效，请重试或检查版本。"),
+        ),
     }
 }
 
@@ -1175,7 +1193,7 @@ fn click_flip_state(
 /// `ok != false`（含显式成功上报与非契约载荷）返回 None——成功面是点击时
 /// 的翻面，无需事件。
 fn parse_mode_result_entry(entry: &TurnEntry) -> Option<(String, String)> {
-    if entry.element_type != "permission_mode_result" {
+    if entry.element_type != TurnElementType::PermissionModeResult {
         return None;
     }
     let v: serde_json::Value = serde_json::from_str(&entry.content).ok()?;
@@ -1215,19 +1233,26 @@ fn decode_wire_key(encoded: &str) -> ChannelKey {
 /// turn 条目 → 卡片机输入（design D3）。工具调用在 turn 流里已是渲染好的
 /// markdown 行（📖/✓ 前缀），按文本增量入账（折叠面板归 tool_start 结构化
 /// 条目，留待 turn 流携带结构时启用）。
+///
+/// （type-session-vocabularies 4.2）类型化匹配：已知取值逐条穷尽表态，新增取值会
+/// 让这里**编译失败**，而不是静默落进字符串兜底。本 build 不认识的取值
+/// （`Unknown`）渲染为**通用文本块**，内容不丢——即改动前的兜底语义。
 fn turn_to_card_input(entry: &TurnEntry) -> Option<sebas_dispatch::card_events::CardInput> {
     use sebas_dispatch::card_events::CardInput;
-    match (entry.kind.as_str(), entry.element_type.as_str()) {
-        ("prompt", _) => None,
-        (_, "thinking") => Some(CardInput::ThinkingDelta {
+    match (&entry.kind, &entry.element_type) {
+        (TurnKind::Prompt, _) => None,
+        (_, TurnElementType::Thinking) => Some(CardInput::ThinkingDelta {
             delta: entry.content.clone(),
         }),
-        (_, "image") => Some(CardInput::TextDelta {
+        // `image` 是**词汇表之外**的历史取值（不在六值集里）：带图标前缀的行为
+        // 逐字保留。它只能是 `Unknown` 载荷，故按原串判别——判别只发生在未知
+        // 回退分支，已知取值的分派全部由类型完成。
+        (_, TurnElementType::Unknown(raw)) if raw == "image" => Some(CardInput::TextDelta {
             delta: format!("🖼 {} ", entry.content),
         }),
-        (_, "markdown") | (_, "text") => Some(CardInput::TextDelta {
-            delta: format!("{}\n", entry.content),
-        }),
+        // 其余一切：六值中的正文类（markdown / tool / error / notice /
+        // permission_mode_result）、历史值 `text`、以及其它未知取值，都是通用
+        // 文本块（与改动前 `(_, "markdown") | (_, "text")` 加上 `_` 两臂等价）。
         _ => Some(CardInput::TextDelta {
             delta: format!("{}\n", entry.content),
         }),
@@ -1507,6 +1532,74 @@ mod tests {
             !note.contains("已切换自动模式"),
             "失败态不得伪装成功: {note}"
         );
+    }
+
+    /// （type-session-vocabularies 4.2）六种 `element_type` 全都要有确定行为，
+    /// 且本 build 不认识的取值渲染为**通用文本块**（内容不丢），不得 panic。
+    #[test]
+    fn turn_to_card_input_covers_six_element_types_and_unknown() {
+        use sebas_dispatch::card_events::CardInput;
+        let entry = |kind: TurnKind, element_type: TurnElementType, content: &str| TurnEntry {
+            position: 0,
+            kind,
+            element_type,
+            content: content.into(),
+            created_at_unix: 0,
+            title: None,
+            failure_class: None,
+        };
+
+        // prompt 条目不进卡片（操作者自己的输入）。
+        assert!(
+            turn_to_card_input(&entry(TurnKind::Prompt, TurnElementType::Markdown, "hi")).is_none()
+        );
+        // thinking 走思维链增量。
+        assert!(matches!(
+            turn_to_card_input(&entry(TurnKind::Content, TurnElementType::Thinking, "t")),
+            Some(CardInput::ThinkingDelta { .. })
+        ));
+        // 六值中的正文类（含 tool/error/notice/permission_mode_result）与历史值
+        // `text` 都是通用文本块，内容不丢。
+        for et in [
+            TurnElementType::Markdown,
+            TurnElementType::Tool,
+            TurnElementType::Error,
+            TurnElementType::Notice,
+            TurnElementType::PermissionModeResult,
+            TurnElementType::from_wire("text"),
+        ] {
+            match turn_to_card_input(&entry(TurnKind::Content, et.clone(), "body")) {
+                Some(CardInput::TextDelta { delta }) => assert_eq!(delta, "body\n", "{et:?}"),
+                other => panic!("{et:?} 应为通用文本块，得到 {other:?}"),
+            }
+        }
+        // 历史值 `image` 保留图标前缀（词汇表之外，行为逐字不变）。
+        match turn_to_card_input(&entry(
+            TurnKind::Content,
+            TurnElementType::from_wire("image"),
+            "pic",
+        )) {
+            Some(CardInput::TextDelta { delta }) => assert_eq!(delta, "🖼 pic "),
+            other => panic!("image 应保留图标前缀，得到 {other:?}"),
+        }
+        // **未知取值**：渲染为通用文本块，内容不丢（改动前的兜底语义）。
+        match turn_to_card_input(&entry(
+            TurnKind::Content,
+            TurnElementType::from_wire("brand_new_type"),
+            "keep me",
+        )) {
+            Some(CardInput::TextDelta { delta }) => assert_eq!(delta, "keep me\n"),
+            other => panic!("未知取值应为通用文本块，得到 {other:?}"),
+        }
+        // 未知 kind 同样不 panic：分派按元素类型进行（thinking 仍走思维链）。
+        match turn_to_card_input(&entry(
+            TurnKind::from_wire("brand_new_kind"),
+            TurnElementType::Thinking,
+            "t2",
+        )) {
+            Some(CardInput::ThinkingDelta { delta }) => assert_eq!(delta, "t2"),
+            other => panic!("未知 kind + thinking 应走思维链，得到 {other:?}"),
+        }
     }
 
     /// 事件契约解析：只有 `ok=false` 的 permission_mode_result 载荷触发翻面。

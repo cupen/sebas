@@ -55,7 +55,7 @@ async fn events_follow_create_status_change_remove() {
         SessionEvent::Created { session } => {
             assert_eq!(session.channel, key.channel_str());
             assert_eq!(session.key, key.reference);
-            assert_eq!(session.status, "spawning");
+            assert_eq!(session.status, "spawning".into());
             assert_eq!(session.project_dir.as_deref(), Some("/tmp/p"));
             assert_eq!(session.session_id, None);
         }
@@ -63,7 +63,7 @@ async fn events_follow_create_status_change_remove() {
     }
     match &seq[1] {
         SessionEvent::Updated { session } => {
-            assert_eq!(session.status, "active");
+            assert_eq!(session.status, "active".into());
             assert_eq!(session.session_id.as_deref(), Some("s1"));
         }
         other => panic!("second event should be Updated, got {other:?}"),
@@ -110,7 +110,10 @@ async fn phase_transition_publishes_updated_with_phase() {
     while let Ok(ev) = events.try_recv() {
         if let SessionEvent::Updated { session } = ev
             && session.session_id.as_deref() == Some("s-b")
-            && session.phase.as_deref() == Some(sebas_dispatch::card_state::phase::WORKING)
+            && session.phase
+                == Some(sebas_domain::session::CardPhase::from(
+                    sebas_dispatch::card_state::phase::WORKING,
+                ))
         {
             saw_working = true;
         }
@@ -182,7 +185,7 @@ async fn applying_events_to_snapshot_reproduces_router_state() {
     assert_eq!(snapshot.len(), 1);
     assert_eq!(snapshot[0].channel, kb_key.channel_str());
     assert_eq!(snapshot[0].key, kb_key.reference);
-    assert_eq!(snapshot[0].status, "active");
+    assert_eq!(snapshot[0].status, "active".into());
     assert_eq!(snapshot[0].session_id.as_deref(), Some("s-b"));
 }
 
@@ -212,7 +215,7 @@ async fn turns_are_incremental_by_position() {
     let all = router.session_turns(&k, 0).await.unwrap();
     // prompt + three deltas
     assert_eq!(all.len(), 4);
-    assert_eq!(all[0].kind, "prompt");
+    assert_eq!(all[0].kind, "prompt".into());
     assert_eq!(all[3].content, "three");
 
     let after = router.session_turns(&k, 3).await.unwrap();
@@ -353,14 +356,14 @@ async fn tool_events_are_labelled_tool_in_turn_content() {
     let turns = router.session_turns(&k, 0).await.unwrap();
     // prompt + text + ToolStart + ToolEnd + text
     assert_eq!(turns.len(), 5);
-    let tools: Vec<_> = turns.iter().filter(|e| e.element_type == "tool").collect();
+    let tools: Vec<_> = turns.iter().filter(|e| e.element_type == "tool".into()).collect();
     assert_eq!(
         tools.len(),
         2,
         "ToolStart and ToolEnd both label tool: {turns:?}"
     );
     for t in &tools {
-        assert_eq!(t.kind, "content", "tool entries are agent-side content");
+        assert_eq!(t.kind, "content".into(), "tool entries are agent-side content");
         assert!(
             t.content.contains("read_file"),
             "tool content stays readable markdown: {}",
@@ -369,7 +372,7 @@ async fn tool_events_are_labelled_tool_in_turn_content() {
     }
     let prose: Vec<_> = turns
         .iter()
-        .filter(|e| e.element_type == "markdown" && e.kind == "content")
+        .filter(|e| e.element_type == "markdown".into() && e.kind == "content".into())
         .collect();
     assert_eq!(prose.len(), 2, "prose stays markdown: {turns:?}");
     // Tool entries are distinguishable from prose without sniffing content.

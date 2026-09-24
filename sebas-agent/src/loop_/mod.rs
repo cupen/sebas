@@ -557,6 +557,18 @@ async fn gated_execute(
                         format!("refused by policy: operator denied `{tool_name}`"),
                     )
                 }
+                // 未知应答不是本 build 能解释的决定：**fail closed**——绝不外放工具，
+                // 也不把它当成允许（spec `agent-driver`：无法解释的决定不得静默解决
+                // 一条泊车审批）。
+                Some(ApprovalAnswer::Unknown(raw)) => {
+                    emit.tool_policy(tool_use_id, tool_name, "unknown_answer");
+                    ToolOutput::error(
+                        ToolErrorKind::Denied { reason: reason.clone() },
+                        format!(
+                            "refused by policy: unrecognized approval answer `{raw}` (fail closed)"
+                        ),
+                    )
+                }
                 None => {
                     emit.tool_policy(tool_use_id, tool_name, "unavailable");
                     ToolOutput::error(

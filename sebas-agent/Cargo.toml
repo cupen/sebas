@@ -21,6 +21,10 @@ walkdir = "2"
 tokio-util = "0.7"
 uuid = { version = "1", features = ["v4"] }
 
+# 中立共享域层：审批决定词汇的**单一**定义处（type-session-vocabularies 3.2）。
+# 本 crate 的原 `policy::ApprovalAnswer` 改为再导出，不再自持一份并行枚举。
+sebas-domain = { path = "../sebas-domain" }
+
 tempfile = "3"
 
 [target.'cfg(unix)'.dependencies]

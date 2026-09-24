@@ -720,7 +720,7 @@ async fn allow_session_click_replies_then_switches_mode_to_auto() {
     // ③ mapping desired_mode=auto 落位（ask 会话点击后的「不再弹卡」语义由
     // driver 层 hook 门控保证——dispatch 只负责把 mode 请求送达执行体）。
     let desired = router.map.get(&key).await.map(|m| m.desired_mode);
-    assert_eq!(desired.as_deref(), Some("auto"));
+    assert_eq!(desired, Some(sebas_domain::session::SessionMode::Auto));
 
     // 在飞记录已登记（driver 事件回执失败时据实翻卡用）。
     assert!(router.auto_mode_switches().take("s1").await.is_some());
@@ -759,7 +759,7 @@ async fn allow_session_click_replies_then_switches_mode_to_auto() {
     assert!(
         !turns
             .iter()
-            .any(|e| e.element_type == "permission_mode_result"),
+            .any(|e| e.element_type == "permission_mode_result".into()),
         "成功路径不写失败契约条目"
     );
 }
@@ -824,7 +824,7 @@ async fn allow_session_click_failure_keeps_allow_and_reports_honestly() {
     let turns = router.session_turns(&key, 0).await.unwrap();
     let entry = turns
         .iter()
-        .find(|e| e.element_type == "permission_mode_result")
+        .find(|e| e.element_type == "permission_mode_result".into())
         .expect("失败必须写事件契约条目");
     let payload: serde_json::Value = serde_json::from_str(&entry.content).unwrap();
     assert_eq!(payload["request_id"], "r1");
@@ -870,7 +870,7 @@ async fn allow_session_click_failure_keeps_allow_and_reports_honestly() {
     assert_eq!(
         turns_after
             .iter()
-            .filter(|e| e.element_type == "permission_mode_result")
+            .filter(|e| e.element_type == "permission_mode_result".into())
             .count(),
         1,
         "重复失败事件不写第二条契约条目"

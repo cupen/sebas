@@ -6,6 +6,10 @@ edition = "2024"
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# 中立共享域层（type-session-vocabularies）：审批决定的**唯一定义**与
+# AvailableCommand 住在那里，本 crate 取用（依赖方向：acp → domain；此前是
+# domain → acp，那条边会造成循环，已随两个类型搬迁断开）。
+sebas-domain = { path = "../sebas-domain" }
 tokio = { version = "1.40", features = ["process", "io-util", "sync", "macros", "rt-multi-thread", "time"] }
 tracing = "0.1"
 thiserror = "2"

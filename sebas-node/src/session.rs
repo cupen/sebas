@@ -22,6 +22,7 @@
 use crate::log::{decode_id_from_file, SessionLog};
 use sebas_node_link::{
     ApprovalDecision, GateCategory, LogEntry, ParkedApproval, SessionEvent, SessionMode,
+    SessionPhase,
     SessionRejectCode, SessionSummary,
 };
 use std::collections::{HashMap, VecDeque};
@@ -184,7 +185,7 @@ struct HostedSession {
     /// 执行体；会话关闭后为 `None`——**日志仍然保留并可查询**（执行事实不因关闭
     /// 消失，否则最后几轮 turn 可能在与 close 的竞态里永远到不了控制面）。
     body: Option<Box<dyn ExecutionBody>>,
-    phase: String,
+    phase: SessionPhase,
 }
 
 struct PendingBatch {
@@ -476,7 +477,7 @@ impl SessionHost {
                             next_request: 0,
                             materials_version: None,
                             body: None,
-                            phase: "terminated".into(),
+                            phase: SessionPhase::Terminated,
                         },
                     );
                 }
@@ -601,7 +602,7 @@ impl SessionHost {
             Some(
                 body.mode()
                     .and_then(|s| SessionMode::parse(&s))
-                    .unwrap_or(desired_mode),
+                    .unwrap_or_else(|| desired_mode.clone()),
             )
         } else {
             None
@@ -609,9 +610,11 @@ impl SessionHost {
 
         let mut log = SessionLog::open(&self.log_dir, session_id)
             .map_err(|e| Rejected::new(SessionRejectCode::NodeError, e.to_string()))?;
-        log.append("state", "spawning", None)
+        // 日志里的 state 行就是相位词：从共享定义取拼写，不再写第二份字面量
+        // （type-session-vocabularies 2.5）。
+        log.append("state", SessionPhase::Spawning.as_str(), None)
             .map_err(|e| Rejected::new(SessionRejectCode::NodeError, e.to_string()))?;
-        log.append("state", "active", None)
+        log.append("state", SessionPhase::Active.as_str(), None)
             .map_err(|e| Rejected::new(SessionRejectCode::NodeError, e.to_string()))?;
 
         // 钉住材料版本并留痕（可复现性：事后要能回答"这个会话当时用的是哪一版"）。
@@ -626,7 +629,7 @@ impl SessionHost {
             epoch: log.epoch(),
             agent_kind: body.agent_kind(),
             model: body.model(),
-            mode: effective_mode.map(|m| m.as_str().to_string()),
+            mode: effective_mode.as_ref().map(|m| m.as_str().to_string()),
             provider: effective_provider.clone(),
             provider_cause: provider_cause.clone(),
             materials_version: materials.as_ref().map(|(v, _)| v.clone()),
@@ -645,7 +648,7 @@ impl SessionHost {
                 next_request: 0,
                 materials_version: materials.as_ref().map(|(v, _)| v.clone()),
                 body: Some(body),
-                phase: "active".into(),
+                phase: SessionPhase::Active,
             },
         );
         Ok(spawned)
@@ -762,7 +765,7 @@ impl SessionHost {
             return Ok(());
         }
         session.body = None;
-        session.phase = "exited".into();
+        session.phase = SessionPhase::Exited;
         let _ = session
             .log
             .append("state", "exited", Some(serde_json::json!({ "cause": cause })));
@@ -786,7 +789,7 @@ impl SessionHost {
             let session = self.session_mut(session_id)?;
             session.next_request += 1;
             (
-                session.desired_mode,
+                session.desired_mode.clone(),
                 format!("{session_id}:req-{}", session.next_request),
             )
         };
@@ -841,7 +844,7 @@ impl SessionHost {
             request_id: request_id.clone(),
             tool: gate.tool.clone(),
             category: gate.category,
-            mode,
+            mode: mode.clone(),
         };
         let entry = {
             let session = self.session_mut(session_id)?;
@@ -900,6 +903,18 @@ impl SessionHost {
         request_id: &str,
         decision: ApprovalDecision,
     ) -> Result<bool, Rejected> {
+        // （type-session-vocabularies 3.1，spec `agent-driver`）无法解释的决定
+        // **不得**解除任何泊车审批：在改动任何状态之前以可判别拒绝挡下，而不是
+        // 把它当成拒绝悄悄结案。
+        if decision.is_unknown() {
+            return Err(Rejected::new(
+                SessionRejectCode::Unknown,
+                format!(
+                    "无法解释的审批决定 {:?}：不解除任何泊车请求",
+                    decision.as_str()
+                ),
+            ));
+        }
         let session = self.session_mut(session_id)?;
 
         // 会话已关闭：丢弃决定并留痕（不静默、也不撒谎说已生效）。
@@ -928,7 +943,7 @@ impl SessionHost {
         // 把决定送回停在门上的执行体；送不到就**不声称已生效**——「点过允许却没
         // 生效」必须能被看见（6.7 的迟到/丢弃语义）。
         let delivered = match (resume_token, session.body.as_mut()) {
-            (Some(token), Some(body)) => body.resolve_gate(&token, decision),
+            (Some(token), Some(body)) => body.resolve_gate(&token, decision.clone()),
             (Some(token), None) => Err(format!("会话已关闭：决定无处送达（{token}）")),
             // 该执行体不上报回执（如 echo）：决定只改变宿主的停驻状态。
             (None, _) => Ok(()),
@@ -988,14 +1003,14 @@ impl SessionHost {
                 format!("会话 {session_id} 已关闭：模式不可变更"),
             ));
         }
-        session.desired_mode = parsed;
+        session.desired_mode = parsed.clone();
         session.effective_mode = if session
             .body
             .as_ref()
             .map(|b| b.enforces_mode())
             .unwrap_or(false)
         {
-            Some(parsed)
+            Some(parsed.clone())
         } else {
             None
         };
@@ -1007,7 +1022,7 @@ impl SessionHost {
                 Some(serde_json::json!({ "source": "control-plane" })),
             );
         }
-        Ok(session.effective_mode)
+        Ok(session.effective_mode.clone())
     }
 
     /// 取消在飞 turn。
@@ -1024,7 +1039,7 @@ impl SessionHost {
         let session = self.session_mut(session_id)?;
         if let Some(mut body) = session.body.take() {
             body.close();
-            session.phase = "closed".into();
+            session.phase = SessionPhase::Closed;
             session
                 .log
                 .append("state", "closed", None)
@@ -1353,8 +1368,8 @@ impl SessionHost {
             agent_kind: session.body.as_ref().map(|b| b.agent_kind()),
             model: session.body.as_ref().and_then(|b| b.model()),
             // **实际生效**的模式；强制不了 → `None`（不把期望值回显成已生效）。
-            mode: session.effective_mode.map(|m| m.as_str().to_string()),
-            desired_mode: Some(session.desired_mode.as_str().to_string()),
+            mode: session.effective_mode.clone(),
+            desired_mode: Some(session.desired_mode.clone()),
             provider: session.provider.clone(),
             desired_provider: session.desired_provider.clone(),
             provider_cause: session.provider_cause.clone(),
@@ -1704,7 +1719,7 @@ mod tests {
 
         let (summary, ..) = host.snapshot("s-1").unwrap();
         assert_eq!(summary.mode, None);
-        assert_eq!(summary.desired_mode.as_deref(), Some("ask"), "期望值仍可见");
+        assert_eq!(summary.desired_mode, Some(SessionMode::Ask), "期望值仍可见");
 
         // 仍按期望模式**尽力**门控看得见的请求：ask 之下请求照旧停驻。
         host.prompt("s-1", "gated").unwrap();
@@ -1761,7 +1776,7 @@ mod tests {
         host.prompt("s-1", "x").unwrap();
 
         let (summary, ..) = host.snapshot("s-1").unwrap();
-        assert_eq!(summary.phase, "exited", "子进程死亡即会话终结");
+        assert_eq!(summary.phase, SessionPhase::Exited, "子进程死亡即会话终结");
         // 执行事实不因死亡消失：日志仍可拉。
         let (_, entries, _) = host.log_from("s-1", 1).unwrap();
         assert!(entries.iter().any(|e| e.text.contains("子进程没了")));
@@ -2092,7 +2107,7 @@ mod tests {
         assert!(entries.iter().any(|e| e.text == "before-close"));
         assert_eq!(entries.last().unwrap().text, "closed");
         let (summary, ..) = host.snapshot("s-1").unwrap();
-        assert_eq!(summary.phase, "closed");
+        assert_eq!(summary.phase, SessionPhase::Closed);
         assert_eq!(summary.last_seq, last);
 
         // 但不再接受输入：明确的 SessionClosed（不是 UnknownSession）。
@@ -2258,7 +2273,7 @@ mod tests {
         let (_d, mut host) = host();
         host.spawn("s-1", None, Some("echo"), None, None, None).unwrap();
         let (summary, ..) = host.snapshot("s-1").unwrap();
-        assert_eq!(summary.mode.as_deref(), Some("ask"), "auto 永远不是缺省");
+        assert_eq!(summary.mode, Some(SessionMode::Ask), "auto 永远不是缺省");
     }
 
     #[test]
@@ -2458,7 +2473,7 @@ mod tests {
         let err = host.set_mode("s-2", "yolo").unwrap_err();
         assert_eq!(err.code, SessionRejectCode::UnsupportedMode);
         let (summary, ..) = host.snapshot("s-2").unwrap();
-        assert_eq!(summary.mode.as_deref(), Some("ask"), "拒绝后模式不变");
+        assert_eq!(summary.mode, Some(SessionMode::Ask), "拒绝后模式不变");
     }
 
     #[test]

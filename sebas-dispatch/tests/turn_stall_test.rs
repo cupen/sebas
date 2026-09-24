@@ -136,7 +136,7 @@ async fn stalled_turn_force_settles_drains_and_notifies() {
     assert!(
         turns
             .iter()
-            .any(|t| t.element_type == "error" && t.content.contains("回合停滞被强制收尾")),
+            .any(|t| t.element_type == "error".into() && t.content.contains("回合停滞被强制收尾")),
         "the transcript must explain the forced settle: {turns:?}"
     );
 
@@ -465,7 +465,7 @@ async fn terminal_error_drops_the_stall_facts() {
         .session_info_for(&key)
         .await
         .expect("the record survives teardown");
-    assert_eq!(info.status, "dormant");
+    assert_eq!(info.status, "dormant".into());
     assert!(!info.turn_engaged, "a retired record occupies no turn");
     // 登记表清空：扫描无事实可看（不 panic、不复活 stale 时钟）。
     assert!(router.force_settle_stalled_turns().await.is_empty());
@@ -532,7 +532,7 @@ async fn idle_placeholder_with_flag_is_never_stall_settled() {
     assert!(
         !turns
             .iter()
-            .any(|t| t.element_type == "error" && t.content.contains("回合停滞")),
+            .any(|t| t.element_type == "error".into() && t.content.contains("回合停滞")),
         "no synthetic stall error may be injected into a placeholder: {turns:?}"
     );
 }
@@ -582,7 +582,7 @@ async fn activated_never_prompted_session_is_not_stall_settled() {
             .await
             .unwrap()
             .iter()
-            .any(|t| t.element_type == "error"),
+            .any(|t| t.element_type == "error".into()),
         "no synthetic error may appear in an idle session's transcript"
     );
 }
@@ -619,7 +619,7 @@ async fn first_message_turn_is_still_guarded_after_the_placeholder() {
     // 恒空——这是看门狗区分二者的引擎事实）。
     let turns = router.session_turns(&key, 0).await.unwrap();
     assert!(
-        turns.iter().any(|t| t.kind == "prompt"),
+        turns.iter().any(|t| t.kind == "prompt".into()),
         "setup: the real turn's prompt entry must be in the transcript: {turns:?}"
     );
     router
@@ -637,7 +637,7 @@ async fn first_message_turn_is_still_guarded_after_the_placeholder() {
     let turns = router.session_turns(&key, 0).await.unwrap();
     let stall_entry = turns
         .iter()
-        .find(|t| t.element_type == "error" && t.content.contains("回合停滞"))
+        .find(|t| t.element_type == "error".into() && t.content.contains("回合停滞"))
         .expect("the stall entry must be in the transcript");
     assert_eq!(stall_entry.failure_class.as_deref(), Some("stall"));
 }

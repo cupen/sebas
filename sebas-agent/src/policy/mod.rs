@@ -82,14 +82,17 @@ pub struct PermissionRequestInfo {
     pub reason: String,
 }
 
-/// 审批应答。`Escalate` = 带理由的一次性放行（DSH-2 升级形态：仅放行那一次，会话策略不变）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ApprovalAnswer {
-    AllowOnce,
-    AllowSession,
-    Deny,
-    Escalate { reason: String },
-}
+/// 审批应答（`allow_once` / `allow_session` / `deny` / `escalate`）。
+///
+/// `Escalate` = 带理由的一次性放行（DSH-2 升级形态：仅放行那一次，会话策略不变），
+/// 理由**不丢**——由共享类型原样承载。
+///
+/// type-session-vocabularies 3.2：此处不再自持枚举，改为 `pub use` 再导出
+/// [`sebas_domain::vocabulary::PermissionDecision`]。既有公开路径
+/// `sebas_agent::policy::ApprovalAnswer` 与变体名（含 `Escalate { reason }`）不变；
+/// 新增的是**未知取值路径** `Unknown(String)`——消费方必须 fail closed（见
+/// `loop_` 的审批 match），不得用它放行动作。
+pub use sebas_domain::vocabulary::PermissionDecision as ApprovalAnswer;
 
 /// 审批回答者（webui 审查卡 / agent-dev 脚本应答 / 测试桩）。
 /// 返回 `None` = 无回答者或未应答 → fail closed。

@@ -528,7 +528,7 @@ impl AcpBody {
         let kind = cfg.kind.clone();
         // 这些是门面要如实回报的值，必须在把 cfg 移进 worker 线程**之前**取出。
         let enforced = cfg.enforces_mode;
-        let desired_mode = cfg.desired_mode;
+        let desired_mode = cfg.desired_mode.clone();
         let effective_model = cfg.model.clone();
         let startup_timeout = cfg.startup_timeout;
         let worker_shared = Arc::clone(&shared);
@@ -630,7 +630,7 @@ impl ExecutionBody for AcpBody {
 
     fn mode(&self) -> Option<String> {
         if self.enforces_mode {
-            self.desired_mode.map(|m| m.as_str().to_string())
+            self.desired_mode.as_ref().map(|m| m.as_str().to_string())
         } else {
             // 强制不了就**不声称**；期望值仍在 SessionSummary.desired_mode 里。
             None
@@ -882,14 +882,20 @@ async fn worker_main(
 
 /// 节点链路的三档决定 → ACP 驱动的三档决定。
 ///
-/// 两侧各有一份同名枚举（链路契约不依赖 `sebas-acp`），这里是唯一的翻译点：
-/// 三档一一对应，没有第四种可能（`escalate` 是原生内核专属，不过链路）。
+/// 把决定送进 ACP 执行体时的**唯一**适配：降级没有 escalate 等价物的值。
+///
+/// （type-session-vocabularies 3.2）两侧现在是**同一个**共享类型
+/// （`ApprovalDecision` = `sebas_domain::PermissionDecision`），不再是并行枚举
+/// 的翻译点——这里只剩 spec 允许的层间语义适配：`escalate` → `allow_once`
+/// （带日志）。未知决定在调用点已被挡下，不会到达这里。
 fn to_acp_decision(decision: ApprovalDecision) -> sebas_acp::Decision {
-    match decision {
-        ApprovalDecision::AllowOnce => sebas_acp::Decision::AllowOnce,
-        ApprovalDecision::AllowSession => sebas_acp::Decision::AllowSession,
-        ApprovalDecision::Deny => sebas_acp::Decision::Deny,
+    let (downgraded, reason) = decision.downgrade_without_escalate();
+    if let Some(reason) = reason {
+        eprintln!(
+            "warning: ACP has no escalate equivalent (reason: {reason}), falling back to allow_once"
+        );
     }
+    downgraded
 }
 
 /// 一条终态错误条目（宿主据此把会话标为 `exited` 并上报 `Exited`）。

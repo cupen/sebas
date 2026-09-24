@@ -444,6 +444,53 @@ mod tests {
         assert_eq!(&back, v, "round-trip mismatch for {json}");
     }
 
+    /// （type-session-vocabularies 3.3，design D5）**webui → 后端**（core channel）
+    /// 边界的发送集：四值决定原样过线，一个不多一个不少，`escalate` 仍带 `reason`。
+    ///
+    /// 合一类型最容易出的错是「静默扩大发送面」——本断言就是那道闸门：若这里少发
+    /// 或多发一个取值，集合大小/拼写立刻对不上。反面演示见 change 的验证记录
+    /// （临时让本边界多发 `escalate` 之外的取值 → 本测试失败）。
+    #[test]
+    fn approval_answer_send_set_is_unchanged() {
+        let decisions = [
+            PermissionDecision::AllowOnce,
+            PermissionDecision::AllowSession,
+            PermissionDecision::Deny,
+            PermissionDecision::Escalate {
+                reason: "needs human".into(),
+            },
+        ];
+        let sent: Vec<String> = decisions
+            .into_iter()
+            .map(|decision| {
+                serde_json::to_string(&CoreChannelRequest::ApprovalAnswer {
+                    request_id: "toolu_1".into(),
+                    decision,
+                })
+                .expect("serialize")
+            })
+            .collect();
+        assert_eq!(sent.len(), 4, "四值决定必须两两序列化不同: {sent:?}");
+        for spelling in ["allow_once", "allow_session", "deny", "escalate"] {
+            assert!(
+                sent.iter().any(|j| j.contains(&format!("\"{spelling}\""))),
+                "webui → 后端边界少发了 `{spelling}`: {sent:?}"
+            );
+        }
+        // `escalate` 的理由不得在过线时丢失。
+        let escalate = serde_json::to_string(&CoreChannelRequest::ApprovalAnswer {
+            request_id: "toolu_1".into(),
+            decision: PermissionDecision::Escalate {
+                reason: "why".into(),
+            },
+        })
+        .unwrap();
+        assert!(
+            escalate.contains("\"why\""),
+            "escalate 的 reason 过线时丢了: {escalate}"
+        );
+    }
+
     /// 4.1 验收：每个请求/响应变体经 serde 往返后与原值一致。
     #[test]
     fn every_request_and_response_variant_round_trips() {

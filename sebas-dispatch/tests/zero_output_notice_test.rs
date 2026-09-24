@@ -30,7 +30,7 @@ async fn seed_turn(router: &DispatchHandle, key: &ChannelKey, sid: &str, prompt:
 }
 
 fn notice_entries(turns: &[sebas_dispatch::TurnEntry]) -> Vec<&sebas_dispatch::TurnEntry> {
-    turns.iter().filter(|t| t.element_type == "notice").collect()
+    turns.iter().filter(|t| t.element_type == "notice".into()).collect()
 }
 
 /// spec 场景「空回合有落点」：回合零输出正常结束 → 投影恰好一条 notice
@@ -57,7 +57,7 @@ async fn empty_turn_appends_exactly_one_notice() {
         1,
         "an empty turn must land exactly one notice entry: {turns:?}"
     );
-    assert_eq!(notices[0].kind, "content", "the notice is core-produced");
+    assert_eq!(notices[0].kind, "content".into(), "the notice is core-produced");
     assert!(
         notices[0].content.contains("回合已结束且无输出"),
         "the notice must say the turn ended without output: {}",
@@ -65,14 +65,14 @@ async fn empty_turn_appends_exactly_one_notice() {
     );
     // 时间线形态：prompt（操作者提交）在前，notice 在后——回合可见地收尾。
     assert_eq!(turns.len(), 2, "prompt + notice, nothing else: {turns:?}");
-    assert_eq!(turns[0].kind, "prompt");
-    assert_eq!(turns[1].element_type, "notice");
+    assert_eq!(turns[0].kind, "prompt".into());
+    assert_eq!(turns[1].element_type, "notice".into());
 
     // turn 流同样携带 notice（实时时间线可见，不只落快照）。
     let mut streamed_notice = false;
     while let Ok(ev) = turn_stream.try_recv() {
         let TurnStreamEvent { entries, .. } = ev;
-        if entries.iter().any(|e| e.element_type == "notice") {
+        if entries.iter().any(|e| e.element_type == "notice".into()) {
             streamed_notice = true;
         }
     }
@@ -168,7 +168,7 @@ async fn process_only_turn_does_not_append_notice() {
             "a {what}-only turn counts as visible output and must not get a notice: {turns:?}"
         );
         assert!(
-            turns.iter().any(|t| t.kind == "content"),
+            turns.iter().any(|t| t.kind == "content".into()),
             "the {what} entry must be in the transcript"
         );
         let _ = sid;
@@ -200,7 +200,7 @@ async fn refusal_error_turn_does_not_append_notice() {
     let turns = router.session_turns(&key, 0).await.unwrap();
     assert!(
         turns.iter()
-            .any(|t| t.element_type == "error" && t.content.contains("I cannot help")),
+            .any(|t| t.element_type == "error".into() && t.content.contains("I cannot help")),
         "the refusal error entry must be present: {turns:?}"
     );
     assert!(

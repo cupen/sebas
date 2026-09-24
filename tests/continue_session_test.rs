@@ -235,7 +235,7 @@ async fn queued_submission_enters_transcript_only_when_its_turn_starts() {
         .await;
     let turns = router.session_turns(&key, 0).await.unwrap();
     let last = turns.last().expect("drain seeded the prompt entry");
-    assert_eq!(last.kind, "prompt");
+    assert_eq!(last.kind, "prompt".into());
     assert_eq!(
         last.content, "queued text",
         "prompt appears at the tail when its turn starts"

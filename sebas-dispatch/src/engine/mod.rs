@@ -32,6 +32,7 @@ use crate::cards::CardConfig;
 use crate::commands::{Command, RouterAction};
 use crate::crud::ProviderForms;
 use crate::state::{Mapping, SessionMap};
+use sebas_domain::session::{CardPhase, SessionMode, TurnElementType, TurnKind};
 use sebas_acp::claude::manager::SessionManager;
 use sebas_acp::claude::session::{AcpCommand, AcpEvent};
 use sebas_channels::card::{AppUsage, ChannelCard, TurnChrome};
@@ -490,17 +491,17 @@ impl DispatchHandle {
     /// card-derived phase/prompt. Returns `None` when no mapping exists.
     pub async fn session_info_for(&self, key: &ChannelKey) -> Option<SessionInfo> {
         let m = self.map.get(key).await?;
-        let (status, session_id) = match &m.state {
-            crate::state::MappingState::Active { session_id } => {
-                ("active", Some(session_id.clone()))
-            }
-            crate::state::MappingState::Dormant { session_id } => {
-                ("dormant", Some(session_id.clone()))
-            }
-            crate::state::MappingState::Spawning { .. } => ("spawning", None),
+        // （type-session-vocabularies 2.2）相位来自 `MappingState::phase()` 的
+        // 类型化映射（原字符串字面量已收敛）；`session_id` 仍是本机的 live
+        // 路由 id——SpawnFailed 的合成 id 语义不同，故不合并成一次匹配。
+        let status = m.state.phase();
+        let session_id = match &m.state {
+            crate::state::MappingState::Active { session_id } => Some(session_id.clone()),
+            crate::state::MappingState::Dormant { session_id } => Some(session_id.clone()),
+            crate::state::MappingState::Spawning { .. } => None,
             // fail-fast-on-startup-errors：spawn-failed 是对外可见的诚实状态
             // （webui spec delta「会话状态 SHALL 标记为 spawn-failed」）。
-            crate::state::MappingState::SpawnFailed { .. } => ("spawn-failed", None),
+            crate::state::MappingState::SpawnFailed { .. } => None,
         };
         // （round4 2.2/2.3）接收回执事实：回合已被服务端接受（prompt 已随
         // 开轮 seed 记入卡态）但 agent 首个输出条目未落（相位仍在 SEED）。
@@ -567,8 +568,10 @@ impl DispatchHandle {
             channel: key.channel_str().to_string(),
             key: key.reference.clone(),
             session_id,
-            status: status.into(),
-            phase,
+            status,
+            // （type-session-vocabularies 2.3）卡相位类型化：卡态里的
+            // `status_emoji` 是飞书 emoji_type 词汇，收敛为共享 `CardPhase`。
+            phase: phase.as_deref().map(CardPhase::from_wire),
             user_prompt,
             last_active_unix: m.last_active_unix,
             project_dir: m.project_dir.clone(),
@@ -1159,7 +1162,9 @@ impl DispatchHandle {
         if let AcpEvent::ModeChanged { mode, .. } = event
             && let Some(key) = self.map.lookup_key_by_session(session_id).await
         {
-            self.map.set_effective_mode(&key, Some(mode.clone())).await;
+            self.map
+                .set_effective_mode(&key, Some(SessionMode::from_wire(&mode)))
+                .await;
             self.publish_updated(&key).await;
         }
         // AvailableCommands（session-slash-commands 2.1）：agent 广告的命令
@@ -1335,7 +1340,10 @@ impl DispatchHandle {
                 return;
             };
             // 最后一条 prompt 的下一位起步；None = 无 prompt 条目（从未开轮）。
-            let Some(start) = log.iter().rposition(|e| e.kind == "prompt").map(|i| i + 1)
+            let Some(start) = log
+                .iter()
+                .rposition(|e| e.kind == TurnKind::Prompt)
+                .map(|i| i + 1)
             else {
                 return;
             };
@@ -1642,7 +1650,7 @@ impl DispatchHandle {
     pub async fn apply_mode_changed(&self, session_id: &str, mode: Option<&str>) {
         if let Some(key) = self.map.lookup_key_by_session(session_id).await {
             self.map
-                .set_effective_mode(&key, mode.map(str::to_string))
+                .set_effective_mode(&key, mode.map(SessionMode::from_wire))
                 .await;
             self.publish_updated(&key).await;
         }
@@ -1830,7 +1838,7 @@ impl DispatchHandle {
         mapping.current_model = identity.current_model;
         mapping.available_models = identity.available_models;
         if let Some(mode) = identity.desired_mode {
-            mapping.desired_mode = mode;
+            mapping.desired_mode = SessionMode::from_wire(&mode);
         }
         // （round4 3.1）命名来源迁移：label 优先（行名第一顺位），预览兜底
         // （第二顺位）。空串归 None——不占 `??` 链的位。
@@ -2501,10 +2509,13 @@ pub(crate) const ZERO_OUTPUT_NOTICE: &str =
 /// 与前端分组同规则），不算可见输出。
 fn turn_has_visible_output(segment: &[TurnEntry]) -> bool {
     segment.iter().any(|e| {
-        e.kind == "content"
+        e.kind == TurnKind::Content
             && matches!(
-                e.element_type.as_str(),
-                "markdown" | "thinking" | "tool" | "error"
+                e.element_type,
+                TurnElementType::Markdown
+                    | TurnElementType::Thinking
+                    | TurnElementType::Tool
+                    | TurnElementType::Error
             )
             && !e.content.is_empty()
     })
@@ -2513,7 +2524,7 @@ fn turn_has_visible_output(segment: &[TurnEntry]) -> bool {
 /// 该条目是否为零输出合成提示（close-acceptance-blind-spots 4.1，纯函数）：
 /// 防御异常的重复 Finished——片段里已有 notice 就不再追加第二条。
 fn is_zero_output_notice(e: &TurnEntry) -> bool {
-    e.element_type == "notice"
+    e.element_type == TurnElementType::Notice
 }
 
 pub fn compose_media_prompt(caption: &str, files: &[String]) -> String {

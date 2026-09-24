@@ -530,18 +530,15 @@ fn pending_op_rejection(e: sebas_dispatch::PendingOpError) -> SessionRejection {
     SessionRejection::PendingRejected { reason }
 }
 
-/// `PermissionDecision` → ACP `Decision`（design D6/R5）。ACP 侧没有 escalate
-/// 等价，`Escalate` 降级为 `AllowOnce`（reason 丢弃，记为已知取舍）。
+/// `PermissionDecision` → ACP：**同一个**共享类型，不再是并行枚举的翻译点
+/// （type-session-vocabularies 3.2）。这里只剩 spec 允许的层间语义适配——
+/// `Escalate` 降级为 `AllowOnce` 并记日志（ACP 侧没有 escalate 等价）。
 fn map_permission_decision(d: PermissionDecision) -> sebas_acp::Decision {
-    match d {
-        PermissionDecision::AllowOnce => sebas_acp::Decision::AllowOnce,
-        PermissionDecision::AllowSession => sebas_acp::Decision::AllowSession,
-        PermissionDecision::Deny => sebas_acp::Decision::Deny,
-        PermissionDecision::Escalate { reason } => {
-            tracing::warn!(%reason, "ACP has no escalate equivalent, falling back to AllowOnce");
-            sebas_acp::Decision::AllowOnce
-        }
+    let (downgraded, reason) = d.downgrade_without_escalate();
+    if let Some(reason) = reason {
+        tracing::warn!(%reason, "ACP has no escalate equivalent, falling back to AllowOnce");
     }
+    downgraded
 }
 
 #[async_trait]
@@ -694,7 +691,12 @@ impl SessionBackend for InProcessBackend {
         // 期望值先记在映射上（快照立即反映操作者意图）；effective 由
         // `ModeChanged` 事件落定（engine 的 apply_event 处理）。
         // （3.2，D5b）desired 非空：切换必须给出控制面词之一。
-        self.router.map.set_desired_mode(&key, mode.clone()).await;
+        // 前端来的拼写按线语义解读（未知词保留原样，交给节点边界以
+        // `UnsupportedMode` 如实拒绝——不在这里静默降级成 ask）。
+        self.router
+            .map
+            .set_desired_mode(&key, sebas_domain::session::SessionMode::from_wire(&mode))
+            .await;
         self.router
             .emit(sebas_dispatch::Out::SendAcp {
                 session_id: sid.clone(),
@@ -908,18 +910,9 @@ impl SessionBackend for InProcessBackend {
         // 决定回填到原生内核（ApproverHub）。先试 native，失败再回退 acp。
         // 原生泊车同样登记在引擎泊车表（publish_native_permission），其批复
         // 成功在此解除登记——读模型/fail-closed 对两条执行体同一口径。
-        let native = match decision.clone() {
-            PermissionDecision::AllowOnce => {
-                sebas_dispatch::native_bridge::NativeApprovalDecision::AllowOnce
-            }
-            PermissionDecision::AllowSession => {
-                sebas_dispatch::native_bridge::NativeApprovalDecision::AllowSession
-            }
-            PermissionDecision::Deny => sebas_dispatch::native_bridge::NativeApprovalDecision::Deny,
-            PermissionDecision::Escalate { reason } => {
-                sebas_dispatch::native_bridge::NativeApprovalDecision::Escalate { reason }
-            }
-        };
+        // （type-session-vocabularies 3.2）原生内核用的是**同一个**共享决定
+        // 类型，原先的逐值桥接已消失。
+        let native = decision.clone();
         if self
             .router
             .answer_native_permission(request_id, native)
@@ -1216,8 +1209,8 @@ impl FakeBackend {
         let position = log.len() as u64;
         log.push(TurnEntry {
             position,
-            kind: kind.to_string(),
-            element_type: element_type.to_string(),
+            kind: sebas_domain::session::TurnKind::from_wire(kind),
+            element_type: sebas_domain::session::TurnElementType::from_wire(element_type),
             content: content.to_string(),
             created_at_unix: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1391,7 +1384,7 @@ impl SessionBackend for FakeBackend {
             channel: key.channel.as_str().to_string(),
             key: key.reference.clone(),
             session_id: None,
-            status: "spawning".into(),
+            status: sebas_domain::session::SessionPhase::Spawning,
             phase: None,
             user_prompt: None,
             last_active_unix: 0,
@@ -1734,6 +1727,44 @@ impl SessionBackend for FakeBackend {
 mod tests {
     use super::*;
 
+    /// （type-session-vocabularies 3.3，design D5）**core channel → ACP** 边界的
+    /// 发送集必须与合一前一致：ACP 侧只收三值，`escalate` 降级为 `allow_once`。
+    ///
+    /// 若某天这里开始把 `escalate` 原样发给 ACP，集合会多出一个拼写 → 断言失败
+    /// （接收侧旧二进制会因未知标签反序列化失败，这正是要挡住的静默扩大）。
+    #[test]
+    fn acp_boundary_send_set_is_unchanged() {
+        use std::collections::BTreeSet;
+        let sent: BTreeSet<String> = [
+            PermissionDecision::AllowOnce,
+            PermissionDecision::AllowSession,
+            PermissionDecision::Deny,
+            PermissionDecision::Escalate {
+                reason: "needs human".into(),
+            },
+        ]
+        .into_iter()
+        .map(|d| map_permission_decision(d).as_str().to_string())
+        .collect();
+        assert_eq!(
+            sent,
+            BTreeSet::from([
+                "allow_once".to_string(),
+                "allow_session".to_string(),
+                "deny".to_string(),
+            ]),
+            "ACP 边界发送集变了——统一类型不得静默扩大发送面（design D5）"
+        );
+        // 单独钉住降级目标，确认它是有意的适配而不是「碰巧落在三值里」。
+        assert_eq!(
+            map_permission_decision(PermissionDecision::Escalate {
+                reason: "x".into()
+            })
+            .as_str(),
+            "allow_once"
+        );
+    }
+
     // 2.2 验收：in-process 满足 trait 且永远 Reachable。
     #[tokio::test]
     async fn in_process_backend_satisfies_trait_and_is_reachable() {
@@ -2023,7 +2054,7 @@ mod tests {
         }
         // desired_mode 落位（成败的最终回执走 engine 的事件流处理）。
         let desired = router.map.get(&key).await.map(|m| m.desired_mode);
-        assert_eq!(desired.as_deref(), Some("auto"));
+        assert_eq!(desired, Some(sebas_domain::session::SessionMode::Auto));
     }
 
     #[tokio::test]
@@ -2087,7 +2118,7 @@ mod tests {
         // （3.2，D5b）desired 非空：未被触碰 = 仍是构造时的缺省词 ask。
         let desired = router.map.get(&key).await.map(|m| m.desired_mode);
         assert_eq!(
-            desired.as_deref(),
+            desired.as_ref().map(|m| m.as_str()),
             Some(sebas_dispatch::engine::ASK_MODE),
             "AllowOnce/Deny 不得改写 desired_mode"
         );

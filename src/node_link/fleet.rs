@@ -17,6 +17,7 @@
 
 use crate::node_link::client::{NodeConnection, NodeLinkError};
 use crate::node_link::driver::RemoteSession;
+use sebas_domain::vocabulary::SessionPhase;
 use sebas_node_link::{SessionOp, SessionResult};
 use std::collections::HashMap;
 
@@ -25,8 +26,8 @@ use std::collections::HashMap;
 pub enum SessionLifecycle {
     /// 节点确认持有（相位由节点给出）。
     Live {
-        /// 节点上报的相位。
-        phase: String,
+        /// 节点上报的相位（共享 [`SessionPhase`]，未知取值原样保留）。
+        phase: SessionPhase,
     },
     /// 链路断了：**没有终止**，只是暂时联系不上（等重连或对账）。
     NodeOffline {
@@ -85,7 +86,7 @@ impl RemoteFleet {
                 node_id: node_id.to_string(),
                 view: RemoteSession::new(session_id),
                 lifecycle: SessionLifecycle::Live {
-                    phase: "spawning".into(),
+                    phase: SessionPhase::Spawning,
                 },
             });
         entry.node_id = node_id.to_string();
@@ -116,11 +117,9 @@ impl RemoteFleet {
     ///
     /// 与 [`Self::set_terminated`] 配对：投影层按节点的事实整体校正生命周期，
     /// 而不是"遇到什么改什么"——否则一次漏报就会把活着的会话永远留在终止态。
-    pub fn set_live(&mut self, session_id: &str, phase: impl Into<String>) {
+    pub fn set_live(&mut self, session_id: &str, phase: SessionPhase) {
         if let Some(tracked) = self.sessions.get_mut(session_id) {
-            tracked.lifecycle = SessionLifecycle::Live {
-                phase: phase.into(),
-            };
+            tracked.lifecycle = SessionLifecycle::Live { phase };
         }
     }
 
@@ -147,7 +146,8 @@ impl RemoteFleet {
             );
             if offline {
                 tracked.lifecycle = SessionLifecycle::Live {
-                    phase: "unknown".into(),
+                    // 相位此时还不知道：保留既有的 `"unknown"` 呈现词，等对账来填。
+                    phase: SessionPhase::Unknown("unknown".into()),
                 };
                 flipped += 1;
             }
@@ -216,7 +216,7 @@ impl RemoteFleet {
                         report.parked_approvals += parked;
                         view.note_phase(summary.phase.clone());
                     }
-                    let lifecycle = if is_terminal_phase(&summary.phase) {
+                    let lifecycle = if summary.phase.is_terminal() {
                         SessionLifecycle::Terminated {
                             cause: format!("节点上报相位 {}", summary.phase),
                         }
@@ -268,7 +268,7 @@ impl RemoteFleet {
             }
             let session_id = summary.session_id.clone();
             let view = RemoteSession::new(session_id.clone());
-            let lifecycle = if is_terminal_phase(&summary.phase) {
+            let lifecycle = if summary.phase.is_terminal() {
                 SessionLifecycle::Terminated {
                     cause: format!("节点上报相位 {}", summary.phase),
                 }
@@ -289,11 +289,6 @@ impl RemoteFleet {
         }
         Ok(adopted)
     }
-}
-
-/// 节点上报的相位是否意味着「已经结束」。
-fn is_terminal_phase(phase: &str) -> bool {
-    matches!(phase, "terminated" | "closed" | "exited" | "failed")
 }
 
 /// 问节点它现在持有哪些会话。
@@ -360,10 +355,10 @@ mod tests {
     #[test]
     fn terminal_phases_are_recognised() {
         for phase in ["terminated", "closed", "exited", "failed"] {
-            assert!(is_terminal_phase(phase), "{phase}");
+            assert!(SessionPhase::from_wire(phase).is_terminal(), "{phase}");
         }
         for phase in ["active", "spawning", "waiting_approval", "idle"] {
-            assert!(!is_terminal_phase(phase), "{phase}");
+            assert!(!SessionPhase::from_wire(phase).is_terminal(), "{phase}");
         }
     }
 

@@ -1,0 +1,135 @@
+{
+  "approval_answers": [
+    {
+      "decision": "allow_once",
+      "op": "approval_answer",
+      "request_id": "s-1:req-1",
+      "session_id": "s-1"
+    },
+    {
+      "decision": "allow_session",
+      "op": "approval_answer",
+      "request_id": "s-1:req-2",
+      "session_id": "s-1"
+    },
+    {
+      "decision": "deny",
+      "op": "approval_answer",
+      "request_id": "s-1:req-3",
+      "session_id": "s-1"
+    }
+  ],
+  "note": "type-session-vocabularies 1.4 golden samples (node link), generated from the pre-change tree",
+  "session_summaries": [
+    {
+      "agent_kind": "claude",
+      "desired_mode": "ask",
+      "epoch": 0,
+      "last_seq": 7,
+      "mode": "ask",
+      "model": "claude-sonnet",
+      "phase": "spawning",
+      "session_id": "s-1"
+    },
+    {
+      "agent_kind": "claude",
+      "desired_mode": "ask",
+      "epoch": 0,
+      "last_seq": 7,
+      "mode": "ask",
+      "model": "claude-sonnet",
+      "phase": "active",
+      "session_id": "s-1"
+    },
+    {
+      "agent_kind": "claude",
+      "desired_mode": "ask",
+      "epoch": 0,
+      "last_seq": 7,
+      "mode": "ask",
+      "model": "claude-sonnet",
+      "phase": "idle",
+      "session_id": "s-1"
+    },
+    {
+      "agent_kind": "claude",
+      "desired_mode": "ask",
+      "epoch": 0,
+      "last_seq": 7,
+      "mode": "ask",
+      "model": "claude-sonnet",
+      "phase": "waiting_approval",
+      "session_id": "s-1"
+    },
+    {
+      "agent_kind": "claude",
+      "desired_mode": "ask",
+      "epoch": 0,
+      "last_seq": 7,
+      "mode": "ask",
+      "model": "claude-sonnet",
+      "phase": "exited",
+      "session_id": "s-1"
+    },
+    {
+      "agent_kind": "claude",
+      "desired_mode": "ask",
+      "epoch": 0,
+      "last_seq": 7,
+      "mode": "ask",
+      "model": "claude-sonnet",
+      "phase": "closed",
+      "session_id": "s-1"
+    },
+    {
+      "agent_kind": "claude",
+      "desired_mode": "ask",
+      "epoch": 0,
+      "last_seq": 7,
+      "mode": "ask",
+      "model": "claude-sonnet",
+      "phase": "terminated",
+      "session_id": "s-1"
+    },
+    {
+      "agent_kind": "claude",
+      "desired_mode": "ask",
+      "epoch": 0,
+      "last_seq": 7,
+      "mode": "ask",
+      "model": "claude-sonnet",
+      "phase": "failed",
+      "session_id": "s-1"
+    },
+    {
+      "agent_kind": "claude",
+      "desired_mode": "edit",
+      "epoch": 0,
+      "last_seq": 7,
+      "mode": "edit",
+      "model": "claude-sonnet",
+      "phase": "active",
+      "session_id": "s-1"
+    },
+    {
+      "agent_kind": "claude",
+      "desired_mode": "allow",
+      "epoch": 0,
+      "last_seq": 7,
+      "mode": "allow",
+      "model": "claude-sonnet",
+      "phase": "active",
+      "session_id": "s-1"
+    },
+    {
+      "agent_kind": "claude",
+      "desired_mode": "auto",
+      "epoch": 0,
+      "last_seq": 7,
+      "mode": "auto",
+      "model": "claude-sonnet",
+      "phase": "active",
+      "session_id": "s-1"
+    }
+  ]
+}

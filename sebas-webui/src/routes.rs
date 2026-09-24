@@ -1,6 +1,7 @@
 //! Route handlers: pure helpers for the JSON API + the router BFF proxies.
 
 use crate::models::{SessionRow, SessionStatus};
+use sebas_domain::session::SessionPhase;
 use crate::server::WebUiState;
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
@@ -25,9 +26,13 @@ pub(crate) fn build_session_rows(
             // add-domain-layer 3.4：行字段全部经唯一 From 转换产出，不再
             // 手写逐字段罗列；这里只补调用方上下文（计数桶 + 聚焦态）。
             let mut row = SessionRow::from(info);
-            match row.status {
-                "active" => active += 1,
-                "dormant" => dormant += 1,
+            // （type-session-vocabularies 2.5）计数桶按**类型化相位**分类，不再拿
+            // 派生出来的 raw status 词做字面量比较：新增相位必须在这里表态，而不是
+            // 静默落进 `_`。桶语义与 `SessionRow::from` 的 raw 词表逐字一致
+            // （active→active、dormant→dormant，其余含 spawning/spawn-failed→spawning）。
+            match info.status {
+                SessionPhase::Active => active += 1,
+                SessionPhase::Dormant => dormant += 1,
                 // （session-parallel-liveness-and-unread-polish 1.3）spawn-failed
                 // 计数桶沿用 spawning（DashboardData 形状不变）。
                 _ => spawning += 1,
@@ -59,7 +64,7 @@ pub(crate) fn build_session_rows(
 /// 膨胀（实测 2.8MB/1074 条），是「每帧全量 refetch」放大回路的载荷大头；
 /// 拆分后单响应回到 KB 级。会话元信息（状态/模型/pending/段计数等）原样保留。
 pub(crate) fn session_summary(info: &SessionInfo) -> serde_json::Value {
-    let derived = SessionStatus::derive(&info.status, info.phase.as_deref().unwrap_or(""))
+    let derived = SessionStatus::derive(&info.status, info.phase.as_ref())
         // （review 3c 补口）泊车维度本地/远端合并（与会话行投影同一规则）。
         .with_parked_approvals(match info.remote.as_ref() {
             Some(r) => r.parked_approvals,

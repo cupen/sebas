@@ -10,7 +10,6 @@
 //! 权限请求走 `AcpEvent::PermissionRequest` 形状被 `InProcessBackend`
 //! 中继到 webui 审查卡（fail-closed：无答即拒）。
 
-use sebas_agent::policy::ApprovalAnswer;
 use sebas_agent::session::{AgentEvent, SessionManager};
 use sebas_channels::ChannelKey;
 use sebas_dispatch::native_bridge::{NativeApprovalDecision, NativeSessionBridge};
@@ -205,6 +204,17 @@ impl NativeSessionBridge for DispatchNativeBridge {
     }
 
     fn answer_permission(&self, request_id: &str, decision: NativeApprovalDecision) -> bool {
+        // 决定词汇已合一（type-session-vocabularies 3.2）：`NativeApprovalDecision` 与
+        // `ApprovalAnswer` 是**同一个**共享类型，直投即可，没有手写桥。
+        // 未知取值**不得**静默解决泊车审批（spec `agent-driver`）：如实拒绝，
+        // 待决表条目保留（审批保持悬空，操作者还能重来）。
+        if !decision.is_answerable() {
+            eprintln!(
+                "native_dispatch_bridge: 审批 {request_id} 收到未知决定 {:?}，已拒绝投递（审批保持悬空）",
+                decision.as_str()
+            );
+            return false;
+        }
         // 持有锁的跨度要短：取出内核 session_id 与句柄克隆，锁外异步投递。
         let handle = {
             let pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
@@ -224,12 +234,7 @@ impl NativeSessionBridge for DispatchNativeBridge {
         };
         // 投递决定：SessionHandle::answer_permission → ApproverHub::answer。
         // 无匹配请求被内核静默丢弃 → 工具调用 fail-closed 不执行。
-        let answer = match decision {
-            NativeApprovalDecision::AllowOnce => ApprovalAnswer::AllowOnce,
-            NativeApprovalDecision::AllowSession => ApprovalAnswer::AllowSession,
-            NativeApprovalDecision::Deny => ApprovalAnswer::Deny,
-            NativeApprovalDecision::Escalate { reason } => ApprovalAnswer::Escalate { reason },
-        };
+        let answer = decision;
         let request_id_owned = request_id.to_string();
         let request_id_spawn = request_id_owned.clone();
         tokio::spawn(async move {

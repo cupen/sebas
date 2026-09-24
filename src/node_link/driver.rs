@@ -18,6 +18,7 @@
 //! 都能按 `seq` 回拉（[`RemoteSession::reconcile`]）。
 
 use crate::node_link::client::{NodeConnection, NodeLinkError};
+use sebas_domain::vocabulary::SessionPhase;
 use sebas_node_link::{
     ApprovalDecision, LogEntry, ParkedApproval, SessionEvent, SessionOp, SessionResult,
 };
@@ -88,8 +89,8 @@ pub struct RemoteSession {
     gaps: Vec<Unavailable>,
     /// 永久缺损（节点已回收）。
     unavailable: Vec<Unavailable>,
-    /// 相位（来自事件或快照）。
-    phase: String,
+    /// 相位（来自事件或快照；共享 [`SessionPhase`]，未知取值原样保留）。
+    phase: SessionPhase,
     /// 结束成因（`Some` 即已终止）。
     terminated: Option<String>,
     /// **悬空的审批请求**（控制面视图）。
@@ -119,7 +120,7 @@ impl RemoteSession {
             reclaimed_through: 0,
             gaps: Vec::new(),
             unavailable: Vec::new(),
-            phase: "spawning".into(),
+            phase: SessionPhase::Spawning,
             terminated: None,
             parked: Vec::new(),
             discarded_decisions: Vec::new(),
@@ -143,7 +144,7 @@ impl RemoteSession {
     }
 
     /// 相位。
-    pub fn phase(&self) -> &str {
+    pub fn phase(&self) -> &SessionPhase {
         &self.phase
     }
 
@@ -328,13 +329,13 @@ impl RemoteSession {
     }
 
     /// 相位变化。
-    pub fn note_phase(&mut self, phase: impl Into<String>) {
-        self.phase = phase.into();
+    pub fn note_phase(&mut self, phase: SessionPhase) {
+        self.phase = phase;
     }
 
     /// 会话结束。
     pub fn note_exited(&mut self, cause: impl Into<String>) {
-        self.phase = "exited".into();
+        self.phase = SessionPhase::Exited;
         self.terminated = Some(cause.into());
     }
 
@@ -382,7 +383,7 @@ impl RemoteSession {
                     request_id: request_id.clone(),
                     tool: tool.clone(),
                     category: *category,
-                    mode: *mode,
+                    mode: mode.clone(),
                 });
                 true
             }
@@ -456,6 +457,20 @@ impl RemoteSession {
         request_id: &str,
         decision: ApprovalDecision,
     ) -> Result<bool, NodeLinkError> {
+        // 未知决定**不得**解除任何泊车审批（spec `agent-driver`：无法解释的决定不得
+        // 静默解决一条泊车审批）。在送出之前就挡下——本地悬空集合保持不动，操作者
+        // 还能看到这条审批仍悬着。
+        if !decision.is_answerable() {
+            return Err(NodeLinkError::Transport {
+                cause: format!(
+                    "决定 {request_id}:{} 不是本 build 能解释的取值，已拒绝投递（泊车审批保持悬空）",
+                    decision.as_str()
+                ),
+            });
+        }
+        // 决定随 `SessionOp` 被 move，丢弃留痕需要原始拼写——先取出来。
+        let decision_tag = decision.as_str().to_string();
+
         let Some(approval) = self
             .parked
             .iter()
@@ -479,8 +494,7 @@ impl RemoteSession {
                 self.note_gate_resolved(request_id);
                 if !applied {
                     self.discarded_decisions.push(format!(
-                        "{request_id}:{} 被节点丢弃（会话已终止）",
-                        decision.as_str()
+                        "{request_id}:{decision_tag} 被节点丢弃（会话已终止）"
                     ));
                 }
                 Ok(applied)
@@ -688,7 +702,7 @@ mod tests {
     fn a_snapshot_corrects_state_without_claiming_we_hold_the_entries() {
         let summary = sebas_node_link::SessionSummary {
             session_id: "s-1".into(),
-            phase: "active".into(),
+            phase: SessionPhase::Active,
             agent_kind: Some("echo".into()),
             model: None,
             mode: Some("ask".into()),
@@ -705,7 +719,7 @@ mod tests {
         let mut view = RemoteSession::new("s-1");
         view.note_state(&summary, 0);
         assert_eq!(view.cursor(), 0, "状态快照不得推进游标");
-        assert_eq!(view.phase(), "active");
+        assert_eq!(view.phase().as_str(), "active");
         assert_eq!(view.epoch(), 3);
         assert_eq!(view.materials_version(), Some("v2"));
 
@@ -789,10 +803,10 @@ mod tests {
         let mut view = RemoteSession::new("s-1");
         assert!(view.note_event(&SessionEvent::State {
             session_id: "s-1".into(),
-            phase: "active".into(),
+            phase: SessionPhase::Active,
             detail: None,
         }));
-        assert_eq!(view.phase(), "active");
+        assert_eq!(view.phase().as_str(), "active");
 
         assert!(view.note_event(&SessionEvent::TurnBatch {
             session_id: "s-1".into(),
@@ -820,7 +834,7 @@ mod tests {
             cause: "节点重启".into(),
         }));
         assert_eq!(view.terminated(), Some("节点重启"));
-        assert_eq!(view.phase(), "exited");
+        assert_eq!(view.phase().as_str(), "exited");
     }
 
     // ── 回拉（对账）对真链路 ────────────────────────────────────────────────

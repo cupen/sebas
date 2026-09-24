@@ -31,15 +31,10 @@ pub trait NativeSessionBridge: Send + Sync {
     fn answer_permission(&self, request_id: &str, decision: NativeApprovalDecision) -> bool;
 }
 
-/// 原生权限决定（trait 层的跨 crate 中立形状；具体桥映射到
-/// `sebas_agent::policy::ApprovalAnswer`）。`Escalate` = 带理由的一次性放行。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NativeApprovalDecision {
-    AllowOnce,
-    AllowSession,
-    Deny,
-    Escalate { reason: String },
-}
+/// 原生权限决定：**同一个**共享定义（type-session-vocabularies 3.2）。
+/// 原位再导出保住既有路径；此前与 `sebas_agent::policy::ApprovalAnswer`、
+/// `sebas_acp::Decision` 三家并行枚举、靠手写桥互转。
+pub use sebas_domain::session::PermissionDecision as NativeApprovalDecision;
 
 /// Router 持有的桥类型（`None` = 未接线）。
 pub type NativeBridge = Option<Arc<dyn NativeSessionBridge>>;

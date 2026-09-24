@@ -10,9 +10,11 @@ serde_json = "1"
 # `SessionInfo.usage` 与 `SessionInfo::channel_key` 引用 channels 的中立类型
 # （add-domain-layer 3.1：类型按 D3 原样搬迁，字段类型不换）。
 sebas-channels = { path = "../sebas-channels" }
-# `SessionInfo.available_commands` 引用 ACP 的 `AvailableCommand`（同上）。
-# sebas-acp 本身中立（sebas-node 直接依赖它），不把主控角色拖进依赖图。
-sebas-acp = { path = "../sebas-acp" }
+# 注（type-session-vocabularies）：此前还依赖 `sebas-acp`（仅为
+# `AvailableCommand`）。那条依赖边使 `sebas-acp` 无法反向取用本层的共享词汇
+# （审批决定的唯一定义会造成 crate 循环），故 `AvailableCommand` 已移入本层
+# `session` 模块、该依赖删除；`sebas_acp::AvailableCommand` 由 acp 侧 `pub use`
+# 原位再导出，公开路径与线形状不变。
 # `prim::expand_tilde` 的 home 目录解析（Known Folder，不吃 HOME env）。
 dirs = "7"
 

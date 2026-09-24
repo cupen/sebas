@@ -15,21 +15,61 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use sebas_acp::AvailableCommand;
 use sebas_channels::card::AppUsage;
 use sebas_channels::ChannelKey;
 
+// 会话词汇的收敛定义（type-session-vocabularies）住在 [`crate::vocabulary`]；
+// 这里原位再导出，`sebas_domain::session::*` 这条既有公开路径零改动。
+pub use crate::vocabulary::{
+    CardPhase, GateCategory, PermissionDecision, SessionMode, SessionPhase, TurnElementType,
+    TurnKind,
+};
+
+/// 会话自广告的命令表（原 `sebas_acp::AvailableCommand`；type-session-vocabularies
+/// 随「共享决策词汇」一并移入）。
+///
+/// **为什么搬**：`sebas-domain` 此前依赖 `sebas-acp`（仅为这一个结构），
+/// 而本 change 要求唯一的审批决定类型定义在 domain 并被 ACP 取用——那条
+/// 依赖边会造成 crate 循环。命令表本身是角色中立的会话视图概念，放在域层
+/// 合理；`sebas_acp::AvailableCommand` 经 `pub use` 原位再导出，字段、serde
+/// 属性与线形状逐字节不变。
+///
+/// 字段全部 `#[serde(default)]`：来源形状随 CLI/agent 版本漂移，缺字段反
+/// 序列化为空值而不是报错（防御性映射的落点，上游映射函数保证不产生缺
+/// name 的条目）。
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct AvailableCommand {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub hint: Option<String>,
+}
+
 /// 控制面缺省 mode（session-parallel-liveness-and-unread-polish 3.2，design
 /// D5b）：ask 是「每个受门控动作都要问」的确定性模式，不是「留给 agent 自己
-/// 猜」。desired_mode 在内存/wire 模型中非空（`String`），旧数据（state.json
-/// 的 null）在 restore 反序列化点一次性落为 ask——迁移是 null 消失的唯一
-/// 地点，之后任何投影都读到这个值，无读侧回退。
+/// 猜」。desired_mode 在内存/wire 模型中非空，旧数据（state.json 的 null）
+/// 在 restore 反序列化点一次性落为 ask——迁移是 null 消失的唯一地点，之后
+/// 任何投影都读到这个值，无读侧回退。
+///
+/// （type-session-vocabularies 2.4）`ASK_MODE` 作为字符串常量的**唯一**用途
+/// 是给尚未类型化的持久行与展示默认值站岗；线/内存模型已改用
+/// [`SessionMode`]。新代码请用 [`SessionMode::Ask`]。
 pub const ASK_MODE: &str = "ask";
 
 /// [`ASK_MODE`] 的 serde 缺省构造器（`#[serde(default = …)]` 形态要求
-/// 同签名的函数）。
-pub fn ask_mode() -> String {
-    ASK_MODE.to_string()
+/// 同签名的函数），也是内存/线模型的缺省 mode。
+///
+/// （type-session-vocabularies 2.4）返回**类型化**的 [`SessionMode`]：字符串
+/// 常量 [`ASK_MODE`] 只留给磁盘行（projects.db 的 `desired_mode TEXT`）站岗。
+pub fn ask_mode() -> SessionMode {
+    SessionMode::Ask
+}
+
+/// [`SessionMode`] 形态的缺省构造器（`#[serde(default = …)]`）。
+pub fn ask_session_mode() -> SessionMode {
+    SessionMode::Ask
 }
 
 /// 远端会话的呈现信息（add-remote-execution-node 8.x）。
@@ -52,13 +92,15 @@ pub struct RemoteSessionView {
     /// `Terminated` 是两件事，展示层不该把后者说成「暂时联系不上」。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_cause: Option<String>,
-    /// 会话**期望**的 mode（`ask` / `edit` / `allow` / `auto`）。
+    /// （type-session-vocabularies 2.4）会话**期望**的 mode：控制面词汇
+    /// `ask` / `edit` / `allow` / `auto`，类型化为共享 [`SessionMode`]。
+    /// 未知 mode 从对端进来时落到 [`SessionMode::Unknown`]（容忍，不拒收）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub desired_mode: Option<String>,
+    pub desired_mode: Option<SessionMode>,
     /// 执行体**实际强制**的 mode。与 `desired_mode` 不同即「执行体强制不了」，
     /// 展示层必须两个都显示并说明差异（不能只显示期望值假装已生效）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effective_mode: Option<String>,
+    pub effective_mode: Option<SessionMode>,
     /// 仍在等主控决定的悬空审批数；`> 0` 表示会话**在等**，不是在跑。
     #[serde(default)]
     pub parked_approvals: u32,
@@ -85,10 +127,17 @@ pub struct SessionInfo {
     pub key: String,
     /// Live routing id — `None` for Spawning placeholders.
     pub session_id: Option<String>,
-    /// `"spawning"` | `"active"` | `"dormant"`.
-    pub status: String,
-    /// Card phase emoji (`SEED`/`OnIt`/`DONE`/`CrossMark`) when a card exists.
-    pub phase: Option<String>,
+    /// （type-session-vocabularies 2.2）会话相位：控制面与节点的**同一**共享
+    /// 定义 [`SessionPhase`]。控制面只发 `spawning` / `active` / `dormant` /
+    /// `spawn-failed` 四个值；其余并集取值属于节点侧。对端发来未知相位时落到
+    /// [`SessionPhase::Unknown`]，不丢帧。
+    pub status: SessionPhase,
+    /// Card phase emoji (`Get`/`OnIt`/`DONE`/`CrossMark`) when a card exists.
+    ///
+    /// （type-session-vocabularies 2.3）类型化为 [`CardPhase`]，使展示层
+    /// `SessionStatus::derive` 的映射成为类型化 `match`（漏一个取值即编译失败）
+    /// 而不是字符串比较。
+    pub phase: Option<CardPhase>,
     /// Current turn's user prompt, when a card exists.
     pub user_prompt: Option<String>,
     pub last_active_unix: i64,
@@ -126,23 +175,23 @@ pub struct SessionInfo {
     /// 报文：旧客户端收不到该键，新客户端收到 `null` 时按本机会话处理。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote: Option<RemoteSessionView>,
-    /// （add-agent-mode-selection）操作者期望的会话 mode（控制面词汇
-    /// `ask`/`edit`/`allow`/`auto`）：创建请求携带、中途切换立即更新。
-    /// （session-parallel-liveness-and-unread-polish 3.2，design D5b）**非空**
-    /// `String`，缺省 `ask`；旧 core-channel 报文里的 null 在反序列化点落为
-    /// ask（与 state.json restore 同一迁移语义），wire 上永远携带确定词。
+    /// （type-session-vocabularies 2.4）操作者期望的会话 mode：控制面词汇
+    /// `ask`/`edit`/`allow`/`auto`，类型化后与节点链路、web UI 请求面共用
+    /// [`SessionMode`]。缺省 `ask`；旧 core-channel 报文里的 null 在反序列化点
+    /// 落为 ask（与 state.json restore 同一迁移语义），wire 上永远携带确定词。
+    /// 对端发来本 build 不认识的 mode 时落到 [`SessionMode::Unknown`] 而非报错。
     #[serde(
-        default = "ask_mode",
+        default = "ask_session_mode",
         deserialize_with = "deserialize_desired_mode"
     )]
-    pub desired_mode: String,
+    pub desired_mode: SessionMode,
     /// （add-agent-mode-selection）执行体回报的**实际生效** mode（本机 =
     /// spawn argv 应用值 / `ModeChanged`；远端 = 节点回报，见 `remote`）。
     /// `None` = 执行体未声称任何 mode 生效——desired/effective 的差异如实
     /// 可见（execution-node spec："mode enforceability is declared, not
     /// assumed"）。`#[serde(default)]` 兼容旧快照/旧事件。
     #[serde(default)]
-    pub effective_mode: Option<String>,
+    pub effective_mode: Option<SessionMode>,
     /// （rail-declutter-unread D1/D2）会话累计「可见回复段」数——rail 未读
     /// 徽标的服务端数据源。口径见 dispatch 侧 `count_chat_messages`；随
     /// `session.updated` 广播（transcript flush 多数时机不发事件，rail 的
@@ -192,12 +241,15 @@ pub struct SessionInfo {
 /// / 旧快照里该字段是显式 `null`（Option 时代形态）或缺失——一律落为
 /// `ask`。与 state.json 的 restore 迁移同一语义（迁移是 null 消失的唯一
 /// 地点），不做读侧投影。
-fn deserialize_desired_mode<'de, D>(d: D) -> Result<String, D::Error>
+///
+/// （type-session-vocabularies 2.4）值改为 [`SessionMode`]：未知 mode 走宽容的
+/// [`SessionMode::from_wire`]（落到 `Unknown`），**不**因不认识而让整帧失败。
+fn deserialize_desired_mode<'de, D>(d: D) -> Result<SessionMode, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let opt: Option<String> = serde::Deserialize::deserialize(d)?;
-    Ok(opt.unwrap_or_else(ask_mode))
+    let opt: Option<SessionMode> = serde::Deserialize::deserialize(d)?;
+    Ok(opt.unwrap_or(SessionMode::Ask))
 }
 
 impl SessionInfo {
@@ -244,18 +296,24 @@ pub enum SessionEvent {
 
 /// One rendered block of a session's transcript, addressed by a monotonic
 /// position. `kind` distinguishes the user's prompt from agent/tool output;
-/// `element_type` tells the client how to render `content`
-/// (`"markdown"` | `"thinking"` | `"tool"` | `"error"` |
-/// `"permission_mode_result"`——最后者见 [`TurnEntry::permission_mode_result`]；
-/// `"notice"` 见 [`TurnEntry::notice`]）。
+/// `element_type` tells the client how to render `content`.
+///
+/// （type-session-vocabularies 4.2）两个字段都从裸 `String` 收敛为共享封闭
+/// 词汇 [`TurnKind`] / [`TurnElementType`]：新增一个取值会让每个分支它的
+/// 消费方**编译失败**，而不是静默落到默认分支。线形状不变（裸字符串拼写逐字
+/// 保留）；本 build 不认识的取值落到各自的 `Unknown`，**照原样传递并渲染为
+/// 通用块**，不丢弃、不报错。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TurnEntry {
     /// 0-based monotonic position within the session's transcript.
     pub position: u64,
-    /// `"prompt"` (user turn input) or `"content"` (agent/tool output).
-    pub kind: String,
-    /// `"markdown"` | `"thinking"` | `"tool"` | `"error"`.
-    pub element_type: String,
+    /// [`TurnKind::Prompt`] (user turn input) or [`TurnKind::Content`]
+    /// (agent/tool output).
+    pub kind: TurnKind,
+    /// [`TurnElementType::Markdown`] | `Thinking` | `Tool` | `Error` |
+    /// `PermissionModeResult`（见 [`TurnEntry::permission_mode_result`]）；
+    /// `Notice` 见 [`TurnEntry::notice`]。
+    pub element_type: TurnElementType,
     pub content: String,
     /// Unix seconds when this entry was appended. Lets the client render a
     /// flush-left timestamp next to each block (spec 4.1) and lets the
@@ -298,22 +356,37 @@ pub struct TurnStreamEvent {
 
 impl TurnEntry {
     pub fn prompt(position: u64, content: impl Into<String>) -> Self {
-        Self::new(position, "prompt", "markdown", content)
+        Self::new(
+            position,
+            TurnKind::Prompt,
+            TurnElementType::Markdown,
+            content,
+        )
     }
 
     pub fn markdown(position: u64, content: impl Into<String>) -> Self {
-        Self::new(position, "content", "markdown", content)
+        Self::new(
+            position,
+            TurnKind::Content,
+            TurnElementType::Markdown,
+            content,
+        )
     }
 
     pub fn thinking(position: u64, content: impl Into<String>) -> Self {
-        Self::new(position, "content", "thinking", content)
+        Self::new(
+            position,
+            TurnKind::Content,
+            TurnElementType::Thinking,
+            content,
+        )
     }
 
     /// 工具调用条目（workbench-conversation-view 1.3，design D2）：内容仍是
     /// 可读 markdown，但 `element_type = "tool"` 让客户端能把工具调用与正文
     /// 区分开（收进「用了 N 个工具」可展开组），不再靠 emoji 前缀当契约。
     pub fn tool(position: u64, content: impl Into<String>) -> Self {
-        Self::new(position, "content", "tool", content)
+        Self::new(position, TurnKind::Content, TurnElementType::Tool, content)
     }
 
     /// spawn 失败等启动期错误条目（fail-fast-on-startup-errors 3.1）：
@@ -321,7 +394,12 @@ impl TurnEntry {
     /// 前端据此渲染为带计数的错误气泡而非普通 markdown。（kind 词汇收敛为
     /// prompt|content 两值是 workbench-conversation-view 的 delta 契约。）
     pub fn error(position: u64, content: impl Into<String>) -> Self {
-        Self::new(position, "content", "error", content)
+        Self::new(
+            position,
+            TurnKind::Content,
+            TurnElementType::Error,
+            content,
+        )
     }
 
     /// 零输出回合的合成提示条目（close-acceptance-blind-spots 4.1，design
@@ -335,7 +413,12 @@ impl TurnEntry {
     /// 前端渲染为中性信息条（非错误红泡）。不计入可见回复段数
     /// （`count_chat_messages` 与前端 `unitSegmentCount` 都跳过 notice）。
     pub fn notice(position: u64, content: impl Into<String>) -> Self {
-        Self::new(position, "content", "notice", content)
+        Self::new(
+            position,
+            TurnKind::Content,
+            TurnElementType::Notice,
+            content,
+        )
     }
 
     /// 权限卡「本会话不再询问」触发的自动模式切换结果条目
@@ -352,17 +435,22 @@ impl TurnEntry {
     pub fn permission_mode_result(position: u64, payload: serde_json::Value) -> Self {
         Self::new(
             position,
-            "content",
-            "permission_mode_result",
+            TurnKind::Content,
+            TurnElementType::PermissionModeResult,
             payload.to_string(),
         )
     }
 
-    fn new(position: u64, kind: &str, element_type: &str, content: impl Into<String>) -> Self {
+    fn new(
+        position: u64,
+        kind: TurnKind,
+        element_type: TurnElementType,
+        content: impl Into<String>,
+    ) -> Self {
         Self {
             position,
-            kind: kind.into(),
-            element_type: element_type.into(),
+            kind,
+            element_type,
             content: content.into(),
             // The router stamps the wall-clock at push time so every
             // entry carries the moment it was appended, not the moment
@@ -467,7 +555,7 @@ mod tests {
             channel: "web".into(),
             key: "web-1".into(),
             session_id: Some("s1".into()),
-            status: "active".into(),
+            status: SessionPhase::Active,
             phase: None,
             user_prompt: None,
             last_active_unix: 7,
@@ -479,7 +567,7 @@ mod tests {
             backend: Some("acp".into()),
             pending: vec![],
             remote: None,
-            desired_mode: "ask".into(),
+            desired_mode: SessionMode::Ask,
             effective_mode: None,
             msg_count: 0,
             available_commands: vec![],
@@ -501,7 +589,7 @@ mod tests {
             r#"{"channel":"web","key":"k","status":"spawning","last_active_unix":0,"desired_mode":null}"#,
         )
         .unwrap();
-        assert_eq!(legacy.desired_mode, "ask");
+        assert_eq!(legacy.desired_mode, SessionMode::Ask);
     }
 
     #[test]
@@ -532,12 +620,12 @@ mod tests {
     #[test]
     fn turn_entry_constructors_set_wire_fields() {
         let t = TurnEntry::tool(3, "📖 x").with_title("Read · a");
-        assert_eq!(t.element_type, "tool");
+        assert_eq!(t.element_type, TurnElementType::Tool);
         assert_eq!(t.title.as_deref(), Some("Read · a"));
         let e = TurnEntry::error(4, "boom").with_failure_class("spawn");
         assert_eq!(e.failure_class.as_deref(), Some("spawn"));
         let n = TurnEntry::notice(5, "no output");
-        assert_eq!(n.element_type, "notice");
+        assert_eq!(n.element_type, TurnElementType::Notice);
         assert!(n.failure_class.is_none());
     }
 
@@ -649,17 +737,11 @@ pub struct PermissionNotice {
     pub reason: String,
 }
 
-/// The operator's answer to a [`PermissionNotice`]. `escalate` = one-shot
-/// elevated retry carrying the operator's stated reason (the session policy
-/// itself never widens).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "decision", rename_all = "snake_case")]
-pub enum PermissionDecision {
-    AllowOnce,
-    AllowSession,
-    Deny,
-    Escalate { reason: String },
-}
+/// The operator's answer to a [`PermissionNotice`].
+///
+/// （type-session-vocabularies 3.1）定义已收敛到 [`crate::vocabulary::PermissionDecision`]
+/// ——唯一共享定义（四值 + 未知值路径），此处经文件顶部的 `pub use` 再导出，
+/// `sebas_domain::session::PermissionDecision` 这条既有公开路径不变。
 
 #[cfg(test)]
 mod webui_wire_tests {

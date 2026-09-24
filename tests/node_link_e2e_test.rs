@@ -150,7 +150,7 @@ async fn a_real_node_hosts_a_session_and_streams_turns_over_the_link() {
             ..
         } => {
             assert_eq!(summary.session_id, "s-1");
-            assert_eq!(summary.phase, "active");
+            assert_eq!(summary.phase, "active".into());
             assert!(last_seq >= cursor_after_prompt);
             assert_eq!(reclaimed_through_seq, 0, "尚未回收");
             view.note_snapshot(&summary, reclaimed_through_seq);
@@ -895,7 +895,7 @@ async fn a_link_loss_marks_sessions_offline_and_a_restart_terminates_them_with_t
     match conn2.request(SessionOp::ListSessions).await.unwrap() {
         SessionResult::Sessions { sessions } => {
             assert_eq!(sessions.len(), 1, "对账不得新建会话");
-            assert_eq!(sessions[0].phase, "terminated");
+            assert_eq!(sessions[0].phase, "terminated".into());
         }
         other => panic!("{other:?}"),
     }

@@ -227,7 +227,7 @@ async fn submission_during_receipt_phase_queues_instead_of_interleaving() {
     );
     let turns = router.session_turns(&key, 0).await.unwrap();
     assert_eq!(
-        turns.iter().filter(|e| e.kind == "prompt").count(),
+        turns.iter().filter(|e| e.kind == "prompt".into()).count(),
         1,
         "no second prompt entry may land while the first turn is a receipt: {turns:?}"
     );
@@ -324,7 +324,7 @@ async fn cancelled_turn_appends_a_stop_entry_and_normal_finish_does_not() {
     let turns = router.session_turns(&key_a, 0).await.unwrap();
     let stop_entries: Vec<&TurnEntry> = turns
         .iter()
-        .filter(|e| e.element_type == "error" && e.content.contains("回合被停止"))
+        .filter(|e| e.element_type == "error".into() && e.content.contains("回合被停止"))
         .collect();
     assert_eq!(
         stop_entries.len(),
@@ -396,7 +396,7 @@ async fn restore_rebuilds_the_session_identity_and_legacy_entries_fall_back() {
         .expect("restore must succeed");
     let info = router.session_info_for(&key).await.expect("info");
     assert_eq!(info.agent_kind.as_deref(), Some("claude"));
-    assert_eq!(info.desired_mode, "auto");
+    assert_eq!(info.desired_mode, "auto".into());
     assert_eq!(info.current_model.as_deref(), Some("claude-sonnet-4"));
     assert_eq!(
         info.available_models.as_deref(),

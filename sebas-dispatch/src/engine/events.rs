@@ -12,7 +12,8 @@
 // D3 原位再导出）：`sebas_dispatch::engine::events::*` 乃至
 // `sebas_dispatch::*` 的既有路径全部保持可解析。
 pub use sebas_domain::session::{
-    PendingApproval, RemoteSessionView, SessionEvent, SessionInfo, TurnEntry, TurnStreamEvent,
+    PendingApproval, RemoteSessionView, SessionEvent, SessionInfo, TurnElementType, TurnEntry,
+    TurnKind, TurnStreamEvent,
 };
 
 /// 可见回复段的计数口径（rail-declutter-unread D2，用户拍板「可见回复段」）：
@@ -35,22 +36,31 @@ pub fn count_chat_messages(entries: &[TurnEntry]) -> u64 {
             // 空条目对前端不可见：不计数、不打断当前段。
             continue;
         }
-        if e.kind != "content" {
+        if e.kind != TurnKind::Content {
             in_markdown_run = false;
             continue;
         }
-        match e.element_type.as_str() {
-            "markdown" => {
+        // （type-session-vocabularies 4.2）类型化 match：新增一个元素类型必须
+        // 在这里显式表态（编译失败），不再靠字符串落到 `_` 兜底。
+        match e.element_type {
+            TurnElementType::Markdown => {
                 if !in_markdown_run {
                     count += 1;
                     in_markdown_run = true;
                 }
             }
-            "error" => {
+            TurnElementType::Error => {
                 count += 1;
                 in_markdown_run = false;
             }
-            _ => in_markdown_run = false,
+            // 其余元素类型都不构成「可见回复段」并打断当前段（既有 `_` 兜底
+            // 的逐字展开）：thinking / tool 是正文附属，notice 与
+            // permission_mode_result 是中性提示，未知取值照同样口径处理。
+            TurnElementType::Thinking
+            | TurnElementType::Tool
+            | TurnElementType::Notice
+            | TurnElementType::PermissionModeResult
+            | TurnElementType::Unknown(_) => in_markdown_run = false,
         }
     }
     count
@@ -291,7 +301,7 @@ mod tests {
         let back: TurnEntry = serde_json::from_str(legacy).unwrap();
         assert_eq!(back.title, None);
         assert_eq!(back.position, 4);
-        assert_eq!(back.element_type, "tool");
+        assert_eq!(back.element_type, sebas_domain::session::TurnElementType::Tool);
 
         // 带 title：完整往返。
         let titled = TurnEntry::tool(0, "📖 **Read**").with_title(tool_entry_title(
