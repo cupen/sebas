@@ -1949,7 +1949,7 @@ mod tests {
 
         let streamed = collect_turn(&mut turns).await;
         assert_eq!(streamed.len(), 2, "notice then summary: {streamed:?}");
-        assert_eq!(streamed[0].element_type, "notice");
+        assert_eq!(streamed[0].element_type, sebas_domain::vocabulary::TurnElementType::Notice);
         assert_eq!(streamed[0].position, 0);
         assert!(
             streamed[0].content.contains("回合已结束且无输出"),
@@ -1986,7 +1986,9 @@ mod tests {
 
         let streamed = collect_turn(&mut turns).await;
         assert!(
-            streamed.iter().all(|e| e.element_type != "notice"),
+            streamed
+                .iter()
+                .all(|e| e.element_type != sebas_domain::vocabulary::TurnElementType::Notice),
             "a turn with text must not carry a zero-output notice: {streamed:?}"
         );
         backend.close(key).await.unwrap();

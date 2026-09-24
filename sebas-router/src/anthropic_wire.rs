@@ -616,9 +616,20 @@ mod tests {
         assert!(think_at < sig_at, "signature_delta follows thinking_delta");
         assert!(sig_at < text_at, "thinking block precedes the text block");
         // thinking 块的 start 形状含 thinking 字段且首帧为空（与 text 不同）。
+        //
+        // 断言**不得**依赖 JSON 键序：`json!` 建的 map 在 serde_json 未开
+        // `preserve_order` 时是 BTreeMap（键按字典序），开了才是插入序。而
+        // `preserve_order` 由 **第三方 crate 的 feature 统一**决定
+        // （`agent-client-protocol` 声明了它）——只要它在依赖图里就是插入序，
+        // 一旦图变化（如 768e3d9 断开 `domain → acp` 把它移出 router 图）就
+        // 翻成字典序。故此处按字段独立断言，与键序解耦。
+        let start = sse
+            .lines()
+            .find(|l| l.contains("\"type\":\"content_block_start\"") && l.contains("thinking"))
+            .expect("a thinking content_block_start frame");
         assert!(
-            sse.contains("\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}"),
-            "thinking content_block_start shape:\n{sse}"
+            start.contains("\"type\":\"thinking\"") && start.contains("\"thinking\":\"\""),
+            "thinking content_block_start carries an empty thinking field:\n{start}"
         );
         assert!(sse.contains("\"index\":0"));
         assert!(sse.contains("\"index\":1"));
