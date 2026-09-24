@@ -8,8 +8,9 @@
 //! `deny_unknown_fields` 严格解析语义、缺省值、JSON 段名 `theme_color` /
 //! `max_user_text_chars` / `max_tool_output_chars` / `fold_long_output` /
 //! `thinking`），保证：
-//! - `settings.json`（TOML `[card]` 首次落盘的全量快照）在两个 crate 间
-//!   往返一致；
+//! - 状态库里 `settings` 表 `card_config` 键的全量快照在两个 crate 间往
+//!   返一致（retire-legacy-state-json 4.1：这份快照过去落在
+//!   `settings.json`，该文件已退休）；
 //! - core bin 装配时把 feishu adapter 持有的 `CardConfig` 按字段拷成镜像
 //!   （`serde_json` 往返即可，两侧形状相同），`/settings` 读写闭环不被
 //!   破坏。
@@ -102,8 +103,8 @@ mod tests {
 
     #[test]
     fn serialized_keys_match_feishu_shape() {
-        // JSON 段名必须与 feishu `CardConfig` 一致（settings.json 跨 crate
-        // 往返依赖这一点）。
+        // JSON 段名必须与 feishu `CardConfig` 一致（状态库里的 card_config
+        // 快照跨 crate 往返依赖这一点）。
         let c = CardConfig {
             theme_color: "orange".into(),
             max_user_text_chars: 100,

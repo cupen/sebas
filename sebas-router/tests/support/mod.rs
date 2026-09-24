@@ -38,15 +38,33 @@ use sebas_router::server;
 /// Task 8 的 usage sink 会写经 `__USAGE__` 替换出的 tempdir 路径，故测试
 /// 不会触及真实状态目录。
 pub async fn start_router(config_toml: &str) -> TestRouter {
-    start_router_impl(config_toml, false).await
+    start_router_impl(config_toml, false, None).await
 }
 
 /// 以 debug 模式启动：parse 完成后注入内置 test provider（`--debug` 语义）。
 pub async fn start_router_debug(config_toml: &str) -> TestRouter {
-    start_router_impl(config_toml, true).await
+    start_router_impl(config_toml, true, None).await
 }
 
-async fn start_router_impl(config_toml: &str, debug: bool) -> TestRouter {
+/// 启动 router 并把 `overlay` 快照投影进配置——**精确复用 core 通道订阅
+/// 循环对每一帧做的事**：`RouterConfig::apply_overlay_value(snapshot)` →
+/// `build_state`（`core_channel::reload_from_channel` 的投影段）。
+///
+/// retire-legacy-state-json 3.5 起 provider/alias 数据没有文件来源；
+/// 需要「配置里有别名/provider」的契约测试用本入口代替「写一个 overlay
+/// 文件再让 parse 读」的旧做法（那条路径已随文件读取一并删除）。
+pub async fn start_router_with_overlay(
+    config_toml: &str,
+    overlay: serde_json::Value,
+) -> TestRouter {
+    start_router_impl(config_toml, false, Some(overlay)).await
+}
+
+async fn start_router_impl(
+    config_toml: &str,
+    debug: bool,
+    overlay: Option<serde_json::Value>,
+) -> TestRouter {
     ensure_test_env_keys();
 
     let dir = test_target_dir("start_router");
@@ -56,26 +74,13 @@ async fn start_router_impl(config_toml: &str, debug: bool) -> TestRouter {
     // unicode 转义导致解析失败。统一换成 `/`（TOML 与 OS 都接受）。
     let usage = usage_path.to_string_lossy().replace('\\', "/");
     let raw = config_toml.replace("__USAGE__", &usage);
-    // 隔离 provider overlay：向 [router] 段注入不存在的 overlay 路径，
-    // parse 时 merge 即 no-op，不合并开发机 ~/.sebas/providers.json（其中
-    // 的 openai 条目会与 preset 校验冲突导致 parse 失败）。TOML 追加在
-    // 文件尾部、且 key 在 [router] 段内已存在时 serde 取后者…… 实际
-    // toml 重复 key 报错，故插到首个段落之前，作为 [router] 的首字段。
-    // config 已含该字段时（无）不会出现。需要真 overlay 的测试（admin_
-    // test）自行起 router，不经本函数。
-    let raw = if raw.contains("provider_overlay") {
-        raw
-    } else {
-        raw.replacen(
-            "[router]\n",
-            &format!(
-                "[router]\nprovider_overlay = {:?}\n",
-                dir.path().join("no-overlay.json").to_string_lossy().replace('\\', "/")
-            ),
-            1,
-        )
-    };
     let mut cfg = RouterConfig::parse(&raw).expect("parse test config");
+    // provider 数据投影：与 `core_channel::reload_from_channel` 同一函数
+    // （订阅循环对 Snapshot / Changed 帧调用它）。
+    if let Some(snapshot) = overlay {
+        cfg.apply_overlay_value(&snapshot)
+            .expect("project overlay snapshot");
+    }
     if debug {
         debug::enable_debug_test_provider(&mut cfg);
     }

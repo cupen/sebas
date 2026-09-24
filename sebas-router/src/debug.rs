@@ -56,14 +56,9 @@ mod tests {
     use super::*;
 
     fn parse_isolated(raw: &str) -> crate::error::Result<RouterConfig> {
-        // SAFETY: 测试串行持有 LOCK（见 config.rs 同名 helper 的注释），
-        // 设一次就清，避免污染本进程内其他测试。
-        unsafe {
-            std::env::set_var(
-                "SEBAS_ROUTER_PROVIDER_OVERLAY",
-                "__sebas_test_no_overlay__.json",
-            );
-        }
+        // retire-legacy-state-json 3.5：`SEBAS_ROUTER_PROVIDER_OVERLAY` 已退休
+        // （overlay 文件读取删除），无需再隔离该 env。调用方仍持有 LOCK 以串行
+        // 化 `SEBAS_ROUTER_LISTEN`（parse 会读它）。
         RouterConfig::parse(raw)
     }
 

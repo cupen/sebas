@@ -34,30 +34,30 @@ use serde_json::{Map, Value};
 /// （= HAIKU 值）。provider 未配 models → 不强制覆盖，claude 用自己发现。
 const CLAUDE_SUBAGENT_MODEL_ENV: &str = "CLAUDE_CODE_SUBAGENT_MODEL";
 
-/// 读单个 provider 的原始 Item（含 `default_model`）。make-core-own-provider-data
-/// 4.1：状态库是权威——`state_store::load()` 优先走 core 的 state store
-/// engine，**不再优先读 legacy `providers.json`**（旧文件会盖住库里的
-/// `default_model`，是 live correctness bug）。
+/// 读单个 provider 的原始 Item（含 `default_model`）。
 ///
-/// 4.2 降级路径：state store 未初始化（engine 缺失，如 DB 初始化失败/测试
-/// 夹具）时 `state_store::load()` 自行回退读 state.json / providers.json
-/// 文件——该路径保留并如实上报来源（warn 一行，注明数据来自 legacy 文件
-/// 而非状态库）。文件不存在 / JSON 坏 / 名字不在 overrides 里 / 已
-/// tombstone → `None`（不报错，让上层决定 graceful fallback 到 `Off`）。
+/// retire-legacy-state-json 3.4：状态库是**唯一**权威——`state_store::load()`
+/// 只走 core 的 state store engine。退休之后没有文件回退层：库不可用时按空
+/// 状态呈现（`deleted` 为空、`providers` 为空），本函数因此返回 `None`，上层
+/// 按既有 graceful 语义回退到 `Off`。**绝不**去读 `state.json` /
+/// `providers.json`。
+///
+/// 名字不在 providers 里 / 已 tombstone → `None`（不报错，让上层决定 graceful
+/// fallback 到 `Off`）。
 ///
 /// `default_model` 只在条目上（router `ProviderConfig` 没有这字段，故意不向
 /// router 同步 —— sebas-63f.4 设计决定），所以必须从这里读，不能从
 /// `router_cfg.providers` 拿。
 fn read_overlay_item(name: &str) -> Option<Map<String, Value>> {
-    let store_live = sebas_dispatch::state_store::engine().is_some();
-    let state = sebas_dispatch::state_store::load();
-    if !store_live {
-        // 4.2：无状态库时的文件降级读取——如实上报来源，不冒充权威。
+    if sebas_dispatch::state_store::engine().is_none() {
+        // 库不可用：如实上报成因，不冒充权威、也不去找文件。
         tracing::warn!(
             provider = %name,
-            "state store 未初始化：provider 数据来自 legacy 文件降级读取（state.json / providers.json），非状态库权威"
+            "{}；Direct provider 数据不可读，按 Off 兜底",
+            sebas_dispatch::state_store::unavailable_cause().unwrap_or("state store 不可用")
         );
     }
+    let state = sebas_dispatch::state_store::load();
     if state.deleted.iter().any(|d| d == name) {
         return None;
     }
@@ -625,8 +625,11 @@ mod tests {
     use sebas_router::config::RouterConfig;
     use std::sync::Mutex;
 
-    // 串行化所有 env 访问：`SEBAS_ROUTER_PROVIDER_OVERLAY` 是全局变量，
-    // 跨测试并发跑会撞；与 `router/src/config.rs::tests` 同惯例。
+    // 串行化所有 env 访问（`SEBAS_ROUTER_LISTEN` 等全局变量跨测试并发跑会撞；
+    // 与 `router/src/config.rs::tests` 同惯例）。两个 legacy 状态文件变量
+    // （`SEBAS_STATE_FILE` / `SEBAS_ROUTER_PROVIDER_OVERLAY`）已随
+    // retire-legacy-state-json 3.5 退休，但本锁仍被其它 env 读写点
+    // （ANTHROPIC_* 等）需要。
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn driver() -> ClaudeCodeDriver {
@@ -663,30 +666,40 @@ mod tests {
 [router]
 listen = "{listen}"
 auth_token = {auth_token:?}
-# 隔离：不合并开发机 ~/.sebas/providers.json（其 openai 条目与 preset
-# 校验冲突导致 parse 失败）。
-provider_overlay = "__sebas_spawn_env_no_overlay__.json"
 [provider.anthropic]
 "#
         );
         RouterConfig::parse(&raw).expect("test router config parses")
     }
 
-    fn write_overlay(dir: &std::path::Path, body: &str) {
-        let path = dir.join("providers.json");
-        std::fs::create_dir_all(dir).unwrap();
-        std::fs::write(&path, body).unwrap();
-        // SAFETY: ENV_LOCK held across all overlay-touching tests.
-        unsafe {
-            std::env::set_var("SEBAS_ROUTER_PROVIDER_OVERLAY", path.to_str().unwrap());
+    /// 装一个以 `body`（旧 overlay 的 JSON 形状）为初值的内存状态引擎，
+    /// 返回 guard —— 调用方必须把它绑到测试局部变量（`let _store = ...`）：
+    /// guard 持有全局锁，drop 时清空引擎。
+    ///
+    /// retire-legacy-state-json 3.4：没有文件回退了，所以「写一个 overlay
+    /// 文件」这件夹具事就地改写成「把同样的数据放进状态库」。`body` 的 JSON
+    /// 形状照旧（`{"providers": {...}, "deleted": [...]}`），因此所有调用点
+    /// 的 payload 一字未改。
+    ///
+    /// `_dir` 只为调用点签名兼容保留。
+    fn write_overlay(_dir: &std::path::Path, body: &str) -> sebas_dispatch::test_engine::EngineGuard {
+        #[derive(serde::Deserialize, Default)]
+        struct Seed {
+            #[serde(default)]
+            providers: std::collections::BTreeMap<String, Map<String, Value>>,
+            #[serde(default)]
+            deleted: Vec<String>,
         }
+        let seed: Seed = serde_json::from_str(body).expect("test seed parses as an overlay body");
+        let mut state = sebas_dispatch::state_store::PersistedState::default();
+        state.providers = seed.providers;
+        state.deleted = seed.deleted;
+        let (_engine, guard) = sebas_dispatch::test_engine::install_fresh_with(state);
+        guard
     }
 
     fn clear_overlay_env() {
-        // SAFETY: ENV_LOCK held.
-        unsafe {
-            std::env::remove_var("SEBAS_ROUTER_PROVIDER_OVERLAY");
-        }
+        // 引擎由 EngineGuard 的 Drop 清空；保留空函数让调用点零改动。
     }
 
     // ---- Off ----
@@ -710,7 +723,7 @@ provider_overlay = "__sebas_spawn_env_no_overlay__.json"
     fn direct_overlay_picks_anthropic_url_and_resolves_api_key_env() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        write_overlay(
+        let _store = write_overlay(
             dir.path(),
             r#"{
                 "providers": {
@@ -751,7 +764,7 @@ provider_overlay = "__sebas_spawn_env_no_overlay__.json"
     fn direct_overlay_falls_back_to_openai_url_when_anthropic_missing() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        write_overlay(
+        let _store = write_overlay(
             dir.path(),
             r#"{
                 "providers": {
@@ -793,7 +806,7 @@ provider_overlay = "__sebas_spawn_env_no_overlay__.json"
     fn direct_overlay_emits_model_arg_when_default_model_set() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        write_overlay(
+        let _store = write_overlay(
             dir.path(),
             r#"{
                 "providers": {
@@ -835,7 +848,7 @@ provider_overlay = "__sebas_spawn_env_no_overlay__.json"
     fn direct_default_selection_model_overrides_overlay_default_model() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        write_overlay(
+        let _store = write_overlay(
             dir.path(),
             r#"{
                 "providers": {
@@ -875,7 +888,7 @@ provider_overlay = "__sebas_spawn_env_no_overlay__.json"
     fn off_with_default_selection_implicit_direct_emits_provider_env() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        write_overlay(
+        let _store = write_overlay(
             dir.path(),
             r#"{
                 "providers": {
@@ -920,7 +933,7 @@ provider_overlay = "__sebas_spawn_env_no_overlay__.json"
     fn off_with_default_selection_emits_model_arg_via_implicit_direct() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        write_overlay(
+        let _store = write_overlay(
             dir.path(),
             r#"{
                 "providers": {
@@ -961,7 +974,7 @@ provider_overlay = "__sebas_spawn_env_no_overlay__.json"
     fn direct_uses_mode_provider_over_default_selection_provider() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        write_overlay(
+        let _store = write_overlay(
             dir.path(),
             r#"{
                 "providers": {
@@ -1011,7 +1024,7 @@ provider_overlay = "__sebas_spawn_env_no_overlay__.json"
     fn direct_overlay_plain_api_key_wins_over_env() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        write_overlay(
+        let _store = write_overlay(
             dir.path(),
             r#"{
                 "providers": {
@@ -1036,7 +1049,7 @@ provider_overlay = "__sebas_spawn_env_no_overlay__.json"
     fn direct_overlay_missing_provider_falls_back_to_off() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        write_overlay(
+        let _store = write_overlay(
             dir.path(),
             r#"{ "providers": { "deepseek": { "preset": "deepseek" } } }"#,
         );
@@ -1054,7 +1067,7 @@ provider_overlay = "__sebas_spawn_env_no_overlay__.json"
     fn direct_overlay_tombstoned_provider_falls_back_to_off() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        write_overlay(
+        let _store = write_overlay(
             dir.path(),
             r#"{
                 "providers": { "deepseek": { "preset": "deepseek" } },
@@ -1074,7 +1087,7 @@ provider_overlay = "__sebas_spawn_env_no_overlay__.json"
     fn direct_overlay_api_key_env_unset_returns_error() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        write_overlay(
+        let _store = write_overlay(
             dir.path(),
             r#"{
                 "providers": {
@@ -1112,7 +1125,7 @@ provider_overlay = "__sebas_spawn_env_no_overlay__.json"
     fn direct_overlay_no_url_returns_error() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        write_overlay(
+        let _store = write_overlay(
             dir.path(),
             r#"{
                 "providers": {
@@ -1146,7 +1159,7 @@ provider_overlay = "__sebas_spawn_env_no_overlay__.json"
         // 新行为：返回 Error，spawn wrapper abort。
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        write_overlay(
+        let _store = write_overlay(
             dir.path(),
             r#"{
                 "providers": {
@@ -1179,7 +1192,7 @@ provider_overlay = "__sebas_spawn_env_no_overlay__.json"
     fn direct_falls_back_to_router_cfg_when_overlay_missing() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        write_overlay(dir.path(), r#"{ "providers": {} }"#);
+        let _store = write_overlay(dir.path(), r#"{ "providers": {} }"#);
         // SAFETY: ENV_LOCK held.
         unsafe {
             std::env::set_var("ANTHROPIC_API_KEY", "sk-anth-gw");
@@ -1338,7 +1351,7 @@ api_key_env = "ANTHROPIC_API_KEY"
     fn resolve_spawn_overrides_direct_does_not_emit_args_without_default_model() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        write_overlay(
+        let _store = write_overlay(
             dir.path(),
             r#"{
                 "providers": {
@@ -1366,58 +1379,50 @@ api_key_env = "ANTHROPIC_API_KEY"
 
     // ---- End-to-end (bead sebas-63f.9) ----
 
-    /// 端到端集成测试：从「在 state.json 里改 mode」到「spawn 时拿到的
+    /// 端到端集成测试：从「状态库里的 mode」到「spawn 时拿到的
     /// `(extra_env, extra_args)`」跑一遍完整链路，不真的 fork 进程。
     ///
     /// 为什么需要单独写这个：单测已经覆盖了「每条分支输出什么」，但缺一个
-    /// 走「用户改了 state.json → `load()` 读到 → `compute_provider_resolution`
+    /// 走「状态库里改 mode → `load()` 读到 → `compute_provider_resolution`
     /// 解析 → `resolve_spawn_overrides` 喂给 driver → 拿到真实 subprocess
-    /// env」的贯通路径。这条链路上任何一个 env var 拼错（比如忘了设
-    /// `SEBAS_STATE_FILE` 而读了真实 `~/.sebas/state.json`）都会让单测全过
-    /// 但生产 spawn 走错分支 —— 这个测试用 tempfile 把两条 env var 重定向
-    /// 到临时文件，确保读到的就是我们刚写的。
+    /// env」的贯通路径。这条链路上任何一个环节拼错（比如读了别的来源）都会
+    /// 让单测全过但生产 spawn 走错分支。
+    ///
+    /// retire-legacy-state-json 3.4：准备数据的方式从「写 state.json 文件 +
+    /// 重定向 `SEBAS_STATE_FILE`」改成「直接换一个预置好的内存引擎」——
+    /// 这两个变量都已退休，行为面因此被完整保留而耦合面消失。
     #[test]
     fn end_to_end_mode_setting_flows_through_to_spawn_env() {
         let _g = ENV_LOCK.lock().unwrap();
 
-        // 准备两个 tempfile：state.json + providers.json。
-        let state_dir = tempfile::tempdir().unwrap();
-        let overlay_dir = tempfile::tempdir().unwrap();
-        let state_path = state_dir.path().join("state.json");
-        let overlay_path = overlay_dir.path().join("providers.json");
-
-        // Overlay 里只放一个 Anthropic 协议的 provider，方便断言 Direct
-        // 路径走 Anthropic 分支。
-        std::fs::write(
-            &overlay_path,
-            r#"{
-                "providers": {
-                    "test_prov": {
-                        "base_url_anthropic": "https://example.test/anthropic",
-                        "api_key": "sk-test-direct"
-                    }
-                }
-            }"#,
-        )
-        .unwrap();
-
-        // 重定向两条全局 env var 到 tempfile，让 production code 读到我们
-        // 写的内容（而不是真的 ~/.sebas/*）。
-        // SAFETY: ENV_LOCK held.
-        unsafe {
-            std::env::set_var("SEBAS_STATE_FILE", state_path.to_str().unwrap());
-            std::env::set_var(
-                "SEBAS_ROUTER_PROVIDER_OVERLAY",
-                overlay_path.to_str().unwrap(),
-            );
+        fn seed(mode: Value, providers: Value, deleted: Vec<String>, selection: Value) -> Value {
+            serde_json::json!({
+                "version": sebas_dispatch::state_store::STATE_VERSION_V2,
+                "providers": providers,
+                "deleted": deleted,
+                "mode": mode,
+                "default_selection": selection,
+                "model_aliases": {},
+            })
         }
 
+        let direct_providers = serde_json::json!({
+            "test_prov": {
+                "base_url_anthropic": "https://example.test/anthropic",
+                "api_key": "sk-test-direct"
+            }
+        });
+
         // --- Scenario A: Off → Off，无 env 无 args ---
-        std::fs::write(
-            &state_path,
-            r#"{"version":2,"providers":{"test_prov":{"base_url_anthropic":"https://example.test/anthropic","api_key":"sk-test-direct"}},"deleted":[],"mode":{"kind":"off"},"default_selection":null}"#,
-        )
-        .unwrap();
+        let (_e, _store) = sebas_dispatch::test_engine::install_fresh_with(
+            serde_json::from_value(seed(
+                serde_json::json!({"kind": "off"}),
+                direct_providers.clone(),
+                vec![],
+                Value::Null,
+            ))
+            .unwrap(),
+        );
         let st = sebas_dispatch::provider_state::load();
         let (env, args) = resolve_spawn_overrides(&driver(), &st, None);
         assert!(matches!(
@@ -1427,12 +1432,16 @@ api_key_env = "ANTHROPIC_API_KEY"
         assert!(env.is_empty(), "Off 不应给 driver 任何 env");
         assert!(args.is_empty(), "Off 不应给 driver 任何 args");
 
-        // --- Scenario B: Direct + overlay 命中 → Direct(Anthropic) ---
-        std::fs::write(
-            &state_path,
-            r#"{"version":2,"providers":{"test_prov":{"base_url_anthropic":"https://example.test/anthropic","api_key":"sk-test-direct"}},"deleted":[],"mode":{"kind":"direct","provider":"test_prov"},"default_selection":{"provider":"test_prov"}}"#,
-        )
-        .unwrap();
+        // --- Scenario B: Direct + 状态库命中 → Direct(Anthropic) ---
+        let (_e, _store) = sebas_dispatch::test_engine::install_fresh_with(
+            serde_json::from_value(seed(
+                serde_json::json!({"kind": "direct", "provider": "test_prov"}),
+                direct_providers.clone(),
+                vec![],
+                serde_json::json!({"provider": "test_prov"}),
+            ))
+            .unwrap(),
+        );
         let st = sebas_dispatch::provider_state::load();
         let (env, args) = resolve_spawn_overrides(&driver(), &st, None);
         match compute_provider_resolution(&st, None).0 {
@@ -1448,7 +1457,7 @@ api_key_env = "ANTHROPIC_API_KEY"
             other => panic!("expected Direct, got {other:?}"),
         }
         // driver 必须把 Direct 翻译成 ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN，
-        // 并把这两个变量送给 subprocess。args 空因为 overlay 里没设 default_model。
+        // 并把这两个变量送给 subprocess。args 空因为条目没设 default_model。
         assert!(
             env.iter()
                 .any(|(k, v)| k == "ANTHROPIC_BASE_URL" && v == "https://example.test/anthropic")
@@ -1460,11 +1469,15 @@ api_key_env = "ANTHROPIC_API_KEY"
         assert!(args.is_empty(), "no default_model → no --model args");
 
         // --- Scenario C: Router → Router ---
-        std::fs::write(
-            &state_path,
-            r#"{"mode":{"kind":"router"},"default_selection":null}"#,
-        )
-        .unwrap();
+        let (_e, _store) = sebas_dispatch::test_engine::install_fresh_with(
+            serde_json::from_value(seed(
+                serde_json::json!({"kind": "router"}),
+                serde_json::json!({}),
+                vec![],
+                Value::Null,
+            ))
+            .unwrap(),
+        );
         let st = sebas_dispatch::provider_state::load();
         let cfg = test_router("127.0.0.1:8888", vec!["sk-gw-test".to_string()]);
         match compute_provider_resolution(&st, Some(&cfg)).0 {
@@ -1480,11 +1493,15 @@ api_key_env = "ANTHROPIC_API_KEY"
         //     `ProviderResolution::Error` → spawn wrapper `exit(1)`，用户因一个
         //     幽灵 provider 名（如泄漏的测试字面量 env-override）连 claude 都
         //     拉不起来；改成回退 Off 后启动不被阻断。---
-        std::fs::write(
-            &state_path,
-            r#"{"mode":{"kind":"direct","provider":"nonexistent"},"default_selection":null}"#,
-        )
-        .unwrap();
+        let (_e, _store) = sebas_dispatch::test_engine::install_fresh_with(
+            serde_json::from_value(seed(
+                serde_json::json!({"kind": "direct", "provider": "nonexistent"}),
+                serde_json::json!({}),
+                vec![],
+                Value::Null,
+            ))
+            .unwrap(),
+        );
         let st = sebas_dispatch::provider_state::load();
         let (env, args) = resolve_spawn_overrides(&driver(), &st, None);
         match compute_provider_resolution(&st, None).0 {
@@ -1506,24 +1523,17 @@ api_key_env = "ANTHROPIC_API_KEY"
             !env.iter().any(|(k, _)| k == "SEBAS_PROVIDER_ERROR"),
             "兜底 Off 不应注入 SEBAS_PROVIDER_ERROR（否则仍会 abort）；got {env:?}"
         );
-
-        // 清理 env var，避免污染后续测试 / CI 环境。
-        // SAFETY: ENV_LOCK held.
-        unsafe {
-            std::env::remove_var("SEBAS_STATE_FILE");
-            std::env::remove_var("SEBAS_ROUTER_PROVIDER_OVERLAY");
-        }
     }
 
     /// Direct provider 的 overlay item 同时填了 anthropic + openai base_url
     /// 且**未显式指定 `protocol` 字段**时，走「auto」默认（协议面选择契约见
     /// openspec/specs/provider-management/spec.md）：优先 Anthropic 协议面。该测试锁定 auto 默认值，避免日后
     /// 被偷改。显式 `protocol=openai` 走 OpenAI 由另一个测试覆盖。
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn direct_prefers_anthropic_when_both_base_urls_set() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        write_overlay(
+        let _store = write_overlay(
             dir.path(),
             r#"{
               "providers": {
@@ -1536,12 +1546,6 @@ api_key_env = "ANTHROPIC_API_KEY"
               }
             }"#,
         );
-        unsafe {
-            std::env::set_var(
-                "SEBAS_ROUTER_PROVIDER_OVERLAY",
-                dir.path().join("providers.json").to_str().unwrap(),
-            );
-        }
         let state = direct_state("dual");
         let (resolution, _) = compute_provider_resolution(&state, None);
         match resolution {
@@ -1557,18 +1561,15 @@ api_key_env = "ANTHROPIC_API_KEY"
             }
             other => panic!("expected Direct, got {other:?}"),
         }
-        unsafe {
-            std::env::remove_var("SEBAS_ROUTER_PROVIDER_OVERLAY");
-        }
     }
 
     /// openspec/specs/provider-management/spec.md：overlay 里 `protocol=openai` 显式声明 +
     /// 两个 URL 都配了 → 强制走 OpenAI（不再走 auto 的 anthropic 优先）。
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn direct_explicit_protocol_openai_with_both_urls_uses_openai() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        write_overlay(
+        let _store = write_overlay(
             dir.path(),
             r#"{
               "providers": {
@@ -1582,12 +1583,6 @@ api_key_env = "ANTHROPIC_API_KEY"
               }
             }"#,
         );
-        unsafe {
-            std::env::set_var(
-                "SEBAS_ROUTER_PROVIDER_OVERLAY",
-                dir.path().join("providers.json").to_str().unwrap(),
-            );
-        }
         let state = direct_state("dual");
         let (resolution, _) = compute_provider_resolution(&state, None);
         match resolution {
@@ -1603,19 +1598,16 @@ api_key_env = "ANTHROPIC_API_KEY"
             }
             other => panic!("expected Direct, got {other:?}"),
         }
-        unsafe {
-            std::env::remove_var("SEBAS_ROUTER_PROVIDER_OVERLAY");
-        }
     }
 
     /// openspec/specs/provider-management/spec.md.2：overlay 里 `protocol=anthropic` 但只配了
     /// openai URL → 显式选择必须能命中；命中失败时不再静默回退 Off，
     /// 而是返回 Error（spawn wrapper abort + 用户看到错误）。
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn direct_explicit_protocol_anthropic_with_only_openai_url_returns_error() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        write_overlay(
+        let _store = write_overlay(
             dir.path(),
             r#"{
               "providers": {
@@ -1628,12 +1620,6 @@ api_key_env = "ANTHROPIC_API_KEY"
               }
             }"#,
         );
-        unsafe {
-            std::env::set_var(
-                "SEBAS_ROUTER_PROVIDER_OVERLAY",
-                dir.path().join("providers.json").to_str().unwrap(),
-            );
-        }
         let state = direct_state("oai-only");
         let (resolution, _) = compute_provider_resolution(&state, None);
         match &resolution {
@@ -1655,18 +1641,15 @@ api_key_env = "ANTHROPIC_API_KEY"
                 "显式 protocol=anthropic 缺 base_url_anthropic → 必须 Error，不能 fallback 到 OpenAI；got {other:?}"
             ),
         }
-        unsafe {
-            std::env::remove_var("SEBAS_ROUTER_PROVIDER_OVERLAY");
-        }
     }
 
     /// openspec/specs/provider-management/spec.md.2：overlay 里 `protocol=openai` 但只配了
     /// anthropic URL → 同样返回 Error（对称分支）。
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn direct_explicit_protocol_openai_with_only_anthropic_url_returns_error() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        write_overlay(
+        let _store = write_overlay(
             dir.path(),
             r#"{
               "providers": {
@@ -1679,12 +1662,6 @@ api_key_env = "ANTHROPIC_API_KEY"
               }
             }"#,
         );
-        unsafe {
-            std::env::set_var(
-                "SEBAS_ROUTER_PROVIDER_OVERLAY",
-                dir.path().join("providers.json").to_str().unwrap(),
-            );
-        }
         let state = direct_state("anth-only");
         let (resolution, _) = compute_provider_resolution(&state, None);
         match &resolution {
@@ -1706,18 +1683,15 @@ api_key_env = "ANTHROPIC_API_KEY"
                 panic!("显式 protocol=openai 缺 base_url_openai_chat → 必须 Error；got {other:?}")
             }
         }
-        unsafe {
-            std::env::remove_var("SEBAS_ROUTER_PROVIDER_OVERLAY");
-        }
     }
 
     /// openspec/specs/provider-management/spec.md：overlay 里 `protocol=anthropic` 显式 +
     /// 两个 URL 都配了 → 强制走 Anthropic（覆盖 auto 优先级）。
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn direct_explicit_protocol_anthropic_with_both_urls_uses_anthropic() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        write_overlay(
+        let _store = write_overlay(
             dir.path(),
             r#"{
               "providers": {
@@ -1731,12 +1705,6 @@ api_key_env = "ANTHROPIC_API_KEY"
               }
             }"#,
         );
-        unsafe {
-            std::env::set_var(
-                "SEBAS_ROUTER_PROVIDER_OVERLAY",
-                dir.path().join("providers.json").to_str().unwrap(),
-            );
-        }
         let state = direct_state("dual");
         let (resolution, _) = compute_provider_resolution(&state, None);
         match resolution {
@@ -1748,21 +1716,15 @@ api_key_env = "ANTHROPIC_API_KEY"
             }
             other => panic!("expected Direct, got {other:?}"),
         }
-        unsafe {
-            std::env::remove_var("SEBAS_ROUTER_PROVIDER_OVERLAY");
-        }
     }
 
     /// Router 模式 + router config 里有 listen 但 auth_token 是空数组：
     /// 不应 panic / 不应拒绝；URL 仍构造，auth_token 是空字符串（agent 会
     /// 在没 Bearer 的情况下调 router，router 自己拒）。这是用户故意不配
     /// auth 的合法状态。
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn router_with_empty_auth_token_still_constructs_url() {
-        // parse 会读 `SEBAS_ROUTER_PROVIDER_OVERLAY`（env 优先于 config 缺省）：
-        // 先持锁清 env，避免并发 overlay 用例的临时 overlay 混入本例的 parse。
         let _g = ENV_LOCK.lock().unwrap();
-        clear_overlay_env();
         let raw = r#"
 [router]
 listen = "127.0.0.1:8787"
@@ -1854,7 +1816,7 @@ base_url_anthropic = "https://api.anthropic.com"
     fn effective_provider_models_direct_preset_reads_table() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        write_overlay(
+        let _store = write_overlay(
             dir.path(),
             r#"{
                 "providers": {
@@ -1886,7 +1848,7 @@ base_url_anthropic = "https://api.anthropic.com"
     fn effective_provider_models_direct_custom_reads_item_models() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        write_overlay(
+        let _store = write_overlay(
             dir.path(),
             r#"{
                 "providers": {
@@ -1942,7 +1904,7 @@ base_url_anthropic = "https://api.anthropic.com"
     fn resolve_spawn_overrides_direct_preset_injects_5_key_model_cover() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        write_overlay(
+        let _store = write_overlay(
             dir.path(),
             r#"{
                 "providers": {
@@ -2110,13 +2072,9 @@ base_url_anthropic = "https://api.anthropic.com"
     #[test]
     fn posture_detection_leaves_process_env_and_spawn_output_untouched() {
         let _g = ENV_LOCK.lock().unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        // state 重定向进沙箱（默认 Off 形态），overlay 缺文件 = no-op。
-        let state_path = dir.path().join("state.json");
-        std::fs::write(&state_path, r#"{"version":2,"deleted":[]}"#).unwrap();
+        // 默认 Off 形态的库（provider 空表、无 tombstone）。
+        let _store = sebas_dispatch::test_engine::install_fresh();
         unsafe {
-            std::env::set_var("SEBAS_STATE_FILE", state_path.to_str().unwrap());
-            std::env::set_var("SEBAS_ROUTER_PROVIDER_OVERLAY", "__no_overlay__.json");
             std::env::set_var("ANTHROPIC_MODEL", "stale-from-shell");
             std::env::set_var("ANTHROPIC_BASE_URL", "https://corp-gw.internal");
         }
@@ -2146,8 +2104,6 @@ base_url_anthropic = "https://api.anthropic.com"
         }
         // SAFETY: ENV_LOCK held。
         unsafe {
-            std::env::remove_var("SEBAS_STATE_FILE");
-            std::env::remove_var("SEBAS_ROUTER_PROVIDER_OVERLAY");
             std::env::remove_var("ANTHROPIC_MODEL");
             std::env::remove_var("ANTHROPIC_BASE_URL");
         }
@@ -2158,18 +2114,26 @@ base_url_anthropic = "https://api.anthropic.com"
     #[test]
     fn posture_full_cover_wiring_yields_empty_list() {
         let _g = ENV_LOCK.lock().unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let state_path = dir.path().join("state.json");
-        // Direct 指向带 models 的 provider（v2 state 文件，provider 条目内嵌）。
-        std::fs::write(
-            &state_path,
-            r#"{"version":2,"deleted":[],"providers":{"cover":{"base_url_anthropic":"https://example.test/anthropic","api_key":"sk-cover","models":["m-strong","m-weak"]}},"mode":{"kind":"direct","provider":"cover"},"default_selection":{"provider":"cover"}}"#,
-        )
-        .unwrap();
+        // Direct 指向带 models 的 provider（预置进状态库）。
+        let (_e, _store) = sebas_dispatch::test_engine::install_fresh_with(
+            serde_json::from_value(serde_json::json!({
+                "version": sebas_dispatch::state_store::STATE_VERSION_V2,
+                "deleted": [],
+                "providers": {
+                    "cover": {
+                        "base_url_anthropic": "https://example.test/anthropic",
+                        "api_key": "sk-cover",
+                        "models": ["m-strong", "m-weak"]
+                    }
+                },
+                "mode": { "kind": "direct", "provider": "cover" },
+                "default_selection": { "provider": "cover" },
+                "model_aliases": {},
+            }))
+            .unwrap(),
+        );
         // SAFETY: ENV_LOCK held。
         unsafe {
-            std::env::set_var("SEBAS_STATE_FILE", state_path.to_str().unwrap());
-            std::env::set_var("SEBAS_ROUTER_PROVIDER_OVERLAY", "__no_overlay__.json");
             std::env::set_var("ANTHROPIC_BASE_URL", "https://corp-gw.internal");
             std::env::set_var("ANTHROPIC_AUTH_TOKEN", "stale-token");
             std::env::set_var("ANTHROPIC_MODEL", "stale-model");
@@ -2185,8 +2149,6 @@ base_url_anthropic = "https://api.anthropic.com"
         );
         // SAFETY: ENV_LOCK held。
         unsafe {
-            std::env::remove_var("SEBAS_STATE_FILE");
-            std::env::remove_var("SEBAS_ROUTER_PROVIDER_OVERLAY");
             std::env::remove_var("ANTHROPIC_BASE_URL");
             std::env::remove_var("ANTHROPIC_AUTH_TOKEN");
             std::env::remove_var("ANTHROPIC_MODEL");

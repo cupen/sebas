@@ -133,9 +133,29 @@ pub async fn run(
                  SEBAS_ROUTER_USAGE_DB）按需显式设置。"
             );
         }
+        // 退休变量提示（retire-legacy-state-json 3.3）：遗留状态文件与它们的
+        // 路径变量都已退休——文件不再被写、不再被读、也不再被导入，变量导出
+        // 不改变任何行为。只报告，不读取其值。
+        if !sebas_dispatch::state_store::retired_file_env_vars_present().is_empty() {
+            tracing::warn!(
+                "{} / {} 已退休：state.json 与 providers.json 不再被读写、也不\
+                 会被导入，导出这两个变量不改变任何行为。provider 与运行态状态\
+                 的唯一权威是状态库。",
+                sebas_dispatch::state_store::RETIRED_STATE_FILE_VAR,
+                sebas_dispatch::state_store::RETIRED_PROVIDER_OVERLAY_VAR,
+            );
+        }
 
         let settings_path = sebas_domain::state_paths::Database::Settings.resolve();
         let projects_path = sebas_domain::state_paths::Database::Projects.resolve();
+
+        // 状态目录收紧为 owner-only（retire-legacy-state-json 1.1）：库文件本身
+        // 在 `sebas_db::conn::open` 里收紧，目录没有单一 opener（archive.json /
+        // services.json / nodes.json 各有其写入者），所以在状态目录的归属处显式
+        // 收紧一次。失败只 warn，绝不阻断启动。
+        if let Some(dir) = settings_path.parent() {
+            sebas_db::conn::secure_directory(dir);
+        }
 
         let settings_writer =
             match crate::sebas_state::writer::StateWriter::start_settings(settings_path.clone()) {
@@ -218,16 +238,14 @@ pub async fn run(
     // 与 spawn 路径同源（库权威）。
     crate::spawn_env::warn_inherited_provider_env(router_cfg.as_ref());
 
-    // TOML is bootstrap; settings.json (if present) wins wholesale.
-    // Strict: malformed settings.json refuses to start with a clear error.
-    // Missing settings.json → fall back to TOML [card] so first-boot users
-    // get the configured values rather than serde defaults.
+    // TOML `[card]` 是唯一引导值。
     //
-    // decouple-feishu-channel task 3/4：`settings.json` 由 router 的中立
-    // `CardConfig` 读写（两面 serde 形状逐一相同）；这里把它转成 router
-    // 需要的类型（serde 往返，零字段映射代码）。
+    // retire-legacy-state-json 4.1：`settings.json` 已退休——card 配置的唯一
+    // 持久权威是状态库 `settings` 表的 `card_config` 键；库不可用/无值时按
+    // TOML `[card]` 呈现（绝不落到 serde 默认值）。
     //
-    // 当 state store DB 可用时, 优先从 DB 读 settings; 再回退到文件。
+    // decouple-feishu-channel task 3/4：这两个 `CardConfig` 是逐一字段相同的
+    // serde 镜像形状；这里做一次 serde 往返，零字段映射代码。
     let merged_card_cfg = if let Some(engine) = sebas_dispatch::state_store::engine() {
         match engine.load_settings().await {
             Ok(Some(value)) => {
@@ -235,21 +253,25 @@ pub async fn run(
                 match serde_json::from_value::<sebas_dispatch::CardConfig>(value) {
                     Ok(cfg) => cfg,
                     Err(e) => {
-                        tracing::warn!(error = %e, "failed to deserialize settings from DB, falling back to file");
+                        tracing::warn!(error = %e, "state store card_config 解析失败，回退 TOML [card]");
                         fallback_settings(&cfg)
                     }
                 }
             }
             Ok(None) => {
-                // DB 无 settings, 回退到文件
+                // 库里没有 card_config → TOML 引导值
                 fallback_settings(&cfg)
             }
             Err(e) => {
-                tracing::warn!(error = %e, "failed to read settings from DB, falling back to file");
+                tracing::warn!(error = %e, "state store card_config 读取失败，回退 TOML [card]");
                 fallback_settings(&cfg)
             }
         }
     } else {
+        tracing::warn!(
+            "{}；card 配置按 TOML [card] 引导值呈现",
+            sebas_dispatch::state_store::unavailable_cause().unwrap_or("状态库不可用")
+        );
         fallback_settings(&cfg)
     };
 
@@ -717,20 +739,15 @@ pub(crate) fn build_router_info(
     }
 }
 
-/// 回退到 settings.json 读取, 再回退到 TOML `[card]`。
+/// card 配置的**引导回退**：TOML `[card]`。
+///
+/// retire-legacy-state-json 4.1：`settings.json` 已退休，这里不再有第二层文件
+/// 读取——库里的 `card_config` 由调用点（`load_merged_card_config` 那段）先读，
+/// 只有「库里没有 / 库不可用」才落到这里。回退目标是 TOML `[card]` 而**不是**
+/// `CardConfig::default()`：后者会静默丢掉操作员写进配置文件的卡片偏好。
 fn fallback_settings(cfg: &Config) -> sebas_dispatch::CardConfig {
-    match sebas_dispatch::settings::load_settings(&sebas_dispatch::settings::settings_path()) {
-        Ok(Some(s)) => s,
-        Ok(None) => {
-            serde_json::from_value(serde_json::to_value(&cfg.card).expect("card config serializes"))
-                .expect("card config round-trips between mirror shapes")
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "failed to parse settings.json, falling back to TOML");
-            serde_json::from_value(serde_json::to_value(&cfg.card).expect("card config serializes"))
-                .expect("card config round-trips between mirror shapes")
-        }
-    }
+    serde_json::from_value(serde_json::to_value(&cfg.card).expect("card config serializes"))
+        .expect("card config round-trips between mirror shapes")
 }
 
 /// 在 watchdog 下运行时向父进程发送 ready 握手（Ready-only 协议）。
@@ -835,7 +852,7 @@ mod router_info_tests {
 
     // fix-webui-detached-status 2.1：detached webui 与 in-process 共用同一
     // 装配。直接构造 RouterConfig，不走 env 敏感的 parse（并行测试会改
-    // SEBAS_ROUTER_PROVIDER_OVERLAY，污染 parse）。
+    // SEBAS_ROUTER_LISTEN，污染 parse）。
     fn gw_config() -> RouterConfig {
         RouterConfig {
             listen: "127.0.0.1:50770".into(),
@@ -847,7 +864,6 @@ mod router_info_tests {
             usage_max_rows: 200_000,
             usage_prune_interval_secs: 0,
             debug: false,
-            provider_overlay: String::new(),
             default_provider: None,
             auth_token: vec!["tok".into()],
             rate_limit: Default::default(),

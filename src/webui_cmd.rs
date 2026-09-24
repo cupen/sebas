@@ -307,10 +307,10 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
         args.config
     );
 
-    // Load card config: settings.json wins if present, else TOML `[card]`.
-    // (The session channel does not transport settings; the settings page
-    // renders this local snapshot.)
-    let merged_card_cfg = load_card_config(&cfg);
+    // card 配置的唯一权威在 core 的状态库（`settings` 表 card_config）——独立
+    // webui 没有进程内引擎，向 core 要一次；不可达时按 TOML `[card]` 呈现。
+    // retire-legacy-state-json 4.2：不再有 `settings.json` 这一层。
+    let merged_card_cfg = load_card_config(&cfg, std::path::Path::new(&args.config)).await;
 
     // The session backend: a client of the core session channel. The core
     // child owns the sessions; this process only renders and forwards.
@@ -659,16 +659,36 @@ fn current_uid() -> u32 {
     0
 }
 
-/// Load card config from settings.json, falling back to the TOML `[card]` section.
-fn load_card_config(cfg: &Config) -> sebas_feishu::cards::CardConfig {
-    match sebas_dispatch::settings::load_settings(&sebas_dispatch::settings::settings_path()) {
-        Ok(Some(s)) => {
-            serde_json::from_value(serde_json::to_value(&s).expect("card config serializes"))
-                .expect("card config round-trips between mirror shapes")
-        }
-        Ok(None) => cfg.card.clone(),
-        Err(e) => {
-            warn!(error = %e, "settings.json parse failed; using config defaults");
+/// 读 card 配置：**只走核心状态通道的 `settings` 域**，库里没有/不可达时回退
+/// TOML `[card]`。
+///
+/// retire-legacy-state-json 4.2：`settings.json` 已退休——独立 webui 进程里没有
+/// 进程内引擎（引擎归 core），所以它必须问 core 要；core 不可达时如实按 TOML
+/// 引导值呈现，**不**去读任何文件。
+async fn load_card_config(
+    cfg: &Config,
+    config_path: &std::path::Path,
+) -> sebas_feishu::cards::CardConfig {
+    let secret_file =
+        crate::config::core_secret_file_path(cfg.service.core.secret_file.as_deref(), config_path);
+    let secret = crate::core_channel::secret::ChannelSecret::from_env_or_file(Some(secret_file));
+    let payload = crate::core_channel::client::snapshot_domain_once(
+        &crate::core_channel::socket_path(cfg),
+        &secret,
+        "settings",
+    )
+    .await;
+    match payload {
+        Some(v) if !v.is_null() => match serde_json::from_value(v) {
+            Ok(card) => card,
+            Err(e) => {
+                warn!(error = %e, "core state store card_config 解析失败；使用 TOML [card]");
+                cfg.card.clone()
+            }
+        },
+        Some(_) => cfg.card.clone(),
+        None => {
+            warn!("core 状态通道不可达；card 配置按 TOML [card] 引导值呈现");
             cfg.card.clone()
         }
     }

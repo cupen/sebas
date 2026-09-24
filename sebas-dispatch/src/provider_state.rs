@@ -1,13 +1,10 @@
 //! `/provider` 运行态持久化：mode + default_selection。
 //!
-//! 自 state.json v2 统一起（openspec/specs/provider-management/spec.md，背景见
-//! docs/design-history.md ADR-4），这部分数据合并进 `state.json`（见
-//! `state_store::PersistedState`）。本模块保留 `ProviderRuntimeState` 类型
-//! 与 `load()` / `update()` 自由函数 API（向后兼容），但底层都委托给
-//! `state_store` —— 不再单独读写 `state.json`。
-//!
-//! 写入频率：仅在 `/provider` 命令切换时更新（典型 <1 次/天），所以用
-//! 同步 std fs + tempfile + atomic rename 就够了，不用 async / mutex。
+//! 这部分数据是 `state_store::PersistedState` 的一个子集视图。本模块保留
+//! `ProviderRuntimeState` 类型与 `load()` / `update()` 自由函数 API（向后
+//! 兼容），底层**全部委托给 `state_store`**（状态库是唯一权威，
+//! retire-legacy-state-json 3.2/3.4：`state.json` 与 `SEBAS_STATE_FILE`
+//! 都已退休，本模块不再有任何文件路径）。
 
 use crate::state_store::{self, DefaultSelection, PersistedState};
 use serde::{Deserialize, Serialize};
@@ -51,90 +48,18 @@ impl ProviderRuntimeState {
     }
 }
 
-/// 状态文件路径：`~/.sebas/state.json`，可用 `SEBAS_STATE_FILE` 覆盖。
-/// （委托给 `state_store` 单一权威路径。）
-pub fn state_path() -> std::path::PathBuf {
-    state_store::state_path()
-}
-
-/// `SEBAS_STATE_FILE` env 覆盖：让测试和隔离部署走自己的 state 文件，
-/// 不污染 `~/.sebas/state.json`。
-#[cfg(test)]
-mod env_override_tests {
-    use super::*;
-    use crate::state_store::{self};
-    use crate::test_util::lock_state_file;
-
-    // 串行化所有 env 访问：和 spawn_env.rs 同源问题。
-
-    #[test]
-    fn sebas_state_file_env_overrides_state_path() {
-        let _g = lock_state_file();
-        let dir = tempfile::tempdir().unwrap();
-        let custom = dir.path().join("custom_state.json");
-        // SAFETY: ENV_LOCK held.
-        unsafe {
-            std::env::set_var("SEBAS_STATE_FILE", &custom);
-        }
-
-        // state_path() 现在返回 env 指定的路径。
-        let resolved = state_path();
-        assert_eq!(
-            resolved, custom,
-            "SEBAS_STATE_FILE 应覆盖默认 ~/.sebas/state.json"
-        );
-
-        // load() 在新文件不存在时返回默认。
-        let loaded = load();
-        assert_eq!(loaded, ProviderRuntimeState::default());
-
-        // save() / load() 在 env 路径上往返成功。
-        let s = ProviderRuntimeState {
-            mode: ProviderMode::Direct {
-                provider: "env-override".into(),
-            },
-            default_selection: Some(DefaultSelection::new("env-override")),
-        };
-        save(&s).expect("save to env-override path");
-        assert!(custom.exists(), "save 应创建 env 指定的文件");
-        let reloaded = load();
-        assert_eq!(
-            reloaded.mode,
-            ProviderMode::Direct {
-                provider: "env-override".into()
-            }
-        );
-        assert_eq!(
-            reloaded
-                .default_selection
-                .as_ref()
-                .map(|d| d.provider.as_str()),
-            Some("env-override")
-        );
-
-        // SAFETY: ENV_LOCK held.
-        unsafe {
-            std::env::remove_var("SEBAS_STATE_FILE");
-        }
-        // 让其他测试看到 default path（state_store 已被污染写一个 v2 文件，
-        // 但默认 path 不存在 → load 仍返回 default）。
-        let _ = state_store::load();
-    }
-}
-
-/// 读盘并解析。失败语义（文件缺失、解析错误、IO 错）一律 warn 后返回
-/// `Default::default()` —— runtime 状态不应让 sebas 启动失败。
+/// 读当前运行态。底层走状态库（`state_store::load`）；库不可用时按
+/// `Default::default()` 呈现并 warn 点名成因 —— runtime 状态不应让 sebas
+/// 启动失败，但也**不**回退读任何文件。
 pub fn load() -> ProviderRuntimeState {
     ProviderRuntimeState::from(&state_store::load())
 }
 
-/// 原子写入：先写 `<path>.tmp` 再 rename。父目录缺失则创建。
-///
-/// `rename` 在同一文件系统上是原子的，避免半截写入；失败时 tmp 残留
-/// 不致命，下次 save 会覆盖。
+/// 写入状态库（`state_store::save`，单事务提交）。
 ///
 /// **重要**：这个 save 会把当前 PersistedState 整体覆盖（包括 providers +
 /// deleted 字段）。调用方应该先 load → 改 → save，或者用 `update()` 闭包。
+/// 状态库不可用时返回 Err（绝不写文件、也不静默成功）。
 pub fn save(s: &ProviderRuntimeState) -> anyhow::Result<()> {
     let mut current = state_store::load();
     s.apply_to(&mut current);
@@ -143,7 +68,7 @@ pub fn save(s: &ProviderRuntimeState) -> anyhow::Result<()> {
 
 /// 读 → 改 → 写一气呵成。`update` 闭包基于当前 runtime state 做条件决策。
 ///
-/// 返回写盘后的最新 runtime state。
+/// 返回落库后的最新 runtime state。状态库不可用时 Err。
 pub fn update<F>(f: F) -> anyhow::Result<ProviderRuntimeState>
 where
     F: FnOnce(&mut ProviderRuntimeState),
@@ -154,16 +79,6 @@ where
         rs.apply_to(persisted);
     })?;
     Ok(ProviderRuntimeState::from(&after))
-}
-
-/// 供测试与未来 mock 注入用：把给定 path 设进 `SEBAS_STATE_FILE`。
-/// 不暴露给生产调用方 —— 测试用 env var 切就行。
-#[doc(hidden)]
-pub fn set_state_path_for_test(path: &std::path::Path) {
-    // SAFETY: tests using this helper should serialize via TEST_LOCK.
-    unsafe {
-        std::env::set_var("SEBAS_STATE_FILE", path.to_str().unwrap());
-    }
 }
 
 #[cfg(test)]
@@ -212,12 +127,10 @@ mod tests {
         );
     }
 
-    /// save → load 往返保留全部字段。
+    /// save → load 往返保留全部字段（经状态库）。
     #[test]
     fn save_then_load_round_trips() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.json");
-        let _g = set_state_file_for_test(&path);
+        let _engine = crate::test_engine::install_fresh();
         let original = ProviderRuntimeState {
             mode: ProviderMode::Direct {
                 provider: "anthropic".into(),
@@ -225,17 +138,13 @@ mod tests {
             default_selection: Some(DefaultSelection::with_model("deepseek", "deepseek-chat")),
         };
         save(&original).unwrap();
-        let loaded = load();
-        assert_eq!(loaded, original);
-        unset_state_file_for_test();
+        assert_eq!(load(), original);
     }
 
     /// `update()` 读 → 改 → 写都做完了，且返回值就是改后的状态。
     #[test]
     fn update_mutates_and_persists() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.json");
-        let _g = set_state_file_for_test(&path);
+        let _engine = crate::test_engine::install_fresh();
         let updated = update(|s| {
             s.mode = ProviderMode::Router;
             s.default_selection = Some(DefaultSelection::new("openai"));
@@ -249,38 +158,22 @@ mod tests {
                 .map(|d| d.provider.as_str()),
             Some("openai")
         );
-        let reloaded = load();
-        assert_eq!(reloaded, updated);
-        unset_state_file_for_test();
+        assert_eq!(load(), updated);
     }
 
-    /// save 父目录不存在时自动创建 —— 首次部署友好。
+    /// 状态库不可用 → 写以 Err 拒绝（绝不写文件、绝不静默成功），读按默认
+    /// 呈现（retire-legacy-state-json 3.2「库不可用呈现 unavailable 而非文件
+    /// 派生值」）。
     #[test]
-    fn save_creates_missing_parent_dir() {
-        let dir = tempfile::tempdir().unwrap();
-        let nested = dir.path().join("a").join("b").join("state.json");
-        let _g = set_state_file_for_test(&nested);
-        save(&ProviderRuntimeState::default()).unwrap();
-        assert!(nested.exists());
-        unset_state_file_for_test();
+    fn unavailable_store_rejects_writes_and_reads_as_default() {
+        let _engine = crate::test_engine::install_none();
+        let err = save(&ProviderRuntimeState::default()).unwrap_err();
+        assert!(
+            err.to_string().contains("不可用"),
+            "错误须点名状态库不可用: {err}"
+        );
+        assert!(update(|s| s.mode = ProviderMode::Router).is_err());
+        assert_eq!(load(), ProviderRuntimeState::default());
     }
 
-    // ---- helpers（test-only env var 切换，串行用） ----
-
-    /// 锁住 STATE_FILE_LOCK, 设置 env, 返回 guard（guard 存活期间锁保持）。
-    fn set_state_file_for_test(path: &std::path::Path) -> std::sync::MutexGuard<'static, ()> {
-        let g = crate::test_util::lock_state_file();
-        // SAFETY: lock held.
-        unsafe {
-            std::env::set_var("SEBAS_STATE_FILE", path.to_str().unwrap());
-        }
-        g
-    }
-
-    fn unset_state_file_for_test() {
-        // SAFETY: lock held.
-        unsafe {
-            std::env::remove_var("SEBAS_STATE_FILE");
-        }
-    }
 }

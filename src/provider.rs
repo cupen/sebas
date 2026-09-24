@@ -1,16 +1,14 @@
-//! `/provider` 命令背后的 provider CRUD：表单 schema、config.toml 种子、
-//! overlay 路径与实例构造。
+//! `/provider` 命令背后的 provider CRUD：表单 schema、config.toml 种子与
+//! 实例构造。
 //!
-//! 数据流：`/provider` 列表的种子来自 config.toml 的顶层 `[provider.*]`
-//! （只读，不改写，支持 preset 惯例默认）；bot 里新增/修改/删除的变更以
-//! delta 形式持久化到 `~/.sebas/providers.json`（overlay）。router 启动时
-//! 把同一份 overlay 合并进自身配置
-//! （见 `sebas_router::config::RouterConfig::merge_provider_overlay`），实现
-//! 「在飞书里改 provider，router 重启后生效」。
+//! 数据流（retire-legacy-state-json 3.1）：`/provider` 列表的种子来自
+//! config.toml 的顶层 `[provider.*]`（只读，不改写，支持 preset 惯例默认），
+//! 叠加**状态库**里的 provider 表；bot 里新增/修改/删除的变更写进状态库。
+//! legacy overlay 文件（`~/.sebas/providers.json`）已退休——既不读也不写；
+//! router 侧经 core 通道拿到同一份状态并热生效（不再有 overlay 合并）。
 //!
-//! 密钥策略：表单直接收 `api_key`（飞书里无法设置环境变量）。密钥存进
-//! overlay 文件（~/.sebas/providers.json），列表/日志中掩码回显；如需
-//! 更严格的落盘隔离，可后续把密钥挪到独立 secrets 文件。
+//! 密钥策略：表单直接收 `api_key`（飞书里无法设置环境变量）。密钥落状态库
+//! （库文件 owner-only 0600），列表/日志中掩码回显。
 //!
 //! `default_model`：bot 侧的「spawn 时落到 agent 的默认 model」选择，仅
 //! 写入 overlay（不落 router `ProviderConfig`），由后续
@@ -26,9 +24,8 @@ use sebas_feishu::cards::{
 use sebas_feishu::forms::{FormField, FormSpec, SelectOption};
 use sebas_router::config::RouterConfig;
 use serde_json::{Map, Value, json};
-use std::path::{Path, PathBuf};
+
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// 预设表单：用户从代码里写好的 provider 里选一个，只填名称 + 密钥 +
 /// 默认 model + 协议。preset 的 base_url / models 跟随代码表，不进表单、
@@ -316,33 +313,21 @@ pub fn item_from_provider(name: &str, p: &sebas_router::config::ProviderConfig) 
     m
 }
 
-/// provider overlay 路径：默认 `~/.sebas/providers.json`，
-/// 可用 `SEBAS_ROUTER_PROVIDER_OVERLAY` 覆盖（与 router 侧一致）。
-pub fn overlay_path() -> std::path::PathBuf {
-    let raw = std::env::var("SEBAS_ROUTER_PROVIDER_OVERLAY")
-        .unwrap_or_else(|_| "~/.sebas/providers.json".into());
-    std::path::PathBuf::from(sebas_domain::prim::expand_tilde(&raw))
-}
-
 /// `/provider` 命令的两张表单（共享同一个 overlay 存储）。
 /// 定义在 router 里；sebas root crate 只是装配。
 pub use sebas_dispatch::crud::ProviderForms;
 
 /// 构造两套 provider CRUD 表单：种子来自 config.toml 的顶层 `[provider.*]`，
-/// 变更持久化到 `state.json`（详见 openspec/specs/provider-management/spec.md 与
+/// 变更持久化到状态库（详见 openspec/specs/provider-management/spec.md 与
 /// `sebas_dispatch::state_store`）。
 ///
-/// **Self-heal（openspec/specs/provider-management/spec.md）**：legacy overlay 文件（`providers.json`，
-/// `state.json` 不存在时一次性迁移源）破损时不再让 `/provider` 死掉 —
-/// 先把损坏的文件备份到 `<path>.broken-<ts>-<pid>.json`，再让
-/// `FileStore::load`（委托给 `state_store::load`）从 `state.json` / 迁移
-/// 路径取数；这样 `/provider` 仍返回 `Some(forms)`，seed 强制为空（让用户
-/// 从 `/provider` 重新建）。备份失败（如只读文件系统）时才回退到 `None`
-/// （`/provider` 在 UI 上显示「不可用」）。
+/// retire-legacy-state-json 3.1：legacy overlay 文件（`providers.json`）已退休
+/// ——不再有「先校验 / 备份损坏 overlay，再从它迁移」这一步。provider 数据的
+/// 唯一权威是状态库；`FileStore::load` 委托 `state_store::load`，库不可用时按
+/// 默认呈现（并由状态库侧点名成因），**不**读任何文件。
 ///
-/// **顺序**：先做 broken-overlay 备份再做 state_store 加载 —— 否则
-/// state_store::load 看到 broken overlay 只 warn + 返回 default，
-/// 损坏文件就留在原位无人清理（openspec/specs/provider-management/spec.md 不允许）。
+/// 返回 `None` 只在「构造表单本身失败」时（今天不会发生——`FileStore::load`
+/// 不再有 IO 失败面），保留该形状让 `/provider` 的「不可用」呈现路径不消失。
 pub fn build_form(raw_config: &str) -> Option<Arc<ProviderForms>> {
     let seed = match RouterConfig::parse(raw_config) {
         Ok(g) => g
@@ -355,65 +340,13 @@ pub fn build_form(raw_config: &str) -> Option<Arc<ProviderForms>> {
             Vec::new()
         }
     };
-    let path = overlay_path();
-    // Self-heal 探测：legacy overlay 存在但 JSON 解析失败 → 备份走人。
-    // 必须放在 FileStore::load（→ state_store::load）之前，否则 state_store
-    // 只 warn + 跳过，broken 文件留在原位。
-    if let Err(parse_err) = validate_legacy_overlay(&path) {
-        tracing::warn!(
-            path = %path.display(),
-            error = %parse_err,
-            "failed to parse legacy overlay, backing up then recovering from empty seed (see openspec/specs/provider-management/spec.md)"
-        );
-        if let Err(backup_err) = backup_broken_overlay(&path) {
-            tracing::warn!(
-                path = %path.display(),
-                parse_error = %parse_err,
-                backup_error = %backup_err,
-                "legacy overlay backup failed, /provider unavailable"
-            );
-            return None;
-        }
-        // 备份成功 → 用空 seed 重 load，让用户从 /provider 重新建。
-        match FileStore::load(path, ID_FIELD, Vec::new()) {
-            Ok(store) => return Some(Arc::new(make_forms(store))),
-            Err(e) => {
-                tracing::warn!(error = %e, "reload after backup still failed, /provider unavailable");
-                return None;
-            }
-        }
-    }
-    match FileStore::load(path, ID_FIELD, seed) {
+    match FileStore::load("(state store)", ID_FIELD, seed) {
         Ok(store) => Some(Arc::new(make_forms(store))),
         Err(e) => {
             tracing::warn!(error = %e, "failed to load provider store, /provider unavailable");
             None
         }
     }
-}
-
-/// 检查 legacy overlay 文件是否能解析为 v2 overlay 形状：
-/// - 不存在 → `Ok`（全新装机，无需备份）；
-/// - 存在 + 解析成功 → `Ok`（state_store 会自动迁移）；
-/// - 存在 + 解析失败 → `Err`（broken，调用方走 backup 路径）。
-fn validate_legacy_overlay(path: &Path) -> Result<(), String> {
-    if !path.exists() {
-        return Ok(());
-    }
-    let raw =
-        std::fs::read_to_string(path).map_err(|e| format!("读取 legacy overlay 失败: {e}"))?;
-    #[derive(serde::Deserialize)]
-    struct OverlayShape {
-        #[serde(default)]
-        #[allow(dead_code)]
-        providers: serde_json::Map<String, serde_json::Value>,
-        #[serde(default)]
-        #[allow(dead_code)]
-        deleted: Vec<String>,
-    }
-    serde_json::from_str::<OverlayShape>(&raw)
-        .map(|_| ())
-        .map_err(|e| format!("解析 legacy overlay 失败: {e}"))
 }
 
 /// `build_form` 的成功路径 — 抽出来让「构造 ProviderForms」只有一处。
@@ -427,40 +360,6 @@ fn make_forms(store: FileStore) -> ProviderForms {
             CrudForm::new(spec_custom(), ID_FIELD, store)
                 .with_normalizer(Arc::new(noop_normalizer)),
         ),
-    }
-}
-
-/// 把损坏的 overlay 文件移到 `<path>.broken-<ts>-<pid>.json`，返回新路径。
-///
-/// - 优先 `std::fs::rename`（同 fs 上原子，且不会复制可能很大的文件）。
-/// - 跨设备 rename 失败 → `copy + remove` 兜底。
-/// - timestamp 用 millis + PID 避免同秒内重复启动导致重名冲突。
-/// - 路径已含扩展名 `.json`：直接拼 `<path>.broken-<ts>-<pid>.json`，
-///   不在文件名尾部再加一次 `.json`（避免双扩展名）。
-fn backup_broken_overlay(path: &Path) -> std::io::Result<PathBuf> {
-    let ts_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let pid = std::process::id();
-    let mut backup = path.to_path_buf().into_os_string();
-    backup.push(format!(".broken-{ts_ms}-{pid}.json"));
-    let backup_path = PathBuf::from(backup);
-
-    match std::fs::rename(path, &backup_path) {
-        Ok(()) => Ok(backup_path),
-        Err(rename_err) => {
-            // rename 在跨设备时会 EXDEV — 试 copy+remove 兜底。
-            std::fs::copy(path, &backup_path)?;
-            std::fs::remove_file(path)?;
-            tracing::debug!(
-                from = %path.display(),
-                to = %backup_path.display(),
-                error = %rename_err,
-                "rename failed (cross-device?), backup done via copy+remove"
-            );
-            Ok(backup_path)
-        }
     }
 }
 
@@ -491,11 +390,6 @@ fn apply_preset_defaults(item: &mut Item) {
 mod tests {
     use super::*;
     use sebas_dispatch::CrudStore;
-    use std::sync::Mutex;
-
-    // 串行化 `SEBAS_ROUTER_PROVIDER_OVERLAY` env 访问，与
-    // `spawn_env::tests` 同惯例（全局 env 跨测试并发跑会撞）。
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn item_with(fields: &[(&str, &str)]) -> Item {
         let mut m = Map::new();
@@ -505,7 +399,7 @@ mod tests {
         m
     }
 
-    /// 写一个最小 config.toml（含 [provider.deepseek] 种子），让
+    /// 写一个最小 config.toml（含 `[provider.deepseek]` 种子），让
     /// `build_form` 走真实 RouterConfig::parse 路径。
     fn minimal_config_with_seed() -> String {
         r#"
@@ -515,45 +409,6 @@ listen = "127.0.0.1:0"
 [provider.deepseek]
 "#
         .to_string()
-    }
-
-    /// 把 overlay env 指向指定路径，同时把 state.json 重定向到同目录的
-    /// `state.json`（openspec/specs/provider-management/spec.md：FileStore 现在走 unified
-    /// `state.json`，env 不隔离会读到真实 `~/.sebas/state.json` 的污染数据）。
-    /// lock 由调用方持。
-    fn point_overlay_env(path: &Path) {
-        let state_path = path.with_file_name("state.json");
-        // SAFETY: ENV_LOCK held by caller.
-        unsafe {
-            std::env::set_var("SEBAS_ROUTER_PROVIDER_OVERLAY", path.to_str().unwrap());
-            std::env::set_var("SEBAS_STATE_FILE", state_path.to_str().unwrap());
-        }
-    }
-
-    fn clear_overlay_env() {
-        // SAFETY: ENV_LOCK held by caller.
-        unsafe {
-            std::env::remove_var("SEBAS_ROUTER_PROVIDER_OVERLAY");
-            std::env::remove_var("SEBAS_STATE_FILE");
-        }
-    }
-
-    /// 枚举指定目录下所有 `.broken-` 后缀的备份文件路径。
-    fn broken_backups(dir: &Path) -> Vec<PathBuf> {
-        std::fs::read_dir(dir)
-            .map(|rd| {
-                rd.flatten()
-                    .filter_map(|e| {
-                        let name = e.file_name().to_string_lossy().into_owned();
-                        if name.contains(".broken-") {
-                            Some(e.path())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
     }
 
     #[test]
@@ -908,195 +763,103 @@ listen = "127.0.0.1:0"
         );
     }
 
-    // ---- openspec/specs/provider-management/spec.md self-heal tests ----
+    // ---- provider 数据的唯一权威是状态库（retire-legacy-state-json 3.1）----
 
-    /// broken JSON 在 overlay 路径 → `build_form` 返回 `Some(forms)`，
-    /// 损坏文件被备份到 `<path>.broken-<ts>-<pid>.json`，原文件不再存在。
-    #[tokio::test]
-    async fn build_form_self_heals_on_broken_overlay() {
-        let _g = ENV_LOCK.lock().unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let overlay = dir.path().join("providers.json");
-        std::fs::write(&overlay, "{not valid json at all").unwrap();
-        point_overlay_env(&overlay);
-
-        let forms = build_form(&minimal_config_with_seed());
-        // 关键：必须返回 Some，不是 None。
-        let _forms = forms.expect("broken overlay must self-heal, not return None");
-
-        // 损坏文件已搬走，原位置不再有 providers.json。
-        assert!(
-            !overlay.exists(),
-            "损坏的 overlay 备份后不应留在原位：{}",
-            overlay.display()
-        );
-
-        // 备份存在，且名字带 `.broken-` 前缀。
-        let backups = broken_backups(dir.path());
-        assert_eq!(
-            backups.len(),
-            1,
-            "应恰好一个 .broken- 备份文件，实际：{:?}",
-            backups
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect::<Vec<_>>()
-        );
-        let backup_name = backups[0]
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
-        assert!(
-            backup_name.starts_with("providers.json.broken-"),
-            "备份名前缀应为 `providers.json.broken-`，实际：{backup_name}"
-        );
-        assert!(
-            backup_name.ends_with(".json"),
-            "备份名应以 .json 结尾：{backup_name}"
-        );
-        // 备份内容应与原损坏内容一致（rename 搬过去，不是删了）。
-        let backed_up = std::fs::read_to_string(&backups[0]).unwrap();
-        assert_eq!(backed_up, "{not valid json at all");
-
-        clear_overlay_env();
-    }
-
-    /// 备份后用空 seed 重新 load — `/provider` 应渲染空列表，但 form 实例
-    /// 仍然可用（不为 None，用户能 add）。直接验证 `forms.preset.store.list()`
-    /// 是空 vec、且表单 form_name 没坏。
-    #[tokio::test]
-    // env 锁有意横跨整个测试（含 await）：env 是进程全局的。
-    #[allow(clippy::await_holding_lock)]
-    async fn build_form_after_self_heal_uses_empty_seed() {
-        let _g = ENV_LOCK.lock().unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let overlay = dir.path().join("providers.json");
-        // 损坏的文件即便看起来像是有 providers 也被忽略 —— 走的是空 seed。
-        std::fs::write(
-            &overlay,
-            r#"{ "providers": { "deepseek": { "name": "deepseek" } } }"#,
-        )
-        .unwrap();
-        // 故意把 JSON 写残。
-        std::fs::write(&overlay, "broken{").unwrap();
-        point_overlay_env(&overlay);
-
-        let forms = build_form(&minimal_config_with_seed()).expect("self-heal");
+    /// 全新装机（库里没有任何 provider）→ `build_form` 正常返回 `Some`，
+    /// 种子来自 config.toml 的 `[provider.*]`。锁定「引导路径不受退休影响」。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn build_form_with_empty_store_uses_config_seed() {
+        let _engine = sebas_dispatch::test_engine::install_fresh();
+        let forms = build_form(&minimal_config_with_seed()).expect("empty store is OK");
         let items = forms.preset.store.list().await;
-        assert!(
-            items.is_empty(),
-            "self-heal 后种子应为空（spec：seed=empty），实际：{:?}",
-            items
-        );
-        // 表单 form_name 保留（用户能 add）。
-        assert_eq!(forms.preset.spec.form_name, FORM_PRESET);
-        assert_eq!(forms.custom.spec.form_name, FORM_CUSTOM);
-
-        clear_overlay_env();
-    }
-
-    /// overlay 文件不存在（首次启动 / 全新装机）→ `build_form` 正常返回
-    /// `Some(forms)`，seed 来自 config.toml（不走 self-heal 分支）。这条
-    /// 测试锁定「正常路径不受影响」。
-    #[tokio::test]
-    // env 锁有意横跨整个测试（含 await）：env 是进程全局的。
-    #[allow(clippy::await_holding_lock)]
-    async fn build_form_missing_overlay_still_works() {
-        let _g = ENV_LOCK.lock().unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let overlay = dir.path().join("providers.json");
-        assert!(!overlay.exists());
-        point_overlay_env(&overlay);
-
-        let forms = build_form(&minimal_config_with_seed()).expect("missing file is OK");
-        let items = forms.preset.store.list().await;
-        // config.toml 里 deepseek seed 应该出现在视图中。
         assert_eq!(items.len(), 1, "config.toml 的 deepseek 应作为种子出现");
         assert_eq!(
             items[0].get("name").and_then(Value::as_str),
             Some("deepseek")
         );
-
-        // 没有 backup 文件生成。
-        assert!(
-            broken_backups(dir.path()).is_empty(),
-            "缺失 overlay 不应触发备份"
-        );
-        clear_overlay_env();
     }
 
-    /// 完整且合法的 overlay 文件 → `build_form` 不触发 self-heal，备份
-    /// 目录为空（守住「只在错误路径备份」的承诺，见
-    /// openspec/specs/provider-management/spec.md）。
-    ///
-    /// change router-admin-api-and-model-aliases：providers.json 拆回
-    /// 独立文件成为单一真源（卡片 + router admin API 双写者共用），
-    /// **不再**迁移到 state.json 后删除。本测试断言新语义：providers.json
-    /// 保留在原位、内容不变。
-    #[tokio::test]
-    // env 锁有意横跨整个测试（含 await）：env 是进程全局的。
-    #[allow(clippy::await_holding_lock)]
-    async fn build_form_valid_overlay_does_not_backup() {
-        let _g = ENV_LOCK.lock().unwrap();
+    /// 库里已有 provider → 它与 config.toml 种子合并（库是权威，种子是引导）。
+    /// 覆盖旧「合法 overlay 文件」用例的语义，只是来源换成状态库。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn build_form_merges_store_values_over_the_config_seed() {
+        let _engine = sebas_dispatch::test_engine::install_fresh();
+        // 先经表单写一条：库里就有 openai。
+        {
+            let forms = build_form(&minimal_config_with_seed()).expect("seed bootstrap");
+            let mut new_item = Map::new();
+            new_item.insert("name".into(), Value::String("openai".into()));
+            forms.preset.store.insert(new_item).await.unwrap();
+        }
+        // 重建表单：config.toml seed (deepseek) + 库 (openai) = 2 条。
+        let forms = build_form(&minimal_config_with_seed()).expect("store plus seed");
+        let items = forms.preset.store.list().await;
+        assert_eq!(items.len(), 2, "库里 1 条 + 种子 1 条：{items:?}");
+    }
+
+    /// 盘上残留的 `providers.json`（哪怕内容完全合法、哪怕它「看起来像
+    /// providers」）**不参与** provider 数据：build_form 既不读它、也不搬它，
+    /// 逐字节未变。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn legacy_providers_json_is_neither_read_nor_moved() {
+        let _engine = sebas_dispatch::test_engine::install_fresh();
+        let dir = tempfile::tempdir().unwrap();
+        let overlay = dir.path().join("providers.json");
+        let body = r#"{ "providers": { "openai": { "name": "openai" } }, "deleted": [] }"#;
+        std::fs::write(&overlay, body).unwrap();
+
+        let forms = build_form(&minimal_config_with_seed()).expect("store-only load");
+        let items = forms.preset.store.list().await;
+        assert_eq!(
+            items.len(),
+            1,
+            "遗留文件里的 openai 不得出现在视图里：{items:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&overlay).unwrap(),
+            body,
+            "遗留 providers.json 必须逐字节未变（不读、不改、不搬、不备份）"
+        );
+        // 也没有 `.broken-` 备份残留（自我修复机制已随文件一起退休）。
+        let backups: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".broken-"))
+            .collect();
+        assert!(backups.is_empty(), "不应再产生备份文件");
+    }
+
+    /// 状态库不可用 → provider 域按空表呈现（种子仍在），且**绝不**去读任何
+    /// 遗留文件。写操作以 Err 拒绝而不是静默成功。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unavailable_store_presents_empty_seed_and_rejects_writes() {
+        let _engine = sebas_dispatch::test_engine::install_none();
         let dir = tempfile::tempdir().unwrap();
         let overlay = dir.path().join("providers.json");
         std::fs::write(
             &overlay,
-            r#"{ "providers": { "openai": { "name": "openai" } }, "deleted": [] }"#,
+            r#"{ "providers": { "ghost": { "name": "ghost" } }, "deleted": [] }"#,
         )
         .unwrap();
-        point_overlay_env(&overlay);
 
-        let forms = build_form(&minimal_config_with_seed()).expect("valid overlay");
+        let forms = build_form(&minimal_config_with_seed()).expect("still constructible");
         let items = forms.preset.store.list().await;
-        // config.toml seed (deepseek) + overlay (openai) = 2 条。
-        assert_eq!(items.len(), 2);
-        assert!(
-            broken_backups(dir.path()).is_empty(),
-            "正常加载不应产生备份"
+        assert_eq!(items.len(), 1, "只剩 config.toml 种子：{items:?}");
+        assert_eq!(
+            items[0].get("name").and_then(Value::as_str),
+            Some("deepseek")
         );
-        // providers.json 是单一真源：保留在原位（不迁移删除）。
+
+        let mut new_item = Map::new();
+        new_item.insert("name".into(), Value::String("nope".into()));
+        assert!(
+            forms.preset.store.insert(new_item).await.is_err(),
+            "库不可用时写必须以 Err 拒绝"
+        );
         assert!(
             overlay.exists(),
-            "providers.json 应保留（单一真源）：{}",
+            "库不可用不得让实现转头去写/动遗留文件：{}",
             overlay.display()
-        );
-        clear_overlay_env();
-    }
-
-    /// 备份命名唯一性：millis + PID 后缀确保同秒内多次「坏文件出现 +
-    /// 备份」不会冲突（虽实际中 self-heal 一次性把文件搬走，再次走
-    /// load 就空了，但留作回归保护）。
-    #[tokio::test]
-    async fn backup_filename_is_unique_and_machine_readable() {
-        let dir = tempfile::tempdir().unwrap();
-        let overlay = dir.path().join("providers.json");
-        std::fs::write(&overlay, "{").unwrap();
-
-        let backup = backup_broken_overlay(&overlay).unwrap();
-        let name = backup.file_name().unwrap().to_string_lossy().into_owned();
-        // 形如 `providers.json.broken-<millis>-<pid>.json`。
-        assert!(name.starts_with("providers.json.broken-"));
-        assert!(name.ends_with(".json"));
-        let mid = name
-            .trim_start_matches("providers.json.broken-")
-            .trim_end_matches(".json");
-        let parts: Vec<&str> = mid.split('-').collect();
-        assert_eq!(
-            parts.len(),
-            2,
-            "备份名中部应为 `<millis>-<pid>`，实际：{mid}"
-        );
-        assert!(
-            parts[0].parse::<u128>().is_ok(),
-            "millis 部分应是数字：{}",
-            parts[0]
-        );
-        assert!(
-            parts[1].parse::<u32>().is_ok(),
-            "pid 部分应是数字：{}",
-            parts[1]
         );
     }
 }

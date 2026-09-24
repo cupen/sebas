@@ -1,10 +1,13 @@
 //! `/provider` 命令 + provider CRUD 表单的路由集成测试：经 DispatchHandle
 //! 驱动 列表 → 新增 → 提交 → 删除，验证按钮/表单回调被正确路由且
-//! 存储（FileStore 委托给 unified state.json，见 openspec/specs/provider-management/spec.md
+//! 存储（FileStore 委托给状态库，见 openspec/specs/provider-management/spec.md
 //! 与 docs/design-history.md ADR-4）随变更持久化。
+//!
+//! retire-legacy-state-json 3.2/3.4：没有文件回退了，隔离手段从「把
+//! `SEBAS_STATE_FILE` / `SEBAS_ROUTER_PROVIDER_OVERLAY` 指向 tempdir」换成
+//! 「装一个全新内存引擎」（`sebas_dispatch::test_engine`）。
 
-// ENV_LOCK 串行化 env 变更：每个 #[tokio::test] 独立 runtime，跨 await 持
-// std 锁只会让其它测试等待，不构成死锁——这是刻意的。
+// 跨 await 持 std 锁只会让其它测试等待，不构成死锁——这是刻意的。
 #![allow(clippy::await_holding_lock)]
 
 use sebas_channels::card::{FormField, FormSpec};
@@ -16,37 +19,12 @@ use sebas_dispatch::engine::DispatchHandle;
 use sebas_dispatch::state::SessionMap;
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-// provider 状态统一（docs/design-history.md ADR-4，行为契约见
-// openspec/specs/provider-management/spec.md）：FileStore 持久化到 unified
-// state.json（路径由 SEBAS_STATE_FILE 决定）。所有走 FileStore / state_store 的测试都要
-// 把 SEBAS_STATE_FILE 指到 tempdir，避免污染开发机 ~/.sebas/state.json，
-// 且避免同进程内测试互相覆盖。全局 mutex 串行化 env 访问。
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-fn isolate(dir: &tempfile::TempDir) {
-    // provider 数据已拆回 providers.json（state_store 双文件），两个 env
-    // 都要隔离，避免读到开发机真实文件。
-    // SAFETY: ENV_LOCK held by caller.
-    unsafe {
-        std::env::set_var(
-            "SEBAS_STATE_FILE",
-            dir.path().join("state.json").to_str().unwrap(),
-        );
-        std::env::set_var(
-            "SEBAS_ROUTER_PROVIDER_OVERLAY",
-            dir.path().join("providers.json").to_str().unwrap(),
-        );
-    }
-}
-
-fn deisolate() {
-    // SAFETY: ENV_LOCK held by caller.
-    unsafe {
-        std::env::remove_var("SEBAS_STATE_FILE");
-        std::env::remove_var("SEBAS_ROUTER_PROVIDER_OVERLAY");
-    }
+/// 装一个全新内存引擎做隔离，返回 guard：调用方必须把它绑到测试局部变量
+/// （`let _store = isolate(&dir);`）——guard 持有全局锁，drop 时清空引擎。
+fn isolate(_dir: &tempfile::TempDir) -> sebas_dispatch::test_engine::EngineGuard {
+    sebas_dispatch::test_engine::install_fresh()
 }
 
 fn spec() -> FormSpec {
@@ -139,14 +117,13 @@ fn provider_router(dir: &tempfile::TempDir) -> (DispatchHandle, tokio::sync::mps
     )
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn provider_command_opens_main_card_with_seed() {
     // bead sebas-63f.5：`/provider` 命令现在打开「Provider 管理」主卡
     // （mode + default-direct 下拉 + 列表下拉 + 新建子区/详情面板），
     // 取代了旧的「列表 + 每条 编辑/删除」双入口卡。
-    let _g = ENV_LOCK.lock().unwrap();
     let dir = tempfile::tempdir().unwrap();
-    isolate(&dir);
+    let _store = isolate(&dir);
     let (router, mut rx) = provider_router(&dir);
 
     router
@@ -182,14 +159,12 @@ async fn provider_command_opens_main_card_with_seed() {
         }
         other => panic!("expected SendCard, got {other:?}"),
     }
-    deisolate();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn provider_create_submit_delete_round_trip() {
-    let _g = ENV_LOCK.lock().unwrap();
     let dir = tempfile::tempdir().unwrap();
-    isolate(&dir);
+    let _store = isolate(&dir);
     let (router, mut rx) = provider_router(&dir);
 
     // 点「＋ 新增」→ 表单卡原地出现。
@@ -237,9 +212,9 @@ async fn provider_create_submit_delete_round_trip() {
     let out = rx.recv().await.unwrap();
     assert!(matches!(out, Out::UpdateCardByMsgId { .. }), "{out:?}");
 
-    // 重启视角：重新加载 unified state.json + 种子 → 只剩 openai。
+    // 重启视角：重新加载状态库 + 种子 → 只剩 openai。
     // 状态统一后（docs/design-history.md ADR-4）：FileStore::load 不再读
-    // providers.json，直接走 state_store::load（SEBAS_STATE_FILE 已指到 dir/state.json）。
+    // 直接走 state_store::load（读的就是隔离出来的那个内存引擎）。
     let reloaded = FileStore::load(
         dir.path().join("providers.json"),
         "name",
@@ -249,14 +224,12 @@ async fn provider_create_submit_delete_round_trip() {
     let items = reloaded.list().await;
     assert_eq!(items.len(), 1, "deepseek 墓碑必须生效");
     assert_eq!(items[0].get("name").and_then(Value::as_str), Some("openai"));
-    deisolate();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn permission_shaped_button_is_not_routed_to_provider_crud() {
-    let _g = ENV_LOCK.lock().unwrap();
     let dir = tempfile::tempdir().unwrap();
-    isolate(&dir);
+    let _store = isolate(&dir);
     let (router, mut rx) = provider_router(&dir);
 
     router
@@ -278,16 +251,14 @@ async fn permission_shaped_button_is_not_routed_to_provider_crud() {
     // UpdateCardByMsgId（带 om_perm），用这个区分。
     let out = rx.recv().await.unwrap();
     assert!(matches!(out, Out::SendCard { .. }), "{out:?}");
-    deisolate();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn cancel_button_returns_to_list_not_to_dead_session_card() {
     // 回归：表单容器外的「取消」按钮带 op=cancel，必须被 on_button 识别为
     // CRUD 路由并回列表卡；如果被吞掉就会落到 ACP session 死会话路径。
-    let _g = ENV_LOCK.lock().unwrap();
     let dir = tempfile::tempdir().unwrap();
-    isolate(&dir);
+    let _store = isolate(&dir);
     let (router, mut rx) = provider_router(&dir);
 
     router
@@ -311,18 +282,16 @@ async fn cancel_button_returns_to_list_not_to_dead_session_card() {
         }
         other => panic!("cancel 应回到 CRUD 列表卡，得到 {other:?}"),
     }
-    deisolate();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn secret_key_is_never_displayed_in_plaintext_in_main_card() {
     // bead sebas-63f.5：主卡详情面板只显示「API Key：已配置/未配置」两态，
     // 取代了旧列表卡的 `••••••` 掩码（一样防泄露，只是文案更简洁）。
     // 编辑表单的密钥不预填行为由既有 `CrudForm::item_to_initial()` 保证
     // （见下方的「编辑表单不预填密钥」半边）。
-    let _g = ENV_LOCK.lock().unwrap();
     let dir = tempfile::tempdir().unwrap();
-    isolate(&dir);
+    let _store = isolate(&dir);
     let store = FileStore::load(
         dir.path().join("providers.json"),
         "name",
@@ -367,14 +336,13 @@ async fn secret_key_is_never_displayed_in_plaintext_in_main_card() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn edit_form_does_not_prefill_secret() {
     // 主卡详情面板里点「编辑」按钮 → 走既有 `provider-custom` 表单的
     // OP_EDIT 路径；表单的 `item_to_initial()` 应跳过 secret 字段，绝不
     // 把密钥回显到表单（沿用 63f.5 之前的契约）。
-    let _g = ENV_LOCK.lock().unwrap();
     let dir = tempfile::tempdir().unwrap();
-    isolate(&dir);
+    let _store = isolate(&dir);
     let store = FileStore::load(
         dir.path().join("providers.json"),
         "name",
@@ -418,14 +386,12 @@ async fn edit_form_does_not_prefill_secret() {
         !s.contains("sk-super-secret"),
         "edit form must not prefill secret: {s}"
     );
-    deisolate();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn empty_secret_submit_preserves_existing_key() {
-    let _g = ENV_LOCK.lock().unwrap();
     let dir = tempfile::tempdir().unwrap();
-    isolate(&dir);
+    let _store = isolate(&dir);
     let store = FileStore::load(
         dir.path().join("providers.json"),
         "name",
@@ -479,5 +445,4 @@ async fn empty_secret_submit_preserves_existing_key() {
         got.get("base_url").and_then(Value::as_str),
         Some("https://new.example")
     );
-    deisolate();
 }

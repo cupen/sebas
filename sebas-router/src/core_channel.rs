@@ -1,7 +1,10 @@
 //! 核心通道状态订阅客户端 (add-state-store 5.3)。
 //!
 //! 当 core channel 本地 socket 可用时, 订阅状态变更通知, 收到通知后触发
-//! provider/alias 热重载。通道不可用时降级为文件监听 (hot_reload 保持)。
+//! provider/alias 热重载。**这是热重载的唯一机制**——overlay 文件读取与
+//! 文件监视已随 retire-legacy-state-json 3.5 退休（design D6），通道不可用
+//! 时不存在文件降级路径：router 保持最后有效配置，并把「数据源不可用」呈现
+//! 在 `/admin/stats`。
 //!
 //! 协议: NDJSON over 本地 IPC (Unix socket / Windows named pipe)。帧类型、
 //! 握手（含版本协商）与请求构造**全部复用 `sebas_ipc::protocol` 的共享定义**
@@ -44,7 +47,7 @@ fn channel_secret() -> String {
 }
 
 /// 核心通道 socket 路径, 由 `SEBAS_CORE_SOCKET` 环境变量指定。
-/// 未设置时返回 `None` (通道不可用, 走文件监听)。
+/// 未设置时返回 `None` (通道不可用, 保持最后有效配置)。
 pub(crate) fn socket_path() -> Option<PathBuf> {
     let raw = std::env::var("SEBAS_CORE_SOCKET").ok()?;
     if raw.is_empty() {
@@ -57,7 +60,9 @@ pub(crate) fn socket_path() -> Option<PathBuf> {
 /// 当 socket 路径可用时, 连接并订阅状态变更; 不可用时静默返回。
 pub fn spawn_subscriber(state: AppState) {
     let Some(path) = socket_path() else {
-        tracing::info!("core channel socket not set (SEBAS_CORE_SOCKET), using file watch");
+        tracing::info!(
+            "core channel socket not set (SEBAS_CORE_SOCKET), keeping config as-is (no file fallback)"
+        );
         return;
     };
     tokio::spawn(async move {
@@ -97,7 +102,7 @@ async fn subscribe_loop(state: AppState, path: PathBuf) {
                     } else {
                         tracing::debug!(
                             error = %e,
-                            "core channel unavailable (core disabled or starting), hot reload via file watch"
+                            "core channel unavailable (core disabled or starting); keeping last valid config"
                         );
                     }
                     reported = true;
@@ -111,8 +116,9 @@ async fn subscribe_loop(state: AppState, path: PathBuf) {
     }
 }
 
-/// 订阅触发的 reload（5.3 投影）：优先从 core channel 拉 providers/aliases
-/// 快照重建配置；通道快照失败时回退文件 overlay（`reload_and_swap`）。
+/// 订阅触发的 reload（5.3 投影）：从 core channel 拉 providers/aliases 快照
+/// 重建配置（`apply_overlay_value` 投影 + `swap_core`）。这是热重载的**唯一**
+/// 路径——overlay 文件读取已退休，重连失败时保持最后有效配置。
 /// 成功后清除「数据源不可用」，失败保旧内核并记录错误。
 pub(crate) async fn reload_from_channel(state: &AppState, path: &Path) {
     let result = async {
@@ -134,12 +140,14 @@ pub(crate) async fn reload_from_channel(state: &AppState, path: &Path) {
         Err(e) => {
             tracing::warn!("core channel snapshot failed, keeping old config: {e}");
             state.reload_status.record_err(&e);
-            // 快照拉取失败但通道仍活着（如 parse 错误）→ 尝试文件回退。
+            // 快照拉取失败但通道仍活着（如 parse 错误）→ 重读 config.toml
+            // 种子并换内核（`reload_and_swap`；已不含任何 overlay 文件读取，
+            // 只是种子回读）。
             if e.contains("core channel connect failed")
                 || e.contains("handshake")
                 || e.contains("response read failed")
             {
-                tracing::info!("core channel unavailable, falling back to file overlay reload");
+                tracing::info!("core channel unavailable, reclaiming config.toml seed");
                 let _ = crate::admin::reload_and_swap(state);
             }
         }

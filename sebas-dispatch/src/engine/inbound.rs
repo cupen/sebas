@@ -11,7 +11,6 @@ use super::{DispatchHandle, Out, compose_media_prompt, text_from_caption};
 use crate::cards::{CardConfig, ThinkingDisplay};
 use crate::cards_ui;
 use crate::commands::{Command, RouterAction, parse_command};
-use crate::settings;
 use sebas_acp::claude::session::{AcpCommand, Decision};
 use sebas_domain::session::{SessionMode, SessionPhase};
 use sebas_channels::card::ChannelCard;
@@ -220,8 +219,7 @@ impl DispatchHandle {
                 self.list_sessions(key).await;
             }
             Command::Settings(setting_key, val) => {
-                self.handle_settings(key, setting_key, val, &settings::settings_path())
-                    .await;
+                self.handle_settings(key, setting_key, val).await;
             }
             Command::Upgrade { dev, dry_run } => {
                 self.request_watchdog_upgrade(key, dev, dry_run).await;
@@ -942,22 +940,49 @@ impl DispatchHandle {
         })
         .await;
     }
+    /// `/settings` 命令：列出 / 查询 / 修改 card 设置。
+    ///
+    /// 持久化**只走状态库**（retire-legacy-state-json 4.3：`settings.json` 已
+    /// 退休）：`settings` 表的 `card_config` 键经 `StateStoreEngine::save_settings`
+    /// 落库。状态库不可用时如实回报「设置域不可用」并拒绝写入——不写文件，
+    /// 也不假装已保存。
     pub async fn handle_settings(
         &self,
         key: ChannelKey,
         setting_key: Option<String>,
         val: Option<String>,
-        path: &std::path::Path,
     ) {
         let mut cfg = self.card_cfg.read().await.clone();
 
         let content = match (setting_key, val) {
-            (None, _) => self.render_settings_list(&cfg, path),
+            (None, _) => self.render_settings_list(&cfg),
             (Some(k), None) => self.render_setting(&cfg, &k),
             (Some(k), Some(v)) => match self.apply_setting(&mut cfg, &k, &v) {
                 Ok(()) => {
-                    // Persist + apply live.
-                    if let Err(e) = settings::save_settings(path, &cfg) {
+                    let Some(engine) = crate::state_store::engine() else {
+                        self.emit(Out::PlainText {
+                            key,
+                            content: format!(
+                                "保存失败: {}",
+                                crate::state_store::unavailable_cause()
+                                    .unwrap_or("state store 不可用")
+                            ),
+                        })
+                        .await;
+                        return;
+                    };
+                    let value = match serde_json::to_value(&cfg) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            self.emit(Out::PlainText {
+                                key,
+                                content: format!("保存失败: 序列化 card 设置失败: {e}"),
+                            })
+                            .await;
+                            return;
+                        }
+                    };
+                    if let Err(e) = engine.save_settings(value).await {
                         self.emit(Out::PlainText {
                             key,
                             content: format!("保存失败: {e}"),
@@ -965,8 +990,9 @@ impl DispatchHandle {
                         .await;
                         return;
                     }
+                    // Persist 成功后才应用到运行期内存快照。
                     self.set_card_config(cfg.clone()).await;
-                    format!("{k} = {v} (已写入 {})", path.display())
+                    format!("{k} = {v} (已保存到状态库)")
                 }
                 Err(msg) => msg,
             },
@@ -974,15 +1000,14 @@ impl DispatchHandle {
         self.emit(Out::PlainText { key, content }).await;
     }
 
-    pub fn render_settings_list(&self, cfg: &CardConfig, path: &std::path::Path) -> String {
+    pub fn render_settings_list(&self, cfg: &CardConfig) -> String {
         format!(
-            "当前设置（来源：{}）:\n\
+            "当前设置（来源：状态库 card_config）:\n\
              thinking = {}\n\
              max_user_text_chars = {}\n\
              max_tool_output_chars = {}\n\
              fold_long_output = {}\n\
              theme_color = {}",
-            path.display(),
             Self::thinking_label(cfg.thinking),
             cfg.max_user_text_chars,
             cfg.max_tool_output_chars,

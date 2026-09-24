@@ -13,7 +13,6 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -122,8 +121,8 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 }
 
 /// 写后的统一 reload（async）：core channel 可用 → 立即用通道快照投影重建
-/// 配置（响应前生效）；通道不可用 → `reload_and_swap`（文件 overlay 重读，
-/// 无 core 的降级读路径，仍是只读操作）。
+/// 配置（响应前生效）；通道不可用 → `reload_and_swap`（重读 config.toml
+/// 种子，无 core 的降级路径，仍是只读操作）。
 pub(crate) async fn reload_after_write(state: &AppState) -> Result<(), String> {
     if let Some(socket) = crate::core_channel::socket_path() {
         // 同步拉一次快照投影（不等订阅广播，保证响应已含新配置）。
@@ -134,7 +133,7 @@ pub(crate) async fn reload_after_write(state: &AppState) -> Result<(), String> {
         {
             return Ok(());
         }
-        tracing::info!("channel projection not applied, falling back to file reload");
+        tracing::info!("channel projection not applied, falling back to config.toml reload");
     }
     crate::admin::reload_and_swap(state)
 }
@@ -149,27 +148,17 @@ pub fn warn_no_secret_once() {
     }
 }
 
-// -------------------- overlay 只读底座（外部热重载降级路径） --------------------/// providers.json 路径（与 config.rs 的 `provider_overlay` 同源；此处从
-/// 当前内核 cfg 取——env 覆盖已在 parse 时应用）。
-fn overlay_path(state: &AppState) -> PathBuf {
-    PathBuf::from(state.core().cfg.provider_overlay.clone())
-}
-
-/// 写后热替换：重读配置（config.toml 种子 + 新 overlay）→ build 校验 →
-/// swap_core。admin 写路径专用：成功后记录当前 overlay 内容（watcher 见
-/// 到相同内容时跳过 reload，不重复消费同一变更）并清 last_reload_error；
-/// 失败保旧内核，错误记入 reload_status（供 stats；文件已持久，下次有效
-/// 写自动恢复）。
+/// 写后热替换：重读 config.toml 种子 → build 校验 → swap_core。成功后清
+/// last_reload_error；失败保旧内核，错误记入 reload_status（供 stats）。
+///
+/// retire-legacy-state-json 3.5：overlay 文件读取已退休，本函数不再合并任何
+/// overlay——provider 数据只从 core 通道快照投影（`reload_from_channel`）。
+/// 这里剩下的语义就是「重读 config.toml 种子并换内核」，作为通道不可用时的
+/// 降级路径（种子里仍有顶层 `[provider.*]`）。
 pub(crate) fn reload_and_swap(state: &AppState) -> Result<(), String> {
     let res = reload_and_swap_inner(state);
     match &res {
-        Ok(()) => {
-            let path = overlay_path(state);
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                state.reload_status.mark_admin_write(&content);
-            }
-            state.reload_status.record_ok_quiet();
-        }
+        Ok(()) => state.reload_status.record_ok_quiet(),
         Err(e) => state.reload_status.record_err(e),
     }
     res
@@ -183,13 +172,20 @@ fn reload_and_swap_inner(state: &AppState) -> Result<(), String> {
 }
 
 /// 从 config.toml 种子重建 RouterConfig，保留外壳启动期字段。
-/// 不含 overlay 合并（调用方决定数据源：文件 or core channel 快照）。
+/// 不含 overlay 合并（provider 数据由 core 通道快照经 `apply_overlay_value`
+/// 投影，调用方决定是否叠加）。
 pub(crate) fn rebuild_from_seed(state: &AppState) -> Result<RouterConfig, String> {
     let core = state.core();
     let toml_path = &core.cfg.config_source;
     let raw_toml = std::fs::read_to_string(toml_path)
         .map_err(|e| format!("读 config.toml ({toml_path}) 失败: {e}"))?;
     let mut cfg = RouterConfig::parse(&raw_toml).map_err(|e| format!("解析失败: {e}"))?;
+    // `config_source` 是**重载自身的定位器**：reload 每次都靠它重读种子。
+    // parse 只能从 `SEBAS_ROUTER_CONFIG` env 认出来（缺省退
+    // `~/.sebas/config.toml`），而独立 router 进程未必有这个 env——不在这里
+    // 回填，第二次 reload 就会去读操作员的真实配置（或直接失败），provider
+    // 变更静默不生效（retire-legacy-state-json 3.5：channel 是唯一热重载路径）。
+    cfg.config_source = core.cfg.config_source.clone();
     // 保留外壳的启动期字段（listen/超时等不因 reload 变化——它们来自原
     // cfg 而非新读）。
     cfg.listen = core.cfg.listen.clone();
@@ -414,4 +410,49 @@ async fn metrics() -> Response {
         out,
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// retire-legacy-state-json 3.5：`rebuild_from_seed` 必须**沿用**外壳的
+    /// `config_source`，不能退回 `RouterConfig::parse` 的缺省。
+    ///
+    /// 为什么是回归点：overlay 文件退休后 channel 投影是热重载的唯一路径，
+    /// 而每次 reload 都靠 `config_source` 重读 config.toml 取 `[provider.*]`
+    /// 种子。parse 只认 `SEBAS_ROUTER_CONFIG`（缺省 `~/.sebas/config.toml`），
+    /// 独立 router 进程未必有该 env——不沿用就会去读操作员的真实配置（或直接
+    /// 失败），provider 变更静默不生效。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rebuild_from_seed_keeps_the_live_config_source() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg_path = dir.path().join("config.toml");
+        std::fs::write(
+            &cfg_path,
+            r#"
+[router]
+listen = "127.0.0.1:0"
+
+[provider.anthropic]
+api_key = "sk-seed"
+"#,
+        )
+        .expect("write config");
+
+        let mut cfg = RouterConfig::parse(
+            &std::fs::read_to_string(&cfg_path).expect("read config"),
+        )
+        .expect("parse");
+        // 模拟 router_cmd：把真实 `-c` 路径记进外壳。
+        cfg.config_source = cfg_path.to_string_lossy().into_owned();
+        let state = crate::server::build_state(cfg).expect("build_state");
+
+        let rebuilt = rebuild_from_seed(&state).expect("rebuild");
+        assert_eq!(
+            rebuilt.config_source,
+            cfg_path.to_string_lossy(),
+            "reload 必须继续读同一份 config.toml，而不是 parse 的缺省路径"
+        );
+    }
 }

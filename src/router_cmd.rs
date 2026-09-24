@@ -26,6 +26,13 @@ pub async fn run(args: RouterArgs) -> Result<()> {
     let raw = std::fs::read_to_string(&args.config)
         .map_err(|e| SebasError::Router(format!("read config {}: {e}", args.config)))?;
     let mut cfg = RouterConfig::parse(&raw).map_err(|e| SebasError::Router(e.to_string()))?;
+    // retire-legacy-state-json 3.5：overlay 文件退休后，channel 热重载是
+    // provider 变更生效的**唯一**路径，而它每次都要重读 config.toml 取
+    // `[provider.*]` 种子（`admin::rebuild_from_seed`）。这里把实际 `-c` 路径
+    // 记进 `config_source`——parse 只认 `SEBAS_ROUTER_CONFIG`，缺省退
+    // `~/.sebas/config.toml`；独立 router 进程不设该 env 时热重载会去读操作员
+    // 的真实配置（或直接失败），provider 变更静默不生效。
+    cfg.config_source = args.config.clone();
     if args.debug {
         // parse 完成后注入内置 test provider（不改变配置解析语义）。
         // 实现在 `sebas_router::debug`。

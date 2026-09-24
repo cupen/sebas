@@ -174,7 +174,6 @@ pub async fn run(cfg: RouterConfig) -> Result<()> {
     let listen = cfg.listen.clone();
     let state = build_state(cfg)?;
     crate::admin::warn_no_secret_once();
-    crate::hot_reload::spawn_watcher(state.clone(), state.reload_status.clone());
     crate::core_channel::spawn_subscriber(state.clone());
     let app = build_router(state);
     let listener = tokio::net::TcpListener::bind(&listen).await?;
@@ -201,7 +200,6 @@ pub fn serve_with_listener(
     tokio::task::JoinHandle<std::io::Result<()>>,
 )> {
     let state = build_state(cfg)?;
-    crate::hot_reload::spawn_watcher(state.clone(), state.reload_status.clone());
     crate::core_channel::spawn_subscriber(state.clone());
     let app = build_router(state);
     let addr = listener.local_addr()?;
@@ -273,7 +271,6 @@ mod tests {
             usage_max_rows: 200_000,
             usage_prune_interval_secs: 0,
             debug: false,
-            provider_overlay: "__test_no_overlay__.json".into(),
             default_provider: None,
             auth_token: Vec::new(),
             rate_limit: crate::config::RateLimitConfig::default(),
@@ -322,5 +319,132 @@ mod tests {
             .resolve(Some("anything"), WireProtocol::Anthropic)
             .expect("旧内核继续服务");
         assert_eq!(d.provider, "alpha", "swap 失败不动旧内核");
+    }
+
+    /// retire-legacy-state-json 3.5 的核心证明：**provider 变更经 channel
+    /// 通知仍热生效**（无重启、无文件）。
+    ///
+    /// 本测试精确重放订阅循环对每一帧 `Snapshot` / `Changed` 所做的投影
+    /// （`core_channel::subscribe_once` → `reload_from_channel`）：
+    /// `RouterConfig::apply_overlay_value(snapshot)` → `AppState::swap_core`。
+    /// 全程无 socket、无文件——overlay 文件读取与监视已退休，投影是唯一入口。
+    ///
+    /// 它证明：providers 合并（新 provider 立即可路由）、deleted 墓碑（被删
+    /// provider 不再解析到）、model_aliases 编译（别名解析到目标 provider 且
+    /// 上游 model 被改写）、以及坏快照的负向行为（`apply_overlay_value` 报
+    /// Err，旧内核原地不动）。
+    ///
+    /// 它**不**证明：socket 握手 / 帧解码 / 重连退避——那是通道传输层，
+    /// 覆盖在进程级 `tests/testsuite_e2e_test.rs` 的
+    /// `core_owned_provider_reaches_router_without_restart`。
+    #[tokio::test]
+    async fn channel_projection_applies_provider_changes_without_restart() {
+        use serde_json::json;
+
+        // 种子：只有 alpha 可路由（单 provider 隐式默认）。
+        let seed = test_cfg(&["alpha", "beta"]);
+        let state = build_state(seed.clone()).expect("build_state");
+        let before = state.core();
+        assert!(
+            before.table.resolve(Some("m"), WireProtocol::Anthropic).is_err()
+                || before
+                    .table
+                    .resolve(Some("m"), WireProtocol::Anthropic)
+                    .map(|d| d.provider != "beta")
+                    .unwrap_or(true),
+            "beta must not be routable in the seed"
+        );
+
+        // 一帧 Snapshot/Changed 的投影：新 provider + 墓碑 + 别名。
+        let mut cfg = seed.clone();
+        let snapshot = json!({
+            "providers": {
+                "gamma": {
+                    "base_url_anthropic": "https://gamma.example",
+                    "api_key": "sk-gamma"
+                }
+            },
+            "deleted": ["beta"],
+            "model_aliases": {
+                "fast": { "provider": "gamma", "upstream_model": "gamma-large" }
+            }
+        });
+        cfg.apply_overlay_value(&snapshot).expect("project snapshot");
+        state.swap_core(cfg).expect("swap after projection");
+
+        let core = state.core();
+
+        // ① 新 provider 可路由 + 别名解析到它并改写上游 model。
+        let d = core
+            .table
+            .resolve(Some("fast"), WireProtocol::Anthropic)
+            .expect("alias 'fast' must resolve after projection");
+        assert_eq!(d.provider, "gamma", "alias must route to the projected provider");
+        assert_eq!(
+            d.upstream_model.as_deref(),
+            Some("gamma-large"),
+            "alias must rewrite the upstream model"
+        );
+        assert!(
+            core.api_keys.contains_key("gamma"),
+            "projected provider's api_key must be resolved into the new core"
+        );
+        assert!(
+            core.cfg.providers.contains_key("gamma"),
+            "projected provider must live in the new core's cfg"
+        );
+
+        // ② 墓碑：被删的 beta 不再解析到。
+        assert!(
+            !core.cfg.providers.contains_key("beta"),
+            "tombstoned provider must be gone from the swapped core"
+        );
+        let beta = core.table.resolve(Some("beta"), WireProtocol::Anthropic);
+        assert!(
+            beta.as_ref().map(|d| d.provider.as_str()) != Ok("beta"),
+            "tombstoned provider must no longer resolve to itself: {beta:?}"
+        );
+
+        // ③ 负向：坏快照 → apply_overlay_value Err，且不产生可 swap 的核。
+        let mut broken = seed.clone();
+        let err = broken
+            .apply_overlay_value(&json!({"providers": "not-an-object"}))
+            .expect_err("malformed snapshot must error");
+        assert!(
+            err.to_string().contains("state snapshot"),
+            "error must name the projection input: {err}"
+        );
+        // 坏投影未改动种子（apply_overlay_value 先反序列化整帧，失败即刻返回）。
+        assert!(
+            !broken.providers.contains_key("gamma"),
+            "failed projection must not partially apply"
+        );
+
+        // ④ swap 失败（无效候选）保旧内核——热替换的原子性。
+        let mut invalid = seed.clone();
+        invalid.providers.insert(
+            "no-url".into(),
+            crate::config::ProviderConfig {
+                preset: None,
+                base_url_anthropic: None,
+                base_url_openai_chat: None,
+                base_url_openai_responses: None,
+                api_key: None,
+                api_key_env: None,
+                model_map: HashMap::new(),
+                models: Vec::new(),
+            },
+        );
+        let err = state.swap_core(invalid).expect_err("invalid candidate must Err");
+        assert!(err.to_string().contains("no-url"), "error names provider: {err}");
+        let core = state.core();
+        let d = core
+            .table
+            .resolve(Some("fast"), WireProtocol::Anthropic)
+            .expect("previous core must keep serving after failed swap");
+        assert_eq!(
+            d.provider, "gamma",
+            "failed swap must not disturb the projected core"
+        );
     }
 }

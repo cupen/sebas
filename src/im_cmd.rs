@@ -244,7 +244,7 @@ pub async fn run(args: ImArgs) -> Result<()> {
 
     // 飞书装配（token 引导/问候/测试消息/adapter 实例化）——与 core 时代
     // 同一入口（sebas_im::bootstrap）。
-    let card_cfg = load_card_config(&cfg);
+    let card_cfg = load_card_config(&cfg, &channel_secret).await;
     let boot = sebas_im::bootstrap::bootstrap(
         sebas_im::bootstrap::FeishuBootstrapConfig {
             app_id: cfg.feishu.app_id.clone(),
@@ -298,17 +298,38 @@ pub async fn run(args: ImArgs) -> Result<()> {
     Ok(())
 }
 
-fn load_card_config(cfg: &Config) -> sebas_feishu::cards::CardConfig {
-    // settings.json 若存在则整体优先（与 core 时代的 fallback_settings 同
-    // 口径）；im 侧只读快照，持久化经通道状态库。
-    match sebas_dispatch::settings::load_settings(&sebas_dispatch::settings::settings_path()) {
-        Ok(Some(s)) => {
-            // settings.json 是 router 中立 CardConfig 形状；转回 feishu 镜像
-            // （与 core 时代 webui_card_cfg 的 serde 往返同口径）。
-            serde_json::from_value(serde_json::to_value(&s).expect("card config serializes"))
-                .expect("card config round-trips between mirror shapes")
+/// 读 card 配置：**只走核心状态通道的 `settings` 域**（core 的 `settings` 表
+/// `card_config` 键），core 不可达时按 TOML `[card]` 呈现。
+///
+/// retire-legacy-state-json 4.2：`settings.json` 已退休——im 进程同样没有进程内
+/// 引擎，所以向 core 要一次快照；取不到就如实按引导值渲染，**不**读文件。
+async fn load_card_config(
+    cfg: &Config,
+    secret: &crate::core_channel::secret::ChannelSecret,
+) -> sebas_feishu::cards::CardConfig {
+    let payload = crate::core_channel::client::snapshot_domain_once(
+        &crate::core_channel::socket_path(cfg),
+        secret,
+        "settings",
+    )
+    .await;
+    match payload {
+        Some(v) if !v.is_null() => match serde_json::from_value::<sebas_dispatch::CardConfig>(v) {
+            // 快照是 router 中立 CardConfig 形状；转回 feishu 镜像（与 core
+            // 时代 webui_card_cfg 的 serde 往返同口径）。
+            Ok(card) => {
+                serde_json::from_value(serde_json::to_value(&card).expect("card config serializes"))
+                    .expect("card config round-trips between mirror shapes")
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "core state store card_config 解析失败；使用 TOML [card]");
+                cfg.card.clone()
+            }
+        },
+        _ => {
+            tracing::warn!("core 状态通道不可达；card 配置按 TOML [card] 引导值呈现");
+            cfg.card.clone()
         }
-        _ => cfg.card.clone(),
     }
 }
 

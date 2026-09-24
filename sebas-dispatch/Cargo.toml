@@ -9,7 +9,6 @@ serde_json = "1"
 tokio = { version = "1.40", features = ["sync", "macros", "rt-multi-thread"] }
 tracing = "0.1"
 thiserror = "2"
-dirs = "7"
 anyhow = "1"
 sebas-channels = { path = "../sebas-channels" }
 # provider 卡片展示/探测需读内置 preset 表（preset 数据跟随代码）。

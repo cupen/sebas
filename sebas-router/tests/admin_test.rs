@@ -3,7 +3,15 @@
 //! 覆盖：鉴权（bearer / loopback fallback / 401 不回显）、admin 路由不被
 //! proxy fallback 吞、provider/alias/defaults/probe 变更面下线（全部 404
 //! 且不写任何文件，2.1/2.2）、只读面健在（presets / reload / stats /
-//! metrics / 外部热重载，2.4）。
+//! metrics，2.4）。
+//!
+//! retire-legacy-state-json 3.5：原先这里还有
+//! `hot_reload_external_write_and_failure_recovery`（外部改写 providers.json
+//! 触发 reload）——该机制（overlay 文件读取 + notify 监视）已在本次退休，
+//! 测试随之删除。热重载的存活路径（core 通道投影 `apply_overlay_value` →
+//! `swap_core`）由 `server.rs::tests::
+//! channel_projection_applies_provider_changes_without_restart` 单测覆盖，
+//! 通道传输层由进程级 `tests/testsuite_e2e_test.rs` 覆盖。
 
 mod support;
 
@@ -12,8 +20,8 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use support::start_router;
 
-/// 测试 config：provider 全走 preset，overlay 指向 tempdir（由调用方通过
-/// env 注入路径——见 start_router_admin）。
+/// 测试 config：provider 全走 preset；`SEBAS_ROUTER_CONFIG` 由调用方注入
+/// tempdir 内的真实 config.toml（见 start_admin_gw）。
 const CFG_TMPL: &str = r#"
 [router]
 listen = "127.0.0.1:0"
@@ -26,8 +34,8 @@ api_key_env = "SEBAS_ROUTER_TEST_UPSTREAM_KEY"
 api_key_env = "SEBAS_ROUTER_TEST_UPSTREAM_KEY_OAI"
 "#;
 
-/// admin 测试需要控制 overlay 路径与 SEBAS_CONTROL_SECRET——两者都是进程
-/// env，测试须串行（env lock）。
+/// admin 测试需要控制 `SEBAS_ROUTER_CONFIG` 与 `SEBAS_CONTROL_SECRET`——两者
+/// 都是进程 env，测试须串行（env lock）。
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 struct EnvGuard {
@@ -35,15 +43,13 @@ struct EnvGuard {
 }
 
 /// set_envs 但长期持锁（guard 由调用方保存到测试结束）——长耗时测试
-/// （hot_reload 等秒级）期间其它测试不得改写 env。
+/// 期间其它测试不得改写 env。
 fn set_envs_locked(
-    overlay: &std::path::Path,
     secret: Option<&str>,
     cfg_path: &std::path::Path,
 ) -> EnvGuard {
     let g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     unsafe {
-        std::env::set_var("SEBAS_ROUTER_PROVIDER_OVERLAY", overlay.to_str().unwrap());
         std::env::set_var("SEBAS_ROUTER_CONFIG", cfg_path.to_str().unwrap());
         match secret {
             Some(s) => std::env::set_var("SEBAS_CONTROL_SECRET", s),
@@ -54,22 +60,11 @@ fn set_envs_locked(
 }
 
 #[allow(dead_code)]
-fn set_envs(
-    overlay: &std::path::Path,
-    secret: Option<&str>,
-    cfg_path: &std::path::Path,
-) -> EnvGuard {
+fn set_envs(secret: Option<&str>, cfg_path: &std::path::Path) -> EnvGuard {
     let g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // SAFETY: 测试串行持有 ENV_LOCK。
     unsafe {
-        std::env::set_var(
-            "SEBAS_ROUTER_PROVIDER_OVERLAY",
-            overlay.to_str().unwrap(),
-        );
-        std::env::set_var(
-            "SEBAS_ROUTER_CONFIG",
-            cfg_path.to_str().unwrap(),
-        );
+        std::env::set_var("SEBAS_ROUTER_CONFIG", cfg_path.to_str().unwrap());
         match secret {
             Some(s) => std::env::set_var("SEBAS_CONTROL_SECRET", s),
             None => std::env::remove_var("SEBAS_CONTROL_SECRET"),
@@ -85,9 +80,13 @@ fn client() -> reqwest::Client {
         .expect("client")
 }
 
-/// 带独立 overlay 的 router 启动。env（overlay 路径 + secret）必须在
-/// start_router **之前**注入——config 在启动时解析 overlay；否则会读到
-/// 开发机真实的 ~/.sebas/providers.json。
+/// 带独立 config.toml 种子的 router 启动。`SEBAS_ROUTER_CONFIG` 与 secret
+/// 必须在 start_router **之前**注入——reload 从 config_source 重读种子，
+/// 否则会读到开发机真实的 ~/.sebas/config.toml。
+///
+/// 第二个返回值是 scratch dir 内「providers.json 不存在」的哨兵路径：管理
+/// 操作不得创建/改动任何文件，断言用它（retire-legacy-state-json 起 overlay
+/// 文件已无读取方，这里只钉「永不被写」）。
 async fn start_admin_gw(secret: Option<&str>) -> (
     support::TestRouter,
     std::path::PathBuf,
@@ -96,11 +95,9 @@ async fn start_admin_gw(secret: Option<&str>) -> (
     let dir = tempfile_dir();
     std::fs::create_dir_all(&dir).unwrap();
     let overlay = dir.join("providers.json");
-    // reload_and_swap 从 config_source 重读 toml 种子——写一份真实文件并经
-    // SEBAS_ROUTER_CONFIG 注入，避免读到开发机的 ~/.sebas/config.toml。
     let cfg_path = dir.join("config.toml");
     std::fs::write(&cfg_path, CFG_TMPL.replace("__USAGE__", "")).unwrap();
-    let env = set_envs(&overlay, secret, &cfg_path);
+    let env = set_envs(secret, &cfg_path);
     let gw = start_router(CFG_TMPL).await;
     (gw, overlay, env)
 }
@@ -281,91 +278,6 @@ async fn probe_endpoint_is_gone() {
 }
 
 #[tokio::test]
-async fn hot_reload_external_write_and_failure_recovery() {
-    use sebas_router::server;
-
-    let dir = tempfile_dir();
-    std::fs::create_dir_all(&dir).unwrap();
-    let overlay = dir.join("providers.json");
-    let cfg_path = dir.join("config.toml");
-    // 种子只有 anthropic；外部写（模拟卡片/router 写）加 deepseek。
-    let cfg_toml = r#"
-[router]
-listen = "127.0.0.1:0"
-usage_db = "__USAGE__"
-
-[provider.anthropic]
-api_key_env = "SEBAS_ROUTER_TEST_UPSTREAM_KEY"
-"#;
-    let cfg_toml = cfg_toml.replace("__USAGE__", &dir.join("usage.db").to_string_lossy().replace('\\', "/"));
-    std::fs::write(&cfg_path, &cfg_toml).unwrap();
-    let _env = set_envs_locked(&overlay, Some("sec-test-123"), &cfg_path);
-
-    // 与 support::start_router 同款 env key 注入（本测试绕过其 harness）。
-    unsafe {
-        std::env::set_var("SEBAS_ROUTER_TEST_UPSTREAM_KEY", "test-anthropic-key");
-    }
-    let cfg = sebas_router::config::RouterConfig::parse(&cfg_toml).unwrap();
-    let state = server::build_state(cfg).unwrap();
-    let ready = sebas_router::hot_reload::spawn_watcher(state.clone(), state.reload_status.clone());
-    ready.await.expect("watcher 注册完成");
-    let app = server::build_router(state);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .unwrap();
-    });
-
-    let c = client();
-    let stats_url = format!("http://{addr}/admin/stats");
-    let auth = "Bearer sec-test-123";
-
-    // 坏 JSON：外部写入损坏文件 → reload 失败，stats 报错，旧内核继续。
-    // watcher 注册是异步 task——轮询直到观察到 reload 失败（上限 5s）。
-    std::fs::write(&overlay, "{ not json").unwrap();
-    let mut body = Value::Null;
-    for _ in 0..25 {
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        let resp = c.get(&stats_url).header("Authorization", auth).send().await.unwrap();
-        let raw = resp.text().await.unwrap();
-        body = serde_json::from_str(&raw).unwrap_or_else(|e| panic!("stats 非 JSON: {raw} ({e})"));
-        if body["last_reload_error"].is_string() {
-            break;
-        }
-    }
-    assert!(body["last_reload_error"].is_string(), "坏 JSON 须记 reload 错误: {body}");
-    assert_eq!(body["providers"], 1, "坏文件保旧内核（仍只有 anthropic）");
-
-    // 有效外部写：加 deepseek provider。
-    std::fs::write(
-        &overlay,
-        serde_json::json!({"providers": {"deepseek": {"preset": "deepseek", "api_key": "sk-x"}}}).to_string(),
-    )
-    .unwrap();
-    // 等 debounce(300ms) + 处理。
-    for _ in 0..20 {
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        let body: Value = serde_json::from_str(
-            &c.get(&stats_url).header("Authorization", auth).send().await.unwrap().text().await.unwrap(),
-        )
-        .unwrap();
-        if body["providers"] == 2 { break; }
-    }
-    let body: Value = serde_json::from_str(
-        &c.get(&stats_url).header("Authorization", auth).send().await.unwrap().text().await.unwrap(),
-    )
-    .unwrap();
-    assert_eq!(body["providers"], 2, "外部写后热重载生效（无重启）: {body}");
-    assert!(body["last_reload_error"].is_null(), "恢复后清错误: {body}");
-    assert!(body["last_reload_ok_at"].is_u64(), "记录成功时间: {body}");
-}
-
-#[tokio::test]
 async fn metrics_and_stats_after_traffic() {
     use sebas_router::proto::WireProtocol;
     use support::{start_router, start_mock_upstream};
@@ -387,10 +299,9 @@ api_key = "sk-alpha"
     );
     let dir = tempfile_dir();
     std::fs::create_dir_all(&dir).unwrap();
-    let overlay = dir.join("providers.json");
     let cfg_path = dir.join("config.toml");
     std::fs::write(&cfg_path, &cfg).unwrap();
-    let _env = set_envs_locked(&overlay, Some("sec-test-123"), &cfg_path);
+    let _env = set_envs_locked(Some("sec-test-123"), &cfg_path);
     let gw = start_router(&cfg).await;
 
     let c = client();

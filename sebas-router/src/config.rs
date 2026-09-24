@@ -70,11 +70,6 @@ pub struct RouterConfig {
     /// debug 模式（`--debug` 启动参数触发，parse 后注入内置 test provider）：
     /// 由 router 自身应答（固定文字 + 回显输入），不转发外部上游。
     pub debug: bool,
-    /// bot 侧 `/provider` 命令写入的 provider 变更文件（delta + 删除墓碑）。
-    /// parse 时与顶层 `[provider.*]` 合并：overlay 里
-    /// 的同名条目覆盖/新增，deleted 墓碑移除条目。config.toml 保持只读。
-    #[serde(default = "default_provider_overlay")]
-    pub provider_overlay: String,
     #[serde(default)]
     pub default_provider: Option<String>,
     /// 下游客户端鉴权 token：单个字符串或字符串数组（TOML 两者都接受）。
@@ -87,13 +82,14 @@ pub struct RouterConfig {
     pub rate_limit: RateLimitConfig,
     #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
-    /// 编译后的路由条目：model alias（overlay `model_aliases` 编译而来）与
+    /// 编译后的路由条目：model alias（core 通道快照 `model_aliases` 经
+    /// `apply_overlay_value` 编译而来）与
     /// debug 注入的 `test` 路由。**TOML 配置不可达**——`[router.routes]`
     /// 已作废（simplify-service-config）：RawRouterConfig 不再携带 routes，
     /// 旧键命中时警告忽略。`RouteTable` 只做精确匹配（别名/调试均精确）。
     pub routes: Vec<RouteGroup>,
-    /// 模型别名 → upstream model（`None` = 别名透传）。由 provider overlay
-    /// 的 `model_aliases` 段编译而来；`RouteTable` 用它在非 namespace 路径
+    /// 模型别名 → upstream model（`None` = 别名透传）。由 core 通道快照的
+    /// `model_aliases` 段编译而来；`RouteTable` 用它在非 namespace 路径
     /// 做 rename。对外结构体序列化用 `serde(skip)`——这是派生数据。
     #[serde(skip)]
     pub model_aliases: HashMap<String, Option<String>>,
@@ -176,10 +172,6 @@ fn default_usage_max_rows() -> u64 {
 fn default_usage_prune_interval_secs() -> u64 {
     3600
 }
-fn default_provider_overlay() -> String {
-    "~/.sebas/providers.json".into()
-}
-
 /// reload 用的 config.toml 来源：`SEBAS_ROUTER_CONFIG` env，退
 /// `~/.sebas/config.toml`。调用方（router_cmd）可在 parse 后覆盖。
 fn default_config_source() -> String {
@@ -294,8 +286,6 @@ struct RawRouterConfig {
     usage_max_rows: u64,
     #[serde(default = "default_usage_prune_interval_secs")]
     usage_prune_interval_secs: u64,
-    #[serde(default = "default_provider_overlay")]
-    provider_overlay: String,
     #[serde(default)]
     default_provider: Option<String>,
     #[serde(default, deserialize_with = "de_auth_token")]
@@ -749,6 +739,33 @@ fn reject_retired_usage_file(raw: &str) -> Result<()> {
     Ok(())
 }
 
+/// `[router] provider_overlay` 是否出现在原始 TOML（retire-legacy-state-json
+/// 3.5：该键已退休，解析层不再消费）。
+fn deprecated_provider_overlay_key_hit(raw: &str) -> bool {
+    raw.parse::<toml::Table>()
+        .ok()
+        .and_then(|v| {
+            v.get("router")
+                .and_then(|r| r.as_table())
+                .map(|r| r.contains_key("provider_overlay"))
+        })
+        .unwrap_or(false)
+}
+
+/// 废弃键告警：stderr + tracing 双通道——router 进程的 parse 同样可能先于
+/// tracing 初始化执行（与根配置 warn_deprecated_watchdog_keys 同一理由）。
+///
+/// **warn-only，不是拒绝**：`[router]` 没有 `deny_unknown_fields`，serde 会
+/// 静默吞掉这个键（design D5 点名的「静默失效」陷阱）。命中即拒绝会让带该
+/// 键的既有部署无法启动，而该键今天已完全惰性——告警是这里正确的取舍。
+fn warn_deprecated_provider_overlay_key(raw: &str) {
+    if deprecated_provider_overlay_key_hit(raw) {
+        let msg = "config [router] provider_overlay is retired and ignored: the router no longer reads any provider overlay file; provider state comes from the core state channel (and the top-level [provider.*] seed); remove the key";
+        tracing::warn!("{msg}");
+        eprintln!("warning: {msg}");
+    }
+}
+
 /// 废弃键告警：stderr + tracing 双通道——router 进程的 parse 同样可能先于
 /// tracing 初始化执行（与根配置 warn_deprecated_watchdog_keys 同一理由）。
 fn warn_deprecated_routes_key(raw: &str) {
@@ -765,6 +782,7 @@ impl RouterConfig {
     /// → validate → tilde 展开（`usage_db`）。
     pub fn parse(raw: &str) -> Result<Self> {
         warn_deprecated_routes_key(raw);
+        warn_deprecated_provider_overlay_key(raw);
         reject_retired_usage_file(raw)?;
         let file: RouterFile =
             toml::from_str(raw).map_err(|e| RouterError::Config(format!("toml parse: {e}")))?;
@@ -786,7 +804,6 @@ impl RouterConfig {
                 usage_max_rows: g.usage_max_rows,
                 usage_prune_interval_secs: g.usage_prune_interval_secs,
                 debug: false,
-                provider_overlay: g.provider_overlay,
                 default_provider: g.default_provider,
                 auth_token: g.auth_token,
                 rate_limit: g.rate_limit,
@@ -808,7 +825,6 @@ impl RouterConfig {
                 usage_max_rows: default_usage_max_rows(),
                 usage_prune_interval_secs: default_usage_prune_interval_secs(),
                 debug: false,
-                provider_overlay: default_provider_overlay(),
                 default_provider: None,
                 auth_token: Vec::new(),
                 rate_limit: RateLimitConfig::default(),
@@ -819,8 +835,7 @@ impl RouterConfig {
             },
         };
         cfg.apply_env_overrides();
-        let mut cfg = cfg.with_expanded_paths();
-        cfg.merge_provider_overlay()?;
+        let cfg = cfg.with_expanded_paths();
         cfg.validate()?;
         Ok(cfg)
     }
@@ -833,37 +848,12 @@ impl RouterConfig {
         {
             self.listen = v;
         }
-        if let Ok(v) = std::env::var("SEBAS_ROUTER_PROVIDER_OVERLAY")
-            && !v.is_empty()
-        {
-            self.provider_overlay = v;
-        }
-    }
-
-    /// 合并 bot 侧 provider 变更文件（`/provider` 命令写入）。
-    /// 文件缺失时是 no-op；格式错误/字段无效则启动即报错（fail fast）。
-    fn merge_provider_overlay(&mut self) -> Result<()> {
-        let path = std::path::Path::new(&self.provider_overlay);
-        if !path.exists() {
-            return Ok(());
-        }
-        let raw = std::fs::read_to_string(path).map_err(|e| {
-            RouterError::Config(format!(
-                "读取 provider overlay {} 失败: {e}",
-                path.display()
-            ))
-        })?;
-        let file: ProviderOverlay = serde_json::from_str(&raw).map_err(|e| {
-            RouterError::Config(format!(
-                "解析 provider overlay {} 失败: {e}",
-                path.display()
-            ))
-        })?;
-        self.apply_overlay(file)
     }
 
     /// 把 overlay 值合并进当前配置（providers 覆盖 + deleted 墓碑 + 模型别名
-    /// 编译）。文件路径与 core channel 快照共用同一 merge 语义（5.3 投影）。
+    /// 编译）。**唯一入口是 core 通道快照**（`apply_overlay_value`，5.3 投影）
+    /// ——provider 数据的写入方是 core 状态库，router 不再读任何 overlay 文件
+    /// （retire-legacy-state-json D6）。
     fn apply_overlay(&mut self, file: ProviderOverlay) -> Result<()> {
         for name in &file.deleted {
             self.providers.remove(name);
@@ -970,7 +960,6 @@ impl RouterConfig {
 
     fn with_expanded_paths(mut self) -> Self {
         self.usage_db = expand_tilde(&self.usage_db);
-        self.provider_overlay = expand_tilde(&self.provider_overlay);
         self
     }
 
@@ -1032,18 +1021,16 @@ mod tests {
     // `SEBAS_ROUTER_LISTEN`，单进程内并行跑会与其他调用 parse 的测试竞争。
     // 跨模块共享锁（crate::test_util::CONFIG_ENV_LOCK 的别名）——debug.rs 与本
     // 模块的测试都动 SEBAS_ROUTER_LISTEN，必须互斥。
+    // （`SEBAS_ROUTER_PROVIDER_OVERLAY` 已随 retire-legacy-state-json 3.5
+    // 退休，不再是竞态源；锁本身仍被 parse 的 listen 覆盖路径需要。）
     static LOCK: &Mutex<()> = &crate::test_util::CONFIG_ENV_LOCK;
 
-    /// 隔离 provider overlay 后解析：把 SEBAS_ROUTER_PROVIDER_OVERLAY 指向
-    /// 不存在的路径，避免测试读到开发机 ~/.sebas/providers.json 影响断言。
-    /// 调用方必须已持有 LOCK（串行化所有 env 访问）。
+    /// 隔离后解析：调用方必须已持有 LOCK（串行化所有 env 访问）。
+    /// 历史上还会把 `SEBAS_ROUTER_PROVIDER_OVERLAY` 指向不存在的路径以避开
+    /// 开发机 `~/.sebas/providers.json`——该 env 与 overlay 文件读取已随
+    /// retire-legacy-state-json 3.5 一并退休，这里不再需要 env 操作，只保留
+    /// 作为「经 parse 且受 LOCK 保护」的调用点收口。
     fn parse_isolated(raw: &str) -> Result<RouterConfig> {
-        unsafe {
-            std::env::set_var(
-                "SEBAS_ROUTER_PROVIDER_OVERLAY",
-                "__sebas_test_no_overlay__.json",
-            );
-        }
         RouterConfig::parse(raw)
     }
 
@@ -1817,37 +1804,30 @@ api_key = "test-key"
         );
     }
 
+    /// provider/alias 合并的唯一入口是 core 通道投影：`apply_overlay_value`
+    /// （即订阅循环每帧调用的那个函数）。文件读取已随 retire-legacy-state-json
+    /// 3.5 退休——这些用例改从该公开 API 驱动同一份 `apply_overlay` 语义。
     #[test]
-    fn overlay_merges_providers_and_deleted() {
+    fn projection_merges_providers_and_deleted() {
         let _g = LOCK.lock().unwrap();
         unsafe {
             std::env::remove_var("SEBAS_ROUTER_LISTEN");
         }
-        let dir = tempfile::tempdir().unwrap();
-        let overlay = dir.path().join("providers.json");
-        std::fs::write(
-            &overlay,
-            r#"{
-                "providers": {
-                    "deepseek": { "preset": "deepseek", "protocol": "anthropic", "api_key": "sk-ds" },
-                    "anthropic": { "api_key_env": "ANTHROPIC_API_KEY_V2" }
-                },
-                "deleted": ["openai"]
-            }"#,
-        )
-        .unwrap();
-        unsafe {
-            std::env::set_var("SEBAS_ROUTER_PROVIDER_OVERLAY", overlay.to_str().unwrap());
-        }
 
-        // 新语法：顶层 [provider.*]；overlay 条目走同一个 preset 解析管线。
+        // 新语法：顶层 [provider.*]；快照条目走同一个 preset 解析管线。
         let raw = r#"
 [provider.anthropic]
 [provider.openai]
 "#;
-        // 注意：不能用 parse_isolated——它会重置 overlay 环境变量；本测试
-        // 自己设置了 overlay 文件，必须直接 parse。
-        let cfg = RouterConfig::parse(raw).expect("parse with overlay");
+        let mut cfg = parse_isolated(raw).expect("parse seed");
+        cfg.apply_overlay_value(&serde_json::json!({
+            "providers": {
+                "deepseek": { "preset": "deepseek", "protocol": "anthropic", "api_key": "sk-ds" },
+                "anthropic": { "api_key_env": "ANTHROPIC_API_KEY_V2" }
+            },
+            "deleted": ["openai"]
+        }))
+        .expect("project snapshot");
 
         assert!(
             !cfg.providers.contains_key("openai"),
@@ -1856,7 +1836,7 @@ api_key = "test-key"
         let ds = cfg
             .providers
             .get("deepseek")
-            .expect("overlay added deepseek");
+            .expect("snapshot added deepseek");
         assert_eq!(
             ds.base_url_anthropic.as_deref(),
             Some("https://api.deepseek.com/anthropic"),
@@ -1870,7 +1850,7 @@ api_key = "test-key"
         assert_eq!(
             ds.api_key.as_deref(),
             Some("sk-ds"),
-            "overlay api_key must be consumed"
+            "projected api_key must be consumed"
         );
         assert_eq!(
             ds.api_key_env, None,
@@ -1885,38 +1865,30 @@ api_key = "test-key"
         assert_eq!(anth.api_key_env.as_deref(), Some("ANTHROPIC_API_KEY_V2"));
     }
 
-    /// overlay 带 model_aliases：编译为前置精确 RouteGroup + model_map 插入。
+    /// 快照带 model_aliases：编译为前置精确 RouteGroup + model_map 插入。
     /// 用 RouteTable::from_config + resolve 验证完整路由语义。
     #[test]
-    fn overlay_model_aliases_compile_into_routes_and_model_map() {
+    fn projection_model_aliases_compile_into_routes_and_model_map() {
         use crate::routing::RouteTable;
         let _g = LOCK.lock().unwrap();
         unsafe {
             std::env::remove_var("SEBAS_ROUTER_LISTEN");
         }
-        let dir = tempfile::tempdir().unwrap();
-        let overlay = dir.path().join("providers.json");
-        std::fs::write(
-            &overlay,
-            r#"{
-                "providers": {
-                    "beta": { "preset": "deepseek", "api_key": "sk-b" }
-                },
-                "model_aliases": {
-                    "my-claude": { "provider": "beta", "upstream_model": "deepseek-chat" },
-                    "bare": { "provider": "beta" }
-                }
-            }"#,
-        )
-        .unwrap();
-        unsafe {
-            std::env::set_var("SEBAS_ROUTER_PROVIDER_OVERLAY", overlay.to_str().unwrap());
-        }
         let raw = r#"
 [provider.anthropic]
 [provider.openai]
 "#;
-        let cfg = RouterConfig::parse(raw).expect("parse with alias overlay");
+        let mut cfg = parse_isolated(raw).expect("parse seed");
+        cfg.apply_overlay_value(&serde_json::json!({
+            "providers": {
+                "beta": { "preset": "deepseek", "api_key": "sk-b" }
+            },
+            "model_aliases": {
+                "my-claude": { "provider": "beta", "upstream_model": "deepseek-chat" },
+                "bare": { "provider": "beta" }
+            }
+        }))
+        .expect("project alias snapshot");
 
         // 带 upstream_model：resolve 后改写为 upstream；缺省：别名透传。
         let table = RouteTable::from_config(&cfg);
@@ -1943,24 +1915,11 @@ api_key = "test-key"
     /// 别名胜过同名 legacy config route：`[router.routes]` 已作废忽略，
     /// alias 保持权威。
     #[test]
-    fn overlay_alias_beats_same_named_config_route() {
+    fn projection_alias_beats_same_named_config_route() {
         use crate::routing::RouteTable;
         let _g = LOCK.lock().unwrap();
         unsafe {
             std::env::remove_var("SEBAS_ROUTER_LISTEN");
-        }
-        let dir = tempfile::tempdir().unwrap();
-        let overlay = dir.path().join("providers.json");
-        std::fs::write(
-            &overlay,
-            r#"{
-                "providers": { "beta": { "preset": "deepseek", "api_key": "sk-b" } },
-                "model_aliases": { "m1": { "provider": "beta" } }
-            }"#,
-        )
-        .unwrap();
-        unsafe {
-            std::env::set_var("SEBAS_ROUTER_PROVIDER_OVERLAY", overlay.to_str().unwrap());
         }
         let raw = r#"
 [provider.anthropic]
@@ -1968,7 +1927,12 @@ api_key = "test-key"
 [router.routes]
 m1 = ["anthropic"]
 "#;
-        let cfg = RouterConfig::parse(raw).expect("parse");
+        let mut cfg = parse_isolated(raw).expect("parse");
+        cfg.apply_overlay_value(&serde_json::json!({
+            "providers": { "beta": { "preset": "deepseek", "api_key": "sk-b" } },
+            "model_aliases": { "m1": { "provider": "beta" } }
+        }))
+        .expect("project");
         let table = RouteTable::from_config(&cfg);
         let d = table
             .resolve(Some("m1"), crate::proto::WireProtocol::Anthropic)
@@ -1978,29 +1942,21 @@ m1 = ["anthropic"]
 
     /// 命名空间仍优先于别名：`beta/m1` 走 beta 的 rest 而非 alias 改写。
     #[test]
-    fn overlay_namespace_still_beats_alias() {
+    fn projection_namespace_still_beats_alias() {
         use crate::routing::RouteTable;
         let _g = LOCK.lock().unwrap();
         unsafe {
             std::env::remove_var("SEBAS_ROUTER_LISTEN");
         }
-        let dir = tempfile::tempdir().unwrap();
-        let overlay = dir.path().join("providers.json");
-        std::fs::write(
-            &overlay,
-            r#"{
-                "providers": { "beta": { "preset": "deepseek", "api_key": "sk-b" } },
-                "model_aliases": { "m1": { "provider": "beta", "upstream_model": "renamed" } }
-            }"#,
-        )
-        .unwrap();
-        unsafe {
-            std::env::set_var("SEBAS_ROUTER_PROVIDER_OVERLAY", overlay.to_str().unwrap());
-        }
         let raw = r#"
 [provider.anthropic]
 "#;
-        let cfg = RouterConfig::parse(raw).expect("parse");
+        let mut cfg = parse_isolated(raw).expect("parse");
+        cfg.apply_overlay_value(&serde_json::json!({
+            "providers": { "beta": { "preset": "deepseek", "api_key": "sk-b" } },
+            "model_aliases": { "m1": { "provider": "beta", "upstream_model": "renamed" } }
+        }))
+        .expect("project");
         let table = RouteTable::from_config(&cfg);
         let d = table
             .resolve(Some("beta/m1"), crate::proto::WireProtocol::Anthropic)
@@ -2015,29 +1971,21 @@ m1 = ["anthropic"]
 
     /// 引用不存在 provider 的别名 drop + warn，不启动失败。
     #[test]
-    fn overlay_alias_to_missing_provider_dropped() {
+    fn projection_alias_to_missing_provider_dropped() {
         use crate::routing::RouteTable;
         let _g = LOCK.lock().unwrap();
         unsafe {
             std::env::remove_var("SEBAS_ROUTER_LISTEN");
         }
-        let dir = tempfile::tempdir().unwrap();
-        let overlay = dir.path().join("providers.json");
-        std::fs::write(
-            &overlay,
-            r#"{
-                "providers": {},
-                "model_aliases": { "ghost": { "provider": "nonexistent" } }
-            }"#,
-        )
-        .unwrap();
-        unsafe {
-            std::env::set_var("SEBAS_ROUTER_PROVIDER_OVERLAY", overlay.to_str().unwrap());
-        }
         let raw = r#"
 [provider.anthropic]
 "#;
-        let cfg = RouterConfig::parse(raw).expect("坏别名不导致启动失败");
+        let mut cfg = parse_isolated(raw).expect("parse");
+        cfg.apply_overlay_value(&serde_json::json!({
+            "providers": {},
+            "model_aliases": { "ghost": { "provider": "nonexistent" } }
+        }))
+        .expect("坏别名不导致启动失败");
         assert!(
             cfg.routes.iter().all(|r| r.model != "ghost"),
             "坏别名不得编译进 routes"
@@ -2048,6 +1996,32 @@ m1 = ["anthropic"]
             .resolve(Some("ghost"), crate::proto::WireProtocol::Anthropic)
             .expect("fallback default");
         assert_eq!(d.provider, "anthropic");
+    }
+
+    /// retire-legacy-state-json 3.5：`[router] provider_overlay` 已退休——
+    /// `[router]` 无 `deny_unknown_fields`，键会被静默吞掉（design D5 的
+    /// 「静默失效」陷阱）。这里钉住两件事：① raw 扫描能识别该键（告警依据）；
+    /// ② 带该键的 config 仍然解析成功（既有部署不会因升级而无法启动）。
+    #[test]
+    fn retired_provider_overlay_key_is_warned_and_ignored() {
+        let _g = LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var("SEBAS_ROUTER_LISTEN");
+        }
+        let raw = r#"
+[router]
+provider_overlay = "/tmp/whatever-providers.json"
+[provider.anthropic]
+api_key = "test-key"
+"#;
+        assert!(
+            deprecated_provider_overlay_key_hit(raw),
+            "raw scan must detect the retired key"
+        );
+        let cfg = parse_isolated(raw).expect("retired key must not fail parse");
+        assert_eq!(cfg.providers.len(), 1);
+        // 该键不再产生任何文件读取：不存在的路径也无副作用。
+        assert!(cfg.routes.is_empty());
     }
 
     /// 校验辅助：无效候选（无 preset 无 URL）Err 且错误信息含 provider 名；

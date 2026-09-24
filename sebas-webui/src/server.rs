@@ -32,8 +32,9 @@ pub struct WebUiState {
     pub router: RouterInfo,
     pub started_at: Instant,
     /// Static snapshot of the card config for the settings page. The session
-    /// channel does not transport settings; the caller loads it (from the
-    /// local settings.json) at startup.
+    /// channel does not transport settings; the caller reads it from the core
+    /// state store (`settings` table `card_config`) at startup
+    /// (retire-legacy-state-json 4.2: the legacy `settings.json` is retired).
     pub card_config: CardConfig,
     /// Supplies the reachable agent kinds for the create-session dropdown.
     /// Empty for deployments that never pass a config-driven provider.

@@ -158,15 +158,15 @@ impl CrudStore for InMemoryStore {
 /// 文件存储：把 CRUD 变更以 delta 形式持久化，与只读种子
 /// （如 config.toml 里的条目）合并后得到最终视图。
 ///
-/// openspec/specs/provider-management/spec.md.8：自 v2 schema 起，所有 provider CRUD 变更与
-/// runtime state（mode / default_selection）统一写入
-/// `~/.sebas/state.json`（详见 `crate::state_store`）。本类型保留
-/// `load(path, id_field, seed)` 旧 API（`path` 仅作为历史 hint 保留）
-/// —— 真实持久化委托给 `state_store::update` —— 实现「删 default
-/// provider」操作的单原子写：providers + deleted + mode + default
-/// 全部走同一个文件、一次写。
+/// openspec/specs/provider-management/spec.md.8：所有 provider CRUD 变更与
+/// runtime state（mode / default_selection）统一落在**状态库**
+/// （详见 `crate::state_store`）。本类型保留 `load(path, id_field, seed)`
+/// 旧 API（`path` 仅作为历史 hint 保留）—— 真实持久化委托给
+/// `state_store::update` —— 实现「删 default provider」操作的单原子提交：
+/// providers + deleted + mode + default 全走同一次提交。
 ///
-/// 文件格式（v2 state.json `providers` / `deleted` 字段）：
+/// retire-legacy-state-json 3.2：这条权威链上已没有任何文件。下面的 JSON 形状
+/// 只是**状态库内 `PersistedState` 的字段布局**（历史文档保留，便于对照）：
 /// ```json
 /// {
 ///   "providers": { "<id>": { ...字段... } },
@@ -176,14 +176,13 @@ impl CrudStore for InMemoryStore {
 /// - `providers`：新增/修改过的条目（覆盖种子）；
 /// - `deleted`：从种子删除的名字（墓碑，防止重启后从只读源复活）。
 ///
-/// 旧 overlay 文件（`~/.sebas/providers.json`）由 `state_store` 一次性
-/// 迁移到 `state.json` 后删除（见 docs/design-history.md ADR-4）；本类型不再写它。
+/// retire-legacy-state-json 3.2：provider 数据的唯一权威是**状态库**；旧的
+/// `providers.json` / `state.json` 都已退休（不写、不读、不导入），本类型也
+/// 不再有任何文件面。
 #[derive(Clone)]
 pub struct FileStore {
-    /// **保留用于向后兼容（签名不变），写入时忽略** —— 持久化统一走
-    /// `state.json`。`state_store::providers_path()`（`SEBAS_ROUTER_PROVIDER_OVERLAY`
-    /// 或默认 `~/.sebas/providers.json`）仍由 `state_store::load()` 在
-    /// 首次迁移路径上读取，本类型不再触达。
+    /// **保留用于向后兼容（签名不变），读写都忽略** —— 持久化统一走状态库
+    /// （`state_store`）。没有任何路径参数会再被解析成文件位置。
     #[allow(dead_code)]
     path: PathBuf,
     id_field: String,
@@ -194,21 +193,18 @@ pub struct FileStore {
 struct FileState {
     /// 合并后的最终视图（种子 + 变更）。
     items: Vec<Item>,
-    /// 新增/修改项：<id> -> item（来自 `state.json.providers`）。
+    /// 新增/修改项：<id> -> item（来自状态库 `providers`）。
     overrides: BTreeMap<String, Item>,
-    /// 删除墓碑：从种子/配置中删除的名字（来自 `state.json.deleted`）。
+    /// 删除墓碑：从种子/配置中删除的名字（来自状态库 `deleted`）。
     deleted: Vec<String>,
 }
 
 impl FileStore {
     /// `seed` 是只读源（config.toml）里已有的条目；持久化的变更从
-    /// `state_store::load()` 读取（自动处理 `providers.json` →
-    /// `state.json` 一次性迁移）。
+    /// `state_store::load()` 读取（状态库是唯一权威）。
     ///
-    /// `path` 参数**仅保留签名兼容**，不读取也不写入 —— 持久化统一
-    /// 走 `state.json`（`SEBAS_STATE_FILE` 或默认
-    /// `~/.sebas/state.json`）。`state_store` 内部仍会按需读取
-    /// 旧 overlay 文件做一次性迁移。
+    /// `path` 参数**仅保留签名兼容**，不读取也不写入 —— 持久化统一走状态库。
+    /// 状态库不可用时按空状态呈现（不回落任何文件）。
     pub fn load(
         path: impl Into<PathBuf>,
         id_field: impl Into<String>,
@@ -216,9 +212,8 @@ impl FileStore {
     ) -> Result<Self, String> {
         let path = path.into();
         let id_field = id_field.into();
-        // 从统一 store 读当前 overrides / deleted。state_store 内部
-        // 处理 v0/v1 state.json + legacy providers.json 的合并迁移
-        // （背景见 docs/design-history.md ADR-4）。
+        // 从状态库读当前 overrides / deleted（唯一权威）。v0/v1 遗留形状
+        // 在库读取层被显式拒绝，本层不做任何文件合并迁移。
         let persisted = crate::state_store::load();
         let mut state = FileState {
             items: seed,
@@ -238,8 +233,9 @@ impl FileStore {
         })
     }
 
-    /// 写入到统一 `state.json`（openspec/specs/provider-management/spec.md）：tmp + rename
-    /// 原子写，由 `state_store::update` 完成。**不再触碰 `self.path`**。
+    /// 提交到状态库（openspec/specs/provider-management/spec.md）：由
+    /// `state_store::update` 在单事务里完成，**不再触碰 `self.path`**，也不再
+    /// 有任何文件写。
     async fn persist(&self, state: &FileState) -> Result<(), String> {
         let overrides = state.overrides.clone();
         let deleted = state.deleted.clone();
@@ -874,10 +870,10 @@ mod tests {
         assert_eq!(scalar_display(&serde_json::json!(["a", "b"])), "a,b");
     }
 
-    // openspec/specs/provider-management/spec.md：FileStore 持久化到 unified state.json（路径由
-    // SEBAS_STATE_FILE 决定）。所有写盘的测试都要先把 SEBAS_STATE_FILE 指
-    // 向 tempdir，避免污染开发机 ~/.sebas/state.json，并避免互相覆盖。
-    // 全局 mutex 串行化 env 访问。
+    // openspec/specs/provider-management/spec.md：FileStore 的持久化走状态库
+    // （retire-legacy-state-json 3.2/3.4 之后没有文件回退，两个 state 文件 env
+    // 都已退休）。写盘的测试改成「装一个全新内存引擎」做隔离：进程级引擎槽
+    // 由 test_engine 的全局锁串行化。
 
     fn item(id: &str, protocol: &str) -> Item {
         let mut m = Map::new();
@@ -890,31 +886,17 @@ mod tests {
         m
     }
 
-    /// 把 SEBAS_STATE_FILE 与 SEBAS_ROUTER_PROVIDER_OVERLAY 都指向
-    /// tempdir（state.json + providers.json），返回 state 路径。
-    /// provider 数据已拆回 providers.json，两个 env 都必须隔离。
-    fn isolate(dir: &tempfile::TempDir) -> std::path::PathBuf {
-        let path = dir.path().join("state.json");
-        // SAFETY: ENV_LOCK held by caller.
-        unsafe {
-            std::env::set_var("SEBAS_STATE_FILE", path.to_str().unwrap());
-            std::env::set_var(
-                "SEBAS_ROUTER_PROVIDER_OVERLAY",
-                dir.path().join("providers.json").to_str().unwrap(),
-            );
-        }
-        path
+    /// 装一个全新内存引擎（替代旧的 env 文件隔离）。调用方必须把返回值绑到
+    /// 测试局部变量：它持有全局锁，drop 时清空引擎。
+    fn isolate(_dir: &tempfile::TempDir) -> crate::test_engine::EngineGuard {
+        crate::test_engine::install_fresh()
     }
 
     fn deisolate() {
-        // SAFETY: ENV_LOCK held by caller.
-        unsafe {
-            std::env::remove_var("SEBAS_STATE_FILE");
-            std::env::remove_var("SEBAS_ROUTER_PROVIDER_OVERLAY");
-        }
+        // 引擎由 EngineGuard 的 Drop 清空；保留空函数让调用点零改动。
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn load_without_file_uses_seed() {
         let _g = lock_state_file();
         let dir = tempfile::tempdir().unwrap();
@@ -929,7 +911,7 @@ mod tests {
         deisolate();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn insert_persists_and_delete_tombstones() {
         let _g = lock_state_file();
         let dir = tempfile::tempdir().unwrap();
@@ -962,7 +944,7 @@ mod tests {
         deisolate();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn update_overrides_seed_value() {
         let _g = lock_state_file();
         let dir = tempfile::tempdir().unwrap();
@@ -1038,7 +1020,7 @@ mod tests {
         )
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn recompute_runs_normalizer_without_persisting() {
         let _g = lock_state_file();
         let dir = tempfile::tempdir().unwrap();
@@ -1091,7 +1073,7 @@ mod tests {
         deisolate();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn recompute_preserves_existing_secret_on_edit() {
         // 编辑已有条目时，recompute 不能把已有的密钥抹掉。
         let _g = lock_state_file();

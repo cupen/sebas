@@ -23,8 +23,8 @@
 //! or `invoke testsuite-real-agents`.
 //!
 //! Isolation mirrors the proven `testsuite_e2e_test` sandbox recipe: all
-//! sebas state (config, state DB, state file, provider overlay, dispatch /
-//! usage files, channel socket) lives inside one throwaway scene dir under
+//! sebas state (config, state DB, dispatch / usage files, channel socket)
+//! lives inside one throwaway scene dir under
 //! `target/tests/` — removed on drop, kept for postmortem on panic. HOME is
 //! deliberately NOT scrubbed: the agent CLIs resolve their own credentials
 //! under `$HOME` (explicitly authorized for these tests); only sebas's own
@@ -225,13 +225,11 @@ base_url_anthropic = "https://api.anthropic.com"
 {e2e_claude_provider}
 [router]
 listen = "127.0.0.1:{router_port}"
-provider_overlay = "{overlay}"
 usage_db = "{usage}"
 "#,
             claude_sessions = fs_string(&path.join("claude-sessions")),
             work = fs_string(&path.join("work")),
             downloads = fs_string(&path.join("downloads")),
-            overlay = fs_string(&path.join("providers.json")),
             usage = fs_string(&path.join("usage.db")),
             // Written ONLY when the token env var is set: router validate
             // rejects an api_key_env pointing at an unset variable, which
@@ -261,11 +259,6 @@ usage_db = "{usage}"
             // single-state-dir：一个目录变量钉住全部状态落点（HOME 有意继承
             // ——agent CLI 需要自己的凭据；sebas 的状态全在目录内）。
             ("SEBAS_STATE_DIR", fs_string(&self.path)),
-            ("SEBAS_STATE_FILE", fs_string(&self.path.join("state.json"))),
-            (
-                "SEBAS_ROUTER_PROVIDER_OVERLAY",
-                fs_string(&self.path.join("providers.json")),
-            ),
             ("SEBAS_CORE_SECRET", "real-agent-e2e-secret".to_string()),
             // Router admin-plane auth (webui RouterClient bearer + embedded
             // router check): PUT /api/agent-defaults and sibling mutations

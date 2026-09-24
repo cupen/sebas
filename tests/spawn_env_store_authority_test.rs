@@ -1,12 +1,10 @@
-//! spawn 权威修正（make-core-own-provider-data 4.1）：`read_overlay_item`
-//! 不再优先读 legacy `providers.json`——状态库是权威。文件与库不一致时
-//! **以库为准**（回归：旧实现里 stale 文件会盖住库里的 `default_model`）。
+//! spawn 权威（make-core-own-provider-data 4.1 + retire-legacy-state-json
+//! 3.2/3.4）：状态库是**唯一**权威。盘上残留的 legacy `providers.json`
+//! 一律不被读取——它与库不一致时以库为准，库为空时也不从它救场。
 //!
 //! 独立测试二进制的原因（同 `state_channel_contract_test.rs`）：ENGINE 是
-//! 进程级 OnceLock，lib 单测进程不能初始化（会污染依赖「engine 未初始化走
-//! 文件回退」的并行测试）；这里显式初始化 fake engine，并把 env 重定向到
-//! 一次性目录。`state_store::load()` 走 `block_in_place`，必须用
-//! multi_thread 运行时。
+//! 进程级槽，在独立二进制里显式初始化 fake engine 才不会与其它测试的引擎
+//! 互踩。`state_store::load()` 走 `block_in_place`，用 multi_thread 运行时。
 
 use sebas_dispatch::provider_state::{ProviderMode, ProviderRuntimeState};
 use sebas_dispatch::state_store::{DefaultSelection, PersistedState};
@@ -95,8 +93,16 @@ fn seed_store_provider(name: &str, default_model: &str) {
     inner.providers.lock().unwrap().insert(name.into(), item);
 }
 
-/// 写一份与库**不一致**的 legacy providers.json（同名条目、不同 default_model）。
-fn write_conflicting_file(dir: &std::path::Path, name: &str, default_model: &str) {
+/// 在盘上写一份与库**不一致**的 legacy `providers.json`（同名条目、不同
+/// default_model），并把已退休的路径变量也导出一遍。
+///
+/// retire-legacy-state-json 3.4：这两样**都必须无效**——文件是孤儿，导出变量
+/// 不改变任何行为。返回路径供调用方断言文件逐字节未变。
+fn write_conflicting_file(
+    dir: &std::path::Path,
+    name: &str,
+    default_model: &str,
+) -> std::path::PathBuf {
     let doc = serde_json::json!({
         "providers": { name: {
             "base_url_anthropic": "https://file.example/anthropic",
@@ -111,7 +117,12 @@ fn write_conflicting_file(dir: &std::path::Path, name: &str, default_model: &str
     // SAFETY: ENV_LOCK 全程持有。
     unsafe {
         std::env::set_var("SEBAS_ROUTER_PROVIDER_OVERLAY", path.to_str().unwrap());
+        std::env::set_var(
+            "SEBAS_STATE_FILE",
+            dir.join("state.json").to_str().unwrap(),
+        );
     }
+    path
 }
 
 /// Direct 模式下 spawn 解析出的 `--model`（default_model 的投递路径）。
@@ -139,7 +150,7 @@ async fn store_beats_conflicting_legacy_file() {
     let _g = ENV_LOCK.lock().unwrap();
     let dir = tempfile::tempdir().unwrap();
     seed_store_provider("alpha", "store-model");
-    write_conflicting_file(dir.path(), "alpha", "file-model");
+    let legacy = write_conflicting_file(dir.path(), "alpha", "file-model");
 
     // read_overlay_item 经 compute_provider_resolution 投递 default_model：
     // 必须是库里的 store-model，不是文件的 file-model。
@@ -148,6 +159,8 @@ async fn store_beats_conflicting_legacy_file() {
         Some("store-model".into()),
         "文件与库不一致时以库为准（4.1）"
     );
+    // 而且文件根本没被碰过（不读、不改、不删、不搬）。
+    assert!(legacy.exists(), "遗留文件不得被搬走：{}", legacy.display());
 }
 
 /// 库里 tombstone 的 provider：即使 legacy 文件仍有条目，也视同不存在。
@@ -174,8 +187,8 @@ async fn store_tombstone_beats_legacy_file_entry() {
     );
 }
 
-/// 库为空（无该条目）而文件有 → 不再从文件救场：视同「找不到」，回退
-/// router_cfg（这里没有 → Off + warn）。
+/// 库为空（无该条目）而文件有 → **不**从文件救场（文件已退休，不是数据源）：
+/// 视同「找不到」，回退 router_cfg（这里没有 → Off + warn）。
 #[tokio::test(flavor = "multi_thread")]
 async fn file_only_entry_no_longer_shadows_missing_store_row() {
     let _g = ENV_LOCK.lock().unwrap();

@@ -21,20 +21,19 @@ use support::*;
 // ===== 配置 =====
 
 /// 双协议面标准 config：anthropic + openai 两 provider 指向各自 mock；
-/// 两把下游 token（`sk-gw-contract` / `sk-gw-openai`）；三条路由规则
-/// （claude-* / gpt-* / text-*）。
+/// 两把下游 token（`sk-gw-contract` / `sk-gw-openai`）。
+///
+/// oai 侧模型路由（gpt-4 / text-embedding-3-small → oai-mock）走**别名投影**
+/// ——`[router.routes]` 已作废，overlay 文件读取已随 retire-legacy-state-json
+/// 3.5 退休，别名改由 `contract_overlay()` 经 `start_router_with_overlay`
+/// 投影（与 core 通道订阅循环同一条路径）。
 fn base_config(anth_url: &str, oai_url: &str) -> String {
-    // oai 侧模型路由改走 overlay 别名（`[router.routes]` 已作废，
-    // simplify-service-config）：gpt-4 / text-embedding-3-small → oai-mock，
-    // 别名缺省透传 upstream model，字节级行为与原 glob 路由一致。
-    let overlay_path = contract_overlay_path().to_string_lossy().replace('\\', "/");
     format!(
         r#"
 [router]
 listen = "127.0.0.1:0"
 usage_db = "__USAGE__"
 default_provider = "anth-mock"
-provider_overlay = "{overlay_path}"
 
 auth_token = ["sk-gw-contract", "sk-gw-openai"]
 
@@ -50,24 +49,15 @@ api_key_env = "SEBAS_ROUTER_TEST_UPSTREAM_KEY_OAI"
     )
 }
 
-/// overlay 别名表：进程内只写一次（OnceLock 串行化并发 setup 的写窗口），
-/// 内容恒定——gpt-4 / text-embedding-3-small 别名到 oai-mock。
-fn contract_overlay_path() -> &'static std::path::PathBuf {
-    static OVERLAY: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
-    OVERLAY.get_or_init(|| {
-        let overlay = std::env::temp_dir().join("sebas-contract-overlay.json");
-        std::fs::write(
-            &overlay,
-            r#"{
-    "providers": {},
-    "model_aliases": {
-        "gpt-4": { "provider": "oai-mock" },
-        "text-embedding-3-small": { "provider": "oai-mock" }
-    }
-}"#,
-        )
-        .expect("write contract overlay");
-        overlay
+/// 别名快照：gpt-4 / text-embedding-3-small → oai-mock（缺省 upstream 透传，
+/// 字节级行为与原 glob 路由一致）。经 `start_router_with_overlay` 投影。
+fn contract_overlay() -> serde_json::Value {
+    serde_json::json!({
+        "providers": {},
+        "model_aliases": {
+            "gpt-4": { "provider": "oai-mock" },
+            "text-embedding-3-small": { "provider": "oai-mock" }
+        }
     })
 }
 
@@ -145,7 +135,7 @@ async fn setup() -> TestEnv {
     let anth = start_mock_upstream(WireProtocol::Anthropic).await;
     let oai = start_mock_upstream(WireProtocol::OpenAiChat).await;
     let cfg = base_config(&anth.url, &oai.url);
-    let gw = start_router(&cfg).await;
+    let gw = start_router_with_overlay(&cfg, contract_overlay()).await;
     TestEnv { gw, anth, oai }
 }
 

@@ -153,10 +153,7 @@ both live in tasks.py — the old `scripts/*sandbox*.sh` harnesses were removed
      `SEBAS_PROJECTS_PATH` is **retired** too (migrate-project-registry): the
      project registry lives in `projects.db`, there is no `projects.json` any
      more, and exporting the variable changes nothing.
-     Still pin `SEBAS_STATE_FILE` (default `~/.sebas/state.json`) and
-     `SEBAS_ROUTER_PROVIDER_OVERLAY` (default `~/.sebas/providers.json`) —
-     those two legacy files are not retired yet (retire-legacy-state-json),
-     and their fallback paths still read them. Keep `HOME` pinned for paths
+     Keep `HOME` pinned for paths
      still resolved via home (skills sync targets).
      Do **not** set `SEBAS_CORE_SECRET`: the core
      auto-arms (generates a key, writes it to `<config dir>/core.secret`,
@@ -175,11 +172,9 @@ both live in tasks.py — the old `scripts/*sandbox*.sh` harnesses were removed
 2. Run the two halves exactly as the watchdog would:
 
    ```bash
-   SEBAS_STATE_DIR=/tmp/sebas-itest SEBAS_STATE_FILE=/tmp/sebas-itest/state.json \
-     SEBAS_ROUTER_PROVIDER_OVERLAY=/tmp/sebas-itest/providers.json \
+   SEBAS_STATE_DIR=/tmp/sebas-itest \
      target/debug/sebas core -c /tmp/sebas-itest/config.toml         # core
-   SEBAS_STATE_DIR=/tmp/sebas-itest SEBAS_STATE_FILE=/tmp/sebas-itest/state.json \
-     SEBAS_ROUTER_PROVIDER_OVERLAY=/tmp/sebas-itest/providers.json \
+   SEBAS_STATE_DIR=/tmp/sebas-itest \
      target/debug/sebas webui -c /tmp/sebas-itest/config.toml        # webui
    ```
 
@@ -314,7 +309,9 @@ addr=127.0.0.1:<port>`，router 侧用自定义 provider（`[provider.fake]` 哑
    api_key = "sk-sandbox-dummy"
 
    [router]
-   provider_overlay = "<SB>/providers.json"   # missing file = no-op
+   # `provider_overlay` 已退休（retire-legacy-state-json 3.5）——router 不再读
+   # 任何 provider overlay 文件，写这个键不再有任何效果（provider 变更经
+   # core state channel 下发）。
    # persist-router-usage：用量落 router 自有的 SQLite 库（默认状态目录下的
    # usage.db，SEBAS_ROUTER_USAGE_DB 可覆盖）。旧的 `usage_file`（NDJSON）键
    # 已删除——残留会以未知键报错。保留期双闸（默认 30 天 / 20 万行，后台
@@ -328,19 +325,14 @@ addr=127.0.0.1:<port>`，router 侧用自定义 provider（`[provider.fake]` 哑
    `<SB>/core.secret` and clients discover it. single-state-dir 起状态 env
    只需 `SEBAS_STATE_DIR` 一个（两库 settings.db / projects.db 与
    auth.db / archive.json / services.json / nodes.json 全部
-   由它派生；`SEBAS_STATE_FILE` / `SEBAS_ROUTER_PROVIDER_OVERLAY` 照旧钉，
-   两个 legacy 文件尚未退休）：
+   由它派生）：
 
    ```bash
    cargo build
    SEBAS_STATE_DIR="<SB>" \
-     SEBAS_STATE_FILE="<SB>/state.json" \
-     SEBAS_ROUTER_PROVIDER_OVERLAY="<SB>/providers.json" \
      target/debug/sebas core -c "<SB>/config.toml" \
      --webui --webui-port 9877 > "<SB>/core.log" 2>&1
    SEBAS_STATE_DIR="<SB>" \
-     SEBAS_STATE_FILE="<SB>/state.json" \
-     SEBAS_ROUTER_PROVIDER_OVERLAY="<SB>/providers.json" \
      target/debug/sebas router -c "<SB>/config.toml" \
      --debug > "<SB>/router.log" 2>&1 &
    ```
@@ -409,7 +401,7 @@ env posture 结论。
 - **拓扑**：AGENTS.md 沙箱菜谱的最简单进程形态——单进程 bare core
   （`--webui --webui-port 9877`）+ 真实 `claude` CLI（PATH 查找）。全部状态
   路径（config、dispatch、media、acp、workspace、skills、channel、
-  `SEBAS_STATE_DIR` + 两个未退休的 legacy env）钉进一次性目录
+  `SEBAS_STATE_DIR`）钉进一次性目录
   `sebas-smoke-*`，跑完即毁（`--keep` 留现场调试）。
   不起独立 router：凭据走继承 env（provider 模式 Off），router 不在回合路径
   上，省掉真实凭据落盘。

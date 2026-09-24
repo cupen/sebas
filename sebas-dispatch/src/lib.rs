@@ -8,9 +8,12 @@ pub mod engine;
 pub mod error;
 pub mod native_bridge;
 pub mod provider_state;
-pub mod settings;
 pub mod state;
 pub mod state_store;
+/// 测试夹具：进程内内存状态引擎 + 换引擎 guard（retire-legacy-state-json 3.2
+/// 之后，没有引擎不再等于「回退读文件」，测试需要自带一个引擎）。
+#[doc(hidden)]
+pub mod test_engine;
 
 pub use crate::engine::{
     DispatchHandle, MsgIdMap, Out, PendingApproval, RemoteSessionView, SessionEvent, SessionInfo,
@@ -27,11 +30,12 @@ pub use state::{
     QueuedTurn, SessionIdentity, SessionMap,
 };
 
-/// 所有 SEBAS_STATE_FILE env 操作串行化（crud + provider_state 共享）。
+/// 既有的 env 串行锁（`SEBAS_STATE_FILE` 已退休，但别名/会话路径等仍用
+/// `SEBAS_*` 环境变量；保留锁与其调用点，避免并行测试互踩 env）。
 #[doc(hidden)]
 pub mod test_util {
     use std::sync::Mutex;
-    /// 全局锁，保护 SEBAS_STATE_FILE 环境变量不被并行测试竞争。
+    /// 全局锁，保护测试里的进程级 env 变更不被并行测试竞争。
     pub static STATE_FILE_LOCK: Mutex<()> = Mutex::new(());
     /// 锁住 STATE_FILE_LOCK，抗 poison。
     pub fn lock_state_file() -> std::sync::MutexGuard<'static, ()> {

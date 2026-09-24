@@ -469,18 +469,6 @@ const ENV_VAR_SPECS: &[EnvVarSpec] = &[
         unset_default: Some("127.0.0.1:8787"),
     },
     EnvVarSpec {
-        name: "SEBAS_ROUTER_PROVIDER_OVERLAY",
-        what: "Provider overlay file",
-        kind: EnvVarKind::Plain,
-        unset_default: Some("~/.sebas/providers.json"),
-    },
-    EnvVarSpec {
-        name: "SEBAS_STATE_FILE",
-        what: "Session state store path",
-        kind: EnvVarKind::Plain,
-        unset_default: Some("~/.sebas/state.json"),
-    },
-    EnvVarSpec {
         name: "SEBAS_STATE_DIR",
         what: "State directory: every state file/DB derives from it (per-file vars override)",
         kind: EnvVarKind::Plain,
@@ -2890,14 +2878,14 @@ mod env_endpoint_tests {
             .map(|i| i["name"].as_str().unwrap())
             .collect();
         // 清单全量钉死（single-state-dir：SEBAS_STATE_DB 退休，
-        // SEBAS_STATE_DIR 上位）：增删条目须显式过这里。
+        // SEBAS_STATE_DIR 上位；retire-legacy-state-json 3.6：
+        // SEBAS_ROUTER_PROVIDER_OVERLAY / SEBAS_STATE_FILE 也退休并从本清单
+        // 删除）：增删条目须显式过这里。
         assert_eq!(
             names,
             [
                 "SEBAS_ROUTER_CONFIG",
                 "SEBAS_ROUTER_LISTEN",
-                "SEBAS_ROUTER_PROVIDER_OVERLAY",
-                "SEBAS_STATE_FILE",
                 "SEBAS_STATE_DIR",
                 "SEBAS_WEBUI_PASSWORD",
                 "SEBAS_CONTROL_SECRET",

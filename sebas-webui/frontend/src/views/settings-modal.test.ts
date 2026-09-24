@@ -319,14 +319,14 @@ beforeEach(() => {
   apiMocks.env.mockResolvedValue({
     items: [
       {
-        name: 'SEBAS_STATE_DB',
-        what: 'Session state database path (default ~/.sebas/sebas.db)',
+        name: 'SEBAS_STATE_DIR',
+        what: 'State directory: every state file/DB derives from it',
         kind: 'plain',
-        value: '/tmp/sebas-itest/sebas.db',
+        value: '/tmp/sebas-itest',
       },
       {
-        name: 'SEBAS_STATE_FILE',
-        what: 'Session state store path (default ~/.sebas/state.json)',
+        name: 'SEBAS_HANG_TIMEOUT_SECS',
+        what: 'Agent driver hang timeout (seconds)',
         kind: 'plain',
         value: null,
       },
@@ -825,9 +825,9 @@ describe('split-env-vars-settings-section：Env Vars 分区（/api/env）', () =
     const rows = envRows(el)
     expect(rows.length).toBe(4)
     // plain 已设置 → 实际值。
-    expect(valueOf(rows, 'SEBAS_STATE_DB')).toBe('/tmp/sebas-itest/sebas.db')
+    expect(valueOf(rows, 'SEBAS_STATE_DIR')).toBe('/tmp/sebas-itest')
     // plain 未设置 → 「未设置（用默认）」。
-    expect(valueOf(rows, 'SEBAS_STATE_FILE')).toBe('未设置（用默认）')
+    expect(valueOf(rows, 'SEBAS_HANG_TIMEOUT_SECS')).toBe('未设置（用默认）')
     // set_unset（敏感）→ 只显已设置/未设置，与 set 布尔一致。
     expect(valueOf(rows, 'SEBAS_CONTROL_SECRET')).toBe('已设置')
     expect(valueOf(rows, 'SEBAS_FEISHU_APP_SECRET')).toBe('未设置')

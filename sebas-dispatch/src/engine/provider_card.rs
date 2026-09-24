@@ -994,22 +994,19 @@ mod tests {
 
     /// openspec/specs/provider-management/spec.md：所有走 FileStore / state_store 的测试需要
     /// 构造一个带 FileStore 的 DispatchHandle（与 provider_test.rs 一致）。
-    /// 返回 `(handle, _guard)` —— 调用方必须把 `_guard` 绑到 test 局部
-    /// 以保持锁和 SEBAS_STATE_FILE 不被中途重置。
+    ///
+    /// retire-legacy-state-json 3.2/3.4 之后没有文件回退：隔离手段从
+    /// 「把 `SEBAS_STATE_FILE` 指到临时文件」换成「装一个全新内存引擎」。
+    /// 返回 `(handle, _guard)` —— 调用方必须把 `_guard` 绑到 test 局部：
+    /// guard 既持有全局串行锁，也在 drop 时清空引擎。
+    ///
+    /// `_dir` 仅为调用点签名兼容保留（这些用例不再需要临时目录）。
     fn handle_with(
-        dir: &std::path::Path,
+        _dir: &std::path::Path,
         seed: Vec<Item>,
-    ) -> (DispatchHandle, std::sync::MutexGuard<'static, ()>) {
-        let _g = crate::test_util::lock_state_file();
-        // SAFETY: lock held. provider 数据在 providers.json，两个 env 都隔离。
-        unsafe {
-            std::env::set_var("SEBAS_STATE_FILE", dir.join("state.json").to_str().unwrap());
-            std::env::set_var(
-                "SEBAS_ROUTER_PROVIDER_OVERLAY",
-                dir.join("providers.json").to_str().unwrap(),
-            );
-        }
-        let store = FileStore::load(dir.join("providers.json"), "name", seed).unwrap();
+    ) -> (DispatchHandle, crate::test_engine::EngineGuard) {
+        let guard = crate::test_engine::install_fresh();
+        let store = FileStore::load("(state store)", "name", seed).unwrap();
         let forms = ProviderForms {
             preset: Arc::new(CrudForm::new(
                 FormSpec::new("provider-preset", "Provider（预设）", vec![]),
@@ -1029,7 +1026,7 @@ mod tests {
             Some(Arc::new(forms)),
             None,
         );
-        (h, _g)
+        (h, guard)
     }
 
     /// Serialize a neutral card and walk its wire JSON for button payloads.
@@ -1102,7 +1099,7 @@ mod tests {
         out
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn render_main_card_includes_all_sections_and_three_mode_buttons() {
         let dir = tempfile::tempdir().unwrap();
         let (handle, _guard) = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
@@ -1145,7 +1142,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn render_main_card_lists_provider_names_as_collapsed_panels() {
         let dir = tempfile::tempdir().unwrap();
         let (handle, _guard) = handle_with(
@@ -1187,7 +1184,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn mode_buttons_highlight_current_mode() {
         let dir = tempfile::tempdir().unwrap();
         let (handle, _guard) = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
@@ -1218,7 +1215,7 @@ mod tests {
         provider_state::update(|s| s.mode = ProviderMode::Off).unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn provider_row_renders_details_inside_collapsed_panel() {
         let dir = tempfile::tempdir().unwrap();
         let (handle, _guard) = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
@@ -1275,7 +1272,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn create_buttons_always_rendered_and_empty_list_hint() {
         // 空列表：显示「暂无 provider」提示，新建按钮仍在。
         let dir = tempfile::tempdir().unwrap();
@@ -1309,7 +1306,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn dispatch_route_for_mode_updates_state_and_refreshes() {
         let dir = tempfile::tempdir().unwrap();
         let (handle, _guard) = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
@@ -1325,7 +1322,7 @@ mod tests {
         provider_state::update(|s| s.mode = ProviderMode::Off).unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn dispatch_mode_to_direct_auto_fills_first_provider() {
         let dir = tempfile::tempdir().unwrap();
         let (handle, _guard) = handle_with(
@@ -1360,7 +1357,7 @@ mod tests {
         .unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn dispatch_route_for_default_direct_writes_state() {
         let dir = tempfile::tempdir().unwrap();
         let (handle, _guard) = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
@@ -1386,7 +1383,7 @@ mod tests {
         provider_state::update(|s| s.default_selection = None).unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn dispatch_route_for_delete_removes_item_and_clears_default() {
         let dir = tempfile::tempdir().unwrap();
         let (handle, _guard) = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
@@ -1413,7 +1410,7 @@ mod tests {
         assert!(state.default_selection.is_none());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn dispatch_route_for_set_default_direct_writes_state() {
         let dir = tempfile::tempdir().unwrap();
         let (handle, _guard) = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
@@ -1434,7 +1431,7 @@ mod tests {
         provider_state::update(|s| s.default_selection = None).unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn dispatch_returns_none_for_unknown_form_name() {
         let dir = tempfile::tempdir().unwrap();
         let (handle, _guard) = handle_with(dir.path(), Vec::new());
@@ -1444,7 +1441,7 @@ mod tests {
         assert!(out.is_none(), "未知 form 名应返回 None 让调用方兜底");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn edit_button_payload_uses_legacy_form_name() {
         // 「编辑」按钮必须发 `provider-preset` / `provider-custom` 老 form 名，
         // 让 `on_button` 的旧 provider_forms 分发按 item.preset 路由到正确表单。
@@ -1473,7 +1470,7 @@ mod tests {
     /// 的当前状态：provider 名出现在 placeholder 之外的位置（select_static
     /// 的 initial 字段），有 model 时 placeholder 追加「· 当前默认 model:
     /// <model>」。验证 dropdown 反映新字段。
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn default_direct_dropdown_shows_model_in_placeholder() {
         let dir = tempfile::tempdir().unwrap();
         let (handle, _guard) = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
@@ -1503,7 +1500,7 @@ mod tests {
 
     /// openspec/specs/provider-management/spec.md：default_selection 只设 provider 没设 model → placeholder
     /// 用普通版本（不含「· 默认 model」），让用户看不到「虚假的 model」。
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn default_direct_dropdown_placeholder_omits_model_when_none() {
         let dir = tempfile::tempdir().unwrap();
         let (handle, _guard) = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
@@ -1540,7 +1537,7 @@ mod tests {
 
     /// provider 行的折叠面板里应出现「🔍 探测 model 列表」按钮，
     /// payload 携带 form=provider-probe 和 name。
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn provider_row_renders_probe_button() {
         let dir = tempfile::tempdir().unwrap();
         let (handle, _guard) = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
@@ -1606,7 +1603,7 @@ mod tests {
     }
 
     /// dispatch 路径：FORM_PROBE_APPLY 把 `default_model` 写到 store。
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn dispatch_route_for_probe_apply_updates_default_model() {
         let dir = tempfile::tempdir().unwrap();
         let (handle, _guard) = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
@@ -1629,7 +1626,7 @@ mod tests {
     }
 
     /// dispatch 路径：FORM_BACK 直接刷回主卡（Out::SendCard / UpdateCard）。
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn dispatch_route_for_back_refreshes_main_card() {
         let dir = tempfile::tempdir().unwrap();
         let (handle, _guard) = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
@@ -1642,7 +1639,7 @@ mod tests {
     /// dispatch 路径：probe 按钮路由存在（FORM_PROBE）。走本地 mock 上游
     /// （add-fetch-models 起 card 探测改调 core 抓取 op，绝不外联真实
     /// provider URL）：mock 可达 → 成功结果卡。
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn dispatch_route_for_probe_emits_card() {
         // 最小 HTTP server：返回 openai-compatible models 列表。
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1695,7 +1692,7 @@ mod tests {
 
     /// openspec/specs/provider-management/spec.md：详情面板里的「协议」radio。选项 = auto /
     /// anthropic / openai；initial 跟随 item.protocol（缺省 auto）。
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn provider_row_renders_protocol_radio_with_three_options() {
         let dir = tempfile::tempdir().unwrap();
         let (handle, _guard) = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
@@ -1738,7 +1735,7 @@ mod tests {
 
     /// openspec/specs/provider-management/spec.md：item 已有 `protocol=openai` → initial 也跟
     /// 显式值（刷新后下拉不会重置回 auto）。
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn protocol_radio_reflects_existing_value() {
         let dir = tempfile::tempdir().unwrap();
         let mut ds_item = item("deepseek", Some("deepseek"));
@@ -1760,7 +1757,7 @@ mod tests {
 
     /// openspec/specs/provider-management/spec.md：dispatch FORM_PROTOCOL 把选中的 protocol
     /// 写回 store，其它字段不动。
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn dispatch_route_for_protocol_writes_to_store() {
         let dir = tempfile::tempdir().unwrap();
         let (handle, _guard) = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
@@ -1792,7 +1789,7 @@ mod tests {
 
     /// openspec/specs/provider-management/spec.md：dispatch FORM_PROTOCOL 收到非法值（不在
     /// auto/anthropic/openai 三档内）→ 忽略（store 不变）。
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn dispatch_route_for_protocol_rejects_invalid_value() {
         let dir = tempfile::tempdir().unwrap();
         let mut ds_item = item("deepseek", Some("deepseek"));
@@ -1816,7 +1813,7 @@ mod tests {
 
     /// 没有 preset 字段的 custom provider，其折叠面板里仍出探测按钮
     /// （custom provider 也可探测 /v1/models）。
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn details_panel_shows_probe_button_for_custom_provider() {
         // 构造无 preset 字段的 custom provider item。
         let dir = tempfile::tempdir().unwrap();
@@ -1841,7 +1838,7 @@ mod tests {
 
     /// openspec/specs/provider-management/spec.md：仅 OpenAI 端点的 provider 仍渲染探测按钮。
     /// 双协议 provider 的探测优先打 OpenAI URL，所以有 openai URL 即显示。
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn details_panel_shows_probe_button_when_only_openai_url_set() {
         // 自定义 provider：只有 base_url_openai、无 base_url_anthropic。
         let dir = tempfile::tempdir().unwrap();
@@ -1869,7 +1866,7 @@ mod tests {
     /// openspec/specs/provider-management/spec.md：仅 Anthropic 端点的 provider **不**渲染
     /// 探测按钮——Anthropic 协议无 `/v1/models` 端点是已知坏掉的，按
     /// spec 隐藏入口避免用户点必失败的按钮。
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn details_panel_hides_probe_button_when_only_anthropic_url_set() {
         // 自定义 provider：只有 base_url_anthropic、无 base_url_openai。
         let dir = tempfile::tempdir().unwrap();
@@ -1902,7 +1899,7 @@ mod tests {
 
     /// dispatch FORM_PROBE：探测响应是 HTTP 401 → 错误卡里含 401 信息。
     /// 用 std::net::TcpListener 起一个最小 HTTP server 返回 401。
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn dispatch_route_for_probe_handles_401_with_error_card() {
         // 起一个最小 HTTP server：任何路径都回 401 + 一个固定 JSON。
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1947,7 +1944,7 @@ mod tests {
 
     /// add-fetch-models 2.2 验收：成功结果卡与失败错误卡都绝不携带密钥
     /// 材料（明文 api_key、api_key_env 名、env 值均不出现在卡片文本）。
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn probe_cards_never_carry_key_material() {
         // 失败场景：mock 401（reason 只含状态码）。
         let fail_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2032,7 +2029,7 @@ mod tests {
 
     /// dispatch FORM_PROBE：探测成功时把官方返回的 model 列表写回 store 的
     /// `models` 目录字段（官方 `/models` 接口是 model 列表的权威来源）。
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn dispatch_route_for_probe_writes_models_catalog_on_success() {
         // 最小 HTTP server：返回 openai-compatible 的 models 列表。
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

@@ -39,9 +39,10 @@ pub mod usage;
 #[cfg(test)]
 pub(crate) mod test_util {
     //! 跨模块共享的测试串行锁。`RouterConfig::parse` 读进程 env
-    //! （SEBAS_ROUTER_LISTEN / SEBAS_ROUTER_PROVIDER_OVERLAY），任何
-    //! set/remove 这些 env 的测试都必须持有同一把锁——历史上 config.rs 与
-    //! debug.rs 各持一把 Mutex 产生跨模块竞态（flake）。
+    //! （SEBAS_ROUTER_LISTEN），任何 set/remove 这些 env 的测试都必须持有
+    //! 同一把锁——历史上 config.rs 与 debug.rs 各持一把 Mutex 产生跨模块
+    //! 竞态（flake）。（`SEBAS_ROUTER_PROVIDER_OVERLAY` 已随
+    //! retire-legacy-state-json 3.5 退休，不再是竞态源。）
     use std::sync::Mutex;
 
     pub static CONFIG_ENV_LOCK: Mutex<()> = Mutex::new(());

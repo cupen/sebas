@@ -210,7 +210,6 @@ mod tests {
             usage_max_rows: 200_000,
             usage_prune_interval_secs: 0,
             debug: false,
-            provider_overlay: "__test_no_overlay__.json".into(),
             default_provider: default.map(String::from),
             auth_token: Vec::new(),
             providers,

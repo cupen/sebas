@@ -2868,6 +2868,16 @@ async fn core_owned_provider_reaches_router_without_restart() {
         !sb.path.join("providers.json").exists(),
         "no provider file may be written in the core-owned topology"
     );
+    // retire-legacy-state-json 5.3：三个 legacy 状态文件在进程级 e2e 里
+    // **一个都不该出现**——core 全程没有写过它们（状态库是唯一权威：文件既不
+    // 写、也不读、也不导入）。`providers.json` 是 router 侧的旧 overlay；
+    // `state.json` / `settings.json` 是 core 侧的旧运行态与卡片配置。
+    for legacy in ["state.json", "settings.json", "providers.json"] {
+        assert!(
+            !sb.path.join(legacy).exists(),
+            "legacy state file {legacy} must never be created (retire-legacy-state-json)"
+        );
+    }
     // router 子进程全程未重启（同一 pid），且 pid 确是 router 子进程
     // （cmdline 首参校验——进程树定位按 cmdline 子串匹配，先自证锚点）。
     let pid_now = router_child_pid(watchdog_pid);

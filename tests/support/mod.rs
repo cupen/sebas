@@ -355,7 +355,6 @@ impl Sandbox {
         let core_log = path.join("core.log");
         let webui_log = path.join("webui.log");
         let router_log = path.join("router.log");
-        let providers = path.join("providers.json");
         // persist-router-usage：用量落 router 自有的 SQLite 库（不再是 jsonl）。
         let usage = path.join("usage.db");
         let fake_claude = forward_slash(Path::new(env!("CARGO_BIN_EXE_fake-claude")));
@@ -409,7 +408,6 @@ api_key = "sk-sandbox-dummy"
 [router]
 # 默认 listen 是固定 8787——并行用例互踩，每个沙箱钉一个 probed 端口。
 listen = "127.0.0.1:{router_port}"
-provider_overlay = "{}"
 # persist-router-usage：用量落 router 自有的 SQLite 库（usage.db）。
 usage_db = "{}"
 "#,
@@ -418,7 +416,6 @@ usage_db = "{}"
             forward_slash(&path.join("downloads")),
             forward_slash(&path),
             forward_slash(&path.join("agents-skills")),
-            forward_slash(&providers),
             forward_slash(&usage),
         );
         std::fs::write(&config_path, &toml)
@@ -446,9 +443,9 @@ usage_db = "{}"
     /// single-state-dir：状态落点收敛为**一个目录变量**——`SEBAS_STATE_DIR`
     /// 派生全部落点（settings.db / projects.db / auth.db / archive.json /
     /// services.json / nodes.json），逐文件变量降级为显式
-    /// 覆盖，不再需要逐个钉。仍钉 `SEBAS_STATE_FILE` /
-    /// `SEBAS_ROUTER_PROVIDER_OVERLAY`：两文件尚未退休
-    /// （retire-legacy-state-json 的范围），降级回退路径仍在读它们。
+    /// 覆盖，不再需要逐个钉。retire-legacy-state-json 之后 `SEBAS_STATE_FILE`
+    /// / `SEBAS_ROUTER_PROVIDER_OVERLAY` 也已退休——导出它们不改变任何行为，
+    /// 所以这里不再钉（钉了反而让读者以为它们还有效）。
     /// `HOME` 钉进沙箱（skills sync 的落点等仍经 home 解析）。
     fn envs(&self, secret: Option<&str>) -> Vec<(&'static str, String)> {
         let mut envs = vec![
@@ -457,14 +454,6 @@ usage_db = "{}"
             (
                 "SEBAS_STATE_DIR",
                 forward_slash(&self.path),
-            ),
-            (
-                "SEBAS_STATE_FILE",
-                forward_slash(&self.path.join("state.json")),
-            ),
-            (
-                "SEBAS_ROUTER_PROVIDER_OVERLAY",
-                forward_slash(&self.path.join("providers.json")),
             ),
             // add-agent-skills：skills sync 的 backend 落点（claude →
             // ~/.claude/skills）经 `skills::resolve_home()` 的 env-first

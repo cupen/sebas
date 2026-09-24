@@ -217,21 +217,23 @@ fn providers_and_aliases_survive_writer_restart() {
 
 // ---- make-core-own-provider-data 1.1/1.4：defaults 并入 settings 域 ----
 
-/// env 重定向锁：SEBAS_ROUTER_PROVIDER_OVERLAY 是全局变量，defaults.json
-/// 的定位派生自它，跨测试并发会撞。
-static OVERLAY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// env 重定向锁：`SEBAS_STATE_DIR` 是全局变量，legacy `defaults.json` 的
+/// 定位由它派生，跨测试并发会撞。
+///
+/// retire-legacy-state-json 3.x：这里过去钉的是 `SEBAS_ROUTER_PROVIDER_OVERLAY`
+/// （defaults.json 曾从 overlay 路径同目录派生）；两个 legacy 变量都已退休，
+/// 现在钉状态目录。
+static STATE_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// 1.1 验收：经 settings 域写入默认 provider/model 后，默认值与 provider
 /// 数据同库持久化（重启仍在），且不产生独立的 defaults 文件。
 #[test]
 fn defaults_round_trip_with_provider_data_and_no_defaults_file() {
-    let _g = OVERLAY_LOCK.lock().unwrap();
+    let _g = STATE_DIR_LOCK.lock().unwrap();
     let dir = tempfile::tempdir().unwrap();
-    let overlay = dir.path().join("providers.json");
-    std::fs::write(&overlay, r#"{"providers": {}, "deleted": []}"#).unwrap();
-    // SAFETY: OVERLAY_LOCK 全程持有。
+    // SAFETY: STATE_DIR_LOCK 全程持有。
     unsafe {
-        std::env::set_var("SEBAS_ROUTER_PROVIDER_OVERLAY", overlay.to_str().unwrap());
+        std::env::set_var("SEBAS_STATE_DIR", dir.path().to_str().unwrap());
     }
 
     let path = dir.path().join("defaults-domain.db");
@@ -281,7 +283,7 @@ fn defaults_round_trip_with_provider_data_and_no_defaults_file() {
             "defaults must survive restart alongside provider data"
         );
     });
-    // 不产生独立的 defaults 文件（目录里只有我们预置的 providers.json 与 DB）。
+    // 不产生独立的 defaults 文件（目录里只有那个 DB）。
     let produced: Vec<_> = std::fs::read_dir(dir.path())
         .unwrap()
         .filter_map(|e| e.ok())
@@ -298,19 +300,17 @@ fn defaults_round_trip_with_provider_data_and_no_defaults_file() {
 /// 后续变化不被 legacy 文件覆盖）。
 #[test]
 fn legacy_defaults_json_imports_exactly_once() {
-    let _g = OVERLAY_LOCK.lock().unwrap();
+    let _g = STATE_DIR_LOCK.lock().unwrap();
     let dir = tempfile::tempdir().unwrap();
-    let overlay = dir.path().join("providers.json");
-    std::fs::write(&overlay, r#"{"providers": {}, "deleted": []}"#).unwrap();
     let defaults = dir.path().join("defaults.json");
     std::fs::write(
         &defaults,
         r#"{"provider": "legacy", "model": "legacy-model"}"#,
     )
     .unwrap();
-    // SAFETY: OVERLAY_LOCK 全程持有。
+    // SAFETY: STATE_DIR_LOCK 全程持有。
     unsafe {
-        std::env::set_var("SEBAS_ROUTER_PROVIDER_OVERLAY", overlay.to_str().unwrap());
+        std::env::set_var("SEBAS_STATE_DIR", dir.path().to_str().unwrap());
     }
 
     let path = dir.path().join("import-once.db");

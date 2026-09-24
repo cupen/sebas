@@ -414,8 +414,15 @@ mod model_and_provider {
     use super::*;
 
 /// Models-management journey (provider governance): a local stub upstream +
-/// provider overlay + model alias → router routes `my-claude` to the stub
-/// with the aliased upstream model; admin surface serves stats.
+/// a provider **in the core state store** + a model alias → the router picks
+/// both up over the core channel and routes `my-claude` to the stub with the
+/// aliased upstream model; admin surface serves stats.
+///
+/// retire-legacy-state-json 3.5/6.2：本旅程过去靠写 `providers.json`
+/// overlay 驱动（"read once at router build"）。overlay 文件已退休，router
+/// 只在启动时吃 `[provider.*]` 种子、此后由 core 通道热更新——所以现在
+/// 经 webui BFF 把 provider 与 alias 写进**状态库**，再断言 router 不重启
+/// 就路由到新别名。这正是生产权威路径。
 #[tokio::test]
 #[ignore = "acceptance journey; run with -- --ignored or invoke testsuite-acceptance"]
 async fn provider_governance_journey() {
@@ -427,40 +434,106 @@ async fn provider_governance_journey() {
     let asked_model: Arc<tokio::sync::Mutex<Option<String>>> = Arc::default();
     let stub = spawn_stub_upstream(asked_model.clone()).await;
 
-    // Provider overlay (read once at router build → write before spawn):
-    // provider `stub` pointing at the local upstream + alias my-claude →
-    // upstream model `stub-model`.
-    std::fs::write(
-        sb.path.join("providers.json"),
-        format!(
-            r#"{{
-                "providers": {{
-                    "stub": {{ "protocol": "anthropic", "base_url_anthropic": "http://127.0.0.1:{stub}", "api_key": "sk-stub" }}
-                }},
-                "model_aliases": {{
-                    "my-claude": {{ "provider": "stub", "upstream_model": "stub-model" }}
-                }}
-            }}"#
-        ),
-    )
-    .expect("write providers overlay");
-
-    let _core = sb.spawn_core();
-    let _router_child = sb.spawn_router_debug();
+    // core（进程内 webui：provider/alias 的唯一写者）+ standalone router 子进程。
+    // 进程内 webui 的端口由 free_port() 现取，与 $sb.webui_url() 不同。
+    let (_core, dashboard_port) = sb.spawn_core_inprocess_webui(&[]);
+    let dashboard = format!("http://127.0.0.1:{dashboard_port}");
+    wait_for("in-process webui health", STARTUP, &sb.path.clone(), {
+        let cli = cli.clone();
+        let url = dashboard.clone();
+        move || {
+            let cli = cli.clone();
+            let url = url.clone();
+            Box::pin(async move {
+                cli.get(format!("{url}/health"))
+                    .send()
+                    .await
+                    .ok()?
+                    .text()
+                    .await
+                    .ok()
+                    .map(|b| b.trim() == "ok")
+                    .filter(|ok| *ok)
+            })
+        }
+    })
+    .await;
+    // standalone router 子进程。它要接 core 通道就得拿到 `SEBAS_CORE_SOCKET`
+    // ——生产里由 watchdog 注入（src/watchdog.rs），本旅程按同一形状显式给。
+    // 没有它 router 只会吃 `[provider.*]` 种子（日志：`core channel socket not
+    // set ... keeping config as-is`），channel 热更新无从发生。
+    let socket = support::forward_slash(&sb.channel_path);
+    let _router_child = sb.spawn(
+        &[
+            "router",
+            "-c",
+            &support::forward_slash(&sb.config_path),
+            "--debug",
+        ],
+        &sb.core_secret,
+        &[("SEBAS_CORE_SOCKET", socket.as_str())],
+        &sb.router_log,
+    );
     let router = wait_router_addr(&sb).await;
 
+    // 经 webui BFF 写状态库：provider `stub` 指向本地假上游。
     let (status, body) = post_json(
         &cli,
-        &format!("{router}/v1/messages"),
+        &format!("{dashboard}/api/providers"),
         serde_json::json!({
-            "model": "my-claude",
-            "max_tokens": 16,
-            "messages": [{ "role": "user", "content": "hi" }]
+            "name": "stub",
+            "protocol": "anthropic",
+            "base_url_anthropic": format!("http://127.0.0.1:{stub}"),
+            "api_key": "sk-stub"
         }),
     )
     .await
-    .expect("router /v1/messages via alias");
-    assert_eq!(status, 200, "alias routing: {body}");
+    .expect("create provider via webui BFF");
+    assert_eq!(status, 201, "provider create: {body}");
+
+    // 同一权威：alias my-claude → 上游 model `stub-model`。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{dashboard}/api/model-aliases"),
+        serde_json::json!({
+            "alias": "my-claude",
+            "provider": "stub",
+            "upstream_model": "stub-model"
+        }),
+    )
+    .await
+    .expect("create model alias via webui BFF");
+    assert_eq!(status, 201, "alias create: {body}");
+
+    // 订阅驱动热生效：不重启 router，等别名路由首次命中（改变通知 →
+    // 快照拉取 → 热交换）。
+    let hint = sb.path.clone();
+    let router_url = router.clone();
+    let cli_wait = cli.clone();
+    let body = wait_for(
+        "router routes the core-stored alias",
+        Duration::from_secs(60),
+        &hint,
+        move || {
+            let cli = cli_wait.clone();
+            let url = format!("{router_url}/v1/messages");
+            Box::pin(async move {
+                let (status, body) = post_json(
+                    &cli,
+                    &url,
+                    serde_json::json!({
+                        "model": "my-claude",
+                        "max_tokens": 16,
+                        "messages": [{ "role": "user", "content": "hi" }]
+                    }),
+                )
+                .await
+                .ok()?;
+                (status == 200 && body["id"] == "msg_stub").then_some(body)
+            })
+        },
+    )
+    .await;
     assert_eq!(body["id"].as_str(), Some("msg_stub"), "stub reply: {body}");
 
     let asked = asked_model.lock().await.clone();
