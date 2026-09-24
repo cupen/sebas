@@ -13,7 +13,7 @@ pub mod server;
 pub use secret::{
     ChannelSecret, ChannelSecret as SecretSource, generate as generate_secret, write_secret_file,
 };
-pub use server::{default_socket_path, socket_path};
+pub use server::{default_socket_path, resolve_channel_path, socket_path};
 
 #[cfg(test)]
 mod tests;

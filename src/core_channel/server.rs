@@ -50,8 +50,39 @@ pub fn default_socket_path() -> PathBuf {
 /// Resolve the socket path for the given config: `[service.core] channel_path`
 /// overrides the default.
 pub fn socket_path(cfg: &crate::config::Config) -> PathBuf {
-    match cfg.service.core.channel_path.as_deref() {
-        Some(p) if !p.is_empty() => PathBuf::from(p),
+    resolve_channel_path(cfg.service.core.channel_path.as_deref())
+}
+
+/// [`socket_path`] 的纯函数核：configured 非空且为相对路径时，用
+/// `std::env::current_dir()` join 成绝对路径再返回；空/缺省走
+/// [`default_socket_path`]；绝对路径原样返回。
+///
+/// 为什么相对值要绝对化（Windows 管道冲突缺陷）：IPC 端点名由
+/// `sebas_ipc::fs_name()` 从路径字符串全局映射（`\\.\pipe\sebas/<路径>`），
+/// Windows 命名空间扁平——相对值让**所有**进程映射到同一个全局管道名，
+/// 并行测试沙箱里第一个 bind 成功、其余 core 启动即死（os error 5）。
+/// 绝对化后：
+/// - Unix：UDS 本就按调用方 CWD 解析相对路径，解析结果与既有语义**逐字节
+///   一致**（bind/connect 时 CWD 相同则落点相同），行为不变；
+/// - Windows：管道名随绝对路径（随各进程 CWD）唯一，并行沙箱互不踩踏。
+///
+/// core（[`socket_path`]）与 watchdog 侧（executor 探针、router spec 的
+/// `SEBAS_CORE_SOCKET` 注入）共用本函数，保证多进程解析**同一来源**——
+/// 任一侧单独按旧逻辑解析，绝对化差异会让它们指向不同端点。
+pub fn resolve_channel_path(configured: Option<&str>) -> PathBuf {
+    match configured {
+        Some(p) if !p.is_empty() => {
+            let path = PathBuf::from(p);
+            if path.is_absolute() {
+                return path;
+            }
+            match std::env::current_dir() {
+                Ok(cwd) => cwd.join(path),
+                // CWD 不可得的极端情况：退回原值，让 bind/connect 的报错如实
+                // 呈现，而不是在此处编造一个更错的路径。
+                Err(_) => path,
+            }
+        }
         _ => default_socket_path(),
     }
 }

@@ -466,14 +466,10 @@ pub async fn run_watchdog(
     // （内置 test provider，不转发上游）。同样始终注册以便后续启停。
     // 注入 core channel 的 secret + socket 路径（5.3 订阅投影）：router
     // 订阅状态变更需要与 core 相同的密钥与通道位置——core 自己按同一
-    // config 计算路径（channel_path 或缺省），此处直接用同一解析结果。
-    let core_channel_path = service
-        .core
-        .channel_path
-        .clone()
-        .filter(|p| !p.is_empty())
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(crate::core_channel::default_socket_path);
+    // config 计算路径（resolve_channel_path：channel_path 或缺省，相对值按
+    // CWD 绝对化），此处直接用同一解析结果。
+    let core_channel_path =
+        crate::core_channel::resolve_channel_path(service.core.channel_path.as_deref());
     services.register(
         spec_with_fail_fast(ServiceSpec::new(
             ServiceName::Router,

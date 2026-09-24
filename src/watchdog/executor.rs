@@ -156,15 +156,11 @@ impl ControlExecutor {
         services: ServiceManager,
     ) -> Self {
         // router 停止保护探针（2.2/D2）：通道位置与 core 自身解析同一来源
-        // （channel_path 或缺省），secret 走 env → config 目录 secret 文件的
-        // 既有发现链。
-        let channel_path = service
-            .core
-            .channel_path
-            .clone()
-            .filter(|p| !p.is_empty())
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(crate::core_channel::default_socket_path);
+        // （resolve_channel_path：channel_path 或缺省，相对值按 CWD 绝对化
+        // ——相对值直接用会在 Windows 全局管道名上与 core 分叉），secret 走
+        // env → config 目录 secret 文件的既有发现链。
+        let channel_path =
+            crate::core_channel::resolve_channel_path(service.core.channel_path.as_deref());
         let secret = crate::core_channel::secret::ChannelSecret::from_env_or_file(Some(
             crate::config::core_secret_file_path(
                 service.core.secret_file.as_deref(),
