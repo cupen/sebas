@@ -2498,10 +2498,10 @@ impl DispatchHandle {
     }
 }
 
-/// 零输出回合合成提示的固定文案（close-acceptance-blind-spots 4.1）：说明
-/// 「回合已结束且无输出」，措辞与停滞强收条目同风格（加粗导语 + 冒号说明）。
-pub(crate) const ZERO_OUTPUT_NOTICE: &str =
-    "**回合已结束且无输出**：本轮回合未产生任何可见输出（正文、thinking、工具、错误皆无）。";
+/// 零输出回合合成提示的固定文案（close-acceptance-blind-spots 4.1）：定义
+/// 已上移域层（extend-test-model-scenarios 3.4）——原生内核转录面要与引擎面
+/// 用同一句话，此处仅按原路径再导出。
+pub(crate) use sebas_domain::session::ZERO_OUTPUT_NOTICE;
 
 /// 一段 transcript 片段是否包含**可见输出**条目（close-acceptance-blind-spots
 /// 4.1，纯函数）：`kind = "content"` 且 `element_type ∈ {markdown, thinking,

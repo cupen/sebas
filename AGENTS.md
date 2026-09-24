@@ -204,6 +204,28 @@ pointing `[acp.agents.claude] path` at the `tests/bin` fake-claude stub
 (built by `cargo build`) lets ACP sessions complete full turns with zero real
 credentials. Let `<SB>` be the throwaway dir (e.g. `/tmp/sebas-debug`).
 
+`--debug` 的 `test` provider 是一个**场景模型**：请求体的 `model` 决定应答形状
+（`test/<scenario>`，未知场景回落到 bare `test` 的 echo），零凭据、零外呼、形状确定
+——**工作台行为类验收默认用它**（extend-test-model-scenarios；进程级 journey 在
+`tests/testsuite_e2e_test.rs`，native 浏览器装配见 `playwright.native.config.ts` +
+`TESTSUITE_NATIVE=1`）：
+
+| 模型 | 用途 | 确定性形状 |
+|---|---|---|
+| `test`（bare） | 既有冒烟/echo 面（路径零改动） | 固定文案 + 回显用户消息，usage 全零 |
+| `test/text` | 纯正文回合（对话连续性、模型切换对照） | 单 text 块，echo = 最后一条用户消息原文 |
+| `test/long` | 流式背压/增量呈现/流式中取消 | 固定长文（>1000 字符），按 32 字符窗口滴流下发 |
+| `test/thinking` | thinking 呈现形态 | thinking 块（带 signature）+ 正文，块序 thinking → text |
+| `test/tool-use` | 单工具环（权限 → 执行 → tool_result → 终文本） | 首个声明工具的 tool_use（input = `mkdir -p .sebas-probe`）→ 终文本 |
+| `test/tools-parallel` | 并行审批卡片各自独立 | 一回合发出全部声明工具的 tool_use（input 各异） |
+| `test/full` | 混排块序（thinking + 正文 + tool_use） | thinking → text → tool_use；终文本轮不带 thinking |
+| `test/empty` | 零输出回合通知路径 | 零 content 块、`end_turn`，usage 全零 |
+| `test/error` | 失败呈现 + 会话可用性 | HTTP 5xx + `api_error`（OpenAI 家族为对应错误形状），native 不重试 |
+
+场景名的另一侧是 **native 内核**（`SEBAS_AGENT_ROUTER_URL` 指 debug router +
+`SEBAS_AGENT_MODEL=test/<scenario>`），真实 claude-code 也能吃同一套场景
+（`test/tool-use` journey 3.11 实测）。
+
 需要「可拨的真上游」来压透传链路时，用 `sebas fake-provider --listen
 127.0.0.1:0 --journal <SB>/fake-journal.jsonl`（独立子命令，与 debug `test`
 provider 是两回事：test 在 router 内部自答、从不经过拨号路径）。它只服务

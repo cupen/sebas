@@ -276,24 +276,33 @@ pub async fn handle(State(state): State<AppState>, req: Request) -> Response {
     }
 
     // 7.5 debug test provider：路由命中内置 `test` provider 时，由 router
-    //     自身应答（固定文字 + 回显输入），不拨号上游。流式/非流式、
-    //     Anthropic/OpenAI 两个协议面都支持（路由层已对 test 豁免协议检查）。
+    //     自身应答（模型名携带场景，见 `test_provider`），不拨号上游。
+    //     流式/非流式、Anthropic/OpenAI 两个协议面都支持（路由层已对 test
+    //     豁免协议检查）。用量按场景的确定性值结算（bare `test` 保持全零）。
     if core.cfg.debug && decision.provider == "test" {
+        let scenario = test_provider::scenario_from_body(buffered_bytes.as_ref());
         let echoed = test_provider::echo_text(buffered_bytes.as_ref());
         let stream = test_provider::wants_stream(buffered_bytes.as_ref());
+        let scenario_model = model.clone().unwrap_or_else(|| "test".to_string());
         settle_inner(
             &state.sink,
             proto,
-            Some("test"),
+            Some(&scenario_model),
             "test",
-            Some("test"),
-            StatusCode::OK.as_u16(),
+            decision.upstream_model.as_deref(),
+            scenario.status().as_u16(),
             start,
             None,
-            UsageInfo::default(),
-            None,
+            scenario.usage_info(),
+            scenario.error(),
         );
-        return test_provider::test_response(proto, &echoed, stream);
+        return test_provider::scenario_response(
+            proto,
+            scenario,
+            buffered_bytes.as_ref(),
+            &echoed,
+            stream,
+        );
     }
 
     // 8. 取上游 provider 配置 + 上游 key。任一缺失（配置不一致）→ 502 防御性错误。

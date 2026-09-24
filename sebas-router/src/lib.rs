@@ -11,6 +11,8 @@
 
 pub mod access_log;
 pub mod admin;
+/// 确定性 agent-loop 规则（test 模型与 fake 上游共用的规则事实源）。
+pub mod agent_loop;
 /// Anthropic `/v1/messages` 响应形状构造（test_provider 与 fake_provider 共用）。
 pub mod anthropic_wire;
 pub mod auth;

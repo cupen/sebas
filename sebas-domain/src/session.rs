@@ -354,6 +354,17 @@ pub struct TurnStreamEvent {
     pub entries: Vec<TurnEntry>,
 }
 
+/// 零输出回合合成提示的固定文案（close-acceptance-blind-spots 4.1）：
+/// 说明「回合已结束且无输出」，措辞与停滞强收条目同风格（加粗导语 + 冒号
+/// 说明）。
+///
+/// 唯一定义在域层（extend-test-model-scenarios 3.4）：ACP/IM 引擎面
+/// （`sebas-dispatch`）与原生内核转录面（根 crate `agent_backend`）都要在
+/// 「回合正常结束但零可见输出」时追加同一条提示，文案漂移会让两侧用户面的
+/// 呈现无法对账。
+pub const ZERO_OUTPUT_NOTICE: &str =
+    "**回合已结束且无输出**：本轮回合未产生任何可见输出（正文、thinking、工具、错误皆无）。";
+
 impl TurnEntry {
     pub fn prompt(position: u64, content: impl Into<String>) -> Self {
         Self::new(

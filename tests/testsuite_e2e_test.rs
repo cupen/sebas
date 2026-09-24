@@ -566,6 +566,338 @@ fn append_frame_texts(ev: &serde_json::Value) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
+// extend-test-model-scenarios 3.x 的旅程基建：native 内核 × 独立 debug router
+// 的内置 `test` provider 场景模型（`test/<scenario>`）。全部经工作台用户面
+// （webui HTTP + WS）驱动，不读内核内部状态。
+// ---------------------------------------------------------------------------
+
+/// 场景清单：与 `sebas_router::test_provider::Scenario` 的模型名一一对应
+/// （`test/<scenario>`；bare `test` 是 echo 既有契约，不在场景清单内）。
+const TEST_MODEL_SCENARIOS: [&str; 8] = [
+    "text",
+    "long",
+    "thinking",
+    "tool-use",
+    "tools-parallel",
+    "full",
+    "empty",
+    "error",
+];
+
+/// 组装「native 内核 → 独立 debug router」栈：router 以 `--debug` 注入内置
+/// 等某个 TCP 端口真正接受连接（子进程就绪探针）。
+///
+/// 不依赖子进程日志行格式，也不吃「构建后首次启动慢」的亏：连不上就重试，
+/// 超时才失败——比固定窗口读日志稳。
+async fn wait_tcp(addr: &str, timeout: Duration) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if std::net::TcpStream::connect(addr).is_ok() {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no process accepted connections on {addr} within {timeout:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// `test` provider（自答、不拨上游、下游 auth 跳过），core 经
+/// `SEBAS_AGENT_ROUTER_URL` 指回它并把默认模型钉成 `test/<scenario>`，webui
+/// 面照常。返回的 Child 由调用方绑定保活（`sb` 自带收尾清理）。
+async fn spawn_test_model_stack(
+    sub: &str,
+    scenario: &str,
+) -> (
+    Sandbox,
+    tokio::process::Child,
+    tokio::process::Child,
+    tokio::process::Child,
+) {
+    let sb = Sandbox::new("testsuite_e2e", sub);
+    let router = sb.spawn_router_debug();
+    // 监听地址直接取沙箱钉住的端口（`[router] listen = 127.0.0.1:{router_port}`，
+    // 独立 router 进程按配置启动）——不依赖「等日志行」的 15s 窗口，构建后
+    // 首次启动慢时不会假失败。
+    let addr = format!("http://127.0.0.1:{}", sb.router_port);
+    wait_tcp(&addr.trim_start_matches("http://").to_string(), Duration::from_secs(30)).await;
+    let models: Vec<String> = TEST_MODEL_SCENARIOS
+        .iter()
+        .map(|s| format!("test/{s}"))
+        .collect();
+    let models_csv = models.join(",");
+    let model = format!("test/{scenario}");
+    let core = sb.spawn_core_extra(&[
+        ("SEBAS_AGENT_ROUTER_URL", addr.as_str()),
+        ("SEBAS_AGENT_MODEL", model.as_str()),
+        ("SEBAS_AGENT_MODELS", models_csv.as_str()),
+    ]);
+    let webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&http_client(), &sb).await;
+    (sb, core, webui, router)
+}
+
+/// 连 `/ws` 并等核心通道订阅上线（`session.resync` 即信号；4s 未到说明订阅
+/// 已在前置检查期间上线，与既有 claude drip 用例同款容忍）。
+async fn ws_subscribe(sb: &Sandbox) -> WsStream {
+    let mut ws = ws_connect(&sb.webui_url()).await;
+    let _ = tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            let ev = next_ws_frame(&mut ws).await;
+            if ev["method"] == "session.resync" {
+                break;
+            }
+        }
+    })
+    .await;
+    ws
+}
+
+/// 一条 native 回合在用户面留下的痕迹。
+#[derive(Default, Debug)]
+struct NativeTurnTrace {
+    /// 转录条目（element_type, content）依到达顺序。
+    entries: Vec<(String, String)>,
+    /// 弹出的权限请求帧（`permission.requested` 的 params）。
+    permissions: Vec<serde_json::Value>,
+    /// 审查卡答案投递回执（request_id, HTTP status）。
+    answers: Vec<(String, u16)>,
+    /// 携带条目的 `turn.append` 帧数（增量呈现/滴流的证据）。
+    frames: usize,
+}
+
+impl NativeTurnTrace {
+    /// 用户面正文（条目内容原样拼接——native 正文按 delta 逐条落账，
+    /// 分块粒度是实现细节，拼接后才是操作者看到的一整段）。
+    fn joined(&self) -> String {
+        self.entries.iter().map(|(_, c)| c.as_str()).collect()
+    }
+
+    fn element_types(&self) -> Vec<&str> {
+        self.entries.iter().map(|(t, _)| t.as_str()).collect()
+    }
+
+    fn gated_tools(&self) -> Vec<String> {
+        self.permissions
+            .iter()
+            .filter_map(|p| p["tool_name"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// 收尾摘要行（native 每轮必落）。
+    fn summary(&self) -> &str {
+        self.entries
+            .iter()
+            .map(|(_, c)| c.as_str())
+            .find(|c| c.contains("turn summary"))
+            .unwrap_or_default()
+    }
+
+    /// 摘要的**稳定部分**（丢掉每次不同的耗时毫秒）——跨轮可重复性比对用。
+    fn summary_shape(&self) -> &str {
+        self.summary().split(", ").next().unwrap_or_default()
+    }
+
+    /// 指定 `element_type` 的条目内容拼接（块序/形态断言用）。
+    fn text_of_type(&self, element_type: &str) -> String {
+        self.entries
+            .iter()
+            .filter(|(t, _)| t == element_type)
+            .map(|(_, c)| c.as_str())
+            .collect()
+    }
+
+    /// 回合的可见正文（排除收尾摘要；工具环回合还含 📖/✓ 过程行）。
+    fn answer_text(&self) -> String {
+        self.entries
+            .iter()
+            .filter(|(_, c)| !c.contains("turn summary"))
+            .map(|(_, c)| c.as_str())
+            .collect()
+    }
+}
+
+/// 读会话详情的转录条目（element_type, content）。
+async fn fetch_session_entries(
+    cli: &reqwest::Client,
+    url: &str,
+) -> Option<Vec<(String, String)>> {
+    let v = cli
+        .get(url)
+        .send()
+        .await
+        .ok()?
+        .json::<serde_json::Value>()
+        .await
+        .ok()?;
+    Some(
+        v["entries"]
+            .as_array()?
+            .iter()
+            .map(|e| {
+                (
+                    e["element_type"].as_str().unwrap_or("markdown").to_string(),
+                    e["content"].as_str().unwrap_or_default().to_string(),
+                )
+            })
+            .collect(),
+    )
+}
+
+/// 轮询会话详情直到转录里出现含 `needle` 的条目并返回全部条目。
+///
+/// cancel / error 的 `⚠` 尾随行落在「🗒 turn summary」**之后**（内核先发
+/// 回合摘要、会话任务再发错误事件），收尾标记不能作为等待条件。
+async fn wait_entry_containing(
+    cli: &reqwest::Client,
+    sb: &Sandbox,
+    key: &str,
+    needle: &str,
+) -> Vec<(String, String)> {
+    let url = format!("{}/api/sessions/{key}", sb.webui_url());
+    wait_for(
+        "native session entry to appear",
+        Duration::from_secs(30),
+        &sb.path.clone(),
+        {
+            let cli = cli.clone();
+            let needle = needle.to_string();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                let needle = needle.clone();
+                Box::pin(async move {
+                    let entries = fetch_session_entries(&cli, &url).await?;
+                    entries
+                        .iter()
+                        .any(|(_, c)| c.contains(&needle))
+                        .then_some(entries)
+                })
+            }
+        },
+    )
+    .await
+}
+
+/// 帧是否属于目标会话（`key` = 建会话返回的编码键，形如 `feishu%00agent-xxxx`）。
+///
+/// `turn.append` / `session.updated` 的 `session_id` 就是编码键；而
+/// `permission.requested` 的 `session_id` 是 ChannelKey 的 **JSON 文本**
+/// （`"{\"channel\":\"feishu\",\"reference\":\"agent-xxxx\"}"`，`PermissionNotice`
+/// 原样透出）——按 reference 尾段对齐两种形状。
+fn frame_targets_session(ev: &serde_json::Value, key: &str) -> bool {
+    let sid = &ev["params"]["session_id"];
+    if sid.as_str() == Some(key) {
+        return true;
+    }
+    let reference = sid
+        .as_str()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .and_then(|inner| inner["reference"].as_str().map(str::to_string))
+        .or_else(|| sid["reference"].as_str().map(str::to_string));
+    reference.is_some_and(|reference| key.ends_with(&reference))
+}
+
+/// 驱动一个 native 回合到收尾：读与 `key` 相关的 WS 帧，收下转录条目与权限
+/// 请求；每见到一条权限请求就按 `decide`（按工具名）决策并回投答案
+/// （`POST /api/permissions/{rid}/answer`），直到「🗒 turn summary」条目到达。
+///
+/// 回合中途的决策走真实用户面端点（不是内核直连），`decide` 收到的是
+/// 审查卡上的工具名。
+async fn drive_native_turn<F>(
+    cli: &reqwest::Client,
+    sb: &Sandbox,
+    ws: &mut WsStream,
+    key: &str,
+    timeout: Duration,
+    decide: F,
+) -> NativeTurnTrace
+where
+    F: Fn(&str) -> PermissionDecision,
+{
+    let mut trace = NativeTurnTrace::default();
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let ev = tokio::time::timeout_at(deadline, next_ws_frame(ws))
+            .await
+            .unwrap_or_else(|_| panic!("timed out driving native turn for {key}"));
+        let method = ev["method"].as_str().unwrap_or_default();
+        if method == "permission.requested" && frame_targets_session(&ev, key) {
+            let notice = ev["params"].clone();
+            let rid = notice["request_id"]
+                .as_str()
+                .expect("permission request id")
+                .to_string();
+            let tool = notice["tool_name"].as_str().unwrap_or_default().to_string();
+            let decision = decide(&tool);
+            trace.permissions.push(notice);
+            let (status, body) = post_json(
+                cli,
+                &format!("{}/api/permissions/{rid}/answer", sb.webui_url()),
+                serde_json::json!({ "decision": decision }),
+            )
+            .await
+            .expect("answer permission over the operator surface");
+            assert_eq!(
+                status, 200,
+                "the operator's decision must be delivered: {body}"
+            );
+            trace.answers.push((rid, status));
+            continue;
+        }
+        if method != "turn.append" || !frame_targets_session(&ev, key) {
+            continue;
+        }
+        let mut done = false;
+        if let Some(entries) = ev["params"]["entries"].as_array() {
+            if !entries.is_empty() {
+                trace.frames += 1;
+            }
+            for e in entries {
+                if e["kind"].as_str() != Some("content") {
+                    continue;
+                }
+                let element_type = e["element_type"].as_str().unwrap_or("markdown").to_string();
+                let content = e["content"].as_str().unwrap_or_default().to_string();
+                if content.contains("turn summary") {
+                    done = true;
+                }
+                trace.entries.push((element_type, content));
+            }
+        }
+        if done {
+            return trace;
+        }
+    }
+}
+
+/// 在沙箱目录下递归找名为 `name` 的条目（工具真的落盘的证据；深度上限 6）。
+fn find_under(root: &Path, name: &str) -> Option<std::path::PathBuf> {
+    let mut stack = vec![root.to_path_buf()];
+    let mut depth = 0;
+    while let Some(dir) = stack.pop() {
+        if depth > 6 {
+            break;
+        }
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if path.file_name().and_then(|n| n.to_str()) == Some(name) {
+                return Some(path);
+            }
+            if path.is_dir() {
+                stack.push(path);
+            }
+        }
+        depth += 1;
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
 // fix-webui-qa-defects-round5 的进程级回归（round5 tasks 1.x / 3.x 的真进程
 // 一层）：内嵌复合后端（`sebas core --webui`，DualSessionBackend = acp 桥 +
 // native）与 detached 两进程形态下的 pending 管理面可达 + 类型化拒绝透传
@@ -2618,6 +2950,352 @@ async fn env_posture_stays_silent_without_inherited_vars() {
         );
     }
 }
+
+    // ── extend-test-model-scenarios 3.1/3.2/3.9/3.13：场景模型驱动的工作台旅程 ──
+
+    /// 3.11（可选）：真实 claude-code 作 ACP 执行体、模型请求打到 **debug
+    /// router 的 `test/tool-use` 场景**（零凭据、零真实外呼）——`test` 场景
+    /// 模型不只服务 native 内核，也能驱动真实 CLI 的 ACP 通路。claude-code
+    /// 二进制缺席时诚实跳过（打印原因、不判失败）。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn test_model_scenario_journey_with_real_claude_code() {
+        let Some(claude_bin) = find_claude_bin() else {
+            eprintln!(
+                "[skip] test_model_scenario_journey_with_real_claude_code: no claude-code \
+                 binary (set SEBAS_TEST_CLAUDE_BIN or put `claude` on PATH); journey ready"
+            );
+            return;
+        };
+        let sb = Sandbox::new("testsuite_e2e", "real-claude-test-model");
+        let cli = http_client();
+        // 配置改写（claude 路径/args）必须在**拉起任何子进程之前**完成：
+        // 子进程启动期会读 config.toml，边写边读会让 router 落到默认 8787，
+        // 与沙箱钉住的 probed 端口不一致，后续请求就打不到场景模型。
+        sb.set_agent_claude_path(&claude_bin);
+        // CLI 侧模型名就是场景名（debug router 按 `test/<scenario>` 路由）；
+        // 必须在 set_agent_claude_path 之后追加（后者会重建该段并丢掉 args）。
+        sb.append_acp_args(&["--model", "test/tool-use"]);
+        let _router = sb.spawn_router_debug();
+        let base = format!("http://127.0.0.1:{}", sb.router_port);
+        wait_tcp(&format!("127.0.0.1:{}", sb.router_port), Duration::from_secs(30)).await;
+        // 真实登录态完全不参与：base_url 指 debug router、哑 token。
+        let _core = sb.spawn_core_extra(&[
+            ("ANTHROPIC_BASE_URL", base.as_str()),
+            ("ANTHROPIC_AUTH_TOKEN", "sk-test-model-scenario"),
+        ]);
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
+
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions", sb.webui_url()),
+            serde_json::json!({
+                "project_id": project_id,
+                "prompt": "Run the Bash tool with `echo ok`, then report what happened.",
+                "agent": "claude",
+                "mode": "allow",
+            }),
+        )
+        .await
+        .expect("create ACP session");
+        assert_eq!(status, 201, "session create: {body}");
+        let key = body["key"].as_str().expect("session key").to_string();
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+
+        // 真 CLI 冷启动 + 场景模型两轮应答；预算放宽但有界。
+        wait_turn_done(&cli, &sb, &detail_url).await;
+
+        // 通过路径断言：真实 CLI 的请求确实打到了场景模型（用量面可证），
+        // 且回合以 Done 收尾（不是悬空/失败）。
+        let records = read_usage_records(&sb.path.join("usage.db"));
+        assert!(
+            records
+                .iter()
+                .any(|r| r.model.as_deref() == Some("test/tool-use")),
+            "the real claude-code request must reach the scenario model: {records:?}"
+        );
+        let detail: serde_json::Value = cli
+            .get(&detail_url)
+            .send()
+            .await
+            .expect("session detail")
+            .json()
+            .await
+            .expect("detail json");
+        assert_eq!(
+            detail["status_slug"].as_str(),
+            Some("done"),
+            "the real CLI turn settles Done against the scenario model: {detail}"
+        );
+        // 更强的通过路径断言：真实 CLI 吃下场景模型的 tool_use、执行工具、
+        // 回传 tool_result，场景模型的次轮终文本因此出现在会话转录里——
+        // 真 CLI 的完整工具环确实由 `test/tool-use` 驱动（零真实外呼）。
+        let entries = fetch_session_entries(&cli, &detail_url).await.expect("session entries");
+        let transcript: String = entries.iter().map(|(_, c)| c.as_str()).collect();
+        assert!(
+            transcript.contains("test provider: tool loop complete."),
+            "the real CLI completes the scenario tool loop: {transcript}"
+        );
+    }
+
+    /// 3.1（+3.9 ②③/操作面全路径、3.13 用量断言）：native 内核经独立 debug
+    /// router 的 `test/tool-use` 场景驱动**真实工具环**——首轮 tool_use（bash）
+    /// → 策略门控（destructive → Ask）→ 工作台用户面弹审查卡 → 操作者
+    /// allow_once → 工具真的执行 → 次轮请求带 tool_result → 终文本收尾。
+    /// 同一旅程跑两遍断言形状可重复；随后按既有 helper 核对 usage.db 的确定性
+    /// 用量行（模型名 = 请求模型、上游模型 = 命名空间尾段）。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn test_model_tool_loop_runs_with_permission_and_records_usage() {
+        let (sb, _core, _webui, _router) =
+            spawn_test_model_stack("test-model-tool-loop", "tool-use").await;
+        let cli = http_client();
+        let mut ws = ws_subscribe(&sb).await;
+        let project_id = scene_project_id(&cli, &sb).await;
+
+        // 操作面全路径的一半：项目（scene project）→ 建会话 → 提交任务。
+        let mut traces: Vec<NativeTurnTrace> = Vec::new();
+        let mut keys: Vec<String> = Vec::new();
+        for round in 0..2 {
+            let (status, body) = post_json(
+                &cli,
+                &format!("{}/api/sessions", sb.webui_url()),
+                serde_json::json!({
+                    "project_id": project_id.clone(),
+                    "prompt": format!("round {round}: probe the workspace"),
+                    "agent": "native",
+                }),
+            )
+            .await
+            .expect("create native session");
+            assert_eq!(status, 201, "native spawn must not be rejected: {body}");
+            let key = body["key"].as_str().expect("session key").to_string();
+            let trace = drive_native_turn(
+                &cli,
+                &sb,
+                &mut ws,
+                &key,
+                Duration::from_secs(60),
+                |tool| {
+                    if tool == "bash" {
+                        PermissionDecision::AllowOnce
+                    } else {
+                        PermissionDecision::Deny
+                    }
+                },
+            )
+            .await;
+            traces.push(trace);
+            keys.push(key);
+        }
+        let trace = &traces[0];
+
+        // 审查卡由用户面弹出：恰好一张、工具是 bash、args 是场景的确定性
+        // 受控探针命令（策略判 destructive → Ask），request_id 非空。
+        assert_eq!(
+            trace.permissions.len(),
+            1,
+            "exactly one gated call in the tool loop: {:?}",
+            trace.permissions
+        );
+        let notice = &trace.permissions[0];
+        assert_eq!(notice["tool_name"].as_str(), Some("bash"));
+        assert_eq!(
+            notice["args"]["command"].as_str(),
+            Some("mkdir -p .sebas-probe"),
+            "the test model's deterministic tool input must reach the card verbatim"
+        );
+        assert!(
+            notice["request_id"].as_str().is_some_and(|s| !s.is_empty()),
+            "the card carries an independent request id: {notice}"
+        );
+
+        // 回合痕迹：待审 → 工具执行 → 终文本；两次模型调用、一次工具调用。
+        let text = trace.joined();
+        assert!(
+            text.contains("awaits approval"),
+            "the operator surface shows the pending card: {text}"
+        );
+        assert!(
+            text.contains("📖 **bash**") && text.contains("✓ **bash**"),
+            "the approved tool call is presented with its result: {text}"
+        );
+        assert!(
+            text.contains("test provider: tool loop complete."),
+            "the second model round (history carries tool_result) closes the loop: {text}"
+        );
+        assert!(
+            trace.summary().contains("2 model calls, 1 tools"),
+            "the loop really ran twice with one tool: {}",
+            trace.summary()
+        );
+        assert_eq!(
+            trace.answers.iter().map(|(_, s)| *s).collect::<Vec<_>>(),
+            vec![200],
+            "the operator's decision was delivered"
+        );
+
+        // 工具**真的执行了**：受控探针命令在会话工作目录下留下目录（不是
+        // 只在转录里假装）。
+        assert!(
+            find_under(&sb.path, ".sebas-probe").is_some(),
+            "the approved bash call must have created the probe dir under the sandbox"
+        );
+
+        // 3.9 ②：同场景重跑，回合形状（条目类型序列 + 门控工具 + 计数）可重复。
+        let shape = |t: &NativeTurnTrace| {
+            (
+                t.entries
+                    .iter()
+                    .map(|(ty, _)| ty.clone())
+                    .collect::<Vec<String>>(),
+                t.gated_tools(),
+                t.summary_shape().to_string(),
+            )
+        };
+        assert_eq!(
+            shape(&traces[1]),
+            shape(trace),
+            "a second run of the same journey must produce the same turn shape"
+        );
+
+        // 3.9 ④ 另一半：会话可关闭（收尾），关闭后详情不再可读。
+        let key = &keys[0];
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/close", sb.webui_url()),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("close session");
+        assert_eq!(status, 200, "an idle native session must close: {body}");
+
+        // 3.13：用量落 usage.db——模型 = 请求模型（命名空间全名），上游模型 =
+        // 尾段；token 数是场景的确定性非零值。
+        let records = read_usage_records(&sb.path.join("usage.db"));
+        let loop_rows: Vec<_> = records
+            .iter()
+            .filter(|r| r.model.as_deref() == Some("test/tool-use"))
+            .collect();
+        assert!(
+            loop_rows.len() >= 2,
+            "both model rounds are recorded: {records:?}"
+        );
+        let row = loop_rows.last().expect("last loop row");
+        assert_eq!(row.provider, "test");
+        assert_eq!(row.upstream_model.as_deref(), Some("tool-use"));
+        assert_eq!(row.input_tokens, Some(19), "deterministic scenario usage");
+        assert_eq!(row.output_tokens, Some(29), "deterministic scenario usage");
+    }
+
+    /// 3.2：`test/tools-parallel` 一回合发出**全部**已声明工具的 tool_use
+    /// （确定性 input 各异）——策略门控只对 bash（Ask）与 web_fetch/web_search
+    /// （Network Off → Deny + 升级审查）出卡；每张卡一个独立 request_id，
+    /// 逐一决策后回合继续推进到终文本。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn test_model_parallel_tool_permissions_are_independent() {
+        let (sb, _core, _webui, _router) =
+            spawn_test_model_stack("test-model-tools-parallel", "tools-parallel").await;
+        let cli = http_client();
+        let mut ws = ws_subscribe(&sb).await;
+        let project_id = scene_project_id(&cli, &sb).await;
+
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions", sb.webui_url()),
+            serde_json::json!({
+                "project_id": project_id,
+                "prompt": "run every tool",
+                "agent": "native",
+            }),
+        )
+        .await
+        .expect("create native session");
+        assert_eq!(status, 201, "native spawn must not be rejected: {body}");
+        let key = body["key"].as_str().expect("session key").to_string();
+
+        let trace = drive_native_turn(
+            &cli,
+            &sb,
+            &mut ws,
+            &key,
+            Duration::from_secs(60),
+            |tool| match tool {
+                // 网络工具在默认策略下被拒（NetworkMode::Off）——操作者驳回。
+                "web_fetch" | "web_search" => PermissionDecision::Deny,
+                // 其余受控调用放行一次。
+                _ => PermissionDecision::AllowOnce,
+            },
+        )
+        .await;
+
+        // 门控子集：bash（策略 Ask）与两个网络工具（策略 Deny + 升级）必出卡；
+        // 其余工具按默认策略自动放行。注意 `edit` 可能加入门控——同一回合里
+        // 更早的 `write` 会在工作目录建出被 `edit` 的目标文件，策略于是判
+        // Destructive（回合内工具按声明顺序推进，门控集随之前移；本用例只钉
+        // 稳定子集，不钉执行顺序）。
+        let gated = trace.gated_tools();
+        assert!(
+            gated.len() >= 3 && gated.len() <= 4,
+            "the policy-gated subset asks for review: {gated:?}"
+        );
+        for tool in ["bash", "web_fetch", "web_search"] {
+            assert!(
+                gated.contains(&tool.to_string()),
+                "missing card for {tool}: {gated:?}"
+            );
+        }
+        assert!(
+            gated.iter().all(|t| [
+                "bash", "read", "write", "edit", "glob", "grep", "web_fetch", "web_search"
+            ]
+            .contains(&t.as_str())),
+            "cards only for declared tools: {gated:?}"
+        );
+        // 每张卡一个独立 request_id（互不串扰）。
+        let ids: Vec<&str> = trace
+            .permissions
+            .iter()
+            .filter_map(|p| p["request_id"].as_str())
+            .collect();
+        let mut unique = ids.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), ids.len(), "request ids must be independent: {ids:?}");
+        assert_eq!(
+            trace.answers.len(),
+            gated.len(),
+            "every card got exactly one decision: {:?}",
+            trace.answers
+        );
+        assert!(
+            trace.answers.iter().all(|(_, s)| *s == 200),
+            "each decision is delivered: {:?}",
+            trace.answers
+        );
+
+        // 逐一决策后回合继续推进到终文本（并行 tool_use → 全部 tool_result →
+        // 次轮终文本），每张卡在用户面留下策略落账。
+        let text = trace.joined();
+        for tool in &gated {
+            assert!(
+                text.contains(&format!("🛡 **{tool}** policy:")),
+                "the decision for {tool} is presented on the operator surface: {text}"
+            );
+        }
+        assert!(
+            text.contains("test provider: tool loop complete."),
+            "the parallel round still closes with the final text: {text}"
+        );
+        assert!(
+            trace.summary().contains("2 model calls"),
+            "one tool_use round + one final round: {}",
+            trace.summary()
+        );
+    }
 }
 
 mod channel_and_supervision {
@@ -4537,6 +5215,140 @@ async fn claude_model_surface_reaches_snapshot_and_switch_round_trips() {
         4
     );
 }
+
+    /// 3.7：模型切换生效 journey——会话先以 `test/text` 完成一回合（无工具环），
+    /// 经用户面 `POST /api/sessions/{key}/model` 切到 `test/tool-use` 后，**下一
+    /// 回合**产生 tool_use 与权限请求；切前后两回合各自的呈现形状都保留。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn test_model_switch_takes_effect_on_the_next_turn() {
+        let (sb, _core, _webui, _router) =
+            spawn_test_model_stack("test-model-switch", "text").await;
+        let cli = http_client();
+        let mut ws = ws_subscribe(&sb).await;
+        let project_id = scene_project_id(&cli, &sb).await;
+
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions", sb.webui_url()),
+            serde_json::json!({
+                "project_id": project_id,
+                "prompt": "first turn",
+                "agent": "native",
+            }),
+        )
+        .await
+        .expect("create native session");
+        assert_eq!(status, 201, "native spawn must not be rejected: {body}");
+        let key = body["key"].as_str().expect("session key").to_string();
+
+        // 切前：test/text 只回正文，无工具环、无审查卡。
+        let before = drive_native_turn(
+            &cli,
+            &sb,
+            &mut ws,
+            &key,
+            Duration::from_secs(45),
+            |_| PermissionDecision::AllowOnce,
+        )
+        .await;
+        assert!(
+            before.permissions.is_empty(),
+            "the text scenario never asks for approval: {:?}",
+            before.permissions
+        );
+        assert!(
+            before
+                .joined()
+                .contains("I'm test provider. I received your message \"first turn\"."),
+            "the first turn echoes its own user message: {}",
+            before.joined()
+        );
+        assert!(
+            !before.joined().contains("📖 **bash**"),
+            "the text scenario emits no tool_use: {}",
+            before.joined()
+        );
+
+        // 切换：用户面设置会话模型（native 的可用模型来自 SEBAS_AGENT_MODELS）。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/model", sb.webui_url()),
+            serde_json::json!({ "model_id": "test/tool-use" }),
+        )
+        .await
+        .expect("switch model over the operator surface");
+        assert_eq!(status, 200, "model switch accepted: {body}");
+        let detail: serde_json::Value = cli
+            .get(&format!("{}/api/sessions/{key}", sb.webui_url()))
+            .send()
+            .await
+            .expect("session detail")
+            .json()
+            .await
+            .expect("detail json");
+        assert_eq!(
+            detail["current_model"].as_str(),
+            Some("test/tool-use"),
+            "the snapshot reflects the switch: {detail}"
+        );
+
+        // 切后：下一回合由 test/tool-use 驱动——tool_use + 权限请求 + 终文本。
+        let (status, _) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+            serde_json::json!({ "message": "second turn" }),
+        )
+        .await
+        .expect("send follow-up");
+        assert_eq!(status, 200, "follow-up accepted");
+        let after = drive_native_turn(
+            &cli,
+            &sb,
+            &mut ws,
+            &key,
+            Duration::from_secs(45),
+            |_| PermissionDecision::AllowOnce,
+        )
+        .await;
+        assert_eq!(
+            after.gated_tools(),
+            vec!["bash".to_string()],
+            "the switched scenario drives the next turn's tool loop: {:?}",
+            after.permissions
+        );
+        assert!(
+            after.joined().contains("📖 **bash**")
+                && after.joined().contains("✓ **bash**")
+                && after.joined().contains("test provider: tool loop complete."),
+            "the second turn keeps the tool loop shape: {}",
+            after.joined()
+        );
+
+        // 切前后两回合各自的形状都保留在转录里（不是覆盖）。
+        let entries = fetch_session_entries(
+            &cli,
+            &format!("{}/api/sessions/{key}", sb.webui_url()),
+        )
+        .await
+        .expect("session entries");
+        let transcript: String = entries.iter().map(|(_, c)| c.as_str()).collect();
+        assert!(
+            transcript.contains("I'm test provider. I received your message \"first turn\".")
+                && transcript.contains("📖 **bash**")
+                && transcript.contains("tool loop complete."),
+            "both turns' presentations survive in one transcript: {transcript}"
+        );
+
+        // 用量面：两个场景各留记录（切换真的换了请求模型）。
+        let records = read_usage_records(&sb.path.join("usage.db"));
+        let models: Vec<Option<String>> = records.iter().map(|r| r.model.clone()).collect();
+        assert!(
+            models.contains(&Some("test/text".to_string()))
+                && models.contains(&Some("test/tool-use".to_string())),
+            "both scenario models were requested: {models:?}"
+        );
+    }
 }
 
 mod sandbox_and_state_dir {
@@ -6979,6 +7791,528 @@ async fn archive_restore_preserves_the_row_naming_sources() {
     assert_eq!(status, 200, "the restored session must be writable: {body}");
     wait_turn_done(&cli, &sb, &detail_url).await;
 }
+
+    // ── extend-test-model-scenarios 3.3/3.4/3.5/3.6/3.8：呈现与流式旅程 ─────
+
+    /// 3.3：`test/thinking` 的 thinking 块与 `test/full` 的混排（thinking +
+    /// 正文 + tool_use）都进转录，呈现类型可区分（`element_type = "thinking"`
+    /// 与 markdown 分开落账）、块序保持（thinking → 工具 → 终文本）。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn test_model_thinking_and_mixed_blocks_reach_the_transcript() {
+        let (sb, _core, _webui, _router) =
+            spawn_test_model_stack("test-model-thinking", "thinking").await;
+        let cli = http_client();
+        let mut ws = ws_subscribe(&sb).await;
+        let project_id = scene_project_id(&cli, &sb).await;
+
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions", sb.webui_url()),
+            serde_json::json!({
+                "project_id": project_id,
+                "prompt": "think about it",
+                "agent": "native",
+            }),
+        )
+        .await
+        .expect("create native session");
+        assert_eq!(status, 201, "native spawn must not be rejected: {body}");
+        let key = body["key"].as_str().expect("session key").to_string();
+
+        // ── test/thinking：thinking 与正文分列，形态可区分 ──
+        let trace = drive_native_turn(
+            &cli,
+            &sb,
+            &mut ws,
+            &key,
+            Duration::from_secs(45),
+            |_| PermissionDecision::AllowOnce,
+        )
+        .await;
+        assert!(
+            trace.permissions.is_empty(),
+            "the thinking scenario never asks for approval: {:?}",
+            trace.permissions
+        );
+        let thinking = trace.text_of_type("thinking");
+        assert!(
+            thinking.contains("test provider thinking:"),
+            "thinking lands as its own element type: {thinking:?}"
+        );
+        let joined = trace.joined();
+        assert!(
+            joined.contains("I'm test provider. I received your message \"think about it\"."),
+            "the answer text echoes the last user message: {joined}"
+        );
+        assert!(
+            joined.find("test provider thinking:").expect("thinking")
+                < joined
+                    .find("I'm test provider.")
+                    .expect("answer text"),
+            "block order: thinking precedes the answer text: {joined}"
+        );
+
+        // ── test/full：混排（thinking + 正文 + tool_use），块序保持 ──
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/model", sb.webui_url()),
+            serde_json::json!({ "model_id": "test/full" }),
+        )
+        .await
+        .expect("switch model");
+        assert_eq!(status, 200, "model switch must apply: {body}");
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+            serde_json::json!({ "message": "mix it" }),
+        )
+        .await
+        .expect("send follow-up");
+        assert_eq!(status, 200, "follow-up accepted: {body}");
+
+        let mixed = drive_native_turn(
+            &cli,
+            &sb,
+            &mut ws,
+            &key,
+            Duration::from_secs(45),
+            |_| PermissionDecision::AllowOnce,
+        )
+        .await;
+        assert_eq!(
+            mixed.gated_tools(),
+            vec!["bash".to_string()],
+            "the mixed turn's tool_use goes through the permission flow: {:?}",
+            mixed.permissions
+        );
+        let joined = mixed.joined();
+        for needle in [
+            "test provider thinking:",
+            "I'm test provider. I received your message \"mix it\".",
+            "📖 **bash**",
+            "✓ **bash**",
+            "test provider: tool loop complete.",
+        ] {
+            assert!(joined.contains(needle), "mixed turn misses {needle:?}: {joined}");
+        }
+        assert!(
+            !mixed.text_of_type("thinking").is_empty(),
+            "the mixed turn keeps its thinking block: {:?}",
+            mixed.element_types()
+        );
+        let thinking_at = joined.find("test provider thinking:").expect("thinking");
+        let tool_at = joined.find("✓ **bash**").expect("tool result");
+        let final_at = joined
+            .find("test provider: tool loop complete.")
+            .expect("final text");
+        assert!(
+            thinking_at < tool_at && tool_at < final_at,
+            "block order must be preserved (thinking → tool → final text): {joined}"
+        );
+    }
+
+    /// 3.4：`test/empty` 回合正常收尾但零可见输出 → 会话面追加零输出通知
+    /// （域层同文案的 `notice` 条目，落在回合摘要之前）；切回 `test/text` 的
+    /// 正常回合不追加通知。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn test_model_empty_turn_appends_the_zero_output_notice() {
+        let (sb, _core, _webui, _router) =
+            spawn_test_model_stack("test-model-empty", "empty").await;
+        let cli = http_client();
+        let mut ws = ws_subscribe(&sb).await;
+        let project_id = scene_project_id(&cli, &sb).await;
+
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions", sb.webui_url()),
+            serde_json::json!({
+                "project_id": project_id,
+                "prompt": "say nothing",
+                "agent": "native",
+            }),
+        )
+        .await
+        .expect("create native session");
+        assert_eq!(status, 201, "native spawn must not be rejected: {body}");
+        let key = body["key"].as_str().expect("session key").to_string();
+
+        let trace = drive_native_turn(
+            &cli,
+            &sb,
+            &mut ws,
+            &key,
+            Duration::from_secs(45),
+            |_| PermissionDecision::AllowOnce,
+        )
+        .await;
+
+        let notice = trace.text_of_type("notice");
+        assert!(
+            notice.contains("回合已结束且无输出"),
+            "an empty turn must project the shared notice text: {notice:?}"
+        );
+        // 除通知与回合摘要外没有可见输出（正文/thinking/工具皆无）。
+        assert_eq!(
+            trace.text_of_type("markdown"),
+            trace.summary(),
+            "the empty turn carries no visible output besides the turn marker: {:?}",
+            trace.entries
+        );
+        let notice_at = trace
+            .entries
+            .iter()
+            .position(|(t, _)| t == "notice")
+            .expect("notice position");
+        let summary_at = trace
+            .entries
+            .iter()
+            .position(|(_, c)| c.contains("turn summary"))
+            .expect("summary position");
+        assert!(
+            notice_at < summary_at,
+            "the notice lands before the turn marker: {:?}",
+            trace.entries
+        );
+
+        // 对照面：换回 test/text 的正常回合不追加通知（对话连续性同时断言
+        // echo = 最后一条用户消息原文）。
+        let (status, _) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/model", sb.webui_url()),
+            serde_json::json!({ "model_id": "test/text" }),
+        )
+        .await
+        .expect("switch model");
+        assert_eq!(status, 200);
+        let (status, _) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+            serde_json::json!({ "message": "now answer" }),
+        )
+        .await
+        .expect("send follow-up");
+        assert_eq!(status, 200);
+        let normal = drive_native_turn(
+            &cli,
+            &sb,
+            &mut ws,
+            &key,
+            Duration::from_secs(45),
+            |_| PermissionDecision::AllowOnce,
+        )
+        .await;
+        assert!(
+            normal.text_of_type("notice").is_empty(),
+            "a normal turn must not carry a zero-output notice: {:?}",
+            normal.entries
+        );
+        assert!(
+            normal
+                .joined()
+                .contains("I'm test provider. I received your message \"now answer\"."),
+            "the normal turn echoes the last user message: {}",
+            normal.joined()
+        );
+    }
+
+    /// 3.5 + 3.6：`test/long` 的流式应答——增量到达（多帧）、拼接与非流式
+    /// 应答逐字一致；流式中经用户面取消 → 流停止、取消如实呈现、会话此后
+    /// 仍能发起并跑完新回合。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn test_model_long_stream_is_incremental_and_cancellable() {
+        let (sb, _core, _webui, _router) =
+            spawn_test_model_stack("test-model-long", "long").await;
+        let cli = http_client();
+        let mut ws = ws_subscribe(&sb).await;
+        let project_id = scene_project_id(&cli, &sb).await;
+
+        // 非流式参照：同一场景经 router 直接取一次（用户面之外的唯一直接
+        // 调用，只用于比对文本；旅程主体仍是工作台面）。
+        let (status, body) = post_json(
+            &cli,
+            &format!("http://127.0.0.1:{}/v1/messages", sb.router_port),
+            serde_json::json!({
+                "model": "test/long",
+                "max_tokens": 64,
+                "stream": false,
+                "messages": [{ "role": "user", "content": "hi" }],
+            }),
+        )
+        .await
+        .expect("non-streaming reference");
+        assert_eq!(status, 200, "reference request: {body}");
+        let expected = body["content"][0]["text"]
+            .as_str()
+            .expect("reference text")
+            .to_string();
+        assert!(expected.len() > 1000, "the long scenario is a long text");
+
+        // ── 3.5：增量 + 拼接一致 ──
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions", sb.webui_url()),
+            serde_json::json!({
+                "project_id": project_id.clone(),
+                "prompt": "stream it",
+                "agent": "native",
+            }),
+        )
+        .await
+        .expect("create native session");
+        assert_eq!(status, 201, "native spawn must not be rejected: {body}");
+        let key = body["key"].as_str().expect("session key").to_string();
+
+        let trace = drive_native_turn(
+            &cli,
+            &sb,
+            &mut ws,
+            &key,
+            Duration::from_secs(90),
+            |_| PermissionDecision::AllowOnce,
+        )
+        .await;
+        assert!(
+            trace.frames >= 5,
+            "the long answer must arrive incrementally (multiple frames), got {}",
+            trace.frames
+        );
+        assert_eq!(
+            trace.answer_text(),
+            expected,
+            "the streamed deltas must concatenate to the non-streaming answer"
+        );
+
+        // ── 3.6：流式中取消 ──
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions", sb.webui_url()),
+            serde_json::json!({
+                "project_id": project_id,
+                "prompt": "cancel me mid-stream",
+                "agent": "native",
+            }),
+        )
+        .await
+        .expect("create native session");
+        assert_eq!(status, 201, "native spawn must not be rejected: {body}");
+        let key2 = body["key"].as_str().expect("session key").to_string();
+
+        // 等流真的开始（至少两条正文 delta 到达）再取消——取消必须落在流中间。
+        let mut deltas = 0usize;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        while deltas < 2 {
+            let ev = tokio::time::timeout_at(deadline, next_ws_frame(&mut ws))
+                .await
+                .expect("ws frame before cancel");
+            if ev["method"] == "turn.append" && frame_targets_session(&ev, &key2) {
+                deltas += ev["params"]["entries"]
+                    .as_array()
+                    .map(|entries| {
+                        entries
+                            .iter()
+                            .filter(|e| {
+                                e["kind"].as_str() == Some("content")
+                                    && !e["content"]
+                                        .as_str()
+                                        .unwrap_or_default()
+                                        .contains("turn summary")
+                            })
+                            .count()
+                    })
+                    .unwrap_or(0);
+            }
+        }
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key2}/cancel", sb.webui_url()),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("cancel over the operator surface");
+        assert_eq!(status, 200, "in-flight cancel must be accepted: {body}");
+
+        // 回合收尾后取消如实呈现（⚠ 行落在收尾标记之后）。
+        let cancelled = drive_native_turn(
+            &cli,
+            &sb,
+            &mut ws,
+            &key2,
+            Duration::from_secs(45),
+            |_| PermissionDecision::AllowOnce,
+        )
+        .await;
+        // 取消的回合照样走到收尾（有回合标记），不是悬空在飞。
+        assert!(
+            cancelled.summary().contains("model calls"),
+            "the cancelled turn still settles with its turn marker: {:?}",
+            cancelled.entries
+        );
+        let entries = wait_entry_containing(&cli, &sb, &key2, "turn cancelled").await;
+        assert!(
+            entries.iter().any(|(_, c)| c.contains("⚠ turn cancelled")),
+            "the operator surface reports the cancellation honestly: {entries:?}"
+        );
+        // 流确实停在半路：会话转录里的正文比完整长文短（不是吐完再取消）。
+        let partial: String = entries
+            .iter()
+            .filter(|(t, c)| t == "markdown" && !c.contains("turn summary") && !c.contains("⚠"))
+            .map(|(_, c)| c.as_str())
+            .collect();
+        assert!(
+            !partial.is_empty() && partial.len() < expected.len(),
+            "the cancelled stream must stop early ({} of {} chars)",
+            partial.len(),
+            expected.len()
+        );
+
+        // 会话此后仍可发起并跑完新回合（long 场景照样完整吐完）。
+        let (status, _) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key2}/message", sb.webui_url()),
+            serde_json::json!({ "message": "run it again" }),
+        )
+        .await
+        .expect("follow-up after cancel");
+        assert_eq!(status, 200, "the session stays usable after a cancel");
+        let after = drive_native_turn(
+            &cli,
+            &sb,
+            &mut ws,
+            &key2,
+            Duration::from_secs(90),
+            |_| PermissionDecision::AllowOnce,
+        )
+        .await;
+        assert!(
+            after.answer_text().len() >= expected.len(),
+            "the new turn streams the full answer ({} chars)",
+            after.answer_text().len()
+        );
+    }
+
+    /// 3.8：`test/error` 的 LLM 失败如实呈现（5xx 进转录，不伪装成功），
+    /// 会话按非终局错误语义留在工作台（native 5xx → terminal=false），
+    /// 其后仍能完成一次正常回合。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn test_model_error_surfaces_and_the_session_stays_workable() {
+        let (sb, _core, _webui, _router) =
+            spawn_test_model_stack("test-model-error", "error").await;
+        let cli = http_client();
+        let mut ws = ws_subscribe(&sb).await;
+        let project_id = scene_project_id(&cli, &sb).await;
+
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions", sb.webui_url()),
+            serde_json::json!({
+                "project_id": project_id,
+                "prompt": "fail please",
+                "agent": "native",
+            }),
+        )
+        .await
+        .expect("create native session");
+        assert_eq!(status, 201, "native spawn must not be rejected: {body}");
+        let key = body["key"].as_str().expect("session key").to_string();
+
+        let failed = drive_native_turn(
+            &cli,
+            &sb,
+            &mut ws,
+            &key,
+            Duration::from_secs(45),
+            |_| PermissionDecision::AllowOnce,
+        )
+        .await;
+        // 失败不伪装成功：没有正文、没有工具痕迹。
+        let text = failed.joined();
+        assert!(
+            !text.contains("I'm test provider.") && !text.contains("tool loop complete"),
+            "a failed turn must not fabricate an answer: {text}"
+        );
+        let entries = wait_entry_containing(&cli, &sb, &key, "HTTP 500").await;
+        let report = entries
+            .iter()
+            .map(|(_, c)| c.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            report.contains("⚠ HTTP 500"),
+            "the upstream failure is reported honestly: {report}"
+        );
+        assert!(
+            report.contains("api_error"),
+            "the upstream error body is preserved: {report}"
+        );
+
+        // 非终局错误：同一会话仍可换场景完成一次正常回合（可用性）。
+        let (status, _) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/model", sb.webui_url()),
+            serde_json::json!({ "model_id": "test/text" }),
+        )
+        .await
+        .expect("switch model");
+        assert_eq!(status, 200, "the failed session is still addressable");
+        let (status, _) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+            serde_json::json!({ "message": "recovered" }),
+        )
+        .await
+        .expect("send message after failure");
+        assert_eq!(status, 200, "the session stays usable after a non-terminal failure");
+        let recovered = drive_native_turn(
+            &cli,
+            &sb,
+            &mut ws,
+            &key,
+            Duration::from_secs(45),
+            |_| PermissionDecision::AllowOnce,
+        )
+        .await;
+        assert!(
+            recovered
+                .joined()
+                .contains("I'm test provider. I received your message \"recovered\"."),
+            "a normal turn completes after the failure: {}",
+            recovered.joined()
+        );
+
+        // 用量面：失败也如实入账（status 500 + 错误文案）。
+        let records = read_usage_records(&sb.path.join("usage.db"));
+        let failed_rows: Vec<_> = records
+            .iter()
+            .filter(|r| r.model.as_deref() == Some("test/error"))
+            .collect();
+        assert!(
+            !failed_rows.is_empty(),
+            "the failed upstream call is recorded: {records:?}"
+        );
+        assert_eq!(failed_rows.last().expect("row").status, 500);
+        // 重试行为的实测结论（design.md Open Questions）：native 后端对 5xx
+        // **不重试**——一次回合只留一条失败记录（真实 claude-code 的重试不在
+        // 本 journey 覆盖范围，3.11 只走 200 路径）。
+        assert_eq!(
+            failed_rows.len(),
+            1,
+            "native attempts a failing upstream exactly once: {failed_rows:?}"
+        );
+        assert!(
+            failed_rows
+                .last()
+                .expect("row")
+                .error
+                .as_deref()
+                .is_some_and(|e| !e.is_empty()),
+            "the recorded failure carries its cause"
+        );
+    }
+
 }
 
 mod scenario_projection {

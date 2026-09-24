@@ -194,19 +194,15 @@ pub fn load_scenario(path: Option<&Path>) -> Result<Scenario, FakeProviderError>
 // ---------------------------------------------------------------------------
 // 内置确定性规则（spec「内置 agent-loop 确定性规则」）
 // ---------------------------------------------------------------------------
+//
+// 规则判断本身已下沉到 `crate::agent_loop`（extend-test-model-scenarios 2.6：
+// 与 test 模型共用同一事实源，避免两处语义漂移）；此处保留同名 re-export，
+// 既有 `fake_provider::pick_tool` 等调用路径不变。文本常量与块 id 仍是本模块
+// 私有的契约（fake 上游的应答文案与 test 模型不同，判断同规范）。
 
-/// tool 选择偏好（小写精确匹配，按序）：先只读类（真实 agent 默认免审批），
-/// 再命令类；都不命中取工具表首个。
-const TOOL_PREFERENCE: &[&str] = &[
-    "read",
-    "glob",
-    "grep",
-    "bash",
-    "shell",
-    "run_command",
-    "execute_command",
-    "terminal",
-];
+pub use crate::agent_loop::{
+    deterministic_input, has_tool_result, pick_tool, tool_schema, tools_of,
+};
 
 /// 请求是否要求流式（body 的 `stream` 布尔）。
 pub fn wants_stream(body: Option<&Value>) -> bool {
@@ -215,115 +211,20 @@ pub fn wants_stream(body: Option<&Value>) -> bool {
         .unwrap_or(false)
 }
 
-/// 请求消息历史里是否已有 `tool_result`（Anthropic content 块）。
-pub fn has_tool_result(body: Option<&Value>) -> bool {
-    let Some(msgs) = body
-        .and_then(|v| v.get("messages"))
-        .and_then(Value::as_array)
-    else {
-        return false;
-    };
-    msgs.iter().any(|m| {
-        m.get("content")
-            .and_then(Value::as_array)
-            .is_some_and(|blocks| {
-                blocks
-                    .iter()
-                    .any(|b| b.get("type").and_then(Value::as_str) == Some("tool_result"))
-            })
-    })
-}
-
-/// 按偏好挑一个 tool，返回 `(name, input)`（无合法 tools → `None`）。
-pub fn pick_tool(tools: &[Value]) -> Option<(String, Value)> {
-    let named: Vec<(String, Option<&Value>)> = tools
-        .iter()
-        .filter_map(|t| {
-            let name = t.get("name").and_then(Value::as_str)?;
-            let schema = t
-                .get("input_schema")
-                .or_else(|| t.get("function").and_then(|f| f.get("parameters")));
-            Some((name.to_string(), schema))
-        })
-        .collect();
-    if named.is_empty() {
-        return None;
-    }
-    let chosen = TOOL_PREFERENCE
-        .iter()
-        .find_map(|pref| named.iter().find(|(n, _)| n.to_lowercase() == *pref))
-        .unwrap_or(&named[0]);
-    let (name, schema) = chosen;
-    Some((name.clone(), deterministic_input(*schema)))
-}
-
-/// 由 tool 的 input_schema 生成**确定性**最小合法 input：只填 `required`
-/// 字段，按属性类型/枚举取值。缺失 schema / 无 required → `{}`。
-pub fn deterministic_input(schema: Option<&Value>) -> Value {
-    let mut obj = serde_json::Map::new();
-    let Some(schema) = schema else {
-        return Value::Object(obj);
-    };
-    let required = schema
-        .get("required")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let props = schema.get("properties");
-    for key in required.iter().filter_map(Value::as_str) {
-        let prop = props.and_then(|p| p.get(key));
-        obj.insert(key.to_string(), deterministic_value(key, prop));
-    }
-    Value::Object(obj)
-}
-
-fn deterministic_value(key: &str, prop: Option<&Value>) -> Value {
-    // 枚举约束优先：取第一个非 null 值（真实 agent 的 subagent_type 等即此形态）。
-    if let Some(first) = prop
-        .and_then(|p| p.get("enum"))
-        .and_then(Value::as_array)
-        .and_then(|e| e.iter().find(|v| !v.is_null()))
-    {
-        return first.clone();
-    }
-    let ty = match prop.and_then(|p| p.get("type")) {
-        Some(Value::String(s)) => s.as_str(),
-        Some(Value::Array(types)) => types
-            .iter()
-            .filter_map(Value::as_str)
-            .find(|t| *t != "null")
-            .unwrap_or("string"),
-        _ => "string",
-    };
-    match ty {
-        "integer" | "number" => json!(0),
-        "boolean" => json!(false),
-        "array" => json!([]),
-        "object" => json!({}),
-        _ if key.to_lowercase().contains("command") => json!("echo ok"),
-        _ => json!("ok"),
-    }
-}
-
 /// 内置规则 → `(content 块数组, stop_reason)`。相同请求恒相同输出。
 pub fn builtin_response(body: Option<&Value>) -> (Vec<Value>, String) {
-    let tools = body
-        .and_then(|v| v.get("tools"))
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let tool_result = has_tool_result(body);
-    if !tools.is_empty()
-        && !tool_result
-        && let Some((name, input)) = pick_tool(&tools)
-    {
-        return (
+    match crate::agent_loop::loop_reply(body) {
+        crate::agent_loop::LoopReply::ToolUse { name, input } => (
             vec![tool_use_block(TOOL_USE_ID, &name, input)],
             "tool_use".to_string(),
-        );
+        ),
+        crate::agent_loop::LoopReply::FinalText => {
+            (vec![text_block(FINAL_TEXT)], "end_turn".to_string())
+        }
+        crate::agent_loop::LoopReply::PlainText => {
+            (vec![text_block(PLAIN_TEXT)], "end_turn".to_string())
+        }
     }
-    let text = if tool_result { FINAL_TEXT } else { PLAIN_TEXT };
-    (vec![text_block(text)], "end_turn".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -420,6 +321,8 @@ impl Engine {
                     content,
                     stop_reason,
                     usage: default_usage(),
+                    // fake 上游保持单帧 delta 的历史形状（不分块）。
+                    chunk_size: None,
                 };
                 if stream {
                     NextResponse::Sse {
@@ -477,6 +380,8 @@ impl Engine {
                         .usage
                         .map(usage_from_override)
                         .unwrap_or_else(default_usage),
+                    // fake 上游保持单帧 delta 的历史形状（不分块）。
+                    chunk_size: None,
                 };
                 if stream {
                     NextResponse::Sse {

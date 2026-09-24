@@ -62,6 +62,16 @@ struct NativeSession {
     /// 真实一拍；cancel 的 Idle 拒绝按它判定（内核对空闲 cancel 本就无效果，
     /// 会话无损，只是拒绝文案可能偏保守）。
     in_flight: bool,
+    /// （extend-test-model-scenarios 3.4）本轮是否已落过**可见输出**条目
+    /// （正文/thinking/工具/错误）。空闲态收到 prompt 开新一轮时复位；
+    /// 回合收尾（`AE::SessionSummary`）时仍为假 = 零输出回合，按域层文案
+    /// 追加一条 `notice` 合成提示，回合在时间线上不再不可见地消失。
+    ///
+    /// 与 ACP 面的差异：原生转录没有 `prompt` 条目（操作者提交不走内核
+    /// 事件），因此判据不是「最后一条 prompt 之后」而是宿主侧的开轮标志。
+    /// 排队连跑（busy 时再提交）沿用在飞近似的同一取舍：标志只在空闲开轮
+    /// 时复位，排队轮次的零输出不单独补提示。
+    turn_visible_output: bool,
 }
 
 impl NativeSession {
@@ -370,6 +380,14 @@ impl NativeAgentBackend {
             element_type: &str,
             content: String,
         ) {
+            // extend-test-model-scenarios 3.4：可见输出记账（判据与
+            // `sebas-dispatch` 引擎面 `turn_has_visible_output` 同表：
+            // markdown/thinking/tool/error 且内容非空；notice 本身不算）。
+            if matches!(element_type, "markdown" | "thinking" | "tool" | "error")
+                && !content.is_empty()
+            {
+                session.turn_visible_output = true;
+            }
             let entry = session.push_entry(element_type, content);
             let _ = turn_events.send(TurnStreamEvent {
                 channel: key.channel_str().to_string(),
@@ -399,9 +417,15 @@ impl NativeAgentBackend {
                         land(session, &turn_events, &key, "markdown", delta);
                         None
                     }
-                    AE::ThinkingDelta { .. } | AE::ToolProgress { .. } | AE::ToolFinish { .. } => {
+                    AE::ThinkingDelta { delta, .. } => {
+                        // extend-test-model-scenarios 3.3：thinking 逐段进转录
+                        // （`element_type = "thinking"`），前端折叠呈现、与正文
+                        // 可区分；`msg_count` 不计思考段。此前 thinking 在原生
+                        // 面被直接丢弃，test/thinking 场景无落点。
+                        land(session, &turn_events, &key, "thinking", delta);
                         None
                     }
+                    AE::ToolProgress { .. } | AE::ToolFinish { .. } => None,
                     AE::ToolStart {
                         tool_name, args, ..
                     } => {
@@ -476,6 +500,20 @@ impl NativeAgentBackend {
                         tool_calls,
                         ..
                     } => {
+                        // extend-test-model-scenarios 3.4：回合正常收尾但本轮零
+                        // 可见输出 → 追加域层同文案的 notice 合成提示（与
+                        // ACP/IM 引擎面 `append_zero_output_notice_if_empty`
+                        // 同语义：真实回合才补，notice 不重复补）。判据在落
+                        // summary 之前取，summary 自己不算可见输出。
+                        if !session.turn_visible_output {
+                            land(
+                                session,
+                                &turn_events,
+                                &key,
+                                "notice",
+                                sebas_domain::session::ZERO_OUTPUT_NOTICE.to_string(),
+                            );
+                        }
                         land(
                             session,
                             &turn_events,
@@ -604,6 +642,9 @@ impl SessionBackend for NativeAgentBackend {
                     default_model: self.default_model.clone(),
                     // 首条 prompt 即开轮（串行队列空）。
                     in_flight: true,
+                    // 开轮：可见输出计数从头开始（extend-test-model-scenarios
+                    // 3.4，零输出回合补 notice 的判据）。
+                    turn_visible_output: false,
                 },
             );
         }
@@ -664,6 +705,12 @@ impl SessionBackend for NativeAgentBackend {
         };
         // workbench-interaction-polish 1.1：空闲时这条 prompt 立即开轮；busy
         // 时内核排队，在飞标志保持 true 不变。
+        if !session.in_flight {
+            // 空闲开轮 → 新一轮的零输出判据复位（extend-test-model-scenarios
+            // 3.4）。排队轮次不复位：在飞近似下无法分辨轮界，宁可少报不误报
+            // （误报会让正常回合被追加零输出提示）。
+            session.turn_visible_output = false;
+        }
         session.in_flight = true;
         session.handle.prompt(message).await;
         Ok(())
@@ -1799,6 +1846,149 @@ mod tests {
         let snapshotted = backend.turns(key.clone(), 0).await.unwrap();
         assert_eq!(snapshotted, streamed, "turn stream == transcript");
 
+        backend.close(key).await.unwrap();
+    }
+
+    // ── extend-test-model-scenarios 3.3/3.4：thinking 落账与零输出提示 ──────
+
+    /// 一段 thinking + 一段正文的脚本 turn（`test/thinking` 的 wire 形状）。
+    fn thinking_turn() -> sebas_agent::llm::LlmTurn {
+        sebas_agent::llm::LlmTurn {
+            content: vec![
+                sebas_agent::message::ContentBlock::Thinking {
+                    thinking: "weighing the options".into(),
+                },
+                sebas_agent::message::ContentBlock::Text {
+                    text: "final answer".into(),
+                },
+            ],
+            stop_reason: sebas_agent::llm::StopReason::EndTurn,
+        }
+    }
+
+    /// 收集一轮的 turn 流（到 turn summary 收尾标记为止）。
+    async fn collect_turn(
+        turns: &mut broadcast::Receiver<TurnStreamEvent>,
+    ) -> Vec<TurnEntry> {
+        let deadline = Duration::from_secs(10);
+        let mut streamed: Vec<TurnEntry> = Vec::new();
+        loop {
+            let event = tokio::time::timeout(deadline, turns.recv())
+                .await
+                .expect("event timeout")
+                .expect("turn stream open");
+            let mut done = false;
+            for entry in event.entries {
+                if entry.content.contains("turn summary") {
+                    done = true;
+                }
+                streamed.push(entry);
+            }
+            if done {
+                return streamed;
+            }
+        }
+    }
+
+    fn backend_with(llm: FakeLlmClient) -> Arc<NativeAgentBackend> {
+        let manager = SessionManager::new(
+            Arc::new(llm),
+            ToolRegistry::with_sandbox(Duration::from_secs(10), SandboxMode::Firewall),
+            SessionConfig::default(),
+        );
+        NativeAgentBackend::with_manager(manager)
+    }
+
+    #[tokio::test]
+    async fn native_pump_projects_thinking_as_its_own_entry() {
+        // 3.3：thinking delta 落一条 `element_type = "thinking"` 条目（此前
+        // 原生面直接丢弃），顺序在正文之前，且不计入可见回复段数。
+        let backend = backend_with(FakeLlmClient::scripted(vec![thinking_turn()]));
+        let mut turns = backend.subscribe_turn_events();
+        let ws = tempfile::tempdir().unwrap();
+        let key = backend
+            .spawn("go".into(), Some(ws.path().to_string_lossy().into()))
+            .await
+            .expect("spawn");
+
+        let streamed = collect_turn(&mut turns).await;
+        let kinds: Vec<(&str, &str)> = streamed
+            .iter()
+            .map(|e| (e.element_type.as_str(), e.content.as_str()))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ("thinking", "weighing the options"),
+                ("markdown", "final answer"),
+                ("markdown", "🗒 turn summary — 1 model calls, 0 tools, 0ms"),
+            ],
+            "thinking must land as its own entry before the text: {streamed:?}"
+        );
+        // 可见回复段数（派生口径）不数 thinking。
+        let snapshotted = backend.turns(key.clone(), 0).await.unwrap();
+        assert_eq!(snapshotted, streamed, "turn stream == transcript");
+        backend.close(key).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_pump_appends_zero_output_notice_for_a_silent_turn() {
+        // 3.4：回合正常收尾但零可见输出 → 在收尾标记之前补一条 `notice`
+        // 合成提示（与 ACP 引擎面同文案、同 element_type）。
+        let silent = sebas_agent::llm::LlmTurn {
+            content: vec![],
+            stop_reason: sebas_agent::llm::StopReason::EndTurn,
+        };
+        let backend = backend_with(FakeLlmClient::scripted(vec![silent]));
+        let mut turns = backend.subscribe_turn_events();
+        let ws = tempfile::tempdir().unwrap();
+        let key = backend
+            .spawn("go".into(), Some(ws.path().to_string_lossy().into()))
+            .await
+            .expect("spawn");
+
+        let streamed = collect_turn(&mut turns).await;
+        assert_eq!(streamed.len(), 2, "notice then summary: {streamed:?}");
+        assert_eq!(streamed[0].element_type, "notice");
+        assert_eq!(streamed[0].position, 0);
+        assert!(
+            streamed[0].content.contains("回合已结束且无输出"),
+            "notice text comes from the shared domain constant: {}",
+            streamed[0].content
+        );
+        assert!(
+            streamed[1].content.contains("turn summary"),
+            "turn-end marker still lands after the notice: {streamed:?}"
+        );
+        // notice 不是可见回复段：本轮唯一计入的 markdown 是收尾摘要，notice
+        // 贡献 0（`count_chat_messages` 跳过 notice）。
+        let info = backend
+            .session_info(&NativeAgentBackend::encode_key(&key))
+            .await
+            .expect("session info");
+        assert_eq!(
+            info.msg_count, 1,
+            "only the turn-summary markdown counts; the notice adds no segment"
+        );
+        backend.close(key).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_pump_skips_the_notice_when_the_turn_had_output() {
+        // 3.4 对照面：有正文的正常回合不补 notice（避免把正常回合染成零输出）。
+        let backend = backend_with(FakeLlmClient::scripted(vec![two_chunk_turn()]));
+        let mut turns = backend.subscribe_turn_events();
+        let ws = tempfile::tempdir().unwrap();
+        let key = backend
+            .spawn("go".into(), Some(ws.path().to_string_lossy().into()))
+            .await
+            .expect("spawn");
+
+        let streamed = collect_turn(&mut turns).await;
+        assert!(
+            streamed.iter().all(|e| e.element_type != "notice"),
+            "a turn with text must not carry a zero-output notice: {streamed:?}"
+        );
         backend.close(key).await.unwrap();
     }
 

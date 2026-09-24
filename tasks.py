@@ -520,6 +520,8 @@ def testsuite_webui(c, case=None):
                 cmd = f"pnpm --dir {suite_dir} exec playwright test --config playwright.auth-setup.config.ts"
             elif case == "dead-core":
                 cmd = f"pnpm --dir {suite_dir} exec playwright test --config playwright.dead-core.config.ts"
+            elif case == "native":
+                cmd = f"pnpm --dir {suite_dir} exec playwright test --config playwright.native.config.ts"
             elif case in ("deployment", "approval-detached"):
                 cmd = (
                     f"pnpm --dir {suite_dir} exec playwright test --config playwright.detached.config.ts"
@@ -534,6 +536,7 @@ def testsuite_webui(c, case=None):
                 f" && pnpm --dir {suite_dir} exec playwright test --config playwright.auth-setup.config.ts"
                 f" && pnpm --dir {suite_dir} exec playwright test --config playwright.detached.config.ts"
                 f" && pnpm --dir {suite_dir} exec playwright test --config playwright.dead-core.config.ts"
+                f" && pnpm --dir {suite_dir} exec playwright test --config playwright.native.config.ts"
             )
         # Pin the shard location explicitly (absolute) so the reporter never has
         # to guess the repo root from its own file path — that guess was one
@@ -575,6 +578,21 @@ _TESTSUITE_AUTH_PORT = 9898
 _TESTSUITE_HUMAN_PORT = 9879
 # auth-setup 姿态（auth 开、零用户、不预建户）：first-run root 引导旅程专用。
 _TESTSUITE_AUTH_SETUP_PORT = 9896
+# extend-test-model-scenarios 3.10：场景模型（native）姿态的专属端口——
+# 与默认沙箱（无 native 凭据）隔离，first-paint 的 native 禁用断言不受影响。
+_TESTSUITE_NATIVE_PORT = 9894
+# 九个场景 + bare `test`：composer 模型菜单里可切的目标（顺序即菜单序）。
+_NATIVE_SCENARIO_MODELS = (
+    "test",
+    "test/text",
+    "test/long",
+    "test/thinking",
+    "test/tool-use",
+    "test/tools-parallel",
+    "test/full",
+    "test/empty",
+    "test/error",
+)
 
 
 def _sandbox_bin(name):
@@ -749,7 +767,7 @@ def _health_ok(url):
         return False
 
 
-def _run_webui_sandbox(port, auth_on, keep, reuse, human, detached=False, provision=True):
+def _run_webui_sandbox(port, auth_on, keep, reuse, human, detached=False, provision=True, native=False):
     """Assemble a throwaway backend and block until signalled; then clean up.
     Mirrors the retired bash harness semantics (ports, env names, pointer and
     marker contracts) so Playwright configs and the reporter keep working.
@@ -857,6 +875,19 @@ def _run_webui_sandbox(port, auth_on, keep, reuse, human, detached=False, provis
         # 清理侧对两个进程都 SIGTERM。
         cfg = os.path.join(work, "config.toml")
         env = _sandbox_env(work)
+        if native:
+            # extend-test-model-scenarios 3.10：把 native 内核指向沙箱内**已在跑**
+            # 的 debug router（config 钉死 127.0.0.1:8791），默认模型 = test/text。
+            # 只有 TESTSUITE_NATIVE=1 的姿态注入这组 env——默认沙箱保持「未配置
+            # 模型凭据」，first-paint 的 native 禁用断言与既有旅程零影响。
+            env.update(
+                {
+                    "SEBAS_AGENT_ROUTER_URL": "http://127.0.0.1:8791",
+                    "SEBAS_AGENT_ROUTER_AUTH": "sk-gw-local-dev",
+                    "SEBAS_AGENT_MODEL": "test/text",
+                    "SEBAS_AGENT_MODELS": ",".join(_NATIVE_SCENARIO_MODELS),
+                }
+            )
         router_log = open(router_log_path, "w")
         router_proc = subprocess.Popen(
             [sebas_bin, "router", "-c", cfg, "--debug"],
@@ -1033,8 +1064,13 @@ def testsuite_webui_server(c):
     # auth-setup：auth 开但零用户（不预建户）——首启设置页旅程的第三形态。
     setup_mode = os.environ.get("TESTSUITE_AUTH_SETUP", "0") == "1"
     detached = os.environ.get("TESTSUITE_MODE", "") == "detached"
+    # extend-test-model-scenarios 3.10：native 场景模型姿态（专属端口 9894，
+    # 默认沙箱零影响）。
+    native = os.environ.get("TESTSUITE_NATIVE", "0") == "1"
     if detached:
         default_port = 9897
+    elif native:
+        default_port = _TESTSUITE_NATIVE_PORT
     elif setup_mode:
         default_port = _TESTSUITE_AUTH_SETUP_PORT
     else:
@@ -1048,6 +1084,7 @@ def testsuite_webui_server(c):
             human=os.environ.get("TESTSUITE_HUMAN", "0") == "1",
             detached=detached,
             provision=not setup_mode,
+            native=native,
         )
     finally:
         _cleanup_stale_sandboxes()

@@ -16,6 +16,26 @@
 > 浏览器级旅程：`invoke testsuite-webui`（`tests/testsuite-webui/`，Playwright + chromium，
 > 旅程账本见 `tests/testsuite-webui/README.md` 与 `openspec/changes/add-webui-playwright-tests`）
 
+> **定向（extend-test-model-scenarios，2026-09-24）：工作台行为验收默认用 `test` 场景模型。**
+> 本轮把「工作台行为」类验收的证据载体从「真上游/桩应答」转为 debug router 内置的
+> `test` 场景模型（九场景 + bare `test`，零凭据、零外呼、确定性形状），新增进程级
+> journey 与一套 native 浏览器装配；**分母与 100% 口径不变**——本 change 只动
+> `openspec/changes/extend-test-model-scenarios/` 的 delta 与测试/装配，主 spec
+> 零改动（`git status --short openspec/specs` 为空），五簇 requirement 计数不受影响。
+> 本轮新增证据指针（行内已回填）：
+> - ① `Turn completing without visible output appends a notice` ← E
+>   `test_model_empty_turn_appends_the_zero_output_notice` + browser（native 载体）
+>   `test-model-scenarios.spec.ts`
+> - ② `set_config_option 换模型`（切换生效）← E
+>   `test_model_switch_takes_effect_on_the_next_turn`
+> - ③ `审批请求全执行体外显`（并行工具调用独立 request_id）← E
+>   `test_model_parallel_tool_permissions_are_independent`（3 张卡各自 request_id）
+> - ⑤ `Session cancel over the channel`（流式中取消 + 会话存活）← E
+>   `test_model_long_stream_is_incremental_and_cancellable`
+>
+> 形状类证据仍以原行内的既有引用为主（未删任何原证据）：新 journey 是同一 requirement
+> 的**追加**命中，不是替换。
+
 ## 矩阵图例
 
 - ✅ = 命中（含证据）　⚠️ = 缺口（未命中且未豁免）　🚫 = 豁免（cause）　➖ = 出账（requirement 自 spec REMOVED，不计分母不计豁免）
@@ -107,7 +127,7 @@ CLI、真实模型跑分、watchdog spawn-fail 进程级注入等）不变。
 | | Remote session lifespan is bound to its node（execution-node 归档新增）| ✅ | E `remote_node_pairs_survives_node_and_core_restarts`（节点重启 → terminated 点名成因、控制面重启会话延续、对账不复活）；J: `remote_node_workbench_journey`（离线/恢复对账与 terminated 呈现）|
 | | Spawn independence is observable in the workbench（execution-node 归档新增）| ✅ | sebas（core 层）`dispatch::tests::web_spawn_instruction_is_not_blocked_by_a_stalled_handshake`（跨会话 spawn 不互堵）；spawn 窗口暂存不排队：`spawn_race_test`；spawn 失败点名成因：`workspace_root_tests::spawn_failed_session_row_and_detail_carry_the_reason` + browser `errors.spec.ts`（spawn failure inline）；E `two_sessions_spawn_and_turn_concurrently` |
 | | Persisted spawning states settle on restore（close-acceptance-blind-spots Δ）| ✅ | E `restarted_spawning_session_redispatches_and_activates`、`restarted_spawning_session_failed_redispatch_lands_synthetic_error`；sebas-dispatch `state.rs::spawning_settle_tests`（僵尸 spawning 重启落定不阻塞其余恢复）|
-| | Turn completing without visible output appends a notice（close-acceptance-blind-spots Δ）| ✅ | J: `zero_output_turn_notice_journey`；E `empty_scenario_projects_zero_output_notice`；sebas-dispatch `tests/zero_output_notice_test.rs`；前端 `transcript-view.test.ts`（terminal slugs expire the receipt fact）+ `dashboard.test.ts`（receipt phase 到期）|
+| | Turn completing without visible output appends a notice（close-acceptance-blind-spots Δ）| ✅ | J: `zero_output_turn_notice_journey`；E `empty_scenario_projects_zero_output_notice`、`test_model_empty_turn_appends_the_zero_output_notice`（native 载体：notice 落在收尾标记之前，且正常回合不追加）；browser `test-model-scenarios.spec.ts`（native 载体 notice 条目呈现）；sebas-dispatch `tests/zero_output_notice_test.rs`；前端 `transcript-view.test.ts`（terminal slugs expire the receipt fact）+ `dashboard.test.ts`（receipt phase 到期）|
 | session-persistence | 默认选择语义 | ✅ | `state_persistence_test` |
 | | 运行态不入该库 | ✅ | `state_persistence_test` |
 | acp-session-mapping | 路由 id ↔ ACP id 映射 | ✅ | `acp_session_mapping_test` |
@@ -118,7 +138,7 @@ CLI、真实模型跑分、watchdog spawn-fail 进程级注入等）不变。
 | 能力 | requirement 簇 | 状态 | 证据 |
 |---|---|---|---|
 | acp-model-selection | 会话模型清单暴露 | ✅ | sebas-acp `acp_resume_test::spawn_outcome_carries_model_info_from_config_options`（ConfigOptions 进快照）；claude 驱动别名模型面（workbench-composer-input-polish 2.1–2.3）：`claude_model_selection.rs`（内置表 spawn 拼装/配置覆盖替换/帧观察 ModelChanged/set_model 控制链 + 帧纠偏）、`tests/config_test.rs`（models 键缺省/覆盖/空表回退）；E `claude_model_surface_reaches_snapshot_and_switch_round_trips`（别名表随快照可达 + 切换链路 200 + 帧确认）；前端 `workbench-composer.test.ts`（dropdown 喂清单/无 option 无 dropdown/只读 current 芯片/会话清单与创建目录独立 D8）；browser `models.spec.ts`（set_session_model happy-path + claude 别名表切换旅程）|
-| | set_config_option 换模型 | ✅ | add-acp-model-selection 测试（sebas-acp）；claude 控制协议等价通道（workbench-composer-input-polish 2.3）：`claude_model_selection.rs::set_model_switches_via_control_protocol_and_frames_correct`（journal 记 set_model、乐观 ModelChanged、帧纠偏）+ E 同上 |
+| | set_config_option 换模型 | ✅ | add-acp-model-selection 测试（sebas-acp）；claude 控制协议等价通道（workbench-composer-input-polish 2.3）：`claude_model_selection.rs::set_model_switches_via_control_protocol_and_frames_correct`（journal 记 set_model、乐观 ModelChanged、帧纠偏）+ E 同上；native 侧切换生效：E `test_model_switch_takes_effect_on_the_next_turn`（切前 text 无工具环、切后 tool_use + 权限请求，两回合形状都保留） |
 | | 模型选择存活于会话生命周期 | ✅ | 同上 |
 | router-model-aliases | 别名实体与持久化 | ✅ | sebas-router `config` overlay 测试；state_channel_contract `alias_mutation_rejects_invalid_entry`（core 落库面）|
 | | 别名解析优先级 | ✅ | 同上 |
@@ -245,7 +265,7 @@ CLI、真实模型跑分、watchdog spawn-fail 进程级注入等）不变。
 | | 回合内容获取 | ✅ | `backend_methods_reach_the_right_handlers`（turns 增量位置语义）；`session_events_test::tool_events_are_labelled_tool_in_turn_content`（submission 与 tool 条目可区分，conversation-view 修订）、`turns_are_incremental_by_position`；`full_e2e_test` 回合内容回读 |
 | | 核心不可达诚实降级 | ✅ | `unreachable_causes_are_distinct`、`client_converges_after_server_restart`；E `reachability_flips_across_core_restart`、`secret_rotation_self_heal_across_core_restart`；webui 全局横幅 + browser `deployment.spec.ts`（横幅 cause/composer 门禁/恢复消隐）|
 | | 协议使用中性会话键 | ✅ | `full_e2e_test`（ChannelKey 语义）；`core_channel/protocol.rs` 内联测试 |
-| | 审批请求全执行体外显 | ✅ | `acp_permission_request_streams_and_answer_routes_back`；`permission_flow_test`；browser `approval-detached.spec.ts`（detached 审批 allow/deny，cover B1.2）；E `permission_loop_allow_once_over_core_channel`（真实泊车非合成：订阅流 ApprovalRequested 带 request_id/tool/args）|
+| | 审批请求全执行体外显 | ✅ | `acp_permission_request_streams_and_answer_routes_back`；`permission_flow_test`；browser `approval-detached.spec.ts`（detached 审批 allow/deny，cover B1.2）；E `permission_loop_allow_once_over_core_channel`（真实泊车非合成：订阅流 ApprovalRequested 带 request_id/tool/args）、`test_model_parallel_tool_permissions_are_independent`（并行 tool_use 各自独立 request_id、逐一决策互不串扰）|
 | | Spawn backend 提示校验 | ✅ | src `agent_backend.rs`（`unknown_backend_hint_rejects_without_session`、`native_missing_credentials_rejection_names_the_backend`、缺省=ACP）|
 | | 通道上的 gated-call 审批 | ✅ | src `core_channel/tests.rs`（审批往返/无应答 fail-closed/unknown rid typed rejection）；`permission_flow_test`；E `permission_loop_allow_once/deny/allow_session_over_core_channel`（跨进程全环：帧下发→ApprovalAnswer→泊住 hook 复活→transcript 记录决定语义）|
 | | 通道上的会话模型选择 | ✅ | src `agent_backend.rs`（native key 分发 + unknown 拒绝 + override 落快照）；E/browser `models.spec.ts`（fakeacp set_session_model happy-path + 未知模型 typed rejection，cover B2.2）|

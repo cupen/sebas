@@ -115,5 +115,21 @@ journey 的设计标尺不是「跑通」，是**证明力**——全绿必须�
 
 ## Open Questions
 
-- thinking 块是否需要 `signature_delta`、流式 input_json_delta 的分片粒度：以真实客户端实测为准（D3），实测结论落本文件。
-- `test/full` 在有 tools 时是否第二轮也应含 thinking：实现取「终文本轮不带 thinking」（与真实模型的典型行为一致），如 journey 需要再调。
+（2026-09-24 实测结论回填；每条都有对应测试钉住，见 `tests/testsuite_e2e_test.rs` 的
+3.x journey 与 `sebas-router` 单测。）
+
+- **thinking 块的 `signature_delta`**：按需发送（块带 `signature` 时才发
+  `signature_delta`）。实测 native 内核对未知 delta 直接忽略，真实 claude-code
+  （3.11 journey）也照常吃下该 thinking 块并跑完工具环——**结论：保留「有则发」，
+  不强制、不阻塞任何客户端。**
+- **`input_json_delta` 分片粒度**：固定 8 字符窗口（`SCENARIO_CHUNK`）。非流式/流式
+  同构性由 1.3 的同构性单测钉住；native 侧按累加解析，拼接结果与非流式逐字一致
+  （3.5 journey 的 `answer_text == 非流式 text` 断言）。**结论：固定窗口，不随场景变。**
+- **未知 `test/<x>` 的处理**：回落到 bare `test` 的 echo 语义（`scenario_from_name`
+  未知 → Echo），单测钉住。**结论：echo 回落**（新增场景只加名字，老客户端不炸）。
+- **`test/full` 第二轮是否带 thinking**：终文本轮**不带** thinking（与真实模型典型
+  行为一致）；3.3 journey 断言混排回合块序 = thinking → 工具 → 终文本。**结论：不带。**
+- **`test/error` 的重试行为**：native 后端对 5xx **不重试**——3.8 journey 断言一次
+  失败回合只留一条用量失败记录（`failed_rows.len() == 1`）、转录只有一条 `⚠ HTTP 500`，
+  且会话非终局（terminal=false，其后换场景仍能完成正常回合）。真实 claude-code 的
+  5xx 重试不在本 change 覆盖范围（3.11 只走 200 路径）。**结论：native 单次尝试。**
