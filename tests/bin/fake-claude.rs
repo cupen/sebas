@@ -74,6 +74,14 @@
 //! - user text == "flood" → 1200 partial-stream chunks back-to-back, no
 //!   pauses — a ≥1000-entry transcript for the small-summary performance
 //!   assertion (fix-webui-streaming-liveness 6.3).
+//! - user text == "parallel" (add-acp-stream-approval-journeys 1.1) → ONE turn
+//!   with two tool_use blocks (distinct tool ids / tool names / inputs) and
+//!   two hook_callback control_requests emitted back-to-back — the second is
+//!   on the wire while the first is still undecided (「同时待批」). Decisions
+//!   are routed per request_id (out-of-order arrival included); each tool's
+//!   tool_result follows its own decision (allow → success text, deny →
+//!   is_error), then a post-loop text and result close the turn normally. This
+//!   is the driver-side data source for the parallel-approval-card journeys.
 
 use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
@@ -537,6 +545,8 @@ fn main() {
                     drip_turn(&mut flags, &mut io, &stdin_rx);
                 } else if text == "flood" {
                     flood_turn(&mut flags, &mut io, &stdin_rx);
+                } else if text == "parallel" {
+                    parallel_turn(&flags, &mut io, &stdin_rx, &mut hook_counter);
                 } else {
                     run_scenario(&mut flags, &mut io, &stdin_rx, &mut hook_counter);
                 }
@@ -598,6 +608,138 @@ fn perm_turn(
         io.emit(&tool_result_frame(sid, "tc-1", "denied by fake", true));
     }
     io.emit(&result_frame(sid, "success", false));
+}
+
+/// "parallel" prompt (add-acp-stream-approval-journeys 1.1): one turn that
+/// emits two tool_use blocks and TWO hook_callback control_requests
+/// back-to-back — the second goes on the wire while the first is still
+/// undecided, so both are 「同时待批」 from the stub's point of view. The
+/// test side may answer them in any order (routing is per request_id); each
+/// tool_result reflects its OWN decision (allow → success text, deny →
+/// is_error), then a post-loop text + result close the turn like tool-loop.
+fn parallel_turn(
+    flags: &Flags,
+    io: &mut Io,
+    stdin_rx: &std::sync::mpsc::Receiver<String>,
+    hook_counter: &mut u64,
+) {
+    let sid = flags.session_id.clone();
+    // 两个工具名/参数都不同：浏览器审批卡片据此断言「两张独立卡片，未合并」。
+    let tools: [(&str, &str, Value); 2] = [
+        ("tc-par-1", "Bash", json!({"command": "echo first"})),
+        ("tc-par-2", "Read", json!({"file_path": "/tmp/fake-parallel.txt"})),
+    ];
+    // 单回合并发两个 tool_use（同一条 assistant 帧的两个 content 块——真模型
+    // 并行工具调用的 wire 形态）。
+    io.emit(&json!({
+        "type": "assistant",
+        "session_id": sid,
+        "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "tc-par-1", "name": "Bash",
+             "input": {"command": "echo first"}},
+            {"type": "tool_use", "id": "tc-par-2", "name": "Read",
+             "input": {"file_path": "/tmp/fake-parallel.txt"}}
+        ]}
+    }));
+    // 连发两个 hook_callback，两次 emit 之间不做任何等待：第二个发出时第一个
+    // 必然仍未决（脚本自身的 wire 契约；进程级 journey 经 journal 钉死它）。
+    let req_ids: Vec<String> = tools
+        .iter()
+        .map(|(tool_id, name, input)| {
+            *hook_counter += 1;
+            let req_id = format!("fake-hook-{}", *hook_counter);
+            io.emit(&json!({
+                "type": "control_request",
+                "request_id": req_id,
+                "request": {
+                    "subtype": "hook_callback",
+                    "callback_id": "hook_0",
+                    "tool_use_id": tool_id,
+                    "input": {
+                        "hook_event_name": "PreToolUse",
+                        "session_id": sid,
+                        "tool_name": name,
+                        "tool_input": input,
+                        "cwd": "/tmp",
+                        "transcript_path": "/tmp/fake.jsonl"
+                    }
+                }
+            }));
+            req_id
+        })
+        .collect();
+    // 决定逐一到达（乱序也各自路由回正确的 request_id）→ 各自落 tool_result。
+    let decisions = wait_hook_decisions(stdin_rx, &req_ids, io);
+    for (i, (tool_id, name, _)) in tools.iter().enumerate() {
+        let decision = decisions
+            .get(&req_ids[i])
+            .map(String::as_str)
+            .unwrap_or("deny");
+        if decision == "allow" {
+            io.emit(&tool_result_frame(sid.as_str(), tool_id, &format!("{name} ok\n"), false));
+        } else {
+            io.emit(&tool_result_frame(sid.as_str(), tool_id, "denied by fake", true));
+        }
+    }
+    // 两个都落定后：环后正文 + result 正常收尾（与 tool-loop 同形态）。
+    emit_assistant_text(io, &sid, "parallel tools finished", reported_model(flags));
+    settle_pause(flags);
+    io.emit(&result_frame(&sid, "success", false));
+}
+
+/// `parallel_turn` 的决定等待：收齐 `request_ids` 的**全部**决定才返回，
+/// 每条决定按自己的 `request_id` 归档（乱序到达各归其位）。等待期间到的其它
+/// `control_request`（驱动看门狗探针 / set_model / set_permission_mode）照旧
+/// 即时 ack；interrupt 按既有合同 ack 后退出。stdin 关闭 = 剩余请求按 deny
+/// 兜底（fail closed，与 `wait_hook_decision` 同语义）。
+fn wait_hook_decisions(
+    stdin_rx: &std::sync::mpsc::Receiver<String>,
+    request_ids: &[String],
+    io: &mut Io,
+) -> std::collections::HashMap<String, String> {
+    let mut decisions: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    while decisions.len() < request_ids.len() {
+        let Ok(line) = stdin_rx.recv() else {
+            break;
+        };
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        io.journal_write("in", &v);
+        match v.get("type").and_then(Value::as_str).unwrap_or("") {
+            "control_request" => {
+                let other_id = v.get("request_id").and_then(Value::as_str).unwrap_or("");
+                let subtype = v
+                    .pointer("/request/subtype")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                io.emit(&json!({
+                    "type": "control_response",
+                    "response": {"subtype": "success", "request_id": other_id, "response": {}}
+                }));
+                if subtype == "interrupt" {
+                    // 与 wait_hook_decision 同款：interrupt 后 CLI 不可用。
+                    io.out.flush().unwrap();
+                    std::process::exit(1);
+                }
+            }
+            "control_response" => {
+                if let Some(rid) = v.pointer("/response/request_id").and_then(Value::as_str)
+                    && request_ids.iter().any(|r| r == rid)
+                {
+                    let decision = v
+                        .pointer("/response/response/hookSpecificOutput/permissionDecision")
+                        .and_then(Value::as_str)
+                        .unwrap_or("deny")
+                        .to_string();
+                    decisions.insert(rid.to_string(), decision);
+                }
+            }
+            _ => {}
+        }
+    }
+    decisions
 }
 
 /// "stream" prompt: 5 text chunks, then a pause so the debounced pump can
@@ -1318,5 +1460,216 @@ mod delta_gap_tests {
             parse_flags_from(&argv(&["--delta-gap-ms", "abc"])).delta_gap_ms,
             0
         );
+    }
+}
+
+#[cfg(test)]
+mod parallel_turn_tests {
+    //! add-acp-stream-approval-journeys 1.1/1.2：`parallel` 剧本的桩内行为
+    //! 单测——单回合并发两个 tool_use + 两个 hook_callback（第二个发出时第一个
+    //! 仍未决）、决定按 `request_id` 各自路由（乱序到达亦然）、三种决定组合
+    //! （allow/allow、allow/deny、deny/deny）下每个 tool_result 与自身决定一致、
+    //! deny 不阻止另一工具的执行与回合收尾、两个都落定后才出环后正文 + result。
+
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// 可回读的帧汇：`Io.out` 的测试替身（生产路径是 stdout）。
+    #[derive(Clone, Default)]
+    struct SharedSink(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for SharedSink {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn argv(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn frames(sink: &SharedSink) -> Vec<Value> {
+        let raw = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
+        raw.lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    /// 一条 hook 决定回灌行（形状与驱动/SDK 回灌一致）。
+    fn decision_line(req_id: &str, decision: &str) -> String {
+        json!({
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": req_id,
+                "response": {"hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": decision
+                }}
+            }
+        })
+        .to_string()
+    }
+
+    /// 把决定行预先塞进 channel 后跑一次 `parallel_turn`：channel 是无界的，
+    /// 决定先于桩的等待就绪——测试无需并发线程即可确定性驱动。
+    fn run(decisions: &[(&str, &str)]) -> Vec<Value> {
+        let flags = parse_flags_from(&argv(&[]));
+        let sink = SharedSink::default();
+        let mut io = Io {
+            out: Box::new(sink.clone()),
+            journal: None,
+            scenario: "hello".into(),
+        };
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        for (rid, d) in decisions {
+            tx.send(decision_line(rid, d)).unwrap();
+        }
+        let mut hook_counter = 0u64;
+        parallel_turn(&flags, &mut io, &rx, &mut hook_counter);
+        frames(&sink)
+    }
+
+    fn frame_types(frames: &[Value]) -> Vec<String> {
+        frames
+            .iter()
+            .map(|f| f["type"].as_str().unwrap_or("").to_string())
+            .collect()
+    }
+
+    fn hook_request_ids(frames: &[Value]) -> Vec<String> {
+        frames
+            .iter()
+            .filter(|f| f["type"] == "control_request")
+            .filter_map(|f| f["request_id"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    fn hook_request(frames: &[Value], req_id: &str) -> Value {
+        frames
+            .iter()
+            .find(|f| f["type"] == "control_request" && f["request_id"] == req_id)
+            .unwrap_or_else(|| panic!("no hook_callback for {req_id}: {frames:?}"))
+            .clone()
+    }
+
+    /// tool_use_id → is_error 的 tool_result 表（各自决定是否生效的数据源）。
+    fn tool_results(frames: &[Value]) -> Vec<(String, bool)> {
+        frames
+            .iter()
+            .filter(|f| f["type"] == "user")
+            .filter_map(|f| {
+                let block = &f["message"]["content"][0];
+                (block["type"] == "tool_result").then(|| {
+                    (
+                        block["tool_use_id"].as_str().unwrap_or("").to_string(),
+                        block["is_error"].as_bool().unwrap_or(false),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    fn is_error_of(results: &[(String, bool)], tool_id: &str) -> bool {
+        results
+            .iter()
+            .find(|(id, _)| id == tool_id)
+            .unwrap_or_else(|| panic!("no tool_result for {tool_id}: {results:?}"))
+            .1
+    }
+
+    fn position(frames: &[Value], pred: impl Fn(&Value) -> bool) -> usize {
+        frames
+            .iter()
+            .position(|f| pred(f))
+            .unwrap_or_else(|| panic!("no frame matched: {frames:?}"))
+    }
+
+    /// 单回合并发两个 tool_use + 两个 hook_callback，且两条 hook 帧紧邻（第二个
+    /// 发出时第一个仍未决）；两个 request_id / tool_use_id / 工具名各不相同。
+    #[test]
+    fn parallel_turn_emits_two_tool_uses_and_two_overlapping_hook_requests() {
+        let fs_ = run(&[("fake-hook-1", "allow"), ("fake-hook-2", "allow")]);
+
+        // 首帧是单条 assistant，两个 tool_use content 块（真模型并行形态）。
+        let blocks = fs_[0]["message"]["content"].as_array().expect("content array");
+        assert_eq!(fs_[0]["type"], "assistant");
+        assert_eq!(blocks.len(), 2, "one assistant frame with two tool_use blocks");
+        assert_eq!(blocks[0]["type"], "tool_use");
+        assert_eq!(blocks[1]["type"], "tool_use");
+
+        let ids = hook_request_ids(&fs_);
+        assert_eq!(ids, vec!["fake-hook-1", "fake-hook-2"]);
+        let h1 = hook_request(&fs_, "fake-hook-1");
+        let h2 = hook_request(&fs_, "fake-hook-2");
+        assert_ne!(
+            h1["request"]["tool_use_id"], h2["request"]["tool_use_id"],
+            "each hook_callback must name its own tool_use"
+        );
+        assert_ne!(
+            h1["request"]["input"]["tool_name"], h2["request"]["input"]["tool_name"],
+            "the two cards must be distinguishable by tool name"
+        );
+        assert_eq!(h1["request"]["subtype"], "hook_callback");
+
+        // 两条 hook_callback 帧紧邻：中间没有任何决定/结果帧——wire 层面的
+        // 「第二个发出时第一个仍待批」。
+        let first_hook = position(&fs_, |f| f["request_id"] == "fake-hook-1");
+        let second_hook = position(&fs_, |f| f["request_id"] == "fake-hook-2");
+        assert_eq!(
+            second_hook,
+            first_hook + 1,
+            "the second hook_callback must be adjacent (first still undecided): {fs_:?}"
+        );
+    }
+
+    /// 决定乱序到达（先答第二个、再答第一个）时各自路由到正确的 request_id：
+    /// 每个 tool_result 与**自己**收到的决定一致。
+    #[test]
+    fn parallel_turn_routes_out_of_order_decisions_to_their_own_tool() {
+        let fs_ = run(&[("fake-hook-2", "deny"), ("fake-hook-1", "allow")]);
+        let results = tool_results(&fs_);
+        assert_eq!(results.len(), 2, "one tool_result per tool_use: {results:?}");
+        assert!(
+            !is_error_of(&results, "tc-par-1"),
+            "tc-par-1 got allow → success even though answered second"
+        );
+        assert!(
+            is_error_of(&results, "tc-par-2"),
+            "tc-par-2 got deny → is_error even though answered first"
+        );
+    }
+
+    /// 三种决定组合：每个 tool_result 与其自身决定一致；deny 不阻止另一工具的
+    /// 执行，且两个都落定后仍有环后正文 + result 收尾。
+    #[test]
+    fn parallel_turn_maps_every_decision_combination_independently() {
+        for (d1, d2) in [("allow", "allow"), ("allow", "deny"), ("deny", "deny")] {
+            let fs_ = run(&[("fake-hook-1", d1), ("fake-hook-2", d2)]);
+            let results = tool_results(&fs_);
+            assert_eq!(is_error_of(&results, "tc-par-1"), d1 == "deny", "combo {d1}/{d2}");
+            assert_eq!(is_error_of(&results, "tc-par-2"), d2 == "deny", "combo {d1}/{d2}");
+
+            // 两个 tool_result 都在环后正文与 result 之前——「全部落定后才收尾」。
+            let last_result = fs_
+                .iter()
+                .rposition(|f| f["type"] == "user")
+                .expect("tool_result frames");
+            let post_text = position(&fs_, |f| {
+                f["type"] == "stream_event"
+                    && f.pointer("/event/delta/text").and_then(Value::as_str)
+                        == Some("parallel tools finished")
+            });
+            let result = position(&fs_, |f| f["type"] == "result");
+            assert!(
+                last_result < post_text && post_text < result,
+                "combo {d1}/{d2}: post-loop text + result must close the turn after both results: {:?}",
+                frame_types(&fs_)
+            );
+        }
     }
 }

@@ -360,6 +360,8 @@ requirement），子功能 = 二层 `test.describe`，一行 = 一条用例；�
 | agent 对话覆盖 | 首回合往返与重载恢复 | composer submit → reply → done → reload restores | `session-roundtrip.spec.ts` | agent 对话覆盖「首回合往返」、会话核心旅程「重载恢复」 |
 | agent 对话覆盖 | 流式分批 | chunks arrive in batches and the turn converges to done | `streaming.spec.ts` | agent 对话覆盖「流式分批渲染」⁸（聚合半边：服务端 API oracle 轮询 5 个 chunk 条目 + 回合结束后 DOM 一气泡） |
 | agent 对话覆盖 | 流式分批 | incremental reply text reaches the DOM while the turn is still running | `conversation-streaming.spec.ts` | agent 对话覆盖「流式分批渲染」⁸（实时半边：placeholder + composer 提交，50ms 轮询 DOM 与 `status_slug`，DOM 有增量正文时会话仍 running；`retries: 0` 零固定 sleep） |
+| agent 对话覆盖 | 流式分批 | incremental reply text reaches the DOM while the turn is still running | `conversation-streaming.spec.ts` | live-turn-stream「text streams during a turn」（结算切换半边，add-acp-stream-approval-journeys delta⁹：同一用例增强——回合进行中末尾正文以 live-tail 纯文本上屏（`div.body.text-live`），回合结算后同一正文转 markdown 渲染（`<p>`）、live-tail 形态消失、拼接与流式前缀一致且每段只出现一次；保留原中途断言与 `retries: 0`） |
+| agent 对话覆盖 | 过程折叠：thinking 呈现 | thinking/正文交替回合：thinking 进默认收起的过程折叠、正文独立按序，结算后顺序与内容不丢失 | `thinking-process-fold.spec.ts` | agent-workbench「process folds interleave in arrival order」+「folds stay collapsed with a live summary while streaming」（add-acp-stream-approval-journeys delta⁹：沙箱第四驱动 agent `[acp.agents.claude-thinking]`（fake-claude `--scenario thinking --slow-ms 800`）真链路——两段 thinking 各成默认收起的过程折叠、正文 run 独立于折叠之外按序（fold→text→fold→text）、结算后展开折叠内容不丢失；与 native 侧 test/thinking 有意双载体） |
 | agent 对话覆盖 | 多轮连续 | 4.1 two consecutive rounds append in order and survive reload | `dialog.spec.ts` | agent 对话覆盖「同会话多轮连续」 |
 | agent 对话覆盖 | 输入守卫 | 4.2 empty and blank input creates no turn, session stays usable | `dialog.spec.ts` | agent 对话覆盖「composer 输入守卫」 |
 | agent 对话覆盖 | 输入守卫 | 4.2 special-char long text round-trips without loss or console errors | `dialog.spec.ts` | agent 对话覆盖「composer 输入守卫」 |
@@ -387,6 +389,7 @@ requirement），子功能 = 二层 `test.describe`，一行 = 一条用例；�
 | 会话管理 | 归档恢复重建 | archive → restore: rail row back, transcript intact, History cleared, writable again | `archive-restore.spec.ts` | project-session-actions「restore archived session」+「restore preserves the transcript」（fix-webui-qa-defects delta²：恢复确认弹窗含重建文案、rail 行回原项目、detail 全 N 条、History 清空、首条消息可写） |
 | 会话管理 | rail 切换即时聚焦 | 4.2 focusing A and clicking B in the rail renders B within the throttle window, with no other events | `rail-focus.spec.ts` | agent-workbench「rail selection renders the conversation immediately」（fix-webui-qa-defects delta²：switch 后无任何会话事件介入，`sebas:rail-focus` → 节流刷新 → 主区渲染 B） |
 | 审批卡片旅程 | 审批读模型恢复 | reload rebuilds the review card from the read model under the same request_id, and deciding clears it for good | `approval-restore.spec.ts` | permission-flow「刷新或重连后仍可取得」+ agent-workbench「刷新后审批面从读模型重建」（fix-webui-approval-restore-and-session-identity delta³：刷新后卡片按同 request_id 重建、唯一决策面、批复后读模型清空、rail waiting 投影） |
+| 审批卡片旅程 | 并行工具调用：卡片各自独立（ACP 桩） | parallel 触发词：两个 tool_use 各自一张卡（独立 request_id / 工具名 / 参数），逐一决策后回合推进、两工具结果呈现 | `parallel-permissions.spec.ts` | permission-flow「Parallel tool calls each get their own request id」（add-acp-stream-approval-journeys delta⁹，**ACP 桩侧载体**：`claude` 档 + `parallel` 触发词连发两个 hook_callback，零装配改动；与 native 侧 `test-model-scenarios.spec.ts` 的 `test/tools-parallel` 有意双载体、互不替代。SDK 边界持锁使驱动侧一次只泊一条，故断言「各自独立泊车与决策」而非两卡同时在 DOM；进程级同锚用例另钉桩侧连发 wire 契约） |
 | 审批卡片旅程 | 相位对账与挂载去重 | waiting-phase empty pull backs off and retries until the card lands without any phase change (round3 7.1) | `approval-reconcile.spec.ts` | fix-webui-qa-defects-round3 tasks 7.1⁷（无 delta scenario，task 级验收）：route 模拟「拉取先于落库」——waiting 下 ≥2 次扑空拉取证明退避环在转，放行后 ≤4s 免刷新免相位翻转补卡（sessionPhase 钉在 waiting、reload 探针）。实施期曾发现 detail 投影缺泊车合并把 sessionPhase 遮成 working（当时以 fulfill detail 舞台绕行上报）；实现修复（api.rs detail 补 `with_parked_approvals`，与 session_phase_frame 同款）落地后已拆舞台直跑真实投影 |
 | 审批卡片旅程 | 相位对账与挂载去重 | mount and session switch pull the approvals read model exactly once (round3 7.2) | `approval-reconcile.spec.ts` | fix-webui-qa-defects-round3 tasks 7.2⁷（无 delta scenario，task 级验收）：rail 切换与冷深链各恰好一次 approvals GET 且卡片照常从读模型重建（挂载期三路并发收敛为单次请求，pullSeq 防陈旧语义不回归） |
 | 停止收尾 | 回合被停止条目 | stopping a streaming turn appends the stop entry, resets the control, and stays settled across reloads | `stop-settle.spec.ts` | agent-workbench「停止后 transcript 有停止条目」+「刷新后不复活在飞状态」（同上 delta³：错误类停止条目、控件复位、reload 稳定、会话存活可继续） |
@@ -527,6 +530,28 @@ requirement），子功能 = 二层 `test.describe`，一行 = 一条用例；�
 > 间隔下必落**两个**独立帧；N=0 时两段背靠背并成一帧，故该判据把「flag 生效 vs
 > 缺省」钉死）。二者与浏览器 DOM 用例互补：浏览器证「回合中 DOM 已上屏」，进程级
 > 证「帧本身就是随时间到达的」，与前端渲染管线解耦。
+>
+> ⁹ add-acp-stream-approval-journeys（2026-09-24，未归档 delta）：ACP 通路补三处真实
+> 缺口，全部走**桩侧**（fake-claude）驱动，与 extend-test-model-scenarios 的 router
+> `test` 模型/native 侧**有意双载体**（事件生产者与链路不同，互不替代、互不豁免）：
+> ① **并行审批卡片**——桩新增 `parallel` 触发词（单回合并发两个 tool_use + 连发两个
+> hook_callback），进程级 `parallel_scenario_parks_each_approval_and_settles_the_turn`
+> / `parallel_scenario_decision_combinations_map_to_their_own_tool`（allow/allow、
+> allow/deny、deny/deny 三组合）/ `parallel_scenario_transcript_shape_is_deterministic_across_runs`
+> （两跑形状逐条一致）+ 浏览器 `parallel-permissions.spec.ts`（`claude` 档 + 触发词，
+> 零装配改动）。**实施实测偏离 design D3**：cc-agent-sdk 0.1.7 在 hook 回调分发处跨
+> await 持回调表锁（`internal/query_full.rs`），第二条 hook_callback 要等第一条决定
+> 返回才开始——驱动侧一次只泊一条，两卡**不同时**在读模型；故断言口径为「两个
+> request_id 各自独立泊车与决策、逐一推进至终态」，桩侧「连发 / 第二个发出时第一个
+> 仍待批」的 wire 契约由 journal（`hook_lines[1] < first_decision`）单独钉死。
+> ② **thinking 过程折叠真链路**——沙箱新增 `[acp.agents.claude-thinking]`
+> （`--scenario thinking --slow-ms 800`），浏览器 `thinking-process-fold.spec.ts`
+> 断言两段 thinking 各成默认收起的过程折叠、正文独立按序（fold→text→fold→text）、
+> 结算后展开不丢内容。③ **流式结算切换**——增强既有
+> `conversation-streaming.spec.ts`（claude-stream + `drip`，保留原中途断言与
+> `retries: 0`）：回合进行中末尾正文为 live-tail 纯文本（`div.body.text-live`），
+> 结算后同正文换 markdown 渲染、live-tail 消失、拼接一致且每段只出现一次。锚点行见
+> 上表；本 change 不动生产代码（`git status --short` 无 src/frontend 改动）。
 
 原「浏览器级 UI 渲染」豁免条目：workbench 首屏、审批卡片操作、登录页闭环等
 浏览器面由本套件覆盖（豁免范围收窄为「飞书端卡片渲染」等其余条目）。

@@ -77,6 +77,11 @@ test.describe('agent 对话覆盖', () => {
       const startedAt = Date.now()
       let earlyText = ''
       let earlySlug: StatusSlug | '' = ''
+      // （add-acp-stream-approval-journeys 3.4）中途采样时末尾正文的渲染形态：
+      // true = live-tail 纯文本（div.body.text-live）。
+      let earlyLiveTail = false
+      // 同一时刻 live-tail 的正文本身（结算后要与它比拼接连续性）。
+      let earlyBodyText = ''
       await expect
         .poll(
           async () => {
@@ -88,6 +93,11 @@ test.describe('agent 对话覆盖', () => {
             if (texts.length > 0 && slug !== undefined && RUNNING.includes(slug)) {
               earlyText = texts.join(' ')
               earlySlug = slug
+              // 与文本同一时刻采样：回合进行中，末尾正文以 live-tail 纯文本形态
+              // 上屏（3.4 的「中途形态」半边），并留下此刻的正文用于拼接对照。
+              const liveBody = assistantTurns.first().locator('.body.text-live')
+              earlyLiveTail = (await liveBody.count()) > 0
+              if (earlyLiveTail) earlyBodyText = (await liveBody.first().textContent()) ?? ''
               return 'incremental-while-running'
             }
             if (slug !== undefined && TERMINAL.includes(slug)) return `terminal:${slug}`
@@ -113,6 +123,52 @@ test.describe('agent 对话覆盖', () => {
       expect(earlyNorm.length).toBeGreaterThan(0)
       expect(finalText.startsWith(earlyNorm)).toBe(true)
       expect(earlyNorm.length).toBeLessThan(finalText.length)
+
+      // ── add-acp-stream-approval-journeys 3.4：结算时刻的形态切换 ──
+      // 中途（与上面同一采样时刻）：增量正文是 live-tail 纯文本形态。既有断言
+      // 只钉「回合进行中文本已上屏」，这里补钉它当时长什么样。
+      expect(
+        earlyLiveTail,
+        'incremental text must render as the live-tail plain-text form (div.body.text-live) while running',
+      ).toBe(true)
+
+      // 结算后：同一正文切回 markdown 渲染——live-tail 形态从 DOM 消失，正文落进
+      // markdown 块（renderMarkdown 产出 <p>）。
+      await expect(assistantTurns.locator('.body.text-live')).toHaveCount(0)
+      const settledBody = assistantTurns.first().locator('.body').last()
+      await expect(settledBody.locator('p').first()).toBeVisible()
+
+      // 拼接一致、无重复条目：结算正文恰为三段 drip 的拼接，且以流式期间采到的
+      // live-tail 正文为前缀（中途看到的那部分一字不改地接上后两段），每段在整条
+      // 转写里只出现一次（不重复、不丢段）。
+      const settledText = norm((await settledBody.textContent()) ?? '')
+      expect(settledText).toBe('drip0 drip1 drip2')
+      const earlyBodyNorm = norm(earlyBodyText)
+      expect(earlyBodyNorm.length).toBeGreaterThan(0)
+      expect(settledText.startsWith(earlyBodyNorm)).toBe(true)
+
+      // 结构上的「无重复条目」：一回合只有一个 assistant 气泡、一个正文块，
+      // 且三段 drip 在转写里各只出现一次（不重复、不丢段）。取文本用**穿透
+      // shadow root 的 locator**（`allTextContents`），不能取宿主元素的
+      // `textContent`/`innerText`——`sebas-transcript-view` 是 shadow DOM 宿主，
+      // 宿主的 textContent 不含影子树内容，会得到假阴性的 0。
+      await expect(assistantTurns).toHaveCount(1)
+      await expect(
+        assistantTurns.first().locator('.body:not(.fold-body):not(.item-body)'),
+      ).toHaveCount(1)
+      const transcriptText = norm(
+        (
+          await page
+            .locator('sebas-dashboard sebas-transcript-view .turn-block')
+            .allTextContents()
+        ).join(' '),
+      )
+      for (const chunk of ['drip0', 'drip1', 'drip2']) {
+        expect(
+          transcriptText.match(new RegExp(chunk, 'g'))?.length ?? 0,
+          `${chunk} must appear exactly once in the settled transcript`,
+        ).toBe(1)
+      }
 
       // 时间线证据（供人工复核实时性；不做会抖动的硬阈值）：文本何时上屏
       // vs 何时 done。上屏必须显著早于 done 才叫「实时」。

@@ -717,6 +717,20 @@ path = "{fake}"
 args = ["--delta-gap-ms", "500"]
 sessions_dir = "{cfg}/claude-stream-sessions"
 work_dir = "{cfg}/work"
+
+# add-acp-stream-approval-journeys 3.1/3.3：第四个 claude 驱动 agent（id =
+# `claude-thinking`）。`--scenario thinking` 让桩在一个回合里**交替**发 thinking
+# 与正文段（hmm / thought out loud / hmm again / and the answer）——浏览器旅程
+# 「thinking 过程折叠真链路呈现」（thinking-process-fold.spec.ts）的数据源。
+# `--slow-ms 800` 与既有 claude 档同款：回合窗口确定，且帧间/收尾静默仍在驱动
+# 1.5s 挂起探测预算内。`parallel` 用例不另设装配——走既有 claude 档 + 触发词
+# （D2：与 perm/drip 同机制，零装配改动）。
+[acp.agents.claude-thinking]
+driver = "claude"
+path = "{fake}"
+args = ["--scenario", "thinking", "--slow-ms", "800"]
+sessions_dir = "{cfg}/claude-thinking-sessions"
+work_dir = "{cfg}/work"
 {fakeacp_toml}
 [media]
 download_dir = "{cfg}/downloads"

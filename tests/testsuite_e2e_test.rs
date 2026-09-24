@@ -8690,4 +8690,392 @@ async fn unknown_scenario_arg_fails_the_turn_loudly() {
     )
     .await;
 }
+
+// ── add-acp-stream-approval-journeys：ACP 桩 `parallel` 剧本的进程级旅程 ──
+//
+// 「并行审批」的驱动侧契约（桩的 wire 形态 + 驱动的泊车/决策路由）。全程经
+// webui 用户面（HTTP API：创建会话 / 读泊车审批 / 应答决定）驱动，不读内核
+// 内部状态；子进程是 fake-claude 桩，零真实上游外呼。
+//
+// ⚠ 实测事实（design D3 的「重叠泊车」假设在 SDK 边界不成立，如实落账）：
+// cc-agent-sdk 0.1.7 在 hook 回调分发处**跨 await 持有回调表锁**
+// (`internal/query_full.rs`：`let callbacks = hook_callbacks.lock().await;`
+// 后 `callback(...).await`)——桩连发的两条 hook_callback 中，第二条的回调要等
+// 第一条（也就是等操作者决定）返回后才开始执行。驱动侧因此一次只泊一条：
+// 第一张卡决策后才出现第二张。桩侧的「连发 / 第二个发出时第一个仍待批」是
+// wire 契约，由 journal 单独钉死（见 `parallel_scenario_...` 用例）。本组
+// 用例断言的是「两个 request_id 各自独立泊车与决策、逐一推进、终态正确」，
+// 不假设两卡同时在读模型里。
+
+/// 驱动一个 `parallel` 回合：按 `decisions`（工具名 → 决定）逐一「等新泊车 →
+/// 应答」。工具名匹配（而非泊车次序）保证即使 SDK 未来放开并发、或两条回调
+/// 的调度顺序反转，每个决定仍路由到正确的工具上。
+async fn drive_parallel_turn(
+    cli: &reqwest::Client,
+    sb: &Sandbox,
+    key: &str,
+    decisions: &[(&str, &str)],
+) -> (Vec<serde_json::Value>, serde_json::Value) {
+    let mut seen: Vec<String> = Vec::new();
+    let mut notices: Vec<serde_json::Value> = Vec::new();
+    for i in 0..decisions.len() {
+        let url = format!("{}/api/sessions/{key}/approvals", sb.webui_url());
+        let seen_snapshot = seen.clone();
+        let notice = wait_for(
+            &format!("parked parallel approval #{}", i + 1),
+            Duration::from_secs(30),
+            &sb.path,
+            {
+                let cli = cli.clone();
+                let url = url.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    let seen = seen_snapshot.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        let approvals = v["approvals"].as_array()?;
+                        approvals
+                            .iter()
+                            .find(|a| {
+                                let rid = a["request_id"].as_str().unwrap_or("");
+                                !rid.is_empty() && !seen.iter().any(|s| s == rid)
+                            })
+                            .cloned()
+                    })
+                }
+            },
+        )
+        .await;
+        let request_id = notice["request_id"]
+            .as_str()
+            .expect("request_id")
+            .to_string();
+        let tool_name = notice["tool_name"].as_str().unwrap_or("").to_string();
+        let (_, decision) = decisions
+            .iter()
+            .find(|(tool, _)| *tool == tool_name)
+            .unwrap_or_else(|| panic!("no decision for parked tool {tool_name}: {notice}"));
+        let (status, body) = post_json(
+            cli,
+            &format!("{}/api/permissions/{request_id}/answer", sb.webui_url()),
+            serde_json::json!({ "decision": { "decision": decision } }),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("answer parked approval {request_id}: {e}"));
+        assert_eq!(status, 200, "answer {request_id} must be delivered: {body}");
+        seen.push(request_id);
+        notices.push(notice);
+    }
+    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+    wait_turn_done(cli, sb, &detail_url).await;
+    let (_status, detail) = get_json_status(cli, &detail_url)
+        .await
+        .expect("session detail");
+    (notices, detail)
+}
+
+/// 转录形状（id/时间戳除外）：`kind|element_type|content|title` 的有序序列 +
+/// 终态 slug。确定性复核（2.2）以它为两跑的比对口径。
+async fn parallel_turn_shape(
+    cli: &reqwest::Client,
+    sb: &Sandbox,
+    project_id: &str,
+    tag: &str,
+) -> (Vec<String>, String) {
+    let (status, body) = post_json(
+        cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "project_id": project_id, "prompt": "parallel", "agent": "claude" }),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("create {tag}: {e}"));
+    assert_eq!(status, 201, "create {tag}: {body}");
+    let key = body["key"].as_str().expect("key").to_string();
+    let (_notices, detail) = drive_parallel_turn(
+        cli,
+        sb,
+        &key,
+        &[("Bash", "allow_once"), ("Read", "allow_once")],
+    )
+    .await;
+    let shape = detail["entries"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|e| {
+            format!(
+                "{}|{}|{}|{}",
+                e["kind"].as_str().unwrap_or(""),
+                e["element_type"].as_str().unwrap_or(""),
+                e["content"].as_str().unwrap_or(""),
+                e["title"].as_str().unwrap_or("")
+            )
+        })
+        .collect();
+    (
+        shape,
+        detail["status_slug"].as_str().unwrap_or("").to_string(),
+    )
+}
+
+/// add-acp-stream-approval-journeys 2.1（spec「并行权限环 journey 全绿」）：
+/// `parallel` 触发词会话提交一回合——驱动桩连发两个 hook_callback，驱动侧
+/// 两个审批请求各自独立泊车（两个不同 request_id，各自点名自己的工具与参数）、
+/// 经 webui 读模型逐一应答后回合推进至 Done，两条工具结果如实呈现。
+/// journal 单独钉死桩侧的 wire 契约：两条 hook_callback 帧在**任何决定回来
+/// 之前**就连发完毕（第二个发出时第一个仍待批）。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn parallel_scenario_parks_each_approval_and_settles_the_turn() {
+    let sb = Sandbox::new("testsuite_e2e", "fake-parallel");
+    let journal = sb.path.join("fake-claude-journal.jsonl");
+    sb.append_acp_args(&["--journal", &support::forward_slash(&journal)]);
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    let project_id = scene_project_id(&cli, &sb).await;
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "project_id": project_id, "prompt": "parallel", "agent": "claude" }),
+    )
+    .await
+    .expect("create session");
+    assert_eq!(status, 201, "create session: {body}");
+    let key = body["key"].as_str().expect("key").to_string();
+
+    let (notices, detail) =
+        drive_parallel_turn(&cli, &sb, &key, &[("Bash", "allow_once"), ("Read", "allow_once")]).await;
+
+    // 两个审批请求各自独立泊车：两个不同 request_id，各自点名自己的工具/参数。
+    assert_eq!(notices.len(), 2, "both approvals must park: {notices:?}");
+    let ids: Vec<&str> = notices
+        .iter()
+        .filter_map(|n| n["request_id"].as_str())
+        .collect();
+    assert_eq!(ids.len(), 2);
+    assert_ne!(ids[0], ids[1], "each request must carry its own request_id");
+    let by_tool = |tool: &str| {
+        notices
+            .iter()
+            .find(|n| n["tool_name"] == tool)
+            .unwrap_or_else(|| panic!("no parked {tool}: {notices:?}"))
+    };
+    assert_eq!(by_tool("Bash")["args"]["command"], "echo first");
+    assert_eq!(
+        by_tool("Read")["args"]["file_path"],
+        "/tmp/fake-parallel.txt"
+    );
+
+    // 转录：两条工具结果如实呈现，各自与自己的工具配对。
+    let entries = detail["entries"].as_array().cloned().unwrap_or_default();
+    let has_tool_result = |tool: &str, result: &str| {
+        entries.iter().any(|e| {
+            e["element_type"].as_str() == Some("tool")
+                && e["content"].as_str().is_some_and(|c| {
+                    c.contains(&format!("✓ **{tool}**")) && c.contains(result)
+                })
+        })
+    };
+    assert!(has_tool_result("Bash", "Bash ok"), "Bash result: {entries:?}");
+    assert!(has_tool_result("Read", "Read ok"), "Read result: {entries:?}");
+    assert!(
+        entries.iter().any(|e| {
+            e["element_type"].as_str() == Some("markdown")
+                && e["content"].as_str() == Some("parallel tools finished")
+        }),
+        "post-loop text must close the turn: {entries:?}"
+    );
+    assert_eq!(
+        detail["status_slug"].as_str(),
+        Some("done"),
+        "turn must settle Done: {detail}"
+    );
+
+    // 桩的 wire 契约（journal 为据）：两条 hook_callback 帧连发——第二条落
+    // journal 时第一条尚无任何决定回来。
+    let lines = read_jsonl(&journal);
+    assert!(
+        !lines.is_empty(),
+        "stub journal must have lines: {}",
+        journal.display()
+    );
+    let is_hook_out = |l: &serde_json::Value| {
+        l["dir"] == "out"
+            && l["msg"]["type"] == "control_request"
+            && l["msg"]["request"]["subtype"] == "hook_callback"
+    };
+    let hook_lines: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| is_hook_out(l))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(hook_lines.len(), 2, "exactly two hook_callback frames: {lines:?}");
+    let first_decision = lines
+        .iter()
+        .position(|l| {
+            l["dir"] == "in"
+                && l["msg"]["type"] == "control_response"
+                && l["msg"]["response"]["response"]["hookSpecificOutput"]["permissionDecision"]
+                    .is_string()
+        })
+        .expect("a hook decision must reach the stub");
+    assert!(
+        hook_lines[1] < first_decision,
+        "the second hook_callback must be on the wire while the first is still undecided: {lines:?}"
+    );
+    let hook_ids: Vec<&str> = lines
+        .iter()
+        .filter(|l| is_hook_out(l))
+        .filter_map(|l| l["msg"]["request_id"].as_str())
+        .collect();
+    assert_ne!(hook_ids[0], hook_ids[1], "the two hook requests need distinct ids");
+    let hook_tools: Vec<&str> = lines
+        .iter()
+        .filter(|l| is_hook_out(l))
+        .filter_map(|l| l["msg"]["request"]["input"]["tool_name"].as_str())
+        .collect();
+    assert!(
+        hook_tools.contains(&"Bash") && hook_tools.contains(&"Read"),
+        "each hook_callback names its own tool: {hook_tools:?}"
+    );
+
+    // 零真实上游外呼：回合由桩驱动（argv 里就是 fake-claude），沙箱里没有
+    // router/上游；journal 里记到了 `parallel` 触发词这一操作者输入。
+    let trigger_seen = lines.iter().any(|l| {
+        l["dir"] == "in"
+            && l["msg"]["type"] == "user"
+            && match l.pointer("/msg/message/content") {
+                Some(serde_json::Value::String(s)) => s == "parallel",
+                Some(serde_json::Value::Array(b)) => {
+                    b.iter().filter_map(|x| x["text"].as_str()).collect::<Vec<_>>().join(" ")
+                        == "parallel"
+                }
+                _ => false,
+            }
+    });
+    assert!(
+        trigger_seen,
+        "the `parallel` trigger word must be recorded in the journal: {lines:?}"
+    );
+}
+
+/// add-acp-stream-approval-journeys 1.2（spec「决定组合逐请求生效」）：
+/// allow/allow、allow/deny、deny/deny 三种组合下，每个 tool_use 的 tool_result
+/// 与其自身收到的决定一致、互不影响；deny 不阻止另一工具的执行与回合收尾。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn parallel_scenario_decision_combinations_map_to_their_own_tool() {
+    let sb = Sandbox::new("testsuite_e2e", "fake-parallel-decisions");
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+    let project_id = scene_project_id(&cli, &sb).await;
+
+    for (combo, (bash_decision, read_decision)) in [
+        ("allow/allow", ("allow_once", "allow_once")),
+        ("allow/deny", ("allow_once", "deny")),
+        ("deny/deny", ("deny", "deny")),
+    ] {
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions", sb.webui_url()),
+            serde_json::json!({ "project_id": project_id, "prompt": "parallel", "agent": "claude" }),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("create session ({combo}): {e}"));
+        assert_eq!(status, 201, "create session ({combo}): {body}");
+        let key = body["key"].as_str().expect("key").to_string();
+
+        let (notices, detail) = drive_parallel_turn(
+            &cli,
+            &sb,
+            &key,
+            &[("Bash", bash_decision), ("Read", read_decision)],
+        )
+        .await;
+        assert_eq!(notices.len(), 2, "{combo}: both tools must park");
+        assert_eq!(
+            detail["status_slug"].as_str(),
+            Some("done"),
+            "{combo}: the turn must still settle after a deny"
+        );
+
+        let entries = detail["entries"].as_array().cloned().unwrap_or_default();
+        let tool_result = |tool: &str| -> String {
+            entries
+                .iter()
+                .filter(|e| e["element_type"].as_str() == Some("tool"))
+                .filter_map(|e| e["content"].as_str())
+                .find(|c| c.starts_with(&format!("✓ **{tool}**")))
+                .unwrap_or_else(|| panic!("{combo}: no tool_result for {tool}: {entries:?}"))
+                .to_string()
+        };
+        let want_bash = if bash_decision == "allow_once" {
+            "Bash ok"
+        } else {
+            "denied by fake"
+        };
+        let want_read = if read_decision == "allow_once" {
+            "Read ok"
+        } else {
+            "denied by fake"
+        };
+        let bash_entry = tool_result("Bash");
+        let read_entry = tool_result("Read");
+        assert!(
+            bash_entry.contains(want_bash),
+            "{combo}: Bash result must follow Bash's own decision: {bash_entry}"
+        );
+        assert!(
+            read_entry.contains(want_read),
+            "{combo}: Read result must follow Read's own decision: {read_entry}"
+        );
+        // deny 不阻止另一工具的执行，也不阻止回合收尾（环后正文在场）。
+        assert!(
+            entries
+                .iter()
+                .any(|e| e["content"].as_str() == Some("parallel tools finished")),
+            "{combo}: a deny must not stop the other tool or the turn close: {entries:?}"
+        );
+    }
+}
+
+/// add-acp-stream-approval-journeys 2.2（spec「重复执行旅程断言转录形状与终态
+/// 一致」）：同一 journey 在同一沙箱内跑两次（各自独立会话），除 id/时间戳外
+/// 转录形状与终态 slug 必须逐条一致——并发泊车/乱序决定的实现若有非确定性
+/// 抖动（条目顺序、重复/丢段），这里当场爆。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn parallel_scenario_transcript_shape_is_deterministic_across_runs() {
+    let sb = Sandbox::new("testsuite_e2e", "fake-parallel-determinism");
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+    let project_id = scene_project_id(&cli, &sb).await;
+
+    let (first, first_slug) = parallel_turn_shape(&cli, &sb, &project_id, "first run").await;
+    let (second, second_slug) = parallel_turn_shape(&cli, &sb, &project_id, "second run").await;
+    assert_eq!(first_slug, "done", "first run must settle Done");
+    assert_eq!(second_slug, "done", "second run must settle Done");
+    assert!(!first.is_empty(), "the transcript shape must not be empty");
+    assert_eq!(
+        first, second,
+        "the same parallel journey must produce an identical transcript shape (ids/timestamps aside)"
+    );
+}
 }
