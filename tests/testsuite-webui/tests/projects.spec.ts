@@ -361,14 +361,20 @@ test.describe('项目管理覆盖', () => {
 
       // Click-select fills the manual path field (the dialog's submit gate).
       await childItem.click()
-      // 选择器填入「根回显(反斜杠) + / 子名」的混合分隔符形——这是
-      // joinChildPath 的既定契约（有单测锚定）；根现在是 workspace root
-      // （场景目录），故期望从 scene 起拼。注册经后端
-      // canonicalize_plain 归一为纯反斜杠普通形，故两处期望不同形。
+      // 选择器把点击项路径回填进输入框，回显**跟随请求原样形**：joinChildPath
+      // 保留父路径风格（有单测锚定 join 行为本身），而父路径的斜杠形取决于
+      // 沙箱配置里 workspace root 的写法——正斜杠根回显即全正斜杠形，反斜杠
+      // 根回显即反斜杠形。故断言只锚路径语义、不锚斜杠风格：两侧都归一为
+      // `/` 后比较。注册经后端 canonicalize_plain 归一，rail 侧断言用
+      // path.join 形，与此处互不影响。
       const pathInput = dialog.locator('wa-input[label="Project path"] input')
-      await expect(pathInput).toHaveValue(`${scene}/work/pick-parent-${t}/pick-child-${t}`, {
-        timeout: 10_000,
-      })
+      const expectedSelected = `${scene}/work/pick-parent-${t}/pick-child-${t}`.replace(/\\/g, '/')
+      await expect
+        .poll(async () => (await pathInput.inputValue()).replace(/\\/g, '/'), {
+          timeout: 10_000,
+          intervals: [200],
+        })
+        .toBe(expectedSelected)
 
       // Submit through the dialog footer; the project lands in the rail.
       await dialog.locator('wa-button').filter({ hasText: 'Add project' }).click()

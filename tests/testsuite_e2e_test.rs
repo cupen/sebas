@@ -1167,9 +1167,14 @@ fn seed_spawning_placeholder(sb: &Sandbox, reference: &str, kind: &str) {
     use sebas_db::schema::open_and_sync;
     use sebas_models::session_map::SessionMapRow;
     let work = sb.path.join("work");
-    let canonical = support::forward_slash(
-        &std::fs::canonicalize(&work).unwrap_or(work),
-    );
+    // 存储形与产品落库同一规范（sebas_webui::fs::canonicalize_plain）。不能
+    // 用 forward_slash(canonicalize(...))：Windows 上 canonicalize 产出
+    // `\\?\` verbatim 形，forward_slash 把它改写成 `//?/D:/…` 直写 DB——
+    // 会话面按「已 canonical 存储值」与 workspace root 做逐分量前缀比较时
+    // 恒假，detail 被误判越界 400（restore 旅程在 Windows 上失败的第二个
+    // linux-first 假设；Linux 上 canonicalize 本就是普通形，行为不变）。
+    let canonical = sebas_webui::fs::canonicalize_plain(&work)
+        .unwrap_or_else(|_| support::forward_slash(&work));
     let projects_db = sb.path.join("projects.db");
     let mut conn = open_and_sync(&projects_db, sebas::sebas_state::repo::PROJECTS_TABLES)
         .expect("open sandbox projects.db for seeding")
