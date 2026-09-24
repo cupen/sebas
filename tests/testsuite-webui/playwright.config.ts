@@ -23,6 +23,11 @@ export default defineConfig({
   // singleprocess-dead-core.spec.ts runs under playwright.dead-core.config.ts
   // (port 9895 + TESTSUITE_ALLOW_CORE_DEATH=1) — it SIGKILLs the shared
   // core --webui process, which is the journey's premise and lethal here.
+  // test-model-scenarios.spec.ts runs under playwright.native.config.ts
+  // (port 9894 + TESTSUITE_NATIVE=1) — its native scenarios need
+  // `SEBAS_AGENT_ROUTER_URL`/`SEBAS_AGENT_MODEL`; in this sandbox the native
+  // execution body is honestly unavailable, so `createSession(agent:'native')`
+  // is rejected with 409 and the journey fails for the wrong reason.
   testIgnore: [
     /auth\.spec\.ts/,
     /auth-setup\.spec\.ts/,
@@ -30,6 +35,7 @@ export default defineConfig({
     /deployment\.spec\.ts/,
     /approval-detached\.spec\.ts/,
     /singleprocess-dead-core\.spec\.ts/,
+    /test-model-scenarios\.spec\.ts/,
   ],
   timeout: 30_000,
   retries: 1,

@@ -33,7 +33,8 @@
 
 新增 native 场景姿态：`playwright.native.config.ts`（端口 9894）+ harness 的
 `TESTSUITE_NATIVE=1`（`tasks.py`：把 native 内核指向沙箱内已在跑的 debug router
-`127.0.0.1:8791`，默认模型 `test/text`，可用模型 = 九场景 + bare `test`）。
+随本装配 webui 端口派生的 debug router 端口，默认模型 `test/text`，可用模型 =
+九场景 + bare `test`）。
 默认沙箱**不注入**这组 env，`first-paint` 的「native 未配置模型凭据」断言不受影响
 （实测：`--case first-paint` 2 passed、`--case permission` 3 passed）。
 `invoke testsuite-webui` 链尾已加 native 配置（第六套）。

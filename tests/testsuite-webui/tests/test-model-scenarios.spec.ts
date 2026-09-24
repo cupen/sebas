@@ -2,7 +2,8 @@
  * 场景模型（native）浏览器级呈现（extend-test-model-scenarios 3.10）。
  *
  * 装配：`playwright.native.config.ts`（端口 9894，`TESTSUITE_NATIVE=1`）——
- * harness 把 native 内核指向沙箱内已在跑的 debug router（`127.0.0.1:8791`），
+ * harness 把 native 内核指向沙箱内已在跑的 debug router（端口随本装配的 webui
+ * 端口派生，见 tasks.py 的 `_router_port_for`），
  * 默认模型 `test/text`、可用模型 = 九个场景 + bare `test`。默认沙箱没有这组
  * env，本文件只在 native 装配下运行。
  *

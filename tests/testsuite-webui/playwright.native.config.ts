@@ -11,7 +11,8 @@ const REPO_ROOT = path.resolve(import.meta.dirname, '../..')
  * 场景模型（native）形态（extend-test-model-scenarios 3.10）。
  *
  * 与默认沙箱唯一的差别：harness 以 `TESTSUITE_NATIVE=1` 装配，把 native 内核
- * 指向沙箱内已在跑的 debug router（`127.0.0.1:8791`）并把默认模型钉成
+ * 指向沙箱内已在跑的 debug router（端口随本装配的 webui 端口派生，见
+ * tasks.py 的 `_router_port_for`）并把默认模型钉成
  * `test/text`（可用模型 = 九个场景 + bare `test`）。默认沙箱**没有**这组
  * env（native 仍是「未配置模型凭据」），所以 first-paint 的 native 禁用断言
  * 与其余五套装配零影响；本装配只跑 native 场景旅程。
