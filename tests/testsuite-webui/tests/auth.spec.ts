@@ -5,7 +5,7 @@
  *
  * Runs ONLY under playwright.auth.config.ts (TESTSUITE_AUTH=1 sandbox on port
  * 9898, unified test account admin/admin provisioned in the sandbox-local
- * auth.db via webui-passwd). Covers: the deep link under auth redirects to
+ * auth.db via `sebas auth add`). Covers: the deep link under auth redirects to
  * the login page, wrong credentials are rejected in place, admin/admin
  * enters the workbench, and logout returns to the unauthenticated state.
  * (The auth-OFF free-access control is implicitly covered by every

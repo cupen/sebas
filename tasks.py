@@ -858,11 +858,11 @@ def _run_webui_sandbox(port, auth_on, keep, reuse, human, detached=False, provis
     _write_sandbox_config(work, fake_bin, auth_on, webui_enabled=detached, port=port, fake_acp_bin=fake_acp_bin, router_port=router_port)
 
     if auth_on and provision:
-        # 统一测试账号 admin/admin：webui-passwd 写沙箱内 auth.db（首个用户
-        # 默认 root），建户先于进程拉起、失败即退（fail-fast，不等 health）。
+        # 统一测试账号 admin/admin：sebas auth add 写沙箱内 auth.db（首个
+        # 用户默认 root），建户先于进程拉起、失败即退（fail-fast，不等 health）。
         # auth-setup 姿态（provision=False）跳过——零用户正是被测前提。
         result = subprocess.run(
-            [sebas_bin, "webui-passwd", "--user", "admin", "--password-stdin"],
+            [sebas_bin, "auth", "add", "admin", "--password-stdin"],
             input=b"admin",
             env={**os.environ, "SEBAS_WEBUI_AUTH_DB": os.path.join(work, "auth.db")},
         )

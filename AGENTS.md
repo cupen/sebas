@@ -106,8 +106,8 @@ throwaway webui on port 9879 with auth **disabled by default** (login-free GUI
 testing); `invoke testsuite-webui-sandbox --auth` turns auth on with the test
 account **admin / admin**, provisioned into the sandbox-local
 `SEBAS_WEBUI_AUTH_DB` (add-webui-multiuser-rbac) via
-`sebas webui-passwd --user admin --password-stdin` — the first user in a
-fresh user store defaults to the root role (`webui-passwd` only warns on
+`sebas auth add admin --password-stdin` — the first user in a
+fresh user store defaults to the root role (`sebas auth` only warns on
 passwords shorter than 8 chars; the interactive `--auth` login prompt is
 username `admin` + password `admin`). Ctrl-C stops it and deletes the sandbox
 dir. The same assembly serves
@@ -161,8 +161,8 @@ both live in tasks.py — the old `scripts/*sandbox*.sh` harnesses were removed
      the env var is only for explicitly simulating a wrong-secret refusal.
 
    Provisioning a WebUI login user (only needed when `auth` stays on):
-   either `sebas webui-passwd --user <name> [--password-stdin|--password]
-   [--role root|admin|member|viewer]` against the state-dir-derived
+   either `sebas auth add <name> [--role root|admin|member|viewer]
+   [--password-stdin|--password]` against the state-dir-derived
    `auth.db` (`SEBAS_WEBUI_AUTH_DB` overrides; first user defaults to root,
    later ones to member), or export `SEBAS_WEBUI_USER` + `SEBAS_WEBUI_PASSWORD`
    before starting the webui (bootstraps root at first start, idempotent on
@@ -300,7 +300,7 @@ addr=127.0.0.1:<port>`，router 侧用自定义 provider（`[provider.fake]` 哑
    auth = false             # 登录免了：零用户 + 默认开的 auth 会停在首启
                             # 设置页——沙箱内要么显式关，要么把用户库
                             # （状态目录下的 auth.db，SEBAS_WEBUI_AUTH_DB 可
-                            # 覆盖）建上户（webui-passwd / env 引导）
+                            # 覆盖）建上户（sebas auth add / env 引导）
 
    # [router] / [provider.*] 都是可选段——纯会话核心不写它们也能启动。
    # --debug 下省略 [provider.*] 也行：内置 test provider 在 parse 之后注入，

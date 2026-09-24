@@ -90,7 +90,7 @@ driver = "claude"
 # auth = true          # 登录鉴权开关。开启（默认）= 全部 /api 与 /ws 需登录：
 #                      #   零用户首启走 WebUI 设置页引导建 root（loopback），
 #                      #   或事先用 SEBAS_WEBUI_USER + SEBAS_WEBUI_PASSWORD
-#                      #   环境变量 / `sebas webui-passwd --user <name>`
+#                      #   环境变量 / `sebas auth add <name>`
 #                      #   建户（用户库默认 ~/.sebas/auth.db，env
 #                      #   SEBAS_WEBUI_AUTH_DB 覆盖）。
 #                      # false = 全路由免登录（仅测试用）；host 非 loopback

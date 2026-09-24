@@ -252,7 +252,7 @@ StateSnapshot / StateMutation）+ 两条持久流（`Subscribe` 会话流、
 | `record` | `src/main.rs` → `src/record.rs::run` | 录制 ACP agent stdio 流量为 fixture |
 | `update` | `src/main.rs` → `src/update.rs::run` | watchdog 的一次性升级/回滚实现 |
 | `agent-kinds list` | `src/main.rs` → `src/agent_kinds.rs::run` | 配置的第三方 agent 可达性报告 |
-| `webui-passwd` | `src/main.rs` → `src/webui_cmd.rs::run_passwd` | 建/改 WebUI 登录账户（PBKDF2 落盘，运行中的 webui mtime 热重载） |
+| `auth` (add/passwd/list) | `src/main.rs` → `src/auth_cmd.rs::run` | WebUI 账户管理（建户/改密/只读列表，PBKDF2 落盘，用户库即活数据） |
 
 ### 3.3 控制面
 
