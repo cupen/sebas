@@ -38,8 +38,8 @@
 - [x] 4.3 改 `tests/support/mod.rs` 的路径钉（移除 sessions.json 相关钉）；验证：`cargo test` 全绿
   - 备注：Sandbox 模板与字段同步移除；testsuite_e2e/acceptance 中引用点已改写（断言 sessions.json 不存在、占位播种走 projects.db）。
 - [x] 4.4 复核无遗留导入代码：验证：`grep -rn "sessions.json" src/ sebas-*/src/` 无生产代码命中；且无导入标记相关的键
-- [ ] 4.5 更新 `openspec/specs/session-persistence/spec.md` 的 Purpose（去掉「being migrated」的进行时表述）；验证：Purpose 与两条 spec 的新要求一致
-  - 备注（范围裁剪）：主 spec（`openspec/specs/`）按本 change 执行指令冻结不动，delta 已在 `openspec/changes/persist-session-map/specs/`，由归档阶段合并（含 Purpose 措辞）。
+- [x] 4.5 更新 `openspec/specs/session-persistence/spec.md` 的 Purpose（去掉「being migrated」的进行时表述）；验证：Purpose 与两条 spec 的新要求一致
+  - 备注（手工落地，不再依赖归档阶段）：Purpose 末句已改写为「会话映射落状态库、按变更落盘、无独立映射文件」，与该文件既有 requirement「Runtime state is not persisted by this store」及两份 delta（`session-lifecycle` / `state-store`）一致；requirement/scenario 正文零改动。`openspec validate session-persistence --type spec` 通过。**原因**：本 change 的 delta 只覆盖 `session-lifecycle` 与 `state-store`，不含 `session-persistence`，归档阶段永远不会修正该 Purpose——这是一项无 delta 承载的孤儿工作，故手工落地。（原备注「主 spec 冻结不动、由归档合并」只适用于有 delta 的两个 capability。）
 
 ## 5. 全量回归
 

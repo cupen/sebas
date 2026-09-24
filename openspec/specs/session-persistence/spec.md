@@ -1,7 +1,7 @@
 # session-persistence Specification
 
 ## Purpose
-Owns the persisted provider-state store: the on-disk layout of `~/.sebas/state.json` and the legacy `~/.sebas/providers.json` overlay, schema versioning and migrations from v1, corruption tolerance, atomic write mechanics, mode/selection repair rules, and exactly which runtime state is deliberately not persisted. The persistence responsibility is being migrated to the core state store (SQLite).
+Owns the persisted provider-state store: the on-disk layout of `~/.sebas/state.json` and the legacy `~/.sebas/providers.json` overlay, schema versioning and migrations from v1, corruption tolerance, atomic write mechanics, mode/selection repair rules, and exactly which runtime state is deliberately not persisted. The agent session map is no longer held here: it is persisted in the core state store (SQLite), written per mutation rather than at shutdown, and no separate session-map file is written or read.
 
 ## Requirements
 
