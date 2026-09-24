@@ -643,7 +643,7 @@ def _sandbox_env(work, secret=True):
     return env
 
 
-def _write_sandbox_config(work, fake_bin, auth_on, webui_enabled=False, port=None, fake_acp_bin=None):
+def _write_sandbox_config(work, fake_bin, auth_on, webui_enabled=False, port=None, fake_acp_bin=None, router_port=None):
     """config.toml following the AGENTS.md debug recipe.
 
     `[service.webui] enabled` decides the topology: false (default) = the
@@ -755,9 +755,15 @@ api_key = "sk-sandbox-dummy"
 
 # router 只以独立进程运行（unify-router-process-shape）：listen 默认
 # 8787 是固定值，会撞操作员实例的托管 router——沙箱钉一个专用端口。
+# 端口**随本装配的 webui 端口派生**（`_router_port_for`）：六链串行时若所有
+# 装配共用同一个固定端口，前一链尚在收尾的 router 会让后一链 bind 失败
+# （`Address already in use`），而后一链的 native 内核仍会连上那个残留 router
+# ——表现为首个 createSession 撞 `BackendUnavailable` → 409（sebas-ps9r）。
 [router]
-listen = "127.0.0.1:8791"
-provider_overlay = "{cfg}/providers.json"
+listen = "127.0.0.1:{router_port}"
+# `provider_overlay` 已退休（retire-legacy-state-json 3.5）——router 不再读任何
+# provider overlay 文件，写这个键只会触发一条废弃告警（config.rs 的原始 TOML
+# 扫描）。provider 变更经 core state channel 下发，故此处不再写该键。
 # persist-router-usage：用量落 router 自有的 SQLite 库（默认状态目录下的
 # usage.db，SEBAS_ROUTER_USAGE_DB 可覆盖）。旧的 `usage_file`（NDJSON）键已
 # 删除——残留会以未知键报错。查库：sqlite3 "{cfg}/usage.db" "SELECT * FROM usage_records ORDER BY id DESC LIMIT 10"
@@ -773,6 +779,21 @@ def _health_ok(url):
             return r.status == 200
     except Exception:
         return False
+
+
+# 沙箱 debug router 端口基址与偏移：`invoke testsuite-webui` 的六链是**串行**
+# 的（main → auth → auth-setup → detached → dead-core → native），但它们各自
+# 的 webui 端口互不相同（9895-9899 / 9894）。router 端口此前是固定 8791，
+# 于是前一链的 router 还没退干净时，后一链的 router 会 bind 失败；更糟的是
+# 残留 router 仍在 8791 上答 `/healthz`，就绪探针被骗过，而 native 内核连的是
+# 那个「别人家的」router → `BackendUnavailable` → 409。让端口随 webui 端口派生
+# 即彻底消除这条跨链耦合。
+_ROUTER_PORT_BASE = 10000
+
+
+def _router_port_for(port):
+    """本装配专属的 debug router 端口（与任何 webui 端口都不重叠）。"""
+    return _ROUTER_PORT_BASE + (int(port) % 1000)
 
 
 def _run_webui_sandbox(port, auth_on, keep, reuse, human, detached=False, provision=True, native=False):
@@ -805,6 +826,7 @@ def _run_webui_sandbox(port, auth_on, keep, reuse, human, detached=False, provis
         "TESTSUITE_SCENE_FILE", os.path.join(tempfile.gettempdir(), f"sebas-testsuite-webui-scene-{port}")
     )
     health_url = f"http://127.0.0.1:{port}/health"
+    router_port = _router_port_for(port)
     stop = threading.Event()
 
     def _on_signal(signum, frame):
@@ -833,7 +855,7 @@ def _run_webui_sandbox(port, auth_on, keep, reuse, human, detached=False, provis
         os.makedirs(os.path.join(work, sub), exist_ok=True)
     with open(scene_file, "w") as f:
         f.write(work)
-    _write_sandbox_config(work, fake_bin, auth_on, webui_enabled=detached, port=port, fake_acp_bin=fake_acp_bin)
+    _write_sandbox_config(work, fake_bin, auth_on, webui_enabled=detached, port=port, fake_acp_bin=fake_acp_bin, router_port=router_port)
 
     if auth_on and provision:
         # 统一测试账号 admin/admin：webui-passwd 写沙箱内 auth.db（首个用户
@@ -885,12 +907,13 @@ def _run_webui_sandbox(port, auth_on, keep, reuse, human, detached=False, provis
         env = _sandbox_env(work)
         if native:
             # extend-test-model-scenarios 3.10：把 native 内核指向沙箱内**已在跑**
-            # 的 debug router（config 钉死 127.0.0.1:8791），默认模型 = test/text。
-            # 只有 TESTSUITE_NATIVE=1 的姿态注入这组 env——默认沙箱保持「未配置
-            # 模型凭据」，first-paint 的 native 禁用断言与既有旅程零影响。
+            # 的 debug router（端口随本装配的 webui 端口派生，见 `_router_port_for`），
+            # 默认模型 = test/text。只有 TESTSUITE_NATIVE=1 的姿态注入这组 env——
+            # 默认沙箱保持「未配置模型凭据」，first-paint 的 native 禁用断言与既有
+            # 旅程零影响。
             env.update(
                 {
-                    "SEBAS_AGENT_ROUTER_URL": "http://127.0.0.1:8791",
+                    "SEBAS_AGENT_ROUTER_URL": f"http://127.0.0.1:{router_port}",
                     "SEBAS_AGENT_ROUTER_AUTH": "sk-gw-local-dev",
                     "SEBAS_AGENT_MODEL": "test/text",
                     "SEBAS_AGENT_MODELS": ",".join(_NATIVE_SCENARIO_MODELS),
@@ -942,13 +965,30 @@ def _run_webui_sandbox(port, auth_on, keep, reuse, human, detached=False, provis
         return aux.poll() is not None
 
     # Readiness poll; a dead child during startup is an immediate error.
+    #
+    # native 姿态额外等本装配的 debug router 就绪：native 内核经
+    # `SEBAS_AGENT_ROUTER_URL` 指向它，而 webui 的 `/health` 只证明 **webui**
+    # 起来了、不证明 router 起来了。router 的 `/healthz` 按路径豁免鉴权，正合
+    # 做探针。
+    #
+    # **liveness 先于 readiness**：端口被占时 router 会 bind 失败并立刻退出，
+    # 而占用者（前一链残留的 router）仍会替它答 `/healthz`——若先判 readiness
+    # 就会在 router 已死的情况下「就绪」，native 内核于是连上别人家的 router，
+    # 首个 createSession 撞 `BackendUnavailable` → 409（sebas-ps9r 的实证路径）。
+    router_health_url = f"http://127.0.0.1:{router_port}/healthz"
+
+    def _ready():
+        if not _health_ok(health_url):
+            return False
+        return not native or _health_ok(router_health_url)
+
     for _ in range(120):
-        if _health_ok(health_url):
-            break
         if _any_dead():
             print("error: sebas process exited during startup; log:", flush=True)
             print(_log_tail(), flush=True)
             raise SystemExit(1)
+        if _ready():
+            break
         time.sleep(0.5)
     else:
         print("error: sandbox not healthy after 60s; log:", flush=True)
