@@ -396,7 +396,7 @@ host = "127.0.0.1"
 port = {webui_port}
 # auth 默认 true；API 断言沙箱一律免登录，显式关闭（webui 登录旅程由
 # testsuite-webui 专测）。开启形态的凭据走沙箱内 SEBAS_WEBUI_AUTH_DB +
-# env 引导 / webui-passwd，绝不落真实 ~/.sebas。
+# env 引导 / sebas auth add，绝不落真实 ~/.sebas。
 auth = false
 
 # router validate requires >=1 provider with a base_url; the debug `test`
