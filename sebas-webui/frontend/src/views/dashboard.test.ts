@@ -1908,6 +1908,87 @@ describe('fresh placeholder first exchange never badges (round3 6.1)', () => {
   })
 })
 
+describe('fresh placeholder first exchange via live streaming (fix-unread-fresh-exchange)', () => {
+  // GUI 真实时序的 dashboard 级钉（session-unread-badge「first focused
+  // exchange of a fresh placeholder」）：创建写锚 0 → 空详情（登记）→
+  // composer 提交后的乐观重取只含 [prompt]（transcript 以 0 可见段挂载）
+  // → 回复经 turn.append 到达。锚必须在回复的到达帧**同步**推进——徽章水位
+  // （msg_count − 锚）恒 0、seam 从未画出——不依赖 250ms 防抖窗或后续重取。
+  const KEY = 'oc_live%00'
+  const anchorKey = `sebas:seen:${KEY}`
+
+  beforeEach(() => {
+    localStorage.removeItem(anchorKey)
+  })
+  afterEach(() => {
+    localStorage.removeItem(anchorKey)
+  })
+
+  it('prompt-only 挂载后回复经 turn.append 到达：锚即时推进，seam 不画', async () => {
+    // rail confirmNewSession 的创建即写锚 0（「创建即见过」基线）。
+    writeFocusAnchor(KEY, 0)
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    apiMocks.session.mockResolvedValue({ ...detailFixture(), msg_count: 0, entries: [] })
+    const el = await mount()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    // 空态在场：transcript 未挂载，dashboard 侧空流登记已完成。
+    expect(el.shadowRoot!.querySelector('.empty-stream')).toBeTruthy()
+    expect(el.shadowRoot!.querySelector('sebas-transcript-view')).toBeNull()
+
+    // composer 提交完成（composer-sent → loadFocused）：此刻服务端只有 prompt。
+    apiMocks.session.mockResolvedValue({
+      ...detailFixture(),
+      msg_count: 0,
+      turn_engaged: true,
+      entries: [
+        {
+          position: 0,
+          kind: 'prompt',
+          element_type: 'markdown',
+          content: 'hello',
+          created_at_unix: 1_700_000_000,
+        },
+      ],
+    })
+    ;(el as unknown as { onComposerSent: () => void }).onComposerSent()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    const transcript = el.shadowRoot!.querySelector('sebas-transcript-view')
+    expect(transcript).toBeTruthy()
+
+    // 回复流式到达（turn.append：dashboard 合并与 transcript 自身订阅同帧）。
+    wsMocks.emit({
+      type: 'turn.append',
+      session_id: KEY,
+      seq: 2,
+      entries: [
+        {
+          position: 1,
+          kind: 'content',
+          element_type: 'thinking',
+          content: 'hmm',
+          created_at_unix: 1_700_000_100,
+        },
+        {
+          position: 2,
+          kind: 'content',
+          element_type: 'markdown',
+          content: 'hello world',
+          created_at_unix: 1_700_000_100,
+        },
+      ],
+    })
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    // 到达帧同步结算：锚 = 已渲染段数 1（= msg_count，徽章水位 0）。
+    expect(JSON.parse(localStorage.getItem(anchorKey)!)).toEqual({ anchor_count: 1 })
+    const seam = (transcript as unknown as { shadowRoot: ShadowRoot }).shadowRoot.querySelector('.seam')
+    expect(seam?.hasAttribute('hidden')).toBe(true)
+    el.remove()
+  })
+})
+
 describe('review-cards phase wiring (round3 2.2)', () => {
   it('the focused session phase is passed to sebas-review-cards for reconciliation', async () => {
     // 相位对账的另一半在 dashboard：卡片组件自己不订阅相位帧，靠这里把
