@@ -187,6 +187,135 @@ def _sweep_orphan_test_processes():
     print(f"[cleanup] killed orphaned test processes: {targets}", flush=True)
 
 
+# ---------------------------------------------------------------------------
+# Suite run reports (openspec change: add-testsuite-report).
+#
+# Contract (spec `testsuite-report`): every suite entry point emits, after the
+# suite has run, an HTML report at the fixed path `.artifacts/verify/
+# report-<suite>.html` plus a compact terminal tree — with no extra manual
+# step. The report is a PURE ADDITION: it is generated after the pass/fail
+# verdict is already known, and a report failure warns without touching the
+# exit code (design D5).
+# ---------------------------------------------------------------------------
+
+_REPORT_SCRIPT = os.path.join("scripts", "testsuite_report.py")
+_REPORT_DIR = os.path.join(".artifacts", "verify")
+
+#: nextest is an OPTIONAL dev dependency: present → native per-case durations
+#: and structured JUnit; absent → the cargo console fallback (spec: Rust 套件
+#: 采集通道自动降级 — the suite MUST NOT fail for lack of nextest).
+_NEXTEST_PROBE = {"checked": False, "available": False}
+
+
+def _has_nextest(c):
+    """Probe `cargo nextest --version` once per process; never raises."""
+    if not _NEXTEST_PROBE["checked"]:
+        result = c.run("cargo nextest --version", hide=True, warn=True)
+        _NEXTEST_PROBE["available"] = not result.failed
+        _NEXTEST_PROBE["checked"] = True
+        if not _NEXTEST_PROBE["available"]:
+            print("[report] cargo-nextest not found — falling back to cargo output parsing")
+    return _NEXTEST_PROBE["available"]
+
+
+def _report_cmd(suite, channel, input_path=None, shards=None, duration=None, out=None, note=None):
+    """Build the `python3 scripts/testsuite_report.py …` invocation."""
+    args = [sys.executable, _REPORT_SCRIPT, "--suite", suite, "--channel", channel]
+    if input_path:
+        args += ["--input", input_path]
+    if shards:
+        args += ["--shards"] + list(shards)
+    if duration is not None:
+        args += ["--duration", f"{duration:.3f}"]
+    if note:
+        args += ["--note", note]
+    args += ["--out", out or os.path.join(_REPORT_DIR, f"report-{suite}.html")]
+    return " ".join(f'"{a}"' if " " in a else a for a in args)
+
+
+def _emit_report(c, suite, channel, **kwargs):
+    """Generate the report; report trouble is a warning, never a failure."""
+    try:
+        os.makedirs(_REPORT_DIR, exist_ok=True)
+    except OSError as exc:
+        print(f"[report] WARNING: cannot create {_REPORT_DIR}: {exc}", file=sys.stderr)
+        return
+    result = c.run(_report_cmd(suite, channel, **kwargs), warn=True)
+    if result.failed:
+        print(
+            f"[report] WARNING: report generation failed (suite verdict unaffected): "
+            f"{(result.stderr or '').strip()[:400]}",
+            file=sys.stderr,
+        )
+
+
+#: Playwright reporter shards. The main config writes the bare name; the other
+#: five configs suffix their config stem (collect-json.ts owns the naming).
+_WEBUI_SHARDS = (
+    "webui-results.json",
+    "webui-results-auth.json",
+    "webui-results-auth-setup.json",
+    "webui-results-deployment.json",
+    "webui-results-detached.json",
+    "webui-results-dead-core.json",
+)
+
+
+def _webui_shard_paths():
+    """Existing shard files, in the stable order above."""
+    return [os.path.join(_REPORT_DIR, name) for name in _WEBUI_SHARDS]
+
+
+def _webui_clear_shards():
+    """Drop the previous run's shards so the report covers this run only."""
+    for path in _webui_shard_paths():
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def _report_webui(c, elapsed):
+    """Merge this run's Playwright shards into the webui report."""
+    shards = [path for path in _webui_shard_paths() if os.path.exists(path)]
+    _emit_report(c, "webui", "webui-shards", shards=shards, duration=elapsed)
+
+
+def _report_rust_suite(c, suite, test_target, case):
+    """Run one Rust integration suite, then report — on pass AND on fail.
+
+    Returns True when the suite passed. The verdict is captured from the run
+    itself so the report is still produced before the caller raises.
+    """
+    started = time.time()
+    if _has_nextest(c):
+        # nextest writes JUnit XML natively (structured status + per-case time).
+        junit = os.path.join(_REPORT_DIR, f"nextest-{suite}.xml")
+        os.makedirs(_REPORT_DIR, exist_ok=True)
+        case_filter = f" {case}" if case else ""
+        cmd = (
+            f"cargo nextest run --test {test_target} --run-ignored all"
+            f" --message-format junit --junit-path {junit}{case_filter}"
+        )
+        result = c.run(cmd, echo=True, warn=True)
+        elapsed = time.time() - started
+        _emit_report(c, suite, "junit", input_path=junit, duration=elapsed)
+    else:
+        # cargo fallback: capture the console so libtest lines can be parsed.
+        log = os.path.join(_REPORT_DIR, f"{suite}.log")
+        os.makedirs(_REPORT_DIR, exist_ok=True)
+        base_filter = f"{case} " if case else ""
+        cmd = f"cargo test --test {test_target} {base_filter}-- --ignored".replace("  ", " ")
+        result = c.run(cmd, echo=True, warn=True)
+        elapsed = time.time() - started
+        try:
+            with open(log, "w", encoding="utf-8") as fh:
+                fh.write(result.stdout or "")
+        except OSError:
+            log = None
+        _emit_report(c, suite, "cargo", input_path=log, duration=elapsed)
+    return not result.failed
+
 
 @task(
     help={
@@ -243,10 +372,8 @@ def testsuite_e2e(c, case=None):
         result = c.run("cargo build", echo=True)
         if result.failed:
             raise SystemExit(1)
-        test_filter = f"{case} " if case else ""
-        cmd = f"cargo test --test testsuite_e2e_test {test_filter}-- --ignored".replace("  ", " ")
-        result = c.run(cmd, echo=True)
-        if result.failed:
+        passed = _report_rust_suite(c, "e2e", "testsuite_e2e_test", case)
+        if not passed:
             print("e2e suite FAILED; kept sandbox dirs are printed above (or under target/tests/)")
             raise SystemExit(1)
     finally:
@@ -283,10 +410,8 @@ def testsuite_acceptance(c, case=None):
         result = c.run("cargo build", echo=True)
         if result.failed:
             raise SystemExit(1)
-        test_filter = f"{case} " if case else ""
-        cmd = f"cargo test --test testsuite_acceptance_test {test_filter}-- --ignored".replace("  ", " ")
-        result = c.run(cmd, echo=True)
-        if result.failed:
+        passed = _report_rust_suite(c, "acceptance", "testsuite_acceptance_test", case)
+        if not passed:
             print("acceptance suite FAILED; kept sandbox dirs are printed above (or under target/tests/)")
             raise SystemExit(1)
     finally:
@@ -374,6 +499,15 @@ def testsuite_webui(c, case=None):
         _testsuite_webui_preflight(c)
 
         suite_dir = "tests/testsuite-webui"
+        # Report plumbing (add-testsuite-report): each Playwright config run
+        # writes its own shard via tests/reporters/collect-json.ts; the report
+        # generator merges them into one tree. Stale shards from a previous run
+        # are cleared first so the report only ever shows THIS run's cases —
+        # especially in the 5-config chain, where a mid-chain failure leaves
+        # earlier shards on disk.
+        _webui_clear_shards()
+        os.makedirs(_REPORT_DIR, exist_ok=True)
+        started = time.time()
         if case:
             # --case auth runs the auth-on form; --case auth-setup the
             # zero-user first-run setup form (auth on, no provisioned user);
@@ -401,7 +535,17 @@ def testsuite_webui(c, case=None):
                 f" && pnpm --dir {suite_dir} exec playwright test --config playwright.detached.config.ts"
                 f" && pnpm --dir {suite_dir} exec playwright test --config playwright.dead-core.config.ts"
             )
-        result = c.run(cmd, echo=True)
+        # Pin the shard location explicitly (absolute) so the reporter never has
+        # to guess the repo root from its own file path — that guess was one
+        # directory short and misfiled every shard as `tests/.artifacts/...`,
+        # which made the merged report render 0 cases.
+        report_env = dict(os.environ)
+        report_env["TESTSUITE_REPORT_JSON"] = os.path.abspath(
+            os.path.join(_REPORT_DIR, "webui-results.json")
+        )
+        result = c.run(cmd, echo=True, warn=True, env=report_env)
+        elapsed = time.time() - started
+        _report_webui(c, elapsed)
         if result.failed:
             print(
                 "testsuite-webui FAILED — sandbox scene kept for debugging (path printed above)."

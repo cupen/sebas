@@ -39,3 +39,7 @@ target-qa/
 target-qa-r5/
 .beads.gate.lock
 __no_overlay__.json
+
+# 套件运行报告与验证产物（add-testsuite-report）：report-<suite>.html 固定
+# 路径覆盖写，属本地运行产物；`.artifacts/verify/*.log` 是既有运行日志同理。
+/.artifacts/

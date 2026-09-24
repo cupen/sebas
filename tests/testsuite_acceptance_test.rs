@@ -6,8 +6,8 @@
 //! Opt-in only: `cargo test --test testsuite_acceptance_test -- --ignored`
 //! or `invoke testsuite-acceptance` (`--case <name>` filters). Coverage accounting for
 //! these cases lives in `tests/acceptance/COVERAGE.md`.
-
 use std::sync::Arc;
+
 use std::time::Duration;
 
 mod support;
@@ -18,6 +18,7 @@ use support::{
 };
 
 const TURN: Duration = Duration::from_secs(30);
+
 const STARTUP: Duration = Duration::from_secs(30);
 
 /// 建会话（`body` 里不用自带 project_id：会话必须从属于项目，这里统一注入
@@ -73,6 +74,115 @@ async fn wait_turn_done(cli: &reqwest::Client, sb: &Sandbox, key: &str) -> Strin
         })
         .unwrap_or_default()
 }
+
+// ===========================================================================
+// Shared helpers and constants (visible to every group below via
+// `use super::*;`). Test functions live in the `mod` groups that follow.
+// ===========================================================================
+
+// ═══════════════════════════════════════════════════════════════════════════
+// add-remote-execution-node 9.4：webui + 真 sebas-node 的远端节点旅程
+// ═══════════════════════════════════════════════════════════════════════════
+/// 从 core 日志里等出一次性 bootstrap 配对 token（只打印一次）。
+async fn wait_bootstrap_token(sb: &Sandbox) -> String {
+    let log = sb.core_log.clone();
+    let hint = sb.path.clone();
+    support::wait_for(
+        "core 打印一次性 bootstrap 配对 token",
+        Duration::from_secs(20),
+        &hint,
+        move || {
+            let log = log.clone();
+            Box::pin(async move {
+                let text = std::fs::read_to_string(&log).ok()?;
+                text.split("有效）：").nth(1).and_then(|rest| {
+                    let token: String = rest
+                        .trim_start()
+                        .chars()
+                        .take_while(|c| c.is_ascii_hexdigit())
+                        .collect();
+                    (token.len() == 64).then_some(token)
+                })
+            })
+        },
+    )
+    .await
+}
+
+/// 等某节点在 `GET /api/nodes` 上进入给定状态（经 HTTP，不查内部结构）。
+async fn wait_node_status(cli: &reqwest::Client, sb: &Sandbox, node_id: &str, want: &str) {
+    let url = format!("{}/api/nodes", sb.webui_url());
+    let want_s = want.to_string();
+    let node_s = node_id.to_string();
+    let hint = sb.path.clone();
+    let got = support::wait_for(
+        &format!("节点 {node_id} 状态变为 {want}"),
+        Duration::from_secs(30),
+        &hint,
+        move || {
+            let cli = cli.clone();
+            let url = url.clone();
+            let want = want_s.clone();
+            let node = node_s.clone();
+            Box::pin(async move {
+                let v = cli
+                    .get(&url)
+                    .send()
+                    .await
+                    .ok()?
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()?;
+                let nodes = v.get("nodes")?.as_array()?.clone();
+                let found = nodes
+                    .iter()
+                    .find(|n| n.get("id").and_then(|i| i.as_str()) == Some(node.as_str()))?;
+                let status = found.get("status").and_then(|s| s.as_str())?;
+                (status == want).then_some(status.to_string())
+            })
+        },
+    )
+    .await;
+    assert_eq!(got, want);
+}
+
+/// 等 `/api/sessions` 里出现满足谓词**且**额外条件成立的一行；返回该行。
+async fn wait_session_row(
+    cli: &reqwest::Client,
+    sb: &Sandbox,
+    what: &str,
+    pred: impl Fn(&serde_json::Value) -> bool + Send + Sync + 'static,
+) -> serde_json::Value {
+    let cli2 = cli.clone();
+    let url = format!("{}/api/sessions", sb.webui_url());
+    let hint = sb.path.clone();
+    // 谓词按 Arc 共享：每次轮询的 future 必须是 `'static`，借用外层的 Fn 不行。
+    let pred = std::sync::Arc::new(pred);
+    support::wait_for(what, Duration::from_secs(30), &hint, move || {
+        let cli = cli2.clone();
+        let url = url.clone();
+        let pred = pred.clone();
+        Box::pin(async move {
+            let v = cli
+                .get(&url)
+                .send()
+                .await
+                .ok()?
+                .json::<serde_json::Value>()
+                .await
+                .ok()?;
+            v.get("recent_sessions")?
+                .as_array()?
+                .iter()
+                .find(|r| pred(r))
+                .cloned()
+        })
+    })
+    .await
+}
+
+mod session_and_turn {
+    use super::*;
 
 /// Core session-management journey (lifecycle + persistence + restart
 /// recovery): create → turn → follow-up message → core restart → mapping
@@ -196,6 +306,112 @@ async fn session_lifecycle_journey() {
         support::wait_reachable(&cli, &sb).await;
     }
 }
+
+/// 零输出回合的合成提示旅程（close-acceptance-blind-spots 4.3，spec
+/// session-lifecycle「Turn completing without visible output appends a
+/// notice」两个场景各半程）：empty 桩（回合 Done、零输出）走一条真实回合，
+/// 投影恰好落一条 notice 合成提示——回合在时间线上可见；对照面用 default
+/// 桩跑一条正常回合，断言不追加 notice（正常回合不受影响）。
+#[tokio::test]
+#[ignore = "acceptance journey; run with -- --ignored or invoke testsuite-acceptance"]
+async fn zero_output_turn_notice_journey() {
+    let cli = http_client();
+
+    // ── 场景「空回合有落点」：empty 桩（真实回合、零输出、正常 Done）──
+    let sb = Sandbox::new("acceptance", "empty-notice");
+    sb.append_acp_args(&["--scenario", "empty"]);
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    support::wait_reachable(&cli, &sb).await;
+
+    let key = create_session(
+        &cli,
+        &sb,
+        serde_json::json!({ "prompt": "say nothing", "agent": "claude" }),
+    )
+    .await;
+    let _ = wait_turn_done(&cli, &sb, &key).await;
+    let url = format!("{}/api/sessions/{key}", sb.webui_url());
+    let detail: serde_json::Value = cli
+        .get(&url)
+        .send()
+        .await
+        .expect("session detail")
+        .json()
+        .await
+        .expect("detail json");
+    let entries = detail["entries"].as_array().cloned().unwrap_or_default();
+
+    // 投影恰好一条 notice 条目，文案说明「回合已结束且无输出」。
+    let notices: Vec<_> = entries
+        .iter()
+        .filter(|e| e["element_type"].as_str() == Some("notice"))
+        .collect();
+    assert_eq!(
+        notices.len(),
+        1,
+        "an empty turn must project exactly one notice entry: {entries:?}"
+    );
+    let notice_text = notices[0]["content"].as_str().unwrap_or_default();
+    assert!(
+        notice_text.contains("回合已结束且无输出"),
+        "the notice must say the turn ended without output: {notice_text}"
+    );
+    // 回合时间线可见：prompt（操作者提交）之后紧跟 notice，此外无其他条目
+    // ——零输出回合不再不可见地消失。
+    assert_eq!(
+        entries.len(),
+        2,
+        "the timeline must read prompt → notice, nothing else: {entries:?}"
+    );
+    assert_eq!(entries[0]["kind"].as_str(), Some("prompt"));
+    assert_eq!(entries[1]["element_type"].as_str(), Some("notice"));
+    assert_eq!(entries[1]["position"].as_u64(), Some(1));
+
+    // ── 场景「正常回合不受影响」：default 桩（正文正常产出）──
+    let sb_ok = Sandbox::new("acceptance", "normal-turn-no-notice");
+    let _core_ok = sb_ok.spawn_core();
+    let _webui_ok = sb_ok.spawn_webui(&sb_ok.core_secret);
+    support::wait_reachable(&cli, &sb_ok).await;
+
+    let key_ok = create_session(
+        &cli,
+        &sb_ok,
+        serde_json::json!({ "prompt": "hello", "agent": "claude" }),
+    )
+    .await;
+    let transcript = wait_turn_done(&cli, &sb_ok, &key_ok).await;
+    assert!(!transcript.is_empty(), "the normal turn must produce output");
+    let url_ok = format!("{}/api/sessions/{key_ok}", sb_ok.webui_url());
+    let detail_ok: serde_json::Value = cli
+        .get(&url_ok)
+        .send()
+        .await
+        .expect("normal session detail")
+        .json()
+        .await
+        .expect("detail json");
+    let entries_ok = detail_ok["entries"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        entries_ok
+            .iter()
+            .all(|e| e["element_type"].as_str() != Some("notice")),
+        "a normal turn must never get a zero-output notice: {entries_ok:?}"
+    );
+    assert!(
+        entries_ok
+            .iter()
+            .any(|e| e["kind"].as_str() == Some("content")),
+        "the normal turn's content must be in the projection: {entries_ok:?}"
+    );
+}
+}
+
+mod model_and_provider {
+    use super::*;
 
 /// Models-management journey (provider governance): a local stub upstream +
 /// provider overlay + model alias → router routes `my-claude` to the stub
@@ -374,6 +590,44 @@ async fn native_agent_turn_via_router_journey() {
 
     let _ = &mut core;
 }
+
+/// Router downstream-auth journey: with `auth_token` configured and the
+/// router NOT in debug mode (debug skips downstream auth), the proxy surface
+/// rejects tokenless requests. The authorized-path 200 is covered by every
+/// other journey riding the debug `test` provider.
+#[tokio::test]
+#[ignore = "acceptance journey; run with -- --ignored or invoke testsuite-acceptance"]
+async fn router_downstream_auth_journey() {
+    let sb = Sandbox::new("acceptance", "auth");
+    sb.set_router_auth_token("sk-gw-test-token");
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _router = sb.spawn_router();
+    let router = wait_router_addr(&sb).await;
+
+    let url = format!("{router}/v1/messages");
+    let payload = serde_json::json!({
+        "model": "claude-x",
+        "max_tokens": 16,
+        "messages": [{ "role": "user", "content": "hi" }]
+    });
+
+    let unauth = cli
+        .post(&url)
+        .json(&payload)
+        .send()
+        .await
+        .expect("tokenless request");
+    assert_eq!(
+        unauth.status().as_u16(),
+        401,
+        "tokenless proxy request must be rejected"
+    );
+}
+}
+
+mod workbench_and_projects {
+    use super::*;
 
 /// Project-management journey: register a sandbox dir as a project, list it,
 /// then create a session bound to that project dir.
@@ -582,142 +836,10 @@ async fn creation_dialog_journey() {
         "legacy backend word must be rejected: {status} {resp}"
     );
 }
-
-/// Router downstream-auth journey: with `auth_token` configured and the
-/// router NOT in debug mode (debug skips downstream auth), the proxy surface
-/// rejects tokenless requests. The authorized-path 200 is covered by every
-/// other journey riding the debug `test` provider.
-#[tokio::test]
-#[ignore = "acceptance journey; run with -- --ignored or invoke testsuite-acceptance"]
-async fn router_downstream_auth_journey() {
-    let sb = Sandbox::new("acceptance", "auth");
-    sb.set_router_auth_token("sk-gw-test-token");
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _router = sb.spawn_router();
-    let router = wait_router_addr(&sb).await;
-
-    let url = format!("{router}/v1/messages");
-    let payload = serde_json::json!({
-        "model": "claude-x",
-        "max_tokens": 16,
-        "messages": [{ "role": "user", "content": "hi" }]
-    });
-
-    let unauth = cli
-        .post(&url)
-        .json(&payload)
-        .send()
-        .await
-        .expect("tokenless request");
-    assert_eq!(
-        unauth.status().as_u16(),
-        401,
-        "tokenless proxy request must be rejected"
-    );
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// add-remote-execution-node 9.4：webui + 真 sebas-node 的远端节点旅程
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// 从 core 日志里等出一次性 bootstrap 配对 token（只打印一次）。
-async fn wait_bootstrap_token(sb: &Sandbox) -> String {
-    let log = sb.core_log.clone();
-    let hint = sb.path.clone();
-    support::wait_for(
-        "core 打印一次性 bootstrap 配对 token",
-        Duration::from_secs(20),
-        &hint,
-        move || {
-            let log = log.clone();
-            Box::pin(async move {
-                let text = std::fs::read_to_string(&log).ok()?;
-                text.split("有效）：").nth(1).and_then(|rest| {
-                    let token: String = rest
-                        .trim_start()
-                        .chars()
-                        .take_while(|c| c.is_ascii_hexdigit())
-                        .collect();
-                    (token.len() == 64).then_some(token)
-                })
-            })
-        },
-    )
-    .await
-}
-
-/// 等某节点在 `GET /api/nodes` 上进入给定状态（经 HTTP，不查内部结构）。
-async fn wait_node_status(cli: &reqwest::Client, sb: &Sandbox, node_id: &str, want: &str) {
-    let url = format!("{}/api/nodes", sb.webui_url());
-    let want_s = want.to_string();
-    let node_s = node_id.to_string();
-    let hint = sb.path.clone();
-    let got = support::wait_for(
-        &format!("节点 {node_id} 状态变为 {want}"),
-        Duration::from_secs(30),
-        &hint,
-        move || {
-            let cli = cli.clone();
-            let url = url.clone();
-            let want = want_s.clone();
-            let node = node_s.clone();
-            Box::pin(async move {
-                let v = cli
-                    .get(&url)
-                    .send()
-                    .await
-                    .ok()?
-                    .json::<serde_json::Value>()
-                    .await
-                    .ok()?;
-                let nodes = v.get("nodes")?.as_array()?.clone();
-                let found = nodes
-                    .iter()
-                    .find(|n| n.get("id").and_then(|i| i.as_str()) == Some(node.as_str()))?;
-                let status = found.get("status").and_then(|s| s.as_str())?;
-                (status == want).then_some(status.to_string())
-            })
-        },
-    )
-    .await;
-    assert_eq!(got, want);
-}
-
-/// 等 `/api/sessions` 里出现满足谓词**且**额外条件成立的一行；返回该行。
-async fn wait_session_row(
-    cli: &reqwest::Client,
-    sb: &Sandbox,
-    what: &str,
-    pred: impl Fn(&serde_json::Value) -> bool + Send + Sync + 'static,
-) -> serde_json::Value {
-    let cli2 = cli.clone();
-    let url = format!("{}/api/sessions", sb.webui_url());
-    let hint = sb.path.clone();
-    // 谓词按 Arc 共享：每次轮询的 future 必须是 `'static`，借用外层的 Fn 不行。
-    let pred = std::sync::Arc::new(pred);
-    support::wait_for(what, Duration::from_secs(30), &hint, move || {
-        let cli = cli2.clone();
-        let url = url.clone();
-        let pred = pred.clone();
-        Box::pin(async move {
-            let v = cli
-                .get(&url)
-                .send()
-                .await
-                .ok()?
-                .json::<serde_json::Value>()
-                .await
-                .ok()?;
-            v.get("recent_sessions")?
-                .as_array()?
-                .iter()
-                .find(|r| pred(r))
-                .cloned()
-        })
-    })
-    .await
-}
+mod remote_node {
+    use super::*;
 
 /// 9.4 验收旅程（webui + 真 `sebas-node`，两个进程）。
 ///
@@ -1118,105 +1240,4 @@ async fn remote_node_mode_journey() {
     core.kill().await.ok();
     webui.kill().await.ok();
 }
-
-/// 零输出回合的合成提示旅程（close-acceptance-blind-spots 4.3，spec
-/// session-lifecycle「Turn completing without visible output appends a
-/// notice」两个场景各半程）：empty 桩（回合 Done、零输出）走一条真实回合，
-/// 投影恰好落一条 notice 合成提示——回合在时间线上可见；对照面用 default
-/// 桩跑一条正常回合，断言不追加 notice（正常回合不受影响）。
-#[tokio::test]
-#[ignore = "acceptance journey; run with -- --ignored or invoke testsuite-acceptance"]
-async fn zero_output_turn_notice_journey() {
-    let cli = http_client();
-
-    // ── 场景「空回合有落点」：empty 桩（真实回合、零输出、正常 Done）──
-    let sb = Sandbox::new("acceptance", "empty-notice");
-    sb.append_acp_args(&["--scenario", "empty"]);
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    support::wait_reachable(&cli, &sb).await;
-
-    let key = create_session(
-        &cli,
-        &sb,
-        serde_json::json!({ "prompt": "say nothing", "agent": "claude" }),
-    )
-    .await;
-    let _ = wait_turn_done(&cli, &sb, &key).await;
-    let url = format!("{}/api/sessions/{key}", sb.webui_url());
-    let detail: serde_json::Value = cli
-        .get(&url)
-        .send()
-        .await
-        .expect("session detail")
-        .json()
-        .await
-        .expect("detail json");
-    let entries = detail["entries"].as_array().cloned().unwrap_or_default();
-
-    // 投影恰好一条 notice 条目，文案说明「回合已结束且无输出」。
-    let notices: Vec<_> = entries
-        .iter()
-        .filter(|e| e["element_type"].as_str() == Some("notice"))
-        .collect();
-    assert_eq!(
-        notices.len(),
-        1,
-        "an empty turn must project exactly one notice entry: {entries:?}"
-    );
-    let notice_text = notices[0]["content"].as_str().unwrap_or_default();
-    assert!(
-        notice_text.contains("回合已结束且无输出"),
-        "the notice must say the turn ended without output: {notice_text}"
-    );
-    // 回合时间线可见：prompt（操作者提交）之后紧跟 notice，此外无其他条目
-    // ——零输出回合不再不可见地消失。
-    assert_eq!(
-        entries.len(),
-        2,
-        "the timeline must read prompt → notice, nothing else: {entries:?}"
-    );
-    assert_eq!(entries[0]["kind"].as_str(), Some("prompt"));
-    assert_eq!(entries[1]["element_type"].as_str(), Some("notice"));
-    assert_eq!(entries[1]["position"].as_u64(), Some(1));
-
-    // ── 场景「正常回合不受影响」：default 桩（正文正常产出）──
-    let sb_ok = Sandbox::new("acceptance", "normal-turn-no-notice");
-    let _core_ok = sb_ok.spawn_core();
-    let _webui_ok = sb_ok.spawn_webui(&sb_ok.core_secret);
-    support::wait_reachable(&cli, &sb_ok).await;
-
-    let key_ok = create_session(
-        &cli,
-        &sb_ok,
-        serde_json::json!({ "prompt": "hello", "agent": "claude" }),
-    )
-    .await;
-    let transcript = wait_turn_done(&cli, &sb_ok, &key_ok).await;
-    assert!(!transcript.is_empty(), "the normal turn must produce output");
-    let url_ok = format!("{}/api/sessions/{key_ok}", sb_ok.webui_url());
-    let detail_ok: serde_json::Value = cli
-        .get(&url_ok)
-        .send()
-        .await
-        .expect("normal session detail")
-        .json()
-        .await
-        .expect("detail json");
-    let entries_ok = detail_ok["entries"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    assert!(
-        entries_ok
-            .iter()
-            .all(|e| e["element_type"].as_str() != Some("notice")),
-        "a normal turn must never get a zero-output notice: {entries_ok:?}"
-    );
-    assert!(
-        entries_ok
-            .iter()
-            .any(|e| e["kind"].as_str() == Some("content")),
-        "the normal turn's content must be in the projection: {entries_ok:?}"
-    );
 }

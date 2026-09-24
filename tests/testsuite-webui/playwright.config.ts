@@ -34,7 +34,9 @@ export default defineConfig({
   timeout: 30_000,
   retries: 1,
   workers: 1,
-  reporter: [['list'], ['./tests/reporters/keep-on-fail.ts']],
+  // collect-json 只写机器可读结果（add-testsuite-report），keep-on-fail 仍是
+  // 沙箱 keep/clean 的唯一权威，两者并列互不干扰。
+  reporter: [['list'], ['./tests/reporters/keep-on-fail.ts'], ['./tests/reporters/collect-json.ts']],
   use: {
     baseURL: `http://127.0.0.1:${WEBUI_PORT}`,
     headless: true,

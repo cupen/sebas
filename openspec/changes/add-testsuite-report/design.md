@@ -45,6 +45,7 @@
 - [cargo 控制台输出格式随 cargo 版本漂移] → 解析器对未知行宽容（只认 `test … ok/FAILED/ignored` 行锚），解析失败时报告如实报「0 case 解析」而非伪造；nextest 存在时该通道非主路径。
 - [HTML 覆盖写丢历史] → 接受（用户已确认固定路径覆盖为默认）；终端树 + 套件日志仍可回溯。
 - [报告器与 keep-on-fail reporter 并存] → Playwright reporter 数组并列，互不干扰；JSON reporter 的输出由 tasks.py 捕获，不进操作员终端。
+- [webui 是六次 Playwright 运行而非一次] → 实施期发现：主配置用 `testIgnore` 把 auth / auth-setup / users-admin / deployment / detached / dead-core 等 spec 排除，交给另外五个 config 跑，`testsuite_webui` 全量时是 5 个 config 的 `&&` 链（`--case` 时是单 config）。**取「六配置各写分片 + 生成器归并」**：`collect-json.ts` 挂进全部六个 config，分片按 config 名区分（`webui-results.json` / `webui-results-<stem>.json`），tasks.py 跑前清分片（避免上一次运行的残留混进本次报告，尤其链中途中止时）、跑后一次性 `--shards` 归并成一棵树。**否决备选**：在 tasks.py 里按配置逐个采集——`&&` 链的每条命令要各自注入不同的输出路径并逐次解析，采集逻辑与 Playwright 调用顺序耦合，且链中途失败时前面几次的采集结果要额外暂存，比"配置自报分片"更脆；任一次运行单独重跑时（`--case auth`）分片机制天然只覆盖它自己的切片。
 
 ## Migration Plan
 

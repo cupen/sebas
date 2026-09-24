@@ -13,8 +13,8 @@
 //! `cargo test --test testsuite_e2e_test -- --ignored` or `invoke testsuite-e2e`.
 //! Any panic keeps the sandbox dir (with core.log / webui.log) for
 //! postmortem — the path is printed on drop.
-
 use std::sync::Arc;
+
 use std::time::Duration;
 
 mod support;
@@ -89,6 +89,878 @@ async fn wait_node_status(cli: &reqwest::Client, sb: &Sandbox, node_id: &str, wa
     .await;
     assert_eq!(got, want);
 }
+
+// ===========================================================================
+// Shared helpers and constants (visible to every group below via
+// `use super::*;`). Test functions live in the `mod` groups that follow.
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// fake-provider-upstream：本地 Anthropic 线协议假上游（零 token）接线
+// ---------------------------------------------------------------------------
+/// 假上游内置规则的确定性文案（`sebas_router::fake_provider` 常量；测试侧
+/// 独立钉死字面量，避免断言随实现漂移而静默放宽）。
+const FAKE_PLAIN_TEXT: &str = "fake-provider: no tools requested";
+
+const FAKE_FINAL_TEXT: &str = "fake-provider: tool loop complete";
+
+/// `[provider.fake]` 的上游哑 key（sandbox 模板）——透传断言的期望值。
+const FAKE_UPSTREAM_KEY: &str = "sk-fake-upstream-dummy";
+
+/// 下游 key：绝不能出现在 fake 的 journal 里。
+const DOWNSTREAM_KEY: &str = "sk-downstream-must-not-leak";
+
+/// 读 NDJSON 行（fake-provider journal），空行跳过。
+fn read_jsonl(path: &std::path::Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect()
+}
+
+/// 读 router 的用量库（`usage.db`，persist-router-usage）全表，按 id 升序
+/// （= 完成顺序）。库文件/表尚未出现时返回空表——配合 `wait_for` 轮询。
+///
+/// 非标准查询（排序）走手写 SQL，但行经表 struct 解出
+/// （`UsageRow::from_row`）——禁止无类型载体。
+fn read_usage_records(path: &std::path::Path) -> Vec<sebas_router::usage::UsageRecord> {
+    use sebas_db::record::Record;
+    use sebas_router::usage::{UsageRecord, UsageRow};
+
+    if !path.exists() {
+        return Vec::new();
+    }
+    let Ok(conn) = sebas_db::conn::open_readonly(path) else {
+        return Vec::new();
+    };
+    let sql = format!(
+        "SELECT {} FROM usage_records ORDER BY id",
+        <UsageRow as Record>::COLUMNS.join(", ")
+    );
+    let Ok(mut stmt) = conn.prepare(&sql) else {
+        return Vec::new();
+    };
+    let Ok(rows) = stmt.query_map([], UsageRow::from_row) else {
+        return Vec::new();
+    };
+    rows.filter_map(|r| r.ok())
+        .map(UsageRecord::from)
+        .collect()
+}
+
+/// 真 claude-code 二进制：`SEBAS_TEST_CLAUDE_BIN` 优先，PATH 兜底；缺席 → None。
+fn find_claude_bin() -> Option<String> {
+    if let Ok(p) = std::env::var("SEBAS_TEST_CLAUDE_BIN")
+        && !p.trim().is_empty()
+    {
+        let path = std::path::PathBuf::from(&p);
+        if path.is_file() {
+            return Some(p);
+        }
+        eprintln!(
+            "[skip] SEBAS_TEST_CLAUDE_BIN={p} is not an existing file — ignoring it"
+        );
+    }
+    let exe = if cfg!(windows) { "claude.exe" } else { "claude" };
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join(exe))
+        .find(|p| p.is_file())
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Find the direct child of `ppid` whose cmdline contains `needle`
+/// (linux `/proc` walk; the supervised-recovery journey needs the core
+/// CHILD pid, not the watchdog's). None while no such child is visible.
+///
+/// Windows/macOS have no `/proc`; the provider-hotswap journey keeps its
+/// process-tree assertions linux-gated (D1) so its portable body still runs
+/// there. Socket-file assertions elsewhere stay unix-gated for the same
+/// reason (named pipes leave no filesystem trace).
+#[cfg(target_os = "linux")]
+fn find_child_pid(ppid: u32, needle: &str) -> Option<u32> {
+    for entry in std::fs::read_dir("/proc").ok()?.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        if pid == ppid {
+            continue;
+        }
+        let Ok(cmd) = std::fs::read_to_string(entry.path().join("cmdline")) else {
+            continue;
+        };
+        if !cmd.contains(needle) {
+            continue;
+        }
+        let Ok(status) = std::fs::read_to_string(entry.path().join("status")) else {
+            continue;
+        };
+        let is_child = status.lines().any(|l| {
+            l.strip_prefix("PPid:")
+                .map(|v| v.trim().parse::<u32>() == Ok(ppid))
+                .unwrap_or(false)
+        });
+        if is_child {
+            return Some(pid);
+        }
+    }
+    None
+}
+
+/// The router CHILD pid under the watchdog — linux-only `/proc` walk
+/// (D1: process-tree assertions are linux-gated, the journey body is not).
+#[cfg(target_os = "linux")]
+fn router_child_pid(watchdog_pid: u32) -> Option<u32> {
+    find_child_pid(watchdog_pid, "router")
+}
+
+#[cfg(not(target_os = "linux"))]
+fn router_child_pid(_watchdog_pid: u32) -> Option<u32> {
+    None
+}
+
+/// Anchor check: the matched child really is the router subprocess
+/// (argv[1] == "router"). Reads `/proc/{pid}/cmdline` — linux-only, and the
+/// `pid_now == Some(router_pid)` equality above is vacuously true on
+/// non-linux (`None == None`), so the restart assertion stays portable.
+#[cfg(target_os = "linux")]
+fn assert_router_child_cmdline(pid_now: Option<u32>) {
+    if let Some(pid) = pid_now {
+        let cmd = std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
+            .expect("read router child cmdline");
+        let mut argv = cmd.split('\0');
+        let _exe = argv.next();
+        assert!(
+            argv.next() == Some("router"),
+            "matched child must be the router subprocess, got cmdline {cmd:?}"
+        );
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn assert_router_child_cmdline(_pid_now: Option<u32>) {}
+
+/// Poll the session detail until the current turn settles to Done.
+async fn wait_turn_done(cli: &reqwest::Client, sb: &Sandbox, detail_url: &str) {
+    wait_for(
+        "session turn to reach Done",
+        Duration::from_secs(25),
+        &sb.path.clone(),
+        {
+            let cli = cli.clone();
+            let url = detail_url.to_string();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    (v["status_slug"].as_str() == Some("done")).then_some(())
+                })
+            }
+        },
+    )
+    .await;
+}
+
+/// POST a 0-turn placeholder session bound to `project_id`; returns the
+/// encoded session key.
+async fn create_project_placeholder(
+    cli: &reqwest::Client,
+    sb: &Sandbox,
+    project_id: &str,
+    tag: &str,
+) -> String {
+    let (status, body) = post_json(
+        cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "agent": "claude", "project_id": project_id }),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("create placeholder {tag}: {e}"));
+    assert_eq!(status, 201, "placeholder {tag}: {body}");
+    body["key"].as_str().expect("key").to_string()
+}
+
+/// GET a URL, return (status, json body). Err on transport failure.
+async fn get_json_status(
+    cli: &reqwest::Client,
+    url: &str,
+) -> Result<(u16, serde_json::Value), String> {
+    let resp = cli
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("GET {url}: {e}"))?;
+    let status = resp.status().as_u16();
+    let json = resp
+        .json()
+        .await
+        .map_err(|e| format!("body of {url}: {e}"))?;
+    Ok((status, json))
+}
+
+// ── feishu-free permission approval loop (the im surface over the core channel) ──
+//
+// 飞书在权限回路里的唯一职责是「权限卡片呈现 + card.action.trigger 回调」；
+// 卡片之前的整条审批回路（agent 泊车 → PermissionNotice 广播 → 订阅流
+// ApprovalRequested 帧 → ApprovalAnswer 回灌 → 泊住的 hook 复活 → 回合完成）
+// 与飞书零耦合，用 fake-claude 的 "perm" 场景（真实 hook_callback 泊车，
+// allow/deny 决定直接改写 tool_result）经核心通道裸帧走全环。这一组用例
+// 就是那条「长链路的前 9 步」：任何一截断裂（驱动泊车、广播、帧下发、
+// 应答路由、oneshot 复活）都会在这里当场爆。卡片回调之后的解析/路由语义
+// 由 sebas-feishu event_parse_test 与 sebas-im frontend 单测覆盖。
+use std::path::Path;
+
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+use support::forward_slash;
+
+use sebas::core_channel::protocol::{
+    ChannelHandshake, CoreChannelRequest, CoreChannelResponse, SessionStreamFrame,
+};
+
+use sebas_channels::ChannelKey;
+
+use sebas_webui::session_backend::{PermissionDecision, PermissionNotice};
+
+/// 把沙箱 config 的 `channel_path` 从相对名补成绝对路径：Sandbox 写的相对名
+/// 依赖「子进程 cwd=沙箱」的字符串映射（Windows named pipe 名从路径字符串
+/// 确定性派生），测试进程直连时必须与服务端同一字符串——绝对路径对两端都
+/// 成立，也顺带满足 Unix 上的文件语义。只影响本组用例自己的沙箱实例。
+fn pin_absolute_channel(sb: &Sandbox) {
+    let cfg = std::fs::read_to_string(&sb.config_path).expect("read sandbox config");
+    let patched = cfg.replace(
+        "channel_path = \"core-channel.sock\"",
+        &format!("channel_path = \"{}\"", forward_slash(&sb.channel_path)),
+    );
+    assert_ne!(cfg, patched, "channel_path line not found in sandbox config");
+    std::fs::write(&sb.config_path, patched).expect("write sandbox config");
+}
+
+/// 通道可连接性轮询（named pipe 无文件残留，不能靠 path.exists()）。
+async fn wait_channel_accept(sb: &Sandbox) {
+    let hint = sb.path.clone();
+    wait_for("core channel to accept a handshake", Duration::from_secs(20), &hint, move || {
+        let path = sb.channel_path.clone();
+        let secret = sb.core_secret.clone();
+        Box::pin(async move {
+            let Ok(stream) = sebas_ipc::connect(&path).await else {
+                return None;
+            };
+            let (r, mut w) = sebas_ipc::split(stream);
+            let hs = serde_json::to_string(&ChannelHandshake { secret }).unwrap();
+            if w.write_all(hs.as_bytes()).await.is_err()
+                || w.write_all(b"\n").await.is_err()
+                || w.flush().await.is_err()
+            {
+                return None;
+            }
+            let mut reader = BufReader::new(r);
+            let mut ack = String::new();
+            match tokio::time::timeout(Duration::from_secs(3), reader.read_line(&mut ack)).await {
+                Ok(Ok(1..)) => Some(()),
+                _ => None,
+            }
+        })
+    })
+    .await;
+}
+
+/// 开一条订阅连接：握手 + Subscribe，吃掉 ack 与 Snapshot 帧，返回读端。
+async fn open_subscriber(sb: &Sandbox) -> BufReader<sebas_ipc::ReadHalf> {
+    let stream = sebas_ipc::connect(&sb.channel_path).await.expect("subscriber connect");
+    let (r, mut w) = sebas_ipc::split(stream);
+    let hs = serde_json::to_string(&ChannelHandshake {
+        secret: sb.core_secret.clone(),
+    })
+    .unwrap();
+    w.write_all(hs.as_bytes()).await.unwrap();
+    w.write_all(b"\n").await.unwrap();
+    w.write_all(serde_json::to_string(&CoreChannelRequest::Subscribe).unwrap().as_bytes())
+        .await
+        .unwrap();
+    w.write_all(b"\n").await.unwrap();
+    w.flush().await.unwrap();
+    let mut reader = BufReader::new(r);
+    let mut ack = String::new();
+    reader.read_line(&mut ack).await.expect("handshake ack");
+    let mut line = String::new();
+    reader.read_line(&mut line).await.expect("snapshot frame");
+    let frame: SessionStreamFrame = serde_json::from_str(line.trim()).expect("frame json");
+    assert!(
+        matches!(frame, SessionStreamFrame::Snapshot { .. }),
+        "first stream frame must be the snapshot: {line}"
+    );
+    reader
+}
+
+/// 单发请求连接（订阅连接只推流不处理请求）：握手 → 请求 → 读响应。
+async fn raw_channel_request(
+    channel: &Path,
+    secret: &str,
+    req: &CoreChannelRequest,
+) -> CoreChannelResponse {
+    let stream = sebas_ipc::connect(channel).await.expect("request connect");
+    let (r, mut w) = sebas_ipc::split(stream);
+    let hs = serde_json::to_string(&ChannelHandshake {
+        secret: secret.to_string(),
+    })
+    .unwrap();
+    w.write_all(hs.as_bytes()).await.unwrap();
+    w.write_all(b"\n").await.unwrap();
+    w.write_all(serde_json::to_string(req).unwrap().as_bytes()).await.unwrap();
+    w.write_all(b"\n").await.unwrap();
+    w.flush().await.unwrap();
+    let mut reader = BufReader::new(r);
+    let mut ack = String::new();
+    reader.read_line(&mut ack).await.expect("handshake ack");
+    let mut line = String::new();
+    tokio::time::timeout(Duration::from_secs(10), reader.read_line(&mut line))
+        .await
+        .expect("response in time")
+        .expect("response line");
+    serde_json::from_str(line.trim()).expect("response json")
+}
+
+/// 从订阅流读一帧（超时由调用方的 tick 循环套）。
+async fn read_frame(reader: &mut BufReader<sebas_ipc::ReadHalf>) -> SessionStreamFrame {
+    let mut line = String::new();
+    reader.read_line(&mut line).await.expect("stream alive");
+    serde_json::from_str(line.trim()).expect("frame json")
+}
+
+/// 等 Turns 里出现第 `n` 个含 `marker` 的条目（transcript 是唯一事实）。
+async fn wait_turn_marker(sb: &Sandbox, key: &ChannelKey, marker: &str, n: usize) {
+    let hint = sb.path.clone();
+    let path = sb.channel_path.clone();
+    let secret = sb.core_secret.clone();
+    let key = key.clone();
+    let marker = marker.to_string();
+    wait_for(
+        &format!("{n}-th transcript marker `{marker}`"),
+        Duration::from_secs(30),
+        &hint,
+        move || {
+            let path = path.clone();
+            let secret = secret.clone();
+            let key = key.clone();
+            let marker = marker.clone();
+            Box::pin(async move {
+                match raw_channel_request(
+                    &path,
+                    &secret,
+                    &CoreChannelRequest::Turns { key, from: 0 },
+                )
+                .await
+                {
+                    CoreChannelResponse::Turns { entries } => {
+                        let count = entries
+                            .iter()
+                            .filter(|e| e.content.contains(&marker))
+                            .count();
+                        (count >= n).then_some(())
+                    }
+                    other => panic!("Turns must return Turns, got {other:?}"),
+                }
+            })
+        },
+    )
+    .await;
+}
+
+/// 全环共享旅程：EnsureMessage("perm") → 真实泊车 → 订阅流收到
+/// ApprovalRequested → ApprovalAnswer{decision} → transcript 出现 `marker`。
+/// 返回收到的 notice 供用例做字段断言。
+async fn drive_parked_perm_to_decision(
+    sb: &Sandbox,
+    mut reader: BufReader<sebas_ipc::ReadHalf>,
+    decision: PermissionDecision,
+    marker: &str,
+) -> PermissionNotice {
+    let key = ChannelKey::feishu("oc_perm_loop", None);
+    let resp = raw_channel_request(
+        &sb.channel_path,
+        &sb.core_secret,
+        &CoreChannelRequest::EnsureMessage {
+            key: key.clone(),
+            message: "perm".into(),
+            attachments: vec![],
+        },
+    )
+    .await;
+    assert!(
+        matches!(resp, CoreChannelResponse::Ok | CoreChannelResponse::Spawned { .. }),
+        "ensure must be accepted: {resp:?}"
+    );
+
+    // 真实泊车产生的 ApprovalRequested（非合成事件）：60s 预算内逐帧吃，
+    // 中间的会话生命周期 Event 帧全部越过。
+    let notice = {
+        let wait = async {
+            loop {
+                if let SessionStreamFrame::ApprovalRequested { notice } =
+                    read_frame(&mut reader).await
+                {
+                    break notice;
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(60), wait)
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "ApprovalRequested frame did not arrive within 60s; logs at {}",
+                    sb.path.display()
+                )
+            })
+    };
+    assert_eq!(notice.tool_name, "Bash", "parked tool: {notice:?}");
+    assert_eq!(
+        notice.args["command"].as_str(),
+        Some("rm -rf /"),
+        "parked tool args: {notice:?}"
+    );
+
+    // 应答走独立请求连接 → Ok。
+    let resp = raw_channel_request(
+        &sb.channel_path,
+        &sb.core_secret,
+        &CoreChannelRequest::ApprovalAnswer {
+            request_id: notice.request_id.clone(),
+            decision,
+        },
+    )
+    .await;
+    assert!(
+        matches!(resp, CoreChannelResponse::Ok),
+        "answer must be accepted: {resp:?}"
+    );
+
+    // 泊住的 hook 复活：transcript 出现决定对应的 tool_result。
+    wait_turn_marker(sb, &key, marker, 1).await;
+    notice
+}
+
+// ── fix-webui-streaming-liveness 6.1/6.2/6.3：流式活性与瘦 summary ─────────
+/// One `turn.append` notification's **content** entry texts (prompt/tool
+/// entries excluded) — the per-frame streaming unit the assertions count.
+fn append_frame_texts(ev: &serde_json::Value) -> Vec<String> {
+    ev["params"]["entries"]
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .filter(|e| e["kind"].as_str() == Some("content"))
+                .filter_map(|e| e["content"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
+// fix-webui-qa-defects-round5 的进程级回归（round5 tasks 1.x / 3.x 的真进程
+// 一层）：内嵌复合后端（`sebas core --webui`，DualSessionBackend = acp 桥 +
+// native）与 detached 两进程形态下的 pending 管理面可达 + 类型化拒绝透传
+// （1.1/1.2），以及 label 写入的实时广播与行投影（3.1）。路由层 fake 已钉
+// 拒绝映射（sebas-webui api.rs）、引擎层已钉 label 发布
+// （sebas-dispatch approval_restore_identity_test）、复合转发已钉
+// （src/agent_backend.rs dual_pending_management_routes_by_key）；这里补
+// 「真 core 进程 + 真 HTTP/WS 面」的证据。浏览器级 GUI 旅程（重命名对话框、
+// rail 行名免刷新）由 testsuite-webui / 主 agent GUI 回归承担。
+// ---------------------------------------------------------------------------
+/// 在 `/ws` 帧流里等目标会话携带目标 `label` 的下一条 `session.updated`
+/// （跳过无关帧与 label 未变化的**回水帧**：resync 护栏放行后，建会话/回合
+/// 收敛期间的相位帧仍会在读帧前排队，它们 label 恒为写入前的旧值，必须跳过
+/// 直到目标写入的帧到达；单帧 15s 超时由 [`next_ws_frame`] 兜底，循环上限防
+/// 无限流）。
+async fn wait_session_updated_with_label(
+    ws: &mut WsStream,
+    key: &str,
+    label: Option<&str>,
+) -> serde_json::Value {
+    for _ in 0..100 {
+        let frame = next_ws_frame(ws).await;
+        let method = frame["method"].as_str().unwrap_or_default();
+        let sid = frame["params"]["session_id"].as_str().unwrap_or_default();
+        let label_matches = match label {
+            Some(expected) => frame["params"]["label"].as_str() == Some(expected),
+            None => frame["params"]["label"].is_null(),
+        };
+        if method == "session.updated" && sid == key && label_matches {
+            return frame;
+        }
+    }
+    panic!("no session.updated frame for {key} with label {label:?} arrived");
+}
+
+/// `GET /api/sessions` 里目标会话的行投影（rail 行名重取的数据源）。
+async fn listed_row(cli: &reqwest::Client, sb: &Sandbox, key: &str) -> serde_json::Value {
+    let (_status, list) = get_json_status(cli, &format!("{}/api/sessions", sb.webui_url()))
+        .await
+        .expect("session list");
+    list["recent_sessions"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .find(|r| r["encoded_key"].as_str() == Some(key))
+        .cloned()
+        .unwrap_or_else(|| panic!("the session must be listed: {list}"))
+}
+
+/// 忙中把两条提交排进待执行队列（首回合 streaming 期间），返回
+/// (detail_url, 先提交的 id, 后提交的 id)。首回合用「stream」场景
+/// （5 帧 × 250ms，与 turn_queue_timing 同款节奏且可应答 watchdog 探测），
+/// 内容帧落地后忙中提交确定性入队。
+async fn queue_two_submissions(
+    cli: &reqwest::Client,
+    base: &str,
+    project_id: &str,
+    hint: &std::path::Path,
+) -> (String, u64, u64) {
+    let (status, body) = post_json(
+        cli,
+        &format!("{base}/api/sessions"),
+        serde_json::json!({
+            "project_id": project_id,
+            "prompt": "stream",
+            "agent": "claude"
+        }),
+    )
+    .await
+    .expect("create session");
+    assert_eq!(status, 201, "create session: {body}");
+    let key = body["key"].as_str().expect("key").to_string();
+    let detail_url = format!("{base}/api/sessions/{key}");
+
+    // 等首个 agent 内容帧落地（WORKING 真在跑）再提交——只认 kind=content
+    // （seed 的 prompt 条目在 SEED 阶段就进 transcript，等非空会提前放行）。
+    let content_cli = cli.clone();
+    let content_url = detail_url.clone();
+    let content_hint = hint.to_path_buf();
+    wait_for("first turn content to stream", Duration::from_secs(40), hint, move || {
+        let cli = content_cli.clone();
+        let url = content_url.clone();
+        Box::pin(async move {
+            let v = cli
+                .get(&url)
+                .send()
+                .await
+                .ok()?
+                .json::<serde_json::Value>()
+                .await
+                .ok()?;
+            let streamed = v["entries"]
+                .as_array()
+                .is_some_and(|b| b.iter().any(|e| e["kind"].as_str() == Some("content")));
+            streamed.then_some(())
+        })
+    })
+    .await;
+
+    for (tag, text) in [("b", "queued-round5-b"), ("c", "queued-round5-c")] {
+        let (status, body) = post_json(
+            cli,
+            &format!("{detail_url}/message"),
+            serde_json::json!({ "message": text }),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("submit {tag}: {e}"));
+        assert_eq!(status, 200, "busy-time submission {tag} must be accepted: {body}");
+    }
+
+    // 两条都已在 pending 里（seed 同步落账；条目开始消费前有 ≈1s 窗口）。
+    let poll_cli = cli.clone();
+    let poll_url = detail_url.clone();
+    let detail = wait_for("both submissions to ride in pending", Duration::from_secs(8), hint, move || {
+        let cli = poll_cli.clone();
+        let url = poll_url.clone();
+        Box::pin(async move {
+            let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+            let n = v["pending"].as_array().map(Vec::len)?;
+            (n == 2).then_some(v)
+        })
+    })
+    .await;
+    let pending = detail["pending"].as_array().expect("pending list");
+    let id_of = |text: &str| {
+        pending
+            .iter()
+            .find(|p| p["text"].as_str() == Some(text))
+            .unwrap_or_else(|| panic!("{text} must be in pending: {pending:?}"))["id"]
+            .as_u64()
+            .expect("pending id")
+    };
+    (detail_url, id_of("queued-round5-b"), id_of("queued-round5-c"))
+}
+
+// ---------------------------------------------------------------------------
+// （fix-webui-qa-defects-round5 1.2 收口；断言按 6.1/3c review 的 wire 现状
+// 校准）busy 会话的待执行管理面经裸 core 复合后端 + 真 HTTP 路径验证：
+// 重排合法生效（200）、已投递 id 的 remove 得 AlreadyStarted 409；上层
+// 「unknown 404 / out_of_range 400」已随 embedded-shape 测试覆盖；
+// PriorityConflict 的 409 映射在 wire 优先入口缺位下由 api.rs 的
+// FakeBackend 缝隙单测钉住。错误文案绝不在某层被「不可用」笼统顶替。
+//
+// 真实复现路径：核心通道端状态层 PendingOpError → InProcessBackend 透传
+// → DualSessionBackend.route() → api.rs PendingReason → StatusCode。
+// ---------------------------------------------------------------------------
+/// 在 stream 场景下把三条**普通**提交排进 busy 会话的待执行栈，返回
+/// (detail_url, 三条 id)。「busy 会话带待执行栈」且不需要优先项的场景
+/// （如复合后端按 key 路由的对照面）从这里拿——全部普通项，id 精确匹配
+/// 文本，没有 /btw 前缀干扰。
+async fn queue_three_pending(
+    cli: &reqwest::Client,
+    base: &str,
+    project_id: &str,
+    hint: &std::path::Path,
+) -> (String, u64, u64, u64) {
+    let (status, body) = post_json(
+        cli,
+        &format!("{base}/api/sessions"),
+        serde_json::json!({
+            "project_id": project_id,
+            "prompt": "stream",
+            "agent": "claude"
+        }),
+    )
+    .await
+    .expect("create session");
+    assert_eq!(status, 201, "create session: {body}");
+    let key = body["key"].as_str().expect("key").to_string();
+    let detail_url = format!("{base}/api/sessions/{key}");
+
+    // 等首个 agent 内容帧落地（WORKING 真在跑）。
+    let content_cli = cli.clone();
+    let content_url = detail_url.clone();
+    let content_hint = hint.to_path_buf();
+    wait_for("first turn content to stream", Duration::from_secs(40), &content_hint, move || {
+        let cli = content_cli.clone();
+        let url = content_url.clone();
+        Box::pin(async move {
+            let v = cli
+                .get(&url)
+                .send()
+                .await
+                .ok()?
+                .json::<serde_json::Value>()
+                .await
+                .ok()?;
+            let streamed = v["entries"]
+                .as_array()
+                .is_some_and(|b| b.iter().any(|e| e["kind"].as_str() == Some("content")));
+            streamed.then_some(())
+        })
+    })
+    .await;
+
+    // 三条普通提交入栈（会话在飞 → 全部 pending）。
+    for (tag, text) in [
+        ("b", "queued-round5-b"),
+        ("c", "queued-round5-c"),
+        ("p", "queued-round5-p"),
+    ] {
+        let (status, body) = post_json(
+            cli,
+            &format!("{detail_url}/message"),
+            serde_json::json!({ "message": text }),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("submit {tag}: {e}"));
+        assert_eq!(status, 200, "busy-time submission {tag} must be accepted: {body}");
+    }
+
+    // 三条都在 pending。
+    let poll_cli = cli.clone();
+    let poll_url = detail_url.clone();
+    let detail = wait_for(
+        "three submissions to ride in pending",
+        Duration::from_secs(8),
+        hint,
+        move || {
+            let cli = poll_cli.clone();
+            let url = poll_url.clone();
+            Box::pin(async move {
+                let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+                let n = v["pending"].as_array().map(Vec::len)?;
+                (n == 3).then_some(v)
+            })
+        },
+    )
+    .await;
+    let pending = detail["pending"].as_array().expect("pending list");
+    let id_of = |text: &str| {
+        pending
+            .iter()
+            .find(|p| p["text"].as_str() == Some(text))
+            .unwrap_or_else(|| panic!("{text} must be in pending: {pending:?}"))["id"]
+            .as_u64()
+            .expect("pending id")
+    };
+    (detail_url, id_of("queued-round5-b"), id_of("queued-round5-c"), id_of("queued-round5-p"))
+}
+
+/// 轮询直到某进程日志同时出现全部给定片段（posture 告警在启动早期落盘，
+/// reachable 之后理应已在——wait_for 只是给慢机器留余量）。
+async fn wait_log_contains(what: &str, log: &Path, needles: &[&str]) {
+    let log = log.to_path_buf();
+    let log_hint = log.clone();
+    let needles: Vec<String> = needles.iter().map(|s| (*s).to_string()).collect();
+    wait_for(what, Duration::from_secs(20), &log_hint, move || {
+        let log = log.clone();
+        let needles = needles.clone();
+        Box::pin(async move {
+            let text = std::fs::read_to_string(&log).ok()?;
+            needles
+                .iter()
+                .all(|n| text.contains(n.as_str()))
+                .then_some(())
+        })
+    })
+    .await;
+}
+
+// ── close-acceptance-blind-spots 盲区 4：重启 spawning 收敛（组 3）──
+/// 在 core 启动前，往状态库（projects.db 的 session_map 表）播种一条
+/// 0-turn 占位行（web 通道）：恢复后即 spawning 相位会话——事故里
+/// 「spawning 相位被持久化后进程退出」的盘面形态。persist-session-map：
+/// 恢复源是状态库，不再是 dispatch 状态文件。`project_dir` 指向沙箱内已
+/// 存在的 work 目录（无项目归属的 web 行会被恢复直接丢弃；**规范化**
+/// 路径——沙箱在深 checkout 下以短符号链接使用，服务端的 workspace-root
+/// 越界检查按规范化形态比对）。
+fn seed_spawning_placeholder(sb: &Sandbox, reference: &str, kind: &str) {
+    use sebas_db::schema::open_and_sync;
+    use sebas_models::session_map::SessionMapRow;
+    let work = sb.path.join("work");
+    let canonical = support::forward_slash(
+        &std::fs::canonicalize(&work).unwrap_or(work),
+    );
+    let projects_db = sb.path.join("projects.db");
+    let mut conn = open_and_sync(&projects_db, sebas::sebas_state::repo::PROJECTS_TABLES)
+        .expect("open sandbox projects.db for seeding")
+        .0;
+    let row = SessionMapRow {
+        chat_id: "web".into(),
+        thread_id: Some(reference.to_string()),
+        session_id: String::new(),
+        last_active_unix: 1_758_000_000,
+        project_dir: Some(canonical),
+        acp_session_id: None,
+        current_model: None,
+        pending_kind: Some(kind.to_string()),
+        pending_model: None,
+        pending_mode: None,
+        desired_mode: "ask".into(),
+        label: None,
+        prompt_preview: None,
+        awaiting_first_prompt: true,
+    };
+    row.save(&conn).expect("seed session_map row");
+}
+
+/// `GET /api/sessions` 里按 reference 找行，返回该行（None = 尚未列出）。
+async fn listed_row_by_reference(
+    cli: &reqwest::Client,
+    list_url: &str,
+    reference: &str,
+) -> Option<serde_json::Value> {
+    let (_status, list) = get_json_status(cli, list_url).await.ok()?;
+    list["recent_sessions"]
+        .as_array()?
+        .iter()
+        .find(|r| r["reference"].as_str() == Some(reference))
+        .cloned()
+}
+
+// ══ single-state-dir：一个状态目录钉住全部状态落点（进程级核验）══
+//
+// 对照 openspec/changes/single-state-dir/specs/ 三个增量里此前只有单元级
+// 或一次性人工验收（任务 8.3 等价执行）的场景，把机械断言固化成进程级 e2e：
+//
+// - cli-service「one variable relocates every state file」+「no state write
+//   escapes the derived directory」：完整 core 旅程（健康、项目注册、
+//   provider put、fake-claude 回合、SIGTERM 优雅退出）后断言每个状态产物
+//   都在钉住的目录内、fake 主目录（HOME 钉进沙箱）下无 `.sebas`、退休名
+//   `sebas.db` 无处出现；
+// - state-store「bounded configuration is separated from growing user
+//   data」：providers 行物理落在 settings.db、projects 行物理落在
+//   projects.db，且两库各自只装自己域的表（拆库的证据不止解析函数）；
+// - cli-service「the retired database variable has no effect」：导出
+//   `SEBAS_STATE_DB` 后分层库照常从状态目录解析，启动日志点名提示、退休
+//   路径从不被创建；
+// - state-store「Environment override relocates the database」：逐库覆盖
+//   只搬走那一个库，其余照常在状态目录内。
+/// 沙箱内全部普通文件（递归，排序后返回相对路径字符串）。
+fn state_dir_walk(dir: &std::path::Path) -> Vec<String> {
+    fn walk(dir: &std::path::Path, prefix: &str, out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let rel = format!("{prefix}{name}");
+            if e.path().is_dir() {
+                walk(&e.path(), &format!("{rel}/"), out);
+            } else {
+                out.push(rel);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, "", &mut out);
+    out.sort();
+    out
+}
+
+/// 只读打开一个 SQLite 库并对 `sqlite_master` 计数指定表。
+fn state_dir_table_count(db: &std::path::Path, tables: &[&str]) -> usize {
+    let conn = rusqlite::Connection::open_with_flags(
+        db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap_or_else(|e| panic!("open {}: {e}", db.display()));
+    let mut hits = 0;
+    for t in tables {
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?1",
+                [t],
+                |r| r.get(0),
+            )
+            .unwrap_or_else(|e| panic!("sqlite_master probe {t} in {}: {e}", db.display()));
+        hits += usize::try_from(n).unwrap();
+    }
+    hits
+}
+
+/// 等会话回合到 Done，返回会话详情（轮询 /api/sessions/{key}）。
+async fn state_dir_wait_done(
+    cli: &reqwest::Client,
+    sb: &Sandbox,
+    key: &str,
+) -> serde_json::Value {
+    let url = format!("{}/api/sessions/{key}", sb.webui_url());
+    let hint = sb.path.clone();
+    wait_for("session turn to reach Done", Duration::from_secs(30), &hint, move || {
+        let cli = cli.clone();
+        let url = url.clone();
+        Box::pin(async move {
+            let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+            (v["status_slug"].as_str() == Some("done")).then_some(v)
+        })
+    })
+    .await
+}
+
+mod session_lifecycle {
+    use super::*;
 
 /// 9.3 进程级 e2e：**core 与 node 是两个进程**。
 ///
@@ -458,7 +1330,6 @@ async fn session_round_trip_via_webui_http() {
 }
 
 // ---- session-parallel-liveness-and-unread-polish 1.2：双会话并行 spawn ----
-
 /// Two 0-turn placeholder sessions spawn concurrently: while the first
 /// session's child is mid-handshake (fake-claude `--delay-init-ms 2500`),
 /// the second session's spawn instruction SHALL NOT queue behind the first
@@ -575,7 +1446,6 @@ async fn two_sessions_spawn_and_turn_concurrently() {
 }
 
 // ---- workbench-interaction-polish 6.1：cancel 链路（BFF → core channel）----
-
 /// Cancel 链路的类型化拒绝：未知 key 404；已知但空闲（无在飞 turn）的会话
 /// 409——「无事可取消」不再伪造成功。
 #[tokio::test]
@@ -784,6 +1654,338 @@ async fn cancel_without_core_answers_503() {
     assert_eq!(status, 503, "unreachable core must answer 503: {body}");
 }
 
+/// workbench-live-conversation-flow 3.1/7.1：聚焦即拉起的进程级旅程。
+///
+/// 0-turn 占位（无 prompt）→ `POST /api/sessions/{key}/activate` 一次 =
+/// `started`（无 prompt 拉起子进程，占位离开 starting 态且没有任何回合）
+/// → 再 activate = `already-running`（幂等，无重复 spawn）。模型芯片的
+/// 数据源（fakeacp 的 configOptions）由沙箱冒烟覆盖——专用 claude 驱动
+/// 不报 configOptions，这里不断言模型表。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn activate_placeholder_spawns_without_prompt() {
+    let sb = Sandbox::new("testsuite_e2e", "activate-placeholder");
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    // 0-turn 占位：创建请求不带 prompt。
+    let project_id = scene_project_id(&cli, &sb).await;
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "project_id": project_id.clone(), "agent": "claude" }),
+    )
+    .await
+    .expect("create placeholder");
+    assert_eq!(status, 201, "create placeholder: {body}");
+    let key = body["key"].as_str().expect("key").to_string();
+    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+    let activate_url = format!("{}/api/sessions/{key}/activate", sb.webui_url());
+
+    // 第一次激活 = started（无 prompt 拉起）。
+    let (status, body) = post_json(&cli, &activate_url, serde_json::json!({}))
+        .await
+        .expect("activate #1");
+    assert_eq!(status, 200, "activate #1: {body}");
+    assert_eq!(body["status"], "started", "activate #1: {body}");
+
+    // 子进程拉起后离开 starting 态（无 prompt、无回合——0-turn 占位保持）。
+    let detail = wait_for(
+        "placeholder to leave starting after activate",
+        Duration::from_secs(25),
+        &sb.path.clone(),
+        {
+            let cli = cli.clone();
+            let url = detail_url.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    (v["status_slug"].as_str() != Some("starting")).then_some(v)
+                })
+            }
+        },
+    )
+    .await;
+    assert_eq!(
+        detail["entries"].as_array().map(Vec::len),
+        Some(0),
+        "activation must not run a turn: {detail}"
+    );
+
+    // 幂等：第二次激活 = already-running（无第二次 spawn）。
+    let (status, body) = post_json(&cli, &activate_url, serde_json::json!({}))
+        .await
+        .expect("activate #2");
+    assert_eq!(status, 200, "activate #2: {body}");
+    assert_eq!(body["status"], "already-running", "activate #2: {body}");
+}
+
+/// fix-webui-qa-defects 3.3（session-lifecycle「idle placeholder is never
+/// stall-settled」的进程级回归）：0-turn 占位经聚焦拉起（activate：无 prompt
+/// spawn、握手 lazy seed 出 SEED 卡、transcript 恒空——QA 幽灵回合的实体）
+/// 后闲置超过配置调小的 `turn_stall_timeout`（3s）——
+/// 1) detail 无任何 error 条目：占位不构成在飞回合，看门狗绝不注入合成
+///    「回合停滞被强制收尾」；
+/// 2) 状态可写：首条消息照常开轮并完成完整回合；完成后再次越过阈值，
+///    transcript 依旧无合成错误（看门狗不误伤已收回合）。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn idle_placeholder_never_stall_settles_and_stays_writable() {
+    let sb = Sandbox::new("testsuite_e2e", "placeholder-idle-stall");
+    sb.set_turn_stall_timeout(3);
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    // 0-turn 占位（创建请求不带 prompt）→ 聚焦拉起（activate #1 = started）。
+    let project_id = scene_project_id(&cli, &sb).await;
+    let key = create_project_placeholder(&cli, &sb, &project_id, "idle-stall").await;
+    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+    let activate_url = format!("{}/api/sessions/{key}/activate", sb.webui_url());
+    let (status, body) = post_json(&cli, &activate_url, serde_json::json!({}))
+        .await
+        .expect("activate placeholder");
+    assert_eq!(status, 200, "activate placeholder: {body}");
+    assert_eq!(body["status"], "started", "activate placeholder: {body}");
+
+    // 子进程拉起后离开 starting 态（0-turn 占位：无 prompt、零条目）。
+    let hint = sb.path.clone();
+    wait_for(
+        "placeholder to leave starting after activate",
+        Duration::from_secs(25),
+        &hint,
+        {
+            let cli = cli.clone();
+            let url = detail_url.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    (v["status_slug"].as_str() != Some("starting")).then_some(v)
+                })
+            }
+        },
+    )
+    .await;
+
+    // 闲置超过阈值（3s 配置，8s 观察窗）：detail 保持干净——零 error 条目、
+    // 无「回合停滞」合成文案（占位幽灵回合的进程级反证）。
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    let (status, v) = get_json_status(&cli, &detail_url)
+        .await
+        .expect("detail after the idle window");
+    assert_eq!(status, 200, "detail after the idle window: {v}");
+    let entries = v["entries"].as_array().cloned().unwrap_or_default();
+    assert!(
+        entries
+            .iter()
+            .all(|e| e["element_type"].as_str() != Some("error")),
+        "an idle 0-turn placeholder must never carry a synthetic error entry: {entries:?}"
+    );
+
+    // 状态可写：首条消息照常开轮并完成完整回合（占位豁免绝不外溢到真实
+    // 回合——看门狗对它照常计时，回合正常完成即不受影响）。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+        serde_json::json!({ "message": "first real message" }),
+    )
+    .await
+    .expect("message the idle placeholder");
+    assert_eq!(status, 200, "the idle placeholder must stay writable: {body}");
+    wait_turn_done(&cli, &sb, &detail_url).await;
+
+    // 完成后再次越过阈值：看门狗不误伤已收回合，transcript 仍无合成错误，
+    // 且真实回合的事实（操作者 prompt + fake-claude 回复）完整在场。
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    let (_status, v) = get_json_status(&cli, &detail_url)
+        .await
+        .expect("detail after the post-done window");
+    let entries = v["entries"].as_array().cloned().unwrap_or_default();
+    assert!(
+        entries
+            .iter()
+            .all(|e| e["element_type"].as_str() != Some("error")),
+        "a completed turn must not gain a synthetic error after the timeout: {entries:?}"
+    );
+    let transcript = entries
+        .iter()
+        .filter_map(|e| e["content"].as_str())
+        .collect::<Vec<_>>()
+        .join("");
+    assert!(
+        transcript.contains("first real message")
+            && transcript.contains("hello")
+            && transcript.contains("world"),
+        "the real turn's prompt and reply must be intact: {transcript:?}"
+    );
+}
+
+/// 重启不留僵尸 spawning（重投激活分支，close-acceptance-blind-spots 3.2）：
+/// 状态库（session_map 表）里播一个 spawning 相位（0-turn 占位）的会话条目 → 起 core
+/// → 恢复路径重投 spawn 指令（design D2 重投优先）→ 该会话离开 spawning 相位，
+/// 以创建时记住的 agent（fake-claude 桩）完成 fresh spawn 激活 → active。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn restarted_spawning_session_redispatches_and_activates() {
+    let sb = Sandbox::new("testsuite_e2e", "restore-spawning-settle");
+    const REF: &str = "restore-spawn-seed";
+    seed_spawning_placeholder(&sb, REF, "claude");
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    let list_url = format!("{}/api/sessions", sb.webui_url());
+    let hint = sb.path.clone();
+    // 恢复落定：该会话不再停留 spawning——重投激活后是 active（fake-claude
+    // 握手确定性成功；若重投失败也会落 spawn-failed，同样不是 spawning，
+    // 但在本沙箱形态下那属于环境性失败）。
+    let settled = wait_for(
+        "the seeded spawning row to settle off spawning",
+        Duration::from_secs(30),
+        &hint,
+        {
+            let cli = cli.clone();
+            let list_url = list_url.clone();
+            let reference = REF.to_string();
+            move || {
+                let cli = cli.clone();
+                let list_url = list_url.clone();
+                let reference = reference.clone();
+                Box::pin(async move {
+                    let row = listed_row_by_reference(&cli, &list_url, &reference).await?;
+                    let status = row["status"].as_str()?;
+                    (status != "spawning").then_some(status.to_string())
+                })
+            }
+        },
+    )
+    .await;
+    assert_eq!(
+        settled, "active",
+        "重投 spawn 指令应经 fake-claude 激活为 active"
+    );
+
+    // 行上身份保留：agent 仍是恢复记录里绑定的 claude，且已有真实路由 id。
+    let row = listed_row_by_reference(&cli, &list_url, REF)
+        .await
+        .expect("seeded row stays listed");
+    assert_eq!(row["agent_kind"].as_str(), Some("claude"));
+    assert!(row["session_id"].as_str().is_some_and(|s| !s.is_empty()));
+}
+
+/// 重投失败的失败分支（close-acceptance-blind-spots 3.2）：占位记录绑定的
+/// agent 配置不存在（ghost-agent）→ spawn 指令重投失败 → 会话投影追加合成
+/// 错误条目（spawn failed + 点名原因）且状态落 spawn-failed 非 spawning 终态。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn restarted_spawning_session_failed_redispatch_lands_synthetic_error() {
+    let sb = Sandbox::new("testsuite_e2e", "restore-spawning-fail");
+    const REF: &str = "restore-spawn-ghost";
+    seed_spawning_placeholder(&sb, REF, "ghost-agent");
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    // 失败分支收敛：spawn-failed 终态 + 如实的失败原因（unknown agent kind）。
+    let list_url = format!("{}/api/sessions", sb.webui_url());
+    let hint = sb.path.clone();
+    wait_for(
+        "the failed redispatch to land on spawn-failed",
+        Duration::from_secs(30),
+        &hint,
+        {
+            let cli = cli.clone();
+            let list_url = list_url.clone();
+            let reference = REF.to_string();
+            move || {
+                let cli = cli.clone();
+                let list_url = list_url.clone();
+                let reference = reference.clone();
+                Box::pin(async move {
+                    let row =
+                        listed_row_by_reference(&cli, &list_url, &reference).await?;
+                    let failed = row["status"].as_str() == Some("spawn-failed");
+                    let reason_named = row["spawn_failure_reason"]
+                        .as_str()
+                        .is_some_and(|r| r.contains("ghost-agent"));
+                    (failed && reason_named).then_some(row)
+                })
+            }
+        },
+    )
+    .await;
+
+    // 合成错误条目随投影可见（detail 按 encoded_key 取回）。
+    let row = listed_row_by_reference(&cli, &list_url, REF)
+        .await
+        .expect("seeded row stays listed");
+    let encoded = row["encoded_key"]
+        .as_str()
+        .expect("row carries its encoded key")
+        .to_string();
+    let detail_url = format!("{}/api/sessions/{encoded}", sb.webui_url());
+    wait_for(
+        "the synthetic error entry to surface in the projection",
+        Duration::from_secs(15),
+        &hint,
+        {
+            let cli = cli.clone();
+            let url = detail_url.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    let errored = v["entries"].as_array().is_some_and(|entries| {
+                        entries.iter().any(|e| {
+                            e["element_type"].as_str() == Some("error")
+                                && e["content"]
+                                    .as_str()
+                                    .is_some_and(|c| c.contains("spawn failed"))
+                        })
+                    });
+                    errored.then_some(())
+                })
+            }
+        },
+    )
+    .await;
+}
+}
+
+mod router_and_provider {
+    use super::*;
+
 /// The built-in debug router answers `model = "test"` over /v1/messages.
 /// （独立 router 子进程：`sebas router --config <沙箱配置> --debug`。）
 #[tokio::test]
@@ -812,59 +2014,6 @@ async fn router_debug_provider_serves_messages() {
         Some("msg_test_debug"),
         "debug provider fixed reply id: {body}"
     );
-}
-
-// ---------------------------------------------------------------------------
-// fake-provider-upstream：本地 Anthropic 线协议假上游（零 token）接线
-// ---------------------------------------------------------------------------
-
-/// 假上游内置规则的确定性文案（`sebas_router::fake_provider` 常量；测试侧
-/// 独立钉死字面量，避免断言随实现漂移而静默放宽）。
-const FAKE_PLAIN_TEXT: &str = "fake-provider: no tools requested";
-const FAKE_FINAL_TEXT: &str = "fake-provider: tool loop complete";
-/// `[provider.fake]` 的上游哑 key（sandbox 模板）——透传断言的期望值。
-const FAKE_UPSTREAM_KEY: &str = "sk-fake-upstream-dummy";
-/// 下游 key：绝不能出现在 fake 的 journal 里。
-const DOWNSTREAM_KEY: &str = "sk-downstream-must-not-leak";
-
-/// 读 NDJSON 行（fake-provider journal），空行跳过。
-fn read_jsonl(path: &std::path::Path) -> Vec<serde_json::Value> {
-    std::fs::read_to_string(path)
-        .unwrap_or_default()
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .collect()
-}
-
-/// 读 router 的用量库（`usage.db`，persist-router-usage）全表，按 id 升序
-/// （= 完成顺序）。库文件/表尚未出现时返回空表——配合 `wait_for` 轮询。
-///
-/// 非标准查询（排序）走手写 SQL，但行经表 struct 解出
-/// （`UsageRow::from_row`）——禁止无类型载体。
-fn read_usage_records(path: &std::path::Path) -> Vec<sebas_router::usage::UsageRecord> {
-    use sebas_db::record::Record;
-    use sebas_router::usage::{UsageRecord, UsageRow};
-
-    if !path.exists() {
-        return Vec::new();
-    }
-    let Ok(conn) = sebas_db::conn::open_readonly(path) else {
-        return Vec::new();
-    };
-    let sql = format!(
-        "SELECT {} FROM usage_records ORDER BY id",
-        <UsageRow as Record>::COLUMNS.join(", ")
-    );
-    let Ok(mut stmt) = conn.prepare(&sql) else {
-        return Vec::new();
-    };
-    let Ok(rows) = stmt.query_map([], UsageRow::from_row) else {
-        return Vec::new();
-    };
-    rows.filter_map(|r| r.ok())
-        .map(UsageRecord::from)
-        .collect()
 }
 
 /// fake-provider-upstream 3.1：`spawn_fake_provider` helper 冒烟——spawn →
@@ -1138,26 +2287,6 @@ async fn fake_provider_deterministic_rate_limit() {
     );
 }
 
-/// 真 claude-code 二进制：`SEBAS_TEST_CLAUDE_BIN` 优先，PATH 兜底；缺席 → None。
-fn find_claude_bin() -> Option<String> {
-    if let Ok(p) = std::env::var("SEBAS_TEST_CLAUDE_BIN")
-        && !p.trim().is_empty()
-    {
-        let path = std::path::PathBuf::from(&p);
-        if path.is_file() {
-            return Some(p);
-        }
-        eprintln!(
-            "[skip] SEBAS_TEST_CLAUDE_BIN={p} is not an existing file — ignoring it"
-        );
-    }
-    let exe = if cfg!(windows) { "claude.exe" } else { "claude" };
-    std::env::split_paths(&std::env::var_os("PATH")?)
-        .map(|dir| dir.join(exe))
-        .find(|p| p.is_file())
-        .map(|p| p.to_string_lossy().into_owned())
-}
-
 /// fake-provider-upstream 3.5：agent-loop journey（零 token）。
 ///
 /// 真 claude-code 作 ACP 执行体、模型请求打到本地 fake 上游：消息 →
@@ -1287,6 +2416,212 @@ async fn agent_loop_journey_claude_over_fake_upstream() {
         "the closing turn must carry a tool_result: {last}"
     );
 }
+
+/// make-core-own-provider-data 3.4 / router-admin-api「Configuration source」
+/// 「card-edited provider reaches router」+「External change hot reload」
+/// 「card edit hot-applies」：watchdog 形态下 router 以独立子进程运行
+/// （watchdog 注入 SEBAS_CORE_SOCKET/SEBAS_CORE_SECRET），订阅 core 通道。
+/// 经 webui BFF 写入 core 状态库的 provider 在 router 不重启、不写任何
+/// provider 文件的情况下变为可路由——router 只是 core 数据的只读消费者。
+/// （此前的全部测试要么用 spawn 前写好的 seed 文件，要么是 core/webui 单侧
+/// 闭环；router 的通道订阅投影 reload_from_channel 在任何层都无进程级覆盖。）
+#[cfg(target_os = "linux")] // find_child_pid 走 /proc/<pid>/cmdline，非 linux 无从自证
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn core_owned_provider_reaches_router_without_restart() {
+    let sb = Sandbox::new("testsuite_e2e", "provider-hotswap");
+    // 固定默认端口 8787 会让并行用例互踩——沙箱配置已钉一个 probed 空闲端口。
+    let router_port = sb.router_port;
+
+    // 本地假上游（anthropic 协议应答，记录被问到的 model）——绝不连外网。
+    let asked = Arc::new(tokio::sync::Mutex::new(None::<String>));
+    let stub = support::spawn_stub_upstream(asked.clone()).await;
+
+    // watchdog 形态：`run --debug` 强制 router 子服务上线。
+    let xdg_run = sb.path.join("xdg-run");
+    std::fs::create_dir_all(&xdg_run).expect("mkdir xdg-run");
+    let xdg = support::forward_slash(&xdg_run);
+    let cfg = support::forward_slash(&sb.config_path);
+    let cli = http_client();
+    let mut watchdog = sb.spawn(
+        &["run", "-c", &cfg, "--debug"],
+        &sb.core_secret,
+        &[("XDG_RUNTIME_DIR", &xdg)],
+        &sb.core_log,
+    );
+    wait_reachable(&cli, &sb).await;
+    let watchdog_pid = watchdog.id().expect("watchdog pid");
+
+    // router 子进程出现并解析监听地址（子进程 stdout/stderr inherit → 日志）。
+    let hint = sb.path.clone();
+    let log = sb.core_log.clone();
+    let (router_pid, router_url) = wait_for(
+        "router child addr in log",
+        Duration::from_secs(30),
+        &hint,
+        move || {
+            let log = log.clone();
+            Box::pin(async move {
+                let pid = router_child_pid(watchdog_pid)?;
+                let text = std::fs::read_to_string(&log).ok()?;
+                for line in text.lines().rev() {
+                    if line.contains("router listening")
+                        && let Some(idx) = line.find("addr=")
+                        && let Ok(addr) = line[idx + 5..]
+                            .split_whitespace()
+                            .next()?
+                            .parse::<std::net::SocketAddr>()
+                    {
+                        return Some((pid, format!("http://{addr}")));
+                    }
+                }
+                None
+            })
+        },
+    )
+    .await;
+    assert_eq!(
+        router_url,
+        format!("http://127.0.0.1:{router_port}"),
+        "router child must honor the pinned [router] listen"
+    );
+
+    // 经 webui BFF 建 provider：写入 core 状态库（core 是唯一写者）。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/providers", sb.webui_url()),
+        serde_json::json!({
+            "name": "stub",
+            "protocol": "anthropic",
+            "base_url_anthropic": format!("http://127.0.0.1:{stub}"),
+            "api_key": "sk-stub-e2e"
+        }),
+    )
+    .await
+    .expect("create provider via webui BFF");
+    assert_eq!(status, 201, "provider create: {body}");
+
+    // 订阅驱动：不重启任何进程，router 按新 provider 路由（改变通知 →
+    // StateSnapshot 拉取 → 热交换）。轮询直到首次命中。
+    wait_for(
+        "router routes the core-stored provider",
+        Duration::from_secs(60),
+        &hint,
+        move || {
+            let cli = cli.clone();
+            let url = format!("{router_url}/v1/messages");
+            Box::pin(async move {
+                let Ok((status, body)) = post_json(
+                    &cli,
+                    &url,
+                    serde_json::json!({
+                        "model": "stub/stub-model",
+                        "max_tokens": 16,
+                        "messages": [{ "role": "user", "content": "hi" }]
+                    }),
+                )
+                .await
+                else {
+                    return None;
+                };
+                (status == 200 && body["id"] == "msg_stub").then_some(body)
+            })
+        },
+    )
+    .await;
+    assert_eq!(
+        asked.lock().await.as_deref(),
+        Some("stub-model"),
+        "upstream must receive the namespace-rest model id"
+    );
+
+    // router 只是只读消费者：provider 文件从未被写（core 状态库是唯一真源）。
+    assert!(
+        !sb.path.join("providers.json").exists(),
+        "no provider file may be written in the core-owned topology"
+    );
+    // router 子进程全程未重启（同一 pid），且 pid 确是 router 子进程
+    // （cmdline 首参校验——进程树定位按 cmdline 子串匹配，先自证锚点）。
+    let pid_now = router_child_pid(watchdog_pid);
+    assert_eq!(
+        pid_now,
+        Some(router_pid),
+        "router must not restart for a provider change to take effect"
+    );
+    assert_router_child_cmdline(pid_now);
+    assert!(
+        watchdog.try_wait().expect("watchdog try_wait").is_none(),
+        "watchdog must stay up"
+    );
+}
+
+/// close-acceptance-blind-spots 盲区 2 进程级 e2e（spec 场景「未覆盖的继承
+/// env 触发告警」）：shell 导出 `ANTHROPIC_BASE_URL` / `ANTHROPIC_MODEL` 后，
+/// core 与 standalone webui 的启动日志各出现一条 env posture WARN，逐变量
+/// 点名「继承自 shell、将在 Claude 子进程生效」。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn env_posture_warn_names_inherited_anthropic_vars() {
+    let sb = Sandbox::new("testsuite_e2e", "env-posture-warn");
+    let cli = http_client();
+    let inherited: &[(&str, &str)] = &[
+        ("ANTHROPIC_BASE_URL", "https://corp-gw.internal/anthropic"),
+        ("ANTHROPIC_MODEL", "corp-unrouted-model"),
+    ];
+    let _core = sb.spawn_core_extra(inherited);
+    let _webui = sb.spawn_webui_extra(&sb.core_secret, inherited);
+    wait_reachable(&cli, &sb).await;
+
+    for (who, log) in [("core", sb.core_log.clone()), ("webui", sb.webui_log.clone())] {
+        wait_log_contains(
+            &format!("{who} 启动日志出现 env posture 告警并点名两个继承变量"),
+            &log,
+            &[
+                "env posture",
+                "ANTHROPIC_BASE_URL",
+                "ANTHROPIC_MODEL",
+                "继承自 shell",
+                "Claude 子进程生效",
+            ],
+        )
+        .await;
+    }
+}
+
+/// spec 场景「全覆盖时保持安静」的进程级反例：不继承任何被检变量时，core
+/// 与 webui 的启动日志都不得出现 env posture 告警。七个被检变量显式置空
+/// （空值 = 未继承），避免跑套件的 shell 恰好导出真实 `ANTHROPIC_*` 污染断言。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn env_posture_stays_silent_without_inherited_vars() {
+    let sb = Sandbox::new("testsuite_e2e", "env-posture-silent");
+    let cli = http_client();
+    let blanks: &[(&str, &str)] = &[
+        ("ANTHROPIC_BASE_URL", ""),
+        ("ANTHROPIC_AUTH_TOKEN", ""),
+        ("ANTHROPIC_MODEL", ""),
+        ("ANTHROPIC_DEFAULT_OPUS_MODEL", ""),
+        ("ANTHROPIC_DEFAULT_SONNET_MODEL", ""),
+        ("ANTHROPIC_DEFAULT_HAIKU_MODEL", ""),
+        ("ANTHROPIC_SMALL_FAST_MODEL", ""),
+    ];
+    let _core = sb.spawn_core_extra(blanks);
+    let _webui = sb.spawn_webui_extra(&sb.core_secret, blanks);
+    wait_reachable(&cli, &sb).await;
+
+    // posture 检测在启动早期执行；reachable 蕴含两边启动日志早已落盘。
+    for (who, log) in [("core", &sb.core_log), ("webui", &sb.webui_log)] {
+        let text = std::fs::read_to_string(log).unwrap_or_default();
+        assert!(
+            !text.contains("env posture"),
+            "{who} 启动日志不得出现 env posture 告警（无继承必须静默）:\n{text}"
+        );
+    }
+}
+}
+
+mod channel_and_supervision {
+    use super::*;
 
 /// A webui presenting a wrong SEBAS_CORE_SECRET must never fake a connected
 /// state: /health still serves, reachability stays false with a cause.
@@ -1627,44 +2962,6 @@ async fn startup_failure_run_exits_75_with_summary() {
     assert_eq!(file.trim(), last.trim());
 }
 
-/// Find the direct child of `ppid` whose cmdline contains `needle`
-/// (linux `/proc` walk; the supervised-recovery journey needs the core
-/// CHILD pid, not the watchdog's). None while no such child is visible.
-///
-/// Windows/macOS have no `/proc`; the provider-hotswap journey keeps its
-/// process-tree assertions linux-gated (D1) so its portable body still runs
-/// there. Socket-file assertions elsewhere stay unix-gated for the same
-/// reason (named pipes leave no filesystem trace).
-#[cfg(target_os = "linux")]
-fn find_child_pid(ppid: u32, needle: &str) -> Option<u32> {
-    for entry in std::fs::read_dir("/proc").ok()?.flatten() {
-        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
-            continue;
-        };
-        if pid == ppid {
-            continue;
-        }
-        let Ok(cmd) = std::fs::read_to_string(entry.path().join("cmdline")) else {
-            continue;
-        };
-        if !cmd.contains(needle) {
-            continue;
-        }
-        let Ok(status) = std::fs::read_to_string(entry.path().join("status")) else {
-            continue;
-        };
-        let is_child = status.lines().any(|l| {
-            l.strip_prefix("PPid:")
-                .map(|v| v.trim().parse::<u32>() == Ok(ppid))
-                .unwrap_or(false)
-        });
-        if is_child {
-            return Some(pid);
-        }
-    }
-    None
-}
-
 /// 5.1 无密钥装配旅程：两个进程都不带 `SEBAS_CORE_SECRET` —— core 自动
 /// 装配（生成密钥并写入 config 旁的 secret 文件）、webui 从文件发现密钥，
 /// reachable 之后完成一次完整会话往返（事故回归：发现路径必须承载真实
@@ -1853,6 +3150,10 @@ async fn watchdog_supervised_core_recovery() {
         "watchdog must stay up across the managed child crash"
     );
 }
+}
+
+mod pending_and_queue {
+    use super::*;
 
 /// workbench-turn-queue 2.3/5.2 + workbench-conversation-view BREAKING 更新：
 /// 忙中提交的进程级时序与丢弃记账。fake-claude 经 `--slow-ms` 在内容帧与
@@ -2102,176 +3403,553 @@ async fn turn_queue_timing_and_dropped_accounting() {
         "close must name the dropped submission count: {resp}"
     );
 }
-/// make-core-own-provider-data 3.4 / router-admin-api「Configuration source」
-/// 「card-edited provider reaches router」+「External change hot reload」
-/// 「card edit hot-applies」：watchdog 形态下 router 以独立子进程运行
-/// （watchdog 注入 SEBAS_CORE_SOCKET/SEBAS_CORE_SECRET），订阅 core 通道。
-/// 经 webui BFF 写入 core 状态库的 provider 在 router 不重启、不写任何
-/// provider 文件的情况下变为可路由——router 只是 core 数据的只读消费者。
-/// （此前的全部测试要么用 spawn 前写好的 seed 文件，要么是 core/webui 单侧
-/// 闭环；router 的通道订阅投影 reload_from_channel 在任何层都无进程级覆盖。）
-#[cfg(target_os = "linux")] // find_child_pid 走 /proc/<pid>/cmdline，非 linux 无从自证
+
+/// （round5 1.1/1.2，core-session-channel「Session drive methods」内嵌场景）
+/// 裸 core 内嵌 WebUI（`sebas core --webui`，复合后端 = acp 桥承载会话）下，
+/// 排队提交的重排/移除必须到达承载子后端并成功，类型化拒绝原样透传
+/// （unknown 404 / out_of_range 400），错误文案绝不自称「核心不可达」。
+/// 修复前三个管理调用全部落复合层 trait 默认实现恒 503、文案谎报可达性。
 #[tokio::test]
 #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn core_owned_provider_reaches_router_without_restart() {
-    let sb = Sandbox::new("testsuite_e2e", "provider-hotswap");
-    // 固定默认端口 8787 会让并行用例互踩——沙箱配置已钉一个 probed 空闲端口。
-    let router_port = sb.router_port;
-
-    // 本地假上游（anthropic 协议应答，记录被问到的 model）——绝不连外网。
-    let asked = Arc::new(tokio::sync::Mutex::new(None::<String>));
-    let stub = support::spawn_stub_upstream(asked.clone()).await;
-
-    // watchdog 形态：`run --debug` 强制 router 子服务上线。
-    let xdg_run = sb.path.join("xdg-run");
-    std::fs::create_dir_all(&xdg_run).expect("mkdir xdg-run");
-    let xdg = support::forward_slash(&xdg_run);
-    let cfg = support::forward_slash(&sb.config_path);
+async fn pending_management_reaches_the_host_backend_in_embedded_shape() {
+    let sb = Sandbox::new("testsuite_e2e", "embedded-pending");
+    sb.slow_fake_agent(400);
     let cli = http_client();
-    let mut watchdog = sb.spawn(
-        &["run", "-c", &cfg, "--debug"],
-        &sb.core_secret,
-        &[("XDG_RUNTIME_DIR", &xdg)],
-        &sb.core_log,
-    );
-    wait_reachable(&cli, &sb).await;
-    let watchdog_pid = watchdog.id().expect("watchdog pid");
-
-    // router 子进程出现并解析监听地址（子进程 stdout/stderr inherit → 日志）。
+    let (_core, dashboard) = sb.spawn_core_inprocess_webui(&[]);
+    let base = format!("http://127.0.0.1:{dashboard}");
     let hint = sb.path.clone();
-    let log = sb.core_log.clone();
-    let (router_pid, router_url) = wait_for(
-        "router child addr in log",
-        Duration::from_secs(30),
-        &hint,
-        move || {
-            let log = log.clone();
-            Box::pin(async move {
-                let pid = router_child_pid(watchdog_pid)?;
-                let text = std::fs::read_to_string(&log).ok()?;
-                for line in text.lines().rev() {
-                    if line.contains("router listening")
-                        && let Some(idx) = line.find("addr=")
-                        && let Ok(addr) = line[idx + 5..]
-                            .split_whitespace()
-                            .next()?
-                            .parse::<std::net::SocketAddr>()
-                    {
-                        return Some((pid, format!("http://{addr}")));
-                    }
-                }
-                None
-            })
-        },
-    )
-    .await;
-    assert_eq!(
-        router_url,
-        format!("http://127.0.0.1:{router_port}"),
-        "router child must honor the pinned [router] listen"
-    );
 
-    // 经 webui BFF 建 provider：写入 core 状态库（core 是唯一写者）。
+    // 内嵌形态的 dashboard 端口是旗标指定的 probed 端口（≠ sb.webui_port）。
+    let health_cli = cli.clone();
+    let health_url = base.clone();
+    let health_hint = hint.clone();
+    wait_for("in-process webui health", Duration::from_secs(30), &health_hint, move || {
+        let cli = health_cli.clone();
+        let url = health_url.clone();
+        Box::pin(async move {
+            cli.get(format!("{url}/health"))
+                .send()
+                .await
+                .ok()?
+                .text()
+                .await
+                .ok()
+                .map(|b| b.trim() == "ok")
+                .filter(|ok| *ok)
+        })
+    })
+    .await;
+
+    // 项目注册走 dashboard 面（workspace root 已钉在沙箱目录，注册必定界内）。
+    let (pstatus, pbody) = post_json(
+        &cli,
+        &format!("{base}/api/projects"),
+        serde_json::json!({ "path": support::forward_slash(&sb.path) }),
+    )
+    .await
+    .expect("register scene project");
+    assert_eq!(pstatus, 201, "register scene project: {pbody}");
+    let project_id = pbody["id"].as_str().expect("project id").to_string();
+
+    let (detail_url, id_b, id_c) = queue_two_submissions(&cli, &base, &project_id, &hint).await;
+
+    // 重排：queued-c 移到队首 → 200 且响应携带重排后的全量队列
+    // （修复前：复合层缺转发恒 503「操作不可用: 此后端不承载待执行队列」，
+    // 且旧文案自称「核心不可达」）。
     let (status, body) = post_json(
         &cli,
-        &format!("{}/api/providers", sb.webui_url()),
+        &format!("{detail_url}/pending/{id_c}/move"),
+        serde_json::json!({ "to_index": 0 }),
+    )
+    .await
+    .expect("move queued-c");
+    assert_eq!(status, 200, "move must reach the acp bridge: {body}");
+    assert_eq!(body["status"], "moved", "{body}");
+    let moved = body["pending"].as_array().expect("pending after move");
+    assert_eq!(moved[0]["text"], "queued-round5-c", "moved entry must lead: {body}");
+    assert_eq!(moved[1]["text"], "queued-round5-b", "{body}");
+
+    // 移除：queued-b 出队 → 200，剩余队列只含 queued-c。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{detail_url}/pending/{id_b}/remove"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("remove queued-b");
+    assert_eq!(status, 200, "remove must reach the acp bridge: {body}");
+    assert_eq!(body["status"], "removed", "{body}");
+    let left = body["pending"].as_array().expect("pending after remove");
+    assert_eq!(left.len(), 1, "{body}");
+    assert_eq!(left[0]["text"], "queued-round5-c", "{body}");
+
+    // 类型化拒绝透传：unknown id → 404（文案点名「不存在」，绝不 5xx、
+    // 绝不自称不可达）。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{detail_url}/pending/9999/remove"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("remove unknown id");
+    assert_eq!(status, 404, "unknown id must pass through typed: {body}");
+    let message = body["error"].as_str().unwrap_or_default();
+    assert!(message.contains("待执行提交不存在"), "{body}");
+    assert!(!message.contains("核心不可达"), "{body}");
+
+    // 越界重排 → 400（目标位置越界），同样诚实。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{detail_url}/pending/{id_c}/move"),
+        serde_json::json!({ "to_index": 9 }),
+    )
+    .await
+    .expect("move out of range");
+    assert_eq!(status, 400, "out-of-range must pass through typed: {body}");
+    let message = body["error"].as_str().unwrap_or_default();
+    assert!(message.contains("目标位置越界"), "{body}");
+    assert!(!message.contains("核心不可达"), "{body}");
+
+    // 全程 core 可达——以上失败没有一条可以伪装成「不可达」。
+    let (_status, summary) = get_json_status(&cli, &format!("{base}/api/summary"))
+        .await
+        .expect("summary");
+    assert_eq!(
+        summary["reachability"]["ok"], true,
+        "the core was reachable the whole time: {summary}"
+    );
+}
+
+/// （round5 1.1「any deployment shape」的 detached 半边）独立 webui + core
+/// 两进程形态下同一管理面契约：move/remove 经核心通道到达 core 侧引擎队列，
+/// 成功与类型化拒绝同样保真。内嵌形态（上一条）钉复合转发；这里钉「任何
+/// 部署形态」的另一半。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn pending_management_reaches_the_core_queue_in_detached_shape() {
+    let sb = Sandbox::new("testsuite_e2e", "detached-pending");
+    sb.slow_fake_agent(400);
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    let project_id = scene_project_id(&cli, &sb).await;
+    let (detail_url, id_b, id_c) =
+        queue_two_submissions(&cli, &sb.webui_url(), &project_id, &sb.path).await;
+
+    // 重排 → 200（队列经核心通道在 core 侧翻转）。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{detail_url}/pending/{id_c}/move"),
+        serde_json::json!({ "to_index": 0 }),
+    )
+    .await
+    .expect("move queued-c");
+    assert_eq!(status, 200, "move must reach the core queue: {body}");
+    assert_eq!(body["pending"][0]["text"], "queued-round5-c", "{body}");
+
+    // 移除 → 200。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{detail_url}/pending/{id_b}/remove"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("remove queued-b");
+    assert_eq!(status, 200, "remove must reach the core queue: {body}");
+    let left = body["pending"].as_array().expect("pending after remove");
+    assert_eq!(left.len(), 1, "{body}");
+    assert_eq!(left[0]["text"], "queued-round5-c", "{body}");
+
+    // 类型化拒绝透传：unknown 404 / out_of_range 400，文案诚实。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{detail_url}/pending/9999/remove"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("remove unknown id");
+    assert_eq!(status, 404, "{body}");
+    assert!(body["error"].as_str().unwrap_or_default().contains("待执行提交不存在"), "{body}");
+    let (status, body) = post_json(
+        &cli,
+        &format!("{detail_url}/pending/{id_c}/move"),
+        serde_json::json!({ "to_index": 9 }),
+    )
+    .await
+    .expect("move out of range");
+    assert_eq!(status, 400, "{body}");
+    let message = body["error"].as_str().unwrap_or_default();
+    assert!(message.contains("目标位置越界"), "{body}");
+    assert!(!message.contains("核心不可达"), "{body}");
+}
+
+/// （round5 3.1，project-session-actions「label writes through any path
+/// update the row live」）被接受的 label 写入必须作为会话更新事件到达已
+/// 连接的客户端（rail 行名免刷新重取的触发器）——detached 形态下写入走
+/// 核心通道、事件经同一通道折返 /ws。列表行投影的 label 字段（重取的读源）
+/// 同步断言：设置与清空各走一轮。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn label_write_reaches_clients_as_session_update_without_reload() {
+    let sb = Sandbox::new("testsuite_e2e", "label-liveness");
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    let project_id = scene_project_id(&cli, &sb).await;
+    // 先连 /ws 再写 label：帧必须在既有连接上到达（免刷新的证据本体）。
+    let mut ws = ws_connect(&sb.webui_url()).await;
+    // webui 启动会与 core 的 socket bind 竞速——首个流式订阅尝试可能失败、
+    // 经 1s 退避后才连上（claude_turn_streams 同款护栏）：`session.resync`
+    // 随每次订阅快照到达，等到它才说明 forwarder 已订阅、后续变更必达；
+    // 若 4s 内没等到（forwarder 在本连接订阅前就已连上，resync 已被广播
+    // 消费），订阅同样已就绪，继续即可。
+    let _ = tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            let ev = next_ws_frame(&mut ws).await;
+            if ev["method"] == "session.resync" {
+                break;
+            }
+        }
+    })
+    .await;
+
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
         serde_json::json!({
-            "name": "stub",
-            "protocol": "anthropic",
-            "base_url_anthropic": format!("http://127.0.0.1:{stub}"),
-            "api_key": "sk-stub-e2e"
+            "project_id": project_id,
+            "prompt": "hello",
+            "agent": "claude"
         }),
     )
     .await
-    .expect("create provider via webui BFF");
-    assert_eq!(status, 201, "provider create: {body}");
+    .expect("create session");
+    assert_eq!(status, 201, "create session: {body}");
+    let key = body["key"].as_str().expect("key").to_string();
+    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+    wait_turn_done(&cli, &sb, &detail_url).await;
 
-    // 订阅驱动：不重启任何进程，router 按新 provider 路由（改变通知 →
-    // StateSnapshot 拉取 → 热交换）。轮询直到首次命中。
-    wait_for(
-        "router routes the core-stored provider",
-        Duration::from_secs(60),
-        &hint,
-        move || {
-            let cli = cli.clone();
-            let url = format!("{router_url}/v1/messages");
-            Box::pin(async move {
-                let Ok((status, body)) = post_json(
-                    &cli,
-                    &url,
-                    serde_json::json!({
-                        "model": "stub/stub-model",
-                        "max_tokens": 16,
-                        "messages": [{ "role": "user", "content": "hi" }]
-                    }),
-                )
-                .await
-                else {
-                    return None;
-                };
-                (status == 200 && body["id"] == "msg_stub").then_some(body)
-            })
-        },
+    // API 路径写入（rail 对话框与它共用同一 label API）。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{detail_url}/label"),
+        serde_json::json!({ "label": "发布清单会话" }),
     )
+    .await
+    .expect("set label");
+    assert_eq!(status, 200, "set label: {body}");
+
+    // 更新帧到达：相位帧（session_id + 四相位键）。round5 6.3 起载荷扩展
+    // `label`（操作者命名随帧如实下发）——rail 的行名重取收窄直接消费该键
+    // （帧 label ≠ 行已知 label 才调度），断键即静默失活，必须在 wire 上钉住。
+    let frame = wait_session_updated_with_label(&mut ws, &key, Some("发布清单会话")).await;
+    let params = &frame["params"];
+    assert!(params["status_slug"].is_string(), "phase frame: {frame}");
+    assert!(params["turn_engaged"].is_boolean(), "phase frame: {frame}");
+    assert!(params["msg_count"].is_number(), "phase frame: {frame}");
+    assert!(params["pending"].is_array(), "phase frame: {frame}");
+
+    // 行投影（rail 重取的读源）已携带新 label。
+    let row = listed_row(&cli, &sb, &key).await;
+    assert_eq!(
+        row["label"], "发布清单会话",
+        "the accepted label must be on the row: {row}"
+    );
+
+    // 清空（API 置 null）同样广播 + 行投影回退。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{detail_url}/label"),
+        serde_json::json!({ "label": null }),
+    )
+    .await
+    .expect("clear label");
+    assert_eq!(status, 200, "clear label: {body}");
+    let frame = wait_session_updated_with_label(&mut ws, &key, None).await;
+    assert!(
+        frame["params"]["label"].is_null(),
+        "the cleared label must ride the frame as null (never a stale value): {frame}"
+    );
+    let row = listed_row(&cli, &sb, &key).await;
+    assert!(
+        row["label"].is_null(),
+        "the cleared label must leave the row: {row}"
+    );
+}
+
+/// （fix-webui-qa-defects-round5 1.2；断言按 6.1/3c review 的 wire 现状校准）
+/// 裸 core 复合后端下的待执行管理面：
+///
+/// - **重排诚实行为 (200)**：wire 上尚无优先提交入口（web_send_message →
+///   submit_turn 恒 priority=false，/btw 的优先位只在 feishu 入站生效），
+///   队列全普通项——move c → 0 是合法重排，得 200 且顺序生效。
+///   PriorityConflict 的 409 映射由 api.rs 的 FakeBackend 缝隙单测钉住；
+///   优先项 wire 入口落地后，本腿改回「越过优先项 must 409」。
+/// - **AlreadyStarted (409)**：等 c/b/p 依序投递完（id_p 离开 pending）→
+///   用陈旧的 p id 重试 remove → 状态层 delivered 集合里命中 →
+///   AlreadyStarted → 409。
+///
+/// 错误文案点名原因（该提交已开始执行）且绝不出现「核心不可达」
+/// 「操作不可用」等其它 5xx/4xx 顶替。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn pending_management_passes_typed_rejections_through_composite_409() {
+    let sb = Sandbox::new("testsuite_e2e", "embedded-pending-409");
+    sb.slow_fake_agent(400);
+    let cli = http_client();
+    let (_core, dashboard) = sb.spawn_core_inprocess_webui(&[]);
+    let base = format!("http://127.0.0.1:{dashboard}");
+    let hint = sb.path.clone();
+
+    // 内嵌形态 dashboard 等就绪。
+    let health_cli = cli.clone();
+    let health_url = base.clone();
+    let health_hint = hint.clone();
+    wait_for("in-process webui health", Duration::from_secs(30), &health_hint, move || {
+        let cli = health_cli.clone();
+        let url = health_url.clone();
+        Box::pin(async move {
+            cli.get(format!("{url}/health"))
+                .send()
+                .await
+                .ok()?
+                .text()
+                .await
+                .ok()
+                .map(|b| b.trim() == "ok")
+                .unwrap_or(false)
+                .then_some(())
+        })
+    })
     .await;
+
+    // 注册项目（workspace root = 沙箱目录，注册必定界内）。
+    let (pstatus, pbody) = post_json(
+        &cli,
+        &format!("{base}/api/projects"),
+        serde_json::json!({ "path": support::forward_slash(&sb.path) }),
+    )
+    .await
+    .expect("register scene project");
+    assert_eq!(pstatus, 201, "register scene project: {pbody}");
+    let project_id = pbody["id"].as_str().expect("project id").to_string();
+
+    // 三条普通入栈（wire 上无优先提交入口，见段落注释）。
+    let (detail_url, _id_b, id_c, id_p) =
+        queue_three_pending(&cli, &base, &project_id, &hint).await;
+
+    // ── 重排诚实行为 → 200：队列全普通项，move c → 0 合法且顺序生效。──
+    let (status, body) = post_json(
+        &cli,
+        &format!("{detail_url}/pending/{id_c}/move"),
+        serde_json::json!({ "to_index": 0 }),
+    )
+    .await
+    .expect("move c to front");
     assert_eq!(
-        asked.lock().await.as_deref(),
-        Some("stub-model"),
-        "upstream must receive the namespace-rest model id"
+        status, 200,
+        "reordering plain submissions must succeed on the wire, got {body}"
     );
-
-    // router 只是只读消费者：provider 文件从未被写（core 状态库是唯一真源）。
-    assert!(
-        !sb.path.join("providers.json").exists(),
-        "no provider file may be written in the core-owned topology"
-    );
-    // router 子进程全程未重启（同一 pid），且 pid 确是 router 子进程
-    // （cmdline 首参校验——进程树定位按 cmdline 子串匹配，先自证锚点）。
-    let pid_now = router_child_pid(watchdog_pid);
+    let (_, detail) = get_json_status(&cli, &detail_url)
+        .await
+        .expect("detail after move");
+    let order: Vec<String> = detail["pending"]
+        .as_array()
+        .expect("pending list")
+        .iter()
+        .map(|p| p["text"].as_str().unwrap_or_default().to_string())
+        .collect();
     assert_eq!(
-        pid_now,
-        Some(router_pid),
-        "router must not restart for a provider change to take effect"
+        order,
+        ["queued-round5-c", "queued-round5-b", "queued-round5-p"],
+        "move to front must take effect: {order:?}"
     );
-    assert_router_child_cmdline(pid_now);
+
+    // ── AlreadyStarted → 409：p 以普通项身份依序投递。轮询直到 id_p 离开
+    // pending（= 已 pop 投递），保留陈旧 id 重试 remove：delivered 集合命中
+    // → AlreadyStarted → 409。文案诚实性断言落在本错误腿上。
+    {
+        let poll_cli = cli.clone();
+        let poll_url = detail_url.clone();
+        wait_for("p to be delivered (leaves pending)", Duration::from_secs(60), &hint, move || {
+            let cli = poll_cli.clone();
+            let url = poll_url.clone();
+            Box::pin(async move {
+                let v = cli
+                    .get(&url)
+                    .send()
+                    .await
+                    .ok()?
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()?;
+                let delivered = v["pending"]
+                    .as_array()?
+                    .iter()
+                    .all(|p| p["id"].as_u64() != Some(id_p));
+                delivered.then_some(())
+            })
+        })
+        .await;
+    }
+    let (status, body) = post_json(
+        &cli,
+        &format!("{detail_url}/pending/{id_p}/remove"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("remove already-started id");
+    assert_eq!(
+        status, 409,
+        "removing a delivered id must 409 (AlreadyStarted), got {body}"
+    );
+    let message = body["error"].as_str().unwrap_or_default();
     assert!(
-        watchdog.try_wait().expect("watchdog try_wait").is_none(),
-        "watchdog must stay up"
+        message.contains("该提交已开始执行"),
+        "AlreadyStarted message must name the cause: {message}"
+    );
+    assert!(!message.contains("核心不可达"), "{message}");
+    assert!(!message.contains("操作不可用"), "{message}");
+
+    // 全程 core 可达——以上两类失败没有一条可以伪装成「不可达」。
+    let (_status, summary) = get_json_status(&cli, &format!("{base}/api/summary"))
+        .await
+        .expect("summary");
+    assert_eq!(
+        summary["reachability"]["ok"], true,
+        "the core was reachable the whole time: {summary}"
     );
 }
 
-/// The router CHILD pid under the watchdog — linux-only `/proc` walk
-/// (D1: process-tree assertions are linux-gated, the journey body is not).
-#[cfg(target_os = "linux")]
-fn router_child_pid(watchdog_pid: u32) -> Option<u32> {
-    find_child_pid(watchdog_pid, "router")
-}
+/// （fix-webui-qa-defects-round5 1.3，core-session-channel 末段：错误文案
+/// 不再自称「核心不可达」）复合后端路由缺位的诚实失败 = HTTP 503 + 文案
+/// 「操作不可用: 此后端不承载待执行队列」——直接打不归 webui 路由的会话：
+/// 该键对应的 channel 后端无队列 / 该 channel 走 native 侧（不路由到 acp
+/// 桥）。这里通过在 feishu channel 上不存在会话的 known-format key 命中
+/// native 侧不可用分支（route() 路由到 NativeAgentBackend → trait 默认
+/// Unavailable），文字契约由 api.rs 透传。
+///
+/// 不创建 feishu 会话（feishu 通道默认 disabled，避免与既有沙箱冲突）；
+/// 只断言调用契约与文案形态——这与 1.2 表格里 FakeBackend 注入 Unavailable
+/// 的接口层单测是同形但反向验证：真实 InProcessBackend/NativeAgentBackend
+/// 路径里走出来的错误文本也得是「操作不可用」而非「核心不可达」。
+/// 键必须是 `agent-` 形引用（is_native 谓词），否则落 ACP 桥得 404 Unknown。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn pending_management_unavailable_uses_honest_cause_text() {
+    let sb = Sandbox::new("testsuite_e2e", "embedded-pending-unavailable");
+    sb.slow_fake_agent(400);
+    let cli = http_client();
+    let (_core, dashboard) = sb.spawn_core_inprocess_webui(&[]);
+    let base = format!("http://127.0.0.1:{dashboard}");
+    let hint = sb.path.clone();
 
-#[cfg(not(target_os = "linux"))]
-fn router_child_pid(_watchdog_pid: u32) -> Option<u32> {
-    None
-}
+    let health_cli = cli.clone();
+    let health_url = base.clone();
+    let health_hint = hint.clone();
+    wait_for("in-process webui health", Duration::from_secs(30), &health_hint, move || {
+        let cli = health_cli.clone();
+        let url = health_url.clone();
+        Box::pin(async move {
+            cli.get(format!("{url}/health"))
+                .send()
+                .await
+                .ok()?
+                .text()
+                .await
+                .ok()
+                .map(|b| b.trim() == "ok")
+                .unwrap_or(false)
+                .then_some(())
+        })
+    })
+    .await;
 
-/// Anchor check: the matched child really is the router subprocess
-/// (argv[1] == "router"). Reads `/proc/{pid}/cmdline` — linux-only, and the
-/// `pid_now == Some(router_pid)` equality above is vacuously true on
-/// non-linux (`None == None`), so the restart assertion stays portable.
-#[cfg(target_os = "linux")]
-fn assert_router_child_cmdline(pid_now: Option<u32>) {
-    if let Some(pid) = pid_now {
-        let cmd = std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
-            .expect("read router child cmdline");
-        let mut argv = cmd.split('\0');
-        let _exe = argv.next();
+    // 注册项目（让 create 不撞 scope 边界）。
+    let (pstatus, pbody) = post_json(
+        &cli,
+        &format!("{base}/api/projects"),
+        serde_json::json!({ "path": support::forward_slash(&sb.path) }),
+    )
+    .await
+    .expect("register scene project");
+    assert_eq!(pstatus, 201, "register scene project: {pbody}");
+    let project_id = pbody["id"].as_str().expect("project id").to_string();
+
+    // web channel 创建会话（走 acp 桥）→ 三条普通提交入栈，作为「acp 侧
+    // 队列照常可用」的对照面（本用例不需要优先项）。
+    let (detail_url, _id_b, _id_c, _id_p) =
+        queue_three_pending(&cli, &base, &project_id, &hint).await;
+
+    // 用合法编码 key 但绕开 webui 路由：直接对 feishu channel 编码键（沙箱
+    // feishu disabled，route() 落到 NativeAgentBackend 的 trait 默认实现 →
+    // Unavailable cause = "此后端不承载待执行队列"）。WebUI 路由 decode 该
+    // key 仍合法（webui 不按 channel 过滤），仅后端不可用。
+    //
+    // 编码约定：「channel%00reference」；is_native（src/agent_backend.rs）
+    // 只认 feishu + `agent-` 前缀才路由 native 侧——引用缺前缀会落 ACP 桥
+    // 得 PendingRejected::Unknown（404），断言的 503/诚实文案就永不匹配
+    // （round5 6.1 修的键形状），故取一个不存在的 `agent-` 形 feishu 引用。
+    let feishu_encoded = "feishu%00agent-round5-native-pending";
+    for (op, suffix) in [("remove", "/remove"), ("move", "/move")] {
+        let url = format!("{base}/api/sessions/{feishu_encoded}/pending/1{suffix}");
+        let body = if op == "move" {
+            serde_json::json!({ "to_index": 0 })
+        } else {
+            serde_json::json!({})
+        };
+        let (status, body) = post_json(&cli, &url, body)
+            .await
+            .unwrap_or_else(|e| panic!("{op} feishu channel: {e}"));
+        assert_eq!(
+            status, 503,
+            "{op} on a non-queue-holding channel must 503 (Unavailable), got {body}"
+        );
+        let message = body["error"].as_str().unwrap_or_default();
         assert!(
-            argv.next() == Some("router"),
-            "matched child must be the router subprocess, got cmdline {cmd:?}"
+            message.contains("操作不可用"),
+            "{op} message must use the round5 honest cause prefix: {message}"
+        );
+        assert!(
+            message.contains("此后端不承载待执行队列"),
+            "{op} message must name the routing gap: {message}"
+        );
+        assert!(
+            !message.contains("核心不可达"),
+            "{op} message must NOT pretend the core is unreachable: {message}"
         );
     }
+
+    // 同一会话 web channel 路径上仍然 200（控制：复合后端按 key 路由成功）。
+    let (_status, summary) = get_json_status(&cli, &format!("{base}/api/summary"))
+        .await
+        .expect("summary");
+    assert_eq!(
+        summary["reachability"]["ok"], true,
+        "the core was reachable the whole time: {summary}"
+    );
+    let (_status, list) =
+        get_json_status(&cli, &format!("{base}/api/sessions"))
+            .await
+            .expect("session list");
+    let in_list = list["recent_sessions"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .any(|r| {
+            r["encoded_key"].as_str()
+                == Some(detail_url.rsplit('/').next().unwrap_or(""))
+        });
+    assert!(in_list, "the queued session must still be reachable by webui list");
+}
 }
 
-#[cfg(not(target_os = "linux"))]
-fn assert_router_child_cmdline(_pid_now: Option<u32>) {}
+mod mode_and_model {
+    use super::*;
 
 /// （add-agent-mode-selection）mode 透传：带 mode 的创建把映射后的
 /// `--permission-mode` 写进子进程 argv；缺省 mode 的对照会话不带该参数；
@@ -2859,35 +4537,10 @@ async fn claude_model_surface_reaches_snapshot_and_switch_round_trips() {
         4
     );
 }
-
-/// Poll the session detail until the current turn settles to Done.
-async fn wait_turn_done(cli: &reqwest::Client, sb: &Sandbox, detail_url: &str) {
-    wait_for(
-        "session turn to reach Done",
-        Duration::from_secs(25),
-        &sb.path.clone(),
-        {
-            let cli = cli.clone();
-            let url = detail_url.to_string();
-            move || {
-                let cli = cli.clone();
-                let url = url.clone();
-                Box::pin(async move {
-                    let v = cli
-                        .get(&url)
-                        .send()
-                        .await
-                        .ok()?
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()?;
-                    (v["status_slug"].as_str() == Some("done")).then_some(())
-                })
-            }
-        },
-    )
-    .await;
 }
+
+mod sandbox_and_state_dir {
+    use super::*;
 
 /// add-workspace-root 4.3：workspace root 执法的进程级旅程——「注册后收紧根」
 /// 变体，Windows 可跑（只重启 webui 单进程，不依赖 unix 信号）。
@@ -3116,229 +4769,404 @@ async fn workspace_root_enforcement_after_tightening() {
     );
 }
 
-/// POST a 0-turn placeholder session bound to `project_id`; returns the
-/// encoded session key.
-async fn create_project_placeholder(
-    cli: &reqwest::Client,
-    sb: &Sandbox,
-    project_id: &str,
-    tag: &str,
-) -> String {
+/// cli-service「one variable relocates every state file」+「no state write
+/// escapes the derived directory」的旅程级机械化（任务 8.3 的常驻自动化版）：
+/// 只钉 `SEBAS_STATE_DIR`（HOME 一并钉进沙箱 = fake 操作员主目录）跑完整
+/// core 旅程，随后断言——
+/// 1. 两库都在目录内且**域分离**：settings.db 只装 providers/model_aliases/
+///    settings 三表，projects.db 只装 projects/session_map 两表；
+/// 2. 写进的数据落在正确的库里：provider 行在 settings.db，project 行在
+///    projects.db（bounded config vs growing user data 的文件级证据）；
+/// 3. fake 主目录下没有 `.sebas`（任何经 HOME 兜底的写都会落在
+///    `<沙箱>/.sebas`，其不存在 = 无一处逃逸派生目录）；
+/// 4. 退休名 `sebas.db` 无处出现；
+/// 5. SIGTERM 优雅退出移除 channel socket。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn single_state_dir_journey_pins_every_state_location() {
+    let sb = Sandbox::new("testsuite_e2e", "state-dir");
+    let cli = http_client();
+    let mut core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    // 项目注册（core projects.db 的 add 写入）。
+    let project_id = scene_project_id(&cli, &sb).await;
+    assert!(!project_id.is_empty(), "project registered");
+
+    // provider put（core settings.db 的 PersistedState 事务写入）。
     let (status, body) = post_json(
-        cli,
-        &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "agent": "claude", "project_id": project_id }),
+        &cli,
+        &format!("{}/api/providers", sb.webui_url()),
+        serde_json::json!({
+            "name": "pinned",
+            "protocol": "anthropic",
+            "base_url_anthropic": "http://127.0.0.1:9",
+            "api_key": "sk-sandbox-dummy"
+        }),
     )
     .await
-    .unwrap_or_else(|e| panic!("create placeholder {tag}: {e}"));
-    assert_eq!(status, 201, "placeholder {tag}: {body}");
-    body["key"].as_str().expect("key").to_string()
+    .expect("create provider");
+    assert_eq!(status, 201, "provider create: {body}");
+
+    // fake-claude 会话回合（完整旅程）。
+    let (s, resp) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "project_id": project_id, "prompt": "hello", "agent": "claude" }),
+    )
+    .await
+    .expect("create session");
+    assert_eq!(s, 201, "create session: {resp}");
+    let key = resp["key"].as_str().expect("session key").to_string();
+    let detail = state_dir_wait_done(&cli, &sb, &key).await;
+    assert_eq!(detail["status_slug"], "done", "turn must complete");
+
+    // SIGTERM core：优雅退出（state-store 通道生命周期）。
+    #[cfg(unix)]
+    {
+        let pid = core.id().expect("core pid");
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+    }
+    #[cfg(not(unix))]
+    core.kill().await.expect("kill core");
+    let _ = core.wait().await;
+    assert!(
+        !sb.channel_path.exists(),
+        "graceful exit must remove the channel socket"
+    );
+
+    // ── 机械断言：全部状态产物都在钉住的目录内 ──
+    let files = state_dir_walk(&sb.path);
+    // 3) 无 `.sebas`：HOME 钉在沙箱，HOME 兜底的任何写都会露形为
+    //    `<沙箱>/.sebas/...`——其不存在 = 旅程中没有一处状态逃出派生目录。
+    assert!(
+        files.iter().all(|f| !f.starts_with(".sebas/")),
+        "no state may escape into a home-relative .sebas: {files:?}"
+    );
+    // 4) 退休名从不被创建（任何层级、任何子目录）。
+    assert!(
+        files.iter().all(|f| !f.ends_with("/sebas.db") && f != "sebas.db"),
+        "the retired single-DB file name must never appear: {files:?}"
+    );
+    // migrate-project-registry 7.1：注册表落 `projects.db`，**`projects.json`
+    // 全程未被创建**（独立 webui 拓扑下也不许有第二个存储：文件回退已删除）。
+    assert!(
+        files
+            .iter()
+            .all(|f| !f.ends_with("/projects.json") && f != "projects.json"),
+        "the retired project-registry file must never be created: {files:?}"
+    );
+    // 1) 两库在场且域分离。
+    let settings_db = sb.path.join("settings.db");
+    let projects_db = sb.path.join("projects.db");
+    assert!(settings_db.exists(), "settings.db must exist in the state dir");
+    assert!(projects_db.exists(), "projects.db must exist in the state dir");
+    assert_eq!(
+        state_dir_table_count(&settings_db, &["providers", "model_aliases", "settings"]),
+        3,
+        "settings.db carries exactly the bounded configuration tables"
+    );
+    assert_eq!(
+        state_dir_table_count(&settings_db, &["projects", "session_map"]),
+        0,
+        "settings.db must not carry any user-data tables"
+    );
+    assert_eq!(
+        state_dir_table_count(&projects_db, &["projects", "session_map"]),
+        2,
+        "projects.db carries exactly the growing user-data tables"
+    );
+    assert_eq!(
+        state_dir_table_count(&projects_db, &["providers", "model_aliases", "settings"]),
+        0,
+        "projects.db must not carry any configuration tables"
+    );
+    // 2) 数据落在正确的库里。
+    {
+        let conn = rusqlite::Connection::open_with_flags(
+            &settings_db,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM providers WHERE id = 'pinned'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "provider row must live in settings.db");
+    }
+    {
+        let conn = rusqlite::Connection::open_with_flags(
+            &projects_db,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
+            .unwrap();
+        assert!(n >= 1, "project row must live in projects.db");
+        // 节点的正式列与稳定 id 都在库里（migrate-project-registry 1.1/2.4）：
+        // id 是移除/重排/项目级默认 agent 的寻址键，落库时就该有值——只在读
+        // 路径回填会让按 id 的 UPDATE 全部匹配 0 行却返回 Ok（假装成功）。
+        let (id, node_id, path): (Option<String>, String, String) = conn
+            .query_row(
+                "SELECT id, node_id, path FROM projects ORDER BY added_at LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert!(path.contains("state-dir"), "registered scene project row: {path}");
+        assert_eq!(node_id, "local", "本机项目落 node_id = local");
+        assert!(
+            id.as_deref().is_some_and(|i| i.starts_with("proj-")),
+            "注册即落库稳定 id（不得留 NULL 等读路径回填）: {id:?}"
+        );
+    }
 }
 
-/// GET a URL, return (status, json body). Err on transport failure.
-async fn get_json_status(
-    cli: &reqwest::Client,
-    url: &str,
-) -> Result<(u16, serde_json::Value), String> {
-    let resp = cli
-        .get(url)
+/// cli-service「the retired database variable has no effect」（任务 6.1 的
+/// 进程级固化）：导出 `SEBAS_STATE_DB` 启动 core——分层库照常从状态目录
+/// 解析并创建、退休路径从不被创建、启动日志对残留值给出点名提示。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn retired_state_db_var_is_warned_and_ignored() {
+    let sb = Sandbox::new("testsuite_e2e", "retired-var");
+    let retired_path = sb.path.join("sebas.db");
+    let retired = retired_path.to_string_lossy().into_owned();
+    let cli = http_client();
+    let _core = sb.spawn_core_extra(&[("SEBAS_STATE_DB", &retired)]);
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    // 退休变量被点名提示（run.rs 的启动 warn）。
+    let hint = sb.path.clone();
+    let log = sb.core_log.clone();
+    wait_for("core logs the retired-variable warning", Duration::from_secs(10), &hint, move || {
+        let log = log.clone();
+        Box::pin(async move {
+            let text = std::fs::read_to_string(&log).ok()?;
+            (text.contains("SEBAS_STATE_DB") && text.contains("退休")).then_some(())
+        })
+    })
+    .await;
+
+    // 退休路径从不被创建；分层库照常解析。
+    assert!(
+        !retired_path.exists(),
+        "the retired variable's path must never be created: {}",
+        retired_path.display()
+    );
+    assert!(sb.path.join("settings.db").exists(), "settings.db resolves from the state dir");
+    assert!(sb.path.join("projects.db").exists(), "projects.db resolves from the state dir");
+}
+
+/// state-store「Environment override relocates the database」的进程级：
+/// `SEBAS_PROJECTS_DB` 只搬走 projects.db——项目注册的真实写入落在覆盖
+/// 路径上，派生路径不再建库，settings.db 与其余落点照常在状态目录内。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn projects_db_override_relocates_only_that_database() {
+    let sb = Sandbox::new("testsuite_e2e", "projects-override");
+    let elsewhere = sb.path.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).expect("mkdir elsewhere");
+    let override_path = elsewhere.join("proj.db");
+    let override_str = override_path.to_string_lossy().into_owned();
+
+    let cli = http_client();
+    let mut core = sb.spawn_core_extra(&[("SEBAS_PROJECTS_DB", &override_str)]);
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    // 项目注册：经 core 通道写 projects 域——写的就是覆盖路径上的库。
+    let project_id = scene_project_id(&cli, &sb).await;
+    assert!(!project_id.is_empty(), "project registered");
+
+    #[cfg(unix)]
+    {
+        let pid = core.id().expect("core pid");
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+    }
+    #[cfg(not(unix))]
+    core.kill().await.expect("kill core");
+    let _ = core.wait().await;
+
+    // 覆盖路径收到真实的库（projects 表里是刚注册的行）。
+    assert!(override_path.exists(), "the override path owns the projects db");
+    {
+        let conn = rusqlite::Connection::open_with_flags(
+            &override_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
+            .unwrap();
+        assert!(n >= 1, "registered project must land in the relocated db");
+    }
+    // 派生路径不再建库；settings.db 照常在状态目录内。
+    assert!(
+        !sb.path.join("projects.db").exists(),
+        "the derived projects.db must not be created when overridden"
+    );
+    assert!(sb.path.join("settings.db").exists(), "settings.db stays in the state dir");
+}
+
+/// watchdog spec「sandboxed watchdog does not touch the operator's
+/// directory」+「a runtime override survives a watchdog restart」+「the
+/// watchdog acquires no persistence layer」+「core still ignores the
+/// override layer」的进程级旅程：监督形态下经 webui admin 控制面（HTTP，
+/// 非浏览器）做 ServiceSet——services.json 落在状态目录内且是普通 JSON
+/// 文件（非 SQLite）；core 的停用请求被拒、core 子进程照常存活；watchdog
+/// 重启后 router 的期望态从文件读回、spawn 决策照旧。
+#[cfg(target_os = "linux")] // find_child_pid 走 /proc/<pid>/cmdline
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn watchdog_service_override_lives_in_state_dir_and_survives_restart() {
+    let sb = Sandbox::new("testsuite_e2e", "watchdog-state-dir");
+    sb.enable_supervised_core();
+    // 控制socket（control.sock）按 XDG_RUNTIME_DIR 解析——钉进沙箱。
+    let xdg_run = sb.path.join("xdg-run");
+    std::fs::create_dir_all(&xdg_run).expect("mkdir xdg-run");
+    let xdg = support::forward_slash(&xdg_run);
+    let cfg = support::forward_slash(&sb.config_path);
+    let cli = http_client();
+    // 不带 --debug：router 初值 = config 开关（默认关）→ 初始无 router 子进程，
+    // 让「enable 持久化 + 重启后读回」有干净的起点。
+    let mut watchdog = sb.spawn(
+        &["run", "-c", &cfg],
+        &sb.core_secret,
+        &[("XDG_RUNTIME_DIR", &xdg)],
+        &sb.core_log,
+    );
+    wait_reachable(&cli, &sb).await;
+    let watchdog_pid = watchdog.id().expect("watchdog pid");
+    let hint = sb.path.clone();
+
+    // admin 控制面在场（standalone webui 持 ControlRpcAdminAdapter）。
+    let services_url = format!("{}/api/admin/services", sb.webui_url());
+    let services: serde_json::Value = cli
+        .get(&services_url)
         .send()
         .await
-        .map_err(|e| format!("GET {url}: {e}"))?;
-    let status = resp.status().as_u16();
-    let json = resp
+        .expect("GET admin services")
         .json()
         .await
-        .map_err(|e| format!("body of {url}: {e}"))?;
-    Ok((status, json))
-}
-
-/// workbench-live-conversation-flow 3.1/7.1：聚焦即拉起的进程级旅程。
-///
-/// 0-turn 占位（无 prompt）→ `POST /api/sessions/{key}/activate` 一次 =
-/// `started`（无 prompt 拉起子进程，占位离开 starting 态且没有任何回合）
-/// → 再 activate = `already-running`（幂等，无重复 spawn）。模型芯片的
-/// 数据源（fakeacp 的 configOptions）由沙箱冒烟覆盖——专用 claude 驱动
-/// 不报 configOptions，这里不断言模型表。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn activate_placeholder_spawns_without_prompt() {
-    let sb = Sandbox::new("testsuite_e2e", "activate-placeholder");
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-
-    // 0-turn 占位：创建请求不带 prompt。
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "project_id": project_id.clone(), "agent": "claude" }),
-    )
-    .await
-    .expect("create placeholder");
-    assert_eq!(status, 201, "create placeholder: {body}");
-    let key = body["key"].as_str().expect("key").to_string();
-    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
-    let activate_url = format!("{}/api/sessions/{key}/activate", sb.webui_url());
-
-    // 第一次激活 = started（无 prompt 拉起）。
-    let (status, body) = post_json(&cli, &activate_url, serde_json::json!({}))
-        .await
-        .expect("activate #1");
-    assert_eq!(status, 200, "activate #1: {body}");
-    assert_eq!(body["status"], "started", "activate #1: {body}");
-
-    // 子进程拉起后离开 starting 态（无 prompt、无回合——0-turn 占位保持）。
-    let detail = wait_for(
-        "placeholder to leave starting after activate",
-        Duration::from_secs(25),
-        &sb.path.clone(),
-        {
-            let cli = cli.clone();
-            let url = detail_url.clone();
-            move || {
-                let cli = cli.clone();
-                let url = url.clone();
-                Box::pin(async move {
-                    let v = cli
-                        .get(&url)
-                        .send()
-                        .await
-                        .ok()?
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()?;
-                    (v["status_slug"].as_str() != Some("starting")).then_some(v)
-                })
-            }
-        },
-    )
-    .await;
+        .expect("admin services json");
     assert_eq!(
-        detail["entries"].as_array().map(Vec::len),
-        Some(0),
-        "activation must not run a turn: {detail}"
+        services["adapter_ok"], true,
+        "the supervised webui must carry the control adapter: {services}"
     );
 
-    // 幂等：第二次激活 = already-running（无第二次 spawn）。
-    let (status, body) = post_json(&cli, &activate_url, serde_json::json!({}))
-        .await
-        .expect("activate #2");
-    assert_eq!(status, 200, "activate #2: {body}");
-    assert_eq!(body["status"], "already-running", "activate #2: {body}");
-}
-
-/// fix-webui-qa-defects 3.3（session-lifecycle「idle placeholder is never
-/// stall-settled」的进程级回归）：0-turn 占位经聚焦拉起（activate：无 prompt
-/// spawn、握手 lazy seed 出 SEED 卡、transcript 恒空——QA 幽灵回合的实体）
-/// 后闲置超过配置调小的 `turn_stall_timeout`（3s）——
-/// 1) detail 无任何 error 条目：占位不构成在飞回合，看门狗绝不注入合成
-///    「回合停滞被强制收尾」；
-/// 2) 状态可写：首条消息照常开轮并完成完整回合；完成后再次越过阈值，
-///    transcript 依旧无合成错误（看门狗不误伤已收回合）。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn idle_placeholder_never_stall_settles_and_stays_writable() {
-    let sb = Sandbox::new("testsuite_e2e", "placeholder-idle-stall");
-    sb.set_turn_stall_timeout(3);
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-
-    // 0-turn 占位（创建请求不带 prompt）→ 聚焦拉起（activate #1 = started）。
-    let project_id = scene_project_id(&cli, &sb).await;
-    let key = create_project_placeholder(&cli, &sb, &project_id, "idle-stall").await;
-    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
-    let activate_url = format!("{}/api/sessions/{key}/activate", sb.webui_url());
-    let (status, body) = post_json(&cli, &activate_url, serde_json::json!({}))
-        .await
-        .expect("activate placeholder");
-    assert_eq!(status, 200, "activate placeholder: {body}");
-    assert_eq!(body["status"], "started", "activate placeholder: {body}");
-
-    // 子进程拉起后离开 starting 态（0-turn 占位：无 prompt、零条目）。
-    let hint = sb.path.clone();
-    wait_for(
-        "placeholder to leave starting after activate",
-        Duration::from_secs(25),
-        &hint,
-        {
-            let cli = cli.clone();
-            let url = detail_url.clone();
-            move || {
-                let cli = cli.clone();
-                let url = url.clone();
-                Box::pin(async move {
-                    let v = cli
-                        .get(&url)
-                        .send()
-                        .await
-                        .ok()?
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()?;
-                    (v["status_slug"].as_str() != Some("starting")).then_some(v)
-                })
-            }
-        },
-    )
-    .await;
-
-    // 闲置超过阈值（3s 配置，8s 观察窗）：detail 保持干净——零 error 条目、
-    // 无「回合停滞」合成文案（占位幽灵回合的进程级反证）。
-    tokio::time::sleep(Duration::from_secs(8)).await;
-    let (status, v) = get_json_status(&cli, &detail_url)
-        .await
-        .expect("detail after the idle window");
-    assert_eq!(status, 200, "detail after the idle window: {v}");
-    let entries = v["entries"].as_array().cloned().unwrap_or_default();
+    // 初始无 router 子进程（config 默认关、无覆盖层）。
     assert!(
-        entries
-            .iter()
-            .all(|e| e["element_type"].as_str() != Some("error")),
-        "an idle 0-turn placeholder must never carry a synthetic error entry: {entries:?}"
+        find_child_pid(watchdog_pid, "router").is_none(),
+        "router must not spawn while its desired state is off"
     );
 
-    // 状态可写：首条消息照常开轮并完成完整回合（占位豁免绝不外溢到真实
-    // 回合——看门狗对它照常计时，回合正常完成即不受影响）。
+    // ServiceSet(router on, persist)：写覆盖层 + 拉起 router 子进程。
     let (status, body) = post_json(
         &cli,
-        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
-        serde_json::json!({ "message": "first real message" }),
+        &format!("{services_url}/router/enable"),
+        serde_json::json!({}),
     )
     .await
-    .expect("message the idle placeholder");
-    assert_eq!(status, 200, "the idle placeholder must stay writable: {body}");
-    wait_turn_done(&cli, &sb, &detail_url).await;
+    .expect("enable router");
+    assert_eq!(status, 200, "router enable: {body}");
 
-    // 完成后再次越过阈值：看门狗不误伤已收回合，transcript 仍无合成错误，
-    // 且真实回合的事实（操作者 prompt + fake-claude 回复）完整在场。
-    tokio::time::sleep(Duration::from_secs(6)).await;
-    let (_status, v) = get_json_status(&cli, &detail_url)
-        .await
-        .expect("detail after the post-done window");
-    let entries = v["entries"].as_array().cloned().unwrap_or_default();
+    // 覆盖层落在状态目录内（派生落点——不是操作员配置目录）。
+    let services_json = sb.path.join("services.json");
+    wait_for("services.json to appear in the state dir", Duration::from_secs(10), &hint, {
+        let services_json = services_json.clone();
+        move || {
+            let services_json = services_json.clone();
+            Box::pin(async move { services_json.exists().then_some(()) })
+        }
+    })
+    .await;
+    let raw = std::fs::read_to_string(&services_json).expect("read services.json");
+    // 普通文件、非任何数据库形态（watchdog 不引入持久层）。
     assert!(
-        entries
-            .iter()
-            .all(|e| e["element_type"].as_str() != Some("error")),
-        "a completed turn must not gain a synthetic error after the timeout: {entries:?}"
+        !raw.starts_with("SQLite format 3"),
+        "the override layer must stay a plain file"
     );
-    let transcript = entries
-        .iter()
-        .filter_map(|e| e["content"].as_str())
-        .collect::<Vec<_>>()
-        .join("");
+    let table: serde_json::Value = serde_json::from_str(&raw).expect("services.json parses");
+    assert_eq!(table["router"], "on", "recorded override: {table}");
+
+    // router 子进程被拉起。
+    wait_for("router child to spawn", Duration::from_secs(20), &hint, {
+        move || {
+            let pid = find_child_pid(watchdog_pid, "router");
+            Box::pin(async move { pid.map(|p| p as u64) })
+        }
+    })
+    .await;
+
+    let (core_status, core_body) = post_json(
+        &cli,
+        &format!("{services_url}/core/disable"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("disable core");
+    assert_ne!(
+        core_status, 200,
+        "core must reject being disabled via the override layer: {core_body}"
+    );
     assert!(
-        transcript.contains("first real message")
-            && transcript.contains("hello")
-            && transcript.contains("world"),
-        "the real turn's prompt and reply must be intact: {transcript:?}"
+        core_body["error"].as_str().is_some_and(|e| !e.is_empty()),
+        "the rejection must name its cause: {core_body}"
+    );
+    assert!(
+        find_child_pid(watchdog_pid, "core").is_some(),
+        "core must stay supervised"
+    );
+
+    // watchdog 重启：router 的期望态从 services.json 读回——spawn 决策照旧。
+    unsafe { libc::kill(watchdog_pid as libc::pid_t, libc::SIGTERM) };
+    let _ = watchdog.wait().await;
+    // 旧 webui 子进程随监督关闭退出——等端口真正释放再起新 watchdog。
+    wait_for("old webui port to be released", Duration::from_secs(15), &hint, {
+        let cli = cli.clone();
+        let url = format!("{}/health", sb.webui_url());
+        move || {
+            let cli = cli.clone();
+            let url = url.clone();
+            Box::pin(async move { cli.get(&url).send().await.is_err().then_some(()) })
+        }
+    })
+    .await;
+
+    let watchdog2 = sb.spawn(
+        &["run", "-c", &cfg],
+        &sb.core_secret,
+        &[("XDG_RUNTIME_DIR", &xdg)],
+        &sb.core_log,
+    );
+    wait_reachable(&cli, &sb).await;
+    let watchdog2_pid = watchdog2.id().expect("watchdog2 pid");
+    let _router_pid = wait_for("router child respawned from the override file", Duration::from_secs(20), &hint, {
+        move || {
+            let pid = find_child_pid(watchdog2_pid, "router");
+            Box::pin(async move { pid.map(|p| p as u64) })
+        }
+    })
+    .await;
+    // core 子进程照常无条件拉起（覆盖层从未被写入 core，重启后也不读它）。
+    assert!(
+        find_child_pid(watchdog2_pid, "core").is_some(),
+        "core must be spawned unconditionally after restart"
+    );
+
+    // 全程无 `.sebas` 逃逸（HOME 钉在沙箱）。
+    let files = state_dir_walk(&sb.path);
+    assert!(
+        files.iter().all(|f| !f.starts_with(".sebas/")),
+        "watchdog must not write outside the state dir: {files:?}"
     );
 }
+}
+
+mod streaming_and_transcript {
+    use super::*;
 
 /// workbench-live-conversation-flow 2.1/7.1：回合内容实时流式的进程级
 /// 旅程——订阅 `/ws` 后提交一条消息，`turn.append` 帧（合并窗批帧，条目
@@ -3675,245 +5503,6 @@ async fn parked_permission_does_not_trip_the_stall_guard() {
     );
 }
 
-// ── feishu-free permission approval loop (the im surface over the core channel) ──
-//
-// 飞书在权限回路里的唯一职责是「权限卡片呈现 + card.action.trigger 回调」；
-// 卡片之前的整条审批回路（agent 泊车 → PermissionNotice 广播 → 订阅流
-// ApprovalRequested 帧 → ApprovalAnswer 回灌 → 泊住的 hook 复活 → 回合完成）
-// 与飞书零耦合，用 fake-claude 的 "perm" 场景（真实 hook_callback 泊车，
-// allow/deny 决定直接改写 tool_result）经核心通道裸帧走全环。这一组用例
-// 就是那条「长链路的前 9 步」：任何一截断裂（驱动泊车、广播、帧下发、
-// 应答路由、oneshot 复活）都会在这里当场爆。卡片回调之后的解析/路由语义
-// 由 sebas-feishu event_parse_test 与 sebas-im frontend 单测覆盖。
-
-use std::path::Path;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
-use support::forward_slash;
-
-use sebas::core_channel::protocol::{
-    ChannelHandshake, CoreChannelRequest, CoreChannelResponse, SessionStreamFrame,
-};
-use sebas_channels::ChannelKey;
-use sebas_webui::session_backend::{PermissionDecision, PermissionNotice};
-
-/// 把沙箱 config 的 `channel_path` 从相对名补成绝对路径：Sandbox 写的相对名
-/// 依赖「子进程 cwd=沙箱」的字符串映射（Windows named pipe 名从路径字符串
-/// 确定性派生），测试进程直连时必须与服务端同一字符串——绝对路径对两端都
-/// 成立，也顺带满足 Unix 上的文件语义。只影响本组用例自己的沙箱实例。
-fn pin_absolute_channel(sb: &Sandbox) {
-    let cfg = std::fs::read_to_string(&sb.config_path).expect("read sandbox config");
-    let patched = cfg.replace(
-        "channel_path = \"core-channel.sock\"",
-        &format!("channel_path = \"{}\"", forward_slash(&sb.channel_path)),
-    );
-    assert_ne!(cfg, patched, "channel_path line not found in sandbox config");
-    std::fs::write(&sb.config_path, patched).expect("write sandbox config");
-}
-
-/// 通道可连接性轮询（named pipe 无文件残留，不能靠 path.exists()）。
-async fn wait_channel_accept(sb: &Sandbox) {
-    let hint = sb.path.clone();
-    wait_for("core channel to accept a handshake", Duration::from_secs(20), &hint, move || {
-        let path = sb.channel_path.clone();
-        let secret = sb.core_secret.clone();
-        Box::pin(async move {
-            let Ok(stream) = sebas_ipc::connect(&path).await else {
-                return None;
-            };
-            let (r, mut w) = sebas_ipc::split(stream);
-            let hs = serde_json::to_string(&ChannelHandshake { secret }).unwrap();
-            if w.write_all(hs.as_bytes()).await.is_err()
-                || w.write_all(b"\n").await.is_err()
-                || w.flush().await.is_err()
-            {
-                return None;
-            }
-            let mut reader = BufReader::new(r);
-            let mut ack = String::new();
-            match tokio::time::timeout(Duration::from_secs(3), reader.read_line(&mut ack)).await {
-                Ok(Ok(1..)) => Some(()),
-                _ => None,
-            }
-        })
-    })
-    .await;
-}
-/// 开一条订阅连接：握手 + Subscribe，吃掉 ack 与 Snapshot 帧，返回读端。
-async fn open_subscriber(sb: &Sandbox) -> BufReader<sebas_ipc::ReadHalf> {
-    let stream = sebas_ipc::connect(&sb.channel_path).await.expect("subscriber connect");
-    let (r, mut w) = sebas_ipc::split(stream);
-    let hs = serde_json::to_string(&ChannelHandshake {
-        secret: sb.core_secret.clone(),
-    })
-    .unwrap();
-    w.write_all(hs.as_bytes()).await.unwrap();
-    w.write_all(b"\n").await.unwrap();
-    w.write_all(serde_json::to_string(&CoreChannelRequest::Subscribe).unwrap().as_bytes())
-        .await
-        .unwrap();
-    w.write_all(b"\n").await.unwrap();
-    w.flush().await.unwrap();
-    let mut reader = BufReader::new(r);
-    let mut ack = String::new();
-    reader.read_line(&mut ack).await.expect("handshake ack");
-    let mut line = String::new();
-    reader.read_line(&mut line).await.expect("snapshot frame");
-    let frame: SessionStreamFrame = serde_json::from_str(line.trim()).expect("frame json");
-    assert!(
-        matches!(frame, SessionStreamFrame::Snapshot { .. }),
-        "first stream frame must be the snapshot: {line}"
-    );
-    reader
-}
-
-/// 单发请求连接（订阅连接只推流不处理请求）：握手 → 请求 → 读响应。
-async fn raw_channel_request(
-    channel: &Path,
-    secret: &str,
-    req: &CoreChannelRequest,
-) -> CoreChannelResponse {
-    let stream = sebas_ipc::connect(channel).await.expect("request connect");
-    let (r, mut w) = sebas_ipc::split(stream);
-    let hs = serde_json::to_string(&ChannelHandshake {
-        secret: secret.to_string(),
-    })
-    .unwrap();
-    w.write_all(hs.as_bytes()).await.unwrap();
-    w.write_all(b"\n").await.unwrap();
-    w.write_all(serde_json::to_string(req).unwrap().as_bytes()).await.unwrap();
-    w.write_all(b"\n").await.unwrap();
-    w.flush().await.unwrap();
-    let mut reader = BufReader::new(r);
-    let mut ack = String::new();
-    reader.read_line(&mut ack).await.expect("handshake ack");
-    let mut line = String::new();
-    tokio::time::timeout(Duration::from_secs(10), reader.read_line(&mut line))
-        .await
-        .expect("response in time")
-        .expect("response line");
-    serde_json::from_str(line.trim()).expect("response json")
-}
-
-/// 从订阅流读一帧（超时由调用方的 tick 循环套）。
-async fn read_frame(reader: &mut BufReader<sebas_ipc::ReadHalf>) -> SessionStreamFrame {
-    let mut line = String::new();
-    reader.read_line(&mut line).await.expect("stream alive");
-    serde_json::from_str(line.trim()).expect("frame json")
-}
-
-/// 等 Turns 里出现第 `n` 个含 `marker` 的条目（transcript 是唯一事实）。
-async fn wait_turn_marker(sb: &Sandbox, key: &ChannelKey, marker: &str, n: usize) {
-    let hint = sb.path.clone();
-    let path = sb.channel_path.clone();
-    let secret = sb.core_secret.clone();
-    let key = key.clone();
-    let marker = marker.to_string();
-    wait_for(
-        &format!("{n}-th transcript marker `{marker}`"),
-        Duration::from_secs(30),
-        &hint,
-        move || {
-            let path = path.clone();
-            let secret = secret.clone();
-            let key = key.clone();
-            let marker = marker.clone();
-            Box::pin(async move {
-                match raw_channel_request(
-                    &path,
-                    &secret,
-                    &CoreChannelRequest::Turns { key, from: 0 },
-                )
-                .await
-                {
-                    CoreChannelResponse::Turns { entries } => {
-                        let count = entries
-                            .iter()
-                            .filter(|e| e.content.contains(&marker))
-                            .count();
-                        (count >= n).then_some(())
-                    }
-                    other => panic!("Turns must return Turns, got {other:?}"),
-                }
-            })
-        },
-    )
-    .await;
-}
-
-/// 全环共享旅程：EnsureMessage("perm") → 真实泊车 → 订阅流收到
-/// ApprovalRequested → ApprovalAnswer{decision} → transcript 出现 `marker`。
-/// 返回收到的 notice 供用例做字段断言。
-async fn drive_parked_perm_to_decision(
-    sb: &Sandbox,
-    mut reader: BufReader<sebas_ipc::ReadHalf>,
-    decision: PermissionDecision,
-    marker: &str,
-) -> PermissionNotice {
-    let key = ChannelKey::feishu("oc_perm_loop", None);
-    let resp = raw_channel_request(
-        &sb.channel_path,
-        &sb.core_secret,
-        &CoreChannelRequest::EnsureMessage {
-            key: key.clone(),
-            message: "perm".into(),
-            attachments: vec![],
-        },
-    )
-    .await;
-    assert!(
-        matches!(resp, CoreChannelResponse::Ok | CoreChannelResponse::Spawned { .. }),
-        "ensure must be accepted: {resp:?}"
-    );
-
-    // 真实泊车产生的 ApprovalRequested（非合成事件）：60s 预算内逐帧吃，
-    // 中间的会话生命周期 Event 帧全部越过。
-    let notice = {
-        let wait = async {
-            loop {
-                if let SessionStreamFrame::ApprovalRequested { notice } =
-                    read_frame(&mut reader).await
-                {
-                    break notice;
-                }
-            }
-        };
-        tokio::time::timeout(Duration::from_secs(60), wait)
-            .await
-            .unwrap_or_else(|_| {
-                panic!(
-                    "ApprovalRequested frame did not arrive within 60s; logs at {}",
-                    sb.path.display()
-                )
-            })
-    };
-    assert_eq!(notice.tool_name, "Bash", "parked tool: {notice:?}");
-    assert_eq!(
-        notice.args["command"].as_str(),
-        Some("rm -rf /"),
-        "parked tool args: {notice:?}"
-    );
-
-    // 应答走独立请求连接 → Ok。
-    let resp = raw_channel_request(
-        &sb.channel_path,
-        &sb.core_secret,
-        &CoreChannelRequest::ApprovalAnswer {
-            request_id: notice.request_id.clone(),
-            decision,
-        },
-    )
-    .await;
-    assert!(
-        matches!(resp, CoreChannelResponse::Ok),
-        "answer must be accepted: {resp:?}"
-    );
-
-    // 泊住的 hook 复活：transcript 出现决定对应的 tool_result。
-    wait_turn_marker(sb, &key, marker, 1).await;
-    notice
-}
-
 /// allow_once：只放行本次，回合完成且 transcript 记录执行痕迹。
 #[tokio::test]
 #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
@@ -3969,23 +5558,6 @@ async fn permission_loop_allow_session_switches_auto_over_core_channel() {
         "second ensure must be accepted: {resp:?}"
     );
     wait_turn_marker(&sb, &key, "perm done", 2).await;
-}
-
-// ── fix-webui-streaming-liveness 6.1/6.2/6.3：流式活性与瘦 summary ─────────
-
-/// One `turn.append` notification's **content** entry texts (prompt/tool
-/// entries excluded) — the per-frame streaming unit the assertions count.
-fn append_frame_texts(ev: &serde_json::Value) -> Vec<String> {
-    ev["params"]["entries"]
-        .as_array()
-        .map(|entries| {
-            entries
-                .iter()
-                .filter(|e| e["kind"].as_str() == Some("content"))
-                .filter_map(|e| e["content"].as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 /// fix-webui-streaming-liveness 6.1：claude 会话流式 e2e（回合进行中分多次帧
@@ -4695,7 +6267,6 @@ async fn summary_stays_small_while_transcript_is_large() {
 // rail 可见、转写完整、History 清空——纯 HTTP 面钉同一契约（浏览器级旅程由
 // testsuite-webui 的 archive-restore.spec / archive-identity.spec 承担）。
 // ---------------------------------------------------------------------------
-
 /// 归档恢复全契约：完整回合 → 归档（活动列表退场、条目带全量转写快照 +
 /// agent 身份）→ 恢复（行重建回原项目、转写完整、History 清空、可继续对话、
 /// 身份原样带回）。
@@ -4853,7 +6424,6 @@ async fn archive_restore_rebuilds_row_transcript_and_clears_history() {
 // 进程 + 真 fake-claude 驱动」一层的 API 面证据。浏览器级 GUI 旅程由
 // testsuite-webui 承担（review 阶段单独执行，不在本套件）。
 // ---------------------------------------------------------------------------
-
 /// （round4 1.2/1.3，session-lifecycle「Escalation kill keeps the session
 /// browsable」+ acp-driver「Escalation finalizes the turn without erasing the
 /// session」）P0 进程级复现：fake-claude 在 `hang` 后沉默（活着、探测照答），
@@ -5409,884 +6979,15 @@ async fn archive_restore_preserves_the_row_naming_sources() {
     assert_eq!(status, 200, "the restored session must be writable: {body}");
     wait_turn_done(&cli, &sb, &detail_url).await;
 }
-
-// ---------------------------------------------------------------------------
-// fix-webui-qa-defects-round5 的进程级回归（round5 tasks 1.x / 3.x 的真进程
-// 一层）：内嵌复合后端（`sebas core --webui`，DualSessionBackend = acp 桥 +
-// native）与 detached 两进程形态下的 pending 管理面可达 + 类型化拒绝透传
-// （1.1/1.2），以及 label 写入的实时广播与行投影（3.1）。路由层 fake 已钉
-// 拒绝映射（sebas-webui api.rs）、引擎层已钉 label 发布
-// （sebas-dispatch approval_restore_identity_test）、复合转发已钉
-// （src/agent_backend.rs dual_pending_management_routes_by_key）；这里补
-// 「真 core 进程 + 真 HTTP/WS 面」的证据。浏览器级 GUI 旅程（重命名对话框、
-// rail 行名免刷新）由 testsuite-webui / 主 agent GUI 回归承担。
-// ---------------------------------------------------------------------------
-
-/// 在 `/ws` 帧流里等目标会话携带目标 `label` 的下一条 `session.updated`
-/// （跳过无关帧与 label 未变化的**回水帧**：resync 护栏放行后，建会话/回合
-/// 收敛期间的相位帧仍会在读帧前排队，它们 label 恒为写入前的旧值，必须跳过
-/// 直到目标写入的帧到达；单帧 15s 超时由 [`next_ws_frame`] 兜底，循环上限防
-/// 无限流）。
-async fn wait_session_updated_with_label(
-    ws: &mut WsStream,
-    key: &str,
-    label: Option<&str>,
-) -> serde_json::Value {
-    for _ in 0..100 {
-        let frame = next_ws_frame(ws).await;
-        let method = frame["method"].as_str().unwrap_or_default();
-        let sid = frame["params"]["session_id"].as_str().unwrap_or_default();
-        let label_matches = match label {
-            Some(expected) => frame["params"]["label"].as_str() == Some(expected),
-            None => frame["params"]["label"].is_null(),
-        };
-        if method == "session.updated" && sid == key && label_matches {
-            return frame;
-        }
-    }
-    panic!("no session.updated frame for {key} with label {label:?} arrived");
 }
 
-/// `GET /api/sessions` 里目标会话的行投影（rail 行名重取的数据源）。
-async fn listed_row(cli: &reqwest::Client, sb: &Sandbox, key: &str) -> serde_json::Value {
-    let (_status, list) = get_json_status(cli, &format!("{}/api/sessions", sb.webui_url()))
-        .await
-        .expect("session list");
-    list["recent_sessions"]
-        .as_array()
-        .expect("rows")
-        .iter()
-        .find(|r| r["encoded_key"].as_str() == Some(key))
-        .cloned()
-        .unwrap_or_else(|| panic!("the session must be listed: {list}"))
-}
-
-/// 忙中把两条提交排进待执行队列（首回合 streaming 期间），返回
-/// (detail_url, 先提交的 id, 后提交的 id)。首回合用「stream」场景
-/// （5 帧 × 250ms，与 turn_queue_timing 同款节奏且可应答 watchdog 探测），
-/// 内容帧落地后忙中提交确定性入队。
-async fn queue_two_submissions(
-    cli: &reqwest::Client,
-    base: &str,
-    project_id: &str,
-    hint: &std::path::Path,
-) -> (String, u64, u64) {
-    let (status, body) = post_json(
-        cli,
-        &format!("{base}/api/sessions"),
-        serde_json::json!({
-            "project_id": project_id,
-            "prompt": "stream",
-            "agent": "claude"
-        }),
-    )
-    .await
-    .expect("create session");
-    assert_eq!(status, 201, "create session: {body}");
-    let key = body["key"].as_str().expect("key").to_string();
-    let detail_url = format!("{base}/api/sessions/{key}");
-
-    // 等首个 agent 内容帧落地（WORKING 真在跑）再提交——只认 kind=content
-    // （seed 的 prompt 条目在 SEED 阶段就进 transcript，等非空会提前放行）。
-    let content_cli = cli.clone();
-    let content_url = detail_url.clone();
-    let content_hint = hint.to_path_buf();
-    wait_for("first turn content to stream", Duration::from_secs(40), hint, move || {
-        let cli = content_cli.clone();
-        let url = content_url.clone();
-        Box::pin(async move {
-            let v = cli
-                .get(&url)
-                .send()
-                .await
-                .ok()?
-                .json::<serde_json::Value>()
-                .await
-                .ok()?;
-            let streamed = v["entries"]
-                .as_array()
-                .is_some_and(|b| b.iter().any(|e| e["kind"].as_str() == Some("content")));
-            streamed.then_some(())
-        })
-    })
-    .await;
-
-    for (tag, text) in [("b", "queued-round5-b"), ("c", "queued-round5-c")] {
-        let (status, body) = post_json(
-            cli,
-            &format!("{detail_url}/message"),
-            serde_json::json!({ "message": text }),
-        )
-        .await
-        .unwrap_or_else(|e| panic!("submit {tag}: {e}"));
-        assert_eq!(status, 200, "busy-time submission {tag} must be accepted: {body}");
-    }
-
-    // 两条都已在 pending 里（seed 同步落账；条目开始消费前有 ≈1s 窗口）。
-    let poll_cli = cli.clone();
-    let poll_url = detail_url.clone();
-    let detail = wait_for("both submissions to ride in pending", Duration::from_secs(8), hint, move || {
-        let cli = poll_cli.clone();
-        let url = poll_url.clone();
-        Box::pin(async move {
-            let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
-            let n = v["pending"].as_array().map(Vec::len)?;
-            (n == 2).then_some(v)
-        })
-    })
-    .await;
-    let pending = detail["pending"].as_array().expect("pending list");
-    let id_of = |text: &str| {
-        pending
-            .iter()
-            .find(|p| p["text"].as_str() == Some(text))
-            .unwrap_or_else(|| panic!("{text} must be in pending: {pending:?}"))["id"]
-            .as_u64()
-            .expect("pending id")
-    };
-    (detail_url, id_of("queued-round5-b"), id_of("queued-round5-c"))
-}
-
-/// （round5 1.1/1.2，core-session-channel「Session drive methods」内嵌场景）
-/// 裸 core 内嵌 WebUI（`sebas core --webui`，复合后端 = acp 桥承载会话）下，
-/// 排队提交的重排/移除必须到达承载子后端并成功，类型化拒绝原样透传
-/// （unknown 404 / out_of_range 400），错误文案绝不自称「核心不可达」。
-/// 修复前三个管理调用全部落复合层 trait 默认实现恒 503、文案谎报可达性。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn pending_management_reaches_the_host_backend_in_embedded_shape() {
-    let sb = Sandbox::new("testsuite_e2e", "embedded-pending");
-    sb.slow_fake_agent(400);
-    let cli = http_client();
-    let (_core, dashboard) = sb.spawn_core_inprocess_webui(&[]);
-    let base = format!("http://127.0.0.1:{dashboard}");
-    let hint = sb.path.clone();
-
-    // 内嵌形态的 dashboard 端口是旗标指定的 probed 端口（≠ sb.webui_port）。
-    let health_cli = cli.clone();
-    let health_url = base.clone();
-    let health_hint = hint.clone();
-    wait_for("in-process webui health", Duration::from_secs(30), &health_hint, move || {
-        let cli = health_cli.clone();
-        let url = health_url.clone();
-        Box::pin(async move {
-            cli.get(format!("{url}/health"))
-                .send()
-                .await
-                .ok()?
-                .text()
-                .await
-                .ok()
-                .map(|b| b.trim() == "ok")
-                .filter(|ok| *ok)
-        })
-    })
-    .await;
-
-    // 项目注册走 dashboard 面（workspace root 已钉在沙箱目录，注册必定界内）。
-    let (pstatus, pbody) = post_json(
-        &cli,
-        &format!("{base}/api/projects"),
-        serde_json::json!({ "path": support::forward_slash(&sb.path) }),
-    )
-    .await
-    .expect("register scene project");
-    assert_eq!(pstatus, 201, "register scene project: {pbody}");
-    let project_id = pbody["id"].as_str().expect("project id").to_string();
-
-    let (detail_url, id_b, id_c) = queue_two_submissions(&cli, &base, &project_id, &hint).await;
-
-    // 重排：queued-c 移到队首 → 200 且响应携带重排后的全量队列
-    // （修复前：复合层缺转发恒 503「操作不可用: 此后端不承载待执行队列」，
-    // 且旧文案自称「核心不可达」）。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{detail_url}/pending/{id_c}/move"),
-        serde_json::json!({ "to_index": 0 }),
-    )
-    .await
-    .expect("move queued-c");
-    assert_eq!(status, 200, "move must reach the acp bridge: {body}");
-    assert_eq!(body["status"], "moved", "{body}");
-    let moved = body["pending"].as_array().expect("pending after move");
-    assert_eq!(moved[0]["text"], "queued-round5-c", "moved entry must lead: {body}");
-    assert_eq!(moved[1]["text"], "queued-round5-b", "{body}");
-
-    // 移除：queued-b 出队 → 200，剩余队列只含 queued-c。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{detail_url}/pending/{id_b}/remove"),
-        serde_json::json!({}),
-    )
-    .await
-    .expect("remove queued-b");
-    assert_eq!(status, 200, "remove must reach the acp bridge: {body}");
-    assert_eq!(body["status"], "removed", "{body}");
-    let left = body["pending"].as_array().expect("pending after remove");
-    assert_eq!(left.len(), 1, "{body}");
-    assert_eq!(left[0]["text"], "queued-round5-c", "{body}");
-
-    // 类型化拒绝透传：unknown id → 404（文案点名「不存在」，绝不 5xx、
-    // 绝不自称不可达）。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{detail_url}/pending/9999/remove"),
-        serde_json::json!({}),
-    )
-    .await
-    .expect("remove unknown id");
-    assert_eq!(status, 404, "unknown id must pass through typed: {body}");
-    let message = body["error"].as_str().unwrap_or_default();
-    assert!(message.contains("待执行提交不存在"), "{body}");
-    assert!(!message.contains("核心不可达"), "{body}");
-
-    // 越界重排 → 400（目标位置越界），同样诚实。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{detail_url}/pending/{id_c}/move"),
-        serde_json::json!({ "to_index": 9 }),
-    )
-    .await
-    .expect("move out of range");
-    assert_eq!(status, 400, "out-of-range must pass through typed: {body}");
-    let message = body["error"].as_str().unwrap_or_default();
-    assert!(message.contains("目标位置越界"), "{body}");
-    assert!(!message.contains("核心不可达"), "{body}");
-
-    // 全程 core 可达——以上失败没有一条可以伪装成「不可达」。
-    let (_status, summary) = get_json_status(&cli, &format!("{base}/api/summary"))
-        .await
-        .expect("summary");
-    assert_eq!(
-        summary["reachability"]["ok"], true,
-        "the core was reachable the whole time: {summary}"
-    );
-}
-
-/// （round5 1.1「any deployment shape」的 detached 半边）独立 webui + core
-/// 两进程形态下同一管理面契约：move/remove 经核心通道到达 core 侧引擎队列，
-/// 成功与类型化拒绝同样保真。内嵌形态（上一条）钉复合转发；这里钉「任何
-/// 部署形态」的另一半。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn pending_management_reaches_the_core_queue_in_detached_shape() {
-    let sb = Sandbox::new("testsuite_e2e", "detached-pending");
-    sb.slow_fake_agent(400);
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (detail_url, id_b, id_c) =
-        queue_two_submissions(&cli, &sb.webui_url(), &project_id, &sb.path).await;
-
-    // 重排 → 200（队列经核心通道在 core 侧翻转）。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{detail_url}/pending/{id_c}/move"),
-        serde_json::json!({ "to_index": 0 }),
-    )
-    .await
-    .expect("move queued-c");
-    assert_eq!(status, 200, "move must reach the core queue: {body}");
-    assert_eq!(body["pending"][0]["text"], "queued-round5-c", "{body}");
-
-    // 移除 → 200。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{detail_url}/pending/{id_b}/remove"),
-        serde_json::json!({}),
-    )
-    .await
-    .expect("remove queued-b");
-    assert_eq!(status, 200, "remove must reach the core queue: {body}");
-    let left = body["pending"].as_array().expect("pending after remove");
-    assert_eq!(left.len(), 1, "{body}");
-    assert_eq!(left[0]["text"], "queued-round5-c", "{body}");
-
-    // 类型化拒绝透传：unknown 404 / out_of_range 400，文案诚实。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{detail_url}/pending/9999/remove"),
-        serde_json::json!({}),
-    )
-    .await
-    .expect("remove unknown id");
-    assert_eq!(status, 404, "{body}");
-    assert!(body["error"].as_str().unwrap_or_default().contains("待执行提交不存在"), "{body}");
-    let (status, body) = post_json(
-        &cli,
-        &format!("{detail_url}/pending/{id_c}/move"),
-        serde_json::json!({ "to_index": 9 }),
-    )
-    .await
-    .expect("move out of range");
-    assert_eq!(status, 400, "{body}");
-    let message = body["error"].as_str().unwrap_or_default();
-    assert!(message.contains("目标位置越界"), "{body}");
-    assert!(!message.contains("核心不可达"), "{body}");
-}
-
-/// （round5 3.1，project-session-actions「label writes through any path
-/// update the row live」）被接受的 label 写入必须作为会话更新事件到达已
-/// 连接的客户端（rail 行名免刷新重取的触发器）——detached 形态下写入走
-/// 核心通道、事件经同一通道折返 /ws。列表行投影的 label 字段（重取的读源）
-/// 同步断言：设置与清空各走一轮。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn label_write_reaches_clients_as_session_update_without_reload() {
-    let sb = Sandbox::new("testsuite_e2e", "label-liveness");
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-
-    let project_id = scene_project_id(&cli, &sb).await;
-    // 先连 /ws 再写 label：帧必须在既有连接上到达（免刷新的证据本体）。
-    let mut ws = ws_connect(&sb.webui_url()).await;
-    // webui 启动会与 core 的 socket bind 竞速——首个流式订阅尝试可能失败、
-    // 经 1s 退避后才连上（claude_turn_streams 同款护栏）：`session.resync`
-    // 随每次订阅快照到达，等到它才说明 forwarder 已订阅、后续变更必达；
-    // 若 4s 内没等到（forwarder 在本连接订阅前就已连上，resync 已被广播
-    // 消费），订阅同样已就绪，继续即可。
-    let _ = tokio::time::timeout(Duration::from_secs(4), async {
-        loop {
-            let ev = next_ws_frame(&mut ws).await;
-            if ev["method"] == "session.resync" {
-                break;
-            }
-        }
-    })
-    .await;
-
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({
-            "project_id": project_id,
-            "prompt": "hello",
-            "agent": "claude"
-        }),
-    )
-    .await
-    .expect("create session");
-    assert_eq!(status, 201, "create session: {body}");
-    let key = body["key"].as_str().expect("key").to_string();
-    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
-    wait_turn_done(&cli, &sb, &detail_url).await;
-
-    // API 路径写入（rail 对话框与它共用同一 label API）。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{detail_url}/label"),
-        serde_json::json!({ "label": "发布清单会话" }),
-    )
-    .await
-    .expect("set label");
-    assert_eq!(status, 200, "set label: {body}");
-
-    // 更新帧到达：相位帧（session_id + 四相位键）。round5 6.3 起载荷扩展
-    // `label`（操作者命名随帧如实下发）——rail 的行名重取收窄直接消费该键
-    // （帧 label ≠ 行已知 label 才调度），断键即静默失活，必须在 wire 上钉住。
-    let frame = wait_session_updated_with_label(&mut ws, &key, Some("发布清单会话")).await;
-    let params = &frame["params"];
-    assert!(params["status_slug"].is_string(), "phase frame: {frame}");
-    assert!(params["turn_engaged"].is_boolean(), "phase frame: {frame}");
-    assert!(params["msg_count"].is_number(), "phase frame: {frame}");
-    assert!(params["pending"].is_array(), "phase frame: {frame}");
-
-    // 行投影（rail 重取的读源）已携带新 label。
-    let row = listed_row(&cli, &sb, &key).await;
-    assert_eq!(
-        row["label"], "发布清单会话",
-        "the accepted label must be on the row: {row}"
-    );
-
-    // 清空（API 置 null）同样广播 + 行投影回退。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{detail_url}/label"),
-        serde_json::json!({ "label": null }),
-    )
-    .await
-    .expect("clear label");
-    assert_eq!(status, 200, "clear label: {body}");
-    let frame = wait_session_updated_with_label(&mut ws, &key, None).await;
-    assert!(
-        frame["params"]["label"].is_null(),
-        "the cleared label must ride the frame as null (never a stale value): {frame}"
-    );
-    let row = listed_row(&cli, &sb, &key).await;
-    assert!(
-        row["label"].is_null(),
-        "the cleared label must leave the row: {row}"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// （fix-webui-qa-defects-round5 1.2 收口；断言按 6.1/3c review 的 wire 现状
-// 校准）busy 会话的待执行管理面经裸 core 复合后端 + 真 HTTP 路径验证：
-// 重排合法生效（200）、已投递 id 的 remove 得 AlreadyStarted 409；上层
-// 「unknown 404 / out_of_range 400」已随 embedded-shape 测试覆盖；
-// PriorityConflict 的 409 映射在 wire 优先入口缺位下由 api.rs 的
-// FakeBackend 缝隙单测钉住。错误文案绝不在某层被「不可用」笼统顶替。
-//
-// 真实复现路径：核心通道端状态层 PendingOpError → InProcessBackend 透传
-// → DualSessionBackend.route() → api.rs PendingReason → StatusCode。
-// ---------------------------------------------------------------------------
-
-
-/// 在 stream 场景下把三条**普通**提交排进 busy 会话的待执行栈，返回
-/// (detail_url, 三条 id)。「busy 会话带待执行栈」且不需要优先项的场景
-/// （如复合后端按 key 路由的对照面）从这里拿——全部普通项，id 精确匹配
-/// 文本，没有 /btw 前缀干扰。
-async fn queue_three_pending(
-    cli: &reqwest::Client,
-    base: &str,
-    project_id: &str,
-    hint: &std::path::Path,
-) -> (String, u64, u64, u64) {
-    let (status, body) = post_json(
-        cli,
-        &format!("{base}/api/sessions"),
-        serde_json::json!({
-            "project_id": project_id,
-            "prompt": "stream",
-            "agent": "claude"
-        }),
-    )
-    .await
-    .expect("create session");
-    assert_eq!(status, 201, "create session: {body}");
-    let key = body["key"].as_str().expect("key").to_string();
-    let detail_url = format!("{base}/api/sessions/{key}");
-
-    // 等首个 agent 内容帧落地（WORKING 真在跑）。
-    let content_cli = cli.clone();
-    let content_url = detail_url.clone();
-    let content_hint = hint.to_path_buf();
-    wait_for("first turn content to stream", Duration::from_secs(40), &content_hint, move || {
-        let cli = content_cli.clone();
-        let url = content_url.clone();
-        Box::pin(async move {
-            let v = cli
-                .get(&url)
-                .send()
-                .await
-                .ok()?
-                .json::<serde_json::Value>()
-                .await
-                .ok()?;
-            let streamed = v["entries"]
-                .as_array()
-                .is_some_and(|b| b.iter().any(|e| e["kind"].as_str() == Some("content")));
-            streamed.then_some(())
-        })
-    })
-    .await;
-
-    // 三条普通提交入栈（会话在飞 → 全部 pending）。
-    for (tag, text) in [
-        ("b", "queued-round5-b"),
-        ("c", "queued-round5-c"),
-        ("p", "queued-round5-p"),
-    ] {
-        let (status, body) = post_json(
-            cli,
-            &format!("{detail_url}/message"),
-            serde_json::json!({ "message": text }),
-        )
-        .await
-        .unwrap_or_else(|e| panic!("submit {tag}: {e}"));
-        assert_eq!(status, 200, "busy-time submission {tag} must be accepted: {body}");
-    }
-
-    // 三条都在 pending。
-    let poll_cli = cli.clone();
-    let poll_url = detail_url.clone();
-    let detail = wait_for(
-        "three submissions to ride in pending",
-        Duration::from_secs(8),
-        hint,
-        move || {
-            let cli = poll_cli.clone();
-            let url = poll_url.clone();
-            Box::pin(async move {
-                let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
-                let n = v["pending"].as_array().map(Vec::len)?;
-                (n == 3).then_some(v)
-            })
-        },
-    )
-    .await;
-    let pending = detail["pending"].as_array().expect("pending list");
-    let id_of = |text: &str| {
-        pending
-            .iter()
-            .find(|p| p["text"].as_str() == Some(text))
-            .unwrap_or_else(|| panic!("{text} must be in pending: {pending:?}"))["id"]
-            .as_u64()
-            .expect("pending id")
-    };
-    (detail_url, id_of("queued-round5-b"), id_of("queued-round5-c"), id_of("queued-round5-p"))
-}
-
-/// （fix-webui-qa-defects-round5 1.2；断言按 6.1/3c review 的 wire 现状校准）
-/// 裸 core 复合后端下的待执行管理面：
-///
-/// - **重排诚实行为 (200)**：wire 上尚无优先提交入口（web_send_message →
-///   submit_turn 恒 priority=false，/btw 的优先位只在 feishu 入站生效），
-///   队列全普通项——move c → 0 是合法重排，得 200 且顺序生效。
-///   PriorityConflict 的 409 映射由 api.rs 的 FakeBackend 缝隙单测钉住；
-///   优先项 wire 入口落地后，本腿改回「越过优先项 must 409」。
-/// - **AlreadyStarted (409)**：等 c/b/p 依序投递完（id_p 离开 pending）→
-///   用陈旧的 p id 重试 remove → 状态层 delivered 集合里命中 →
-///   AlreadyStarted → 409。
-///
-/// 错误文案点名原因（该提交已开始执行）且绝不出现「核心不可达」
-/// 「操作不可用」等其它 5xx/4xx 顶替。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn pending_management_passes_typed_rejections_through_composite_409() {
-    let sb = Sandbox::new("testsuite_e2e", "embedded-pending-409");
-    sb.slow_fake_agent(400);
-    let cli = http_client();
-    let (_core, dashboard) = sb.spawn_core_inprocess_webui(&[]);
-    let base = format!("http://127.0.0.1:{dashboard}");
-    let hint = sb.path.clone();
-
-    // 内嵌形态 dashboard 等就绪。
-    let health_cli = cli.clone();
-    let health_url = base.clone();
-    let health_hint = hint.clone();
-    wait_for("in-process webui health", Duration::from_secs(30), &health_hint, move || {
-        let cli = health_cli.clone();
-        let url = health_url.clone();
-        Box::pin(async move {
-            cli.get(format!("{url}/health"))
-                .send()
-                .await
-                .ok()?
-                .text()
-                .await
-                .ok()
-                .map(|b| b.trim() == "ok")
-                .unwrap_or(false)
-                .then_some(())
-        })
-    })
-    .await;
-
-    // 注册项目（workspace root = 沙箱目录，注册必定界内）。
-    let (pstatus, pbody) = post_json(
-        &cli,
-        &format!("{base}/api/projects"),
-        serde_json::json!({ "path": support::forward_slash(&sb.path) }),
-    )
-    .await
-    .expect("register scene project");
-    assert_eq!(pstatus, 201, "register scene project: {pbody}");
-    let project_id = pbody["id"].as_str().expect("project id").to_string();
-
-    // 三条普通入栈（wire 上无优先提交入口，见段落注释）。
-    let (detail_url, _id_b, id_c, id_p) =
-        queue_three_pending(&cli, &base, &project_id, &hint).await;
-
-    // ── 重排诚实行为 → 200：队列全普通项，move c → 0 合法且顺序生效。──
-    let (status, body) = post_json(
-        &cli,
-        &format!("{detail_url}/pending/{id_c}/move"),
-        serde_json::json!({ "to_index": 0 }),
-    )
-    .await
-    .expect("move c to front");
-    assert_eq!(
-        status, 200,
-        "reordering plain submissions must succeed on the wire, got {body}"
-    );
-    let (_, detail) = get_json_status(&cli, &detail_url)
-        .await
-        .expect("detail after move");
-    let order: Vec<String> = detail["pending"]
-        .as_array()
-        .expect("pending list")
-        .iter()
-        .map(|p| p["text"].as_str().unwrap_or_default().to_string())
-        .collect();
-    assert_eq!(
-        order,
-        ["queued-round5-c", "queued-round5-b", "queued-round5-p"],
-        "move to front must take effect: {order:?}"
-    );
-
-    // ── AlreadyStarted → 409：p 以普通项身份依序投递。轮询直到 id_p 离开
-    // pending（= 已 pop 投递），保留陈旧 id 重试 remove：delivered 集合命中
-    // → AlreadyStarted → 409。文案诚实性断言落在本错误腿上。
-    {
-        let poll_cli = cli.clone();
-        let poll_url = detail_url.clone();
-        wait_for("p to be delivered (leaves pending)", Duration::from_secs(60), &hint, move || {
-            let cli = poll_cli.clone();
-            let url = poll_url.clone();
-            Box::pin(async move {
-                let v = cli
-                    .get(&url)
-                    .send()
-                    .await
-                    .ok()?
-                    .json::<serde_json::Value>()
-                    .await
-                    .ok()?;
-                let delivered = v["pending"]
-                    .as_array()?
-                    .iter()
-                    .all(|p| p["id"].as_u64() != Some(id_p));
-                delivered.then_some(())
-            })
-        })
-        .await;
-    }
-    let (status, body) = post_json(
-        &cli,
-        &format!("{detail_url}/pending/{id_p}/remove"),
-        serde_json::json!({}),
-    )
-    .await
-    .expect("remove already-started id");
-    assert_eq!(
-        status, 409,
-        "removing a delivered id must 409 (AlreadyStarted), got {body}"
-    );
-    let message = body["error"].as_str().unwrap_or_default();
-    assert!(
-        message.contains("该提交已开始执行"),
-        "AlreadyStarted message must name the cause: {message}"
-    );
-    assert!(!message.contains("核心不可达"), "{message}");
-    assert!(!message.contains("操作不可用"), "{message}");
-
-    // 全程 core 可达——以上两类失败没有一条可以伪装成「不可达」。
-    let (_status, summary) = get_json_status(&cli, &format!("{base}/api/summary"))
-        .await
-        .expect("summary");
-    assert_eq!(
-        summary["reachability"]["ok"], true,
-        "the core was reachable the whole time: {summary}"
-    );
-}
-
-/// （fix-webui-qa-defects-round5 1.3，core-session-channel 末段：错误文案
-/// 不再自称「核心不可达」）复合后端路由缺位的诚实失败 = HTTP 503 + 文案
-/// 「操作不可用: 此后端不承载待执行队列」——直接打不归 webui 路由的会话：
-/// 该键对应的 channel 后端无队列 / 该 channel 走 native 侧（不路由到 acp
-/// 桥）。这里通过在 feishu channel 上不存在会话的 known-format key 命中
-/// native 侧不可用分支（route() 路由到 NativeAgentBackend → trait 默认
-/// Unavailable），文字契约由 api.rs 透传。
-///
-/// 不创建 feishu 会话（feishu 通道默认 disabled，避免与既有沙箱冲突）；
-/// 只断言调用契约与文案形态——这与 1.2 表格里 FakeBackend 注入 Unavailable
-/// 的接口层单测是同形但反向验证：真实 InProcessBackend/NativeAgentBackend
-/// 路径里走出来的错误文本也得是「操作不可用」而非「核心不可达」。
-/// 键必须是 `agent-` 形引用（is_native 谓词），否则落 ACP 桥得 404 Unknown。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn pending_management_unavailable_uses_honest_cause_text() {
-    let sb = Sandbox::new("testsuite_e2e", "embedded-pending-unavailable");
-    sb.slow_fake_agent(400);
-    let cli = http_client();
-    let (_core, dashboard) = sb.spawn_core_inprocess_webui(&[]);
-    let base = format!("http://127.0.0.1:{dashboard}");
-    let hint = sb.path.clone();
-
-    let health_cli = cli.clone();
-    let health_url = base.clone();
-    let health_hint = hint.clone();
-    wait_for("in-process webui health", Duration::from_secs(30), &health_hint, move || {
-        let cli = health_cli.clone();
-        let url = health_url.clone();
-        Box::pin(async move {
-            cli.get(format!("{url}/health"))
-                .send()
-                .await
-                .ok()?
-                .text()
-                .await
-                .ok()
-                .map(|b| b.trim() == "ok")
-                .unwrap_or(false)
-                .then_some(())
-        })
-    })
-    .await;
-
-    // 注册项目（让 create 不撞 scope 边界）。
-    let (pstatus, pbody) = post_json(
-        &cli,
-        &format!("{base}/api/projects"),
-        serde_json::json!({ "path": support::forward_slash(&sb.path) }),
-    )
-    .await
-    .expect("register scene project");
-    assert_eq!(pstatus, 201, "register scene project: {pbody}");
-    let project_id = pbody["id"].as_str().expect("project id").to_string();
-
-    // web channel 创建会话（走 acp 桥）→ 三条普通提交入栈，作为「acp 侧
-    // 队列照常可用」的对照面（本用例不需要优先项）。
-    let (detail_url, _id_b, _id_c, _id_p) =
-        queue_three_pending(&cli, &base, &project_id, &hint).await;
-
-    // 用合法编码 key 但绕开 webui 路由：直接对 feishu channel 编码键（沙箱
-    // feishu disabled，route() 落到 NativeAgentBackend 的 trait 默认实现 →
-    // Unavailable cause = "此后端不承载待执行队列"）。WebUI 路由 decode 该
-    // key 仍合法（webui 不按 channel 过滤），仅后端不可用。
-    //
-    // 编码约定：「channel%00reference」；is_native（src/agent_backend.rs）
-    // 只认 feishu + `agent-` 前缀才路由 native 侧——引用缺前缀会落 ACP 桥
-    // 得 PendingRejected::Unknown（404），断言的 503/诚实文案就永不匹配
-    // （round5 6.1 修的键形状），故取一个不存在的 `agent-` 形 feishu 引用。
-    let feishu_encoded = "feishu%00agent-round5-native-pending";
-    for (op, suffix) in [("remove", "/remove"), ("move", "/move")] {
-        let url = format!("{base}/api/sessions/{feishu_encoded}/pending/1{suffix}");
-        let body = if op == "move" {
-            serde_json::json!({ "to_index": 0 })
-        } else {
-            serde_json::json!({})
-        };
-        let (status, body) = post_json(&cli, &url, body)
-            .await
-            .unwrap_or_else(|e| panic!("{op} feishu channel: {e}"));
-        assert_eq!(
-            status, 503,
-            "{op} on a non-queue-holding channel must 503 (Unavailable), got {body}"
-        );
-        let message = body["error"].as_str().unwrap_or_default();
-        assert!(
-            message.contains("操作不可用"),
-            "{op} message must use the round5 honest cause prefix: {message}"
-        );
-        assert!(
-            message.contains("此后端不承载待执行队列"),
-            "{op} message must name the routing gap: {message}"
-        );
-        assert!(
-            !message.contains("核心不可达"),
-            "{op} message must NOT pretend the core is unreachable: {message}"
-        );
-    }
-
-    // 同一会话 web channel 路径上仍然 200（控制：复合后端按 key 路由成功）。
-    let (_status, summary) = get_json_status(&cli, &format!("{base}/api/summary"))
-        .await
-        .expect("summary");
-    assert_eq!(
-        summary["reachability"]["ok"], true,
-        "the core was reachable the whole time: {summary}"
-    );
-    let (_status, list) =
-        get_json_status(&cli, &format!("{base}/api/sessions"))
-            .await
-            .expect("session list");
-    let in_list = list["recent_sessions"]
-        .as_array()
-        .expect("rows")
-        .iter()
-        .any(|r| {
-            r["encoded_key"].as_str()
-                == Some(detail_url.rsplit('/').next().unwrap_or(""))
-        });
-    assert!(in_list, "the queued session must still be reachable by webui list");
-}
-
-/// 轮询直到某进程日志同时出现全部给定片段（posture 告警在启动早期落盘，
-/// reachable 之后理应已在——wait_for 只是给慢机器留余量）。
-async fn wait_log_contains(what: &str, log: &Path, needles: &[&str]) {
-    let log = log.to_path_buf();
-    let log_hint = log.clone();
-    let needles: Vec<String> = needles.iter().map(|s| (*s).to_string()).collect();
-    wait_for(what, Duration::from_secs(20), &log_hint, move || {
-        let log = log.clone();
-        let needles = needles.clone();
-        Box::pin(async move {
-            let text = std::fs::read_to_string(&log).ok()?;
-            needles
-                .iter()
-                .all(|n| text.contains(n.as_str()))
-                .then_some(())
-        })
-    })
-    .await;
-}
-
-/// close-acceptance-blind-spots 盲区 2 进程级 e2e（spec 场景「未覆盖的继承
-/// env 触发告警」）：shell 导出 `ANTHROPIC_BASE_URL` / `ANTHROPIC_MODEL` 后，
-/// core 与 standalone webui 的启动日志各出现一条 env posture WARN，逐变量
-/// 点名「继承自 shell、将在 Claude 子进程生效」。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn env_posture_warn_names_inherited_anthropic_vars() {
-    let sb = Sandbox::new("testsuite_e2e", "env-posture-warn");
-    let cli = http_client();
-    let inherited: &[(&str, &str)] = &[
-        ("ANTHROPIC_BASE_URL", "https://corp-gw.internal/anthropic"),
-        ("ANTHROPIC_MODEL", "corp-unrouted-model"),
-    ];
-    let _core = sb.spawn_core_extra(inherited);
-    let _webui = sb.spawn_webui_extra(&sb.core_secret, inherited);
-    wait_reachable(&cli, &sb).await;
-
-    for (who, log) in [("core", sb.core_log.clone()), ("webui", sb.webui_log.clone())] {
-        wait_log_contains(
-            &format!("{who} 启动日志出现 env posture 告警并点名两个继承变量"),
-            &log,
-            &[
-                "env posture",
-                "ANTHROPIC_BASE_URL",
-                "ANTHROPIC_MODEL",
-                "继承自 shell",
-                "Claude 子进程生效",
-            ],
-        )
-        .await;
-    }
-}
-
-/// spec 场景「全覆盖时保持安静」的进程级反例：不继承任何被检变量时，core
-/// 与 webui 的启动日志都不得出现 env posture 告警。七个被检变量显式置空
-/// （空值 = 未继承），避免跑套件的 shell 恰好导出真实 `ANTHROPIC_*` 污染断言。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn env_posture_stays_silent_without_inherited_vars() {
-    let sb = Sandbox::new("testsuite_e2e", "env-posture-silent");
-    let cli = http_client();
-    let blanks: &[(&str, &str)] = &[
-        ("ANTHROPIC_BASE_URL", ""),
-        ("ANTHROPIC_AUTH_TOKEN", ""),
-        ("ANTHROPIC_MODEL", ""),
-        ("ANTHROPIC_DEFAULT_OPUS_MODEL", ""),
-        ("ANTHROPIC_DEFAULT_SONNET_MODEL", ""),
-        ("ANTHROPIC_DEFAULT_HAIKU_MODEL", ""),
-        ("ANTHROPIC_SMALL_FAST_MODEL", ""),
-    ];
-    let _core = sb.spawn_core_extra(blanks);
-    let _webui = sb.spawn_webui_extra(&sb.core_secret, blanks);
-    wait_reachable(&cli, &sb).await;
-
-    // posture 检测在启动早期执行；reachable 蕴含两边启动日志早已落盘。
-    for (who, log) in [("core", &sb.core_log), ("webui", &sb.webui_log)] {
-        let text = std::fs::read_to_string(log).unwrap_or_default();
-        assert!(
-            !text.contains("env posture"),
-            "{who} 启动日志不得出现 env posture 告警（无继承必须静默）:\n{text}"
-        );
-    }
-}
+mod scenario_projection {
+    use super::*;
 
 // ── close-acceptance-blind-spots 1.3：fake-claude 全行为 mock 的进程级 e2e ──
 //
 // 场景用例即桩的验收（design Risks）：桩的行为由真实 core+webui 子进程反向
 // 断言，桩坏了套件红、不静默假绿。全部走一次性沙箱，零真模型调用。
-
 /// spec 场景「工具环场景」（close-acceptance-blind-spots 1.3）：tool-loop
 /// 桩发出 tool_use → 泊车审批由**测试侧**经 webui HTTP 应答 allow_once →
 /// tool_result → 环后正文 → Done。投影按 position 单调读出
@@ -6655,673 +7356,4 @@ async fn unknown_scenario_arg_fails_the_turn_loudly() {
     )
     .await;
 }
-
-// ── close-acceptance-blind-spots 盲区 4：重启 spawning 收敛（组 3）──
-
-/// 在 core 启动前，往状态库（projects.db 的 session_map 表）播种一条
-/// 0-turn 占位行（web 通道）：恢复后即 spawning 相位会话——事故里
-/// 「spawning 相位被持久化后进程退出」的盘面形态。persist-session-map：
-/// 恢复源是状态库，不再是 dispatch 状态文件。`project_dir` 指向沙箱内已
-/// 存在的 work 目录（无项目归属的 web 行会被恢复直接丢弃；**规范化**
-/// 路径——沙箱在深 checkout 下以短符号链接使用，服务端的 workspace-root
-/// 越界检查按规范化形态比对）。
-fn seed_spawning_placeholder(sb: &Sandbox, reference: &str, kind: &str) {
-    use sebas_db::schema::open_and_sync;
-    use sebas_models::session_map::SessionMapRow;
-    let work = sb.path.join("work");
-    let canonical = support::forward_slash(
-        &std::fs::canonicalize(&work).unwrap_or(work),
-    );
-    let projects_db = sb.path.join("projects.db");
-    let mut conn = open_and_sync(&projects_db, sebas::sebas_state::repo::PROJECTS_TABLES)
-        .expect("open sandbox projects.db for seeding")
-        .0;
-    let row = SessionMapRow {
-        chat_id: "web".into(),
-        thread_id: Some(reference.to_string()),
-        session_id: String::new(),
-        last_active_unix: 1_758_000_000,
-        project_dir: Some(canonical),
-        acp_session_id: None,
-        current_model: None,
-        pending_kind: Some(kind.to_string()),
-        pending_model: None,
-        pending_mode: None,
-        desired_mode: "ask".into(),
-        label: None,
-        prompt_preview: None,
-        awaiting_first_prompt: true,
-    };
-    row.save(&conn).expect("seed session_map row");
-}
-
-/// `GET /api/sessions` 里按 reference 找行，返回该行（None = 尚未列出）。
-async fn listed_row_by_reference(
-    cli: &reqwest::Client,
-    list_url: &str,
-    reference: &str,
-) -> Option<serde_json::Value> {
-    let (_status, list) = get_json_status(cli, list_url).await.ok()?;
-    list["recent_sessions"]
-        .as_array()?
-        .iter()
-        .find(|r| r["reference"].as_str() == Some(reference))
-        .cloned()
-}
-
-/// 重启不留僵尸 spawning（重投激活分支，close-acceptance-blind-spots 3.2）：
-/// 状态库（session_map 表）里播一个 spawning 相位（0-turn 占位）的会话条目 → 起 core
-/// → 恢复路径重投 spawn 指令（design D2 重投优先）→ 该会话离开 spawning 相位，
-/// 以创建时记住的 agent（fake-claude 桩）完成 fresh spawn 激活 → active。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn restarted_spawning_session_redispatches_and_activates() {
-    let sb = Sandbox::new("testsuite_e2e", "restore-spawning-settle");
-    const REF: &str = "restore-spawn-seed";
-    seed_spawning_placeholder(&sb, REF, "claude");
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-
-    let list_url = format!("{}/api/sessions", sb.webui_url());
-    let hint = sb.path.clone();
-    // 恢复落定：该会话不再停留 spawning——重投激活后是 active（fake-claude
-    // 握手确定性成功；若重投失败也会落 spawn-failed，同样不是 spawning，
-    // 但在本沙箱形态下那属于环境性失败）。
-    let settled = wait_for(
-        "the seeded spawning row to settle off spawning",
-        Duration::from_secs(30),
-        &hint,
-        {
-            let cli = cli.clone();
-            let list_url = list_url.clone();
-            let reference = REF.to_string();
-            move || {
-                let cli = cli.clone();
-                let list_url = list_url.clone();
-                let reference = reference.clone();
-                Box::pin(async move {
-                    let row = listed_row_by_reference(&cli, &list_url, &reference).await?;
-                    let status = row["status"].as_str()?;
-                    (status != "spawning").then_some(status.to_string())
-                })
-            }
-        },
-    )
-    .await;
-    assert_eq!(
-        settled, "active",
-        "重投 spawn 指令应经 fake-claude 激活为 active"
-    );
-
-    // 行上身份保留：agent 仍是恢复记录里绑定的 claude，且已有真实路由 id。
-    let row = listed_row_by_reference(&cli, &list_url, REF)
-        .await
-        .expect("seeded row stays listed");
-    assert_eq!(row["agent_kind"].as_str(), Some("claude"));
-    assert!(row["session_id"].as_str().is_some_and(|s| !s.is_empty()));
-}
-
-/// 重投失败的失败分支（close-acceptance-blind-spots 3.2）：占位记录绑定的
-/// agent 配置不存在（ghost-agent）→ spawn 指令重投失败 → 会话投影追加合成
-/// 错误条目（spawn failed + 点名原因）且状态落 spawn-failed 非 spawning 终态。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn restarted_spawning_session_failed_redispatch_lands_synthetic_error() {
-    let sb = Sandbox::new("testsuite_e2e", "restore-spawning-fail");
-    const REF: &str = "restore-spawn-ghost";
-    seed_spawning_placeholder(&sb, REF, "ghost-agent");
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-
-    // 失败分支收敛：spawn-failed 终态 + 如实的失败原因（unknown agent kind）。
-    let list_url = format!("{}/api/sessions", sb.webui_url());
-    let hint = sb.path.clone();
-    wait_for(
-        "the failed redispatch to land on spawn-failed",
-        Duration::from_secs(30),
-        &hint,
-        {
-            let cli = cli.clone();
-            let list_url = list_url.clone();
-            let reference = REF.to_string();
-            move || {
-                let cli = cli.clone();
-                let list_url = list_url.clone();
-                let reference = reference.clone();
-                Box::pin(async move {
-                    let row =
-                        listed_row_by_reference(&cli, &list_url, &reference).await?;
-                    let failed = row["status"].as_str() == Some("spawn-failed");
-                    let reason_named = row["spawn_failure_reason"]
-                        .as_str()
-                        .is_some_and(|r| r.contains("ghost-agent"));
-                    (failed && reason_named).then_some(row)
-                })
-            }
-        },
-    )
-    .await;
-
-    // 合成错误条目随投影可见（detail 按 encoded_key 取回）。
-    let row = listed_row_by_reference(&cli, &list_url, REF)
-        .await
-        .expect("seeded row stays listed");
-    let encoded = row["encoded_key"]
-        .as_str()
-        .expect("row carries its encoded key")
-        .to_string();
-    let detail_url = format!("{}/api/sessions/{encoded}", sb.webui_url());
-    wait_for(
-        "the synthetic error entry to surface in the projection",
-        Duration::from_secs(15),
-        &hint,
-        {
-            let cli = cli.clone();
-            let url = detail_url.clone();
-            move || {
-                let cli = cli.clone();
-                let url = url.clone();
-                Box::pin(async move {
-                    let v = cli
-                        .get(&url)
-                        .send()
-                        .await
-                        .ok()?
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()?;
-                    let errored = v["entries"].as_array().is_some_and(|entries| {
-                        entries.iter().any(|e| {
-                            e["element_type"].as_str() == Some("error")
-                                && e["content"]
-                                    .as_str()
-                                    .is_some_and(|c| c.contains("spawn failed"))
-                        })
-                    });
-                    errored.then_some(())
-                })
-            }
-        },
-    )
-    .await;
-}
-
-// ══ single-state-dir：一个状态目录钉住全部状态落点（进程级核验）══
-//
-// 对照 openspec/changes/single-state-dir/specs/ 三个增量里此前只有单元级
-// 或一次性人工验收（任务 8.3 等价执行）的场景，把机械断言固化成进程级 e2e：
-//
-// - cli-service「one variable relocates every state file」+「no state write
-//   escapes the derived directory」：完整 core 旅程（健康、项目注册、
-//   provider put、fake-claude 回合、SIGTERM 优雅退出）后断言每个状态产物
-//   都在钉住的目录内、fake 主目录（HOME 钉进沙箱）下无 `.sebas`、退休名
-//   `sebas.db` 无处出现；
-// - state-store「bounded configuration is separated from growing user
-//   data」：providers 行物理落在 settings.db、projects 行物理落在
-//   projects.db，且两库各自只装自己域的表（拆库的证据不止解析函数）；
-// - cli-service「the retired database variable has no effect」：导出
-//   `SEBAS_STATE_DB` 后分层库照常从状态目录解析，启动日志点名提示、退休
-//   路径从不被创建；
-// - state-store「Environment override relocates the database」：逐库覆盖
-//   只搬走那一个库，其余照常在状态目录内。
-
-/// 沙箱内全部普通文件（递归，排序后返回相对路径字符串）。
-fn state_dir_walk(dir: &std::path::Path) -> Vec<String> {
-    fn walk(dir: &std::path::Path, prefix: &str, out: &mut Vec<String>) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for e in entries.flatten() {
-            let name = e.file_name().to_string_lossy().into_owned();
-            let rel = format!("{prefix}{name}");
-            if e.path().is_dir() {
-                walk(&e.path(), &format!("{rel}/"), out);
-            } else {
-                out.push(rel);
-            }
-        }
-    }
-    let mut out = Vec::new();
-    walk(dir, "", &mut out);
-    out.sort();
-    out
-}
-
-/// 只读打开一个 SQLite 库并对 `sqlite_master` 计数指定表。
-fn state_dir_table_count(db: &std::path::Path, tables: &[&str]) -> usize {
-    let conn = rusqlite::Connection::open_with_flags(
-        db,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .unwrap_or_else(|e| panic!("open {}: {e}", db.display()));
-    let mut hits = 0;
-    for t in tables {
-        let n: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?1",
-                [t],
-                |r| r.get(0),
-            )
-            .unwrap_or_else(|e| panic!("sqlite_master probe {t} in {}: {e}", db.display()));
-        hits += usize::try_from(n).unwrap();
-    }
-    hits
-}
-
-/// 等会话回合到 Done，返回会话详情（轮询 /api/sessions/{key}）。
-async fn state_dir_wait_done(
-    cli: &reqwest::Client,
-    sb: &Sandbox,
-    key: &str,
-) -> serde_json::Value {
-    let url = format!("{}/api/sessions/{key}", sb.webui_url());
-    let hint = sb.path.clone();
-    wait_for("session turn to reach Done", Duration::from_secs(30), &hint, move || {
-        let cli = cli.clone();
-        let url = url.clone();
-        Box::pin(async move {
-            let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
-            (v["status_slug"].as_str() == Some("done")).then_some(v)
-        })
-    })
-    .await
-}
-
-/// cli-service「one variable relocates every state file」+「no state write
-/// escapes the derived directory」的旅程级机械化（任务 8.3 的常驻自动化版）：
-/// 只钉 `SEBAS_STATE_DIR`（HOME 一并钉进沙箱 = fake 操作员主目录）跑完整
-/// core 旅程，随后断言——
-/// 1. 两库都在目录内且**域分离**：settings.db 只装 providers/model_aliases/
-///    settings 三表，projects.db 只装 projects/session_map 两表；
-/// 2. 写进的数据落在正确的库里：provider 行在 settings.db，project 行在
-///    projects.db（bounded config vs growing user data 的文件级证据）；
-/// 3. fake 主目录下没有 `.sebas`（任何经 HOME 兜底的写都会落在
-///    `<沙箱>/.sebas`，其不存在 = 无一处逃逸派生目录）；
-/// 4. 退休名 `sebas.db` 无处出现；
-/// 5. SIGTERM 优雅退出移除 channel socket。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn single_state_dir_journey_pins_every_state_location() {
-    let sb = Sandbox::new("testsuite_e2e", "state-dir");
-    let cli = http_client();
-    let mut core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-
-    // 项目注册（core projects.db 的 add 写入）。
-    let project_id = scene_project_id(&cli, &sb).await;
-    assert!(!project_id.is_empty(), "project registered");
-
-    // provider put（core settings.db 的 PersistedState 事务写入）。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/providers", sb.webui_url()),
-        serde_json::json!({
-            "name": "pinned",
-            "protocol": "anthropic",
-            "base_url_anthropic": "http://127.0.0.1:9",
-            "api_key": "sk-sandbox-dummy"
-        }),
-    )
-    .await
-    .expect("create provider");
-    assert_eq!(status, 201, "provider create: {body}");
-
-    // fake-claude 会话回合（完整旅程）。
-    let (s, resp) = post_json(
-        &cli,
-        &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "project_id": project_id, "prompt": "hello", "agent": "claude" }),
-    )
-    .await
-    .expect("create session");
-    assert_eq!(s, 201, "create session: {resp}");
-    let key = resp["key"].as_str().expect("session key").to_string();
-    let detail = state_dir_wait_done(&cli, &sb, &key).await;
-    assert_eq!(detail["status_slug"], "done", "turn must complete");
-
-    // SIGTERM core：优雅退出（state-store 通道生命周期）。
-    #[cfg(unix)]
-    {
-        let pid = core.id().expect("core pid");
-        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
-    }
-    #[cfg(not(unix))]
-    core.kill().await.expect("kill core");
-    let _ = core.wait().await;
-    assert!(
-        !sb.channel_path.exists(),
-        "graceful exit must remove the channel socket"
-    );
-
-    // ── 机械断言：全部状态产物都在钉住的目录内 ──
-    let files = state_dir_walk(&sb.path);
-    // 3) 无 `.sebas`：HOME 钉在沙箱，HOME 兜底的任何写都会露形为
-    //    `<沙箱>/.sebas/...`——其不存在 = 旅程中没有一处状态逃出派生目录。
-    assert!(
-        files.iter().all(|f| !f.starts_with(".sebas/")),
-        "no state may escape into a home-relative .sebas: {files:?}"
-    );
-    // 4) 退休名从不被创建（任何层级、任何子目录）。
-    assert!(
-        files.iter().all(|f| !f.ends_with("/sebas.db") && f != "sebas.db"),
-        "the retired single-DB file name must never appear: {files:?}"
-    );
-    // migrate-project-registry 7.1：注册表落 `projects.db`，**`projects.json`
-    // 全程未被创建**（独立 webui 拓扑下也不许有第二个存储：文件回退已删除）。
-    assert!(
-        files
-            .iter()
-            .all(|f| !f.ends_with("/projects.json") && f != "projects.json"),
-        "the retired project-registry file must never be created: {files:?}"
-    );
-    // 1) 两库在场且域分离。
-    let settings_db = sb.path.join("settings.db");
-    let projects_db = sb.path.join("projects.db");
-    assert!(settings_db.exists(), "settings.db must exist in the state dir");
-    assert!(projects_db.exists(), "projects.db must exist in the state dir");
-    assert_eq!(
-        state_dir_table_count(&settings_db, &["providers", "model_aliases", "settings"]),
-        3,
-        "settings.db carries exactly the bounded configuration tables"
-    );
-    assert_eq!(
-        state_dir_table_count(&settings_db, &["projects", "session_map"]),
-        0,
-        "settings.db must not carry any user-data tables"
-    );
-    assert_eq!(
-        state_dir_table_count(&projects_db, &["projects", "session_map"]),
-        2,
-        "projects.db carries exactly the growing user-data tables"
-    );
-    assert_eq!(
-        state_dir_table_count(&projects_db, &["providers", "model_aliases", "settings"]),
-        0,
-        "projects.db must not carry any configuration tables"
-    );
-    // 2) 数据落在正确的库里。
-    {
-        let conn = rusqlite::Connection::open_with_flags(
-            &settings_db,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .unwrap();
-        let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM providers WHERE id = 'pinned'", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(n, 1, "provider row must live in settings.db");
-    }
-    {
-        let conn = rusqlite::Connection::open_with_flags(
-            &projects_db,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .unwrap();
-        let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
-            .unwrap();
-        assert!(n >= 1, "project row must live in projects.db");
-        // 节点的正式列与稳定 id 都在库里（migrate-project-registry 1.1/2.4）：
-        // id 是移除/重排/项目级默认 agent 的寻址键，落库时就该有值——只在读
-        // 路径回填会让按 id 的 UPDATE 全部匹配 0 行却返回 Ok（假装成功）。
-        let (id, node_id, path): (Option<String>, String, String) = conn
-            .query_row(
-                "SELECT id, node_id, path FROM projects ORDER BY added_at LIMIT 1",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .unwrap();
-        assert!(path.contains("state-dir"), "registered scene project row: {path}");
-        assert_eq!(node_id, "local", "本机项目落 node_id = local");
-        assert!(
-            id.as_deref().is_some_and(|i| i.starts_with("proj-")),
-            "注册即落库稳定 id（不得留 NULL 等读路径回填）: {id:?}"
-        );
-    }
-}
-
-/// cli-service「the retired database variable has no effect」（任务 6.1 的
-/// 进程级固化）：导出 `SEBAS_STATE_DB` 启动 core——分层库照常从状态目录
-/// 解析并创建、退休路径从不被创建、启动日志对残留值给出点名提示。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn retired_state_db_var_is_warned_and_ignored() {
-    let sb = Sandbox::new("testsuite_e2e", "retired-var");
-    let retired_path = sb.path.join("sebas.db");
-    let retired = retired_path.to_string_lossy().into_owned();
-    let cli = http_client();
-    let _core = sb.spawn_core_extra(&[("SEBAS_STATE_DB", &retired)]);
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-
-    // 退休变量被点名提示（run.rs 的启动 warn）。
-    let hint = sb.path.clone();
-    let log = sb.core_log.clone();
-    wait_for("core logs the retired-variable warning", Duration::from_secs(10), &hint, move || {
-        let log = log.clone();
-        Box::pin(async move {
-            let text = std::fs::read_to_string(&log).ok()?;
-            (text.contains("SEBAS_STATE_DB") && text.contains("退休")).then_some(())
-        })
-    })
-    .await;
-
-    // 退休路径从不被创建；分层库照常解析。
-    assert!(
-        !retired_path.exists(),
-        "the retired variable's path must never be created: {}",
-        retired_path.display()
-    );
-    assert!(sb.path.join("settings.db").exists(), "settings.db resolves from the state dir");
-    assert!(sb.path.join("projects.db").exists(), "projects.db resolves from the state dir");
-}
-
-/// state-store「Environment override relocates the database」的进程级：
-/// `SEBAS_PROJECTS_DB` 只搬走 projects.db——项目注册的真实写入落在覆盖
-/// 路径上，派生路径不再建库，settings.db 与其余落点照常在状态目录内。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn projects_db_override_relocates_only_that_database() {
-    let sb = Sandbox::new("testsuite_e2e", "projects-override");
-    let elsewhere = sb.path.join("elsewhere");
-    std::fs::create_dir_all(&elsewhere).expect("mkdir elsewhere");
-    let override_path = elsewhere.join("proj.db");
-    let override_str = override_path.to_string_lossy().into_owned();
-
-    let cli = http_client();
-    let mut core = sb.spawn_core_extra(&[("SEBAS_PROJECTS_DB", &override_str)]);
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-
-    // 项目注册：经 core 通道写 projects 域——写的就是覆盖路径上的库。
-    let project_id = scene_project_id(&cli, &sb).await;
-    assert!(!project_id.is_empty(), "project registered");
-
-    #[cfg(unix)]
-    {
-        let pid = core.id().expect("core pid");
-        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
-    }
-    #[cfg(not(unix))]
-    core.kill().await.expect("kill core");
-    let _ = core.wait().await;
-
-    // 覆盖路径收到真实的库（projects 表里是刚注册的行）。
-    assert!(override_path.exists(), "the override path owns the projects db");
-    {
-        let conn = rusqlite::Connection::open_with_flags(
-            &override_path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .unwrap();
-        let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
-            .unwrap();
-        assert!(n >= 1, "registered project must land in the relocated db");
-    }
-    // 派生路径不再建库；settings.db 照常在状态目录内。
-    assert!(
-        !sb.path.join("projects.db").exists(),
-        "the derived projects.db must not be created when overridden"
-    );
-    assert!(sb.path.join("settings.db").exists(), "settings.db stays in the state dir");
-}
-
-/// watchdog spec「sandboxed watchdog does not touch the operator's
-/// directory」+「a runtime override survives a watchdog restart」+「the
-/// watchdog acquires no persistence layer」+「core still ignores the
-/// override layer」的进程级旅程：监督形态下经 webui admin 控制面（HTTP，
-/// 非浏览器）做 ServiceSet——services.json 落在状态目录内且是普通 JSON
-/// 文件（非 SQLite）；core 的停用请求被拒、core 子进程照常存活；watchdog
-/// 重启后 router 的期望态从文件读回、spawn 决策照旧。
-#[cfg(target_os = "linux")] // find_child_pid 走 /proc/<pid>/cmdline
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn watchdog_service_override_lives_in_state_dir_and_survives_restart() {
-    let sb = Sandbox::new("testsuite_e2e", "watchdog-state-dir");
-    sb.enable_supervised_core();
-    // 控制socket（control.sock）按 XDG_RUNTIME_DIR 解析——钉进沙箱。
-    let xdg_run = sb.path.join("xdg-run");
-    std::fs::create_dir_all(&xdg_run).expect("mkdir xdg-run");
-    let xdg = support::forward_slash(&xdg_run);
-    let cfg = support::forward_slash(&sb.config_path);
-    let cli = http_client();
-    // 不带 --debug：router 初值 = config 开关（默认关）→ 初始无 router 子进程，
-    // 让「enable 持久化 + 重启后读回」有干净的起点。
-    let mut watchdog = sb.spawn(
-        &["run", "-c", &cfg],
-        &sb.core_secret,
-        &[("XDG_RUNTIME_DIR", &xdg)],
-        &sb.core_log,
-    );
-    wait_reachable(&cli, &sb).await;
-    let watchdog_pid = watchdog.id().expect("watchdog pid");
-    let hint = sb.path.clone();
-
-    // admin 控制面在场（standalone webui 持 ControlRpcAdminAdapter）。
-    let services_url = format!("{}/api/admin/services", sb.webui_url());
-    let services: serde_json::Value = cli
-        .get(&services_url)
-        .send()
-        .await
-        .expect("GET admin services")
-        .json()
-        .await
-        .expect("admin services json");
-    assert_eq!(
-        services["adapter_ok"], true,
-        "the supervised webui must carry the control adapter: {services}"
-    );
-
-    // 初始无 router 子进程（config 默认关、无覆盖层）。
-    assert!(
-        find_child_pid(watchdog_pid, "router").is_none(),
-        "router must not spawn while its desired state is off"
-    );
-
-    // ServiceSet(router on, persist)：写覆盖层 + 拉起 router 子进程。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{services_url}/router/enable"),
-        serde_json::json!({}),
-    )
-    .await
-    .expect("enable router");
-    assert_eq!(status, 200, "router enable: {body}");
-
-    // 覆盖层落在状态目录内（派生落点——不是操作员配置目录）。
-    let services_json = sb.path.join("services.json");
-    wait_for("services.json to appear in the state dir", Duration::from_secs(10), &hint, {
-        let services_json = services_json.clone();
-        move || {
-            let services_json = services_json.clone();
-            Box::pin(async move { services_json.exists().then_some(()) })
-        }
-    })
-    .await;
-    let raw = std::fs::read_to_string(&services_json).expect("read services.json");
-    // 普通文件、非任何数据库形态（watchdog 不引入持久层）。
-    assert!(
-        !raw.starts_with("SQLite format 3"),
-        "the override layer must stay a plain file"
-    );
-    let table: serde_json::Value = serde_json::from_str(&raw).expect("services.json parses");
-    assert_eq!(table["router"], "on", "recorded override: {table}");
-
-    // router 子进程被拉起。
-    wait_for("router child to spawn", Duration::from_secs(20), &hint, {
-        move || {
-            let pid = find_child_pid(watchdog_pid, "router");
-            Box::pin(async move { pid.map(|p| p as u64) })
-        }
-    })
-    .await;
-
-    let (core_status, core_body) = post_json(
-        &cli,
-        &format!("{services_url}/core/disable"),
-        serde_json::json!({}),
-    )
-    .await
-    .expect("disable core");
-    assert_ne!(
-        core_status, 200,
-        "core must reject being disabled via the override layer: {core_body}"
-    );
-    assert!(
-        core_body["error"].as_str().is_some_and(|e| !e.is_empty()),
-        "the rejection must name its cause: {core_body}"
-    );
-    assert!(
-        find_child_pid(watchdog_pid, "core").is_some(),
-        "core must stay supervised"
-    );
-
-    // watchdog 重启：router 的期望态从 services.json 读回——spawn 决策照旧。
-    unsafe { libc::kill(watchdog_pid as libc::pid_t, libc::SIGTERM) };
-    let _ = watchdog.wait().await;
-    // 旧 webui 子进程随监督关闭退出——等端口真正释放再起新 watchdog。
-    wait_for("old webui port to be released", Duration::from_secs(15), &hint, {
-        let cli = cli.clone();
-        let url = format!("{}/health", sb.webui_url());
-        move || {
-            let cli = cli.clone();
-            let url = url.clone();
-            Box::pin(async move { cli.get(&url).send().await.is_err().then_some(()) })
-        }
-    })
-    .await;
-
-    let watchdog2 = sb.spawn(
-        &["run", "-c", &cfg],
-        &sb.core_secret,
-        &[("XDG_RUNTIME_DIR", &xdg)],
-        &sb.core_log,
-    );
-    wait_reachable(&cli, &sb).await;
-    let watchdog2_pid = watchdog2.id().expect("watchdog2 pid");
-    let _router_pid = wait_for("router child respawned from the override file", Duration::from_secs(20), &hint, {
-        move || {
-            let pid = find_child_pid(watchdog2_pid, "router");
-            Box::pin(async move { pid.map(|p| p as u64) })
-        }
-    })
-    .await;
-    // core 子进程照常无条件拉起（覆盖层从未被写入 core，重启后也不读它）。
-    assert!(
-        find_child_pid(watchdog2_pid, "core").is_some(),
-        "core must be spawned unconditionally after restart"
-    );
-
-    // 全程无 `.sebas` 逃逸（HOME 钉在沙箱）。
-    let files = state_dir_walk(&sb.path);
-    assert!(
-        files.iter().all(|f| !f.starts_with(".sebas/")),
-        "watchdog must not write outside the state dir: {files:?}"
-    );
 }
