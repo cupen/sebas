@@ -308,7 +308,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         static TABLES: &[TableSchema] = &[TableSchema {
             name: "providers",
-            create_ddl: "CREATE TABLE providers (
+            create_table_ddl: "CREATE TABLE providers (
                 id          TEXT PRIMARY KEY,
                 name        TEXT,
                 preset      TEXT,
@@ -324,8 +324,8 @@ mod tests {
                 deleted     INTEGER NOT NULL DEFAULT 0,
                 created_at  INTEGER NOT NULL,
                 updated_at  INTEGER NOT NULL
-            );
-            CREATE INDEX idx_providers_deleted ON providers(deleted);",
+            );",
+            index_ddls: &["CREATE INDEX idx_providers_deleted ON providers(deleted);"],
             columns: ProviderRow::schema_columns(),
         }];
         let conn = open_and_sync(&dir.path().join("p.db"), TABLES).unwrap().0;

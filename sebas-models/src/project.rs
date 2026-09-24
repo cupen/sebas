@@ -215,15 +215,15 @@ mod tests {
         assert_eq!(ProjectRow::TABLE, "projects");
         assert_eq!(ProjectRow::PK_COLUMNS, &["path"]);
         let baseline: &[SchemaColumn] = &[
-            SchemaColumn { name: "id", affinity: "TEXT", default: None, not_null: false },
-            SchemaColumn { name: "path", affinity: "TEXT", default: None, not_null: true },
-            SchemaColumn { name: "name", affinity: "TEXT", default: None, not_null: true },
-            SchemaColumn { name: "branch_at", affinity: "INTEGER", default: Some("0"), not_null: true },
-            SchemaColumn { name: "added_at", affinity: "INTEGER", default: None, not_null: true },
-            SchemaColumn { name: "sort_order", affinity: "INTEGER", default: Some("0"), not_null: true },
-            SchemaColumn { name: "node_id", affinity: "TEXT", default: Some("'local'"), not_null: true },
-            SchemaColumn { name: "default_agent", affinity: "TEXT", default: None, not_null: false },
-            SchemaColumn { name: "branch", affinity: "TEXT", default: None, not_null: false },
+            SchemaColumn { name: "id", affinity: "TEXT", default: None, not_null: false, rename_from: None },
+            SchemaColumn { name: "path", affinity: "TEXT", default: None, not_null: true, rename_from: None },
+            SchemaColumn { name: "name", affinity: "TEXT", default: None, not_null: true, rename_from: None },
+            SchemaColumn { name: "branch_at", affinity: "INTEGER", default: Some("0"), not_null: true, rename_from: None },
+            SchemaColumn { name: "added_at", affinity: "INTEGER", default: None, not_null: true, rename_from: None },
+            SchemaColumn { name: "sort_order", affinity: "INTEGER", default: Some("0"), not_null: true, rename_from: None },
+            SchemaColumn { name: "node_id", affinity: "TEXT", default: Some("'local'"), not_null: true, rename_from: None },
+            SchemaColumn { name: "default_agent", affinity: "TEXT", default: None, not_null: false, rename_from: None },
+            SchemaColumn { name: "branch", affinity: "TEXT", default: None, not_null: false, rename_from: None },
         ];
         assert_eq!(ProjectRow::schema_columns(), baseline);
         assert_eq!(ProjectRow::COLUMNS, baseline.iter().map(|c| c.name).collect::<Vec<_>>().as_slice());

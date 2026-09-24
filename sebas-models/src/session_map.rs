@@ -10,8 +10,9 @@
 //! 空间），`thread_id` = reference（通道自己的引用，飞书含 `chat\0thread`
 //! 组合）——主键 `(chat_id, thread_id)` 因此就是完整会话键（列名是历史
 //! 沿革，寻址语义不变）。新增的映射列均为 NOT NULL 无常量默认或可空列：
-//! 旧形状的库在打开时按「缺列非空且无默认」走隔离重置（产品未发布，
-//! D2/D5 接受一次重置，隔离保留痕迹）。
+//! 改造前的旧形状库在打开时按「缺列非空且无默认」fail-closed 拒启动并点名
+//! 缺列（retire-schema-reset：不再删库/隔离；要迁移就给这类列补常量默认值，
+//! 或加 `#[column(rename_from = "...")]` 声明改名保数据）。
 //!
 //! 持久化语义（persist-session-map D2）：**按变更落盘**——生命周期事件处
 //! 一次 `entry.save(&conn)`（ActiveRecord 生成，无手写 SQL），删除走

@@ -139,8 +139,9 @@ impl StateWriter {
         let join_handle = std::thread::Builder::new()
             .name("sebas-state-db".into())
             .spawn(move || {
-                // 打开 + schema 同步: open 失败按损坏拒启,
-                // 不兼容由 sync 层隔离旧库后重建空 schema, 这里只区分"就绪/失败"。
+                // 打开 + schema 同步: open 失败按损坏拒启;
+                // 任何结构差异都在 sync 层原位保数据迁移（不删库、失败即拒启），
+                // 这里只区分"就绪/失败"。
                 let mut conn =
                     match crate::schema::open_and_sync(&db_path, tables) {
                         Ok((conn, outcome)) => {
@@ -208,7 +209,7 @@ mod tests {
     #[tokio::test]
     async fn writer_refuses_corrupt_database_at_startup() {
         // state-store spec「Corrupt store is not silently reset」: 损坏库必须
-        // 拒启并报出路径, 且绝不自动删除/重建文件 (与 schema 不兼容的重置严格分离)。
+        // 拒启并报出路径, 且绝不自动删除/重建文件 (与结构漂移的非破坏迁移严格分离)。
         let dir = tempdir().unwrap();
         let path = dir.path().join("corrupt.db");
         let garbage = b"not a sqlite database at all".to_vec();

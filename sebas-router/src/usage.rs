@@ -145,7 +145,7 @@ impl From<UsageRow> for UsageRecord {
 /// 列清单来自 `UsageRow::schema_columns()`（struct 即 schema 事实源）。
 pub static USAGE_TABLES: &[TableSchema] = &[TableSchema {
     name: "usage_records",
-    create_ddl: "CREATE TABLE IF NOT EXISTS usage_records (
+    create_table_ddl: "CREATE TABLE IF NOT EXISTS usage_records (
         id                    INTEGER PRIMARY KEY,
         key                   TEXT NOT NULL,
         protocol              TEXT NOT NULL,
@@ -161,8 +161,8 @@ pub static USAGE_TABLES: &[TableSchema] = &[TableSchema {
         cache_creation_tokens INTEGER,
         error                 TEXT,
         ts                    TEXT NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_usage_records_ts ON usage_records(ts);",
+    );",
+    index_ddls: &["CREATE INDEX IF NOT EXISTS idx_usage_records_ts ON usage_records(ts);"],
     columns: UsageRow::schema_columns(),
 }];
 
@@ -1028,9 +1028,14 @@ mod tests {
                 "列 {col} 缺失"
             );
         }
-        // DDL 里出现的列名与派生列逐个对齐（建表与 struct 不漂移）。
+        // DDL 里出现的列名与派生列逐个对齐（建表与 struct 不漂移；建表段与
+        // 索引段分开注册，retire-schema-reset D3）。
+        let registered: String = std::iter::once(table.create_table_ddl)
+            .chain(table.index_ddls.iter().copied())
+            .collect::<Vec<_>>()
+            .join("\n");
         for col in <UsageRow as Record>::COLUMNS {
-            assert!(table.create_ddl.contains(col), "DDL 未声明派生列 {col}");
+            assert!(registered.contains(col), "DDL 未声明派生列 {col}");
         }
     }
 

@@ -7,72 +7,83 @@
 use crate::schema::{SchemaColumn, TableSchema};
 
 /// alpha 表的派生列清单（与真实模型同构：主键列无非空默认、可空列
-/// `not_null: false`、带默认列 `default: Some("0")`）。
+/// `not_null: false`、带默认列 `default: Some("0")`、无改名来源）。
 pub(crate) static ALPHA_COLUMNS: &[SchemaColumn] = &[
     SchemaColumn {
         name: "id",
         affinity: "TEXT",
         default: None,
         not_null: true,
+        rename_from: None,
     },
     SchemaColumn {
         name: "name",
         affinity: "TEXT",
         default: None,
         not_null: true,
+        rename_from: None,
     },
     SchemaColumn {
         name: "note",
         affinity: "TEXT",
         default: None,
         not_null: false,
+        rename_from: None,
     },
     SchemaColumn {
         name: "score",
         affinity: "INTEGER",
         default: Some("0"),
         not_null: true,
+        rename_from: None,
     },
 ];
 
 /// 同步算法的测试注册表：单表 `alpha`（主键 id，含可空列与带默认列）。
 pub(crate) static TEST_TABLES: &[TableSchema] = &[TableSchema {
     name: "alpha",
-    create_ddl: "create table alpha (
+    create_table_ddl: "create table alpha (
         id    TEXT PRIMARY KEY,
         name  TEXT NOT NULL,
         note  TEXT,
         score INTEGER NOT NULL DEFAULT 0
     );",
+    index_ddls: &[],
     columns: ALPHA_COLUMNS,
 }];
 
 /// record / writer 测试用的单表 `kv`（单列主键）。
 pub(crate) static KV_TABLES: &[TableSchema] = &[TableSchema {
     name: "kv",
-    create_ddl: "create table kv (
+    create_table_ddl: "create table kv (
         key   TEXT PRIMARY KEY,
         value TEXT NOT NULL,
         flag  INTEGER NOT NULL DEFAULT 0
     );",
-    columns: &[SchemaColumn {
-        name: "key",
-        affinity: "TEXT",
-        default: None,
-        not_null: true,
-    },
-    SchemaColumn {
-        name: "value",
-        affinity: "TEXT",
-        default: None,
-        not_null: true,
-    },
-    SchemaColumn {
-        name: "flag",
-        affinity: "INTEGER",
-        default: Some("0"),
-        not_null: true,
-    }],
+    index_ddls: &[],
+    columns: &[
+        SchemaColumn {
+            name: "key",
+            affinity: "TEXT",
+            default: None,
+            not_null: true,
+            rename_from: None,
+        },
+        SchemaColumn {
+            name: "value",
+            affinity: "TEXT",
+            default: None,
+            not_null: true,
+            rename_from: None,
+        },
+        SchemaColumn {
+            name: "flag",
+            affinity: "INTEGER",
+            default: Some("0"),
+            not_null: true,
+            rename_from: None,
+        },
+    ],
 }];
 
 /// `kv` 表的中性测试行（手写 `Record` impl——本 crate 内不能用自家

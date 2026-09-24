@@ -24,6 +24,9 @@
 //! - `default = "..."`: 常量默认值, 内容**逐字**作为 SQL `DEFAULT` 表达式
 //!   使用 (如 `"0"`、`"'none'"`), 供缺列时 `ALTER TABLE ADD COLUMN` 拼接。
 //! - `not_null`: 显式非空标记, 必须搭配 `default`(存量行要有值可取)。
+//! - `rename_from = "旧列名"`: **显式**声明本列由旧列名改名而来 (retire-schema-reset)。
+//!   启动同步据此执行 `ALTER TABLE RENAME COLUMN`, 数据原地保留; 不做任何
+//!   启发式猜测——未标注的「一缺一多」按删列 + 补列处理。
 //!
 //! # 编译期拒绝
 //!
@@ -32,6 +35,8 @@
 //!   SQLite 也无法用 `ADD COLUMN` 补这两类列。
 //! - `not_null` 且无常量默认值。
 //! - 类型不在映射内。
+//! - `rename_from` 等于自身列名 (含 `name` 覆盖后的列名)。
+//! - 同 struct 内两个字段声明同一个 `rename_from` 旧列名。
 //!
 //! 注意: 生成的代码引用 `::sebas_db::schema::SchemaColumn`（extract-sebas-db
 //! D3——共享持久层 crate 是唯一的元数据落点），因此使用方只需依赖
@@ -51,7 +56,7 @@
 //! 表名与主键由辅助属性声明（主键约束本身仍只在注册 DDL 里表达，这里只是
 //! CRUD 的定位键）：
 //!
-//! ```ignore
+//! ```text
 //! #[derive(SchemaColumns, ActiveRecord)]
 //! #[active_record(table = "session_map")]
 //! #[active_record(pk = "chat_id")]
@@ -74,6 +79,8 @@ struct ColumnMeta {
     affinity: &'static str,
     default: Option<String>,
     not_null: bool,
+    /// 显式改名来源 (旧列名)。None = 本列从未改名。
+    rename_from: Option<String>,
 }
 
 /// 解析并校验 struct, 返回派生列清单。拒绝路径返回带字段定位的错误。
@@ -120,6 +127,35 @@ fn analyze_with_fields(input: &syn::DeriveInput) -> syn::Result<Vec<(ColumnMeta,
         }
     }
     match errors {
+        Some(e) => return Err(e),
+        None => {}
+    }
+
+    // rename_from 去重：同一 struct 内两个字段不得声明同一个旧列名——迁移源
+    // 只会被消费一次，重复即意图不明（retire-schema-reset D2 编译期校验）。
+    let mut seen: Vec<(String, String)> = Vec::new();
+    let mut dup_errors: Option<syn::Error> = None;
+    for (meta, ident) in &columns {
+        let Some(from) = &meta.rename_from else {
+            continue;
+        };
+        if let Some((_, prev_field)) = seen.iter().find(|(f, _)| f == from) {
+            let e = syn::Error::new(
+                ident.span(),
+                format!(
+                    "字段 `{ident}`: rename_from = \"{from}\" 与字段 `{prev_field}` 的声明重复 \
+                     (同一 struct 内每个旧列名只能被一个字段认领)"
+                ),
+            );
+            match &mut dup_errors {
+                Some(prev) => prev.combine(e),
+                None => dup_errors = Some(e),
+            }
+        } else {
+            seen.push((from.clone(), ident.to_string()));
+        }
+    }
+    match dup_errors {
         Some(e) => Err(e),
         None => Ok(columns),
     }
@@ -136,6 +172,7 @@ fn analyze_field(field: &syn::Field) -> syn::Result<ColumnMeta> {
     // ---- #[column(...)] 属性 ----
     let mut attr_name: Option<String> = None;
     let mut attr_default: Option<String> = None;
+    let mut attr_rename_from: Option<String> = None;
     let mut explicit_not_null = false;
     for attr in &field.attrs {
         if !attr.path().is_ident("column") {
@@ -147,6 +184,9 @@ fn analyze_field(field: &syn::Field) -> syn::Result<ColumnMeta> {
             } else if meta.path.is_ident("default") {
                 // 内容逐字作为 SQL DEFAULT 表达式 (常量, 来自我们自己的源码)
                 attr_default = Some(meta.value()?.parse::<syn::LitStr>()?.value());
+            } else if meta.path.is_ident("rename_from") {
+                // 显式改名来源 (旧列名)：启动同步执行 RENAME COLUMN，不猜
+                attr_rename_from = Some(meta.value()?.parse::<syn::LitStr>()?.value());
             } else if meta.path.is_ident("not_null") {
                 explicit_not_null = true;
             } else if meta.path.is_ident("primary_key")
@@ -163,11 +203,27 @@ fn analyze_field(field: &syn::Field) -> syn::Result<ColumnMeta> {
             } else {
                 return Err(syn::Error::new(
                     meta.path.span(),
-                    format!("字段 `{field_name}`: 未知的 #[column] 键, 支持 name/default/not_null"),
+                    format!(
+                        "字段 `{field_name}`: 未知的 #[column] 键, 支持 name/default/not_null/rename_from"
+                    ),
                 ));
             }
             Ok(())
         })?;
+    }
+
+    // 列名 (可能经 name 覆盖) —— rename_from 不得等于自身列名。
+    let column_name = attr_name.clone().unwrap_or_else(|| field_name.clone());
+    if let Some(from) = &attr_rename_from
+        && from == &column_name
+    {
+        return Err(syn::Error::new(
+            field.ty.span(),
+            format!(
+                "字段 `{field_name}`: rename_from = \"{from}\" 等于本列自己的列名, \
+                 改名来源必须是**旧**列名"
+            ),
+        ));
     }
 
     // ---- 类型映射 ----
@@ -192,10 +248,11 @@ fn analyze_field(field: &syn::Field) -> syn::Result<ColumnMeta> {
     }
 
     Ok(ColumnMeta {
-        name: attr_name.unwrap_or(field_name),
+        name: column_name,
         affinity,
         default: attr_default,
         not_null,
+        rename_from: attr_rename_from,
     })
 }
 
@@ -295,12 +352,17 @@ fn expand(input: &syn::DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             None => quote!(None),
         };
         let not_null = col.not_null;
+        let rename_from = match &col.rename_from {
+            Some(old) => quote!(Some(#old)),
+            None => quote!(None),
+        };
         quote! {
             #meta_ty {
                 name: #name,
                 affinity: #affinity,
                 default: #default,
                 not_null: #not_null,
+                rename_from: #rename_from,
             }
         }
     });
@@ -630,6 +692,60 @@ mod tests {
     fn rejects_unknown_column_key() {
         let input = parse(r#"struct T { #[column(nmae = "x")] n: i64 }"#);
         assert!(analyze(&input).is_err(), "拼错的键要拒绝");
+    }
+
+    // ---- rename_from（retire-schema-reset 1.1）----
+
+    /// 合法标注：rename_from 被解析进列元数据，默认 None。
+    #[test]
+    fn parses_rename_from_annotation_and_defaults_to_none() {
+        let input = parse(
+            r#"struct T { id: String, #[column(rename_from = "old_name")] new_name: String }"#,
+        );
+        let cols = analyze(&input).expect("合法 struct 不该报错");
+        assert_eq!(cols[0].name, "id");
+        assert_eq!(cols[0].rename_from, None, "未标注列不得自带改名来源");
+        assert_eq!(cols[1].name, "new_name");
+        assert_eq!(cols[1].rename_from.as_deref(), Some("old_name"));
+    }
+
+    /// 自己改自己（含 `name` 覆盖后的列名）→ 编译期拒绝。
+    #[test]
+    fn rejects_rename_from_equal_to_own_column_name() {
+        let input = parse(r#"struct T { #[column(rename_from = "n")] n: String }"#);
+        let err = analyze(&input).expect_err("rename_from = 自身列名应被拒绝");
+        assert!(err.to_string().contains('n'), "报错要点名: {err}");
+
+        let overridden =
+            parse(r#"struct T { #[column(name = "x", rename_from = "x")] n: String }"#);
+        assert!(
+            analyze(&overridden).is_err(),
+            "name 覆盖后与 rename_from 相同也要拒绝"
+        );
+    }
+
+    /// 同一 struct 内两个字段认领同一个旧列名 → 拒绝（迁移源只能被消费一次）。
+    #[test]
+    fn rejects_duplicate_rename_from_in_one_struct() {
+        let input = parse(
+            r#"struct T {
+                #[column(rename_from = "old")] a: String,
+                #[column(rename_from = "old")] b: String,
+            }"#,
+        );
+        let err = analyze(&input).expect_err("重复 rename_from 应被拒绝");
+        let msg = err.to_string();
+        assert!(msg.contains("old"), "报错要点名旧列名: {msg}");
+        assert!(msg.contains('a') && msg.contains('b'), "报错要点名两个字段: {msg}");
+    }
+
+    /// 生成代码把 rename_from 落到 `SchemaColumn`。
+    #[test]
+    fn generated_code_carries_rename_from() {
+        let input = parse(r#"struct T { id: String, #[column(rename_from = "old")] n: i64 }"#);
+        let code = flat(&expand(&input).expect("生成成功"));
+        assert!(code.contains(r#"rename_from:Some("old")"#), "{code}");
+        assert!(code.contains("rename_from:None"), "{code}");
     }
 
     #[test]

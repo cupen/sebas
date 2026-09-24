@@ -126,7 +126,8 @@ mod tests {
     /// 的中立替身）。
     static KV_TABLES: &[TableSchema] = &[TableSchema {
         name: "settings",
-        create_ddl: "create table settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+        create_table_ddl: "create table settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+        index_ddls: &[],
         columns: crate::setting::SettingRow::schema_columns(),
     }];
 

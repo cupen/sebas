@@ -24,7 +24,7 @@ use tempfile::tempdir;
 static FIXTURE_TABLES: &[TableSchema] = &[
     TableSchema {
         name: "providers",
-        create_ddl: "CREATE TABLE providers (
+        create_table_ddl: "CREATE TABLE providers (
             id          TEXT PRIMARY KEY,
             name        TEXT,
             preset      TEXT,
@@ -41,16 +41,18 @@ static FIXTURE_TABLES: &[TableSchema] = &[
             created_at  INTEGER NOT NULL,
             updated_at  INTEGER NOT NULL
         );",
+        index_ddls: &[],
         columns: ProviderRow::schema_columns(),
     },
     TableSchema {
         name: "model_aliases",
-        create_ddl: "CREATE TABLE model_aliases (
+        create_table_ddl: "CREATE TABLE model_aliases (
             alias           TEXT PRIMARY KEY,
             provider        TEXT NOT NULL REFERENCES providers(id),
             upstream_model  TEXT,
             created_at      INTEGER NOT NULL
         );",
+        index_ddls: &[],
         columns: ModelAliasRow::schema_columns(),
     },
 ];
@@ -59,13 +61,14 @@ static FIXTURE_TABLES: &[TableSchema] = &[
 /// 启动同步原地补上的列。
 static LEGACY_PROJECTS_TABLE: &[TableSchema] = &[TableSchema {
     name: "projects",
-    create_ddl: "CREATE TABLE projects (
+    create_table_ddl: "CREATE TABLE projects (
         path        TEXT PRIMARY KEY,
         name        TEXT NOT NULL,
         branch      TEXT,
         branch_at   INTEGER NOT NULL DEFAULT 0,
         added_at    INTEGER NOT NULL
     );",
+    index_ddls: &[],
     columns: ProjectRow::schema_columns(),
 }];
 
@@ -166,7 +169,12 @@ fn added_column_reads_back_at_default_through_generated_crud() {
         sebas_db::schema::open_and_sync(&path, LEGACY_PROJECTS_TABLE).unwrap();
     assert_eq!(
         outcome,
-        SyncOutcome::Synced { added_columns: 4 },
+        SyncOutcome::Synced {
+            added_columns: 4,
+            renamed: 0,
+            rebuilt: 0,
+            dropped: 0,
+        },
         "四个缺列都应原地补齐"
     );
 

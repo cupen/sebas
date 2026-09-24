@@ -17,14 +17,19 @@
 //! - 单写 actor 与类型化门面：`sebas_db::writer`；
 //! - 行 struct 与对象风格 CRUD / 域查询：`sebas_models`。
 //!
-//! # Schema 纪律 (sqlite-auto-schema-sync)
+//! # Schema 纪律 (retire-schema-reset)
 //!
 //! - **struct 即事实源**: 表结构由 `*Row` struct 声明
 //!   (`#[derive(SchemaColumns, ActiveRecord)]`, 定义在 `sebas-models`),
-//!   启动时与实际库结构对比: 缺列自动 `ALTER TABLE ADD COLUMN`,
-//!   其余不兼容(类型不符/多余列/缺表/版本格式未知)重置重建。
+//!   启动时与实际库结构对比，结构差异一律**原位保数据迁移**：缺列
+//!   `ALTER TABLE ADD COLUMN`、声明改名 `ALTER TABLE RENAME COLUMN`、类型不符
+//!   事务内覆盖式重建、多余列 `ALTER TABLE DROP COLUMN`（受限列走重建）、缺表
+//!   按注册 DDL 建表。任何路径都不删除数据库文件。
 //! - **加列规则**: 新列要么可空 (`Option<T>`), 要么带常量默认值
-//!   (`#[column(default = "...")]`); 非空无默认的缺列无法原地补, 会触发重置。
+//!   (`#[column(default = "...")]`); 非空无默认的缺列既补不了也回填不了，
+//!   按 fail-closed 拒启动（不再回退成删库）。
+//! - **破坏性步骤先备份**: 重建/删列前 `VACUUM INTO '<db>.pre-sync'`；备份失败
+//!   或迁移中途失败 → 事务回滚 + 拒启动，库字节不变。
 //! - SQL 里 INSERT/UPDATE 一律显式列名, 禁止 `INSERT INTO t VALUES(...)`。
 //! - 约束 (PRIMARY KEY/UNIQUE/REFERENCES) 与索引只表达在 `SETTINGS_TABLES`
 //!   / `PROJECTS_TABLES`（single-state-dir 拆库注册表）的手写 DDL 里;

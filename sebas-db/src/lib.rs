@@ -18,7 +18,9 @@
 //! - [`conn`]：连接配方（WAL + busy_timeout=5s + foreign_keys=ON）、两种
 //!   事务入口、`user_version` 原语；
 //! - [`schema`]：schema 原语（`SchemaColumn` / `TableSchema`）与启动同步
-//!   算法（列级 diff、`ALTER TABLE ADD COLUMN`、自描述版本戳、不兼容重置）；
+//!   算法（列级 diff、`ALTER TABLE ADD COLUMN` / `RENAME COLUMN` /
+//!   `DROP COLUMN`、事务内覆盖式重建、破坏性迁移前备份、自描述版本戳）；
+//!   任何结构差异都**原位保数据迁移**，不删除数据库文件（retire-schema-reset）。
 //! - [`record`]：泛型 `Record` trait 与标准 CRUD 的 SQL 构建器——运行时
 //!   只认识 trait，不认识任何域类型；
 //! - [`writer`]：单写 actor（`StateWriter` / `StateHandle`）与 `Record`

@@ -28,7 +28,7 @@ impl StateWriter {
     }
 
     /// 启动 settings.db 写者线程（providers / model_aliases / settings）。
-    /// 会自动打开/创建数据库并同步 schema (sqlite-auto-schema-sync)。
+    /// 会自动打开/创建数据库并同步 schema (retire-schema-reset：原位保数据迁移)。
     /// 在同步完成前阻塞, 返回后 DB 已就绪。
     pub fn start_settings(db_path: std::path::PathBuf) -> Result<Self, String> {
         Ok(Self {
@@ -37,7 +37,7 @@ impl StateWriter {
     }
 
     /// 启动 projects.db 写者线程（projects / session_map）。语义同上——
-    /// 两库互不感知，重置一个不影响另一个。
+    /// 两库互不感知，一个库的迁移不影响另一个（各自的备份/事务落在本库）。
     pub fn start_projects(db_path: std::path::PathBuf) -> Result<Self, String> {
         Ok(Self {
             inner: sebas_db::writer::StateWriter::start(db_path, PROJECTS_TABLES)?,
