@@ -1115,6 +1115,76 @@ fn arm_config(dir: &StdPath) -> (crate::config::Config, std::path::PathBuf) {
     (cfg, config_path)
 }
 
+// ── Windows 管道冲突修复：channel_path 相对值按 CWD 绝对化 ─────────────────
+//
+// Windows 上 IPC 端点名由 sebas_ipc 的 fs_name() 从路径字符串全局映射
+// （\\.\pipe\sebas/<路径>），命名空间扁平：相对配置值让所有进程共享同一个
+// 全局管道名，并行沙箱里第二个 core 起 bind 即死（os error 5）。绝对化后
+// 管道名随各进程 CWD 唯一；Unix 上 UDS 本就按调用方 CWD 解析相对路径，
+// 解析结果与既有语义逐字节一致（行为不变）。
+
+/// (a) 相对配置值：解析结果以 current_dir 为前缀、文件名不变。
+#[test]
+fn relative_channel_path_resolves_against_current_dir() {
+    let cfg = crate::config::Config::parse("[service.core]\nchannel_path = \"core-channel.sock\"\n")
+        .expect("relative channel_path parses");
+    let resolved = server::socket_path(&cfg);
+    let cwd = std::env::current_dir().expect("test process has a cwd");
+    assert!(
+        resolved.is_absolute(),
+        "relative value must resolve to absolute: {resolved:?}"
+    );
+    assert_eq!(
+        resolved.file_name().and_then(|n| n.to_str()),
+        Some("core-channel.sock"),
+        "file name must survive resolution: {resolved:?}"
+    );
+    assert!(
+        resolved.starts_with(&cwd),
+        "resolved path must sit under cwd: {resolved:?} vs {cwd:?}"
+    );
+    // socket_path 是 resolve_channel_path 的薄委托，两侧必须同解。
+    assert_eq!(
+        resolved,
+        server::resolve_channel_path(Some("core-channel.sock"))
+    );
+}
+
+/// (b) 绝对配置值：原样返回，不做任何改写。
+/// （TOML basic string 不能裸写反斜杠——Windows 侧用正斜杠形，std::path 同样
+/// 判定为绝对路径。）
+#[test]
+fn absolute_channel_path_is_returned_verbatim() {
+    let abs = if cfg!(windows) {
+        "C:/somewhere/core.sock"
+    } else {
+        "/somewhere/core.sock"
+    };
+    let raw = format!("[service.core]\nchannel_path = \"{abs}\"\n");
+    let cfg = crate::config::Config::parse(&raw).expect("absolute channel_path parses");
+    assert_eq!(server::socket_path(&cfg), StdPath::new(abs));
+    assert_eq!(server::resolve_channel_path(Some(abs)), StdPath::new(abs));
+}
+
+/// (c) 缺省/空配置：走 default_socket_path()。
+#[test]
+fn missing_or_empty_channel_path_falls_back_to_default() {
+    let empty = crate::config::Config::parse("[service.core]\nchannel_path = \"\"\n")
+        .expect("empty channel_path parses");
+    assert_eq!(server::socket_path(&empty), server::default_socket_path());
+    let none = crate::config::Config::parse("[feishu]\nenabled = false\n")
+        .expect("config without channel_path parses");
+    assert_eq!(server::socket_path(&none), server::default_socket_path());
+    assert_eq!(
+        server::resolve_channel_path(None),
+        server::default_socket_path()
+    );
+    assert_eq!(
+        server::resolve_channel_path(Some("")),
+        server::default_socket_path()
+    );
+}
+
 async fn arm_for_test(dir: &StdPath) -> crate::run::ArmedChannel {
     let (cfg, config_path) = arm_config(dir);
     let (router, _out_rx) = DispatchHandle::new(SessionMap::new());
