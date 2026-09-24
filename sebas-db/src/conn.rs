@@ -83,6 +83,17 @@ pub fn secure_directory(dir: &Path) {
     tighten_with(dir, OWNER_ONLY_DIR, &real_chmod);
 }
 
+/// 把**单个文件**收紧到所有者专用（0600），同样只告警不中止。
+///
+/// 供 `open` 之外的**库内容副本**使用：破坏性迁移的整库备份
+/// （`<db>.pre-sync`，见 `schema::backup_database`）是同一份含 provider
+/// `api_key` 的内容，若不收紧就会以 umask 决定的 0644 落地——把 `open`
+/// 刚保护起来的库又复制成世界可读（retire-legacy-state-json 的 0600 保证
+/// 会被备份绕过）。权限比 0600 窄则不动。
+pub fn tighten_file(path: &Path) {
+    tighten_with(path, OWNER_ONLY_FILE, &real_chmod);
+}
+
 /// 打开 SQLite 数据库，配置 WAL mode 和 busy_timeout。
 ///
 /// - 数据库不存在时自动创建

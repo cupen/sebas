@@ -550,6 +550,10 @@ fn backup_database(conn: &Connection, db_path: &Path) -> Result<PathBuf, String>
     let target_str = target.to_string_lossy().to_string();
     conn.execute("VACUUM INTO ?1", rusqlite::params![target_str])
         .map_err(|e| format!("写入备份 {} 失败: {e}", target.display()))?;
+    // 备份是**库内容的完整副本**（含 provider `api_key`、card 快照），必须与库
+    // 文件同权限：`VACUUM INTO` 建出的文件权限由 umask 决定（常见 0644），会把
+    // `conn::open` 的 0600 保证从副本旁路掉。
+    crate::conn::tighten_file(&target);
     info!(path = %db_path.display(), backup = %target.display(), "破坏性 schema 迁移前已备份整库");
     Ok(target)
 }
@@ -1405,6 +1409,18 @@ mod tests {
         // 备份先行：库旁有一份迁移前的完整快照。
         let backups = backup_files(dir.path());
         assert_eq!(backups.len(), 1, "破坏性迁移前必须备份: {backups:?}");
+        // 备份是库内容的完整副本（含 provider api_key），权限必须与库同窄：
+        // `VACUUM INTO` 建的文件默认吃 umask（常见 0644），会把 0600 旁路掉。
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&backups[0]).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode,
+                conn::OWNER_ONLY_FILE,
+                "备份副本必须与库同权限 0600，实得 {mode:o}"
+            );
+        }
         let snap = conn::open_readonly(&backups[0]).unwrap();
         assert_eq!(
             type_affinity(&column_decl(&snap, "alpha", "name")),

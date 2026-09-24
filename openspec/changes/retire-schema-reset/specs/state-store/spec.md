@@ -54,12 +54,17 @@ The schema SHALL be derived from the code's model objects: each registered table
 
 ### Requirement: Destructive schema migration is backed up and fails closed
 
-The sync path SHALL never delete the database file. Before performing any destructive migration step (a table rebuild or a column drop), the store SHALL write a backup copy of the whole database adjacent to the database file, replacing any previous backup; if the backup cannot be written, the destructive migration SHALL NOT run and startup SHALL abort with a diagnostic naming the backup failure. Every migration SHALL run inside a transaction; if a migration step fails, the transaction SHALL roll back, the database SHALL be left byte-identical to before the attempt, and startup SHALL abort with a diagnostic naming the failed step — the store MUST NOT fall back to resetting or rebuilding the database as a side effect of a failed migration.
+The sync path SHALL never delete the database file. Before performing any destructive migration step (a table rebuild or a column drop), the store SHALL write a backup copy of the whole database adjacent to the database file, replacing any previous backup; the backup copy SHALL be tightened to the same owner-only permissions as the database file, because it is a complete copy of the same content (including provider credentials); if the backup cannot be written, the destructive migration SHALL NOT run and startup SHALL abort with a diagnostic naming the backup failure. Every migration SHALL run inside a transaction; if a migration step fails, the transaction SHALL roll back, the database SHALL be left byte-identical to before the attempt, and startup SHALL abort with a diagnostic naming the failed step — the store MUST NOT fall back to resetting or rebuilding the database as a side effect of a failed migration.
 
 #### Scenario: Backup precedes a destructive migration
 
 - **WHEN** a type change or column drop is about to run
 - **THEN** a backup copy of the database is written next to the database file first, and the migration proceeds only after the backup succeeds
+
+#### Scenario: The backup copy is not more permissive than the database
+
+- **WHEN** the backup copy has been written
+- **THEN** its file permissions are owner-only, matching the database file, so the copy does not re-expose content the database itself protects
 
 #### Scenario: Backup failure blocks the destructive migration
 
