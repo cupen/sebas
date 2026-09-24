@@ -165,6 +165,14 @@ pub struct NativeAgentBackend {
     turn_events: broadcast::Sender<TurnStreamEvent>,
     /// Gated-call feed (review cards).
     notices: broadcast::Sender<PermissionNotice>,
+    /// 泊车审批读模型（native 侧）：encoded key → request_id → 审批行。pump
+    /// 在 `PermissionRequest` 事件登记，回合终态（Finished/Error）、close 与
+    /// 决策投递成功时清除；`pending_approvals` 据此枚举。webui 打开/刷新会话
+    /// 经它重建审批面，不再依赖一次性 WS 推送（与 ACP 读模型同契约）——
+    /// fake-provider 秒回的回合里推送会先于页面挂载到达，没有这层兜底，
+    /// native 审批卡在竞态下永久丢失。
+    pending_approvals:
+        Arc<RwLock<HashMap<String, HashMap<String, PendingApproval>>>>,
     /// Why the native backend is unavailable (missing LLM credentials), if so.
     unavailable_cause: Option<String>,
     /// （wire-webui-sebas-agent-e2e）原生内核可供选择的模型 id 列表。来自
@@ -332,14 +340,21 @@ impl NativeAgentBackend {
             events,
             turn_events,
             notices,
+            pending_approvals: Arc::new(RwLock::new(HashMap::new())),
             unavailable_cause,
             available_models,
             default_model,
         })
     }
 
+    /// 会话键编码走 `sebas-channels` 的唯一实现（canonical URL-safe
+    /// `channel\0reference` percent 形）。此前这里是 ChannelKey 的 JSON
+    /// 字符串形——`permission.requested` 帧把它原样透传（api.rs 不再加工），
+    /// 与 webui 路由/turn 流的编码形不一致，review-card 的精确匹配永远丢弃
+    /// native 审批卡；ACP 通路（InProcessBackend 中继）经 `encode_session_key`
+    /// 产出编码形，两条通路必须在 wire 上同形（webui-ws-rpc 契约）。
     fn encode_key(key: &ChannelKey) -> String {
-        serde_json::to_string(key).expect("ChannelKey serialization")
+        sebas_channels::key::encode_session_key(key)
     }
 
     async fn session_info(&self, encoded: &str) -> Option<SessionInfo> {
@@ -348,11 +363,12 @@ impl NativeAgentBackend {
             .map(|s| s.info(&Self::decode_agent_key(encoded)))
     }
 
+    /// encode_key 的逆：严格解码（无 NUL / 非法转义 → None）。退路保持旧
+    /// 语义（整串当作 feishu reference）——只服务防御性输入，正常键全部
+    /// 出自 [`Self::encode_key`]，必可解码。
     fn decode_agent_key(encoded: &str) -> ChannelKey {
-        serde_json::from_str(encoded).unwrap_or_else(|_| ChannelKey {
-            channel: "feishu".into(),
-            reference: encoded.to_string(),
-        })
+        sebas_channels::key::decode_session_key(encoded)
+            .unwrap_or_else(|| ChannelKey::new("feishu", encoded))
     }
 
     /// Drive one native session: kernel events → transcript + lifecycle
@@ -370,6 +386,7 @@ impl NativeAgentBackend {
         events: broadcast::Sender<SessionEvent>,
         turn_events: broadcast::Sender<TurnStreamEvent>,
         notices: broadcast::Sender<PermissionNotice>,
+        pending_approvals: Arc<RwLock<HashMap<String, HashMap<String, PendingApproval>>>>,
     ) {
         use AgentEvent as AE;
         // transcript 落账 + turn 事件广播的一体化出口（锁内调用）。
@@ -469,6 +486,20 @@ impl NativeAgentBackend {
                             "markdown",
                             format!("⏳ **{tool_name}** awaits approval — {reason}"),
                         );
+                        // 泊车登记（读模型半边）：决策/回合终态负责清除。
+                        pending_approvals
+                            .write()
+                            .await
+                            .entry(encoded.clone())
+                            .or_default()
+                            .insert(
+                                request_id.clone(),
+                                PendingApproval {
+                                    request_id: request_id.clone(),
+                                    tool_name: tool_name.clone(),
+                                    args: args.clone(),
+                                },
+                            );
                         let _ = notices.send(PermissionNotice {
                             request_id,
                             session_id: encoded.clone(),
@@ -536,6 +567,8 @@ impl NativeAgentBackend {
                         // workbench-interaction-polish 1.1：turn 终态（含取消
                         // 的非 terminal "turn cancelled"）复位在飞标志。
                         session.in_flight = false;
+                        // 回合已终：内核对悬空审批 fail-closed，泊车登记随之清除。
+                        pending_approvals.write().await.remove(&encoded);
                         removed = terminal;
                         None
                     }
@@ -543,6 +576,8 @@ impl NativeAgentBackend {
                         // 正文已逐 delta 落账（2.1），收尾无积压可 flush；
                         // Updated 仍照发——状态/段计数随快照刷新。
                         session.in_flight = false;
+                        // 回合已终：悬空审批不再待决（fail-closed），清登记。
+                        pending_approvals.write().await.remove(&encoded);
                         Some(SessionEvent::Updated {
                             session: session.info(&key),
                         })
@@ -662,10 +697,14 @@ impl SessionBackend for NativeAgentBackend {
         let events = self.events.clone();
         let turn_events = self.turn_events.clone();
         let notices = self.notices.clone();
+        let pending = self.pending_approvals.clone();
         let pump_key = key.clone();
         let pump_encoded = encoded.clone();
         tokio::spawn(async move {
-            Self::pump(rx, pump_key, pump_encoded, sessions, events, turn_events, notices).await;
+            Self::pump(
+                rx, pump_key, pump_encoded, sessions, events, turn_events, notices, pending,
+            )
+            .await;
         });
 
         // First prompt drives the first turn.
@@ -739,6 +778,8 @@ impl SessionBackend for NativeAgentBackend {
             return Err(SessionRejection::UnknownSession { key: encoded });
         };
         session.handle.cancel().await;
+        // 会话拆除：泊车审批随会话消失（内核 fail-closed，不再待决）。
+        self.pending_approvals.write().await.remove(&encoded);
         // native 内核没有 core 侧待执行栈（提交即投递）。
         Ok(CloseReport::default())
     }
@@ -772,6 +813,27 @@ impl SessionBackend for NativeAgentBackend {
         Some(self.notices.subscribe())
     }
 
+    /// 泊车审批读模型（native 侧）：登记表按会话枚举。未知会话 → typed
+    /// rejection（路由转 404）；已知会话无泊车 = 空表。webui 打开/刷新会话
+    /// 据此重建审批面——推送先于页面挂载到达的竞态由这一半边兜住（与 ACP
+    /// 读模型同契约，fix-webui-approval-restore-and-session-identity 1.2）。
+    async fn pending_approvals(
+        &self,
+        key: ChannelKey,
+    ) -> Result<Vec<PendingApproval>, SessionRejection> {
+        let encoded = Self::encode_key(&key);
+        {
+            let sessions = self.sessions.read().await;
+            if !sessions.contains_key(&encoded) {
+                return Err(SessionRejection::UnknownSession { key: encoded });
+            }
+        }
+        let g = self.pending_approvals.read().await;
+        Ok(g.get(&encoded)
+            .map(|approvals| approvals.values().cloned().collect())
+            .unwrap_or_default())
+    }
+
     async fn answer_permission(&self, request_id: &str, decision: PermissionDecision) -> bool {
         // 决定词汇已合一（type-session-vocabularies 3.2）：这里不再有手写桥，
         // `PermissionDecision` 与 `ApprovalAnswer` 是**同一个**类型，直投即可。
@@ -784,7 +846,16 @@ impl SessionBackend for NativeAgentBackend {
             );
             return false;
         }
-        self.hub.answer(request_id, decision)
+        let delivered = self.hub.answer(request_id, decision);
+        if delivered {
+            // 决定已投递：从泊车登记移除（读模型不再枚举该请求；迟到推送 /
+            // 陈旧读模型行由前端墓碑与 404 expired 语义兜住）。
+            let mut g = self.pending_approvals.write().await;
+            for approvals in g.values_mut() {
+                approvals.remove(request_id);
+            }
+        }
+        delivered
     }
 }
 
@@ -1334,17 +1405,32 @@ mod tests {
             .expect("notice timeout")
             .expect("notice");
         assert_eq!(notice.tool_name, "bash");
+        // 会话键是 canonical URL-safe 编码形（webui 路由/turn 流/ACP 通路的
+        // 同一 wire 形，webui-ws-rpc 契约）；JSON 字符串形会让 review-card
+        // 的精确匹配永远丢弃 native 审批卡。
         assert_eq!(
             notice.session_id,
-            NativeAgentBackend::encode_key(&key),
-            "session id is the encoded key"
+            sebas_channels::key::encode_session_key(&key),
+            "session id is the canonical encoded key"
         );
+        assert!(
+            notice.session_id.starts_with("feishu%00agent-"),
+            "native notice session_id must be the URL-safe encoded shape, got {:?}",
+            notice.session_id
+        );
+        // 泊车审批读模型：决策前枚举到该请求，决策投递后清空。
+        let parked = backend.pending_approvals(key.clone()).await.expect("read model");
+        assert_eq!(parked.len(), 1, "the gated call is parked");
+        assert_eq!(parked[0].request_id, notice.request_id);
+        assert_eq!(parked[0].tool_name, "bash");
         assert!(
             backend
                 .answer_permission(&notice.request_id, PermissionDecision::AllowOnce)
                 .await,
             "answer must reach the pending request"
         );
+        let parked = backend.pending_approvals(key.clone()).await.expect("read model");
+        assert!(parked.is_empty(), "answered request must leave the registry");
 
         // turn 收尾后的 transcript：策略事件 + 完成文本可见。
         let deadline = Duration::from_secs(10);
