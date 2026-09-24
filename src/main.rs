@@ -120,8 +120,32 @@ async fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Cmd::WebUiPasswd(args) => {
-            if let Err(e) = sebas::webui_cmd::run_passwd(args.into()) {
+        Cmd::Auth(args) => {
+            // 一次性管理命令（非服务）：失败按普通错误退出 1。
+            let cmd = match args.cmd {
+                cli::AuthCmd::Add {
+                    username,
+                    role,
+                    password,
+                    password_stdin,
+                } => sebas::auth_cmd::AuthCmd::Add {
+                    username,
+                    role,
+                    password,
+                    password_stdin,
+                },
+                cli::AuthCmd::Passwd {
+                    username,
+                    password,
+                    password_stdin,
+                } => sebas::auth_cmd::AuthCmd::Passwd {
+                    username,
+                    password,
+                    password_stdin,
+                },
+                cli::AuthCmd::List => sebas::auth_cmd::AuthCmd::List,
+            };
+            if let Err(e) = sebas::auth_cmd::run(sebas::auth_cmd::AuthArgs { cmd }) {
                 eprintln!("error: {e:?}");
                 std::process::exit(1);
             }
@@ -588,17 +612,6 @@ impl From<WebUiArgs> for sebas::webui_cmd::WebUiArgs {
     }
 }
 
-impl From<cli::WebUiPasswdArgs> for sebas::webui_cmd::WebUiPasswdArgs {
-    fn from(a: cli::WebUiPasswdArgs) -> Self {
-        Self {
-            user: a.user,
-            password: a.password,
-            password_stdin: a.password_stdin,
-            role: a.role,
-        }
-    }
-}
-
 impl From<cli::UpdateArgs> for sebas::update::UpdateArgs {
     fn from(a: cli::UpdateArgs) -> Self {
         Self {
@@ -844,6 +857,105 @@ mod tests {
             panic!("expected WebUi subcommand");
         };
         assert_eq!(args.config, "./config.toml");
+    }
+
+    #[test]
+    fn auth_group_parses_all_three_verbs() {
+        // add-auth-subcommand 2.2：add / passwd / list 三动词各自可出，
+        // 用户名是位置参数（auth-cli spec「auth 组命令形态」）。
+        let cli = Cli::try_parse_from([
+            "sebas",
+            "auth",
+            "add",
+            "alice",
+            "--role",
+            "viewer",
+            "--password",
+            "pw",
+        ])
+        .expect("`sebas auth add` must parse");
+        let Cmd::Auth(args) = cli.cmd else {
+            panic!("expected Auth subcommand");
+        };
+        let cli::AuthCmd::Add {
+            username,
+            role,
+            password,
+            password_stdin,
+        } = args.cmd
+        else {
+            panic!("expected Add subcommand");
+        };
+        assert_eq!(username, "alice");
+        assert_eq!(role.as_deref(), Some("viewer"));
+        assert_eq!(password.as_deref(), Some("pw"));
+        assert!(!password_stdin);
+
+        let cli = Cli::try_parse_from([
+            "sebas",
+            "auth",
+            "passwd",
+            "alice",
+            "--password-stdin",
+        ])
+        .expect("`sebas auth passwd` must parse");
+        let Cmd::Auth(args) = cli.cmd else {
+            panic!("expected Auth subcommand");
+        };
+        let cli::AuthCmd::Passwd {
+            username,
+            password,
+            password_stdin,
+        } = args.cmd
+        else {
+            panic!("expected Passwd subcommand");
+        };
+        assert_eq!(username, "alice");
+        assert!(password.is_none());
+        assert!(password_stdin);
+
+        let cli = Cli::try_parse_from(["sebas", "auth", "list"]).expect("`sebas auth list` must parse");
+        assert!(matches!(cli.cmd, Cmd::Auth(a) if matches!(a.cmd, cli::AuthCmd::List)));
+
+        // 用户名位置参数必填：缺了就是 clap 解析错误。
+        assert!(Cli::try_parse_from(["sebas", "auth", "add"]).is_err());
+        assert!(Cli::try_parse_from(["sebas", "auth", "passwd"]).is_err());
+    }
+
+    #[test]
+    fn auth_password_sources_conflict_at_parse_level() {
+        // auth-cli spec「来源互斥报错」：clap 层即拒绝（参数错误非零退出）。
+        assert!(
+            Cli::try_parse_from([
+                "sebas",
+                "auth",
+                "add",
+                "alice",
+                "--password",
+                "pw",
+                "--password-stdin"
+            ])
+            .is_err(),
+            "--password 与 --password-stdin 必须互斥"
+        );
+    }
+
+    #[test]
+    fn retired_webui_passwd_is_unknown_subcommand() {
+        // add-auth-subcommand（BREAKING，clean-break 无别名）：旧
+        // `webui-passwd` 一律未知子命令非零退出；账户管理改用 `sebas auth`。
+        assert!(Cli::try_parse_from(["sebas", "webui-passwd"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "sebas",
+                "webui-passwd",
+                "--user",
+                "admin",
+                "--password",
+                "admin"
+            ])
+            .is_err()
+        );
     }
 
     #[test]

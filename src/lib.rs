@@ -17,6 +17,9 @@ pub const ROUTER_SUBCOMMAND: &str = "router";
 
 pub mod agent_backend;
 pub mod agent_kinds;
+/// `sebas auth` 命令行面（add-auth-subcommand；建户/改密/列表核心在本模块，
+/// 存储层在 `sebas_webui::user_store`）。
+pub mod auth_cmd;
 pub mod config;
 pub mod core_channel;
 mod dispatch;
