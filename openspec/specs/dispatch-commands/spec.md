@@ -26,7 +26,7 @@ The system SHALL match commands case-sensitively against the exact command word 
 
 ### Requirement: Per-command argument validation
 
-Each command SHALL enforce its own argument contract: `/switch` requires a numeric argument (otherwise the line passes through); `/rollback`, `/restart`, `/services` reject any argument; `/router` accepts only `on|off|restart|status`; `/webui` accepts only `status`; `/upgrade` accepts only `dev`/`--dev` and `--dry-run`/`dry-run` flags; `/system` ignores trailing arguments; empty `/btw` passes through as text.
+Each command SHALL enforce its own argument contract: `/switch` requires a numeric argument (otherwise the line passes through); `/rollback`, `/restart`, `/services` reject any argument; `/router` accepts only `on|off|restart|status`; `/webui` accepts only `status`; `/upgrade` accepts only `dev`/`--dev` and `--dry-run`/`dry-run` flags; `/system` ignores trailing arguments; empty `/btw` passes through as text; `/confirm` requires its token argument (bare `/confirm` does not pass through — it is handled locally as an incomplete confirmation). `/gateway` is retained as a hidden alias of `/router` (rename-cli-surface compatibility) with the same argument contract.
 
 #### Scenario: Router with invalid action passes through
 
@@ -138,10 +138,10 @@ Each command SHALL enforce its own argument contract: `/switch` requires a numer
 - **WHEN** the user sends `/model sonnet`
 - **THEN** the session receives the literal prompt `/model sonnet`
 
-#### Scenario: /cd currently has no effect
+#### Scenario: /cd replies an explicit unsupported notice
 
 - **WHEN** the user sends `/cd /tmp`
-- **THEN** the working directory is not changed and no response is sent to the chat
+- **THEN** the working directory is not changed and the chat receives the plain-text "暂未支持" notice naming `/cd` (with the `/new` and `/sessions` alternatives)
 
 ### Requirement: Inbound acknowledgment reaction
 

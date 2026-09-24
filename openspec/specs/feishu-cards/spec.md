@@ -6,7 +6,7 @@ per-turn card model, streaming update cadence, content layout, thinking/tool
 rendering, long-content truncation and card rotation, interactive elements,
 help cards, and error/status cards.
 
-The router produces the neutral presentation model; the Feishu adapter maps it to Feishu card schema 2.0 JSON and API calls (decouple-feishu-channel).
+The IM service's frontend produces the neutral presentation model; the Feishu adapter maps it to Feishu card schema 2.0 JSON and API calls (decouple-feishu-channel, extract-im-service).
 
 ## Requirements
 
@@ -31,31 +31,31 @@ The Feishu adapter SHALL maintain exactly one `CardState` per session, seeded wh
 
 ### Requirement: Card structure
 
-Every turn card SHALL be structured top-to-bottom as: header (title derived from the first non-empty line of the user prompt, truncated to 40 chars), quote block containing the user prompt, divider, body elements, and footer. The footer SHALL show the model and token usage as `{model} · in: {input} out: {output} · ctx: {total_input}` when usage is known, otherwise `msg_id: {session_id}`.
+Every turn card SHALL be structured top-to-bottom as: header (title derived from the first non-empty line of the user prompt, condensed to at most 24 chars — contiguous whitespace collapsed, truncated at a whitespace boundary, hanging punctuation stripped, and an ellipsis appended when truncated), quote block containing the user prompt, divider, body elements, and footer. The footer SHALL show the model and token usage in the `{model}  ·  in: {input} out: {output}  ·  ctx: {total_input}` form with humanized token counts and the model short name when usage is known, otherwise `msg_id: {session_id}`.
 
 #### Scenario: usage footer
 
 - **WHEN** a turn finishes with a usage event carrying input=10, output=25, total_input=12 for model `claude-x`
-- **THEN** the card footer renders `claude-x · in: 10 out: 25 · ctx: 12`
+- **THEN** the card footer renders the model short name and the humanized token counts separated by `·` (for example `claude-x  ·  in: 10 out: 25  ·  ctx: 12`)
 
 #### Scenario: title truncation
 
 - **WHEN** the user prompt's first non-empty line is 80 characters
-- **THEN** the card header title shows only the first 40 characters
+- **THEN** the card header title shows a condensed form of at most 24 characters ending with an ellipsis
 
 ### Requirement: Streaming update cadence
 
-Streaming events SHALL accumulate in an in-memory card body and flush as a single `UpdateCard` per debounce tick (150 ms), coalescing multiple deltas into one API call. The system SHALL flush immediately — bypassing the debounce — on `Finished`, terminal `Error`, and `PermissionRequest` events.
+Streaming events SHALL accumulate in the IM frontend's per-session card view and be flushed as a single PATCH per render tick: the frontend polls the session's turn stream on a fixed interval (250 ms) and flushes whenever the view is dirty, coalescing multiple deltas into one API call. Boundary events (`Finished`, terminal `Error`, `PermissionRequest`) SHALL be flushed without waiting for the next tick.
 
 #### Scenario: deltas coalesce
 
-- **WHEN** five text deltas arrive within one debounce window
-- **THEN** exactly one `UpdateCard` call flushes after the window
+- **WHEN** five text deltas arrive within one 250 ms poll interval
+- **THEN** exactly one update call flushes for that tick
 
 #### Scenario: terminal event flushes immediately
 
-- **WHEN** the `Finished` event arrives mid-debounce-window
-- **THEN** the pending body flushes without waiting for the window to expire
+- **WHEN** the `Finished` event arrives mid-interval
+- **THEN** the pending body flushes without waiting for the next tick
 
 ### Requirement: Terminal state rendering
 
@@ -134,31 +134,39 @@ Cards SHALL be emitted as Feishu card schema `2.0` JSON using interactive v2 ele
 
 ### Requirement: Help card
 
-The `/help` command SHALL render an interactive help card organized as tabs (命令 / 会话 / 管理 / 通道), with command buttons laid out in 2–3 columns via `column_set` (wide commands taking a full row). Tab switching SHALL update the same card in place (PATCH by msg id) rather than sending a new card. Clicking a command button SHALL behave as if the user typed that command's text.
+The `/help` command SHALL render an interactive help card organized as grouped sections (💬 会话管理 / ⚙️ 系统功能 / 🔧 服务管理 / 📦 其他), with command buttons laid out in 2–3 columns via `column_set` (wide commands taking a full row). Clicking a command button SHALL behave as if the user typed that command's text.
 
-#### Scenario: tab switch in place
-
-- **WHEN** the user clicks the 会话 tab button on the help card
-- **THEN** the existing help card is updated in place to show session commands, with no new message in the chat
+> **Reality note**: in-flight tab-switching (updating the same card in place
+> per tab) is defined in the retired engine outbound path only; the live IM
+> frontend does not yet answer the tab callback, so a tab click currently
+> yields the "点击未识别" fallback receipt. Either wiring the tab callback in
+> the IM frontend or removing the tab buttons is pending decision.
 
 #### Scenario: command button invocation
 
 - **WHEN** the user clicks a command button on the help card
-- **THEN** the router processes the corresponding command text through the same path as a typed message
+- **THEN** the IM frontend resolves the callback to the corresponding command text and issues it through the same path as a typed message
 
-### Requirement: Error and status cards
+### Requirement: Error and status presentation
 
-System events SHALL be reported as dedicated cards: spawn failure as a red `❌ 启动失败` card (detail in a code fence when multi-line or over 120 chars); interaction with a dead session as a grey `会话已结束` card; a rejected resume falling back to a fresh session as an orange `已开启新会话` card.
+Live terminal states SHALL be presented in place rather than as separate
+message cards: a turn that ends in error SHALL flip the current card's working
+panel to its error state and the triggering user message SHALL receive a `❌`
+(FAILED) reaction; dead-session interaction and rejected-resume clicks SHALL be
+answered by flipping the clicked card in place with a short text fallback
+naming the outcome. (Reality note: the former dedicated red `❌ 启动失败` /
+grey `会话已结束` / orange `已开启新会话` message cards belonged to the
+retired core outbound card path and are no longer sent on the live path.)
 
-#### Scenario: spawn failure card
+#### Scenario: terminal error marks the turn
 
-- **WHEN** the ACP child fails to start with error `claude not found`
-- **THEN** the adapter sends a red card titled `❌ 启动失败` containing the error
+- **WHEN** the ACP session reports a terminal error with message `boom`
+- **THEN** the turn card shows the error row and the user's message carries the FAILED reaction
 
 #### Scenario: dead session interaction
 
 - **WHEN** a button callback arrives for a session whose mapping is gone
-- **THEN** the adapter replies with a grey `会话已结束` card instead of routing the action
+- **THEN** the clicked card is flipped in place with an honest outcome text instead of routing the action
 
 ### Requirement: Card lifecycle cleanup
 
@@ -171,7 +179,7 @@ The system SHALL drop the card state when a session ends (terminal error, channe
 
 ### Requirement: Card theme configuration
 
-The card theme color (`card.theme_color`, default `blue`) SHALL flow into the card header template. Card settings SHALL be parsed with strict (deny-unknown-fields) semantics — an unknown key in `[card]` is a configuration error rather than a silent ignore — and persisted as a full-snapshot JSON file written atomically with mode 0600.
+The card theme color (`card.theme_color`, default `blue`) SHALL flow into the card header template. Card settings SHALL be parsed with strict (deny-unknown-fields) semantics — an unknown key in `[card]` is a configuration error rather than a silent ignore — and SHALL be persisted as a full config snapshot in the core state store, which SHALL be the only authority for card settings. Card settings SHALL NOT be persisted to a JSON file of their own. The state store file that carries the snapshot SHALL be readable and writable only by its owner, and the snapshot SHALL be replaced atomically as a whole so a reader never observes a partially written configuration.
 
 #### Scenario: default theme
 
@@ -182,6 +190,12 @@ The card theme color (`card.theme_color`, default `blue`) SHALL flow into the ca
 
 - **WHEN** the config file contains `[card]` with key `theme_colr`
 - **THEN** configuration parsing fails with an unknown-field error
+
+#### Scenario: card settings survive restart without a settings file
+
+- **WHEN** an operator changes the card theme and the process restarts
+- **THEN** the changed theme still applies
+- **AND** no card-settings JSON file exists on disk
 
 ### Requirement: Feishu adapter renders the neutral presentation model
 

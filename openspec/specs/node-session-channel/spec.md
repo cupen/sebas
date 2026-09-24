@@ -110,7 +110,7 @@ A session's project SHALL cross the link as a reference to a directory path on t
 
 ### Requirement: Session placement is a function of the project
 
-A session SHALL be placed on the node named by its project reference. A session with no project SHALL be placed on the configured default execution node. When the target node is offline, the session request SHALL fail with a cause naming the node and its state; the request SHALL NOT be queued for later delivery. The placement request SHALL carry the session's creation-time desired mode, and mid-session mode changes SHALL travel to the node over the existing SetMode primitive; the node's reported effective mode remains the node's fact, not the control plane's wish.
+A session SHALL be placed on the node named by its project reference. A session with no project SHALL be placed on the configured default execution node — a path that in the current product only a Feishu-originated session can reach, since webui session creation requires a project (require-session-project); remote-node placement itself is unchanged by that rule. When the target node is offline, the session request SHALL fail with a cause naming the node and its state; the request SHALL NOT be queued for later delivery. The placement request SHALL carry the session's creation-time desired mode, and mid-session mode changes SHALL travel to the node over the existing SetMode primitive; the node's reported effective mode remains the node's fact, not the control plane's wish.
 
 #### Scenario: project decides the node
 
@@ -137,3 +137,25 @@ A session SHALL be placed on the node named by its project reference. A session 
 
 - **WHEN** the control plane switches a placed session's mode mid-session
 - **THEN** the SetMode op arrives at the node, the node updates its gate behavior and reports the outcome, and the control-plane projection reflects the reported mode
+
+### Requirement: Link contract is pinned by fixtures
+
+The node link's existing version and capability negotiation SHALL be backed by a checked-in contract fixture set, so that the link's wire shapes are held by a mechanical gate rather than by the discipline of the crate that owns them. The fixtures SHALL pin each link message's serialized shape and its set of field names.
+
+#### Scenario: A link message change must update the fixture
+
+- **WHEN** a link message gains, loses, or renames a field
+- **THEN** the link's contract fixture test fails until the fixture is updated deliberately
+- **AND** the change record states whether the alteration is compatible or breaking
+
+#### Scenario: Version negotiation is covered by the same gate
+
+- **WHEN** the handshake or its version negotiation changes
+- **THEN** the fixture set covering the handshake is updated in the same change
+- **AND** the existing exact-version comparison and the rejection naming both versions remain in force
+
+#### Scenario: The link keeps one shared definition
+
+- **WHEN** the control plane and the node are built
+- **THEN** both obtain the link's message types from the single shared contract crate
+- **AND** neither side carries a redeclared copy

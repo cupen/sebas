@@ -53,7 +53,7 @@
 
 ### Requirement: 既有事件迁入 Notification
 
-既有 7 种事件帧（session.created / session.updated / session.removed / session.pending_dropped / config.updated / permission.requested / turn.append）SHALL 以 `Notification{method: 原 type, params: 原 payload}` 投递，裸 `{type, ...}` 帧 SHALL 不再出现。订阅方按 method 分发，分发 key 与既有契约一致；未知 method 的 Notification SHALL 被容忍（忽略，不断连）。
+会话事件帧（session.created / session.updated / session.removed / session.pending_dropped / session.turn_stalled / session.resync / config.updated / permission.requested / turn.append / core.reachability）SHALL 以 `Notification{method: 原 type, params: 原 payload}` 投递，裸 `{type, ...}` 帧 SHALL 不再出现。订阅方按 method 分发，分发 key 与既有契约一致；未知 method 的 Notification SHALL 被容忍（忽略，不断连）。
 
 #### Scenario: turn.append 以 Notification 到达
 

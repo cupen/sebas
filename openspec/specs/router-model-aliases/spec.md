@@ -17,10 +17,10 @@ A model alias SHALL be persisted in the core state store as a row with fields: `
 ### Requirement: Alias resolution precedence
 
 Alias matching SHALL sit in the routing priority chain between the provider
-namespace and exact config routes: (1) provider namespace (`provider/model`,
-first segment names a known provider); (2) alias exact match; (3) exact
-config route; (4) glob route; (5) default provider. An alias whose name
-equals a config-seed route name MUST win over the config route. Alias
+namespace and the default provider: (1) provider namespace (`provider/model`,
+first segment names a known provider); (2) alias exact match; (3) default
+provider. The legacy `[router.routes]` config table is retired and SHALL NOT
+contribute routing entries (see router-core). Alias
 matching is exact — aliases never participate in glob matching.
 
 #### Scenario: alias routes to bound provider
@@ -29,11 +29,12 @@ matching is exact — aliases never participate in glob matching.
   names model `my-claude`
 - **THEN** the request routes to `company`
 
-#### Scenario: alias beats same-named config route
+#### Scenario: alias beats a same-named deprecated config route
 
-- **WHEN** alias `m1` is bound to provider `beta` while a config route `m1`
-  points to provider `alpha`
-- **THEN** a request for model `m1` routes to `beta`
+- **WHEN** alias `m1` is bound to provider `beta` while a deprecated
+  `[router.routes]` table maps `m1` to provider `alpha`
+- **THEN** a request for model `m1` routes to `beta` — the legacy table is
+  not consulted at all
 
 #### Scenario: namespace still wins over alias
 

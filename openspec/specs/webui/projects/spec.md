@@ -6,6 +6,17 @@ Code agent in that directory, and interact with it through the browser —
 turning the WebUI from a session viewer into a project-oriented agent
 workspace.
 
+> **Reality note（retired surface, pending formal retirement）**: the HTMX-era
+> surface this spec describes no longer exists in the product — there is no
+> `GET /agent` route, no `POST /api/agent/projects` auto-spawn, no
+> `GET /agent/{key}/timeline` fragments, and no composer creation mode. The
+> project-oriented workbench now lives in the SPA workbench (`/`), governed by
+> the `agent-workbench`, `webui`, and `project-session-actions` specs. The
+> frontend routes are `/`, `/sessions`, and `/sessions/:key` only; SessionRow
+> carries `project_id`, not `project_dir`. This capability is retained only
+> until its formal retirement lands via a REMOVED delta; do not implement
+> against it.
+
 ## Requirements
 
 ### Requirement: Agent project page

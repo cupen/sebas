@@ -1,7 +1,8 @@
 # watchdog Specification
 
 ## Purpose
-Defines the watchdog daemon: supervision of the core child process, safe
+Defines the watchdog daemon (entry command `sebas run`): supervision of its
+managed child services (core, webui, router, im), safe
 execution of upgrades and rollbacks, the authenticated control RPC surface,
 the dangerous-action confirmation flow, the in-memory event timeline, service
 lifecycle, and bare-core degraded mode.
@@ -24,7 +25,7 @@ The watchdog SHALL spawn the core as `current_exe() core --config <path>` — th
 #### Scenario: spawn failure within limit still logged
 
 - **WHEN** spawning fails but未达 N 次上限
-- **THEN** watchdog SHALL 写结构化错误日志（含 stderr 摘要）、按 1 s 退避重试、触发者经 `sebas ctl status` SHALL 看到上次失败时间与原因
+- **THEN** watchdog SHALL 写结构化错误日志（含 stderr 摘要）、按固定 5 s 退避（`SPAWN_RETRY_DELAY`）重试、触发者经 `sebas ctl status` SHALL 看到上次失败时间与原因
 
 #### Scenario: spawn failure retries
 
@@ -32,14 +33,14 @@ The watchdog SHALL spawn the core as `current_exe() core --config <path>` — th
 - **THEN** the watchdog logs the error, waits, and retries — the watchdog
   process itself stays alive until N 次连续失败再终止
 
-#### Scenario: early-fatal counts toward startup-failure limit
+#### Scenario: early-fatal exit counts toward startup-failure limit
 
-- **WHEN** core 在 pipe 上发送 early-fatal 行后退出、且未达 ready
+- **WHEN** core 在 ready 之前以非 75 退出码退出（pipe 协议只承载 readiness；early-fatal 无 pipe 错误行，失败经退出码 + `SEBAS_STARTUP_ERROR_FILE` 分类）
 - **THEN** 该退出 SHALL 计入 `failed-startup` 终态计数器，与 spawn failure 同等待遇
 
 ### Requirement: Crash backoff
 
-The crash counter SHALL apply per managed service (core, webui, router),
+The crash counter SHALL apply per managed service (core, webui, router, im),
 each with an independent counter that resets when that service's previous
 crash was more than 1 h ago. Restarts proceed while the service's crash
 count is at or below the maximum (3); once exceeded, the watchdog sleeps
@@ -285,9 +286,9 @@ and SHALL be documented as such.
 
 #### Scenario: webui enabled by default
 
-- **WHEN** the config has no `[watchdog.webui]` section
-- **THEN** the watchdog spawns the WebUI child (webui 是 watchdog 唯一默认
-  启动的服务，enable-core-by-default 后 core 亦恒启）
+- **WHEN** the config has no `[service.webui]` section
+- **THEN** the watchdog spawns the WebUI child（webui 是唯一默认 `enabled` 的
+  服务开关；core 恒启动、无开关；im 缺省跟随 feishu 判定；router 默认关闭）
 
 #### Scenario: crashed webui is restarted
 
@@ -420,3 +421,42 @@ core 子进程的 readiness 信号 SHALL 在核心会话通道武装完成之后
 
 - **WHEN** core 的通道 socket bind 失败（路径被存活进程占用）
 - **THEN** core 以 bind 失败退出码退出且从未发出 ready，supervisor 依据退出码标记 Degraded（对齐 webui bind 失败语义），不进入无限重启循环
+
+### Requirement: Service override layer follows the state directory
+
+The watchdog's service desired-state override layer SHALL resolve inside the state directory rather than a fixed home-relative path, and SHALL be explicitly overridable for deployments that keep it elsewhere. Because this file was previously unpinnable, a sandboxed or test instance SHALL be able to keep it out of the operator's real configuration directory without editing any configuration file. The override layer is operator configuration, on par with the configuration file: it records explicit decisions made through service-set operations, and the watchdog's entire handling of it is reading it at spawn decisions and rewriting it when such an operation arrives. The watchdog SHALL NOT acquire a persistence layer for it — no database, no schema machinery; it stays a plain file. Service-set operations arrive at the watchdog's own control socket from surfaces such as the CLI, the web UI's service page, and the IM bridge; the core is not on that path. The three-layer resolution (configuration, then override file, then runtime) and the rule that core is unconditionally managed and ignores the override layer are unchanged.
+
+#### Scenario: sandboxed watchdog does not touch the operator's directory
+
+- **WHEN** the state directory is pinned and the watchdog starts with its override layer defaulting to the derived location
+- **THEN** the override layer is created inside the pinned directory
+- **AND** nothing is written to the operator's real configuration directory
+
+#### Scenario: explicit override still wins
+
+- **WHEN** the override layer's own path is configured explicitly
+- **THEN** that path is used instead of the derived one
+
+#### Scenario: the watchdog acquires no persistence layer
+
+- **WHEN** a service-set operation is recorded
+- **THEN** it is written to the plain override file and nowhere else
+- **AND** the watchdog binary carries no database dependency
+
+#### Scenario: a runtime override survives a watchdog restart
+
+- **WHEN** the operator sets a service's desired state and the watchdog later restarts
+- **THEN** the spawn decision for that service still reflects the recorded override
+- **AND** the override was read from the file, not from any other process
+
+#### Scenario: the override layer works while core is down
+
+- **WHEN** the core process is not running and the operator sets a service's desired state
+- **THEN** the watchdog records the desired state and applies it without involving the core
+- **AND** the recorded state is read at the next spawn decision even if the core has never started
+
+#### Scenario: core still ignores the override layer
+
+- **WHEN** the override layer names core as disabled
+- **THEN** core is still spawned and supervised, and the override is ignored with a warning
+- **AND** this is unchanged from the previous behavior

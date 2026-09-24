@@ -28,6 +28,8 @@ On daemon start, the system SHALL restore the persisted session map from the sta
 - **THEN** after restart the session map contains every mapping committed before the kill
 - **AND** it does not depend on a snapshot having been written at the last graceful shutdown
 
+## ADDED Requirements
+
 ### Requirement: Session map is persisted per mutation
 
 Each committed change to a session's mapping SHALL be durable in the state store before it is observable to clients, so that an abrupt process exit cannot roll a mapping back to an earlier state. The session map SHALL NOT be persisted only at shutdown.

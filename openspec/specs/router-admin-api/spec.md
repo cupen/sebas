@@ -18,13 +18,13 @@ addresses and reject others with 401; startup logs a warning in that mode.
 
 #### Scenario: bearer accepted
 
-- **WHEN** `SEBAS_CONTROL_SECRET` is set and a request to `/admin/providers`
+- **WHEN** `SEBAS_CONTROL_SECRET` is set and a request to `/admin/stats`
   carries the correct bearer token
 - **THEN** the request is processed normally
 
 #### Scenario: wrong bearer rejected
 
-- **WHEN** a request to `/admin/providers` carries a wrong or missing bearer
+- **WHEN** a request to `/admin/stats` carries a wrong or missing bearer
   token while a control secret is set
 - **THEN** the response is 401 and the body does not contain the presented
   token value
@@ -32,7 +32,7 @@ addresses and reject others with 401; startup logs a warning in that mode.
 #### Scenario: loopback fallback in standalone mode
 
 - **WHEN** no control secret is set and a loopback client requests
-  `/admin/providers`
+  `/admin/stats`
 - **THEN** the request is processed, while the same request from a
   non-loopback address yields 401
 
@@ -41,13 +41,16 @@ addresses and reject others with 401; startup logs a warning in that mode.
 The router SHALL read provider overrides (providers, deletions, model aliases) through
 the core channel state methods, backed by the core state store, merged on top of the
 config seed. The core state store SHALL be the single source of truth for provider and
-model data, and core SHALL be its only writer: the feishu `/provider` card path, the
-WebUI provider surface, and this process's admin read views all obtain and mutate that
+model data, and core SHALL be its only writer: the feishu `/provider` card path and
+the WebUI provider surface obtain and mutate that
 data through core. The router SHALL NOT write provider, alias, or default data by any
 path — no admin mutation endpoint, no file fallback, no direct write to
 `providers.json` or a defaults file. When no stored provider data exists, the config seed
 alone applies. Legacy JSON files SHALL NOT be imported and SHALL NOT be written: the
-state store starts empty and remains the only authority.
+state store starts empty and remains the only authority. As a degraded read path only,
+when the core channel is unavailable the router MAY re-read the provider overlay file
+(`SEBAS_ROUTER_PROVIDER_OVERLAY`) so hand-edited external changes still apply on
+reload — the file is never written by the router.
 
 #### Scenario: card-edited provider reaches router
 
