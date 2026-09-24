@@ -47,23 +47,24 @@ export function sebasBin(): string {
 /**
  * Env for a core (or any channel client) spawned against the scene: every
  * default that would fall back to the real `~/.sebas` is redirected into
- * the scene (SAME set the harness injects — SEBAS_HOME / SEBAS_WEBUI_AUTH_DB
- * included: the state directory resolves to the scene, so the project
- * registry lands in the scene's `projects.db`), and SEBAS_CORE_SECRET is
- * REMOVED so the auto-arm + discovery path is exercised, never the env
- * shortcut.
+ * the scene (SEBAS_HOME / SEBAS_WEBUI_AUTH_DB included: the state directory
+ * resolves to the scene, so the project registry lands in the scene's
+ * `projects.db`), and SEBAS_CORE_SECRET is REMOVED so the auto-arm +
+ * discovery path is exercised, never the env shortcut.
  *
  * migrate-project-registry: `SEBAS_PROJECTS_PATH` is retired (there is no
- * `projects.json` any more — the registry lives in `projects.db`), so this
- * helper no longer pins it.
+ * `projects.json` any more — the registry lives in `projects.db`).
+ * retire-legacy-state-json: `SEBAS_STATE_DB` / `SEBAS_STATE_FILE` /
+ * `SEBAS_ROUTER_PROVIDER_OVERLAY` are retired too (exporting them changes
+ * nothing), so this helper no longer pins them. Isolation rests on the
+ * single state-directory variable (+ SEBAS_HOME / HOME), matching the
+ * harness's `_sandbox_env`.
  */
 export function detachedCoreEnv(scene: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env }
   delete env.SEBAS_CORE_SECRET
   env.SEBAS_HOME = scene
-  env.SEBAS_STATE_DB = path.join(scene, 'sebas.db')
-  env.SEBAS_STATE_FILE = path.join(scene, 'state.json')
-  env.SEBAS_ROUTER_PROVIDER_OVERLAY = path.join(scene, 'providers.json')
+  env.SEBAS_STATE_DIR = scene
   env.SEBAS_WEBUI_AUTH_DB = path.join(scene, 'auth.db')
   // add-agent-skills：skills sync 的 backend 落点经 HOME 的 env-first 解析
   // （skills::resolve_home），harness 侧已钉（tasks.py _sandbox_env）——重启的

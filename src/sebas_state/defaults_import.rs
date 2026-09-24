@@ -33,7 +33,7 @@ struct LegacyDefaults {
     model: Option<String>,
 }
 
-/// 启动期一次性导入（定位经 `SEBAS_ROUTER_PROVIDER_OVERLAY` 派生）。
+/// 启动期一次性导入（定位经状态目录派生——两个 legacy 文件 env 已退休）。
 pub async fn import_legacy_defaults_once(handle: &StateHandle) -> Result<bool, String> {
     import_legacy_defaults_from(handle, &legacy_defaults_path()).await
 }

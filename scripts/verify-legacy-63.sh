@@ -10,7 +10,9 @@
 #   5. 断言三个遗留文件逐字节未变、库里无 POISON 值。
 set -uo pipefail
 
-REPO=/data/workbench/repos-ai/sebas-sg-w5a
+# 仓库根从脚本自身位置推导（脚本在 <repo>/scripts/ 下）——此前硬编码了某个
+# worktree 的绝对路径，换 checkout 就跑不起来。
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SB="$(mktemp -d /tmp/sebas-legacy-63-XXXXXX)"
 CORE_LOG="$SB/core.log"
 ROUTER_LOG="$SB/router.log"
@@ -82,7 +84,9 @@ api_key = "sk-sandbox-dummy"
 
 [router]
 listen = "127.0.0.1:18771"
-provider_overlay = "$SB/providers.json"
+# 不写 `provider_overlay`：该键已退休（retire-legacy-state-json 3.5），写了只会
+# 触发废弃告警。本脚本正是要证明 $SB/providers.json 这个遗留文件**不被读取**，
+# 所以更不能把它接回配置——它只作为「毒值不被导入」的诱饵存在。
 
 [dispatch]
 TOML
