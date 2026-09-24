@@ -111,5 +111,10 @@ pub async fn run(args: Args) -> Result<(), SebasError> {
         NodeLinkOutcome::Failed { cause } => {
             Err(SebasError::Config(format!("管理操作失败：{cause}")))
         }
+        // （6.1）对端报了本 build 不认识的 result：如实报告，绝不假装成功
+        // （节点链路管理是会改状态的操作，"看不懂"必须表现为失败）。
+        NodeLinkOutcome::Unknown => Err(SebasError::Config(
+            "core 返回了本版本不认识的节点链路结果（core 比 CLI 新），本次操作结果未知".into(),
+        )),
     }
 }

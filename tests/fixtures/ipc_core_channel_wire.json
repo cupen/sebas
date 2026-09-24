@@ -1,0 +1,165 @@
+{
+  "handshake": {
+    "after": {
+      "bytes": "{\"secret\":\"s3cret\",\"version\":1}",
+      "fields": [
+        "secret",
+        "version"
+      ],
+      "note": "本 change 唯一有意的 wire 变化：additive 的 version 字段，缺省按 1 处理"
+    },
+    "before": {
+      "bytes": "{\"secret\":\"s3cret\"}",
+      "fields": [
+        "secret"
+      ]
+    }
+  },
+  "note": "unify-ipc-protocol-home golden core-channel wire fixture。`payloads` 是**迁出前**（类型还在根 crate `src/core_channel/protocol.rs` 时）由代码序列化出的真实字节，冻结在此；类型迁入 `sebas-ipc::protocol` 后必须逐字节不变。`handshake` 一节记录本 change **唯一**有意的 wire 变化（additive 版本字段），before/after 两侧都是真实序列化产物。",
+  "payloads": [
+    {
+      "bytes": "{\"cmd\":\"spawn\",\"prompt\":\"hello\",\"project_dir\":\"/proj\",\"model\":\"m1\",\"mode\":\"allow\",\"agent\":\"claude\"}",
+      "fields": [
+        "agent",
+        "cmd",
+        "mode",
+        "model",
+        "project_dir",
+        "prompt"
+      ],
+      "name": "request.spawn"
+    },
+    {
+      "bytes": "{\"cmd\":\"message\",\"key\":{\"channel\":\"feishu\",\"reference\":\"oc_1\\u0000om_t\"},\"message\":\"hi\",\"attachments\":[{\"path\":\"/tmp/img.png\",\"mime\":\"image/png\",\"name\":\"img.png\"}]}",
+      "fields": [
+        "attachments",
+        "cmd",
+        "key",
+        "message"
+      ],
+      "name": "request.message"
+    },
+    {
+      "bytes": "{\"cmd\":\"state_snapshot\",\"domain\":\"providers\"}",
+      "fields": [
+        "cmd",
+        "domain"
+      ],
+      "name": "request.state_snapshot"
+    },
+    {
+      "bytes": "{\"cmd\":\"state_subscribe\"}",
+      "fields": [
+        "cmd"
+      ],
+      "name": "request.state_subscribe"
+    },
+    {
+      "bytes": "{\"cmd\":\"approval_answer\",\"request_id\":\"toolu_1\",\"decision\":{\"decision\":\"escalate\",\"reason\":\"needs human\"}}",
+      "fields": [
+        "cmd",
+        "decision",
+        "request_id"
+      ],
+      "name": "request.approval_answer"
+    },
+    {
+      "bytes": "{\"cmd\":\"node_link\",\"op\":{\"op\":\"list_nodes\"}}",
+      "fields": [
+        "cmd",
+        "op"
+      ],
+      "name": "request.node_link_list"
+    },
+    {
+      "bytes": "{\"cmd\":\"node_link\",\"op\":{\"op\":\"issue_join_token\",\"ttl_secs\":900}}",
+      "fields": [
+        "cmd",
+        "op"
+      ],
+      "name": "request.node_link_issue_token"
+    },
+    {
+      "bytes": "{\"cmd\":\"snapshot\",\"sessions\":[{\"channel\":\"feishu\",\"key\":\"oc_1\",\"session_id\":\"s1\",\"status\":\"active\",\"phase\":\"OnIt\",\"user_prompt\":\"hello\",\"last_active_unix\":1700000000,\"project_dir\":\"/proj\",\"current_model\":\"m1\",\"available_models\":[\"m1\",\"m2\"],\"agent_kind\":\"claude\",\"usage\":null,\"backend\":\"acp\",\"pending\":[],\"desired_mode\":\"ask\",\"effective_mode\":\"ask\",\"msg_count\":3,\"turn_engaged\":true,\"parked_approvals\":0,\"label\":\"demo\"}]}",
+      "fields": [
+        "cmd",
+        "sessions"
+      ],
+      "name": "response.snapshot"
+    },
+    {
+      "bytes": "{\"cmd\":\"spawned\",\"key\":{\"channel\":\"feishu\",\"reference\":\"oc_1\\u0000om_t\"}}",
+      "fields": [
+        "cmd",
+        "key"
+      ],
+      "name": "response.spawned"
+    },
+    {
+      "bytes": "{\"cmd\":\"rejected\",\"code\":\"unknown_session\",\"key\":\"k\"}",
+      "fields": [
+        "cmd",
+        "code",
+        "key"
+      ],
+      "name": "response.rejected"
+    },
+    {
+      "bytes": "{\"cmd\":\"state_snapshot\",\"domain\":\"providers\",\"payload\":{\"providers\":{\"p\":{\"ok\":true}}}}",
+      "fields": [
+        "cmd",
+        "domain",
+        "payload"
+      ],
+      "name": "response.state_snapshot"
+    },
+    {
+      "bytes": "{\"cmd\":\"node_link\",\"result\":\"nodes\",\"nodes\":[{\"id\":\"node-a\",\"status\":\"online\",\"last_seen_unix\":1700000000,\"created_unix\":1600000000}]}",
+      "fields": [
+        "cmd",
+        "nodes",
+        "result"
+      ],
+      "name": "response.node_link_nodes"
+    },
+    {
+      "bytes": "{\"frame\":\"snapshot\",\"sessions\":[{\"channel\":\"feishu\",\"key\":\"oc_1\",\"session_id\":\"s1\",\"status\":\"active\",\"phase\":\"OnIt\",\"user_prompt\":\"hello\",\"last_active_unix\":1700000000,\"project_dir\":\"/proj\",\"current_model\":\"m1\",\"available_models\":[\"m1\",\"m2\"],\"agent_kind\":\"claude\",\"usage\":null,\"backend\":\"acp\",\"pending\":[],\"desired_mode\":\"ask\",\"effective_mode\":\"ask\",\"msg_count\":3,\"turn_engaged\":true,\"parked_approvals\":0,\"label\":\"demo\"}]}",
+      "fields": [
+        "frame",
+        "sessions"
+      ],
+      "name": "frame.session_snapshot"
+    },
+    {
+      "bytes": "{\"frame\":\"event\",\"event\":{\"type\":\"updated\",\"session\":{\"channel\":\"feishu\",\"key\":\"oc_1\",\"session_id\":\"s1\",\"status\":\"active\",\"phase\":\"OnIt\",\"user_prompt\":\"hello\",\"last_active_unix\":1700000000,\"project_dir\":\"/proj\",\"current_model\":\"m1\",\"available_models\":[\"m1\",\"m2\"],\"agent_kind\":\"claude\",\"usage\":null,\"backend\":\"acp\",\"pending\":[],\"desired_mode\":\"ask\",\"effective_mode\":\"ask\",\"msg_count\":3,\"turn_engaged\":true,\"parked_approvals\":0,\"label\":\"demo\"}}}",
+      "fields": [
+        "event",
+        "frame"
+      ],
+      "name": "frame.session_event"
+    },
+    {
+      "bytes": "{\"frame\":\"resync\"}",
+      "fields": [
+        "frame"
+      ],
+      "name": "frame.session_resync"
+    },
+    {
+      "bytes": "{\"frame\":\"snapshot\",\"domains\":{\"providers\":{},\"settings\":null,\"projects\":[],\"sessions\":[]}}",
+      "fields": [
+        "domains",
+        "frame"
+      ],
+      "name": "frame.state_snapshot"
+    },
+    {
+      "bytes": "{\"frame\":\"changed\",\"scope\":\"providers\"}",
+      "fields": [
+        "frame",
+        "scope"
+      ],
+      "name": "frame.state_changed"
+    }
+  ]
+}

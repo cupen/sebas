@@ -356,7 +356,7 @@ async fn wait_channel_accept(sb: &Sandbox) {
                 return None;
             };
             let (r, mut w) = sebas_ipc::split(stream);
-            let hs = serde_json::to_string(&ChannelHandshake { secret }).unwrap();
+            let hs = serde_json::to_string(&ChannelHandshake::new(secret)).unwrap();
             if w.write_all(hs.as_bytes()).await.is_err()
                 || w.write_all(b"\n").await.is_err()
                 || w.flush().await.is_err()
@@ -378,9 +378,7 @@ async fn wait_channel_accept(sb: &Sandbox) {
 async fn open_subscriber(sb: &Sandbox) -> BufReader<sebas_ipc::ReadHalf> {
     let stream = sebas_ipc::connect(&sb.channel_path).await.expect("subscriber connect");
     let (r, mut w) = sebas_ipc::split(stream);
-    let hs = serde_json::to_string(&ChannelHandshake {
-        secret: sb.core_secret.clone(),
-    })
+    let hs = serde_json::to_string(&ChannelHandshake::new(sb.core_secret.clone()))
     .unwrap();
     w.write_all(hs.as_bytes()).await.unwrap();
     w.write_all(b"\n").await.unwrap();
@@ -410,9 +408,7 @@ async fn raw_channel_request(
 ) -> CoreChannelResponse {
     let stream = sebas_ipc::connect(channel).await.expect("request connect");
     let (r, mut w) = sebas_ipc::split(stream);
-    let hs = serde_json::to_string(&ChannelHandshake {
-        secret: secret.to_string(),
-    })
+    let hs = serde_json::to_string(&ChannelHandshake::new(secret.to_string()))
     .unwrap();
     w.write_all(hs.as_bytes()).await.unwrap();
     w.write_all(b"\n").await.unwrap();

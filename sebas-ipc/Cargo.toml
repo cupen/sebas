@@ -7,6 +7,16 @@ rust-version = "1.90"
 [dependencies]
 tokio = { version = "1.40", features = ["full"] }
 interprocess = { version = "2", features = ["tokio"] }
+# 协议之家的载荷类型（unify-ipc-protocol-home 1.1）：serde 形状与 JSON。
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+# 只允许中立叶子：域层（会话/节点视图形状）与渠道层（ChannelKey）。
+# 任何角色实现（core / webui / router / im）与执行节点都**不得**出现在这里
+# ——协议 crate 若引用它们即成依赖环（design D3），机械断言见根 crate 的
+# tests/ipc_protocol_home_test.rs。
+sebas-domain = { path = "../sebas-domain" }
+sebas-channels = { path = "../sebas-channels" }
 
 [dev-dependencies]
 tempfile = "3"

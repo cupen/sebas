@@ -2993,8 +2993,13 @@ name = "sebas-ipc"
 version = "0.1.0"
 dependencies = [
  "interprocess",
+ "sebas-channels",
+ "sebas-domain",
+ "serde",
+ "serde_json",
  "tempfile",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

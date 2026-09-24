@@ -1,18 +1,58 @@
-//! 跨平台本地 IPC 传输层（核心会话通道 / 控制 RPC / router 状态订阅共用）。
+//! 跨平台本地 IPC 传输层 + 跨进程协议之家
+//! （核心会话通道 / 控制 RPC / router 状态订阅共用）。
 //!
 //! 基于 `interprocess` 的 local socket 抽象：Unix 上是 Unix domain socket
 //! （文件路径语义与历史行为一致，含僵尸 socket 回收），Windows 上由
 //! `GenericFilePath` 确定性映射为 named pipe。配置里的 socket 路径跨平台
 //! 不变，服务端与客户端从同一路径得到同一端点。
 //!
-//! - [`bind`] / [`IpcListener::accept`]：服务端；
+//! - [`bind`] / [`accept`]：服务端；
 //! - [`connect`]：客户端（Windows 上所有管道实例忙时做有界重试）；
-//! - [`split`]：拆成读写两半（[`ReadHalf`] / [`WriteHalf`]）。
+//! - [`split`]：拆成读写两半（[`ReadHalf`] / [`WriteHalf`]）；
+//! - [`protocol`]：各边界的 wire 类型与握手 / framing 助手；
+//! - [`secret`]：通道 secret 的共享发现实现（env → secret 文件）。
 //!
 //! 安全基线：应用层 secret 握手由各通道协议自带。Unix 上 socket 文件
 //! 0600 与 SO_PEERCRED uid 校验由调用方负责（socket 文件路径仍可由调用方
 //! 直接操作）；Windows named pipe 依赖默认 ACL（仅创建者与
 //! SYSTEM/Administrators 可访问）+ secret。
+//!
+//! # 准入面（unify-ipc-protocol-home 1.3）
+//!
+//! 本 crate 是**协议之家**：跨进程协议的定义只允许有一份，谁说话谁依赖它。
+//! 一个类型 / 函数进入本 crate 必须属于下面三类之一：
+//!
+//! 1. **transport**——端点绑定、连接、接受、拆半（[`bind`] / [`connect`] /
+//!    [`accept`] / [`split`]）；
+//! 2. **wire 类型**——跨进程边界上过线的消息、帧、载荷（[`protocol`]），
+//!    含它们各自的 serde 形状与固有助手；
+//! 3. **握手 / framing 助手**——握手（secret + 版本协商，[`protocol`]）与
+//!    NDJSON 一行一帧的分帧（[`protocol::encode_line`] /
+//!    [`protocol::decode_line`]），以及 secret 的**发现**（[`secret`]）。
+//!
+//! ## 不得含角色实现
+//!
+//! **不允许**进来的东西（纪律，不是建议）：
+//!
+//! - 任何**角色实现**的关注点：core / webui / router / im 的运行时类型、
+//!   trait、句柄，以及执行节点 `sebas-node` 的任何类型。角色要说话就**依赖**
+//!   本 crate，不得反过来被本 crate 依赖——否则协议 crate 一旦引用角色类型
+//!   即成依赖环（`dispatch → router`、`webui → router` 两条边已存在，见
+//!   design D3）。
+//! - 任何**域表名**（持久层概念）。本 crate 不认识任何数据库、表或 schema。
+//! - **secret 文件的生命周期**（生成 / 原子落盘 / 权限）：那是 core 进程的
+//!   职责，留在根 crate 的 `core_channel::secret`。这里只做**解析**。
+//!
+//! 两条准入面各有一条机械断言守着（根 crate
+//! `tests/ipc_protocol_home_test.rs`）：依赖图里不得出现角色实现，公开源码里
+//! 不得出现角色 crate 引用或域表名字面量。违反即测试红。
+//!
+//! ## 演进纪律（前向兼容三规则）
+//!
+//! 新增字段**必须**带 serde 默认值；取 wire 值的枚举**必须**保留未知值路径
+//! （`#[serde(other)] Unknown`）；删字段 / 改字段名 / 改取值属**破坏性变更**，
+//! 必须在 change 里显式声明并同步更新 golden fixture（见 [`protocol`] 模块
+//! 文档与 `openspec/changes/unify-ipc-protocol-home/specs/ipc-protocol-home/spec.md`）。
 
 use std::io;
 use std::path::Path;
@@ -22,6 +62,9 @@ use std::time::{Duration, Instant};
 
 use interprocess::local_socket::traits::tokio::Stream as TokioStream;
 use interprocess::local_socket::{GenericFilePath, ListenerOptions, ToFsName};
+
+pub mod protocol;
+pub mod secret;
 
 pub type IpcStream = interprocess::local_socket::tokio::Stream;
 pub type IpcListener = interprocess::local_socket::tokio::Listener;

@@ -35,7 +35,17 @@
 
 - **改动**：`sebas-ipc`（新增 protocol 模块 + 握手助手）、`sebas-router`（删重复协议、改复用）、根 crate `src/core_channel/{protocol,client,server}.rs`（类型迁出、握手加版本、协商逻辑）、`sebas-webui`（`ws_rpc` 的帧类型如需共享则改引用 | 仅在其序列化的类型被迁出时受影响）、四套 golden fixture 与其测试。
 - **依赖方向**：`sebas-ipc` 只可依赖中立叶子（`sebas-domain` / `sebas-channels`），**不可**依赖任何角色实现——这是 `add-domain-layer` 解开的环（`dispatch → router` 已存在，协议 crate 若引用 dispatch/webui 的类型即成环）。该约束写入 spec 并由机械断言守住。
-- **有意的 wire 变化（additive）**：core channel 握手响应新增版本字段。旧客户端不读新字段即忽略；新服务端收到无版本握手指视为 1。两个方向都要有用例。除此之外零 wire 变化。
+- **有意的 wire 变化（additive，本 change 唯一一处）**：core channel 握手帧
+  新增版本字段（`ChannelHandshake.version`，缺省 1），握手应答新增
+  `version`，版本不受支持时回 `{"handshake":"version_unsupported","version":N,
+  "client_version":M}`（**双方版本都上 wire**）。旧客户端不读新字段即忽略；
+  新服务端收到无版本握手指视为 1；新客户端读到旧服务端的 `{"handshake":"ok"}`
+  靠默认值解码成功。三个方向都有用例（`src/core_channel/tests.rs` 的 3.4①、
+  `sebas-ipc::protocol` 的 3.4②、3.3 的认证次序）。
+  **除此之外零 wire 变化**——机械证据：`tests/fixtures/ipc_core_channel_wire.json`
+  的 17 条代表性载荷是**类型迁出根 crate 之前**由代码序列化出的真实字节，
+  迁出后逐字节一致（`cargo test --test ipc_protocol_contract_test` 全绿）；
+  四套 fixture 覆盖 core channel / node link / webui WS / webui HTTP。
 - **验收**：既有 `sebas-router`（含 `process_e2e_test`）、`sebas-webui`（含 `ws_rpc_contract_test`）测试全绿 + 新增 golden fixture + 双向版本兼容用例 + `invoke testsuite-e2e` / `testsuite-acceptance` 全绿。
 
 ## Non-goals

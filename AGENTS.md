@@ -44,6 +44,7 @@ bd dolt push            # Push beads data to remote
 | `sebas-models` | core 各表的 **ActiveRecord struct**（一表一 struct、一行一实例）+ 返回 struct 实例的域查询。依赖 `sebas-db`/`sebas-domain`；`sebas-node` 不依赖它（节点依赖图里没有 SQLite）。 |
 | 根 crate `sebas_state` | 域接线：五表注册表（手写 DDL，`CREATE TABLE` 只允许在这里）、`DbStateEngine`（dispatch 端口实现）、`StateWriter` 域包装、PersistedState/CardConfig 存储胶水。 |
 | `sebas-webui` / `sebas-router` | 各自的行 struct 按写入者归属：`User`/`UserRow`（auth.db）在 webui，`UsageRecord`（usage.db）在 router。 |
+| `sebas-ipc` | **跨进程协议之家**：transport（`bind`/`connect`/`accept`/`split`）+ 各边界的 wire 类型与握手/framing 助手（`protocol` / `secret`）。准入：只可依赖中立叶子（`sebas-domain` / `sebas-channels`），**不得**含任何角色实现与域表名（机械断言在 `tests/ipc_protocol_home_test.rs`）。协议类型只允许有一份定义——角色要说话就依赖它。 |
 
 准入规则（extract-sebas-db，spec `persistence-runtime`）：
 
@@ -63,6 +64,24 @@ bd dolt push            # Push beads data to remote
    auth.db 自持 `Mutex` + `sebas_db::conn::transaction_immediate`——共享层
    不替调用方改选，也不统一两库的版本机制（`schema_meta` 日期戳 vs
    `user_version`，统一已推迟）。
+
+### 协议演进三规则（unify-ipc-protocol-home 6.3）
+
+跨进程 wire 形状是**兼容面**，演进来回只有三条规则（spec
+`ipc-protocol-home`「Forward compatibility rules are explicit and enforced」，
+机械闸门是 `tests/ipc_protocol_contract_test.rs` 的 golden fixture）：
+
+1. **新增字段必须带 serde 默认值**——对端不发也能读。要老的字节形状零变化
+   就再加 `skip_serializing_if`（缺省值不上 wire）；不带默认值的新字段会让
+   旧对端整帧解码失败。
+2. **取 wire 值的枚举必须保留未知值路径**——`#[serde(other)] Unknown`
+   （范例：`sebas-node-link` 的 `RejectCode`），未知取值被如实呈现而不是让
+   整帧失败。清单与逐条口径见
+   `openspec/changes/unify-ipc-protocol-home/audit-enum-unknown-paths.md`。
+3. **删字段 / 改字段名 / 改枚举取值 = 破坏性变更**——必须在 change 里显式
+   声明并说明对端的迁移路径，且**同 change 更新对应 fixture**；不得作为
+   别的改动的副作用顺手发生。fixture 比对的是序列化字节 + 字段名集合，
+   所以这类改动必红（1.2 / 4.3 / 5.1 各附过一次失败演示）。
 
 ## Frontend/Backend Integration Testing (联调)
 

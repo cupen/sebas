@@ -79,7 +79,17 @@
 
 ## Risks / Trade-offs
 
-- **[握手加字段改变线上字节]** → additive + 默认值；两个方向各一个用例（新服务端 × 旧客户端、旧服务端 × 新客户端）。这是本 change 唯一有意的 wire 变化，必须在 change 记录里点名。
+- **[握手加字段改变线上字节]** → additive + 默认值；两个方向各一个用例（新服务端 × 旧客户端、旧服务端 × 新客户端）。**这是本 change 唯一有意的 wire 变化**，在此点名：握手帧
+  `{"secret":…}` → `{"secret":…,"version":1}`（`ChannelHandshake.version`，
+  `#[serde(default = "default_protocol_version")]`），握手应答
+  `{"handshake":"ok"}` → `{"handshake":"ok","version":1}`，版本不受支持时
+  `{"handshake":"version_unsupported","version":1,"client_version":9}`。
+  实现落点：`sebas-ipc/src/protocol.rs`（`PROTOCOL_VERSION` /
+  `ChannelHandshake` / `ChannelHandshakeAck` / `ChannelHandshake::negotiate`）、
+  `src/core_channel/server.rs`（`read_handshake` + `write_handshake_ack`）、
+  `src/core_channel/client.rs`（`handshake`）、`sebas-router/src/core_channel.rs`。
+  除此之外零 wire 差异，机械证据见 `tests/fixtures/ipc_core_channel_wire.json`
+  与 `tests/ipc_protocol_contract_test.rs`。
 - **[认证次序被版本检查插到前面，导致向未认证连接泄露版本支持]** → D7 的次序约束 + 专场景覆盖（错 secret + 不支持版本 → 只报认证失败）。
 - **[搬协议类型时漏看它引用的角色类型]** → 编译器兜底：proposed 搬迁后若仍引用 dispatch/webui，`cargo build -p sebas-ipc` 立刻失败；再加机械断言（公开面与依赖图都不含角色实现）。
 - **[router 改复用后 hot-reload 行为漂移]** → 既有 router 测试套件（`contract_test` / `process_e2e_test` / `hot_reload` 相关）不改而全绿的硬要求。

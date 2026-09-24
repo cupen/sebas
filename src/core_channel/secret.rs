@@ -1,31 +1,19 @@
-//! Core session channel secret: shared-secret discovery for clients and the
-//! atomic secret file written by the auto-arming core
-//! (harden-core-channel-deployment, design D1/D2/D5).
+//! Core session channel secret: **core 侧**的生成与原子落盘
+//! （harden-core-channel-deployment, design D1/D2/D5）。
 //!
-//! Resolution order for every channel client (standalone webui, im, router
-//! subscription): `SEBAS_CORE_SECRET` env wins (cached at construction, zero
-//! per-connect cost); otherwise the secret file is read before **every**
-//! connect attempt, so a core restart that rotates the key is healed by the
-//! client's reconnect backoff alone — no notification channel needed. When
-//! both are missing the client warns once and attempts an empty-secret
-//! handshake (honest, not silent; the server closes it and the UI reports
-//! `secret rejected`).
+//! **解析（发现）已下沉 `sebas_ipc::secret`**（unify-ipc-protocol-home 4.2）：
+//! 每一个通道客户端（standalone webui、im、router 的状态订阅）此前各自
+//! 复刻一份「env → secret 文件」的解析；现在只有一份共享实现，这里原位
+//! `pub use` 保持既有公开路径不变。
 //!
-//! File lifecycle (D5): the core writes the secret file atomically
-//! (tmp + rename, 0600 on unix) at arm time and deliberately does NOT remove
-//! it on graceful exit — the socket file is the authoritative "core is dead"
-//! signal, and a leftover secret file is harmless (clients cannot reach a
-//! handshake without a live socket).
+//! 本模块只剩**文件生命周期**：core 在 arm 时把 secret 原子写入
+//! （tmp + rename，unix 上 0600），且**有意**不在优雅退出时删除它——socket
+//! 文件才是「core 已死」的权威信号，残留的 secret 文件无害（没有活 socket
+//! 就到不了握手）。
 
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::Path;
 
-/// Default secret file name, resolved next to the config file (D1).
-pub const SECRET_FILE_NAME: &str = "core.secret";
-
-/// Warn-once flag shared by every discovery in this process: missing secret
-/// is a startup-visible condition, not a per-reconnect log flood.
-static MISSING_WARNED: AtomicBool = AtomicBool::new(false);
+pub use sebas_ipc::secret::{ChannelSecret, ChannelSecret as SecretSource, SECRET_FILE_NAME};
 
 /// Test-only: serialize `SEBAS_CORE_SECRET` mutations across the crate's test
 /// modules (parallel `#[tokio::test]`s share one process and one environ).
@@ -60,94 +48,9 @@ pub fn write_secret_file(path: &Path, secret: &str) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
-/// Where a channel client gets its handshake secret from (D2).
-pub enum ChannelSecret {
-    /// `SEBAS_CORE_SECRET` was set at construction: cached, zero cost, and
-    /// the watchdog deployment path keeps today's exact semantics.
-    Static(String),
-    /// No usable env: read the secret file before every connect attempt.
-    Discover(Option<PathBuf>),
-}
-
-impl ChannelSecret {
-    /// env 非空 → Static（缓存）；否则 Discover(文件路径)。
-    /// `file` 为 `None` 表示调用方没有可用的 config 推导（缺省为空表发现）。
-    pub fn from_env_or_file(file: Option<PathBuf>) -> Self {
-        match std::env::var("SEBAS_CORE_SECRET") {
-            Ok(s) if !s.is_empty() => Self::Static(s),
-            _ => Self::Discover(file),
-        }
-    }
-
-    /// 构造期常量（既有调用方与测试的直通形态）。
-    pub fn static_value(v: String) -> Self {
-        Self::Static(v)
-    }
-
-    /// 当前应使用的握手 secret。Discover 每次调用重读文件——`secret
-    /// rejected` / 断线重连路径天然拿到 core 重启后的新钥（D2）。
-    pub fn current(&self) -> String {
-        match self {
-            Self::Static(s) => s.clone(),
-            Self::Discover(file) => match file.as_deref().map(std::fs::read_to_string) {
-                Some(Ok(content)) => content.trim().to_string(),
-                _ => {
-                    if !MISSING_WARNED.swap(true, Ordering::Relaxed) {
-                        tracing::warn!(
-                            "核心通道 secret 未找到（SEBAS_CORE_SECRET 未设置且 secret 文件缺失）: \
-                             以空 secret 尝试连接，握手将被拒绝；请确认与 core 使用同一份 config"
-                        );
-                    }
-                    String::new()
-                }
-            },
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    struct EnvGuard {
-        name: &'static str,
-        prev: Option<std::env::VarError>,
-        _lock: std::sync::MutexGuard<'static, ()>,
-    }
-    // 同进程并行测试都在读写 SEBAS_CORE_SECRET：guard 持锁到 drop，串行化
-    //（锁与 core_channel::tests 共用同一把，见 secret_env_test_lock）。
-    impl EnvGuard {
-        fn set(name: &'static str, value: &str) -> Self {
-            let lock = super::secret_env_test_lock().lock().unwrap();
-            let prev = std::env::var(name).err();
-            unsafe { std::env::set_var(name, value) };
-            Self {
-                name,
-                prev,
-                _lock: lock,
-            }
-        }
-        fn unset(name: &'static str) -> Self {
-            let lock = super::secret_env_test_lock().lock().unwrap();
-            let prev = std::env::var(name).err();
-            unsafe { std::env::remove_var(name) };
-            Self {
-                name,
-                prev,
-                _lock: lock,
-            }
-        }
-    }
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match &self.prev {
-                Some(std::env::VarError::NotPresent) | None => unsafe {
-                    std::env::remove_var(self.name)
-                },
-                _ => {}
-            }
-        }
-    }
 
     #[test]
     fn generate_is_random_hex_and_long_enough() {
@@ -178,56 +81,5 @@ mod tests {
             !path.with_extension("secret.tmp").exists(),
             "tmp file must be renamed away, never left behind"
         );
-    }
-
-    #[test]
-    fn discovery_env_wins_and_is_cached() {
-        let _g = EnvGuard::set("SEBAS_CORE_SECRET", "from-env");
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("core.secret");
-        std::fs::write(&file, "from-file").unwrap();
-        let cs = ChannelSecret::from_env_or_file(Some(file));
-        assert_eq!(cs.current(), "from-env", "env must win over the file");
-    }
-
-    #[test]
-    fn discovery_reads_file_fresh_each_time() {
-        let _g = EnvGuard::unset("SEBAS_CORE_SECRET");
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("core.secret");
-        std::fs::write(&file, "key-one").unwrap();
-        let cs = ChannelSecret::from_env_or_file(Some(file.clone()));
-        assert_eq!(cs.current(), "key-one");
-        // core 重启换钥：覆写文件后同一 client 实例立刻读到新钥（D2 自愈）。
-        std::fs::write(&file, "key-two").unwrap();
-        assert_eq!(cs.current(), "key-two", "rotation must be picked up");
-    }
-
-    #[test]
-    fn discovery_both_missing_warns_once_and_uses_empty() {
-        let _g = EnvGuard::unset("SEBAS_CORE_SECRET");
-        let cs = ChannelSecret::from_env_or_file(Some(PathBuf::from(
-            "/definitely/not/here/core.secret",
-        )));
-        MISSING_WARNED.store(false, Ordering::Relaxed);
-        assert_eq!(cs.current(), "");
-        assert_eq!(
-            cs.current(),
-            "",
-            "empty attempt stays stable across reconnects"
-        );
-        // warn-once 语义不在此断言（tracing 断言成本高）；MISSING_WARNED 的
-        // swap 行为由下一次 from_env_or_file 调用重置。
-        MISSING_WARNED.store(false, Ordering::Relaxed);
-    }
-
-    #[test]
-    fn discovery_trims_whitespace() {
-        let _g = EnvGuard::unset("SEBAS_CORE_SECRET");
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("core.secret");
-        std::fs::write(&file, "  padded-key\n").unwrap();
-        let cs = ChannelSecret::from_env_or_file(Some(file));
-        assert_eq!(cs.current(), "padded-key");
     }
 }

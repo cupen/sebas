@@ -65,6 +65,10 @@ fn rejection_response(rej: SessionRejection) -> Response {
         // workbench-interaction-polish 1.1：空闲会话的取消是可重试的冲突——
         // 会话还在、只是没有在飞 turn 可停（409 而非 404，与「未知会话」区分）。
         SessionRejection::Idle { .. } => StatusCode::CONFLICT,
+        // （unify-ipc-protocol-home 6.1）看不懂的拒绝码：不能假装它是 4xx
+        // 语义（那会把"我不认识"说成"你的请求有问题"）。502 如实表达
+        // "上游（core）给了一个我解释不了的答复"，文案由 rejection 自己给。
+        SessionRejection::Unknown => StatusCode::BAD_GATEWAY,
     };
     api_error(status, rej.to_string())
 }

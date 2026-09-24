@@ -99,9 +99,7 @@ async fn raw_request(path: &StdPath, req: &CoreChannelRequest) -> std::io::Resul
     let stream = sebas_ipc::connect(path).await?;
     let (r, mut w) = sebas_ipc::split(stream);
     let mut reader = BufReader::new(r);
-    let hs = serde_json::to_string(&ChannelHandshake {
-        secret: SECRET.to_string(),
-    })
+    let hs = serde_json::to_string(&ChannelHandshake::new(SECRET.to_string()))
     .unwrap();
     w.write_all(hs.as_bytes()).await?;
     w.write_all(b"\n").await?;
@@ -376,9 +374,7 @@ async fn state_subscribe_delivers_mutations_after_snapshot() {
     let stream = sebas_ipc::connect(&core.path).await.unwrap();
     let (r, mut w) = sebas_ipc::split(stream);
     let mut reader = BufReader::new(r);
-    let hs = serde_json::to_string(&ChannelHandshake {
-        secret: SECRET.into(),
-    })
+    let hs = serde_json::to_string(&ChannelHandshake::new(SECRET.to_string()))
     .unwrap();
     w.write_all(hs.as_bytes()).await.unwrap();
     w.write_all(b"\n").await.unwrap();

@@ -1,0 +1,33 @@
+{
+  "note": "unify-ipc-protocol-home golden node-link fixture (5.2): 握手与版本协商消息",
+  "payloads": [
+    {
+      "bytes": "{\"protocol_version\":1,\"node_id\":\"dev-box\",\"auth\":{\"kind\":\"join_token\",\"token\":\"tok-1\"},\"manifest\":{\"agent_kinds\":[],\"providers\":[\"anthropic\"],\"mode_enforcement\":[]}}",
+      "fields": [
+        "auth",
+        "manifest",
+        "node_id",
+        "protocol_version"
+      ],
+      "name": "hello.join_token"
+    },
+    {
+      "bytes": "{\"protocol_version\":1,\"outcome\":{\"result\":\"accepted\",\"credential\":\"cred-1\"},\"router_url\":\"http://10.0.0.5:8787\",\"router_token\":\"rt-1\"}",
+      "fields": [
+        "outcome",
+        "protocol_version",
+        "router_token",
+        "router_url"
+      ],
+      "name": "hello_ack.accepted"
+    },
+    {
+      "bytes": "{\"protocol_version\":1,\"outcome\":{\"result\":\"rejected\",\"code\":\"protocol_version_unsupported\",\"cause\":\"node speaks 9, master supports 1\"}}",
+      "fields": [
+        "outcome",
+        "protocol_version"
+      ],
+      "name": "hello_ack.rejected"
+    }
+  ]
+}

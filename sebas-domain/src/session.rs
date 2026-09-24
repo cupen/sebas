@@ -679,6 +679,13 @@ pub enum SessionRejection {
     /// 无从谈起，如实拒绝而非伪造成功。`key` 是编码会话键（诊断用）。
     #[serde(rename = "idle_session")]
     Idle { key: String },
+    /// 对端发来本 build 不认识的拒绝码（对端比本端新）。
+    ///
+    /// `#[serde(other)]`（unify-ipc-protocol-home 6.1）：容忍未知码而不是让
+    /// **整个响应帧**解析失败——旧客户端不该因为新 core 多了一种拒绝理由就
+    /// 连"被拒绝了"这件事都读不出来。语义按「操作不可用」呈现，绝不假装成功。
+    #[serde(other)]
+    Unknown,
 }
 
 /// pending submission 管理拒绝的具体原因（workbench-turn-queue D7）。
@@ -731,6 +738,10 @@ impl std::fmt::Display for SessionRejection {
             SessionRejection::Idle { key } => {
                 write!(f, "会话空闲（无在飞回复，无需取消）: {key}")
             }
+            SessionRejection::Unknown => write!(
+                f,
+                "核心拒绝了这次操作，但拒绝理由是当前版本不认识的（核心比界面新）"
+            ),
         }
     }
 }

@@ -112,9 +112,7 @@ async fn mutation_delivers_change_notification_on_subscription() {
     let stream = UnixStream::connect(&core.path).await.unwrap();
     let (r, mut w) = stream.into_split();
     let mut reader = BufReader::new(r);
-    let hs = serde_json::to_string(&ChannelHandshake {
-        secret: SECRET.into(),
-    })
+    let hs = serde_json::to_string(&ChannelHandshake::new(SECRET.to_string()))
     .unwrap();
     w.write_all(hs.as_bytes()).await.unwrap();
     w.write_all(b"\n").await.unwrap();
@@ -217,9 +215,7 @@ async fn providers_and_aliases_mutation_round_trip_over_channel() {
         let stream = UnixStream::connect(path).await.unwrap();
         let (r, mut w) = stream.into_split();
         let mut reader = BufReader::new(r);
-        let hs = serde_json::to_string(&ChannelHandshake {
-            secret: SECRET.into(),
-        })
+        let hs = serde_json::to_string(&ChannelHandshake::new(SECRET.to_string()))
         .unwrap();
         w.write_all(hs.as_bytes()).await.unwrap();
         w.write_all(b"\n").await.unwrap();

@@ -13,7 +13,8 @@
 //!   `disconnected` (refused connect, post-handshake drop, timeout).
 
 use super::protocol::{
-    ChannelHandshake, CoreChannelRequest, CoreChannelResponse, SessionStreamFrame,
+    ChannelHandshake, ChannelHandshakeAck, CoreChannelRequest, CoreChannelResponse,
+    SessionStreamFrame,
 };
 use super::secret::ChannelSecret;
 use async_trait::async_trait;
@@ -403,6 +404,12 @@ impl CoreChannelBackend {
                     self.set_status(ConnStatus::Connected);
                     let _ = self.events.send(SessionEvent::Resync);
                 }
+                // （6.1）对端多了一种本 build 不认识的帧：**忽略这一帧**，
+                // 连接保持、后续帧照收（未知值不失败解码）。连接状态照旧
+                // 标为健康——收到帧本身就证明链路活着。
+                SessionStreamFrame::Unknown => {
+                    self.set_status(ConnStatus::Connected);
+                }
             }
         }
     }
@@ -515,21 +522,20 @@ async fn connect(
 /// handshake = the secret was rejected (5.3 server side closes) — the caller
 /// latches `FailKind::AuthRejected` around this. Cause wording is the spec's
 /// "core rejected channel handshake" (A1.2 scenario).
+///
+/// （3.4②）新客户端读**旧服务端**的 `{"handshake":"ok"}`：`version` 靠 serde
+/// 默认值落为 1，握手照旧成功——版本字段是纯 additive 的。
+/// （3.2 镜像）服务端报出本端不支持的在先版本时，错误文本**指名双方版本**。
 async fn handshake(
     writer: &mut WriteHalf,
     reader: &mut BufReader<ReadHalf>,
     secret: &str,
 ) -> std::result::Result<(), String> {
-    let hs = serde_json::to_string(&ChannelHandshake {
-        secret: secret.to_string(),
-    })
-    .map_err(|e| format!("serialize failed: {e}"))?;
+    let hs = ChannelHandshake::new(secret.to_string())
+        .to_line()
+        .map_err(|e| format!("serialize failed: {e}"))?;
     writer
         .write_all(hs.as_bytes())
-        .await
-        .map_err(|e| format!("handshake write failed: {e}"))?;
-    writer
-        .write_all(b"\n")
         .await
         .map_err(|e| format!("handshake write failed: {e}"))?;
     writer
@@ -545,13 +551,15 @@ async fn handshake(
     if line.trim().is_empty() {
         return Err("core rejected channel handshake".into());
     }
-    #[derive(serde::Deserialize)]
-    struct Ack {
-        handshake: String,
-    }
-    match serde_json::from_str::<Ack>(line.trim()) {
-        Ok(ack) if ack.handshake == "ok" => Ok(()),
-        _ => Err("core rejected channel handshake".into()),
+    match ChannelHandshakeAck::from_line(line.trim()) {
+        Ok(ChannelHandshakeAck::Ok { version }) if version <= sebas_ipc::protocol::PROTOCOL_VERSION => {
+            Ok(())
+        }
+        Ok(ack) => Err(format!(
+            "core rejected channel handshake: {}",
+            ack.cause().unwrap_or_else(|| "unknown handshake response".into())
+        )),
+        Err(_) => Err("core rejected channel handshake".into()),
     }
 }
 

@@ -8,12 +8,16 @@
 //! - peer uid equality via `SO_PEERCRED`, checked **before** any request is
 //!   read;
 //! - a shared-secret handshake line (`SEBAS_CORE_SECRET`) before any request;
+//! - 握手版本协商（unify-ipc-protocol-home 3.x）：**次序是 peer-uid → secret
+//!   → 版本 → 请求**。版本不受支持时以类型化拒绝指名双方版本；错 secret
+//!   的连接在版本检查之前就被关掉，**不泄露**版本支持（fail closed）；
 //! - `project_dir` canonicalized and stat'ed before any spawn, with no
 //!   existence disclosure in the rejection;
 //! - a lagging subscriber is dropped rather than delivered a gap.
 
 use super::protocol::{
-    ChannelHandshake, CoreChannelRequest, CoreChannelResponse, SessionStreamFrame, StateStreamFrame,
+    ChannelHandshake, ChannelHandshakeAck, CoreChannelRequest, CoreChannelResponse,
+    SessionStreamFrame, StateStreamFrame,
 };
 use crate::agent_backend::DualSessionBackend;
 use crate::error::{Result, SebasError};
@@ -214,22 +218,39 @@ fn peer_uid_ok(_stream: &IpcStream) -> bool {
     true
 }
 
-/// Read the handshake line and verify the secret (task 5.3). Absent line,
-/// unparseable line, empty-vs-required, or wrong secret → None (caller
-/// closes without answering).
-async fn read_handshake(reader: &mut BufReader<ReadHalf>, secret: &str) -> Option<()> {
+/// Read the handshake line (task 5.3 + unify-ipc-protocol-home 3.x). Absent
+/// line or unparseable line → None (caller closes without answering).
+///
+/// 这里**只读**，不做 secret 比较与版本协商：两者是分开的两步，且**次序**
+/// 由调用方钉死（secret 先、版本后）——「错 secret + 不支持的版本」必须只
+/// 报认证失败，不得泄露版本支持（spec 第四场景）。
+async fn read_handshake(reader: &mut BufReader<ReadHalf>) -> Option<ChannelHandshake> {
     let mut line = String::new();
     reader.read_line(&mut line).await.ok()?;
     if line.trim().is_empty() {
         return None;
     }
-    let hs: ChannelHandshake = serde_json::from_str(line.trim()).ok()?;
-    // Constant-time-ish comparison is overkill for a local same-uid check
-    // that the kernel already gated by uid; keep it simple and honest.
-    if hs.secret != secret {
-        return None;
-    }
-    Some(())
+    ChannelHandshake::from_line(line.trim()).ok()
+}
+
+/// 版本协商的握手应答：通过 → 携带本端版本的 `ok`；不受支持 → 类型化拒绝
+/// （指名双方版本）。返回 Err 时调用方**不读任何请求**，写完拒绝行即关闭。
+async fn write_handshake_ack(
+    writer: &mut WriteHalf,
+    hs: &ChannelHandshake,
+) -> Result<ChannelHandshakeAck> {
+    let ack = match hs.negotiate() {
+        Ok(_) => ChannelHandshakeAck::ok(),
+        Err(rejection) => rejection,
+    };
+    let line = ack
+        .to_line()
+        .map_err(|e| SebasError::Upgrade(format!("core channel ack serialize failed: {e}")))?;
+    writer
+        .write_all(line.as_bytes())
+        .await
+        .map_err(|e| SebasError::Upgrade(format!("core channel ack write failed: {e}")))?;
+    Ok(ack)
 }
 
 async fn handle_connection(
@@ -252,14 +273,27 @@ async fn handle_connection(
     // 5.3: secret handshake line before any request. On success the server
     // sends a tiny ack so the client can report "secret rejected" as a
     // distinct cause instead of guessing from an EOF.
-    if read_handshake(&mut reader, &secret).await.is_none() {
+    //
+    // （3.3）**认证次序**：错 secret 在这里就 return，握手应答（含版本信息）
+    // 一个字节都不发——未认证连接拿不到任何版本支持情报。
+    let Some(hs) = read_handshake(&mut reader).await else {
+        warn!("core channel: handshake failed; closing");
+        return Ok(());
+    };
+    // Constant-time-ish comparison is overkill for a local same-uid check
+    // that the kernel already gated by uid; keep it simple and honest.
+    if hs.secret != secret {
         warn!("core channel: handshake failed; closing");
         return Ok(());
     }
-    writer
-        .write_all(b"{\"handshake\":\"ok\"}\n")
-        .await
-        .map_err(|e| SebasError::Upgrade(format!("core channel ack write failed: {e}")))?;
+
+    // （3.1/3.2）认证**之后**才谈版本：不受支持 → 类型化拒绝（指名双方版本）
+    // 并关闭，绝不进入请求循环。
+    let ack = write_handshake_ack(&mut writer, &hs).await?;
+    if let Some(cause) = ack.cause() {
+        warn!(cause = %cause, "core channel: handshake version rejected; closing");
+        return Ok(());
+    }
 
     let mut line = String::new();
     loop {
@@ -1272,6 +1306,14 @@ async fn dispatch(
                 Err(e) => node_link_rejection(e),
             }
         }
+        // （6.1）对端发来本 build 不认识的命令（对端比本端新）：类型化拒绝，
+        // **不执行任何动作**、不断连。这是「未知值不失败解码」的落地——
+        // 帧被接受并如实拒绝，而不是整条连接因一个看不懂的 cmd 断掉。
+        CoreChannelRequest::Unknown => CoreChannelResponse::Rejected {
+            rejection: SessionRejection::Unavailable {
+                cause: "unknown request command (peer speaks a newer protocol)".to_string(),
+            },
+        },
     }
 }
 
@@ -1380,6 +1422,10 @@ async fn dispatch_node_link(
         };
     };
     let now = crate::node_link::server::now_unix();
+    // （6.1）未知 op 在**取锁之前**挡住：看不懂的操作不得触碰注册表。
+    if let NodeLinkOp::Unknown = op {
+        return NodeLinkOutcome::Unknown;
+    }
     let mut reg = registry.lock().await;
     match op {
         NodeLinkOp::IssueJoinToken { ttl_secs } => {
@@ -1417,6 +1463,8 @@ async fn dispatch_node_link(
                 cause: e.to_string(),
             },
         },
+        // 早退分支已挡住（见上）；这里只是把 match 走完，绝不触碰注册表。
+        NodeLinkOp::Unknown => NodeLinkOutcome::Unknown,
     }
 }
 

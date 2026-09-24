@@ -1,0 +1,83 @@
+{
+  "http_payloads": [
+    {
+      "bytes": "{\"reachability\":{\"ok\":true},\"execution_bodies\":{\"acp\":{\"ok\":true},\"native\":{\"ok\":false}},\"sessions\":3}",
+      "fields": [
+        "execution_bodies",
+        "reachability",
+        "sessions"
+      ],
+      "name": "summary"
+    },
+    {
+      "bytes": "{\"channel\":\"feishu\",\"key\":\"oc_1\",\"session_id\":\"s1\",\"status\":\"active\",\"phase\":\"OnIt\",\"user_prompt\":\"hello\",\"last_active_unix\":1700000000,\"project_dir\":\"/proj\",\"current_model\":\"m1\",\"available_models\":[\"m1\",\"m2\"],\"agent_kind\":\"claude\",\"usage\":null,\"backend\":\"acp\",\"pending\":[],\"desired_mode\":\"ask\",\"effective_mode\":\"ask\",\"msg_count\":3,\"turn_engaged\":true,\"parked_approvals\":0,\"label\":\"demo\"}",
+      "fields": [
+        "agent_kind",
+        "available_models",
+        "backend",
+        "channel",
+        "current_model",
+        "desired_mode",
+        "effective_mode",
+        "key",
+        "label",
+        "last_active_unix",
+        "msg_count",
+        "parked_approvals",
+        "pending",
+        "phase",
+        "project_dir",
+        "session_id",
+        "status",
+        "turn_engaged",
+        "usage",
+        "user_prompt"
+      ],
+      "name": "session_row"
+    },
+    {
+      "bytes": "{\"code\":\"unknown_session\",\"key\":\"oc_1\"}",
+      "fields": [
+        "code",
+        "key"
+      ],
+      "name": "rejection_body"
+    }
+  ],
+  "note": "unify-ipc-protocol-home golden webui fixture (5.3): 浏览器 WS 帧与 HTTP 载荷形状",
+  "ws_frames": [
+    {
+      "bytes": "{\"id\":7,\"method\":\"ping\",\"params\":{\"deep\":[1,2,3]}}",
+      "fields": [
+        "id",
+        "method",
+        "params"
+      ],
+      "name": "request"
+    },
+    {
+      "bytes": "{\"id\":7,\"result\":\"pong\"}",
+      "fields": [
+        "id",
+        "result"
+      ],
+      "name": "response.ok"
+    },
+    {
+      "bytes": "{\"id\":7,\"error\":{\"code\":\"unknown_method\",\"message\":\"no such method\"}}",
+      "fields": [
+        "error",
+        "id"
+      ],
+      "name": "response.error"
+    },
+    {
+      "bytes": "{\"method\":\"session.created\",\"params\":{\"session_id\":\"oc_a\"}}",
+      "fields": [
+        "method",
+        "params"
+      ],
+      "name": "notification"
+    }
+  ]
+}

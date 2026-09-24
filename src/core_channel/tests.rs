@@ -107,9 +107,7 @@ async fn raw_request(
     let (r, mut w) = sebas_ipc::split(stream);
     let mut reader = BufReader::new(r);
     if let Some(s) = secret {
-        let hs = serde_json::to_string(&ChannelHandshake {
-            secret: s.to_string(),
-        })
+        let hs = serde_json::to_string(&ChannelHandshake::new(s.to_string()))
         .unwrap();
         w.write_all(hs.as_bytes()).await?;
         w.write_all(b"\n").await?;
@@ -161,9 +159,7 @@ async fn wrong_and_empty_secrets_are_rejected() {
         let stream = sebas_ipc::connect(&core.path).await.unwrap();
         let (r, mut w) = sebas_ipc::split(stream);
         let mut reader = BufReader::new(r);
-        let hs = serde_json::to_string(&ChannelHandshake {
-            secret: secret.to_string(),
-        })
+        let hs = serde_json::to_string(&ChannelHandshake::new(secret.to_string()))
         .unwrap();
         w.write_all(hs.as_bytes()).await.unwrap();
         w.write_all(b"\n").await.unwrap();
@@ -194,9 +190,7 @@ async fn subscription_delivers_every_mutation_after_the_snapshot() {
     let stream = sebas_ipc::connect(&core.path).await.unwrap();
     let (r, mut w) = sebas_ipc::split(stream);
     let mut reader = BufReader::new(r);
-    let hs = serde_json::to_string(&ChannelHandshake {
-        secret: SECRET.into(),
-    })
+    let hs = serde_json::to_string(&ChannelHandshake::new(SECRET.to_string()))
     .unwrap();
     w.write_all(hs.as_bytes()).await.unwrap();
     w.write_all(b"\n").await.unwrap();
@@ -573,9 +567,7 @@ async fn lagging_subscriber_is_disconnected_and_can_resnapshot() {
     let stream = sebas_ipc::connect(&core.path).await.unwrap();
     let (r, mut w) = sebas_ipc::split(stream);
     let mut reader = BufReader::new(r);
-    let hs = serde_json::to_string(&ChannelHandshake {
-        secret: SECRET.into(),
-    })
+    let hs = serde_json::to_string(&ChannelHandshake::new(SECRET.to_string()))
     .unwrap();
     w.write_all(hs.as_bytes()).await.unwrap();
     w.write_all(b"\n").await.unwrap();
@@ -684,9 +676,7 @@ async fn state_subscription_serves_snapshot_frame_without_engine() {
     let stream = sebas_ipc::connect(&core.path).await.unwrap();
     let (r, mut w) = sebas_ipc::split(stream);
     let mut reader = BufReader::new(r);
-    let hs = serde_json::to_string(&ChannelHandshake {
-        secret: SECRET.into(),
-    })
+    let hs = serde_json::to_string(&ChannelHandshake::new(SECRET.to_string()))
     .unwrap();
     w.write_all(hs.as_bytes()).await.unwrap();
     w.write_all(b"\n").await.unwrap();
@@ -888,9 +878,7 @@ async fn acp_permission_request_streams_and_answer_routes_back() {
     let stream = sebas_ipc::connect(&core.path).await.unwrap();
     let (r, mut w) = sebas_ipc::split(stream);
     let mut reader = BufReader::new(r);
-    let hs = serde_json::to_string(&ChannelHandshake {
-        secret: SECRET.into(),
-    })
+    let hs = serde_json::to_string(&ChannelHandshake::new(SECRET.to_string()))
     .unwrap();
     w.write_all(hs.as_bytes()).await.unwrap();
     w.write_all(
@@ -2137,4 +2125,166 @@ async fn set_status_frames_carry_startup_summary_enrichment() {
             cause: "core startup failed: bad config".into()
         }
     );
+}
+
+// ── 3.x: 握手版本协商（unify-ipc-protocol-home）────────────────────────────
+
+/// 用**原始握手文本**建连，返回服务端读到的第一行（EOF → None）。
+/// 后面几例都要看「服务端到底回了什么字节」，所以直接写原文，不走类型。
+async fn raw_handshake(path: &StdPath, handshake_line: &str) -> std::io::Result<Option<String>> {
+    let stream = sebas_ipc::connect(path).await?;
+    let (r, mut w) = sebas_ipc::split(stream);
+    let mut reader = BufReader::new(r);
+    w.write_all(handshake_line.as_bytes()).await?;
+    if !handshake_line.ends_with('\n') {
+        w.write_all(b"\n").await?;
+    }
+    w.flush().await?;
+    let mut line = String::new();
+    let n = reader.read_line(&mut line).await?;
+    if n == 0 {
+        return Ok(None);
+    }
+    Ok(Some(line))
+}
+
+/// 3.4①：新服务端 × **不发版本**的旧客户端 → 按版本 1 服务。
+/// 附握手原文（旧客户端真实字节）。
+#[tokio::test]
+async fn legacy_client_without_version_is_served_as_version_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = start_core(dir.path()).await;
+
+    // 旧客户端的握手原文：只有 secret，没有 version 键。
+    let legacy = format!("{{\"secret\":\"{SECRET}\"}}");
+    let ack = raw_handshake(&core.path, &legacy)
+        .await
+        .unwrap()
+        .expect("旧客户端必须收到握手应答（按版本 1 服务）");
+    let parsed: crate::core_channel::protocol::ChannelHandshakeAck =
+        serde_json::from_str(ack.trim()).unwrap();
+    assert!(
+        parsed.is_ok(),
+        "旧客户端的无版本握手必须被接受: {ack}"
+    );
+
+    // 而且**真的能被服务**：后续请求正常应答。
+    let resp = raw_request(&core.path, Some(SECRET), &CoreChannelRequest::Snapshot)
+        .await
+        .unwrap();
+    assert!(resp.is_some(), "按版本 1 服务的连接必须继续处理请求");
+}
+
+/// 3.2：版本不受支持 → **类型化拒绝且指名双方版本**，且该连接上
+/// **没有任何请求被处理**（服务端写完拒绝即关闭）。
+#[tokio::test]
+async fn unsupported_version_is_typed_rejected_and_no_request_is_processed() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = start_core(dir.path()).await;
+
+    let ack = raw_handshake(
+        &core.path,
+        &format!("{{\"secret\":\"{SECRET}\",\"version\":9}}"),
+    )
+    .await
+    .unwrap()
+    .expect("版本不受支持必须收到**类型化拒绝**（而不是静默断开）");
+    let parsed: crate::core_channel::protocol::ChannelHandshakeAck =
+        serde_json::from_str(ack.trim()).unwrap();
+    assert!(!parsed.is_ok(), "版本不受支持的握手不得被接受: {ack}");
+    let cause = parsed.cause().expect("拒绝必须带成因");
+    assert!(cause.contains("client=9"), "拒绝须指名客户端版本: {cause}");
+    assert!(
+        cause.contains(&format!(
+            "supported={}",
+            sebas_ipc::protocol::PROTOCOL_VERSION
+        )),
+        "拒绝须指名本端支持版本: {cause}"
+    );
+    // 线上原文同时携带两个版本号（机读，不只靠文案）。
+    let v = serde_json::to_value(&parsed).unwrap();
+    assert_eq!(v["handshake"], "version_unsupported");
+    assert_eq!(v["client_version"], 9);
+    assert_eq!(v["version"], sebas_ipc::protocol::PROTOCOL_VERSION);
+}
+
+/// 3.2 续：版本被拒的连接**不得**处理任何请求——再发一帧请求读回来必须是
+/// EOF（服务端已经关掉了它），而不是一个响应。
+#[tokio::test]
+async fn no_request_is_served_on_a_version_rejected_connection() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = start_core(dir.path()).await;
+
+    let stream = sebas_ipc::connect(&core.path).await.unwrap();
+    let (r, mut w) = sebas_ipc::split(stream);
+    let mut reader = BufReader::new(r);
+    let hs = format!("{{\"secret\":\"{SECRET}\",\"version\":9}}\n");
+    w.write_all(hs.as_bytes()).await.unwrap();
+    // 明知会被拒，仍把请求塞进去（服务端不该读它）。
+    let req = format!(
+        "{}\n",
+        serde_json::to_string(&CoreChannelRequest::Snapshot).unwrap()
+    );
+    w.write_all(req.as_bytes()).await.unwrap();
+    w.flush().await.unwrap();
+
+    let mut ack = String::new();
+    reader.read_line(&mut ack).await.unwrap();
+    assert!(
+        ack.contains("version_unsupported"),
+        "第一行必须是类型化版本拒绝: {ack:?}"
+    );
+    // 之后必须是 EOF：没有任何请求被处理。
+    let mut rest = String::new();
+    let n = reader.read_line(&mut rest).await.unwrap();
+    assert_eq!(
+        n, 0,
+        "版本被拒的连接上不得处理请求（读到的应当是 EOF）: {rest:?}"
+    );
+}
+
+/// 3.3：**认证次序不被削弱**——peer-uid → secret → 版本 → 请求。
+///
+/// 「错 secret + 不支持的版本」只报认证失败，**不泄露版本支持**：
+/// 连接被静默关闭，一个字节都不回（连版本拒绝都发不出去）。
+/// PostgreSQL 风格的 fail-closed 次序。
+#[tokio::test]
+async fn wrong_secret_with_unsupported_version_discloses_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = start_core(dir.path()).await;
+
+    let ack = raw_handshake(
+        &core.path,
+        "{\"secret\":\"totally-wrong\",\"version\":9}",
+    )
+    .await
+    .unwrap();
+    assert!(
+        ack.is_none(),
+        "错 secret + 不支持的版本必须只表现为认证失败（静默关闭），\
+         绝不能回一条泄露版本支持的拒绝: {ack:?}"
+    );
+    // 对照：secret 正确时，同样的版本 9 **确实**会拿到指名双方版本的拒绝。
+    let ok = raw_handshake(
+        &core.path,
+        &format!("{{\"secret\":\"{SECRET}\",\"version\":9}}"),
+    )
+    .await
+    .unwrap()
+    .expect("正确 secret 下版本拒绝必须可见");
+    assert!(ok.contains("version_unsupported"), "{ok:?}");
+}
+
+/// 3.1：本端握手的应答携带本端版本；服务端应答里也能读到它。
+#[tokio::test]
+async fn server_ack_carries_the_local_protocol_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = start_core(dir.path()).await;
+    let ack = raw_handshake(&core.path, &format!("{{\"secret\":\"{SECRET}\"}}"))
+        .await
+        .unwrap()
+        .expect("握手应答");
+    let v: serde_json::Value = serde_json::from_str(ack.trim()).unwrap();
+    assert_eq!(v["handshake"], "ok");
+    assert_eq!(v["version"], sebas_ipc::protocol::PROTOCOL_VERSION);
 }
