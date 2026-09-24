@@ -2,7 +2,7 @@
 
 ### Requirement: 工作台验收载体 = 内置 test 模型
 
-涉及 agent 回合的工作台行为验收（旅程级与进程级）SHALL 以 router 内置 debug `test` 模型的场景模型为标准 LLM 载体：正文、thinking、工具环、权限流、零输出、长文流式、错误呈现等形状一律由 `test/<scenario>` 驱动，而非真实凭据或独立 fake 上游进程。fake 上游与真实上游 journey SHALL 保留，但其职责限定为**拨号透传路径**的验收（header 过滤、key 注入、SSE 透传、限流/用量结算），不承担工作台行为验收。载体切换 SHALL NOT 降低覆盖口径：核心五簇账本（`tests/acceptance/COVERAGE.md`）保持 100% 硬指标——证据可以随载体更换重指，requirement 分母与命中率口径不变；账本 SHALL 记录本次载体定向作为变更说明。
+涉及 agent 回合的工作台行为验收（旅程级、进程级与浏览器级）SHALL 以 router 内置 debug `test` 模型的场景模型为标准 LLM 载体：正文、thinking、工具环、权限流、零输出、长文流式、错误呈现等形状一律由 `test/<scenario>` 驱动，而非真实凭据或独立 fake 上游进程。fake 上游与真实上游 journey SHALL 保留，但其职责限定为**拨号透传路径**的验收（header 过滤、key 注入、SSE 透传、限流/用量结算），不承担工作台行为验收。`fake-claude` 桩在浏览器级继续作为其驱动器专属契约（ACP 驱动行为）的权威，其 LLM 形状类用例按账本节奏向 test 模型迁移。载体切换 SHALL NOT 降低覆盖口径：核心五簇账本（`tests/acceptance/COVERAGE.md`）保持 100% 硬指标——证据可以随载体更换重指，requirement 分母与命中率口径不变；账本 SHALL 记录本次载体定向作为变更说明。
 
 #### Scenario: 工作台旅程由 test 模型驱动
 

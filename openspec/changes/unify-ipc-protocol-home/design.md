@@ -88,7 +88,7 @@
 
 ## Migration Plan
 
-顺序（依赖已由 `add-domain-layer` 满足）：
+顺序（依赖已满足：`add-domain-layer` 已实现归档，中立契约类型已居 `sebas-domain`）：
 
 1. `sebas-ipc` 增加 protocol 模块与握手/framing 助手；接进 workspace 依赖；机械断言其依赖图不含角色实现。
 2. core channel 的 wire 类型从根 crate 迁入 `sebas-ipc`，根 crate 原位再导出（调用点零改动）；确保不再引用 dispatch/webui 类型。

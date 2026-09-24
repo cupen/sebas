@@ -24,9 +24,10 @@
 - [ ] 3.7 **模型切换生效 journey**：会话先以 `test/text` 完成一回合，经用户面切模型为 `test/tool-use` 后下一回合产生 tool_use 与权限请求，切前后回合各自保留呈现形状；验证：journey 全绿（对应 acp-model-selection「切换生效」）
 - [ ] 3.8 错误呈现 + 可用性 journey（`test/error`）：LLM 失败如实呈现、会话状态迁移遵循终局错误语义，**且失败后新会话可创建并完成一次正常回合**；验证：journey 全绿（注意真实 claude-code 对 5xx 有重试——本 journey 以 native 后端驱动，重试行为实测结论记入 design）
 - [ ] 3.9 **证明标准落地**：① 全部 journey 经 webui HTTP API + WS/SSE 驱动（辅助函数不得绕过用户面直调内部接口，复核 helpers 并整改）；② 工具环 journey 重复执行两次断言转录形状与终态一致（id/时间戳除外）；③ `test/text` journey 断言 echo 回显 = 最后一条用户消息原文（对话连续性）；④ 操作员全路径（项目 → 建会话 → 提交 → 流式 → 权限 → 结果 → 关闭）核对有 journey 命中，缺哪个补哪个；验证：四项各有一条结论附 PR 描述
-- [ ] 3.10 可选：真实 claude-code 场景 journey（`test/tool-use`），二进制缺席诚实跳过；验证：跳过路径与通过路径各有断言
-- [ ] 3.11 复核既有 bare `test` 用例（「router debug provider 应答」）不改而通过；验证：`invoke testsuite-e2e` 相关用例全绿
-- [ ] 3.12 usage 断言经套件既有辅助取数（不直接绑定 JSONL/DB 形态）；验证：辅助函数签名不变或两边各改一次的结论记入 PR 描述
+- [ ] 3.10 **浏览器级呈现 journey**（`testsuite-webui-browser`，Playwright）：以 `test/tools-parallel` 验证并行审批卡片各自独立、`test/empty` 验证零输出通知呈现、`test/long` 验证 UI 取消、`test/text → UI 切模型 → test/tool-use` 验证切换生效（native 通路不可通时按既有 spike 门控转豁免入账）；验证：浏览器旅程全绿或按门控诚实豁免，`testsuite-webui` 整体不红
+- [ ] 3.11 可选：真实 claude-code 场景 journey（`test/tool-use`），二进制缺席诚实跳过；验证：跳过路径与通过路径各有断言
+- [ ] 3.12 复核既有 bare `test` 用例（「router debug provider 应答」）不改而通过；验证：`invoke testsuite-e2e` 相关用例全绿
+- [ ] 3.13 usage 断言经套件既有辅助取数（不直接绑定 JSONL/DB 形态）；验证：辅助函数签名不变或两边各改一次的结论记入 PR 描述
 
 ## 4. 验收载体定向与收口
 

@@ -2,7 +2,7 @@
 
 动机与范围见 `proposal.md` — Why / What Changes。设计只需要以下约束：
 
-1. **`add-domain-layer` 已提供承载处**：类型化后的 enum 落 `sebas-domain`，原 crate 用 `pub use` 再导出。本 change 依赖它（见其 design D3/D4）。
+1. **`add-domain-layer` 已实现并归档**（2026-09-23）：`sebas-domain` crate 已存在且为承载处（`shared-domain-layer` 已入主 spec），原 crate 走 `pub use` 再导出。本 change 的前置已满足。
 2. **零变化基线仍然生效**：所有取值拼写、JSON 字段名、NDJSON 帧必须逐字节不变。本 change 只把**既有取值集合类型化**，不新增、不删除、不改拼写。
 3. **反序列化形态今天是最宽松的**：`status`、`phase`、`mode`、`element_type` 都是 `String`，什么都能收。收紧为封闭集是本 change **唯一的兼容性回退面**。
 4. **`agent-driver` spec 已声明决策词汇**（`allow_once` / `allow_session` / `deny` / `escalate`）与 ACP 降级规则；本 change 不改语义，只让这四值由**唯一类型**承载。今日 5 份并行枚举：`sebas_acp::Decision`（3 值）、`sebas-webui::session_backend::PermissionDecision`（4 值）、`NativeApprovalDecision`（4 值）、`sebas-agent::ApprovalAnswer`（4 值）、`sebas-node-link::ApprovalDecision`（3 值）。

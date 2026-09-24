@@ -31,7 +31,7 @@
 
 - **改动**：`sebas-router/src/usage.rs`（sink 改为库写入 + 后台清理）、`sebas-router/src/config.rs`（`usage_db` 键、`usage_file` 两步退休）、`sebas-router` 的依赖（新增 `sebas-db`）、`tasks.py` / `AGENTS.md`（`[router] usage_file` 说明）。
 - **测试面**：`tests/testsuite_e2e_test.rs:928-957` 的 `read_jsonl` 辅助与断言、`scripts/e2e_router.sh:225-237`、`tests/support/mod.rs:361` 都要改为查询库。
-- **依赖**：建议排在 `extract-sebas-db` 与 `single-state-dir` 之后——前者提供共享连接配方与单写执行模型（router 不必自建一套），后者提供状态目录逻辑名（`usage_db` 自动被沙箱覆盖）。
+- **依赖**：已满足——`extract-sebas-db` 与 `single-state-dir` 均已实现归档（`sebas-db` 的 `Record` trait + `StateHandle` 门面、状态目录逻辑名映射表均已落地），本 change 可直接实现。
 - **验收**：新增「保留期生效（超期与超行数各一条）」+「sink 溢出仍丢弃且响应不受影响」+「router 不打开 core 的状态库」三道断言；e2e 的用量断言改为查库后全绿。
 
 ## Non-goals

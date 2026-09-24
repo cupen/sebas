@@ -29,6 +29,7 @@
 
 ## Impact
 
+- **前提状态**：`extract-sebas-db` / `single-state-dir` 已实现归档（`sebas-db` 落地、状态目录映射表落地、`SEBAS_STATE_FILE` 等退休基座就绪）；但**库文件 0600 尚未实现**（`sebas-db/src/conn.rs` 无权限处理），本 change 的 1.x 任务仍是真实工作。
 - **改动**：`src/provider.rs`（overlay 写入与损坏隔离）、`src/run.rs`（启动读取回退）、`sebas-dispatch/src/state_store.rs`（文件回退与 `load_at`）、`sebas-dispatch/src/settings.rs`（文件读写）、`src/webui_cmd.rs` / `src/im_cmd.rs`（settings.json 读取）、`sebas-router/src/{config,hot_reload}.rs`（overlay 文件读取与监视）、`sebas-db`（库文件 0600）、`tasks.py` 与 `AGENTS.md`（退休的环境变量与沙箱菜谱）。
 - **测试面**：`tests/state_persistence_test.rs`、`tests/spawn_env_store_authority_test.rs`、`tests/testsuite_e2e_test.rs`（providers.json 缺席断言）、`scripts/e2e_gateway_admin.sh`（外部改写 overlay 测热更新）都要改——它们今天**裸读/裸写这些文件**。
 - **不变**：所有表结构与线格式不变；不新增表、不新增列。验收 = 既有 `state_persistence_test` / `state_subscription_test` 改写后全绿 + `invoke testsuite-e2e` / `testsuite-acceptance` 全绿。

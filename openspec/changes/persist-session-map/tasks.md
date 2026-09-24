@@ -6,7 +6,7 @@
   - 备注：`MappingDto` 整体删除（grep 0 命中，优于「只剩一处定义」）——行即唯一持久化形状；`dump_json`/`restore_json*`/`parse_disk_key` 一并退休。
 - [x] 1.3 既有 5 列（`chat_id` / `thread_id` / `session_id` / `last_active_unix` / `project_dir`）与主键语义不变；验证：`pragma_table_info('session_map')` 含这些列且主键与改造前一致
   - 备注：`old_shape_session_map_db_resets_and_quarantines_old_rows` 内含 pragma 断言（列亲和 + pk 位次）。
-- [x] 1.4 旧库在形状变化后走重置路径并隔离旧文件；验证：用改造前的库启动，断言日志给出隔离路径、隔离文件可打开并含旧行（依赖 `quarantine-database-reset`；若该 change 未落地，则断言重置发生且日志如实说明）
+- [x] 1.4 旧库在形状变化后走重置路径并隔离旧文件；验证：用改造前的库启动，断言日志给出隔离路径、隔离文件可打开并含旧行（`quarantine-database-reset` 已实现归档）
   - 备注：`desired_mode`/`awaiting_first_prompt` 为非空无默认列 → 旧形状库打开即 Incompatible → 隔离重置；测试断言 Reset、空表、`.reset-*` 文件可开且含旧行。
 
 ## 2. 按变更持久化

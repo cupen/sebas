@@ -24,8 +24,9 @@ router 的内置 debug `test` provider 今天只会**一句台词**：固定文�
 ### Modified Capabilities
 
 - `router-core`: 「Debug test provider」更新——保留 echo 契约，新增九场景模型、块类型混排、确定性 agent-loop 规则（含 test 特有的并行 tool_use）、错误应答、流式事件保真、确定性 usage、OpenAI 家族降级规则。
-- `testsuite-process-e2e`: 新增「test 模型场景 journey」要求——工具环 + 权限流（含并行）、thinking 呈现、混排、零输出通知、长文流式、错误呈现的进程级覆盖。
-- `testsuite-acceptance`: 新增「工作台验收载体 = 内置 test 模型」要求——涉及 agent 回合的验收旅程 SHALL 以 test 模型驱动；账本规则同步（载体切换不计减分母、不降口径）。
+- `testsuite-process-e2e`: 新增「test 模型场景 journey」与「旅程证明标准」要求——工具环 + 权限流（含并行）、thinking 呈现、混排、零输出通知、长文流式、流式中取消、模型切换生效、错误呈现 + 失败后可用的进程级覆盖；全部经用户面驱动、含重复一致性与对话连续性断言。
+- `testsuite-acceptance`: 新增「工作台验收载体 = 内置 test 模型」要求——涉及 agent 回合的验收旅程（旅程级、进程级、浏览器级）SHALL 以 test 模型驱动；账本规则同步（载体切换不计减分母、不降口径）。
+- `testsuite-webui-browser`: 新增「test 场景驱动的浏览器呈现覆盖」要求——浏览器级 LLM 形状类旅程以 test 场景驱动（native 通路遵循既有 spike 门控），`fake-claude` 桩保留为驱动器专属契约的权威；并行审批卡片、零输出通知、UI 取消、UI 模型切换生效四个新呈现纳入覆盖方向。其中「并行审批卡片」「UI 取消」与 `add-acp-stream-approval-journeys` 的桩侧用例构成**有意双载体**——事件生产者与链路不同（native 内核直投 对比 ACP 驱动解析/hook 泊车），互不替代、互不豁免（分工理由见 specs/testsuite-webui-browser 增量）。
 
 ## Impact
 
