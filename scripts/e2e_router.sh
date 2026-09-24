@@ -6,7 +6,7 @@
 #   有 OPENAI_API_KEY 时发 POST /v1/chat/completions；
 #   有 DEEPSEEK_API_KEY 时经网关到 DeepSeek 的 Anthropic 兼容端点发 POST /v1/messages；
 #   无 key 则跳过该段并打印 SKIP；
-#   末尾校验 usage.jsonl 非空（至少一条 record）；清理进程与临时目录。
+#   末尾校验用量库 usage.db 非空（至少一条 record）；清理进程与临时目录。
 #
 # 退出码：0 成功（含全 SKIP 路径——这是验证脚本而非 CI 门禁）；非 0 失败。
 #
@@ -17,7 +17,9 @@
 # - 上游 key 仅从 env 读（api_key_env），缺失时该 provider 挂到不可达本地端口
 #   （http://127.0.0.1:9）做 smoke，绝不拿假 key 去触达真上游。
 # - 始终跑一次 smoke 透传调用（model=smoke-test → 不可达 provider → 502），
-#   保证 usage.jsonl 至少落一条 record，使「非空」校验在所有路径下都有意义。
+#   保证 usage.db 至少落一条 record，使「非空」校验在所有路径下都有意义。
+# - persist-router-usage：用量落 router 自有的 SQLite 库（sqlite3 查询），
+#   旧键 `usage_file` 已删除；本脚本的 [router] 段随之改写为 `usage_db`。
 set -euo pipefail
 
 # ---- 路径与常量 ----
@@ -26,7 +28,8 @@ BIN="$REPO_ROOT/target/debug/sebas"
 GATEWAY_KEY="sk-gw-e2e-${RANDOM}"
 TMPDIR="$(mktemp -d -t sebas-router-e2e.XXXXXX)"
 CONFIG="$TMPDIR/router.toml"
-USAGE_FILE="$TMPDIR/router-usage.jsonl"
+# persist-router-usage：用量落 router 自有的 SQLite 库（不再是 jsonl）。
+USAGE_DB="$TMPDIR/usage.db"
 LOG_FILE="$TMPDIR/router.log"
 
 # 动态选一个空闲端口，避免与本机已运行的服务碰撞。
@@ -55,7 +58,7 @@ cleanup() {
 trap cleanup EXIT
 
 # ---- 工具检查 ----
-for cmd in cargo curl python3; do
+for cmd in cargo curl python3 sqlite3; do
   command -v "$cmd" >/dev/null 2>&1 || { echo "error: 需要 $cmd"; exit 1; }
 done
 
@@ -99,11 +102,11 @@ write_provider() { # write_provider <name> <protocol> <real_base> <env_var> <rea
   fi
   echo
 }
-export GATEWAY_KEY USAGE_FILE PORT
+export GATEWAY_KEY USAGE_DB PORT
 {
   echo "[router]"
   echo "listen = \"127.0.0.1:${PORT}\""
-  echo "usage_file = \"$USAGE_FILE\""
+  echo "usage_db = \"$USAGE_DB\""
   echo
   echo "[[router.keys]]"
   echo "key = \"$GATEWAY_KEY\""
@@ -144,7 +147,7 @@ code="$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' "$BASE/healthz")"
 echo "  /healthz → HTTP $code"
 [[ "$code" == "200" ]] || { echo "error: /healthz 非 200"; exit 1; }
 
-# ---- 5. smoke 透传调用（始终跑：验证 proxy→usage→jsonl 链路，不依赖真上游） ----
+# ---- 5. smoke 透传调用（始终跑：验证 proxy→usage→usage.db 链路，不依赖真上游） ----
 echo "[5/7] smoke 透传调用（model=smoke-test → 不可达 provider，期望 502 并落 usage record）"
 smoke_code="$(curl -sS --max-time 15 -o /dev/null -w '%{http_code}' \
   -X POST "$BASE/v1/messages" \
@@ -222,47 +225,49 @@ if [[ $OPENAI_SET -eq 1 ]];    then run_openai_sse;    else
 if [[ $DEEPSEEK_SET -eq 1 ]]; then run_deepseek_sse;  else
   echo "  SKIP: deepseek 真上游（DEEPSEEK_API_KEY 未设置）"; fi
 
-# ---- 7. usage.jsonl 非空校验 ----
-echo "[7/7] usage.jsonl 非空校验 → $USAGE_FILE"
-# writer 是异步 mpsc，轮询直到至少一行出现（最多 3s）。
-lines=0
+# ---- 7. 用量库非空校验（persist-router-usage：jsonl → usage.db）----
+echo "[7/7] usage.db 非空校验 → $USAGE_DB"
+# writer 是异步 mpsc，轮询直到至少一行落库（最多 3s）。
+# 注意：库文件在 router 启动时即创建，故「文件不存在」= 启动就失败了。
+rows=0
 for _ in $(seq 1 30); do
-  [[ -f "$USAGE_FILE" ]] && lines=$(grep -c . "$USAGE_FILE" 2>/dev/null || echo 0)
-  [[ "$lines" -gt 0 ]] && break
+  if [[ -f "$USAGE_DB" ]]; then
+    rows=$(sqlite3 "$USAGE_DB" "SELECT COUNT(*) FROM usage_records" 2>/dev/null || echo 0)
+  fi
+  [[ "${rows:-0}" -gt 0 ]] && break
   sleep 0.1
 done
-if [[ "$lines" -le 0 ]]; then
-  echo "error: usage.jsonl 为空（无 record 落盘）"; exit 1
+if [[ "${rows:-0}" -le 0 ]]; then
+  echo "error: usage.db 无 record 落库"; exit 1
 fi
-echo "  usage.jsonl: $lines 行 record"
-# 抽样校验：每行是合法 JSON，且 smoke 段的 502 record 在场。
-python3 - "$USAGE_FILE" <<'PY'
-import json, sys
-path = sys.argv[1]
-bad = 0; has_502 = False; has_tokens = False
-with open(path, encoding="utf-8") as f:
-    for ln in f:
-        ln = ln.strip()
-        if not ln: continue
-        try:
-            r = json.loads(ln)
-        except Exception:
-            bad += 1; continue
-        if r.get("status") == 502: has_502 = True
-        if r.get("input_tokens") is not None or r.get("output_tokens") is not None:
-            has_tokens = True
+echo "  usage.db: $rows 行 record"
+# 抽样校验（断言等价于改造前的「每行合法 JSON」+「smoke 502 record 在场」+
+# 「token 计数存在」）：记录经表 struct 读出，按 provider/status/token 分类。
+sqlite3 "$USAGE_DB" \
+  "SELECT status, provider, input_tokens, output_tokens FROM usage_records" \
+  | python3 -c '
+import sys
+bad = 0; has_502 = False; has_tokens = False; total = 0
+for ln in sys.stdin:
+    parts = ln.rstrip("\n").split("|")
+    if len(parts) != 4:
+        bad += 1; continue
+    total += 1
+    status, provider, inp, outp = parts
+    if status == "502": has_502 = True
+    if inp != "" or outp != "": has_tokens = True
 if bad:
-    print(f"  error: {bad} 行非法 JSON"); sys.exit(1)
-print(f"  合法 JSON，全部 record 可解析")
-print(f"  smoke 502 record: {'在场' if has_502 else '缺失'}")
-print(f"  含 token 计数的 record: {'有' if has_tokens else '无（全 SKIP 路径下正常）'}")
-PY
+    print(f"  error: {bad} 行列数异常（表 struct 解不出）"); sys.exit(1)
+print(f"  {total} 条 record 全部可解析")
+print(f"  smoke 502 record: {"在场" if has_502 else "缺失"}")
+print(f"  含 token 计数的 record: {"有" if has_tokens else "无（全 SKIP 路径下正常）"}")
+'
 
 echo
 echo "=== e2e 通过 ==="
 if [[ $ran_real -eq 1 ]]; then
   echo "  真上游流式验证：已跑通"
 else
-  echo "  真上游流式验证：全 SKIP（无 env key）——smoke 链路已验证 proxy+usage+jsonl 闭环"
+  echo "  真上游流式验证：全 SKIP（无 env key）——smoke 链路已验证 proxy+usage+usage.db 闭环"
 fi
 exit 0

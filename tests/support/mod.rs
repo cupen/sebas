@@ -356,7 +356,8 @@ impl Sandbox {
         let webui_log = path.join("webui.log");
         let router_log = path.join("router.log");
         let providers = path.join("providers.json");
-        let usage = path.join("router-usage.jsonl");
+        // persist-router-usage：用量落 router 自有的 SQLite 库（不再是 jsonl）。
+        let usage = path.join("usage.db");
         let fake_claude = forward_slash(Path::new(env!("CARGO_BIN_EXE_fake-claude")));
 
         // TOML basic strings reject bare backslashes — normalize to `/`
@@ -409,7 +410,8 @@ api_key = "sk-sandbox-dummy"
 # 默认 listen 是固定 8787——并行用例互踩，每个沙箱钉一个 probed 端口。
 listen = "127.0.0.1:{router_port}"
 provider_overlay = "{}"
-usage_file = "{}"
+# persist-router-usage：用量落 router 自有的 SQLite 库（usage.db）。
+usage_db = "{}"
 "#,
             forward_slash(&path.join("claude-sessions")),
             forward_slash(&path.join("work")),

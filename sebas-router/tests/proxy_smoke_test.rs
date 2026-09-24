@@ -92,7 +92,7 @@ fn router_cfg(upstream_addr: std::net::SocketAddr) -> String {
         r#"
 [router]
 listen = "127.0.0.1:0"
-usage_file = "__USAGE__"
+usage_db = "__USAGE__"
 default_provider = "mock"
 
 auth_token = "sk-downstream-gw"
@@ -219,7 +219,7 @@ async fn unreachable_upstream_returns_502_upstream_error() {
     let cfg = r#"
 [router]
 listen = "127.0.0.1:0"
-usage_file = "__USAGE__"
+usage_db = "__USAGE__"
 default_provider = "unreachable"
 
 auth_token = "sk-downstream-gw"

@@ -22,6 +22,12 @@ notify = "8.2.0"
 
 # 中立共享域层（add-domain-layer）：跨角色域概念的唯一定义处。
 sebas-domain = { path = "../sebas-domain" }
+# 持久层 runtime（extract-sebas-db）：连接配方 / schema 同步 / 单写 actor 的
+# 唯一提供者。router 自有用量库 usage.db（persist-router-usage D1）——
+# router **不**打开 core 的状态库。
+sebas-db = { path = "../sebas-db" }
+# 编译期 schema 提取：Row struct 即建表事实源（sqlite-auto-schema-sync D1）。
+sebas-schema-derive = { path = "../sebas-schema-derive" }
 
 [dev-dependencies]
 tempfile = "3"

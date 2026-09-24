@@ -96,7 +96,7 @@ fn cfg(upstream: &str, extra_router_fields: &str) -> String {
         r#"
 [router]
 listen = "127.0.0.1:0"
-usage_file = "__USAGE__"
+usage_db = "__USAGE__"
 {extra_router_fields}
 default_provider = "up"
 
@@ -196,7 +196,7 @@ async fn upstream_read_timeout_returns_502_without_key_leak() {
 async fn truncated_sse_passthrough_and_usage_best_effort() {
     let url = start_failure_upstream(Scenario::TruncatedSse).await;
     let gw = start_router(&cfg(&url, "")).await;
-    let usage_path = gw.dir.path().join("usage.jsonl");
+    let usage_path = gw.dir.path().join("usage.db");
     let resp = post_messages(&client(), &format!("http://{}", gw.addr))
         .send()
         .await
@@ -216,7 +216,7 @@ async fn truncated_sse_passthrough_and_usage_best_effort() {
     );
 
     // usage 尽力解析：流结束即结算一条 200 record（token 字段可全 None）。
-    let records = support::poll_usage_jsonl(&usage_path, 1).await;
-    assert_eq!(records[0]["status"], 200);
-    assert_eq!(records[0]["protocol"], "anthropic");
+    let records = support::poll_usage_records(&usage_path, 1).await;
+    assert_eq!(records[0].status, 200);
+    assert_eq!(records[0].protocol, "anthropic");
 }

@@ -12,11 +12,11 @@ use support::start_router;
 
 /// 双协议面最小 config：一个 anthropic provider + 一个 openai provider，
 /// 均从测试 env key 取上游密钥；一个下游 key `sk-gw-test`。
-/// `__USAGE__` 由 `start_router` 替换为 tempdir 内 usage.jsonl。
+/// `__USAGE__` 由 `start_router` 替换为 tempdir 内 usage.db（router 自有用量库）。
 const CFG: &str = r#"
 [router]
 listen = "127.0.0.1:0"
-usage_file = "__USAGE__"
+usage_db = "__USAGE__"
 # 隔离 overlay：不合并开发机 ~/.sebas/providers.json（其 openai 条目会
 # 与本 config 的 openai preset 冲突导致 parse 失败）。
 provider_overlay = "__SEBAS_TEST_NO_OVERLAY__.json"

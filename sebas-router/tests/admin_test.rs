@@ -17,7 +17,7 @@ use support::start_router;
 const CFG_TMPL: &str = r#"
 [router]
 listen = "127.0.0.1:0"
-usage_file = "__USAGE__"
+usage_db = "__USAGE__"
 
 [provider.anthropic]
 api_key_env = "SEBAS_ROUTER_TEST_UPSTREAM_KEY"
@@ -292,12 +292,12 @@ async fn hot_reload_external_write_and_failure_recovery() {
     let cfg_toml = r#"
 [router]
 listen = "127.0.0.1:0"
-usage_file = "__USAGE__"
+usage_db = "__USAGE__"
 
 [provider.anthropic]
 api_key_env = "SEBAS_ROUTER_TEST_UPSTREAM_KEY"
 "#;
-    let cfg_toml = cfg_toml.replace("__USAGE__", &dir.join("usage.jsonl").to_string_lossy().replace('\\', "/"));
+    let cfg_toml = cfg_toml.replace("__USAGE__", &dir.join("usage.db").to_string_lossy().replace('\\', "/"));
     std::fs::write(&cfg_path, &cfg_toml).unwrap();
     let _env = set_envs_locked(&overlay, Some("sec-test-123"), &cfg_path);
 
@@ -376,7 +376,7 @@ async fn metrics_and_stats_after_traffic() {
         r#"
 [router]
 listen = "127.0.0.1:0"
-usage_file = "__USAGE__"
+usage_db = "__USAGE__"
 auth_token = "tok-1"
 
 [provider.alpha]

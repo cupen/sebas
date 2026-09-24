@@ -15,7 +15,7 @@ use support::{start_router, start_router_debug};
 const DEBUG_CFG: &str = r#"
 [router]
 listen = "127.0.0.1:0"
-usage_file = "__USAGE__"
+usage_db = "__USAGE__"
 
 [[router.keys]]
 key = "sk-gw-debug"
@@ -31,7 +31,7 @@ api_key = "test-key"
 const NON_DEBUG_CFG: &str = r#"
 [router]
 listen = "127.0.0.1:0"
-usage_file = "__USAGE__"
+usage_db = "__USAGE__"
 
 [[router.keys]]
 key = "sk-gw-debug"
@@ -146,7 +146,7 @@ async fn debug_openai_chat_sse_contains_text_and_done() {
 #[tokio::test]
 async fn debug_requests_write_usage_record() {
     let gw = start_router_debug(DEBUG_CFG).await;
-    let usage_path = gw.dir.path().join("usage.jsonl");
+    let usage_path = gw.dir.path().join("usage.db");
     let resp = client()
         .post(format!("http://{}/v1/messages", gw.addr))
         .header("authorization", "Bearer sk-gw-debug")
@@ -158,10 +158,10 @@ async fn debug_requests_write_usage_record() {
         .expect("POST /v1/messages");
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
 
-    let records = support::poll_usage_jsonl(&usage_path, 1).await;
-    assert_eq!(records[0]["status"], 200);
-    assert_eq!(records[0]["provider"], "test");
-    assert_eq!(records[0]["model"], "test");
+    let records = support::poll_usage_records(&usage_path, 1).await;
+    assert_eq!(records[0].status, 200);
+    assert_eq!(records[0].provider, "test");
+    assert_eq!(records[0].model.as_deref(), Some("test"));
 }
 
 #[tokio::test]

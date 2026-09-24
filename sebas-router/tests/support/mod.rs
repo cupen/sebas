@@ -1,9 +1,9 @@
 //! 测试支撑：启动真实 router（OS 分配端口），自动 set 两个测试 env key，
-//! 并把 config 中的 `__USAGE__` 占位替换为 tempdir 内 usage.jsonl，
-//! 避免测试污染 `~/.local/state`。
+//! 并把 config 中的 `__USAGE__` 占位替换为 tempdir 内 usage.db（router 自有的
+//! 用量库，persist-router-usage），避免测试污染真实状态目录。
 //!
 //! Task 9 扩展本模块追加 mock upstream（双协议面 axum fallback）+ fixture 集
-//! + 断言辅助（header 查找、usage.jsonl 轮询）。
+//! + 断言辅助（header 查找、usage 库轮询）。
 //!
 //! 各 test 二进制独立编译本模块，未必用到每个 pub 项（如 auth_test 不用
 //! mock upstream），故模块级 `allow(dead_code)` 抑制跨二进制未用警告。
@@ -31,12 +31,12 @@ use sebas_router::server;
 /// 启动一个 router 实例并返回其监听地址 + 持有 scratch dir（drop 即清理）。
 ///
 /// `config_toml` 中：
-/// - `usage_file = "__USAGE__"` 会被替换为 tempdir 内 `usage.jsonl`；
+/// - `usage_db = "__USAGE__"` 会被替换为 tempdir 内 `usage.db`；
 /// - provider 的 `api_key_env` 应指向 `SEBAS_ROUTER_TEST_UPSTREAM_KEY`
 ///   或 `SEBAS_ROUTER_TEST_UPSTREAM_KEY_OAI`，本函数自动 set 两者。
 ///
 /// Task 8 的 usage sink 会写经 `__USAGE__` 替换出的 tempdir 路径，故测试
-/// 不会触及 `~/.local/state`。
+/// 不会触及真实状态目录。
 pub async fn start_router(config_toml: &str) -> TestRouter {
     start_router_impl(config_toml, false).await
 }
@@ -50,7 +50,8 @@ async fn start_router_impl(config_toml: &str, debug: bool) -> TestRouter {
     ensure_test_env_keys();
 
     let dir = test_target_dir("start_router");
-    let usage_path = dir.path().join("usage.jsonl");
+    // persist-router-usage：用量落 router 自有的 `usage.db`（不再是 jsonl）。
+    let usage_path = dir.path().join("usage.db");
     // Windows 临时路径含反斜杠（`C:\Users\...\Temp\...`），TOML 会把 `\U` 当
     // unicode 转义导致解析失败。统一换成 `/`（TOML 与 OS 都接受）。
     let usage = usage_path.to_string_lossy().replace('\\', "/");
@@ -143,7 +144,7 @@ impl Drop for TestDir {
 /// 运行中的 router 测试实例。drop 时 abort 后台 task + 清理 scratch dir。
 pub struct TestRouter {
     pub addr: SocketAddr,
-    /// 持有以保持 scratch dir 存活至 drop；Task 9 读 `dir.path()` 轮询 usage.jsonl。
+    /// 持有以保持 scratch dir 存活至 drop；Task 9 读 `dir.path()` 轮询用量库。
     pub dir: TestDir,
     _server: tokio::task::JoinHandle<()>,
 }
@@ -406,7 +407,7 @@ fn is_model_get(path: &str) -> bool {
 }
 
 // ===== Fixtures =====
-// usage 数字须与 contract_test.rs 的 usage.jsonl 断言一致。
+// usage 数字须与 contract_test.rs 的用量库断言一致。
 // Anthropic messages：input=10 output=25 cache_read=5 cache_creation=2。
 // OpenAI chat：prompt=12 completion=34。OpenAI responses：input=8 output=20。
 
@@ -527,25 +528,56 @@ pub const OPENAI_MODEL_GET: &str =
 
 // ===== 断言辅助 =====
 
-/// 轮询 usage.jsonl 直到至少 `min_lines` 行可解析为 JSON，或超时（3s）。
-/// writer 异步（mpsc + tokio task），故需带超时重试。返回按出现序的 Value 列表。
-pub async fn poll_usage_jsonl(path: &Path, min_lines: usize) -> Vec<serde_json::Value> {
+/// 轮询用量库直到至少 `min_rows` 行落库，或超时（3s）。
+/// writer 异步（mpsc + tokio task），故需带超时重试。返回**按完成顺序**
+/// （id 升序）的 [`UsageRecord`] 列表。
+///
+/// persist-router-usage：断言面由「解析 NDJSON 日志」改为「查库」——
+/// 记录形状（字段集与语义）不变，读法变了。
+pub async fn poll_usage_records(
+    path: &Path,
+    min_rows: usize,
+) -> Vec<sebas_router::usage::UsageRecord> {
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            let content = tokio::fs::read_to_string(path).await.unwrap_or_default();
-            let vals: Vec<serde_json::Value> = content
-                .lines()
-                .filter(|l| !l.is_empty())
-                .filter_map(|l| serde_json::from_str(l).ok())
-                .collect();
-            if vals.len() >= min_lines {
-                return vals;
+            let rows = read_usage_records(path);
+            if rows.len() >= min_rows {
+                return rows;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await
-    .expect("usage.jsonl records not written within 3s timeout")
+    .expect("usage records not committed within 3s timeout")
+}
+
+/// 读用量库全表（id 升序 = 完成顺序）；库不存在/尚未建表时返回空表。
+///
+/// 非标准查询（排序）走手写 SQL，但返回的是表 struct 实例
+/// （`UsageRow::from_row`）——禁止无类型载体。
+pub fn read_usage_records(path: &Path) -> Vec<sebas_router::usage::UsageRecord> {
+    use sebas_db::record::Record;
+    use sebas_router::usage::{UsageRecord, UsageRow};
+
+    if !path.exists() {
+        return Vec::new();
+    }
+    let Ok(conn) = sebas_db::conn::open_readonly(path) else {
+        return Vec::new();
+    };
+    let sql = format!(
+        "SELECT {} FROM usage_records ORDER BY id",
+        <UsageRow as Record>::COLUMNS.join(", ")
+    );
+    let Ok(mut stmt) = conn.prepare(&sql) else {
+        return Vec::new();
+    };
+    let Ok(rows) = stmt.query_map([], UsageRow::from_row) else {
+        return Vec::new();
+    };
+    rows.filter_map(|r| r.ok())
+        .map(UsageRecord::from)
+        .collect()
 }
 
 /// 在 mock 记录的请求头 map 中做 case-insensitive 查找。返回匹配值。

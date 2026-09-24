@@ -111,12 +111,19 @@ pub fn build_state(cfg: RouterConfig) -> Result<AppState> {
         .read_timeout(Duration::from_secs(cfg.read_timeout_secs))
         .build()
         .map_err(|e| RouterError::Upstream(format!("构建 reqwest client 失败: {e}")))?;
-    // usage jsonl sink：spawn_writer 起后台 task + 建父目录。失败 → Config
-    // 错误拒绝启动（spec：usage_file 父目录由 spawn_writer 创建）。
-    let sink = UsageSink::spawn_writer(&cfg.usage_file).map_err(|e| {
+    // usage 库 sink（persist-router-usage）：spawn_writer 打开 router 自有的
+    // `usage_db`（单写线程 + schema 同步）并起后台写入/清理 task。失败 →
+    // Config 错误拒绝启动（`usage_db` 的父目录由 spawn_writer 创建）。
+    // 注意：这里只打开 usage_db 这一个文件——core 的状态库绝不在此打开。
+    let policy = crate::usage::RetentionPolicy {
+        retention_days: cfg.usage_retention_days,
+        max_rows: cfg.usage_max_rows,
+        prune_interval_secs: cfg.usage_prune_interval_secs,
+    };
+    let sink = UsageSink::spawn_writer(&cfg.usage_db, policy).map_err(|e| {
         RouterError::Config(format!(
-            "usage sink (path {}) spawn failed: {e}",
-            cfg.usage_file
+            "usage sink (db {}) spawn failed: {e}",
+            cfg.usage_db
         ))
     })?;
     // token-bucket 限流状态（`cfg.rate_limit` 缺省不限流）。
@@ -261,7 +268,10 @@ mod tests {
             max_body_bytes: 1024,
             connect_timeout_secs: 1,
             read_timeout_secs: 1,
-            usage_file: "/tmp/sebas-gw-test-usage.jsonl".into(),
+            usage_db: "/tmp/sebas-gw-test-usage.db".into(),
+            usage_retention_days: 30,
+            usage_max_rows: 200_000,
+            usage_prune_interval_secs: 0,
             debug: false,
             provider_overlay: "__test_no_overlay__.json".into(),
             default_provider: None,

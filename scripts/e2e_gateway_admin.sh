@@ -101,7 +101,7 @@ echo "[2/6] 生成临时 config → $CONFIG"
 {
   echo "[gateway]"
   echo "listen = \"127.0.0.1:${PORT}\""
-  echo "usage_file = \"$TMPDIR/usage.jsonl\""
+  echo "usage_db = \"$TMPDIR/usage.db\""
   echo "provider_overlay = \"$OVERLAY\""
   echo
   echo "[[gateway.keys]]"

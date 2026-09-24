@@ -196,7 +196,12 @@ pub(crate) fn rebuild_from_seed(state: &AppState) -> Result<RouterConfig, String
     cfg.max_body_bytes = core.cfg.max_body_bytes;
     cfg.connect_timeout_secs = core.cfg.connect_timeout_secs;
     cfg.read_timeout_secs = core.cfg.read_timeout_secs;
-    cfg.usage_file = core.cfg.usage_file.clone();
+    // 用量库与保留期是启动期字段：reload 不换库（sink 已绑定到启动时那一个
+    // 文件与策略），这里保留外壳的值。
+    cfg.usage_db = core.cfg.usage_db.clone();
+    cfg.usage_retention_days = core.cfg.usage_retention_days;
+    cfg.usage_max_rows = core.cfg.usage_max_rows;
+    cfg.usage_prune_interval_secs = core.cfg.usage_prune_interval_secs;
     cfg.debug = core.cfg.debug;
     cfg.rate_limit = core.cfg.rate_limit;
     // debug 模式的内置 test provider 是启动期内存注入、不在 config.toml

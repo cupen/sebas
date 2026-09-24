@@ -22,6 +22,10 @@ use sebas_router::server;
 /// (test-only; never touches the network). listen=0 lets the OS pick a port.
 /// No `default_provider` so a model-less request yields NoRoute (502) — a
 /// single-provider config would implicitly default.
+///
+/// `usage_db = "__USAGE__"` 由 [`pin_usage_db`] 替换为 scratch 目录下的
+/// `usage.db`：**必须钉**——`build_state` 会真的打开用量库，缺省值落在
+/// 状态目录（`~/.sebas/usage.db`），不钉就会污染操作员的真实实例。
 const CFG: &str = r#"
 [router]
 listen = "127.0.0.1:0"
@@ -29,6 +33,7 @@ auth_token = "sk-gw-test"
 # 隔离：不合并开发机 ~/.sebas/providers.json（其 openai 条目与 preset
 # 校验冲突导致 parse 失败）。
 provider_overlay = "__sebas_server_smoke_no_overlay__.json"
+usage_db = "__USAGE__"
 [provider.anth-mock]
 base_url_anthropic = "https://api.anthropic.com"
 api_key = "test-key"
@@ -37,9 +42,23 @@ base_url_openai_chat = "https://api.openai.com/v1"
 api_key = "test-key-oai"
 "#;
 
+/// 把 `__USAGE__` 换成 `support::test_target_dir` 下的 `usage.db`（worktree
+/// 的 `target/` 内，随 `cargo clean` 清理），并返回替换后的 TOML。
+/// 顺带用 `TestDir` 的 RAII 保证 scratch 目录在测试期间存活。
+fn pin_usage_db() -> (String, support::TestDir) {
+    let dir = support::test_target_dir("server_smoke");
+    let usage = dir
+        .path()
+        .join("usage.db")
+        .to_string_lossy()
+        .replace('\\', "/");
+    (CFG.replace("__USAGE__", &usage), dir)
+}
+
 #[tokio::test]
 async fn healthz_ok_and_proxy_returns_502_no_route_for_modelless_request() {
-    let cfg = RouterConfig::parse(CFG).expect("parse test config");
+    let (cfg_toml, _usage_dir) = pin_usage_db();
+    let cfg = RouterConfig::parse(&cfg_toml).expect("parse test config");
     let state = server::build_state(cfg).expect("build_state");
     let app = server::build_router(state);
 
@@ -97,7 +116,7 @@ async fn modelless_get_models_without_default_provider_returns_502() {
     let cfg = r#"
 [router]
 listen = "127.0.0.1:0"
-usage_file = "__USAGE__"
+usage_db = "__USAGE__"
 
 [[router.keys]]
 key = "sk-gw-test"

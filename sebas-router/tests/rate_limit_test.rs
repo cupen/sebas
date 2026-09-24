@@ -27,7 +27,7 @@ fn cfg(upstream: &str) -> String {
         r#"
 [router]
 listen = "127.0.0.1:0"
-usage_file = "__USAGE__"
+usage_db = "__USAGE__"
 
 auth_token = "sk-gw-test"
 
@@ -49,7 +49,7 @@ fn cfg_two_tokens(upstream: &str) -> String {
         r#"
 [router]
 listen = "127.0.0.1:0"
-usage_file = "__USAGE__"
+usage_db = "__USAGE__"
 
 auth_token = ["sk-a", "sk-b"]
 

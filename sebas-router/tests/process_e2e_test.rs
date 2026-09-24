@@ -2,7 +2,7 @@
 //! mock upstream，复用 `support` 的 fixture 做字节级断言。
 //!
 //! 覆盖：anthropic messages JSON/SSE、openai chat JSON/SSE 字节级透传、
-//! 401 鉴权、usage.jsonl 至少一条 record、上游收到注入的 key。
+//! 401 鉴权、用量库至少一条 record、上游收到注入的 key。
 //!
 //! binary 定位：router crate 在 workspace 子目录，`target/debug` 在 workspace
 //! 根（上一级）。binary 缺失时 skip（不失败）——本地先 `cargo build --bin sebas`；
@@ -42,7 +42,7 @@ async fn pick_free_port() -> u16 {
     addr.port()
 }
 
-/// 写临时 router config：双 provider 指向两个 mock，usage 落到 target/tests/。
+/// 写临时 router config：双 provider 指向两个 mock，usage 落到 target/tests/ 下的 usage.db。
 /// 返回 config 路径（TOML 里路径统一用 `/`，兼容 Windows 反斜杠转义问题）。
 fn write_config(
     dir: &Path,
@@ -57,7 +57,7 @@ fn write_config(
         r#"
 [router]
 listen = "127.0.0.1:{port}"
-usage_file = "{usage}"
+usage_db = "{usage}"
 # 隔离：不合并开发机 ~/.sebas/providers.json（其 openai 条目与 preset
 # 校验冲突会让 router 启动即失败）。
 provider_overlay = "{}/no-overlay.json"
@@ -80,7 +80,7 @@ api_key_env = "SEBAS_ROUTER_TEST_UPSTREAM_KEY_OAI"
 }
 
 /// 独立 `sebas router` 进程 + 顶层 `[provider.*]` 的配置：`[router]` 只放
-/// listen/auth_token/usage，provider 定义在顶层（与 run 共用）。protocol 省略 →
+/// listen/auth_token/usage_db，provider 定义在顶层（与 run 共用）。protocol 省略 →
 /// preset 自动填 anthropic；base_url 显式指向 mock；api_key_env 显式。
 fn write_top_level_provider_config(
     dir: &Path,
@@ -94,7 +94,7 @@ fn write_top_level_provider_config(
         r#"
 [router]
 listen = "127.0.0.1:{port}"
-usage_file = "{usage}"
+usage_db = "{usage}"
 # 隔离：不合并开发机 ~/.sebas/providers.json（其 openai 条目与 preset
 # 校验冲突会让 router 启动即失败）。
 provider_overlay = "{}/no-overlay.json"
@@ -160,7 +160,7 @@ async fn real_binary_forwards_anthropic_openai_auth_and_usage() {
     let anth = start_mock_upstream(WireProtocol::Anthropic).await;
     let oai = start_mock_upstream(WireProtocol::OpenAiChat).await;
     let dir = support::test_target_dir("process_e2e");
-    let usage_path = dir.path().join("usage.jsonl");
+    let usage_path = dir.path().join("usage.db");
     let port = pick_free_port().await;
     let config_path = write_config(dir.path(), port, &anth.url, &oai.url, &usage_path);
 
@@ -301,11 +301,11 @@ async fn real_binary_forwards_anthropic_openai_auth_and_usage() {
         .expect("POST without key");
     assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
 
-    // 6. usage.jsonl 至少一条 record（前四次 200 调用任意一条即可）
-    let records = poll_usage_jsonl(&usage_path, 1).await;
+    // 6. 用量库至少一条 record（前四次 200 调用任意一条即可）
+    let records = poll_usage_records(&usage_path, 1).await;
     // 无 per-key 身份：key 恒为空（绝不写 token 本体）。
-    assert_eq!(records[0]["key"], "");
-    assert_eq!(records[0]["status"], 200);
+    assert_eq!(records[0].key, "");
+    assert_eq!(records[0].status, 200);
 
     // 7. mock 收到注入的上游 key（child 真转发，非仅返回 fixture）
     let anth_reqs = anth.requests.lock().await;
@@ -343,7 +343,7 @@ async fn standalone_router_reads_top_level_provider_table() {
 
     let anth = start_mock_upstream(WireProtocol::Anthropic).await;
     let dir = support::test_target_dir("process_e2e_top");
-    let usage_path = dir.path().join("usage.jsonl");
+    let usage_path = dir.path().join("usage.db");
     let port = pick_free_port().await;
     let config_path = write_top_level_provider_config(dir.path(), port, &anth.url, &usage_path);
 
@@ -428,11 +428,11 @@ async fn standalone_router_reads_top_level_provider_table() {
         .expect("POST without key");
     assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
 
-    // usage 落盘（独立进程同样写 usage.jsonl）
-    let records = poll_usage_jsonl(&usage_path, 1).await;
+    // usage 落盘（独立进程同样写 router 自有 usage.db）
+    let records = poll_usage_records(&usage_path, 1).await;
     // 无 per-key 身份：key 恒为空（绝不写 token 本体）。
-    assert_eq!(records[0]["key"], "");
-    assert_eq!(records[0]["status"], 200);
+    assert_eq!(records[0].key, "");
+    assert_eq!(records[0].status, 200);
 
     let stderr = gw.kill_and_capture_stderr();
     if !stderr.is_empty() {

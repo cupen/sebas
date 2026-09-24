@@ -274,7 +274,11 @@ addr=127.0.0.1:<port>`，router 侧用自定义 provider（`[provider.fake]` 哑
 
    [router]
    provider_overlay = "<SB>/providers.json"   # missing file = no-op
-   usage_file = "<SB>/router-usage.jsonl"
+   # persist-router-usage：用量落 router 自有的 SQLite 库（默认状态目录下的
+   # usage.db，SEBAS_ROUTER_USAGE_DB 可覆盖）。旧的 `usage_file`（NDJSON）键
+   # 已删除——残留会以未知键报错。保留期双闸（默认 30 天 / 20 万行，后台
+   # 每小时清理）见 config/config.toml.example。
+   usage_db = "<SB>/usage.db"
    ```
 
 2. Start the two processes（unify-router-process-shape：router 只以独立进程
@@ -322,6 +326,13 @@ addr=127.0.0.1:<port>`，router 侧用自定义 provider（`[provider.fake]` 哑
      502 `no_route` **even though routing is fine** (check `/admin/stats`:
      `routes: 1` means the debug route is present). Use ASCII payloads or
      `-d @file.json` (UTF-8).
+   - 用量记录落 `usage.db`（不是 jsonl）；直接查库核对：
+
+     ```bash
+     sqlite3 "<SB>/usage.db" \
+       "SELECT ts, provider, model, status, input_tokens, output_tokens \
+          FROM usage_records ORDER BY id DESC LIMIT 10"
+     ```
 
 4. Clean up per rule 4 — every artifact (incl. the state DB) lives inside
    `<SB>`, so deleting the dir is complete.

@@ -48,8 +48,25 @@ pub struct RouterConfig {
     pub connect_timeout_secs: u64,
     #[serde(default = "default_read_timeout_secs")]
     pub read_timeout_secs: u64,
-    #[serde(default = "default_usage_file")]
-    pub usage_file: String,
+    /// 用量库落点（persist-router-usage D1/D5）：router **自有**的 SQLite
+    /// 库文件，缺省落在状态目录下（`single-state-dir` 的逻辑名
+    /// `StatePath::UsageDb` → `<状态目录>/usage.db`，`SEBAS_ROUTER_USAGE_DB`
+    /// 可覆盖）。旧的 `usage_file`（NDJSON）键**已删除**——出现在配置里会以
+    /// 未知键报错（`RawRouterConfig` 尚无 `deny_unknown_fields`，因此这里
+    /// 额外做一次 raw-TOML 扫描显式拒绝，理由见 `reject_retired_usage_file`）。
+    #[serde(default = "default_usage_db")]
+    pub usage_db: String,
+    /// 保留期的时间闸（persist-router-usage D2）：早于该窗口的记录被后台
+    /// 清理。`0` = 关闭时间闸，只留行数闸。
+    #[serde(default = "default_usage_retention_days")]
+    pub usage_retention_days: u64,
+    /// 保留期的行数闸（persist-router-usage D2）：行数超过该上限时清理最旧
+    /// 记录。`0` = 关闭行数闸（不推荐：库会无限增长）。
+    #[serde(default = "default_usage_max_rows")]
+    pub usage_max_rows: u64,
+    /// 后台清理间隔（秒）。`0` = 关闭后台清理（保留期闸不再被触发）。
+    #[serde(default = "default_usage_prune_interval_secs")]
+    pub usage_prune_interval_secs: u64,
     /// debug 模式（`--debug` 启动参数触发，parse 后注入内置 test provider）：
     /// 由 router 自身应答（固定文字 + 回显输入），不转发外部上游。
     pub debug: bool,
@@ -140,10 +157,24 @@ fn default_connect_timeout_secs() -> u64 {
 fn default_read_timeout_secs() -> u64 {
     600
 }
-fn default_usage_file() -> String {
-    // $HOME/.sebas/ works on both Unix and Windows (tilde expansion below
-    // resolves it through dirs::home_dir()).
-    "~/.sebas/router-usage.jsonl".into()
+/// 用量库缺省落点：状态目录下的 `usage.db`（single-state-dir 逻辑名表）。
+fn default_usage_db() -> String {
+    sebas_domain::state_paths::StatePath::UsageDb
+        .resolve()
+        .to_string_lossy()
+        .into_owned()
+}
+/// 保留期时间闸缺省：30 天（保守值——足够长，且让库有界）。
+fn default_usage_retention_days() -> u64 {
+    30
+}
+/// 保留期行数闸缺省：200_000 行（典型部署下远超 30 天窗口，实际很少触发）。
+fn default_usage_max_rows() -> u64 {
+    200_000
+}
+/// 后台清理间隔缺省：1 小时。清理是后台动作，不影响请求路径。
+fn default_usage_prune_interval_secs() -> u64 {
+    3600
 }
 fn default_provider_overlay() -> String {
     "~/.sebas/providers.json".into()
@@ -255,8 +286,14 @@ struct RawRouterConfig {
     connect_timeout_secs: u64,
     #[serde(default = "default_read_timeout_secs")]
     read_timeout_secs: u64,
-    #[serde(default = "default_usage_file")]
-    usage_file: String,
+    #[serde(default = "default_usage_db")]
+    usage_db: String,
+    #[serde(default = "default_usage_retention_days")]
+    usage_retention_days: u64,
+    #[serde(default = "default_usage_max_rows")]
+    usage_max_rows: u64,
+    #[serde(default = "default_usage_prune_interval_secs")]
+    usage_prune_interval_secs: u64,
     #[serde(default = "default_provider_overlay")]
     provider_overlay: String,
     #[serde(default)]
@@ -684,6 +721,34 @@ fn deprecated_routes_key_hit(raw: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// persist-router-usage D5：`[router] usage_file` 键**已删除**（存量为
+/// `usage_db`）。`RawRouterConfig` 没有 `deny_unknown_fields`（它要容忍
+/// `[feishu]` / `[acp.*]` 等同文件无关段），所以 serde 会静默吞掉这个键；
+/// 这里对 raw TOML 做一次显式扫描，把「能解析但不生效」的假键变成启动期
+/// **报错**——这比静默忽略更诚实（操作员会以为配置还在起作用）。
+///
+/// **不是**过渡期保留：没有 warn-only 分支，命中即拒绝。
+fn reject_retired_usage_file(raw: &str) -> Result<()> {
+    let hit = raw
+        .parse::<toml::Table>()
+        .ok()
+        .and_then(|v| {
+            v.get("router")
+                .and_then(|r| r.as_table())
+                .map(|r| r.contains_key("usage_file"))
+        })
+        .unwrap_or(false);
+    if hit {
+        return Err(RouterError::Config(
+            "config [router] usage_file is retired (persist-router-usage): usage records now \
+             live in the router's own SQLite usage database; replace the key with `usage_db` \
+             (default: <state dir>/usage.db, override: SEBAS_ROUTER_USAGE_DB)"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 /// 废弃键告警：stderr + tracing 双通道——router 进程的 parse 同样可能先于
 /// tracing 初始化执行（与根配置 warn_deprecated_watchdog_keys 同一理由）。
 fn warn_deprecated_routes_key(raw: &str) {
@@ -697,9 +762,10 @@ fn warn_deprecated_routes_key(raw: &str) {
 impl RouterConfig {
     /// 解析顺序对齐 root house style（src/config.rs）：
     /// toml → preset 填充（raw → resolved）→ env 覆盖（`SEBAS_ROUTER_LISTEN`）
-    /// → validate → tilde 展开（`usage_file`）。
+    /// → validate → tilde 展开（`usage_db`）。
     pub fn parse(raw: &str) -> Result<Self> {
         warn_deprecated_routes_key(raw);
+        reject_retired_usage_file(raw)?;
         let file: RouterFile =
             toml::from_str(raw).map_err(|e| RouterError::Config(format!("toml parse: {e}")))?;
 
@@ -715,7 +781,10 @@ impl RouterConfig {
                 max_body_bytes: g.max_body_bytes,
                 connect_timeout_secs: g.connect_timeout_secs,
                 read_timeout_secs: g.read_timeout_secs,
-                usage_file: g.usage_file,
+                usage_db: g.usage_db,
+                usage_retention_days: g.usage_retention_days,
+                usage_max_rows: g.usage_max_rows,
+                usage_prune_interval_secs: g.usage_prune_interval_secs,
                 debug: false,
                 provider_overlay: g.provider_overlay,
                 default_provider: g.default_provider,
@@ -734,7 +803,10 @@ impl RouterConfig {
                 max_body_bytes: default_max_body_bytes(),
                 connect_timeout_secs: default_connect_timeout_secs(),
                 read_timeout_secs: default_read_timeout_secs(),
-                usage_file: default_usage_file(),
+                usage_db: default_usage_db(),
+                usage_retention_days: default_usage_retention_days(),
+                usage_max_rows: default_usage_max_rows(),
+                usage_prune_interval_secs: default_usage_prune_interval_secs(),
                 debug: false,
                 provider_overlay: default_provider_overlay(),
                 default_provider: None,
@@ -897,7 +969,7 @@ impl RouterConfig {
     }
 
     fn with_expanded_paths(mut self) -> Self {
-        self.usage_file = expand_tilde(&self.usage_file);
+        self.usage_db = expand_tilde(&self.usage_db);
         self.provider_overlay = expand_tilde(&self.provider_overlay);
         self
     }
@@ -1000,12 +1072,17 @@ api_key_env = "DEEPSEEK_API_KEY"
         assert_eq!(cfg.max_body_bytes, 67_108_864);
         assert_eq!(cfg.connect_timeout_secs, 10);
         assert_eq!(cfg.read_timeout_secs, 600);
-        let expected_suffix = std::path::Path::new(".sebas").join("router-usage.jsonl");
-        let usage_path = std::path::Path::new(&cfg.usage_file);
-        assert!(
-            usage_path.ends_with(expected_suffix),
-            "usage_file {:?} should end with the .sebas suffix",
-            cfg.usage_file
+        // 缺省落点 = 状态目录下的 usage.db（single-state-dir 逻辑名）。
+        assert_eq!(
+            std::path::Path::new(&cfg.usage_db),
+            sebas_domain::state_paths::StatePath::UsageDb.resolve(),
+            "usage_db 缺省必须由状态目录逻辑名派生"
+        );
+        assert_eq!(
+            std::path::Path::new(&cfg.usage_db)
+                .file_name()
+                .and_then(|s| s.to_str()),
+            Some("usage.db")
         );
         assert_eq!(cfg.default_provider.as_deref(), Some("anthropic"));
         assert_eq!(cfg.auth_token, vec!["sk-gw-local-dev".to_string()]);
@@ -1091,7 +1168,7 @@ api_key = "test-key"
     }
 
     #[test]
-    fn usage_file_tilde_is_expanded() {
+    fn usage_db_tilde_is_expanded() {
         let _g = LOCK.lock().unwrap();
         // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
         unsafe {
@@ -1100,18 +1177,72 @@ api_key = "test-key"
         let home = dirs::home_dir().expect("HOME must be set for this test");
         let raw = r#"
 [router]
-usage_file = "~/sebas/router-usage.jsonl"
+usage_db = "~/sebas/usage.db"
 auth_token = "sk-test"
 [provider.anthropic]
 api_key = "test-key"
 "#;
         let cfg = parse_isolated(raw).expect("parse");
         assert_eq!(
-            cfg.usage_file,
-            home.join("sebas/router-usage.jsonl")
-                .to_string_lossy()
-                .into_owned()
+            cfg.usage_db,
+            home.join("sebas/usage.db").to_string_lossy().into_owned()
         );
+    }
+
+    /// persist-router-usage 1.1：`[router] usage_file` **已删除**——残留该键
+    /// 的配置必须以未知键报错（不留「能解析但不生效」的假键，design D5）。
+    #[test]
+    fn retired_usage_file_key_is_rejected() {
+        let _g = LOCK.lock().unwrap();
+        // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
+        unsafe {
+            std::env::remove_var("SEBAS_ROUTER_LISTEN");
+        }
+        let raw = r#"
+[router]
+usage_file = "/tmp/router-usage.jsonl"
+auth_token = "sk-test"
+[provider.anthropic]
+api_key = "test-key"
+"#;
+        let err = parse_isolated(raw).expect_err("usage_file 必须被拒绝");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("usage_file"),
+            "报错必须点名退休键，实际: {msg}"
+        );
+        assert!(
+            msg.contains("usage_db"),
+            "报错必须指出替代键，实际: {msg}"
+        );
+    }
+
+    /// persist-router-usage 3.1/3.2/3.3：保留期三个键的保守默认值与可配置性。
+    #[test]
+    fn usage_retention_defaults_and_overrides() {
+        let _g = LOCK.lock().unwrap();
+        // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
+        unsafe {
+            std::env::remove_var("SEBAS_ROUTER_LISTEN");
+        }
+        let base = parse_isolated(FULL_EXAMPLE).expect("parse");
+        assert_eq!(base.usage_retention_days, 30, "默认时间闸保守（30 天）");
+        assert_eq!(base.usage_max_rows, 200_000, "默认行数闸");
+        assert_eq!(base.usage_prune_interval_secs, 3600, "默认清理间隔 1 小时");
+
+        let raw = r#"
+[router]
+usage_retention_days = 0
+usage_max_rows = 500
+usage_prune_interval_secs = 5
+auth_token = "sk-test"
+[provider.anthropic]
+api_key = "test-key"
+"#;
+        let cfg = parse_isolated(raw).expect("parse");
+        assert_eq!(cfg.usage_retention_days, 0, "0 = 关闭时间闸");
+        assert_eq!(cfg.usage_max_rows, 500);
+        assert_eq!(cfg.usage_prune_interval_secs, 5);
     }
 
     // -------------------- provider preset --------------------

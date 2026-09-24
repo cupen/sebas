@@ -41,7 +41,31 @@ driver = "claude"
 # listen = "127.0.0.1:8787"     # 独立进程（含 watchdog 托管的 router 子进程）都读这里
 # default_provider = "deepseek" # 无 model 请求（如 GET /v1/models）的兜底
 # auth_token = ["sk-local-dev"] # 不配置 = 不校验下游 token（启动时 warn）
-# usage_file = "~/.sebas/router-usage.jsonl"
+#
+# 用量库（persist-router-usage）：router 自有的 SQLite 文件，一行一条记录
+# （时间戳/协议/模型/provider/上游模型/状态/延迟/ttft/四类 token 计数/error；
+# key 字段恒空——无 per-key 归属）。缺省落在状态目录下（`usage.db`，
+# SEBAS_ROUTER_USAGE_DB 可覆盖）；router 是唯一写入者，且**不打开** core 的
+# 状态库。
+# 旧的 `usage_file`（NDJSON）键已删除——残留会以未知键报错。
+# usage_db = "~/.sebas/usage.db"
+#
+# 保留期（双闸，后台定期清理；两闸都设 0 = 不清理，库会无限增长）：
+#   usage_retention_days       时间闸，默认 30（保守值）；0 = 关闸
+#   usage_max_rows             行数闸，默认 200000；0 = 关闸
+#   usage_prune_interval_secs  清理间隔，默认 3600（秒）；0 = 不跑后台清理
+# 清理动作写 INFO 日志（aged_pruned / excess_pruned 计数），数据不会悄悄消失。
+# usage_retention_days = 30
+# usage_max_rows = 200000
+# usage_prune_interval_secs = 3600
+#
+# 直接查库（不新增导出 CLI；非标准查询手写 SQL 即可）：
+#   sqlite3 ~/.sebas/usage.db \
+#     "SELECT ts, provider, model, status, input_tokens, output_tokens \
+#        FROM usage_records WHERE model = 'claude-sonnet-4' ORDER BY id DESC LIMIT 20"
+#   sqlite3 ~/.sebas/usage.db \
+#     "SELECT provider, model, COUNT(*), SUM(output_tokens) \
+#        FROM usage_records GROUP BY provider, model ORDER BY 3 DESC"
 #
 # [provider.anthropic]
 # # api_key = "..."    # 明文可落 overlay（WebUI/卡片写入）；config.toml 建议 env

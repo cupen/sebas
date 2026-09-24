@@ -226,13 +226,13 @@ base_url_anthropic = "https://api.anthropic.com"
 [router]
 listen = "127.0.0.1:{router_port}"
 provider_overlay = "{overlay}"
-usage_file = "{usage}"
+usage_db = "{usage}"
 "#,
             claude_sessions = fs_string(&path.join("claude-sessions")),
             work = fs_string(&path.join("work")),
             downloads = fs_string(&path.join("downloads")),
             overlay = fs_string(&path.join("providers.json")),
-            usage = fs_string(&path.join("router-usage.jsonl")),
+            usage = fs_string(&path.join("usage.db")),
             // Written ONLY when the token env var is set: router validate
             // rejects an api_key_env pointing at an unset variable, which
             // would kill the core at startup even though this provider is

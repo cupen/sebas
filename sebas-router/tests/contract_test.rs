@@ -32,7 +32,7 @@ fn base_config(anth_url: &str, oai_url: &str) -> String {
         r#"
 [router]
 listen = "127.0.0.1:0"
-usage_file = "__USAGE__"
+usage_db = "__USAGE__"
 default_provider = "anth-mock"
 provider_overlay = "{overlay_path}"
 
@@ -77,7 +77,7 @@ fn rename_config(anth_url: &str, oai_url: &str) -> String {
         r#"
 [router]
 listen = "127.0.0.1:0"
-usage_file = "__USAGE__"
+usage_db = "__USAGE__"
 default_provider = "anth-mock"
 
 auth_token = "sk-gw-contract"
@@ -105,7 +105,7 @@ fn openai_default_config(anth_url: &str, oai_url: &str) -> String {
         r#"
 [router]
 listen = "127.0.0.1:0"
-usage_file = "__USAGE__"
+usage_db = "__USAGE__"
 default_provider = "oai-mock"
 
 auth_token = "sk-gw-openai"
@@ -137,7 +137,7 @@ impl TestEnv {
     }
 
     fn usage_path(&self) -> std::path::PathBuf {
-        self.gw.dir.path().join("usage.jsonl")
+        self.gw.dir.path().join("usage.db")
     }
 }
 
@@ -272,7 +272,7 @@ async fn case_1_anthropic_messages_non_stream_byte_passthrough() {
     assert_key_injection(&rec, WireProtocol::Anthropic, "sk-gw-contract");
 }
 
-// ===== 2. POST /v1/messages 流式 SSE 字节透传 + usage.jsonl 断言 =====
+// ===== 2. POST /v1/messages 流式 SSE 字节透传 + 用量库断言 =====
 
 #[tokio::test]
 async fn case_2_anthropic_messages_sse_byte_passthrough_and_usage() {
@@ -306,15 +306,15 @@ async fn case_2_anthropic_messages_sse_byte_passthrough_and_usage() {
     // ③ key 注入 + 不泄漏
     assert_key_injection(&rec, WireProtocol::Anthropic, "sk-gw-contract");
 
-    // usage.jsonl 断言：input=10 output=25 cache_read=5 cache_creation=2
-    let records = poll_usage_jsonl(&env.usage_path(), 1).await;
+    // 用量库断言：input=10 output=25 cache_read=5 cache_creation=2
+    let records = poll_usage_records(&env.usage_path(), 1).await;
     let u = &records[0];
-    assert_eq!(u["protocol"], "anthropic");
-    assert_eq!(u["status"], 200);
-    assert_eq!(u["input_tokens"], 10);
-    assert_eq!(u["output_tokens"], 25);
-    assert_eq!(u["cache_read_tokens"], 5);
-    assert_eq!(u["cache_creation_tokens"], 2);
+    assert_eq!(u.protocol, "anthropic");
+    assert_eq!(u.status, 200);
+    assert_eq!(u.input_tokens, Some(10));
+    assert_eq!(u.output_tokens, Some(25));
+    assert_eq!(u.cache_read_tokens, Some(5));
+    assert_eq!(u.cache_creation_tokens, Some(2));
 }
 
 // ===== 3. POST /v1/messages/count_tokens =====
@@ -466,17 +466,17 @@ async fn case_7_openai_chat_sse_byte_passthrough_and_usage() {
     assert_key_injection(&rec, WireProtocol::OpenAiChat, "sk-gw-contract");
 
     // usage 断言：prompt=12 completion=34 → input=12 output=34
-    let records = poll_usage_jsonl(&env.usage_path(), 1).await;
+    let records = poll_usage_records(&env.usage_path(), 1).await;
     let u = &records[0];
-    assert_eq!(u["protocol"], "openai_chat");
-    assert_eq!(u["status"], 200);
-    assert_eq!(u["input_tokens"], 12);
-    assert_eq!(u["output_tokens"], 34);
+    assert_eq!(u.protocol, "openai_chat");
+    assert_eq!(u.status, 200);
+    assert_eq!(u.input_tokens, Some(12));
+    assert_eq!(u.output_tokens, Some(34));
     assert!(
-        u["cache_read_tokens"].is_null(),
+        u.cache_read_tokens.is_none(),
         "OpenAI must not set cache_read_tokens"
     );
-    assert!(u["cache_creation_tokens"].is_null());
+    assert!(u.cache_creation_tokens.is_none());
 }
 
 // ===== 8. POST /v1/responses（responses usage shape）=====
@@ -508,11 +508,11 @@ async fn case_8_openai_responses_byte_passthrough_and_usage() {
     assert_key_injection(&rec, WireProtocol::OpenAiResponses, "sk-gw-contract");
 
     // usage 断言：responses shape input=8 output=20
-    let records = poll_usage_jsonl(&env.usage_path(), 1).await;
+    let records = poll_usage_records(&env.usage_path(), 1).await;
     let u = &records[0];
-    assert_eq!(u["protocol"], "openai_responses");
-    assert_eq!(u["input_tokens"], 8);
-    assert_eq!(u["output_tokens"], 20);
+    assert_eq!(u.protocol, "openai_responses");
+    assert_eq!(u.input_tokens, Some(8));
+    assert_eq!(u.output_tokens, Some(20));
 }
 
 // ===== 9. POST /v1/embeddings =====

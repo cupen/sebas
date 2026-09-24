@@ -827,13 +827,43 @@ const FAKE_UPSTREAM_KEY: &str = "sk-fake-upstream-dummy";
 /// 下游 key：绝不能出现在 fake 的 journal 里。
 const DOWNSTREAM_KEY: &str = "sk-downstream-must-not-leak";
 
-/// 读 NDJSON 行（journal / usage），空行跳过。
+/// 读 NDJSON 行（fake-provider journal），空行跳过。
 fn read_jsonl(path: &std::path::Path) -> Vec<serde_json::Value> {
     std::fs::read_to_string(path)
         .unwrap_or_default()
         .lines()
         .filter(|l| !l.trim().is_empty())
         .filter_map(|l| serde_json::from_str(l).ok())
+        .collect()
+}
+
+/// 读 router 的用量库（`usage.db`，persist-router-usage）全表，按 id 升序
+/// （= 完成顺序）。库文件/表尚未出现时返回空表——配合 `wait_for` 轮询。
+///
+/// 非标准查询（排序）走手写 SQL，但行经表 struct 解出
+/// （`UsageRow::from_row`）——禁止无类型载体。
+fn read_usage_records(path: &std::path::Path) -> Vec<sebas_router::usage::UsageRecord> {
+    use sebas_db::record::Record;
+    use sebas_router::usage::{UsageRecord, UsageRow};
+
+    if !path.exists() {
+        return Vec::new();
+    }
+    let Ok(conn) = sebas_db::conn::open_readonly(path) else {
+        return Vec::new();
+    };
+    let sql = format!(
+        "SELECT {} FROM usage_records ORDER BY id",
+        <UsageRow as Record>::COLUMNS.join(", ")
+    );
+    let Ok(mut stmt) = conn.prepare(&sql) else {
+        return Vec::new();
+    };
+    let Ok(rows) = stmt.query_map([], UsageRow::from_row) else {
+        return Vec::new();
+    };
+    rows.filter_map(|r| r.ok())
+        .map(UsageRecord::from)
         .collect()
 }
 
@@ -925,7 +955,9 @@ async fn fake_provider_passthrough_journey() {
     assert!(body["usage"]["input_tokens"].as_u64().unwrap_or(0) > 0);
 
     // usage 结算：非零 input/output + provider 名 + model rename 记录。
-    let usage_path = sb.path.join("router-usage.jsonl");
+    // persist-router-usage：断言面由「解析 NDJSON」改为「查用量库」——覆盖点
+    // （provider / model / upstream_model / token 计数）逐条保留。
+    let usage_path = sb.path.join("usage.db");
     let hint = sb.path.clone();
     let fake_usage = {
         let usage_path = usage_path.clone();
@@ -936,20 +968,19 @@ async fn fake_provider_passthrough_journey() {
             move || {
                 let usage_path = usage_path.clone();
                 Box::pin(async move {
-                    read_jsonl(&usage_path)
+                    read_usage_records(&usage_path)
                         .into_iter()
-                        .find(|r| r["provider"] == "fake" && r["status"] == 200)
+                        .find(|r| r.provider == "fake" && r.status == 200)
                 })
             },
         )
         .await
     };
-    assert_eq!(fake_usage["model"], "fake/fake-model");
-    assert_eq!(fake_usage["upstream_model"], "fake-model");
+    assert_eq!(fake_usage.model.as_deref(), Some("fake/fake-model"));
+    assert_eq!(fake_usage.upstream_model.as_deref(), Some("fake-model"));
     assert!(
-        fake_usage["input_tokens"].as_u64().unwrap_or(0) > 0
-            && fake_usage["output_tokens"].as_u64().unwrap_or(0) > 0,
-        "non-zero usage must settle: {fake_usage}"
+        fake_usage.input_tokens.unwrap_or(0) > 0 && fake_usage.output_tokens.unwrap_or(0) > 0,
+        "non-zero usage must settle: {fake_usage:?}"
     );
 
     // --- 流式：SSE 完整事件序列透传，文本与非流式一致 ---
@@ -993,9 +1024,9 @@ async fn fake_provider_passthrough_journey() {
         move || {
             let usage_path2 = usage_path2.clone();
             Box::pin(async move {
-                let fake_records = read_jsonl(&usage_path2)
+                let fake_records = read_usage_records(&usage_path2)
                     .into_iter()
-                    .filter(|r| r["provider"] == "fake")
+                    .filter(|r| r.provider == "fake")
                     .count();
                 (fake_records >= 2).then_some(())
             })

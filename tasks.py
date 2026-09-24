@@ -588,7 +588,10 @@ api_key = "sk-sandbox-dummy"
 [router]
 listen = "127.0.0.1:8791"
 provider_overlay = "{cfg}/providers.json"
-usage_file = "{cfg}/router-usage.jsonl"
+# persist-router-usage：用量落 router 自有的 SQLite 库（默认状态目录下的
+# usage.db，SEBAS_ROUTER_USAGE_DB 可覆盖）。旧的 `usage_file`（NDJSON）键已
+# 删除——残留会以未知键报错。查库：sqlite3 "{cfg}/usage.db" "SELECT * FROM usage_records ORDER BY id DESC LIMIT 10"
+usage_db = "{cfg}/usage.db"
 """
     with open(os.path.join(work, "config.toml"), "w") as f:
         f.write(text)
