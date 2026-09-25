@@ -192,6 +192,9 @@ fn claude_launch_options(
     session_id: String,
     stderr_callback: Arc<dyn Fn(String) + Send + Sync>,
 ) -> ClaudeAgentOptions {
+    // Windows：npm 全局安装的 claude 是「无扩展名 sh 脚本 + .cmd 包装」，
+    // SDK 侧 Command::new 对裸名字只找 .exe——先解析成可 spawn 的形态。
+    let claude_path = crate::resolve_windows_executable(&claude_path);
     ClaudeAgentOptions {
         cli_path: Some(claude_path.into()),
         cwd: work_dir.map(Into::into),
@@ -2276,8 +2279,11 @@ mod tests {
         // `include_partial_messages: true`。cc-agent-sdk 的 subprocess
         // transport 把该 flag 1:1 渲染成子进程命令行的
         // `--include-partial-messages`（真 CLI 据此发 stream_event 帧）。
+        // cli_path 输入用显式 `.exe` 形态钉「原样透传」契约（跨平台稳定）；
+        // 裸名字（"claude"）的按 PATH 解析契约由 win_exe 模块测试与
+        // tests/win_exe_real_cli_smoke.rs 钉住。
         let options = claude_launch_options(
-            "claude".into(),
+            "claude.exe".into(),
             None,
             HashMap::new(),
             HashMap::new(),
@@ -2292,12 +2298,15 @@ mod tests {
         );
         // 其余装配原样透传（resume false → None；cli_path/cwd 钉住）。
         assert!(options.resume.is_none());
-        assert_eq!(options.cli_path.as_deref(), Some(std::path::Path::new("claude")));
+        assert_eq!(
+            options.cli_path.as_deref(),
+            Some(std::path::Path::new("claude.exe"))
+        );
         assert!(options.cwd.is_none());
 
         // resume 形态：会话 id 原样携带。
         let resumed = claude_launch_options(
-            "claude".into(),
+            "claude.exe".into(),
             None,
             HashMap::new(),
             HashMap::new(),

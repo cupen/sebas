@@ -1063,23 +1063,33 @@ fn check_dir_writable(dir: &std::path::Path, what: &str) -> Result<()> {
 /// relative-with-separator) path is checked directly, a bare name is
 /// resolved against PATH. Either way the file must exist and be executable.
 fn check_binary_reachable(path: &str) -> Result<()> {
+    #[cfg(unix)]
     let is_executable = |p: &std::path::Path| -> bool {
         if !p.is_file() {
             return false;
         }
-        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::metadata(p)
                 .map(|m| m.permissions().mode() & 0o111 != 0)
                 .unwrap_or(false)
         }
-        #[cfg(not(unix))]
-        {
-            true
-        }
     };
 
+    // Windows：npm 全局安装的 CLI 是「无扩展名 sh 脚本 + .cmd 包装」，不能按
+    // Unix 可执行位语义校验——解析成实际可 spawn 的形态再验存在性，与 spawn
+    // 侧同一判定（否则校验放行、spawn 报 program not found，见 win_exe 模块）。
+    #[cfg(not(unix))]
+    let found = {
+        let resolved = sebas_acp::resolve_windows_executable(path);
+        let resolved = std::path::Path::new(&resolved);
+        resolved.is_file()
+            && resolved.extension().is_some_and(|e| {
+                ["exe", "cmd", "bat"].contains(&e.to_string_lossy().to_ascii_lowercase().as_str())
+            })
+    };
+
+    #[cfg(unix)]
     let found = if path.contains('/') {
         is_executable(std::path::Path::new(path))
     } else {

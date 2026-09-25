@@ -54,6 +54,9 @@ impl AgentDriver for AcpDriver {
         let exe = argv
             .next()
             .ok_or_else(|| DriverError::NotFound("empty command".to_string()))?;
+        // Windows：npm 形态的无扩展名 CLI 需解析成 .exe/.cmd/.bat 才能 spawn
+        // （见 `win_exe` 模块文档）；其余平台恒等。
+        let exe = crate::resolve_windows_executable(&exe);
         let args: Vec<String> = argv.collect();
         let mut agent_cfg = AcpAgentConfig::new(exe).args(args);
         for (k, v) in extra_env {
