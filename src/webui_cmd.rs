@@ -143,13 +143,10 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
         .map_err(|e| SebasError::Config(format!("read config {}: {e}", args.config)))?;
     let cfg = Config::parse(&raw)?;
 
-    // close-acceptance-blind-spots 盲区 2：env posture 启动告警——继承自
-    // shell 且不被 cover 语义覆盖的 ANTHROPIC_* 逐变量 WARN 点名（只报告，
-    // 不篡改 env，design D1）。standalone webui 不初始化状态库，provider
-    // 解析经 `provider_state::load()` 的文件降级读取——与本进程可见的解析
-    // 一致；`[router]` 段解析一次，供此处与下方 router_info 共用。
+    // `[router]` 段解析一次，供下方 router_info 共用。env posture 告警归
+    // core（run.rs 在引擎就绪后报告）——standalone webui 不初始化状态库也
+    // 不 spawn agent 子进程，provider 真相经核心状态通道按需读取。
     let router_cfg = sebas_router::config::RouterConfig::parse(&raw).ok();
-    crate::spawn_env::warn_inherited_provider_env(router_cfg.as_ref());
 
     // Build the WebUI endpoint from config (enabled, host, port).
     // Returns None when service.webui.enabled is false — we require it to be
@@ -552,10 +549,12 @@ async fn load_card_config(
     let secret_file =
         crate::config::core_secret_file_path(cfg.service.core.secret_file.as_deref(), config_path);
     let secret = crate::core_channel::secret::ChannelSecret::from_env_or_file(Some(secret_file));
-    let payload = crate::core_channel::client::snapshot_domain_once(
+    let payload = crate::core_channel::client::snapshot_domain_with_retry(
         &crate::core_channel::socket_path(cfg),
         &secret,
         "settings",
+        10,
+        std::time::Duration::from_millis(400),
     )
     .await;
     match payload {

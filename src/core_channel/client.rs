@@ -474,6 +474,29 @@ pub async fn snapshot_domain_once(
     }
 }
 
+/// 带启动窗口的有界重试版 [`snapshot_domain_once`]：watchdog 把 core 与
+/// webui/im 同时拉起，子进程首次读状态时常早于 core 完成通道 bind（实测
+/// 差距仅几毫秒）。只对「core 不可达」（`None`）重试；拿到应答（含 null
+/// payload）即刻返回。重试耗尽仍不可达才交回 `None`，由调用方走各自的
+/// 降级告警——告警因此只在 core 真不可达时出现。
+pub async fn snapshot_domain_with_retry(
+    path: &Path,
+    secret: &ChannelSecret,
+    domain: &str,
+    attempts: usize,
+    delay: std::time::Duration,
+) -> Option<serde_json::Value> {
+    for attempt in 0..attempts {
+        if attempt > 0 {
+            tokio::time::sleep(delay).await;
+        }
+        if let Some(payload) = snapshot_domain_once(path, secret, domain).await {
+            return Some(payload);
+        }
+    }
+    None
+}
+
 /// fail-fast-on-startup-errors（core-session-channel spec delta / task 2.4）：
 /// core 不可达时，若 `SEBAS_STARTUP_ERROR_FILE` 里有最近一次启动失败的摘要
 /// （core 的「最近一次启动尝试失败」闩锁，ready 后自清除），把它并进 cause
@@ -1014,5 +1037,33 @@ impl SessionBackend for CoreChannelBackend {
             .await,
             Ok(CoreChannelResponse::Ok)
         )
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+
+    /// 只对「core 不可达」重试：路径不存在时每次尝试都返回 None，
+    /// 总耗时 ≥ (attempts-1)×delay 证明真的重试了，而不是首试即弃。
+    #[tokio::test]
+    async fn retries_unreachable_core_before_giving_up() {
+        let attempts = 3;
+        let delay = std::time::Duration::from_millis(20);
+        let started = std::time::Instant::now();
+        let out = snapshot_domain_with_retry(
+            std::path::Path::new(r"\\.\pipe\sebas/test/no-such-channel"),
+            &ChannelSecret::from_env_or_file(None),
+            "settings",
+            attempts,
+            delay,
+        )
+        .await;
+        assert!(out.is_none(), "unreachable core must yield None");
+        assert!(
+            started.elapsed() >= delay * (attempts as u32 - 1),
+            "must keep retrying across the window, took {:?}",
+            started.elapsed()
+        );
     }
 }

@@ -563,8 +563,11 @@ pub fn inherited_provider_env_posture(
 /// covering 模式全覆盖时完全静默。只报告不篡改——env 的实际传递行为归
 /// claude-env-cover 管，这里只补可观测性（design D1）。
 ///
-/// core 侧在 state store 初始化之后调用（provider 解析走库权威）；webui 侧
-/// 无状态库，`provider_state::load()` 自行按文件降级读取。
+/// **只在 core 进程调用**（run.rs，state store 初始化之后——provider 解析
+/// 走库权威）。webui/im 无状态库（引擎归 core）也不 spawn agent 子进程，
+/// env posture 与它们无关；在无引擎进程调用会在每次启动打出误导性的
+/// 「state store engine 未初始化」告警（state_store spec：unavailability
+/// is reported, not hidden——报告给真正读库的读者）。
 pub fn warn_inherited_provider_env(router_cfg: Option<&RouterConfig>) {
     let state = sebas_dispatch::provider_state::load();
     let uncovered = inherited_provider_env_posture(&state, router_cfg);
