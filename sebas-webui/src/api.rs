@@ -2478,25 +2478,22 @@ fn session_event_to_frame(ev: SessionEvent) -> Option<WebUiEvent> {
 async fn recv_broadcast<T: Clone>(
     rx: &mut Option<tokio::sync::broadcast::Receiver<T>>,
 ) -> BroadcastRecv<T> {
-    loop {
-        match rx.as_mut() {
-            // 支路已停用（后端没有该流，或已因 Closed 置 None）：这一臂必须
-            // 永久挂起——返回值会被 select 臂当作「无事发生」立即再轮询，
-            // 退化成 100% CPU 忙等（首版实现的真实事故，测试抓出的）。
-            None => loop {
-                std::future::pending::<()>().await;
-            },
-            Some(r) => match r.recv().await {
-                Ok(ev) => return BroadcastRecv::Event(ev),
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    return BroadcastRecv::Lagged;
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    *rx = None;
-                    return BroadcastRecv::Closed;
-                }
-            },
-        }
+    // 无外层 loop：每条路径要么 return 要么永久挂起，循环体永远到不了
+    // 回边（clippy::never_loop，deny）。挂起语义必须保留——返回值会被
+    // select 臂当作「无事发生」立即再轮询，退化成 100% CPU 忙等（首版
+    // 实现的真实事故，测试抓出的）。
+    match rx.as_mut() {
+        None => loop {
+            std::future::pending::<()>().await;
+        },
+        Some(r) => match r.recv().await {
+            Ok(ev) => BroadcastRecv::Event(ev),
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => BroadcastRecv::Lagged,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                *rx = None;
+                BroadcastRecv::Closed
+            }
+        },
     }
 }
 
