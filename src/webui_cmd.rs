@@ -143,10 +143,25 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
         .map_err(|e| SebasError::Config(format!("read config {}: {e}", args.config)))?;
     let cfg = Config::parse(&raw)?;
 
-    // `[router]` 段解析一次，供下方 router_info 共用。env posture 告警归
-    // core（run.rs 在引擎就绪后报告）——standalone webui 不初始化状态库也
-    // 不 spawn agent 子进程，provider 真相经核心状态通道按需读取。
+    // `[router]` 段解析一次，供下方 router_info 共用。env posture 报告
+    // （close-acceptance-blind-spots 盲区 2）要求 standalone webui 启动日志
+    // 也点名继承变量——本进程无状态库，provider 真相经核心状态通道读取
+    // （有界重试覆盖 core 启动窗口；通道不可达按空状态呈现）。
     let router_cfg = sebas_router::config::RouterConfig::parse(&raw).ok();
+    {
+        let secret_file = crate::config::core_secret_file_path(
+            cfg.service.core.secret_file.as_deref(),
+            std::path::Path::new(&args.config),
+        );
+        let channel_secret =
+            crate::core_channel::secret::ChannelSecret::from_env_or_file(Some(secret_file));
+        crate::spawn_env::warn_inherited_provider_env_via_channel(
+            router_cfg.as_ref(),
+            &crate::core_channel::socket_path(&cfg),
+            &channel_secret,
+        )
+        .await;
+    }
 
     // Build the WebUI endpoint from config (enabled, host, port).
     // Returns None when service.webui.enabled is false — we require it to be
