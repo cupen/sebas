@@ -21,8 +21,9 @@ mod support;
 
 use support::{
     Sandbox, free_port, http_client, next_ws_frame, post_json, scene_project_id,
-    spawn_sse_stub_upstream, wait_for, wait_reachable, wait_router_addr,
-    wait_unreachable_with_cause, webui_healthy, ws_connect, WsStream,
+    spawn_sse_stub_upstream, spawn_stub_upstream, spawn_title_stub_upstream, wait_for,
+    wait_reachable, wait_router_addr, wait_unreachable_with_cause, webui_healthy, ws_connect,
+    WsStream,
 };
 
 /// 从 core 日志里等出一次性 bootstrap 配对 token（只打印一次，读过就没了）。
@@ -331,12 +332,15 @@ use sebas_channels::ChannelKey;
 
 use sebas_webui::session_backend::{PermissionDecision, PermissionNotice};
 
-/// 把沙箱 config 的 `channel_path` 从相对名补成绝对路径：Sandbox 写的相对名
-/// 依赖「子进程 cwd=沙箱」的字符串映射（Windows named pipe 名从路径字符串
-/// 确定性派生），测试进程直连时必须与服务端同一字符串——绝对路径对两端都
-/// 成立，也顺带满足 Unix 上的文件语义。只影响本组用例自己的沙箱实例。
+/// 把沙箱 config 的 `channel_path` 钉成绝对路径：测试进程直连时必须与服务
+/// 端同一字符串——绝对路径对两端都成立。Sandbox 模板如今已直接写绝对路径
+/// （深 checkout 下相对名经 getcwd 解析会溢出 sun_path），本函数保留为幂等
+/// 兜底：仅当模板仍带相对名时改写。
 fn pin_absolute_channel(sb: &Sandbox) {
     let cfg = std::fs::read_to_string(&sb.config_path).expect("read sandbox config");
+    if cfg.contains(&format!("channel_path = \"{}\"", forward_slash(&sb.channel_path))) {
+        return;
+    }
     let patched = cfg.replace(
         "channel_path = \"core-channel.sock\"",
         &format!("channel_path = \"{}\"", forward_slash(&sb.channel_path)),
@@ -9089,4 +9093,679 @@ async fn parallel_scenario_transcript_shape_is_deterministic_across_runs() {
         "the same parallel journey must produce an identical transcript shape (ids/timestamps aside)"
     );
 }
+}
+
+// ── add-agent-settings-and-session-titles：agent 目录 journey（5.2）──────────
+//
+// 「UI 添加 agent → 立即建会话 → fake-claude 完成一回合」的进程级旅程。
+// 本 change 阶段只交付测试代码（进程级环境由 testsuite-e2e 装配，跑通验收
+// 留待后续阶段）：
+//
+// 1. config `[acp.agents.claude]` 种子导入 → GET /api/agents 立即列出
+//    （catalog 无 driver 泄漏，native 恒在）；同 id 再 create → 409（store 赢）。
+// 2. POST /api/agents 新建 store-only agent（fake-claude 桩）→ 免重启立即可见
+//    且探测 reachable。
+// 3. 立即以它建会话（带 prompt）→ spawn 动态解析 → fake-claude 完成一回合。
+// 4. DELETE 后：catalog 消失；再用它建会话 → spawn-failed（typed
+//    unknown-agent，拒绝原因点名 id），已建会话不受影响。
+mod agent_catalog {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn ui_added_agent_spawns_without_restart_and_completes_a_turn() {
+        let sb = Sandbox::new("testsuite_e2e", "agent-catalog-journey");
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
+        let project_id = scene_project_id(&cli, &sb).await;
+        let agents_url = format!("{}/api/agents", sb.webui_url());
+
+        // 1) 种子导入：config 条目已在 catalog（core 启动时导入 agents 表）。
+        let (status, body) = get_json_status(&cli, &agents_url)
+            .await
+            .expect("GET /api/agents");
+        assert_eq!(status, 200, "{body}");
+        let ids: Vec<String> = body["agents"]
+            .as_array()
+            .expect("agents array")
+            .iter()
+            .filter_map(|a| a["id"].as_str().map(str::to_string))
+            .collect();
+        assert!(ids.iter().any(|i| i == "native"), "native is always present: {body}");
+        assert!(ids.iter().any(|i| i == "claude"), "config seed already listed: {body}");
+        let raw = body.to_string();
+        assert!(!raw.contains("\"driver\""), "catalog must not leak driver: {raw}");
+
+        // 同 id 再 create → 409（store 赢：种子行已受 Settings 管辖）。
+        let (status, body) = post_json(
+            &cli,
+            &agents_url,
+            serde_json::json!({"id": "claude", "driver": "claude", "path": "claude"}),
+        )
+        .await
+        .expect("duplicate create");
+        assert_eq!(status, 409, "store wins on the same id: {body}");
+
+        // 2) UI（BFF）添加 store-only agent：fake-claude 桩。
+        let fake = forward_slash(Path::new(env!("CARGO_BIN_EXE_fake-claude")));
+        let (status, body) = post_json(
+            &cli,
+            &agents_url,
+            serde_json::json!({
+                "id": "stub",
+                "driver": "claude",
+                "path": fake,
+                "display": "Stub Agent",
+            }),
+        )
+        .await
+        .expect("create store-only agent");
+        assert_eq!(status, 201, "create agent: {body}");
+
+        // 免重启立即可见且探测 reachable（stub 随 cargo build 产出）。
+        let hint = sb.path.clone();
+        let listed = wait_for(
+            "the store-only agent to appear reachable in the catalog",
+            Duration::from_secs(15),
+            &hint,
+            {
+                let cli = cli.clone();
+                let url = agents_url.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    Box::pin(async move {
+                        let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+                        v["agents"].as_array()?.iter().find(|a| a["id"] == "stub" && a["reachable"] == true).cloned()
+                    })
+                }
+            },
+        )
+        .await;
+        assert_eq!(listed["display"], "Stub Agent", "{listed}");
+
+        // 3) 立即建会话：store-only agent 完成一回合（spawn 动态解析）。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions", sb.webui_url()),
+            serde_json::json!({
+                "prompt": "hello",
+                "agent": "stub",
+                "project_id": project_id,
+            }),
+        )
+        .await
+        .expect("create session with the store-only agent");
+        assert_eq!(status, 201, "store-only agent spawns: {body}");
+        let key = body["key"].as_str().expect("key").to_string();
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+        wait_turn_done(&cli, &sb, &detail_url).await;
+
+        // 4) 删除：catalog 消失；未知 id 的建会话在 spawn 处 typed 拒绝
+        // （spawn-failed 相位 + 原因点名 id），已建会话（上面那轮）不受影响。
+        let resp = cli
+            .delete(&format!("{agents_url}/stub"))
+            .send()
+            .await
+            .expect("delete agent");
+        assert_eq!(resp.status().as_u16(), 200, "delete agent");
+        let (_status, body) = get_json_status(&cli, &agents_url).await.expect("catalog after delete");
+        assert!(
+            !body.to_string().contains("\"stub\""),
+            "deleted agent leaves the catalog: {body}"
+        );
+
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions", sb.webui_url()),
+            serde_json::json!({
+                "prompt": "anyone there?",
+                "agent": "stub",
+                "project_id": project_id,
+            }),
+        )
+        .await
+        .expect("create session with the deleted agent");
+        assert_eq!(status, 201, "the row is created; the rejection rides the transcript: {body}");
+        let key2 = body["key"].as_str().expect("key").to_string();
+        let detail2 = format!("{}/api/sessions/{key2}", sb.webui_url());
+        let hint = sb.path.clone();
+        wait_for(
+            "the unknown-agent spawn to settle as failed naming the id",
+            Duration::from_secs(20),
+            &hint,
+            {
+                let cli = cli.clone();
+                let url = detail2.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    Box::pin(async move {
+                        let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+                        // wire 契约（models.rs SessionStatus::derive）：SpawnFailed
+                        // 相位的 detail slug 是 "failed"，typed 拒绝的原因原文在
+                        // spawn_failure_reason——那里必须点名 id。
+                        (v["status_slug"].as_str() == Some("failed")
+                            && v["spawn_failure_reason"]
+                                .as_str()
+                                .is_some_and(|r| r.contains("stub")))
+                        .then_some(())
+                    })
+                }
+            },
+        )
+        .await;
+
+        // 已建会话（第 3 步）保持 done，不受目录变更影响。
+        let (status, v) = get_json_status(&cli, &detail_url).await.expect("earlier session detail");
+        assert_eq!(status, 200);
+        assert_eq!(v["status_slug"].as_str(), Some("done"), "earlier session unaffected: {v}");
+    }
+
+    /// 8.2 沙箱真实升级路径演练（进程级固化）：带 `[acp.agents.claude]` 的
+    /// 旧 config + 含既有会话的**旧形态状态目录**（settings.db 尚无 agents
+    /// 表）重启一次——种子导入、旧会话可达、Settings（API 面）可改三者同场
+    /// 验证。GUI 手测（Settings 分区可视化编辑）由主 agent 承担。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn restart_with_legacy_state_dir_reseeds_agents_and_keeps_sessions() {
+        let sb = Sandbox::new("testsuite_e2e", "agent-upgrade-restart");
+        let cli = http_client();
+        let mut core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
+
+        // 升级前：正常使用中——一个已完成回合的既有会话。
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions", sb.webui_url()),
+            serde_json::json!({
+                "project_id": project_id,
+                "prompt": "legacy turn",
+                "agent": "claude"
+            }),
+        )
+        .await
+        .expect("create legacy session");
+        assert_eq!(status, 201, "create legacy session: {body}");
+        let key = body["key"].as_str().expect("key").to_string();
+        wait_turn_done(&cli, &sb, &format!("{}/api/sessions/{key}", sb.webui_url())).await;
+
+        // 优雅停机（SIGTERM：状态落盘 + socket 摘除——重启路径的前提）。
+        let pid = core.id().expect("core pid") as libc::pid_t;
+        unsafe {
+            libc::kill(pid, libc::SIGTERM);
+        }
+        core.wait().await.expect("core exits gracefully");
+
+        // 把 settings.db 退回**旧形态**：agents 表不存在（本 change 之前的
+        // 状态目录升级瞬间就是这张表缺失的样子）。启动 diff-sync 应原地把表
+        // 补回来，既有数据不受影响。
+        let settings_db = sb.path.join("settings.db");
+        let conn = sebas_db::conn::open(&settings_db).expect("open settings.db");
+        conn.execute("DROP TABLE agents", []).expect("drop agents table");
+        drop(conn);
+
+        // 升级启动：旧 config（[acp.agents.claude] 原样在场）+ 旧状态目录。
+        let _core2 = sb.spawn_core();
+        wait_reachable(&cli, &sb).await;
+
+        // 1) 种子导入：claude 行回来了（agent=claude 的既有会话因此仍可解析）。
+        let (status, body) = get_json_status(&cli, &format!("{}/api/agents", sb.webui_url()))
+            .await
+            .expect("catalog after upgrade restart");
+        assert_eq!(status, 200, "{body}");
+        let find = |v: &serde_json::Value, id: &str| {
+            v["agents"]
+                .as_array()
+                .expect("agents array")
+                .iter()
+                .find(|a| a["id"].as_str() == Some(id))
+                .cloned()
+                .unwrap_or_else(|| panic!("{id} must be listed: {v}"))
+        };
+        let claude = find(&body, "claude");
+        assert_eq!(claude["reachable"], true, "seeded claude must probe: {claude}");
+        assert!(find(&body, "native").is_object(), "native survives the restart: {body}");
+
+        // 2) 旧会话可达：重启后仍在列表（persisted session map）、详情可读、
+        // 归档前那回合的转写还在。注：preview 命名不随普通重启保留（row 的
+        // prompt_preview 只由归档恢复/行迁移链路回填，live 来源是内存卡态
+        // ——既有行为，与本 change 无关；label/auto-title 走持久化写入，
+        // 重启保留）。
+        let (_, list) = get_json_status(&cli, &format!("{}/api/sessions", sb.webui_url()))
+            .await
+            .expect("session list after restart");
+        let row = list["recent_sessions"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .find(|r| r["encoded_key"].as_str() == Some(key.as_str()))
+            .cloned()
+            .unwrap_or_else(|| panic!("the legacy session must survive the restart: {list}"));
+        assert_eq!(row["status_slug"].as_str(), Some("dormant"), "{row}");
+        assert_eq!(row["agent_kind"].as_str(), Some("claude"), "{row}");
+        let (status, detail) = get_json_status(&cli, &format!("{}/api/sessions/{key}", sb.webui_url()))
+            .await
+            .expect("legacy session detail after restart");
+        assert_eq!(status, 200, "{detail}");
+        assert_eq!(
+            detail["agent_kind"].as_str(),
+            Some("claude"),
+            "identity survives the restart: {detail}"
+        );
+        assert_eq!(
+            detail["status_slug"].as_str(),
+            Some("dormant"),
+            "the restored mapping is dormant (livable on demand): {detail}"
+        );
+
+        // 3) Settings 可改（API 面）：改名即时反映到 catalog，store 是权威。
+        let (status, body) = {
+            let resp = cli
+                .put(&format!("{}/api/agents/claude", sb.webui_url()))
+                .json(&serde_json::json!({ "display": "CLI Claude (edited)" }))
+                .send()
+                .await
+                .expect("PUT /api/agents/claude");
+            let status = resp.status().as_u16();
+            (status, resp.json::<serde_json::Value>().await.unwrap_or_default())
+        };
+        assert_eq!(status, 200, "edit after upgrade: {body}");
+        let (_, body) = get_json_status(&cli, &format!("{}/api/agents", sb.webui_url()))
+            .await
+            .expect("catalog after edit");
+        assert_eq!(
+            find(&body, "claude")["display"].as_str(),
+            Some("CLI Claude (edited)"),
+            "the edit must be live in the catalog: {body}"
+        );
+
+        // 编辑后的目录免重启可 spawn：以同 id 建会话照常完成一回合。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions", sb.webui_url()),
+            serde_json::json!({
+                "project_id": project_id,
+                "prompt": "post-upgrade turn",
+                "agent": "claude"
+            }),
+        )
+        .await
+        .expect("create post-upgrade session");
+        assert_eq!(status, 201, "{body}");
+        let key2 = body["key"].as_str().expect("key").to_string();
+        wait_turn_done(&cli, &sb, &format!("{}/api/sessions/{key2}", sb.webui_url())).await;
+    }
+}
+
+// ── add-agent-settings-and-session-titles：会话自动标题 journey（6.3）────────
+//
+// 「首回合零延迟、标题就绪后列表行原地更新；归档→恢复后标题仍在」的进程级
+// 证据。标题上游是本地 one-shot stub（anthropic 形状、可调延迟、NDJSON
+// journal 记下出站请求）——core 侧 auto_title 模块 reqwest 直连 provider 的
+// base_url_anthropic，不经 router、不碰真实上游。
+//
+// 聚焦头部的可视化原地更新（dashboard 渲染层）由 testsuite-webui / 主 agent
+// GUI 回归承担；这里钉的是 wire 半边：行投影（rail 重取读源）与
+// session.updated 帧（免刷新触发器）。
+//
+// default provider/model 经状态目录的 legacy `defaults.json` 一次性导入 seeding
+// （src/sebas_state/defaults_import.rs：首启导入 `default_selection`）——HTTP
+// 面没有 defaults 写端点，这条 seeding 通道正是给首次启动用的。
+mod auto_title {
+    use super::*;
+
+    /// 标题 stub 返回的多行原文（清洗后应为单行「标题一线 标题二线」）。
+    const STUB_TITLE_RAW: &str = "  标题一线\n标题二线  ";
+    /// 清洗后的期望标题（换行折叠 + trim；≤40 codepoints）。
+    const EXPECTED_TITLE: &str = "标题一线 标题二线";
+
+    /// 沙箱 + 标题上游 + provider 装配。spawn 前写 defaults.json（状态目录
+    /// 的首启一次性导入通道：default provider = titlep / title-model）；起
+    /// core/webui 后经 BFF 建 provider（base_url_anthropic 指向本地 stub）。
+    /// stub 的应答被**闩住**（release 文件出现才放行）——「标题在途」窗口由
+    /// 测试确定性控制。core/webui 句柄由调用方持有（kill_on_drop）。
+    async fn sandbox_with_title_provider(
+        sub: &str,
+        title_text: &str,
+    ) -> (Sandbox, reqwest::Client, tokio::process::Child, tokio::process::Child) {
+        let sb = Sandbox::new("testsuite_e2e", sub);
+        std::fs::write(
+            sb.path.join("defaults.json"),
+            r#"{"provider": "titlep", "model": "title-model"}"#,
+        )
+        .expect("write defaults.json");
+        let journal = sb.path.join("title-journal.jsonl");
+        let release = sb.path.join("title-release");
+        let port = spawn_title_stub_upstream(title_text, release, journal).await;
+        let cli = http_client();
+        let core = sb.spawn_core();
+        let webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/providers", sb.webui_url()),
+            serde_json::json!({
+                "name": "titlep",
+                "base_url_anthropic": format!("http://127.0.0.1:{port}"),
+                "api_key": "sk-title-stub",
+            }),
+        )
+        .await
+        .expect("create title provider");
+        assert_eq!(status, 201, "create title provider: {body}");
+        (sb, cli, core, webui)
+    }
+
+    /// 出站标题调用的 journal 行（断言模型/prompt/凭据/路径用）。
+    fn title_journal_lines(journal: &std::path::Path) -> Vec<String> {
+        std::fs::read_to_string(journal)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// 6.3 主旅程：标题生成不拖慢首回合（回合先 Done、行还在 preview 命名）；
+    /// 标题就绪后行投影与 session.updated 帧携带标题（免刷新更新的事件源）；
+    /// 出站调用用了 default selection（模型/凭据/anthropic 路径/标题 prompt）；
+    /// 归档→恢复后标题仍在（命名不退化为短 id）。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn auto_title_arrives_after_the_turn_and_survives_archive_restore() {
+        let (sb, cli, _core, _webui) =
+            sandbox_with_title_provider("title-main", STUB_TITLE_RAW).await;
+        let release = sb.path.join("title-release");
+        let journal = sb.path.join("title-journal.jsonl");
+
+        // defaults.json 已被首启导入：default selection 经 BFF 只读面如实可见。
+        let (_, defaults) = get_json_status(&cli, &format!("{}/api/provider-defaults", sb.webui_url()))
+            .await
+            .expect("provider defaults");
+        assert_eq!(defaults["default_provider"], "titlep", "{defaults}");
+        assert_eq!(defaults["default_model"], "title-model", "{defaults}");
+
+        // 先连 /ws 再建会话：标题帧必须在既有连接上到达（免刷新的事件本体）。
+        let mut ws = ws_connect(&sb.webui_url()).await;
+        let _ = tokio::time::timeout(Duration::from_secs(4), async {
+            loop {
+                let ev = next_ws_frame(&mut ws).await;
+                if ev["method"] == "session.resync" {
+                    break;
+                }
+            }
+        })
+        .await;
+
+        let project_id = scene_project_id(&cli, &sb).await;
+        let prompt = "帮我把这段量子计算的文章总结成三句话";
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions", sb.webui_url()),
+            serde_json::json!({
+                "project_id": project_id,
+                "prompt": prompt,
+                "agent": "claude"
+            }),
+        )
+        .await
+        .expect("create session");
+        assert_eq!(status, 201, "create session: {body}");
+        let key = body["key"].as_str().expect("key").to_string();
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+
+        // 首回合零延迟：标题调用先出站（journal 落行），而回合**不受它牵制**
+        // ——标题应答仍被闩住（在途）时，转写里已经出现回合内容、行还在
+        // preview 命名。标题调用绝不阻塞回合路径。
+        let hint = sb.path.clone();
+        let journal_for_wait = journal.clone();
+        wait_for(
+            "the outbound title call to land in the journal",
+            Duration::from_secs(10),
+            &hint,
+            {
+                let journal = journal_for_wait.clone();
+                move || {
+                    let lines = title_journal_lines(&journal);
+                    Box::pin(async move { (lines.len() == 1).then_some(()) })
+                }
+            },
+        )
+        .await;
+        let content_cli = cli.clone();
+        let content_url = detail_url.clone();
+        wait_for(
+            "first turn content to stream while the title answer is still held",
+            Duration::from_secs(15),
+            &hint,
+            {
+                let cli = content_cli.clone();
+                let url = content_url.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        let streamed = v["entries"].as_array().is_some_and(|b| {
+                            b.iter().any(|e| e["kind"].as_str() == Some("content"))
+                        });
+                        streamed.then_some(())
+                    })
+                }
+            },
+        )
+        .await;
+        let row = listed_row(&cli, &sb, &key).await;
+        assert!(
+            row["label"].is_null(),
+            "the row must still be preview-named while the title is in flight: {row}"
+        );
+        assert_eq!(row["prompt_preview"].as_str(), Some(prompt), "{row}");
+
+        // 放行标题应答：回合收敛（Done）且行投影（rail 重取的读源）与
+        // session.updated 帧（免刷新触发器）先后携带清洗后的标题。
+        std::fs::write(&release, b"release").expect("release the title answer");
+        wait_turn_done(&cli, &sb, &detail_url).await;
+        let list_url = format!("{}/api/sessions", sb.webui_url());
+        let key_for_poll = key.clone();
+        wait_for(
+            "the row to carry the auto title",
+            Duration::from_secs(20),
+            &hint,
+            {
+                let cli = cli.clone();
+                let list_url = list_url.clone();
+                let key = key_for_poll.clone();
+                move || {
+                    let cli = cli.clone();
+                    let list_url = list_url.clone();
+                    let key = key.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&list_url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        let row = v["recent_sessions"]
+                            .as_array()?
+                            .iter()
+                            .find(|r| r["encoded_key"].as_str() == Some(key.as_str()))?
+                            .clone();
+                        (row["label"].as_str() == Some(EXPECTED_TITLE)).then_some(())
+                    })
+                }
+            },
+        )
+        .await;
+        let frame = wait_session_updated_with_label(&mut ws, &key, Some(EXPECTED_TITLE)).await;
+        assert!(
+            frame["params"]["status_slug"].is_string(),
+            "the title rides a full phase frame: {frame}"
+        );
+
+        // 出站调用如实来自 default selection：anthropic 路径 + 模型 + 凭据 +
+        // 标题 prompt（内嵌首条消息原文）。恰好一次。
+        let lines = title_journal_lines(&journal);
+        assert_eq!(lines.len(), 1, "exactly one title call: {lines:?}");
+        let line = &lines[0];
+        assert!(line.contains("POST /v1/messages"), "anthropic slot first: {line}");
+        assert!(line.contains(r#""model":"title-model""#), "{line}");
+        assert!(line.contains("x-api-key: sk-title-stub"), "{line}");
+        assert!(line.contains("生成一个简短标题"), "{line}");
+        assert!(line.contains(prompt), "{line}");
+
+        // 归档→恢复：标题（存于 label）随快照落档、随恢复迁回，行命名不退化。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{detail_url}/archive"),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("archive");
+        assert_eq!(status, 200, "archive: {body}");
+        let (_, archive) = get_json_status(&cli, &format!("{}/api/archive", sb.webui_url()))
+            .await
+            .expect("archive list");
+        let entry = &archive["archived_sessions"].as_array().expect("entries")[0];
+        assert_eq!(
+            entry["operator_label"].as_str(),
+            Some(EXPECTED_TITLE),
+            "the auto title must ride the archive snapshot: {entry}"
+        );
+        let (status, body) = post_json(
+            &cli,
+            &format!("{detail_url}/restore"),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("restore");
+        assert_eq!(status, 200, "restore: {body}");
+        let row = listed_row(&cli, &sb, &key).await;
+        assert_eq!(
+            row["label"].as_str(),
+            Some(EXPECTED_TITLE),
+            "the title must survive archive→restore: {row}"
+        );
+    }
+
+    /// spec「no default provider falls back silently」：零 provider/零默认
+    /// 配置下首条消息照常完成回合，行命名留在 preview，无任何错误上报。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn auto_title_without_default_provider_stays_silent() {
+        let sb = Sandbox::new("testsuite_e2e", "auto-title-silent");
+        // 无 defaults.json、无 provider：标题链路在 default_selection 处静默
+        // 短路（不发请求）。
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
+
+        let project_id = scene_project_id(&cli, &sb).await;
+        let prompt = "没有默认供应商也要照常命名";
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions", sb.webui_url()),
+            serde_json::json!({
+                "project_id": project_id,
+                "prompt": prompt,
+                "agent": "claude"
+            }),
+        )
+        .await
+        .expect("create session");
+        assert_eq!(status, 201, "{body}");
+        let key = body["key"].as_str().expect("key").to_string();
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+        wait_turn_done(&cli, &sb, &detail_url).await;
+
+        // 静默回退：回合无恙、行命名 = preview（title 链路未写 label）。
+        let (status, detail) = get_json_status(&cli, &detail_url).await.expect("detail");
+        assert_eq!(status, 200);
+        assert_eq!(detail["status_slug"].as_str(), Some("done"), "{detail}");
+        let row = listed_row(&cli, &sb, &key).await;
+        assert!(row["label"].is_null(), "no title may appear: {row}");
+        assert_eq!(row["prompt_preview"].as_str(), Some(prompt), "{row}");
+    }
+
+    /// spec「operator label survives the late title」：操作员在标题到达前
+    /// 改名 → 晚到的标题被丢弃，操作员命名原样保留（标题调用本身照常发生
+    /// ——丢弃发生在写回点）。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn operator_label_set_before_the_late_title_wins() {
+        let (sb, cli, _core, _webui) =
+            sandbox_with_title_provider("title-label", STUB_TITLE_RAW).await;
+        let release = sb.path.join("title-release");
+        let journal = sb.path.join("title-journal.jsonl");
+
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions", sb.webui_url()),
+            serde_json::json!({
+                "project_id": project_id,
+                "prompt": "标题还没来我先命名",
+                "agent": "claude"
+            }),
+        )
+        .await
+        .expect("create session");
+        assert_eq!(status, 201, "{body}");
+        let key = body["key"].as_str().expect("key").to_string();
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+
+        // 标题在途（应答被闩住）时写入操作员 label。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{detail_url}/label"),
+            serde_json::json!({ "label": "操作员命名" }),
+        )
+        .await
+        .expect("set operator label");
+        assert_eq!(status, 200, "set label: {body}");
+
+        // 标题调用已出站（journal 落行）。
+        let hint = sb.path.clone();
+        wait_for(
+            "the outbound title call to land in the journal",
+            Duration::from_secs(10),
+            &hint,
+            {
+                let journal = journal.clone();
+                move || {
+                    let lines = title_journal_lines(&journal);
+                    Box::pin(async move { (lines.len() == 1).then_some(()) })
+                }
+            },
+        )
+        .await;
+
+        // 放行晚到的标题：写回点复检 label 非空 → 标题被丢弃。回合随后照常
+        // 收敛（标题链路不拖慢它）。
+        std::fs::write(&release, b"release").expect("release the title answer");
+        wait_turn_done(&cli, &sb, &detail_url).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let row = listed_row(&cli, &sb, &key).await;
+        assert_eq!(
+            row["label"].as_str(),
+            Some("操作员命名"),
+            "the operator label must survive the late title: {row}"
+        );
+    }
 }

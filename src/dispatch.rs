@@ -18,13 +18,6 @@ use tracing::{debug, info, warn};
 // 话题失效提示文案（Q8→F1 熔断）：发一次提示并终止会话，不重试、不重发。
 // 群聊/p2p 通用，不提「开新话题」。
 
-/// `[acp.agents.<kind>] idle_kill_secs` → 事件泵 idle 超时（sebas-9pz ②）。
-/// 配置 > 0 时启用（生产默认 172800/48h 照常生效）；0 = 不过期。
-fn idle_timeout_from(cfg: &Config, kind: &str) -> Option<Duration> {
-    let secs = cfg.acp.idle_kill_for(kind);
-    (secs > 0).then(|| Duration::from_secs(secs))
-}
-
 // 参数即 outbound 共享上下文（client/http/tokens/cfg/router/mgr/reactions），
 // 打包 struct 只会给每个 match arm 增加 `ctx.` 噪音。
 // `router_control_request` 在 tests 模块里——它只服务
@@ -97,6 +90,12 @@ pub(crate) async fn dispatch_out_without_feishu(
             });
             Ok(())
         }
+        Out::PlaceholderFirstTurn { key, prompt } => {
+            // add-agent-settings-and-session-titles 6.2：占位会话首条消息开
+            // 轮——异步自动标题，不阻塞回合（engine 侧已开轮，这里只投递）。
+            crate::auto_title::spawn_auto_title(router.clone(), key, prompt);
+            Ok(())
+        }
         Out::SendAcp { session_id, cmd } => Ok(mgr.send(&session_id, cmd).await?),
         other => {
             debug!(
@@ -122,12 +121,29 @@ async fn handle_web_spawn(
     mode: Option<String>,
 ) -> anyhow::Result<()> {
     let kind = requested_kind.unwrap_or_else(|| cfg.acp.default_kind().to_string());
-    let command = cfg.acp.command_for(&kind).unwrap_or_default();
+    // （add-agent-settings-and-session-titles 3.1）spawn 时动态解析 agent
+    // id：config 注册表优先，miss 读 agents 表构建等价定义，两处皆无 →
+    // typed unknown-agent 拒绝（spawn-failed transcript 点名 id）。store-only
+    // agent 据此免重启可 spawn。
+    let agent = match crate::agent_store::resolve_agent_config(cfg, &kind).await {
+        Some(a) => a,
+        None => {
+            let reason = format!(
+                "unknown agent '{kind}'：config 注册表与 agents 库均无此 id"
+            );
+            warn!(%kind, "web_spawn: unknown agent rejected");
+            router.fail_spawn(&key, &reason).await;
+            return Ok(());
+        }
+    };
+    // store 行（或 re-registration）把驱动实例 upsert 进注册表——claude 驱动
+    // 携带各自的模型别名表，acp 走通用驱动。
+    crate::agent_store::ensure_registered(mgr, &kind, &agent);
     // （add-agent-mode-selection）控制面 mode → 子进程 argv：只有 claude
     // 驱动认识 `--permission-mode`；其它执行体接受请求但不生效（非致命，
     // 同 model 的既有语义）。argv 是模式的单一出处（driver 解析它初始化
     // 探针模式，fake-claude journal 也由此可断言）。
-    let mut command = command;
+    let mut command = agent.command();
     if kind == "claude"
         && let Some(flag) = mode.as_deref().and_then(mode_to_permission_flag)
     {
@@ -141,7 +157,7 @@ async fn handle_web_spawn(
         &prompt,
         &kind,
         command,
-        project_dir.or_else(|| cfg.acp.work_dir_for(&kind)),
+        project_dir.or_else(|| agent.work_dir()),
         router_cfg,
         model,
     )
@@ -177,9 +193,14 @@ async fn handle_web_spawn(
     // 只随真实首条消息写入）。
     if !prompt.is_empty() {
         router.seed_card(session_id.clone(), prompt.clone()).await;
+        // add-agent-settings-and-session-titles 6.2：首条用户消息异步自动
+        // 标题——绝不阻塞回合路径；失败静默（preview 顶上），操作员已改名
+        // 则标题在写回点被丢弃。
+        crate::auto_title::spawn_auto_title(router.clone(), key.clone(), prompt.clone());
     }
-    // sebas-9pz ②: idle_kill_secs 接线(与 Feishu 路径一致)。
-    let idle_timeout = idle_timeout_from(cfg, &kind);
+    // sebas-9pz ②: idle_kill_secs 接线(与 Feishu 路径一致)——0 = 不过期。
+    let idle_secs = agent.idle_kill_secs();
+    let idle_timeout = (idle_secs > 0).then(|| Duration::from_secs(idle_secs));
     spawn_acp_pump_with_idle(
         rx,
         router.clone(),
@@ -233,7 +254,22 @@ async fn handle_spawn_resume_without_feishu(
     prompt: String,
 ) -> anyhow::Result<()> {
     let kind = cfg.acp.default_kind().to_string();
-    let command = cfg.acp.command_for(&kind).unwrap_or_default();
+    // （add-agent-settings-and-session-titles 3.1）resume 与 fresh spawn 同
+    // 一解析链：config 注册表 miss → agents 表（默认 kind 也可能是 store-only
+    // 条目）；两处皆无 → typed unknown-agent 拒绝。
+    let agent = match crate::agent_store::resolve_agent_config(cfg, &kind).await {
+        Some(a) => a,
+        None => {
+            let reason = format!(
+                "unknown agent '{kind}'：config 注册表与 agents 库均无此 id"
+            );
+            warn!(%kind, "resume: unknown agent rejected");
+            router.fail_spawn(&key, &reason).await;
+            return Ok(());
+        }
+    };
+    crate::agent_store::ensure_registered(mgr, &kind, &agent);
+    let command = agent.command();
     // （add-agent-mode-selection）resume 读取映射里的 desired mode：子进程
     // 是新建的，`--permission-mode` 必须随 argv 重新下发，否则恢复出来的
     // 会话回退到 CLI 默认（映射字段随 state.json 持久化）。
@@ -247,7 +283,7 @@ async fn handle_spawn_resume_without_feishu(
         &prompt,
         &kind,
         command,
-        cfg.acp.work_dir_for(&kind),
+        agent.work_dir(),
         router_cfg,
         // webui resume 路径暂无模型参数（创建/中程切换走 POST model）。
         None,
@@ -285,7 +321,9 @@ async fn handle_spawn_resume_without_feishu(
             .await;
     }
     router.seed_card(session_id.clone(), prompt.clone()).await;
-    let idle_timeout = idle_timeout_from(cfg, &kind);
+    // sebas-9pz ②: idle_kill_secs 接线——0 = 不过期。
+    let idle_secs = agent.idle_kill_secs();
+    let idle_timeout = (idle_secs > 0).then(|| Duration::from_secs(idle_secs));
     spawn_acp_pump_with_idle(
         rx,
         router.clone(),
@@ -302,6 +340,172 @@ async fn handle_spawn_resume_without_feishu(
 mod tests {
     use sebas_dispatch::commands::RouterAction;
 
+    // ---- add-agent-settings-and-session-titles 3.1：spawn 动态解析 ----
+
+    /// fake-claude 桩的绝对路径（cargo build 产出；与既有停滞握手测试同源）。
+    fn fake_claude_path() -> String {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/debug")
+            .join(format!("fake-claude{}", std::env::consts::EXE_SUFFIX))
+            .to_string_lossy()
+            .to_string()
+    }
+
+    /// 未知 agent id 的 typed 拒绝：config 注册表与 agents 库均无此 id →
+    /// spawn-failed 相位 + 失败原因点名 id（经 fail_spawn 如实呈现），绝不
+    /// spawn 出任何子进程。
+    #[tokio::test]
+    async fn unknown_agent_id_is_typed_rejected() {
+        use sebas_channels::ChannelKey;
+        use sebas_dispatch::engine::{DispatchHandle, Out};
+        use sebas_dispatch::state::SessionMap;
+        use sebas_domain::vocabulary::SessionPhase;
+        use std::sync::Arc;
+
+        let _engine = sebas_dispatch::test_engine::install_fresh();
+        let cfg: crate::config::Config =
+            toml::from_str(r#"[acp.agents.claude]
+                driver = "claude"
+                path = "claude""#)
+            .expect("config parses");
+        let map = SessionMap::new();
+        let (router, _out_rx) = DispatchHandle::new(map);
+        let mgr = Arc::new(sebas_acp::claude::manager::SessionManager::claude_only(
+            std::time::Duration::from_secs(5),
+        ));
+
+        // 与 web_send_message 的 SpawnNew 路由同款：spawn 指令到达前映射已在
+        // Spawning 占位——fail_spawn 只对占位生效。
+        let key = ChannelKey::web_new();
+        router
+            .map
+            .insert(
+                key.clone(),
+                sebas_dispatch::state::Mapping::spawning_with(
+                    Some("ghost".into()),
+                    None,
+                    None,
+                    false,
+                ),
+            )
+            .await
+            .expect("placeholder insert");
+
+        super::dispatch_out_without_feishu(
+            &cfg,
+            &router,
+            &mgr,
+            None,
+            Out::WebSpawn {
+                key,
+                prompt: "hello".into(),
+                project_dir: None,
+                kind: Some("ghost".into()),
+                model: None,
+                mode: None,
+            },
+        )
+        .await
+        .expect("dispatch itself succeeds; the rejection rides the transcript");
+
+        // spawn-failed 相位 + 原因点名 id（等待 per-spawn 任务落地）。
+        let mut reason_seen = false;
+        for _ in 0..100 {
+            let sessions = router.session_info_snapshot().await;
+            if let Some(info) = sessions
+                .iter()
+                .find(|s| matches!(s.status, SessionPhase::SpawnFailed))
+            {
+                reason_seen = info
+                    .spawn_failure_reason
+                    .as_deref()
+                    .is_some_and(|r| r.contains("ghost"));
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(reason_seen, "拒绝原因必须点名 unknown id（spawn-failed 可见）");
+    }
+
+    /// store-only agent 可 spawn：agents 库里注册的 claude 驱动条目（fake-claude
+    /// 桩）经动态解析 → 注册表登记 → 完整 spawn；config 定义的 kind 在同一
+    /// 注册表机制下解析行为不变。
+    #[tokio::test]
+    async fn store_only_agent_spawns_without_config_entry() {
+        use sebas_channels::ChannelKey;
+        use sebas_dispatch::engine::{DispatchHandle, Out};
+        use sebas_dispatch::state::SessionMap;
+        use sebas_domain::vocabulary::SessionPhase;
+        use std::sync::Arc;
+
+        let _engine = sebas_dispatch::test_engine::install_fresh();
+        let fake = fake_claude_path();
+        // config 只定义 `claude`；`stub` 只存在于 agents 库。
+        let cfg: crate::config::Config = toml::from_str(&format!(
+            r#"[acp.agents.claude]
+            driver = "claude"
+            path = '{fake}'
+            sessions_dir = "/tmp/sebas-dispatch-test-sessions""#
+        ))
+        .expect("config parses");
+        sebas_dispatch::state_store::agents_mutation(
+            sebas_dispatch::state_store::engine().expect("fixture engine"),
+            &serde_json::json!({
+                "op": "put",
+                "id": "stub",
+                "agent": {"driver": "claude", "path": fake},
+            }),
+        )
+        .await
+        .expect("store row must accept claude driver");
+
+        let map = SessionMap::new();
+        let (router, _out_rx) = DispatchHandle::new(map);
+        let mgr = Arc::new(sebas_acp::claude::manager::SessionManager::claude_only(
+            std::time::Duration::from_secs(10),
+        ));
+
+        super::dispatch_out_without_feishu(
+            &cfg,
+            &router,
+            &mgr,
+            None,
+            Out::WebSpawn {
+                key: ChannelKey::web_new(),
+                prompt: "store-only hello".into(),
+                project_dir: None,
+                kind: Some("stub".into()),
+                model: None,
+                mode: None,
+            },
+        )
+        .await
+        .expect("dispatch succeeds");
+
+        // store-only agent 完成启动：相位推进到 Active（fake-claude 秒级
+        // 完成握手）。
+        let mut active = false;
+        for _ in 0..150 {
+            let sessions = router.session_info_snapshot().await;
+            if sessions
+                .iter()
+                .any(|s| matches!(s.status, SessionPhase::Active))
+            {
+                active = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(active, "store-only agent 必须能完成 spawn（Active 相位）");
+
+        // config 定义的 kind 行为不变：解析仍走 config（同一注册表机制）。
+        let resolved = crate::agent_store::resolve_agent_config(&cfg, "claude")
+            .await
+            .expect("config kind still resolves");
+        assert!(matches!(resolved, crate::config::AgentConfig::Claude(_)));
+    }
+
+    /// （session-parallel-liveness-and-unread-polish 1.1/1.4）回归：出站泵
     /// （session-parallel-liveness-and-unread-polish 1.1/1.4）回归：出站泵
     /// 不得被一个僵住的握手串行——`WebSpawn`/`SpawnResume` 指令投递独立
     /// 任务后立即返回 Ok(())（fix 前：泵内同步 await，直到 startup_timeout

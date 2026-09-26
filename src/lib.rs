@@ -17,6 +17,11 @@ pub const ROUTER_SUBCOMMAND: &str = "router";
 
 pub mod agent_backend;
 pub mod agent_kinds;
+/// Agent 目录的 store 侧 glue（add-agent-settings-and-session-titles）：
+/// config 种子导入、spawn 动态解析与注册表登记。
+pub mod agent_store;
+/// 会话自动标题的触发编排（add-agent-settings-and-session-titles 6.2）。
+pub mod auto_title;
 /// `sebas auth` 命令行面（add-auth-subcommand；建户/改密/列表核心在本模块，
 /// 存储层在 `sebas_webui::user_store`）。
 pub mod auth_cmd;

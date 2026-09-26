@@ -894,6 +894,33 @@ impl SessionMap {
         hit
     }
 
+    /// 自动标题写入（add-agent-settings-and-session-titles 6.2）：**仅当
+    /// label 当前为空**时落（操作员已改名 → 标题被丢弃，消除「晚到的标题
+    /// 覆盖操作员命名」竞态）。检查与写入在同一把映射锁内，原子。返回是否
+    /// 写入；无映射同样 no-op。
+    pub async fn set_label_if_empty(&self, key: &ChannelKey, label: String) -> bool {
+        let hit = {
+            let mut g = self.inner.write().await;
+            match g.get_mut(key) {
+                Some(m)
+                    if m.label
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .is_none() =>
+                {
+                    m.label = Some(label);
+                    true
+                }
+                _ => false,
+            }
+        };
+        if hit {
+            self.persist_upsert(key).await;
+        }
+        hit
+    }
+
     /// （session-slash-commands 2.1）物化 agent 广告的会话命令表：
     /// `AcpEvent::AvailableCommands` 到达时全量覆盖（二次通知 = 刷新旧表，
     /// 与 model/mode 同一到达线）。无映射时 no-op。空表同样写入——agent 撤
@@ -1539,6 +1566,49 @@ mod tests {
         let (_, restored_bare) = mapping_from_row(session_map_row(&bare_key, &bare).unwrap())
             .unwrap();
         assert_eq!(restored_bare.pending_kind, None);
+    }
+
+    /// add-agent-settings-and-session-titles 6.2：自动标题只在 label 为空时
+    /// 落——操作员先改名则晚到的标题被丢弃（竞态消除）；空白 label 视同
+    /// 未命名；无映射 no-op。
+    #[tokio::test]
+    async fn auto_title_writes_only_while_label_is_empty() {
+        let map = SessionMap::new();
+        let key = ChannelKey::new("web", "web-auto-title");
+        map.insert(
+            key.clone(),
+            Mapping::dormant("s-auto-title", 1),
+        )
+        .await
+        .expect("fresh key inserts");
+
+        // label 为空 → 落。
+        assert!(map.set_label_if_empty(&key, "自动标题".into()).await);
+        assert_eq!(
+            map.get(&key).await.unwrap().label.as_deref(),
+            Some("自动标题")
+        );
+
+        // 已有 label → 晚到的标题被丢弃（操作员命名不被覆盖）。
+        assert!(!map.set_label_if_empty(&key, "另一个标题".into()).await);
+        assert_eq!(
+            map.get(&key).await.unwrap().label.as_deref(),
+            Some("自动标题"),
+            "operator label survives the late title"
+        );
+
+        // 操作员清除 label → 机制上允许再写（是否再生由触发面决定：不在
+        // 首条消息场景之外触发）。
+        map.set_label(&key, None).await;
+        assert!(map.set_label_if_empty(&key, "新标题".into()).await);
+
+        // 空白 label 视同未命名。
+        map.set_label(&key, Some("   ".into())).await;
+        assert!(map.set_label_if_empty(&key, "再写".into()).await);
+
+        // 无映射 no-op。
+        let ghost = ChannelKey::new("web", "web-auto-title-ghost");
+        assert!(!map.set_label_if_empty(&ghost, "x".into()).await);
     }
 
     /// 非持久形态（in-flight 占位 / SpawnFailed）不产出行——已提交行原样

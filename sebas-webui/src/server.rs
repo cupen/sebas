@@ -321,6 +321,13 @@ fn build_router_full(
             "/api/model-aliases/{alias}",
             axum::routing::put(routes::alias_update).delete(routes::alias_delete),
         )
+        // add-agent-settings-and-session-titles 4.1：agent 管理面（增删改）；
+        // 读面 GET /api/agents 在 core 路由里（driver-free catalog）。
+        .route("/api/agents", post(routes::agent_create))
+        .route(
+            "/api/agents/{id}",
+            axum::routing::put(routes::agent_update).delete(routes::agent_delete),
+        )
         .layer(axum::middleware::from_fn(routes::provider_mutation_guard))
         .with_state(state.clone());
 

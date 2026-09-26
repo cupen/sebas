@@ -28,6 +28,7 @@
 //! 查询（排序、聚合、按非键列条件）保留手写 SQL，但一律返回 struct 实例或
 //! 标量，不再有 `Map<String, Value>` 式的无类型载体。
 
+pub mod agent;
 pub mod project;
 pub mod provider;
 pub mod runtime_state;

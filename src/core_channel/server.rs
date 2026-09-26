@@ -648,6 +648,12 @@ async fn snapshot_domain(router: &DispatchHandle, domain: &str) -> serde_json::V
             Ok(projects) => serde_json::json!({ "projects": projects }),
             Err(e) => serde_json::json!({"error": e}),
         },
+        "agents" => match engine.load_agents().await {
+            Ok(rows) => serde_json::json!({
+                "agents": rows.iter().map(|r| serde_json::Value::Object(r.to_item())).collect::<Vec<_>>()
+            }),
+            Err(e) => serde_json::json!({"error": e}),
+        },
         other => serde_json::json!({"error": format!("unknown domain: {other}")}),
     }
 }
@@ -673,7 +679,7 @@ fn preset_table_value() -> serde_json::Value {
     serde_json::json!({ "presets": out })
 }
 
-/// 全域快照：providers / settings / projects / presets / sessions /
+/// 全域快照：providers / settings / projects / agents / presets / sessions /
 /// router_activity。
 async fn state_snapshot_all(router: &DispatchHandle) -> serde_json::Value {
     let mut domains = serde_json::Map::new();
@@ -681,6 +687,7 @@ async fn state_snapshot_all(router: &DispatchHandle) -> serde_json::Value {
         "providers",
         "settings",
         "projects",
+        "agents",
         "presets",
         "sessions",
         "router_activity",
@@ -1275,6 +1282,12 @@ async fn dispatch(
                         "aliases" => {
                             sebas_dispatch::state_store::aliases_mutation(engine, &payload).await
                         }
+                        // add-agent-settings-and-session-titles 1.4：agents 域
+                        // 与 webui InProcessBackend 共用同一实现（单一实现避免
+                        // 两侧漂移）。
+                        "agents" => {
+                            sebas_dispatch::state_store::agents_mutation(engine, &payload).await
+                        }
                         other => Err(format!("unknown domain: {other}")),
                     };
                     match result {
@@ -1810,6 +1823,10 @@ mod tests {
     // `sebas_router::config::presets()` 逐项一致（只读代码表直出，无存储副本）。
     #[tokio::test]
     async fn presets_domain_serves_the_code_table() {
+        // 本用例断言「引擎不在场」的降级分支：持 SERIAL 锁（install_none）
+        // 与一切装引擎的用例互斥——本模块的 agents 域用例等并发装引擎时不
+        // 会让这里读到「引擎在场」的假象。
+        let _no_engine = sebas_dispatch::test_engine::install_none();
         let (router, _rx) =
             sebas_dispatch::DispatchHandle::new(sebas_dispatch::state::SessionMap::new());
         let payload = snapshot_domain(&router, "presets").await;
@@ -1864,6 +1881,51 @@ mod tests {
         // 未设置 state store 时其余域报错，presets 域不受影响（纯代码表）。
         let missing = snapshot_domain(&router, "providers").await;
         assert!(missing.get("error").is_some());
+    }
+
+    // ---- add-agent-settings-and-session-titles 1.4：agents 域快照 ----
+
+    /// core channel 半边：mutation（共用同一 `agents_mutation`）提交后
+    /// `snapshot_domain("agents")` 立即可见；快照条目是 `AgentRow::to_item`
+    /// 投影（管理面 wire 形状）。与 webui InProcessBackend 的行为一致性由
+    /// 「同一实现」保证，两侧各钉一份接线测试。
+    #[tokio::test]
+    async fn agents_snapshot_reflects_committed_mutation() {
+        let _engine = sebas_dispatch::test_engine::install_fresh();
+        let (router, _rx) =
+            sebas_dispatch::DispatchHandle::new(sebas_dispatch::state::SessionMap::new());
+
+        // 空表快照（catalog 只余 native 的前提）。
+        let empty = snapshot_domain(&router, "agents").await;
+        assert_eq!(
+            empty
+                .get("agents")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
+            Some(0)
+        );
+
+        let engine = sebas_dispatch::state_store::engine().expect("fixture engine");
+        sebas_dispatch::state_store::agents_mutation(
+            engine,
+            &serde_json::json!({
+                "op": "put",
+                "id": "cursor",
+                "agent": {"driver": "acp", "path": "cursor-agent", "args": ["acp"]},
+            }),
+        )
+        .await
+        .expect("agents put");
+
+        let snap = snapshot_domain(&router, "agents").await;
+        let rows = snap
+            .get("agents")
+            .and_then(serde_json::Value::as_array)
+            .expect("agents array");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["id"], "cursor");
+        assert_eq!(rows[0]["driver"], "acp");
+        assert_eq!(rows[0]["source"], "ui");
     }
 
     /// 管理面测试用的注册表句柄（不需要起监听）。

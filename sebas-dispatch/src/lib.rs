@@ -10,6 +10,7 @@ pub mod native_bridge;
 pub mod provider_state;
 pub mod state;
 pub mod state_store;
+pub mod title;
 /// 测试夹具：进程内内存状态引擎 + 换引擎 guard（retire-legacy-state-json 3.2
 /// 之后，没有引擎不再等于「回退读文件」，测试需要自带一个引擎）。
 #[doc(hidden)]

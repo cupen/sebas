@@ -670,6 +670,11 @@ async fn unreachable_causes_are_distinct() {
 /// 全局 engine 状态）。
 #[tokio::test]
 async fn state_subscription_serves_snapshot_frame_without_engine() {
+    // 本用例断言「engine 未初始化」的快照降级分支：持 SERIAL 锁（install_none）
+    // 与一切装引擎的 lib 单测互斥——否则并发用例的全局引擎会把这个进程内的
+    // core 带进「引擎在场」分支（block_in_place 在 current-thread runtime 上
+    // 直接 panic，快照帧反而不到）。
+    let _no_engine = sebas_dispatch::test_engine::install_none();
     let dir = tempfile::tempdir().unwrap();
     let core = start_core(dir.path()).await;
 

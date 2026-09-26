@@ -25,6 +25,7 @@ use tower::ServiceExt;
 #[derive(Default)]
 struct MemoryInner {
     state: Mutex<PersistedState>,
+    agents: Mutex<Vec<sebas_models::agent::AgentRow>>,
 }
 
 struct MemoryEngine {
@@ -81,6 +82,30 @@ impl sebas_dispatch::state_store::StateStoreEngine for MemoryEngine {
     }
     async fn set_project_default_agent(&self, _id: &str, _agent: &str) -> Result<(), String> {
         Ok(())
+    }
+
+    async fn load_agents(&self) -> Result<Vec<sebas_models::agent::AgentRow>, String> {
+        let mut agents = self.inner.agents.lock().unwrap().clone();
+        agents.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(agents)
+    }
+
+    async fn put_agent(&self, row: sebas_models::agent::AgentRow) -> Result<(), String> {
+        let mut agents = self.inner.agents.lock().unwrap();
+        agents.retain(|r| r.id != row.id);
+        agents.push(row);
+        Ok(())
+    }
+
+    async fn delete_agent(&self, id: &str) -> Result<bool, String> {
+        let mut agents = self.inner.agents.lock().unwrap();
+        let before = agents.len();
+        agents.retain(|r| r.id != id);
+        Ok(agents.len() != before)
+    }
+
+    async fn clear_project_default_agent(&self, _agent: &str) -> Result<usize, String> {
+        Ok(0)
     }
 }
 
@@ -157,6 +182,7 @@ static STORE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 async fn reset_store() -> tokio::sync::MutexGuard<'static, ()> {
     let g = STORE_LOCK.lock().await;
     *memory_engine().state.lock().unwrap() = PersistedState::default();
+    memory_engine().agents.lock().unwrap().clear();
     g
 }
 
@@ -657,4 +683,152 @@ async fn admin_bff_router_stop_force_is_forwarded_and_accepted() {
     assert_eq!(v["status"], "accepted", "{body}");
     // force 实参按序透传（false → true）。
     assert_eq!(*adapter.seen_force.lock().unwrap(), vec![false, true]);
+}
+
+// ---- add-agent-settings-and-session-titles 4.1/4.2：agent 管理面 ----
+
+/// CRUD 往返：POST 创建 → GET /api/agents 立即可见（免重启）；PUT 部分更新
+/// 合并不丢存量字段；DELETE 后消失；未知 id 404。
+#[tokio::test]
+async fn agents_crud_round_trips_through_the_store() {
+    let _g = reset_store().await;
+    let (app, mem) = app_with_core_store().await;
+
+    // 创建（完整 launch 定义）。
+    let (status, body) = json_request(
+        &app,
+        "POST",
+        "/api/agents",
+        Some(r#"{"id":"opencode","driver":"acp","path":"opencode","args":["acp"],"display":"OpenCode"}"#.into()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    // catalog（driver-free）立即可见。
+    let (status, body) = json_request(&app, "GET", "/api/agents", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let rows = v["agents"].as_array().unwrap();
+    let oc = rows.iter().find(|r| r["id"] == "opencode").expect("created agent listed");
+    assert_eq!(oc["display"], "OpenCode");
+    assert!(oc.get("reachable").is_some());
+    assert!(oc.get("driver").is_none(), "catalog 不得泄漏 driver: {oc}");
+
+    // 同 id 重复创建 → 409。
+    let (status, _) = json_request(
+        &app,
+        "POST",
+        "/api/agents",
+        Some(r#"{"id":"opencode","driver":"acp","path":"x"}"#.into()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    // PUT 部分更新（只带 display）：合并语义保留存量 launch 字段。
+    let (status, body) = json_request(
+        &app,
+        "PUT",
+        "/api/agents/opencode",
+        Some(r#"{"display":"Renamed"}"#.into()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    {
+        let agents = mem.agents.lock().unwrap();
+        let row = agents.iter().find(|r| r.id == "opencode").unwrap();
+        assert_eq!(row.display.as_deref(), Some("Renamed"));
+        assert_eq!(row.path.as_deref(), Some("opencode"), "未提交的字段保留");
+        assert_eq!(row.args.as_deref(), Some(r#"["acp"]"#), "args 保留");
+        assert_eq!(row.source, "ui");
+    }
+
+    // catalog display 即时更新（无重启）。
+    let (_, body) = json_request(&app, "GET", "/api/agents", None).await;
+    assert!(body.contains("Renamed"), "edit reflects live: {body}");
+
+    // 未知 id 更新/删除 → 404。
+    let (status, _) = json_request(&app, "PUT", "/api/agents/ghost", Some(r#"{"display":"x"}"#.into())).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = json_request(&app, "DELETE", "/api/agents/ghost", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // 删除 → catalog 消失。
+    let (status, _) = json_request(&app, "DELETE", "/api/agents/opencode", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, body) = json_request(&app, "GET", "/api/agents", None).await;
+    assert!(!body.contains("Renamed"), "deleted agent leaves the catalog: {body}");
+}
+
+/// 非法 payload 400：缺 driver / 非法 driver / 未知字段 / acp 缺 path；
+/// native 保留 id 拒绝写（create/update/delete 全部拒绝）。
+#[tokio::test]
+async fn agents_mutations_reject_invalid_payloads_and_native() {
+    let _g = reset_store().await;
+    let (app, mem) = app_with_core_store().await;
+
+    for payload in [
+        r#"{"id":"g1","path":"x"}"#,                          // 缺 driver
+        r#"{"id":"g2","driver":"gemini","path":"x"}"#,        // 非法 driver
+        r#"{"id":"g3","driver":"acp","stale":1}"#,            // 未知字段
+        r#"{"id":"g4","driver":"acp"}"#,                      // acp 缺 path
+    ] {
+        let (status, body) = json_request(&app, "POST", "/api/agents", Some(payload.into())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{payload} → {body}");
+    }
+    assert!(mem.agents.lock().unwrap().is_empty(), "拒绝不落行");
+
+    // native：create / update / delete 一律拒绝（400）。
+    let (status, body) = json_request(
+        &app,
+        "POST",
+        "/api/agents",
+        Some(r#"{"id":"native","driver":"acp","path":"x"}"#.into()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // 先放一个普通行进去，再对 native 的 PUT/DELETE 断言（native 无行也可，
+    // 拒绝在 handler 就发生）。
+    let (status, _) = json_request(
+        &app,
+        "POST",
+        "/api/agents",
+        Some(r#"{"id":"claude","driver":"claude","path":"claude"}"#.into()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, body) = json_request(
+        &app,
+        "PUT",
+        "/api/agents/native",
+        Some(r#"{"display":"hijack"}"#.into()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("native"), "拒绝点名 native: {body}");
+
+    let (status, body) = json_request(&app, "DELETE", "/api/agents/native", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("native"), "拒绝点名 native: {body}");
+
+    // 缺 id 字段的 create → 400。
+    let (status, _) = json_request(&app, "POST", "/api/agents", Some(r#"{"driver":"acp","path":"x"}"#.into())).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+/// core 不可达：agents 增删改一律 503（不回退陈快照、不伪装成功）。
+/// catalog `GET /api/agents` 不在此列——它由 config + native 组成、不依赖
+/// store（store 不可达时如实退化为 config-only 目录）。
+#[tokio::test]
+async fn agents_mutations_answer_503_without_core() {
+    let app = app_with_unreachable_core().await;
+    for (method, uri, body) in [
+        ("POST", "/api/agents", Some(r#"{"id":"x","driver":"acp","path":"p"}"#.to_string())),
+        ("PUT", "/api/agents/x", Some(r#"{"display":"y"}"#.to_string())),
+        ("DELETE", "/api/agents/x", None),
+    ] {
+        let (status, _) = json_request(&app, method, uri, body).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{method} {uri}");
+    }
 }

@@ -20,18 +20,36 @@ pub async fn run(args: ListArgs) -> Result<()> {
         .map_err(|e| SebasError::Config(format!("read config {}: {e}", args.config)))?;
     let cfg = Config::parse(&raw)?;
 
+    // add-agent-settings-and-session-titles 3.2：目录 = **union**（与
+    // webui `GET /api/agents` 同源）——store 行优先（store 是唯一权威，
+    // 同 id 的 config 条目被取代），config-only 条目随后。
+    let store_rows = crate::agent_store::load_store_rows_readonly();
+    let mut sources: Vec<sebas_webui::agent_kinds::AgentKindSource> = Vec::new();
+    for row in &store_rows {
+        let def = row.to_definition();
+        sources.push(sebas_webui::agent_kinds::AgentKindSource {
+            slug: row.id.clone(),
+            command: def.command(),
+            driver: def.driver.clone(),
+            display: def.display.clone(),
+        });
+    }
+    let config_agent_map = crate::agent_store::config_agent_map(&cfg);
+    for (slug, def) in &config_agent_map {
+        if sources.iter().any(|s| &s.slug == slug) {
+            continue;
+        }
+        sources.push(sebas_webui::agent_kinds::AgentKindSource {
+            slug: slug.clone(),
+            command: def.command(),
+            driver: def.driver.clone(),
+            display: def.display.clone(),
+        });
+    }
+
     let mut kinds: Vec<AgentKindInfo> = Vec::new();
-    for slug in cfg.acp.agents.keys() {
-        let command = cfg.acp.command_for(slug).unwrap_or_default();
-        kinds.push(
-            discover_agent(&sebas_webui::agent_kinds::AgentKindSource {
-                slug: slug.clone(),
-                command,
-                driver: cfg.acp.driver_tag_of(slug),
-                display: cfg.acp.display_for(slug),
-            })
-            .await,
-        );
+    for src in &sources {
+        kinds.push(discover_agent(src).await);
     }
 
     if args.json {

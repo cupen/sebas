@@ -178,6 +178,12 @@ pub async fn run(
             tracing::warn!(error = %e, "legacy defaults 导入阶段失败（不阻断启动）");
         }
 
+        // add-agent-settings-and-session-titles 2.1：config `[acp.agents.*]`
+        // 是**种子源**——db 缺失的 id 幂等建行（source=seed），同 id 已存在
+        // 则 store 赢（+ notice 指向 Settings）。与 defaults 导入同一时机、
+        // 同一 writer 句柄；失败不阻断启动。
+        crate::agent_store::seed_agents_from_config(settings_writer.handle(), &cfg).await;
+
         let engine = match crate::sebas_state::writer::StateWriter::start_projects(
             projects_path.clone(),
         ) {

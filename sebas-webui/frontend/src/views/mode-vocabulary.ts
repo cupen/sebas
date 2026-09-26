@@ -15,12 +15,17 @@ export interface ModeOption {
   label: string
 }
 
-/** 四个权限模式与中文解释（唯一出处；创建弹窗与 composer 下拉同源渲染）。 */
+/**
+ * 四个权限模式的下拉选项（唯一出处；创建弹窗与 composer 下拉同源渲染）。
+ * add-agent-settings-and-session-titles 7.2：选项标签首字母大写并移除中文
+ * 注释（Ask / Edit / Allow / Auto）——wire 值 `ask|edit|allow|auto` 不变，
+ * dashboard 的中文徽标走 modeBadgeLabel（同样不动）。
+ */
 export const MODE_OPTIONS: readonly ModeOption[] = [
-  { value: 'ask', label: 'ask（逐次询问）' },
-  { value: 'edit', label: 'edit（自动接受编辑）' },
-  { value: 'allow', label: 'allow（放行并留审计）' },
-  { value: 'auto', label: 'auto（不门控，留审计）' },
+  { value: 'ask', label: 'Ask' },
+  { value: 'edit', label: 'Edit' },
+  { value: 'allow', label: 'Allow' },
+  { value: 'auto', label: 'Auto' },
 ]
 
 /**
@@ -45,6 +50,8 @@ export function modeBadgeLabel(mode: string): string {
 
 /**
  * composer 下拉的默认态显示文案（4.1）：会话未记录 mode（创建时选了
- * 「agent 默认」或旧会话）时显示「默认（ask）」而非空白。
+ * 「默认」或旧会话）时显示「默认（Ask）」而非空白。7.2：与新选项词汇同
+ * 源大写（此前是「默认（ask）」）；创建弹窗的空值首项也用这里（消除
+ * 重复源）。
  */
-export const MODE_DEFAULT_LABEL = '默认（ask）'
+export const MODE_DEFAULT_LABEL = '默认（Ask）'

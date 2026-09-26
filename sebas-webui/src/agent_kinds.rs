@@ -190,6 +190,52 @@ pub async fn discover_all(sources: &[AgentKindSource]) -> Vec<AgentKindInfo> {
     out
 }
 
+/// agents 域快照条目（`AgentRow::to_item` 投影）→ 探测源（
+/// add-agent-settings-and-session-titles 3.2）：claude → `[path]`（缺省
+/// `"claude"`）；acp → `[path, args..]`。`driver` 是配置层标签，只进探测
+/// 源、不上 catalog wire。
+pub fn source_from_store_item(item: &serde_json::Value) -> Option<AgentKindSource> {
+    let id = item.get("id")?.as_str()?.to_string();
+    let driver = item
+        .get("driver")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("acp")
+        .to_string();
+    let path = item
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            if driver == "claude" {
+                "claude".to_string()
+            } else {
+                String::new()
+            }
+        });
+    let mut command = vec![path];
+    if let Some(args) = item.get("args").and_then(serde_json::Value::as_array) {
+        command.extend(
+            args.iter()
+                .filter_map(|a| a.as_str())
+                .map(str::to_string),
+        );
+    }
+    if command[0].is_empty() {
+        command.remove(0);
+    }
+    Some(AgentKindSource {
+        slug: id,
+        command,
+        driver,
+        display: item
+            .get("display")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+    })
+}
+
 /// Supplies the agent-kind list to the webui server. The binary crate injects
 /// the real provider (config-driven); tests inject a canned provider.
 #[async_trait]
@@ -298,6 +344,33 @@ mod tests {
         let info = discover_agent(&source("shell", &["sh"])).await;
         assert!(info.reachable, "sh should be on PATH: {info:?}");
         assert!(info.cause.is_none());
+    }
+
+    /// store 快照条目 → 探测源：claude 缺 path 回退内置 `claude`；acp 组装
+    /// 完整 argv；空 argv 如实保留（探测报 empty command）。
+    #[test]
+    fn store_item_maps_to_probe_source() {
+        let claude = serde_json::json!({"id": "seeded", "driver": "claude"});
+        let src = source_from_store_item(&claude).unwrap();
+        assert_eq!(src.command, vec!["claude".to_string()], "claude 缺 path 走内置");
+        assert_eq!(src.driver, "claude");
+
+        let acp = serde_json::json!({
+            "id": "cursor",
+            "driver": "acp",
+            "path": "cursor-agent",
+            "args": ["acp"],
+            "display": "Cursor",
+        });
+        let src = source_from_store_item(&acp).unwrap();
+        assert_eq!(src.command, vec!["cursor-agent".to_string(), "acp".to_string()]);
+        assert_eq!(src.display.as_deref(), Some("Cursor"));
+
+        let empty = serde_json::json!({"id": "broken", "driver": "acp"});
+        let src = source_from_store_item(&empty).unwrap();
+        assert!(src.command.is_empty(), "acp 无 argv[0] = 空 argv");
+        assert!(source_from_store_item(&serde_json::json!({"driver": "acp"})).is_none(),
+            "缺 id 的条目不成源");
     }
 
     /// opencode (`opencode acp`) 走现有 `discover_agent` 探测应兼容：二进制在

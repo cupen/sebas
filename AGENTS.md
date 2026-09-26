@@ -273,6 +273,12 @@ addr=127.0.0.1:<port>`，router 侧用自定义 provider（`[provider.fake]` 哑
    work_dir = "<SB>/work"
    # args = ["--scenario", "thinking"]            # 键值形式示例
 
+   # add-agent-settings-and-session-titles：`[acp.agents.*]` 只是**种子源**——
+   # core 启动时把条目幂等导入状态库 agents 表（同 id 已存在则 Settings 管理的
+   # store 行赢）。agent 目录的增删改走 WebUI Settings → Agents（免重启生效），
+   # 不写回 config；沙箱里 store 行随 SEBAS_STATE_DIR 落 settings.db，删沙箱
+   # 目录即全清。
+
    # persist-session-map：`[dispatch] state_file` 已退休——会话映射落
    # 状态库（projects.db 的 session_map 表，随 SEBAS_STATE_DIR 派生），
    # 残留该键会在解析期以未知键报错。

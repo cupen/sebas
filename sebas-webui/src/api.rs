@@ -559,13 +559,40 @@ pub async fn env_vars() -> Response {
     Json(json!({ "items": items })).into_response()
 }
 
-/// GET /api/agents — the agent catalog（workbench-agent-wire-fix 3.2），
-/// agent 可用性的唯一真源：每个配置的 agent 一行（id/display/reachable/
-/// cause?/version?）+ 内置内核 `"native"` 一行（可用性来自执行体自身的
-/// 凭据上报，与 ACP 的 binary 探测语义不同源，如实区分）。`driver` 是
-/// 配置层概念，不在响应中出现。
+/// GET /api/agents — the agent catalog（workbench-agent-wire-fix 3.2；
+/// add-agent-settings-and-session-titles 3.2 改 **union**）：agents 库全行
+/// （config 种子行与 Settings 创建行同权，store 是唯一权威——同 id 的 config
+/// 注册表条目被 store 行取代）+ config-only 条目（store 暂不可达时的降级
+/// 面）+ 内置内核 `"native"` 一行（可用性来自执行体自身的凭据上报，与 ACP
+/// 的 binary 探测语义不同源，如实区分）。每行探测 reachable/cause/version；
+/// `driver` 是配置层概念，不在响应中出现。
 pub async fn agent_kinds(State(state): State<WebUiState>) -> Response {
     let mut agents = state.agent_kinds.agent_kinds().await;
+    // store union：同 id store 行赢（config 只是种子源）；store 行按 id
+    // 字典序追加，保持确定性。core 不可达 / 快照带 error → 保留 config 面。
+    if let Some(snapshot) = state.backend.state_snapshot("agents").await
+        && snapshot.get("error").is_none()
+    {
+        let rows = snapshot
+            .get("agents")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let store_ids: std::collections::BTreeSet<String> = rows
+            .iter()
+            .filter_map(|r| r.get("id").and_then(serde_json::Value::as_str))
+            .map(str::to_string)
+            .collect();
+        agents.retain(|a| !store_ids.contains(&a.id));
+        let mut sources: Vec<_> = rows
+            .iter()
+            .filter_map(crate::agent_kinds::source_from_store_item)
+            .collect();
+        sources.sort_by(|a, b| a.slug.cmp(&b.slug));
+        for src in &sources {
+            agents.push(crate::agent_kinds::discover_agent(src).await);
+        }
+    }
     let native = state
         .backend
         .execution_bodies()

@@ -23,7 +23,9 @@ import { guardedHide } from '../components/wa-hide-guard.js'
 import { notify } from '../notify.js'
 import { modeBadgeLabel } from './mode-vocabulary.js'
 // fix-webui-qa-defects 7.3：终止通知的可读会话名与 rail 同源（回退链复用）。
-import { fullSessionLabel, RAIL_FOCUS_EVENT } from './project-rail.js'
+// add-agent-settings-and-session-titles 7.1：聚焦头部同走 fullSessionLabel
+// 命名链，truncateName 提供展示截断（全文进 title）。
+import { fullSessionLabel, truncateName, RAIL_FOCUS_EVENT } from './project-rail.js'
 // （round3 3.1）焦点处立读锚：详情到达时为本浏览器缺锚的聚焦会话立锚。
 import { readAnchorCount, writeFocusAnchor } from './unread-cursor.js'
 
@@ -1676,6 +1678,19 @@ export class SebasDashboard extends LitElement {
     const remote = d.remote ?? null
     const nodeId = remote?.node_id ?? LOCAL_NODE
     const nodeOffline = remote != null && remote.node_status !== 'online'
+    // （add-agent-settings-and-session-titles 7.1）聚焦头部命名链：与 rail
+    // 行同走 fullSessionLabel（label → 首条消息预览 → 短 id → 键尾段），
+    // 不再裸显 session_id 截片。行不可得（列表尚未就位）时才回落原 id 截片
+    // ——零信息场景保底。展示超限截断（全文进 title 悬停）。
+    const focusedRow = this.data?.recent_sessions?.find(
+      (r) => r.encoded_key === d.encoded_key,
+    )
+    const headName = focusedRow
+      ? truncateName(fullSessionLabel(focusedRow))
+      : d.session_id
+        ? d.session_id.slice(0, 12)
+        : null
+    const headTitle = focusedRow ? fullSessionLabel(focusedRow) : d.session_id
     // （add-agent-mode-selection）mode 对本机/远端会话同通道呈现：远端来自
     // remote 视图（节点回报），本机来自 detail 顶层字段（argv 应用值/
     // ModeChanged）——两处同源（core 侧投影/映射）。
@@ -1698,8 +1713,8 @@ export class SebasDashboard extends LitElement {
               : nothing}</span
           >
           <span class="meta">
-            ${d.session_id
-              ? html`<span class="mono" title=${d.session_id}>${d.session_id.slice(0, 12)}</span>`
+            ${headName
+              ? html`<span class="mono" data-testid="session-head-name" title=${headTitle ?? ''}>${headName}</span>`
               : nothing}
             <span
               class="mono"

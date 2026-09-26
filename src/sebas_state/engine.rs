@@ -21,7 +21,7 @@ use serde_json::Value;
 
 /// 基于 SQLite 的状态存储引擎（两库双写者）。
 pub struct DbStateEngine {
-    /// settings.db 句柄：providers / model_aliases / settings。
+    /// settings.db 句柄：providers / model_aliases / settings / agents。
     settings: StateHandle,
     /// projects.db 句柄：projects / session_map。`None` = 库不可用（降级）。
     projects: Option<StateHandle>,
@@ -126,6 +126,45 @@ impl StateStoreEngine for DbStateEngine {
             .await?;
         sebas_dispatch::state_store::notify_change("projects");
         Ok(())
+    }
+
+    // ---- agents 域（add-agent-settings-and-session-titles 1.3/1.4）----
+    //
+    // 行归 settings.db（agents 表）；删除守卫的「清项目默认」半边落
+    // projects.db。两库各一笔事务——跨库单事务按分层纪律不存在，agents_
+    // mutation 按先清默认、后删行的顺序串行提交。
+
+    async fn load_agents(&self) -> Result<Vec<sebas_models::agent::AgentRow>, String> {
+        self.settings
+            .exec(crate::sebas_state::repo::load_agents)
+            .await
+    }
+
+    async fn put_agent(&self, row: sebas_models::agent::AgentRow) -> Result<(), String> {
+        self.settings
+            .exec(move |conn| crate::sebas_state::repo::save_agent(conn, row))
+            .await?;
+        sebas_dispatch::state_store::notify_change("agents");
+        Ok(())
+    }
+
+    async fn delete_agent(&self, id: &str) -> Result<bool, String> {
+        let id = id.to_string();
+        let existed = self
+            .settings
+            .exec(move |conn| crate::sebas_state::repo::delete_agent(conn, &id))
+            .await?;
+        if existed {
+            sebas_dispatch::state_store::notify_change("agents");
+        }
+        Ok(existed)
+    }
+
+    async fn clear_project_default_agent(&self, agent: &str) -> Result<usize, String> {
+        let agent = agent.to_string();
+        self.projects()?
+            .exec(move |conn| sebas_models::project::clear_default_agent_for(conn, &agent))
+            .await
     }
 
     async fn add_project(

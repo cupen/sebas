@@ -47,7 +47,7 @@ describe('notice store: 栈上限挤占（spec「栈上限与去重」）', () =
   })
 
   it('error toasts auto-dismiss (round5 4.2): transient, evictable, cap-counted', () => {
-    const e1 = notify({ level: 'error', message: 'e1' })!
+    notify({ level: 'error', message: 'e1' })
     const e2 = notify({ level: 'error', message: 'e2' })!
     notify({ level: 'info', message: 'i0' })
     notify({ level: 'info', message: 'i1' })

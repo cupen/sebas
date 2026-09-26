@@ -794,6 +794,192 @@ pub async fn provider_mutation_guard(
     next.run(req).await
 }
 
+// ---- agent 管理面（add-agent-settings-and-session-titles 4.1）----
+//
+// 数据面与 provider 管理同一 seam：读 = `backend.state_snapshot("agents")`，
+// 写 = `backend.state_mutate("agents", payload)`；错误映射复用
+// `map_mutation_error`（不存在 → 404、已存在 → 409、业务校验 → 400、传输类
+// → 503）。catalog 的 `GET /api/agents` 是 driver-free 的（api::agent_kinds）；
+// 这里只承载增删改。
+
+/// 拉取 agents 域快照；不可达（None）或快照自带 error → None（调用方 503）。
+async fn agents_snapshot(state: &WebUiState) -> Option<serde_json::Value> {
+    let v = state.backend.state_snapshot("agents").await?;
+    if v.get("error").is_some() {
+        return None;
+    }
+    Some(v)
+}
+
+/// 快照里 agents 段的条目列表（幂等取数组）。
+fn stored_agents(snapshot: &serde_json::Value) -> Vec<serde_json::Map<String, serde_json::Value>> {
+    snapshot
+        .get("agents")
+        .and_then(serde_json::Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_object().cloned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// agents 条目的可写字段集（与 core 侧 `agents_mutation` 校验同词表）；
+/// PUT 的合并只认这些键，身份/账目键（id/source/created_at/updated_at）是
+/// 只读投影，写入即 400。
+const AGENT_WRITABLE_FIELDS: &[&str] = &[
+    "driver",
+    "path",
+    "args",
+    "display",
+    "models",
+    "startup_timeout_secs",
+    "idle_kill_secs",
+    "work_dir",
+];
+
+/// PUT 载荷 → 合并后的 mutation item：body 键逐个覆盖 store 行同名字段，
+/// 未出现的键保留存量（部分更新——编辑表单只提交改动面；catalog 是
+/// driver-free 的，浏览器没有存量 launch 字段可回填，合并语义是唯一不撒谎
+/// 的编辑路径）。显式 `null` = 清除该可选槽位。身份/账目键（id/source/
+/// created_at/updated_at）是只读投影——即使存量条目带有它们，合并结果也只
+/// 含 launch 字段（core 侧 mutation 以同词表校验）。
+fn merge_agent_item(stored: &serde_json::Map<String, serde_json::Value>, body: serde_json::Value) -> Result<serde_json::Value, String> {
+    let body_obj = body
+        .as_object()
+        .ok_or_else(|| "agent 载荷必须是对象".to_string())?;
+    for key in body_obj.keys() {
+        if !AGENT_WRITABLE_FIELDS.contains(&key.as_str()) {
+            return Err(format!("put: agent 含未知字段 '{key}'"));
+        }
+    }
+    let mut merged = serde_json::Map::new();
+    for key in AGENT_WRITABLE_FIELDS {
+        if let Some(v) = body_obj.get(*key) {
+            if !v.is_null() {
+                merged.insert((*key).to_string(), v.clone());
+            }
+        } else if let Some(v) = stored.get(*key) {
+            merged.insert((*key).to_string(), v.clone());
+        }
+    }
+    Ok(serde_json::Value::Object(merged))
+}
+
+/// POST /api/agents：创建一个 agent（完整 launch 定义；同 id → 409）。
+pub async fn agent_create(
+    State(state): State<WebUiState>,
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> axum::response::Response {
+    let Some(snapshot) = agents_snapshot(&state).await else {
+        return err_503_core_unreachable();
+    };
+    let Some(id) = body
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+    else {
+        return bad_request("缺少 id 字段").into_response();
+    };
+    if stored_agents(&snapshot).iter().any(|r| r.get("id").and_then(serde_json::Value::as_str) == Some(id.as_str())) {
+        return conflict(format!("agent '{id}' 已存在"));
+    }
+    let mut item = body;
+    if let Some(obj) = item.as_object_mut() {
+        obj.remove("id"); // id 走路径/外层字段，不进 launch 定义
+    }
+    map_mutation_result(
+        state
+            .backend
+            .state_mutate(
+                "agents",
+                serde_json::json!({"op": "put", "id": id, "agent": item}),
+            )
+            .await,
+        || {
+            (
+                axum::http::StatusCode::CREATED,
+                serde_json::json!({"created": id}),
+            )
+        },
+    )
+}
+
+/// PUT /api/agents/{id}：部分更新（合并语义见 [`merge_agent_item`]）。
+/// 未知 id → 404；`native` 是内置内核保留 id → 拒绝。
+pub async fn agent_update(
+    State(state): State<WebUiState>,
+    Path(id): Path<String>,
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> axum::response::Response {
+    let Some(snapshot) = agents_snapshot(&state).await else {
+        return err_503_core_unreachable();
+    };
+    let id = id.trim().to_string();
+    // native 是内置内核保留 id：身份判断先于存在性（不可占用也不可伪装成
+    // 「不存在」——那会让探测面把保留 id 当普通未知条目）。
+    if id == "native" {
+        return bad_request("put: 'native' 是内置内核保留 id，不可占用").into_response();
+    }
+    let Some(stored) = stored_agents(&snapshot)
+        .into_iter()
+        .find(|r| r.get("id").and_then(serde_json::Value::as_str) == Some(id.as_str()))
+    else {
+        return not_found(&format!("agent '{id}' 不存在")).into_response();
+    };
+    let item = match merge_agent_item(&stored, body) {
+        Ok(item) => item,
+        Err(cause) => return bad_request(&cause).into_response(),
+    };
+    map_mutation_result(
+        state
+            .backend
+            .state_mutate(
+                "agents",
+                serde_json::json!({"op": "put", "id": id, "agent": item}),
+            )
+            .await,
+        || {
+            (
+                axum::http::StatusCode::OK,
+                serde_json::json!({"updated": id}),
+            )
+        },
+    )
+}
+
+/// DELETE /api/agents/{id}：删除 + core 侧清除项目默认引用（删除守卫在
+/// agents 域 mutation 内）。未知 id → 404；`native` → 400。
+pub async fn agent_delete(State(state): State<WebUiState>, Path(id): Path<String>) -> axum::response::Response {
+    let Some(snapshot) = agents_snapshot(&state).await else {
+        return err_503_core_unreachable();
+    };
+    let id = id.trim().to_string();
+    if id == "native" {
+        return bad_request("delete: 'native' 是内置内核，不可删除").into_response();
+    }
+    if !stored_agents(&snapshot)
+        .iter()
+        .any(|r| r.get("id").and_then(serde_json::Value::as_str) == Some(id.as_str()))
+    {
+        return not_found(&format!("agent '{id}' 不存在")).into_response();
+    }
+    map_mutation_result(
+        state
+            .backend
+            .state_mutate("agents", serde_json::json!({"op": "delete", "id": id}))
+            .await,
+        || {
+            (
+                axum::http::StatusCode::OK,
+                serde_json::json!({"deleted": id}),
+            )
+        },
+    )
+}
+
 /// Health probe: `GET /health`.
 pub async fn health() -> &'static str {
     "ok\n"

@@ -435,6 +435,72 @@ describe('sebas-dashboard (workbench main area)', () => {
     el.remove()
   })
 
+  it('names the focused header by the rail chain, not the raw id slice (7.1)', async () => {
+    // add-agent-settings-and-session-titles 7.1：聚焦头部与 rail 行同走
+    // fullSessionLabel 链（label → 首条消息预览 → 短 id → 键尾段）——任一
+    // 命名来源在场时不裸显 session_id 截片；title 带全文。
+    apiMocks.summary.mockResolvedValue({
+      ...focusedSummary(),
+      recent_sessions: [
+        row({
+          encoded_key: 'oc_live%00',
+          chat_id: 'chat-live',
+          session_id: 'aaaaaaaa-0009',
+          session_id_short: 'aaaa0009',
+          label: '重构计划',
+          prompt_preview: 'do the thing',
+        }),
+      ],
+    })
+    apiMocks.session.mockResolvedValue(detailFixture())
+    const el = await mount()
+    // 等会话列表与聚焦详情两条取数链都落定（data.recent_sessions 就位）。
+    for (let i = 0; i < 5; i++) {
+      await new Promise((r) => setTimeout(r, 10))
+      await el.updateComplete
+    }
+    const name = el.shadowRoot!.querySelector<HTMLElement>('[data-testid="session-head-name"]')
+    expect(name).toBeTruthy()
+    expect(name!.textContent?.trim()).toBe('重构计划')
+    expect(name!.getAttribute('title')).toBe('重构计划')
+    el.remove()
+
+    // 无 label → 首条消息预览顶上。
+    apiMocks.summary.mockResolvedValue({
+      ...focusedSummary(),
+      recent_sessions: [
+        row({
+          encoded_key: 'oc_live%00',
+          chat_id: 'chat-live',
+          session_id: 'aaaaaaaa-0009',
+          session_id_short: 'aaaa0009',
+          label: null,
+          prompt_preview: 'do the thing',
+        }),
+      ],
+    })
+    const el2 = await mount()
+    for (let i = 0; i < 5; i++) {
+      await new Promise((r) => setTimeout(r, 10))
+      await el2.updateComplete
+    }
+    const name2 = el2.shadowRoot!.querySelector<HTMLElement>('[data-testid="session-head-name"]')
+    expect(name2!.textContent?.trim()).toBe('do the thing')
+    el2.remove()
+
+    // 行不可得（列表尚未就位）→ 保留 id 截片保底（零信息场景）。
+    apiMocks.summary.mockResolvedValue({ ...focusedSummary(), recent_sessions: [] })
+    const el3 = await mount()
+    for (let i = 0; i < 5; i++) {
+      await new Promise((r) => setTimeout(r, 10))
+      await el3.updateComplete
+    }
+    const name3 = el3.shadowRoot!.querySelector<HTMLElement>('[data-testid="session-head-name"]')
+    expect(name3!.textContent?.trim()).toBe('aaaaaaaa-000'.slice(0, 12))
+    expect(name3!.getAttribute('title')).toBe('aaaaaaaa-0009')
+    el3.remove()
+  })
+
   it('gives no session model dropdown when the agent exposes none', async () => {
     apiMocks.summary.mockResolvedValue(focusedSummary())
     const el = await mount()

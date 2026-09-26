@@ -42,11 +42,13 @@ test.describe('agent mode 选择', () => {
     const modeSelect = rail.newSessionDialog().locator('[data-testid="dialog-mode-select"]')
     await expect(modeSelect).toBeVisible()
     // 缺省项 = agent 默认（不发送 mode 字段）；四个控制面词汇都在列。
-    await expect(modeSelect).toContainText('默认（逐次询问）')
-    await expect(modeSelect).toContainText('ask')
-    await expect(modeSelect).toContainText('edit')
-    await expect(modeSelect).toContainText('allow')
-    await expect(modeSelect).toContainText('auto')
+    // （add-agent-settings-and-session-titles 7.2）选项标签 = Ask/Edit/
+    // Allow/Auto，缺省首项 = MODE_DEFAULT_LABEL「默认（Ask）」；wire 值不变。
+    await expect(modeSelect).toContainText('默认（Ask）')
+    await expect(modeSelect).toContainText('Ask')
+    await expect(modeSelect).toContainText('Edit')
+    await expect(modeSelect).toContainText('Allow')
+    await expect(modeSelect).toContainText('Auto')
 
     // 无聚焦会话时 composer 只渲染 rail 创建指引——不承载任何 mode 控件
     // （创建选择归对话框；会话中切换归 composer 底沿，见下方用例）。
@@ -118,11 +120,13 @@ test.describe('agent mode 选择', () => {
       request,
     }) => {
       // round3 4.1 的放宽写在 document 级 wa-overrides.css，够不到 shadow 树
-      // 里的 wa-select——composer 模式下拉的中文长文案（「allow（放行并留审
-      // 计）」等）仍按字折行挤高选项行。修复把同款规则（listbox min-width:
-      // max-content / 320px 封顶 + option 单行省略）补进 workbench-composer
-      // 自己的样式表。本旅程展开真实下拉，量测每个选项盒高度：单行 ≈26px
-      // 量级，折行必然 ≥2×行高（≈44px+）——40px 阈值两侧有充分间隔。
+      // 里的 wa-select——composer 模式下拉的长文案仍会按字折行挤高选项行。
+      // 修复把同款规则（listbox min-width: max-content / 320px 封顶 + option
+      // 单行省略）补进 workbench-composer 自己的样式表。本旅程展开真实下拉，
+      // 量测每个选项盒高度：单行 ≈26px 量级，折行必然 ≥2×行高（≈44px+）
+      // ——40px 阈值两侧有充分间隔。（add-agent-settings-and-session-titles
+      // 7.2 后选项标签已瘦身成 Ask/Edit/Allow/Auto——折行风险随之消失，但
+      // 单行契约（nowrap + <40px）仍是这个下拉的形状规约，旅程保留。）
       const key = await createSession(request, { prompt: 'hello', mode: 'ask' })
       await waitStatus(request, key, ['done'])
 
@@ -134,7 +138,7 @@ test.describe('agent mode 选择', () => {
       // 五个选项（默认 + 四模式）都可见——面板真实展开，不是残留浮层。
       const options = modeSwitch.locator('wa-option')
       await expect(options).toHaveCount(5, { timeout: 10_000 })
-      const longest = options.filter({ hasText: 'allow（放行并留审计）' })
+      const longest = options.filter({ hasText: 'Allow' })
       await expect(longest).toBeVisible()
 
       const heights = await options.evaluateAll((els) =>

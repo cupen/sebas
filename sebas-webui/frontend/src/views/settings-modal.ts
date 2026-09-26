@@ -17,6 +17,10 @@
  *                  改角色、重置密码、启停、删除；400/409 文案就地展示
  *   - models     → provider 管理列表（redesign-provider-models-settings
  *                  3.4：router 运行状态归 Services，本分区不再呈现网关卡）
+ *   - agents     → agent 目录管理（add-agent-settings-and-session-titles
+ *                  5.1：builtIn `native` 行只读恒在，其余条目全量增删改，
+ *                  保存免重启生效；新建表单 claude / opencode / 自定义 ACP
+ *                  三形态；config [acp.agents.*] 只是种子源）
  *   - ── 弹性留白 + 分隔线，压底 ──
  *   - env-vars   → 环境变量只读表（GET /api/env 的服务端策划清单：plain
  *                  已设置显实际值、未设置显「未设置（用默认）」、set_unset
@@ -60,6 +64,8 @@ import {
   type About,
   type AdminEvent,
   type AdminService,
+  type AgentKindInfo,
+  type AgentLaunchPayload,
   type EnvVarEntry,
   type ProviderAdmin,
   type ProviderPreset,
@@ -100,6 +106,7 @@ export type SettingsSection =
   | 'services'
   | 'users'
   | 'models'
+  | 'agents'
   | 'skills'
   | 'env-vars'
   | 'about'
@@ -131,6 +138,9 @@ const SECTIONS: ReadonlyArray<{ id: SettingsSection; label: string; icon: string
   { id: 'services', label: 'Services', icon: 'shield' },
   { id: 'users', label: 'Users', icon: 'users' },
   { id: 'models', label: 'Models', icon: 'zap' },
+  // add-agent-settings-and-session-titles 5.1：Agents 分区紧跟 Models
+  // （导航顺序 …Models → Agents → Env Vars · About）。
+  { id: 'agents', label: 'Agents', icon: 'sessions' },
   { id: 'skills', label: 'Skills', icon: 'skills' },
   { id: 'env-vars', label: 'Env Vars', icon: 'about' },
   { id: 'about', label: 'About', icon: 'about' },
@@ -149,6 +159,8 @@ const SECTION_DESC: Record<SettingsSection, string> = {
   services: '与 sebas 并行运行的后台服务。',
   users: '本实例的操作员账户。仅 root 可管理——改动即时生效。',
   models: '管理模型 provider。预设派生值跟随应用代码；API key 由你自己保管。',
+  agents:
+    '管理 agent 目录。内置 sebas 内核恒在不可删；其余条目全量增删改，保存后免重启生效。config.toml 的 [acp.agents.*] 只是首次启动的种子源——之后以这里为准。',
   skills:
     '本机存储的 agent 技能。可浏览与移除条目，然后 Sync 把技能仓投影到你的 agent。本页从不创建或编辑技能——请使用 CLI、git 或 npx，然后 Refresh。',
   'env-vars':
@@ -301,6 +313,34 @@ export class SebasSettingsModal extends LitElement {
   @state() private skillBusy = false
   /** 删除确认对话框目标（null = 关闭）。 */
   @state() private skillDelete: { name: string; error: string } | null = null
+  // ---- Agents 分区（add-agent-settings-and-session-titles 5.1，/api/agents*）----
+  /**
+   * agent 目录（GET /api/agents，catalog 词表：id/display/reachable/cause/
+   * version——driver 等实现字段按合同不上 wire，编辑表单因此是「改动面 +
+   * 形态选择」而不是存量回填）。null = 尚未加载或加载失败。
+   */
+  @state() private agentsCatalog: AgentKindInfo[] | null = null
+  @state() private agentsError = ''
+  @state() private agentsBusy = false
+  /** 行动作的内联结果（删除/保存成功提示；错误走表单 error 或 callout）。 */
+  @state() private agentAction: { ok: boolean; text: string } | null = null
+  /**
+   * agent 新建/编辑对话框草稿：`shape` 是表单形态（claude = 二进制路径、
+   * opencode = ACP 命令预填、custom = 任意 ACP argv）；edit 模式下 `shape`
+   * 缺省 ''（不改 launch 定义，只改 display）——catalog 不带存量定义，
+   * 改动面语义是唯一不撒谎的编辑路径。
+   */
+  @state() private agentForm: {
+    mode: 'create' | 'edit'
+    id: string
+    display: string
+    shape: '' | 'claude' | 'opencode' | 'custom'
+    path: string
+    commandText: string
+    error: string
+  } | null = null
+  /** agent 删除二次确认对话框（error 就地承载拒绝文案）。 */
+  @state() private agentDelete: { id: string; error: string } | null = null
   /**
    * Router 停止被拒的第二层对话框（unify-router-process-shape D4：拒绝驱动，
    * 前端不做活跃数预查询）：目标服务名 + 拒绝携带的活跃 routed 会话计数；
@@ -1296,6 +1336,9 @@ export class SebasSettingsModal extends LitElement {
     // Skills 分区：仓内条目列表（每次切入都刷新——spec「refresh reflects
     // on-disk community changes」，社区工具在盘上加的东西切入即见）。
     if (changed.has('section') && this.section === 'skills') this.loadSkills()
+    // Agents 分区：agent 目录（每次切入都刷新——增删改免重启，切入即见
+    // 最新目录；与 models 同款生命周期）。
+    if (changed.has('section') && this.section === 'agents') this.loadAgentsCatalog()
   }
 
   /**
@@ -2079,6 +2122,11 @@ export class SebasSettingsModal extends LitElement {
           ${this.renderSectionHead(section)}
           ${this.renderModels()}
         `
+      case 'agents':
+        return html`
+          ${this.renderSectionHead(section)}
+          ${this.renderAgents()}
+        `
       case 'skills':
         return html`
           ${this.renderSectionHead(section)}
@@ -2205,6 +2253,393 @@ export class SebasSettingsModal extends LitElement {
             </div>`
           : nothing}
       </div>
+    `
+  }
+
+  /**
+   * Agents 分区（add-agent-settings-and-session-titles 5.1）：agent 目录
+   * 管理。builtIn `native` 行只读恒在（spec「built-in `native` kernel …
+   * without being stored or deletable」）；其余条目可编辑/删除（删除二次
+   * 确认，且不影响已建会话）；「＋ New agent」打开三形态新建表单（claude /
+   * opencode 预填 / 自定义 ACP argv）。保存后免重启生效——创建会话下拉在
+   * 下次打开/`sebas:refetch` 时即见新目录。
+   */
+  private renderAgents() {
+    const rows = this.agentsCatalog
+    const builtin = rows?.find((a) => a.id === 'native') ?? null
+    const managed = (rows ?? []).filter((a) => a.id !== 'native')
+    return html`
+      <div class="provider-toolbar">
+        <wa-button appearance="outlined" @click=${() => this.loadAgentsCatalog()}>Refresh</wa-button>
+        <wa-button
+          variant="brand"
+          appearance="filled"
+          ?disabled=${this.agentsBusy}
+          @click=${() => this.openAgentCreate()}
+        >
+          ＋ New agent
+        </wa-button>
+      </div>
+      ${this.agentAction
+        ? html`<div
+            class="callout ${this.agentAction.ok ? 'callout-info' : 'callout-error'}"
+            role=${this.agentAction.ok ? 'status' : 'alert'}
+            data-testid="agent-action"
+          >
+            ${this.agentAction.text}
+          </div>`
+        : nothing}
+      ${this.agentsError
+        ? html`<div class="callout callout-error" role="alert">${this.agentsError}</div>`
+        : nothing}
+      ${rows === null
+        ? html`
+            <div class="panel panel-pad">
+              <div class="skel-row"><div class="skel skel-line" style="width:55%"></div></div>
+              <div class="skel skel-line" style="width:35%"></div>
+            </div>
+          `
+        : html`
+            <div class="provider-list" data-testid="agents-list">
+              ${builtin
+                ? html`
+                    <div class="provider-row" data-testid="agent-row-native">
+                      <div class="provider-row-main">
+                        <span class="provider-row-name">${builtin.id}</span>
+                        <span class="provider-badge default" data-testid="agent-builtin-badge"
+                          >builtIn · sebas</span
+                        >
+                        <span class="provider-key ${builtin.reachable ? 'on' : 'off'}">
+                          ${builtin.reachable
+                            ? 'reachable'
+                            : (builtin.cause ?? 'unreachable')}
+                        </span>
+                        <span class="provider-row-url">内置 sebas 内核（不可删除）</span>
+                      </div>
+                    </div>
+                  `
+                : nothing}
+              ${managed.length === 0 && builtin
+                ? html`<div class="provider-row-empty" data-testid="agents-empty">
+                    目录里还没有其它 agent——用「＋ New agent」添加，或在 config.toml
+                    的 [acp.agents.*] 里声明（首次启动作为种子导入）。
+                  </div>`
+                : managed.map((a) => this.renderAgentRow(a))}
+            </div>
+          `}
+    `
+  }
+
+  /** 单个 agent 行：id + 展示名 + 可达性（不可达带 cause）+ 编辑/删除。 */
+  private renderAgentRow(a: AgentKindInfo) {
+    return html`
+      <div class="provider-row" data-testid="agent-row" data-id=${a.id}>
+        <div class="provider-row-main">
+          <span class="provider-row-name">${a.id}</span>
+          ${a.display && a.display !== a.id
+            ? html`<span class="provider-badge preset">${a.display}</span>`
+            : nothing}
+          <span
+            class="provider-key ${a.reachable ? 'on' : 'off'}"
+            title=${a.cause ?? ''}
+          >
+            ${a.reachable ? 'reachable' : (a.cause ?? 'unreachable')}
+          </span>
+          <span class="provider-row-actions">
+            <button
+              class="row-action"
+              title="Edit"
+              ?disabled=${this.agentsBusy}
+              @click=${() => this.openAgentEdit(a)}
+            >
+              ✎
+            </button>
+            <button
+              class="row-action danger"
+              title="Delete"
+              ?disabled=${this.agentsBusy}
+              @click=${() => (this.agentDelete = { id: a.id, error: '' })}
+            >
+              🗑
+            </button>
+          </span>
+        </div>
+      </div>
+    `
+  }
+
+  private loadAgentsCatalog(): void {
+    this.agentsError = ''
+    api
+      .agents()
+      .then((d) => {
+        this.agentsCatalog = d.agents
+      })
+      .catch((e) => {
+        this.agentsError = e instanceof ApiError ? e.message : String(e)
+        this.agentsCatalog = []
+      })
+  }
+
+  private openAgentCreate(): void {
+    this.agentAction = null
+    this.agentForm = {
+      mode: 'create',
+      id: '',
+      display: '',
+      shape: 'claude',
+      path: 'claude',
+      commandText: 'opencode acp',
+      error: '',
+    }
+  }
+
+  private openAgentEdit(a: AgentKindInfo): void {
+    this.agentAction = null
+    this.agentForm = {
+      mode: 'edit',
+      id: a.id,
+      display: a.display !== a.id ? a.display : '',
+      shape: '',
+      path: 'claude',
+      commandText: 'opencode acp',
+      error: '',
+    }
+  }
+
+  /** 表单形态 → 提交载荷（create 全量 launch 定义；edit 只交改动面——
+   * 形态保持「不改」时不携带任何 launch 字段，PUT 合并语义保留存量）。 */
+  private agentFormPayload(form: NonNullable<typeof this.agentForm>): Partial<AgentLaunchPayload> {
+    if (form.mode === 'edit' && form.shape === '') {
+      // 不改 launch 定义：只提交 display 改动面（清空 = 回退 id 展示）。
+      return { display: form.display.trim() || null }
+    }
+    const display = form.display.trim() || null
+    if (form.shape === 'claude') {
+      return { driver: 'claude', path: form.path.trim() || 'claude', display }
+    }
+    if (form.shape === 'opencode') {
+      return { driver: 'acp', path: 'opencode', args: ['acp'], display }
+    }
+    const argv = form.commandText.trim().split(/\s+/).filter((s) => s.length > 0)
+    return { driver: 'acp', path: argv[0] ?? '', args: argv.slice(1), display }
+  }
+
+  private async submitAgentForm(): Promise<void> {
+    const form = this.agentForm
+    if (!form || this.agentsBusy) return
+    const id = form.id.trim()
+    if (form.mode === 'create') {
+      if (!id) {
+        this.agentForm = {
+          ...form,
+          error: 'agent id 必填（且不能是保留 id "native"）',
+        }
+        return
+      }
+      if (id === 'native') {
+        this.agentForm = { ...form, error: '"native" 是内置内核保留 id，不可占用' }
+        return
+      }
+    }
+    if (form.shape === 'custom') {
+      const argv = form.commandText.trim().split(/\s+/).filter((s) => s.length > 0)
+      if (argv.length === 0) {
+        this.agentForm = { ...form, error: '自定义 ACP 需要至少一个命令（argv[0]）' }
+        return
+      }
+    }
+    const payload = this.agentFormPayload(form)
+    this.agentsBusy = true
+    try {
+      if (form.mode === 'create') {
+        // create 携带完整 launch 定义（payload 在 create 形态下必有 driver）。
+        const { display, ...launch } = payload as AgentLaunchPayload & Partial<AgentLaunchPayload>
+        await api.agentsCreate(id, { ...launch, display } as AgentLaunchPayload)
+      } else {
+        await api.agentsUpdate(id, payload)
+      }
+      this.agentForm = null
+      this.agentAction = {
+        ok: true,
+        text:
+          form.mode === 'create'
+            ? `已创建 ${id}（免重启，创建会话下拉立即可选）`
+            : `已更新 ${id}`,
+      }
+      this.loadAgentsCatalog()
+      // 创建会话下拉等消费面即时重取（免重启生效的可观察面）。
+      window.dispatchEvent(new Event('sebas:refetch'))
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : String(err)
+      this.agentForm = { ...form, error: message }
+    } finally {
+      this.agentsBusy = false
+    }
+  }
+
+  private async confirmAgentDelete(): Promise<void> {
+    const target = this.agentDelete
+    if (!target || this.agentsBusy) return
+    this.agentsBusy = true
+    try {
+      await api.agentsDelete(target.id)
+      this.agentDelete = null
+      this.agentAction = { ok: true, text: `已删除 ${target.id}（已建会话继续到自然结束）` }
+      this.loadAgentsCatalog()
+      window.dispatchEvent(new Event('sebas:refetch'))
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : String(err)
+      this.agentDelete = { ...target, error: message }
+    } finally {
+      this.agentsBusy = false
+    }
+  }
+
+  /** Agents 对话框群（5.1）：新建/编辑表单 + 删除二次确认；全部带 wa-hide
+   *  来源守卫（与其余分区对话框同款）。 */
+  private renderAgentDialogs() {
+    const form = this.agentForm
+    return html`
+      <wa-dialog
+        label=${form?.mode === 'edit' ? `Edit agent ${form.id}` : 'New agent'}
+        ?open=${form !== null}
+        @wa-hide=${guardedHide(() => (this.agentForm = null))}
+        class="user-create"
+      >
+        ${form === null
+          ? nothing
+          : html`
+              ${form.error
+                ? html`<div class="callout callout-error" role="alert" data-testid="agent-form-error">
+                    ${form.error}
+                  </div>`
+                : nothing}
+              <div class="editor-grid">
+                <wa-input
+                  label="Agent id"
+                  ?disabled=${form.mode === 'edit'}
+                  .value=${form.id}
+                  @input=${(ev: Event) =>
+                    (this.agentForm = {
+                      ...form,
+                      id: (ev.target as HTMLInputElement).value,
+                    })}
+                ></wa-input>
+                <wa-input
+                  label="Display name (optional)"
+                  .value=${form.display}
+                  @input=${(ev: Event) =>
+                    (this.agentForm = {
+                      ...form,
+                      display: (ev.target as HTMLInputElement).value,
+                    })}
+                ></wa-input>
+                ${form.mode === 'edit'
+                  ? html`
+                      <wa-select
+                        label="Launch definition"
+                        value=${form.shape}
+                        hoist
+                        @change=${(ev: Event) =>
+                          (this.agentForm = {
+                            ...form,
+                            shape: (ev.target as HTMLSelectElement).value as typeof form.shape,
+                          })}
+                      >
+                        <wa-option value="">不改（保留当前启动定义）</wa-option>
+                        <wa-option value="claude">claude（二进制路径）</wa-option>
+                        <wa-option value="opencode">opencode（ACP 命令）</wa-option>
+                        <wa-option value="custom">自定义 ACP（任意命令）</wa-option>
+                      </wa-select>
+                    `
+                  : html`
+                      <wa-select
+                        label="Shape"
+                        value=${form.shape}
+                        hoist
+                        @change=${(ev: Event) =>
+                          (this.agentForm = {
+                            ...form,
+                            shape: (ev.target as HTMLSelectElement).value as typeof form.shape,
+                          })}
+                      >
+                        <wa-option value="claude">claude（二进制路径）</wa-option>
+                        <wa-option value="opencode">opencode（ACP 命令）</wa-option>
+                        <wa-option value="custom">自定义 ACP（任意命令）</wa-option>
+                      </wa-select>
+                    `}
+                ${form.shape === 'claude'
+                  ? html`
+                      <wa-input
+                        label="Binary path"
+                        placeholder="claude"
+                        .value=${form.path}
+                        @input=${(ev: Event) =>
+                          (this.agentForm = {
+                            ...form,
+                            path: (ev.target as HTMLInputElement).value,
+                          })}
+                      ></wa-input>
+                    `
+                  : nothing}
+                ${form.shape === 'custom'
+                  ? html`
+                      <wa-input
+                        label="Command (argv, space separated)"
+                        placeholder="cursor-agent acp"
+                        .value=${form.commandText}
+                        @input=${(ev: Event) =>
+                          (this.agentForm = {
+                            ...form,
+                            commandText: (ev.target as HTMLInputElement).value,
+                          })}
+                      ></wa-input>
+                    `
+                  : nothing}
+                ${form.shape === 'opencode'
+                  ? html`<p class="prefs-placeholder">命令已预填：<code>opencode acp</code></p>`
+                  : nothing}
+              </div>
+            `}
+        <wa-button slot="footer" appearance="plain" @click=${() => (this.agentForm = null)}>
+          Cancel
+        </wa-button>
+        <wa-button
+          slot="footer"
+          variant="brand"
+          ?disabled=${this.agentsBusy}
+          @click=${() => void this.submitAgentForm()}
+        >
+          ${this.agentsBusy ? 'Saving…' : 'Save'}
+        </wa-button>
+      </wa-dialog>
+
+      <wa-dialog
+        label="Delete agent"
+        ?open=${this.agentDelete !== null}
+        @wa-hide=${guardedHide(() => (this.agentDelete = null))}
+      >
+        <p class="dialog-text">
+          Delete agent <strong>${this.agentDelete?.id ?? ''}</strong>? 已建会话不受影响
+          （继续到自然结束）；引用它的项目默认 agent 会被清除。之后在创建会话下拉
+          中立即可见。
+        </p>
+        ${this.agentDelete?.error
+          ? html`<div class="callout callout-error" role="alert">${this.agentDelete.error}</div>`
+          : nothing}
+        <wa-button slot="footer" appearance="plain" @click=${() => (this.agentDelete = null)}>
+          Cancel
+        </wa-button>
+        <wa-button
+          slot="footer"
+          variant="danger"
+          ?disabled=${this.agentsBusy}
+          @click=${() => void this.confirmAgentDelete()}
+        >
+          Delete
+        </wa-button>
+      </wa-dialog>
     `
   }
 
@@ -2850,6 +3285,7 @@ export class SebasSettingsModal extends LitElement {
       ${this.renderProviderDialogs()}
       ${this.renderUserDialogs()}
       ${this.renderSkillsDialogs()}
+      ${this.renderAgentDialogs()}
     `
   }
 
