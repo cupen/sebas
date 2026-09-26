@@ -25,7 +25,14 @@ pub async fn run(args: ListArgs) -> Result<()> {
     // 同 id 的 config 条目被取代），config-only 条目随后。
     let store_rows = crate::agent_store::load_store_rows_readonly();
     let mut sources: Vec<sebas_webui::agent_kinds::AgentKindSource> = Vec::new();
-    for row in &store_rows {
+    // 墓碑行不进目录，但同 id 的 config 条目也一并排除（与 webui catalog
+    // 同语义：删除对 config 种子 agent 同样生效）。
+    let tombstoned: std::collections::BTreeSet<String> = store_rows
+        .iter()
+        .filter(|r| r.is_deleted())
+        .map(|r| r.id.clone())
+        .collect();
+    for row in store_rows.iter().filter(|r| !r.is_deleted()) {
         let def = row.to_definition();
         sources.push(sebas_webui::agent_kinds::AgentKindSource {
             slug: row.id.clone(),
@@ -36,7 +43,7 @@ pub async fn run(args: ListArgs) -> Result<()> {
     }
     let config_agent_map = crate::agent_store::config_agent_map(&cfg);
     for (slug, def) in &config_agent_map {
-        if sources.iter().any(|s| &s.slug == slug) {
+        if sources.iter().any(|s| &s.slug == slug) || tombstoned.contains(slug) {
             continue;
         }
         sources.push(sebas_webui::agent_kinds::AgentKindSource {

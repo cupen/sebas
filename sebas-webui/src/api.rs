@@ -583,7 +583,18 @@ pub async fn agent_kinds(State(state): State<WebUiState>) -> Response {
             .filter_map(|r| r.get("id").and_then(serde_json::Value::as_str))
             .map(str::to_string)
             .collect();
-        agents.retain(|a| !store_ids.contains(&a.id));
+        // 墓碑 id：config 种子 agent 被 UI 删除后行以墓碑留存——config 侧
+        // 同 id 条目一并排除，否则删除在读取期被 union 并回（spec「删除后
+        // 从 catalog 消失」）。
+        let deleted_ids: std::collections::BTreeSet<String> = snapshot
+            .get("deleted_ids")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        agents.retain(|a| !store_ids.contains(&a.id) && !deleted_ids.contains(&a.id));
         let mut sources: Vec<_> = rows
             .iter()
             .filter_map(crate::agent_kinds::source_from_store_item)

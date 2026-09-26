@@ -649,9 +649,9 @@ async fn snapshot_domain(router: &DispatchHandle, domain: &str) -> serde_json::V
             Err(e) => serde_json::json!({"error": e}),
         },
         "agents" => match engine.load_agents().await {
-            Ok(rows) => serde_json::json!({
-                "agents": rows.iter().map(|r| serde_json::Value::Object(r.to_item())).collect::<Vec<_>>()
-            }),
+            // 快照形状（活跃行 + 墓碑 id 清单）由 AgentRow::snapshot_value
+            // 统一供给——与 webui InProcessBackend 同一处定义，防止漂移。
+            Ok(rows) => sebas_models::agent::AgentRow::snapshot_value(&rows),
             Err(e) => serde_json::json!({"error": e}),
         },
         other => serde_json::json!({"error": format!("unknown domain: {other}")}),
@@ -1926,6 +1926,56 @@ mod tests {
         assert_eq!(rows[0]["id"], "cursor");
         assert_eq!(rows[0]["driver"], "acp");
         assert_eq!(rows[0]["source"], "ui");
+
+        // 软删（墓碑）：活跃行从快照消失、id 进 deleted_ids——catalog union
+        // 据此把 config 侧同 id 条目一并排除（spec「删除后从 catalog 消失」）。
+        sebas_dispatch::state_store::agents_mutation(
+            engine,
+            &serde_json::json!({"op": "delete", "id": "cursor"}),
+        )
+        .await
+        .expect("agents delete");
+        let snap = snapshot_domain(&router, "agents").await;
+        assert_eq!(
+            snap.get("agents")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
+            Some(0),
+            "墓碑行不出现在活跃行里"
+        );
+        assert_eq!(
+            snap.get("deleted_ids")
+                .and_then(serde_json::Value::as_array)
+                .map(|a| a.len()),
+            Some(1)
+        );
+        assert_eq!(snap["deleted_ids"][0], "cursor");
+
+        // 同 id 重新 put = 复活：回到活跃行、墓碑清单清空。
+        sebas_dispatch::state_store::agents_mutation(
+            engine,
+            &serde_json::json!({
+                "op": "put",
+                "id": "cursor",
+                "agent": {"driver": "acp", "path": "cursor-agent", "args": ["acp"]},
+            }),
+        )
+        .await
+        .expect("agents put (resurrect)");
+        let snap = snapshot_domain(&router, "agents").await;
+        assert_eq!(
+            snap.get("agents")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
+            Some(1),
+            "put 复活墓碑行"
+        );
+        assert_eq!(
+            snap.get("deleted_ids")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
+            Some(0)
+        );
     }
 
     /// 管理面测试用的注册表句柄（不需要起监听）。

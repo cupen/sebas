@@ -88,6 +88,7 @@ pub static SETTINGS_TABLES: &[TableSchema] = &[
             idle_kill_secs       INTEGER NOT NULL DEFAULT 172800,
             work_dir             TEXT,
             source               TEXT NOT NULL DEFAULT 'seed',
+            deleted              INTEGER NOT NULL DEFAULT 0,
             created_at           INTEGER NOT NULL,
             updated_at           INTEGER NOT NULL
         );",
@@ -332,16 +333,22 @@ pub fn save_agent(conn: &mut Connection, row: sebas_models::agent::AgentRow) -> 
     row.save(conn).map_err(|e| format!("写入 agent {} 失败: {e}", row.id))
 }
 
-/// 按 id 删除一行。返回是否存在。
+/// 按 id 软删除（墓碑，与 providers 表的 deleted 同款机制）：行保留
+/// （deleted=1），目录 / 解析 / 种子导入视其不存在——config 种子 agent 的
+/// 删除因此可粘住（读取期 union 不再并回，重启不被种子回填）。返回是否
+/// 发生了删除（id 不存在或已是墓碑 → false）。
 pub fn delete_agent(conn: &mut Connection, id: &str) -> Result<bool, String> {
-    let existed = sebas_models::agent::AgentRow::find(conn, id)
-        .map_err(|e| format!("查询 agent {id} 失败: {e}"))?
-        .is_some();
-    if existed {
-        sebas_models::agent::AgentRow::delete(conn, id)
-            .map_err(|e| format!("删除 agent {id} 失败: {e}"))?;
-    }
-    Ok(existed)
+    let existing = sebas_models::agent::AgentRow::find(conn, id)
+        .map_err(|e| format!("查询 agent {id} 失败: {e}"))?;
+    let mut row = match existing {
+        Some(row) if !row.is_deleted() => row,
+        _ => return Ok(false),
+    };
+    row.deleted = 1;
+    row.updated_at = sebas_domain::prim::now_unix();
+    row.save(conn)
+        .map_err(|e| format!("删除 agent {id} 失败: {e}"))?;
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -778,6 +785,7 @@ mod tests {
                     ("idle_kill_secs", "INTEGER"),
                     ("work_dir", "TEXT"),
                     ("source", "TEXT"),
+                    ("deleted", "INTEGER"),
                     ("created_at", "INTEGER"),
                     ("updated_at", "INTEGER"),
                 ],
@@ -1694,7 +1702,11 @@ mod writer_wiring_tests {
         assert_eq!(loaded[0].id, "seeded");
         assert!(delete_agent(&mut conn, "seeded").unwrap());
         assert!(!delete_agent(&mut conn, "seeded").unwrap(), "二次删除如实报不存在");
-        assert!(load_agents(&mut conn).unwrap().is_empty());
+        // 软删墓碑：行保留（deleted=1）——目录/解析/种子导入视其不存在，
+        // config 种子 agent 的删除因此可粘住（重启不被回填）。
+        let rows = load_agents(&mut conn).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].is_deleted());
     }
 
     /// 旧库（无 agents 表的存量 settings.db）启动 diff-sync 原地补建新表，

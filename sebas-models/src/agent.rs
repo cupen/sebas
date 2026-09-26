@@ -52,6 +52,11 @@ pub struct AgentRow {
     /// 行来源：`seed`（config 种子导入）| `ui`（Settings 创建）。
     #[column(default = "seed")]
     pub source: String,
+    /// 删除墓碑（0 = 活跃，1 = 已删除）：行保留使 config 种子导入天然跳过
+    /// 已删 id，删除对 catalog / spawn / 重启回填全部生效（spec「disappears
+    /// from the catalog」）。put 同 id = 复活（deleted 归 0）。
+    #[column(default = "0")]
+    pub deleted: i64,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -149,6 +154,29 @@ impl AgentDefinition {
 }
 
 impl AgentRow {
+    /// 墓碑判定（删除后、复活前的行）。
+    pub fn is_deleted(&self) -> bool {
+        self.deleted != 0
+    }
+
+    /// agents 域快照形状（core channel 服务端与 webui InProcessBackend 共
+    /// 用一处，避免两处漂移）：`agents` 只含活跃行（墓碑对普通消费方不可
+    /// 见），`deleted_ids` 是墓碑 id 列表——catalog union 用它把 config 侧
+    /// 同 id 条目一并排除，否则被删的种子 agent 会在读取期被 config 并回。
+    pub fn snapshot_value(rows: &[AgentRow]) -> Value {
+        let active: Vec<Value> = rows
+            .iter()
+            .filter(|r| !r.is_deleted())
+            .map(|r| Value::Object(r.to_item()))
+            .collect();
+        let deleted_ids: Vec<Value> = rows
+            .iter()
+            .filter(|r| r.is_deleted())
+            .map(|r| Value::String(r.id.clone()))
+            .collect();
+        serde_json::json!({ "agents": active, "deleted_ids": deleted_ids })
+    }
+
     /// 载荷 → 行（写入路径）。`created_at`/`updated_at` 取当前时间；
     /// source 由调用方给定（`seed` | `ui`）。
     pub fn from_definition(id: &str, def: &AgentDefinition, source: &str) -> Self {
@@ -164,6 +192,7 @@ impl AgentRow {
             idle_kill_secs: def.idle_kill_secs as i64,
             work_dir: def.work_dir.clone(),
             source: source.to_string(),
+            deleted: 0,
             created_at: now,
             updated_at: now,
         }
@@ -395,6 +424,7 @@ mod tests {
                 "idle_kill_secs",
                 "work_dir",
                 "source",
+                "deleted",
                 "created_at",
                 "updated_at",
             ]
@@ -415,6 +445,7 @@ mod tests {
                 idle_kill_secs       INTEGER NOT NULL DEFAULT 172800,
                 work_dir             TEXT,
                 source               TEXT NOT NULL DEFAULT 'seed',
+                deleted              INTEGER NOT NULL DEFAULT 0,
                 created_at           INTEGER NOT NULL,
                 updated_at           INTEGER NOT NULL
             );",

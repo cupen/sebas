@@ -129,10 +129,16 @@ impl StateStoreEngine for MemoryEngine {
     }
 
     async fn delete_agent(&self, id: &str) -> Result<bool, String> {
+        // 与 SQLite repo 同款软删墓碑语义（trait 合同）：行保留、deleted=1。
         let mut agents = self.inner.agents.lock().unwrap();
-        let before = agents.len();
-        agents.retain(|r| r.id != id);
-        Ok(agents.len() != before)
+        let mut deleted = false;
+        for r in agents.iter_mut() {
+            if r.id == id && !r.is_deleted() {
+                r.deleted = 1;
+                deleted = true;
+            }
+        }
+        Ok(deleted)
     }
 
     async fn clear_project_default_agent(&self, agent: &str) -> Result<usize, String> {

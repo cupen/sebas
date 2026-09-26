@@ -100,6 +100,13 @@ pub async fn seed_agents_from_config(handle: &crate::sebas_state::writer::StateH
         if slug == sebas_models::agent::RESERVED_NATIVE_ID {
             continue;
         }
+        if existing.iter().any(|r| r.id == *slug && r.is_deleted()) {
+            tracing::info!(
+                agent = %slug,
+                "config [acp.agents.{slug}] 对应 id 已被操作员删除（墓碑留存）：跳过回填"
+            );
+            continue;
+        }
         if existing.iter().any(|r| r.id == *slug) {
             // store 赢：Settings 里管理过的同名条目优先，config 段被忽略。
             tracing::info!(
@@ -126,19 +133,33 @@ pub async fn seed_agents_from_config(handle: &crate::sebas_state::writer::StateH
 
 /// spawn 动态解析（决策 3）：config 注册表优先，miss 则读 agents 表构建
 /// 等价 `AgentConfig`。两处皆无 → `None`（调用方给 typed unknown-agent
-/// 拒绝）。每次 spawn 直读（本地 SQLite 单行查，微秒级）。
+/// 拒绝）。每次 spawn 直读（本地 SQLite 单行查，微秒级）。墓碑守卫：id
+/// 在 store 留有删除墓碑时 config 臂同样视为缺席——UI 删除的种子 agent
+/// 不经 config 复活（spec「delete removes the agent for new sessions」）。
 pub async fn resolve_agent_config(cfg: &Config, kind: &str) -> Option<AgentConfig> {
     if kind.is_empty() {
         let fallback = cfg.acp.default_kind().to_string();
         return Box::pin(resolve_agent_config(cfg, &fallback)).await;
     }
+    let engine = sebas_dispatch::state_store::engine();
+    let store_rows = match &engine {
+        Some(engine) => engine.load_agents().await.ok(),
+        None => None,
+    };
+    let tombstoned = |id: &str| {
+        store_rows
+            .as_ref()
+            .is_some_and(|rows| rows.iter().any(|r| r.id == id && r.is_deleted()))
+    };
     if let Some(configured) = cfg.acp.agents.get(kind) {
+        if tombstoned(kind) {
+            return None;
+        }
         return Some(configured.clone());
     }
-    let engine = sebas_dispatch::state_store::engine()?;
-    let rows = engine.load_agents().await.ok()?;
+    let rows = store_rows?;
     rows.iter()
-        .find(|r| r.id == kind)
+        .find(|r| r.id == kind && !r.is_deleted())
         .map(|r| config_of_definition(&r.to_definition()))
 }
 
@@ -353,5 +374,102 @@ mod tests {
         assert!(!mgr.has_agent("opencode"), "登记前 unknown");
         ensure_registered(&mgr, "opencode", &agent);
         assert!(mgr.has_agent("opencode"), "登记后 registry 命中");
+    }
+
+    /// 删除墓碑闭环（内存引擎侧）：config 种子 agent 被 UI 删除后——
+    /// ① spawn 解析不再经 config 臂复活（None）；② 同 id 重新 put = 复活
+    /// （解析恢复）。种子导入侧的墓碑跳过由
+    /// `reseed_skips_tombstoned_rows` 单独钉。
+    #[tokio::test]
+    async fn deleted_config_agent_stays_deleted_until_recreated() {
+        let _engine_guard = sebas_dispatch::test_engine::install_fresh();
+        let engine = sebas_dispatch::state_store::engine().unwrap();
+        let cfg: Config = toml::from_str(
+            r#"
+            [acp.agents.claude]
+            driver = "claude"
+            path = "claude"
+            "#,
+        )
+        .unwrap();
+
+        // 删除种子 agent（软删：行留墓碑）。
+        sebas_dispatch::state_store::agents_mutation(
+            engine,
+            &serde_json::json!({
+                "op": "put",
+                "id": "claude",
+                "agent": {"driver": "claude", "path": "claude"},
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(
+            resolve_agent_config(&cfg, "claude").await.is_some(),
+            "活跃 store 行 + config 命中 → 正常解析"
+        );
+
+        sebas_dispatch::state_store::agents_mutation(
+            engine,
+            &serde_json::json!({"op": "delete", "id": "claude"}),
+        )
+        .await
+        .unwrap();
+        assert!(
+            resolve_agent_config(&cfg, "claude").await.is_none(),
+            "墓碑 id 的 spawn 解析 = None（config 臂也被守卫拦下）"
+        );
+
+        // 同 id 重新创建（put）= 复活。
+        sebas_dispatch::state_store::agents_mutation(
+            engine,
+            &serde_json::json!({
+                "op": "put",
+                "id": "claude",
+                "agent": {"driver": "claude", "path": "claude"},
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(
+            resolve_agent_config(&cfg, "claude").await.is_some(),
+            "复活后解析恢复"
+        );
+    }
+
+    /// 删除墓碑（SQLite 侧）：repo 软删留行；重启种子导入对墓碑行跳过
+    /// 回填——config 段里仍声明的 agent 不会在重启后复活。
+    #[tokio::test]
+    async fn reseed_skips_tombstoned_rows() {
+        use crate::sebas_state::writer::StateWriter;
+        let dir = tempfile::tempdir().unwrap();
+        let writer = StateWriter::start_settings(dir.path().join("settings.db")).unwrap();
+        let cfg: Config = toml::from_str(
+            r#"
+            [acp.agents.claude]
+            driver = "claude"
+            path = "claude"
+            "#,
+        )
+        .unwrap();
+
+        seed_agents_from_config(writer.handle(), &cfg).await;
+        let deleted = writer
+            .handle()
+            .exec(|conn| crate::sebas_state::repo::delete_agent(conn, "claude"))
+            .await
+            .unwrap();
+        assert!(deleted, "首次删除成功");
+
+        // 重启种子导入：墓碑行在，跳过回填。
+        seed_agents_from_config(writer.handle(), &cfg).await;
+        let rows = writer
+            .handle()
+            .exec(crate::sebas_state::repo::load_agents)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "不产生第二行");
+        assert!(rows[0].is_deleted(), "墓碑行原样保留");
+        assert_eq!(rows[0].source, "seed");
     }
 }

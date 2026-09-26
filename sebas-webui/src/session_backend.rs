@@ -843,12 +843,11 @@ impl SessionBackend for InProcessBackend {
                 Some(serde_json::json!({ "projects": projects }))
             }
             // add-agent-settings-and-session-titles 1.4：agents 域与 core
-            // channel 服务端共用同一实现（快照条目 = AgentRow::to_item 投影）。
+            // channel 服务端共用同一实现（快照形状 = AgentRow::snapshot_value
+            // ——活跃行 + 墓碑 id 清单，同一处定义防漂移）。
             "agents" => {
                 let rows = engine.load_agents().await.ok()?;
-                Some(serde_json::json!({
-                    "agents": rows.iter().map(|r| serde_json::Value::Object(r.to_item())).collect::<Vec<_>>()
-                }))
+                Some(sebas_models::agent::AgentRow::snapshot_value(&rows))
             }
             _ => None,
         }

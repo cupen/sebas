@@ -81,7 +81,9 @@ pub trait StateStoreEngine: Send + Sync {
         Ok(())
     }
 
-    /// 按 id 删除一行。返回是否存在（不存在 = typed rejection 的依据）。
+    /// 按 id 删除一行（软删墓碑：行保留、deleted=1，目录/解析/种子导入视
+    /// 其不存在——config 种子 agent 的删除因此可粘住）。返回是否发生了删
+    /// 除（不存在或已是墓碑 = false，typed rejection 的依据）。
     async fn delete_agent(&self, id: &str) -> Result<bool, String> {
         tracing::debug!(id = %id, "agent delete hit the no-op engine default");
         let _ = id;
@@ -1465,7 +1467,12 @@ mod tests {
         )
         .await
         .expect("delete existing");
-        assert!(engine.load_agents().await.unwrap().is_empty(), "行已消失");
+        // 软删墓碑：行保留（deleted=1），普通 load 视角仍见其行——目录/
+        // 解析消费方按 is_deleted 过滤（AgentRow::snapshot_value / resolve
+        // / 种子导入），删除对 config 种子 agent 也可粘住。
+        let rows = engine.load_agents().await.unwrap();
+        assert_eq!(rows.len(), 1, "墓碑行保留");
+        assert!(rows[0].is_deleted());
         let projects = engine.load_projects().await.unwrap();
         assert_eq!(
             projects[0].default_agent, None,
