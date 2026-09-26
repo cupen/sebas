@@ -77,7 +77,7 @@ import {
   type ModelCatalog,
 } from '../api/model-catalog.js'
 import { renderMarkdown } from '../components/markdown.js'
-import { MODE_OPTIONS, MODE_DEFAULT_LABEL } from './mode-vocabulary.js'
+import { MODE_OPTIONS } from './mode-vocabulary.js'
 import { icon } from '../components/icons.js'
 import { viewStyles } from '../styles/shared.js'
 import { isNarrowViewport, onNarrowChange } from './split-persist.js'
@@ -923,16 +923,20 @@ export class SebasWorkbenchComposer extends LitElement {
                   title="权限模式"
                   @change=${(e: Event) => {
                     const v = (e as unknown as { target: { value: string } }).target.value
-                    if (v) void this.switchMode(v)
+                    void this.switchMode(v)
                   }}
                 >
                   <!-- （4.1）选项词汇来自共享 MODE_OPTIONS：创建弹窗与本下拉
-                       同源渲染，杜绝「一边裸词一边带解释」的漂移。首项空值 =
-                       历史「agent 默认」条目（currentMode 非空，D5b：服务端
-                       缺省 ask，故它只作旧会话的展示兜底，选中即不切换）。 -->
-                  <wa-option value="">${MODE_DEFAULT_LABEL}</wa-option>
+                       同源渲染，杜绝「一边裸词一边带解释」的漂移。
+                       （simplify-mode-menus）恰为四词、无空值占位项（schema
+                       NOT NULL + 服务端缺省 ask 下不存在 mode 为空的存量会话，
+                       spec「SHALL NOT render an empty or placeholder mode
+                       state」）；解释走悬浮 title（工具栏紧凑约束，不加
+                       hint 行——会话当前模式的可读措辞由 dashboard 徽章
+                       modeBadgeLabel 承担）。 -->
                   ${MODE_OPTIONS.map(
-                    (m) => html`<wa-option value=${m.value}>${m.label}</wa-option>`,
+                    (m) =>
+                      html`<wa-option value=${m.value} title=${m.description}>${m.label}</wa-option>`,
                   )}
                 </wa-select>`
               : nothing}

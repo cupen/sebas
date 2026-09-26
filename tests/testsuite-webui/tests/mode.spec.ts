@@ -3,8 +3,9 @@
  * conversation-flow 4.2 收口：创建时 mode 选择在创建对话框，会话中切换在
  * composer 底沿——头部去交互化后只留展示）。
  *
- * - 创建对话框提供权限模式下拉，缺省项是诚实的「默认（逐次询问）」
- *   （= 不发送 mode 字段，wire 上缺省）。
+ * - 创建对话框提供权限模式下拉，恰为 Ask/Edit/Allow/Auto 四词、无空值
+ *   占位项（simplify-mode-menus），预选 ask；wire 值 ask|edit|allow|auto
+ *   不变。模式解释走非内联通道：选项悬浮 title + 下拉 hint 行随选中项。
  * - 创建带 mode=allow 的会话后，会话头部的 mode 标签呈现 desired=allow
  *   （数据源：创建请求记入映射的 desired_mode）。
  * - composer 底沿的 mode 下拉切换 → POST /api/sessions/{key}/mode 送达 →
@@ -30,7 +31,7 @@ test.describe('agent mode 选择', () => {
     collector = new ErrorCollector(page)
   })
 
-  test('creation dialog offers the permission-mode select with an honest default; composer carries no mode control', async ({
+  test('creation dialog offers the four-word mode select prefilled with ask; composer carries no mode control', async ({
     page,
   }) => {
     const rail = new ProjectRail(page)
@@ -41,14 +42,27 @@ test.describe('agent mode 选择', () => {
     await rail.openNewSessionDialog(projectName)
     const modeSelect = rail.newSessionDialog().locator('[data-testid="dialog-mode-select"]')
     await expect(modeSelect).toBeVisible()
-    // 缺省项 = agent 默认（不发送 mode 字段）；四个控制面词汇都在列。
-    // （add-agent-settings-and-session-titles 7.2）选项标签 = Ask/Edit/
-    // Allow/Auto，缺省首项 = MODE_DEFAULT_LABEL「默认（Ask）」；wire 值不变。
-    await expect(modeSelect).toContainText('默认（Ask）')
+    // 恰为四个控制面词汇（simplify-mode-menus：空值占位项已退役——菜单
+    // 不含「默认」，也无 value="" 可发空值的路径）；wire 值 ask|edit|
+    // allow|auto 不变。
     await expect(modeSelect).toContainText('Ask')
     await expect(modeSelect).toContainText('Edit')
     await expect(modeSelect).toContainText('Allow')
     await expect(modeSelect).toContainText('Auto')
+    const optionValues = await modeSelect
+      .locator('wa-option')
+      .evaluateAll((els) => els.map((el) => el.getAttribute('value')))
+    expect(optionValues).toEqual(['ask', 'edit', 'allow', 'auto'])
+
+    // hint 行随当前选中模式：初始预选 ask →「逐次询问」；改选 edit →
+    // 跟随切换为「自动接受编辑」（Playwright 定位穿透 shadow DOM）。
+    await expect(modeSelect).toContainText('逐次询问')
+    await modeSelect.evaluate((el) => {
+      ;(el as unknown as { value: string }).value = 'edit'
+      el.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    await expect(modeSelect).toContainText('自动接受编辑')
+    await expect(modeSelect).not.toContainText('逐次询问')
 
     // 无聚焦会话时 composer 只渲染 rail 创建指引——不承载任何 mode 控件
     // （创建选择归对话框；会话中切换归 composer 底沿，见下方用例）。
@@ -135,16 +149,17 @@ test.describe('agent mode 选择', () => {
       await expect(modeSwitch).toBeVisible()
 
       await modeSwitch.click()
-      // 五个选项（默认 + 四模式）都可见——面板真实展开，不是残留浮层。
+      // 四个选项都可见——面板真实展开，不是残留浮层（simplify-mode-menus
+      // 后恰为四模式，空值占位项已退役）。
       const options = modeSwitch.locator('wa-option')
-      await expect(options).toHaveCount(5, { timeout: 10_000 })
+      await expect(options).toHaveCount(4, { timeout: 10_000 })
       const longest = options.filter({ hasText: 'Allow' })
       await expect(longest).toBeVisible()
 
       const heights = await options.evaluateAll((els) =>
         els.map((el) => el.getBoundingClientRect().height),
       )
-      expect(heights.length).toBe(5)
+      expect(heights.length).toBe(4)
       for (const h of heights) {
         expect(h, `option box height ${h}px must be single-line (<40px)`).toBeLessThan(40)
       }
