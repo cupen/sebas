@@ -42,7 +42,7 @@ import {
   saveLastUsedPair,
   type ModelCatalog,
 } from '../api/model-catalog.js'
-import { MODE_DEFAULT_LABEL, MODE_OPTIONS } from './mode-vocabulary.js'
+import { MODE_OPTIONS } from './mode-vocabulary.js'
 import '@awesome.me/webawesome/dist/components/dialog/dialog.js'
 import '@awesome.me/webawesome/dist/components/select/select.js'
 import '@awesome.me/webawesome/dist/components/option/option.js'
@@ -105,6 +105,16 @@ export class SebasNewSessionDialog extends LitElement {
   @state() private catalogUnavailable = false
   /** 选定的权限模式。（3.2，D5b）非空：打开即预填 'ask'（真源如此）。 */
   @state() private mode: string = 'ask'
+
+  /**
+   * 当前选中模式的中文解释（simplify-mode-menus）：绑定在 mode 下拉的
+   * hint 行上，选中即可见（弹窗有纵向空间，键盘/触屏用户也有可读通道）；
+   * 悬浮解释由各 wa-option 的 title 承担。措辞唯一出处是 MODE_OPTIONS
+   * 的 description，这里只做查找。
+   */
+  private get modeDescription(): string {
+    return MODE_OPTIONS.find((m) => m.value === this.mode)?.description ?? ''
+  }
 
   /**
    * （round3 1.2 第三轮）同一弹窗会话内最近一次确认的时刻；`-Infinity` =
@@ -362,20 +372,25 @@ export class SebasNewSessionDialog extends LitElement {
 
           <!-- 权限 mode（3.2，D5b）：预填 Ask，wire 无条件发送——四个控制面
                词都是一等值。（4.1）选项词汇来自共享 MODE_OPTIONS，与 composer
-               面板同源渲染；（7.2）空值首项同样来自共享词汇（原为重复的
-               硬编码「默认（逐次询问）」）。 -->
+               面板同源渲染；（simplify-mode-menus）恰为四词、无空值占位项
+               （spec「SHALL NOT render an empty or placeholder mode state」
+               对弹窗的同源落实），解释走非内联通道：选项悬浮 title + 下拉
+               hint 行随当前选中模式动态显示。 -->
           <wa-select
             label="Permission mode"
             aria-label="Permission mode"
             data-testid="dialog-mode-select"
             value=${this.mode}
+            hint=${this.modeDescription}
             hoist
             @change=${(e: Event) => {
               this.mode = (e.target as HTMLSelectElement).value || 'ask'
             }}
           >
-            <wa-option value="">${MODE_DEFAULT_LABEL}</wa-option>
-            ${MODE_OPTIONS.map((m) => html`<wa-option value=${m.value}>${m.label}</wa-option>`)}
+            ${MODE_OPTIONS.map(
+              (m) =>
+                html`<wa-option value=${m.value} title=${m.description}>${m.label}</wa-option>`,
+            )}
           </wa-select>
           ${this.error
             ? html`<p class="error" data-testid="dialog-error" role="alert">${this.error}</p>`

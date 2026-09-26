@@ -10,10 +10,14 @@
  *     stale 记忆 → 目录第一对（不伪造选项）；配置 defaults 不再参与
  *   - 确认写记忆：dialog-confirm 时 saveLastUsedPair（唯一写入点）
  *   - 取消：dialog-cancel 事件、不创建任何东西（无创建 API 调用）
- *   - 确认：dialog-confirm detail 携带 agent/model/mode；mode 缺省 = null
- *     （wire 上省略），选 edit = 'edit'
+ *   - 确认：dialog-confirm detail 携带 agent/model/mode；mode 预选显式
+ *     缺省 ask（wire 无条件携带），选 edit = 'edit'
  *   - 目录不可得：显式引导（Settings → Models），无 provider/model 下拉
  *   - 不可达 agent：禁选并标注 cause
+ *   （simplify-mode-menus：mode 菜单恰为四词，无空值占位项）
+ *   - mode 选项集恰为共享 MODE_OPTIONS 四词（Ask/Edit/Allow/Auto），首项
+ *     Ask、无 value="" 占位项；每项携带 title 悬浮解释；hint 行随选中
+ *     模式显示其 description
  *   （round3 1.2：确认控件 = 原生 button + dialog 级 Enter 提交 + 同窗去重）
  *   - 确认/取消控件是原生 <button>（激活面不依赖任何组件怪癖）
  *   - 首次激活：操作过 Agent 下拉后，原生按钮第一次 click 恰好一条
@@ -140,7 +144,7 @@ afterEach(() => {
 })
 
 describe('sebas-new-session-dialog', () => {
-  it('confirms with agent/model/mode; mode default omits the field (null)', async () => {
+  it('confirms with agent/model/mode; mode prefilled with the explicit ask default (D5b)', async () => {
     ;(api.providers as ReturnType<typeof vi.fn>).mockResolvedValue({
       providers: [
         {
@@ -186,10 +190,10 @@ describe('sebas-new-session-dialog', () => {
     })
   })
 
-  it('mode dropdown renders the shared MODE_OPTIONS vocabulary (4.1)', async () => {
+  it('mode dropdown renders exactly the shared MODE_OPTIONS vocabulary with no empty entry (4.1)', async () => {
     // polish-workbench-walkthrough-ux 4.1：创建弹窗与 composer 下拉同源——
-    // 选项来自共享 MODE_OPTIONS（值 + 中文解释一致），杜绝「一边裸词一边
-    // 带解释」的漂移。
+    // 选项来自共享 MODE_OPTIONS（值 + 文案一致），杜绝「一边裸词一边带
+    // 解释」的漂移；（simplify-mode-menus）恰为四词、无空值占位项。
     const { MODE_OPTIONS } = await import('./mode-vocabulary.js')
     const el = await mount({ open: true, defaultAgent: 'claude' })
     const modeSel = el.shadowRoot!.querySelector('[data-testid="dialog-mode-select"]')
@@ -197,29 +201,39 @@ describe('sebas-new-session-dialog', () => {
       value: o.getAttribute('value'),
       label: o.textContent ?? '',
     }))
-    // 缺省项（agent 默认，wire 省略 mode）+ 四个共享模式。
-    expect(options[0]!.value).toBe('')
-    expect(options.slice(1).map((o) => o.value)).toEqual(MODE_OPTIONS.map((m) => m.value))
-    expect(options.slice(1).map((o) => o.label)).toEqual(MODE_OPTIONS.map((m) => m.label))
+    expect(options.map((o) => o.value)).toEqual(MODE_OPTIONS.map((m) => m.value))
+    expect(options.map((o) => o.label)).toEqual(MODE_OPTIONS.map((m) => m.label))
+    expect(options.some((o) => o.value === '')).toBe(false)
     el.remove()
   })
 
-  it('mode vocabulary is the capitalized Ask/Edit/Allow/Auto with unchanged wire values (7.2)', async () => {
-    // add-agent-settings-and-session-titles 7.2：选项标签首字母大写并移除
-    // 中文注释；空值首项文案来自共享 MODE_DEFAULT_LABEL；wire 值仍是小写
-    // ask/edit/allow/auto。
-    const { MODE_OPTIONS, MODE_DEFAULT_LABEL } = await import('./mode-vocabulary.js')
+  it('mode options carry title descriptions and the hint row follows the selection (simplify-mode-menus)', async () => {
+    // simplify-mode-menus：空值占位项退役，菜单恰为四词
+    // （首项 Ask）；解释走非内联通道——每个 wa-option 的悬浮 title 与
+    // mode 下拉的 hint 行（初始预选 ask 即显示其解释，随选择切换）；
+    // wire 值仍是小写 ask/edit/allow/auto。
+    const { MODE_OPTIONS } = await import('./mode-vocabulary.js')
     expect(MODE_OPTIONS.map((m) => m.label)).toEqual(['Ask', 'Edit', 'Allow', 'Auto'])
     expect(MODE_OPTIONS.map((m) => m.value)).toEqual(['ask', 'edit', 'allow', 'auto'])
-    expect(MODE_DEFAULT_LABEL).toBe('默认（Ask）')
     const el = await mount({ open: true, defaultAgent: 'claude' })
-    const modeSel = el.shadowRoot!.querySelector('[data-testid="dialog-mode-select"]')
-    const options = Array.from(modeSel?.querySelectorAll('wa-option') ?? []).map((o) => ({
+    const modeSel = el.shadowRoot!.querySelector('[data-testid="dialog-mode-select"]') as
+      unknown as { shadowRoot: ShadowRoot | null } & HTMLElement
+    const options = Array.from(modeSel.querySelectorAll('wa-option') ?? []).map((o) => ({
       value: o.getAttribute('value'),
       label: o.textContent ?? '',
+      title: (o as unknown as { title: string }).title,
     }))
-    expect(options[0]!.label).toBe('默认（Ask）')
-    expect(options.map((o) => o.label)).toEqual(['默认（Ask）', 'Ask', 'Edit', 'Allow', 'Auto'])
+    expect(options[0]!.label).toBe('Ask')
+    expect(options.map((o) => o.label)).toEqual(['Ask', 'Edit', 'Allow', 'Auto'])
+    expect(options.some((o) => o.value === '')).toBe(false)
+    // 每个选项携带 title 悬浮解释（与共享词汇的 description 一一对应）。
+    expect(options.map((o) => o.title)).toEqual(MODE_OPTIONS.map((m) => m.description))
+    // hint 行随当前选中模式：初始预选 ask → 其 description；选 edit → 跟随。
+    const hintOf = (sel: { shadowRoot: ShadowRoot | null }): string | null =>
+      sel.shadowRoot?.querySelector('[part="hint"]')?.textContent ?? null
+    expect(hintOf(modeSel)).toBe(MODE_OPTIONS[0]!.description)
+    await pick(el, 'dialog-mode-select', 'edit')
+    expect(hintOf(modeSel)).toBe(MODE_OPTIONS[1]!.description)
     el.remove()
   })
 

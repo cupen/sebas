@@ -256,22 +256,25 @@ describe('composer is pure follow-up (4.1)', () => {
 
   it('composer mode dropdown shares the MODE_OPTIONS vocabulary with the creation dialog (4.1)', async () => {
     // polish-workbench-walkthrough-ux 4.1：composer 权限模式下拉与创建弹窗
-    // 同源渲染——选项文案来自共享 MODE_OPTIONS，且带 aria-label「权限模式」，
-    // 默认态显示「默认（ask）」而非空白。
-    const { MODE_OPTIONS, MODE_DEFAULT_LABEL } = await import('./mode-vocabulary.js')
+    // 同源渲染——选项文案来自共享 MODE_OPTIONS，且带 aria-label「权限模式」。
+    // （simplify-mode-menus）恰为四词、无空值占位项；解释走 option 悬浮
+    // title，不渲染 hint 行（工具栏紧凑约束，见 design D5）。
+    const { MODE_OPTIONS } = await import('./mode-vocabulary.js')
     const el = await mount({ ...focus, modeEditable: true, currentMode: 'ask' })
     const sel = el.shadowRoot?.querySelector('[data-testid="mode-switch"]')
     expect(sel?.getAttribute('aria-label')).toBe('权限模式')
-    const options = Array.from(sel?.querySelectorAll('wa-option') ?? []).map(
-      (o) => o.getAttribute('value'),
-    )
-    // 空值默认项 + 四个共享模式（顺序一致）。
-    expect(options).toEqual(['', ...MODE_OPTIONS.map((m) => m.value)])
-    const labels = Array.from(sel?.querySelectorAll('wa-option') ?? []).map(
-      (o) => o.textContent ?? '',
-    )
-    expect(labels[0]).toBe(MODE_DEFAULT_LABEL)
-    expect(labels.slice(1)).toEqual(MODE_OPTIONS.map((m) => m.label))
+    const optionEls = Array.from(sel?.querySelectorAll('wa-option') ?? [])
+    const options = optionEls.map((o) => o.getAttribute('value'))
+    // 恰为四个共享模式（顺序一致），无空值默认项。
+    expect(options).toEqual(MODE_OPTIONS.map((m) => m.value))
+    const labels = optionEls.map((o) => o.textContent ?? '')
+    expect(labels[0]).toBe('Ask')
+    expect(labels).toEqual(MODE_OPTIONS.map((m) => m.label))
+    // 每个选项携带 title 悬浮解释（与共享词汇的 description 一一对应）；
+    // 下拉不渲染 hint 行——hint 属性未设（空串）。
+    const titles = optionEls.map((o) => (o as unknown as { title: string }).title)
+    expect(titles).toEqual(MODE_OPTIONS.map((m) => m.description))
+    expect((sel as unknown as { hint?: string } | null)?.hint ?? '').toBe('')
     el.remove()
   })
 
@@ -520,9 +523,10 @@ describe('model chip (4.2, design D3)', () => {
 // ── 4.3 发送状态机 ────────────────────────────────────────────────────────
 
 describe('mode switch compact + desired-mode rendering (3.1/3.2, D5) and toolbar grid (3.3)', () => {
-  it('renders the desired mode from the wire, not the empty legacy entry (3.2, D5b)', async () => {
-    // （3.2，D5b）currentMode 非空（服务端缺省 ask）：选择器真源值渲染，不落
-    // 空态。选项词汇与默认条目由上面 4.1 的同源测试钉住（共享 MODE_OPTIONS）。
+  it('renders the desired mode from the wire (3.2, D5b)', async () => {
+    // （3.2，D5b）currentMode 非空（服务端缺省 ask）：选择器真源值渲染。
+    // 选项词汇由上面 4.1 的同源测试钉住（共享 MODE_OPTIONS；空值占位项
+    // 已随 simplify-mode-menus 退役）。
     const el = await mount({ ...focus, modeEditable: true, currentMode: 'ask' })
     const sel = el.shadowRoot?.querySelector('[data-testid="mode-switch"]') as HTMLElement & {
       value: string
