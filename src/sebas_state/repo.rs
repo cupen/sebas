@@ -7,7 +7,7 @@
 //! 与 `CardConfig`（sebas-feishu）进不了 sebas-models 的依赖清单。
 //!
 //! single-state-dir D2/D5：core 的库按**增长特征**分成两个——
-//! [`SETTINGS_TABLES`]（providers / model_aliases / settings，有界系统配置）
+//! [`SETTINGS_TABLES`]（providers / model_aliases / settings / agents，有界系统配置）
 //! 与 [`PROJECTS_TABLES`]（projects / session_map，增长的用户数据）。两库
 //! 各开一次连接、各有一份注册表与版本戳；`save_persisted_state` 的三表
 //! 事务全部落在 settings.db 内，**没有任何写事务横跨两库**（design D4
@@ -23,7 +23,7 @@ use sebas_models::runtime_state::{self, RuntimeStateRow};
 // ---- Table schemas (sqlite-auto-schema-sync) ----
 
 /// settings.db 注册清单（有界系统配置）：providers / model_aliases /
-/// settings。DDL 只在"建新库/覆盖式重建"时执行, 与注册列逐一对应; 日常同步
+/// settings / agents（add-agent-settings-and-session-titles）。DDL 只在"建新库/覆盖式重建"时执行, 与注册列逐一对应; 日常同步
 /// 只对比派生列 vs `PRAGMA table_info`。建表段与索引段分开注册
 /// （retire-schema-reset D3：覆盖式重建要以临时表名重组建表段）；providers
 /// 已扁平化为类型化列（single-state-dir 3.2，列名与既有 provider JSON 键对齐）。
@@ -69,6 +69,31 @@ pub static SETTINGS_TABLES: &[TableSchema] = &[
         );",
         index_ddls: &[],
         columns: sebas_models::setting::SettingRow::schema_columns(),
+    },
+    TableSchema {
+        // add-agent-settings-and-session-titles 1.2：agent 目录表（settings.db
+        // 承载，spec「Agent catalog lives in the state store」）。约束只在
+        // 这里表达：id 主键 + 驱动标签非空；列集取 `AgentRow::schema_columns()`
+        // （sebas_models::agent）。新表——旧库由启动 diff-sync 原地补建，无
+        // 破坏步骤（design Risks「schema 新表」）。
+        name: "agents",
+        create_table_ddl: "CREATE TABLE agents (
+            id                   TEXT PRIMARY KEY,
+            driver               TEXT NOT NULL,
+            path                 TEXT,
+            args                 TEXT,           -- JSON 文本（argv 数组）
+            display              TEXT,
+            models               TEXT,           -- JSON 文本（模型别名数组）
+            startup_timeout_secs INTEGER NOT NULL DEFAULT 30,
+            idle_kill_secs       INTEGER NOT NULL DEFAULT 172800,
+            work_dir             TEXT,
+            source               TEXT NOT NULL DEFAULT 'seed',
+            deleted              INTEGER NOT NULL DEFAULT 0,
+            created_at           INTEGER NOT NULL,
+            updated_at           INTEGER NOT NULL
+        );",
+        index_ddls: &[],
+        columns: sebas_models::agent::AgentRow::schema_columns(),
     },
 ];
 
@@ -287,6 +312,43 @@ pub fn save_settings(
     .save(conn)
     .map_err(|e| format!("写入 settings 失败: {e}"))?;
     Ok(())
+}
+
+// ---- agents 域（add-agent-settings-and-session-titles 1.3）----
+//
+// agent 目录行的存储侧胶水：标准 CRUD 全部走 ActiveRecord 生成的方法
+// （save = upsert / all / delete），无手写 SQL。归属 settings.db（有界系统
+// 配置——agent 目录是全局能力配置，与 providers 同类）。
+
+/// 全部 agent 行（snapshot 投影源；行序按 id 字典序由调用方排序）。
+pub fn load_agents(conn: &mut Connection) -> Result<Vec<sebas_models::agent::AgentRow>, String> {
+    let mut rows = sebas_models::agent::AgentRow::all(conn)
+        .map_err(|e| format!("查询 agents 失败: {e}"))?;
+    rows.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(rows)
+}
+
+/// 单行 upsert（put op 的存储半边；created_at/updated_at 由行自带）。
+pub fn save_agent(conn: &mut Connection, row: sebas_models::agent::AgentRow) -> Result<(), String> {
+    row.save(conn).map_err(|e| format!("写入 agent {} 失败: {e}", row.id))
+}
+
+/// 按 id 软删除（墓碑，与 providers 表的 deleted 同款机制）：行保留
+/// （deleted=1），目录 / 解析 / 种子导入视其不存在——config 种子 agent 的
+/// 删除因此可粘住（读取期 union 不再并回，重启不被种子回填）。返回是否
+/// 发生了删除（id 不存在或已是墓碑 → false）。
+pub fn delete_agent(conn: &mut Connection, id: &str) -> Result<bool, String> {
+    let existing = sebas_models::agent::AgentRow::find(conn, id)
+        .map_err(|e| format!("查询 agent {id} 失败: {e}"))?;
+    let mut row = match existing {
+        Some(row) if !row.is_deleted() => row,
+        _ => return Ok(false),
+    };
+    row.deleted = 1;
+    row.updated_at = sebas_domain::prim::now_unix();
+    row.save(conn)
+        .map_err(|e| format!("删除 agent {id} 失败: {e}"))?;
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -710,6 +772,24 @@ mod tests {
                 ],
             ),
             ("settings", &[("key", "TEXT"), ("value", "TEXT")]),
+            (
+                "agents",
+                &[
+                    ("id", "TEXT"),
+                    ("driver", "TEXT"),
+                    ("path", "TEXT"),
+                    ("args", "TEXT"),
+                    ("display", "TEXT"),
+                    ("models", "TEXT"),
+                    ("startup_timeout_secs", "INTEGER"),
+                    ("idle_kill_secs", "INTEGER"),
+                    ("work_dir", "TEXT"),
+                    ("source", "TEXT"),
+                    ("deleted", "INTEGER"),
+                    ("created_at", "INTEGER"),
+                    ("updated_at", "INTEGER"),
+                ],
+            ),
         ];
         let projects: &[(&str, &[(&str, &str)])] = &[
             (
@@ -758,8 +838,8 @@ mod tests {
         }
     }
 
-    /// 分层不变量：两份注册表各管各的表，无交叠、合并后恰好六表
-    /// （settings 三表 + projects 两表，schema_meta 由 runtime 自管）。
+    /// 分层不变量：两份注册表各管各的表，无交叠、合并后恰好七表
+    /// （settings 四表 + projects 两表，schema_meta 由 runtime 自管）。
     #[test]
     fn registries_are_disjoint_and_complete() {
         let mut seen = Vec::new();
@@ -767,7 +847,7 @@ mod tests {
             assert!(!seen.contains(&t.name), "表 {} 被注册了两次", t.name);
             seen.push(t.name);
         }
-        for expected in ["providers", "model_aliases", "settings"] {
+        for expected in ["providers", "model_aliases", "settings", "agents"] {
             assert!(SETTINGS_TABLES.iter().any(|t| t.name == expected));
         }
         for expected in ["projects", "session_map"] {
@@ -1457,8 +1537,13 @@ mod active_record_tests {
 // single-state-dir 3.1 的两库落点（映射表派生路径 + 各自注册表）。
 #[cfg(test)]
 mod writer_wiring_tests {
+    use super::{
+        SETTINGS_TABLES, TableSchema, delete_agent, load_agents, load_persisted_state,
+        save_agent,
+    };
     use crate::sebas_state::writer::StateWriter;
     use sebas_dispatch::state_store::StateStoreEngine;
+    use sebas_db::schema::open_and_sync;
     use tempfile::tempdir;
 
     /// 两库各自 open：settings.db 拿到三张表 + schema_meta，projects.db
@@ -1577,5 +1662,98 @@ mod writer_wiring_tests {
             assert_eq!(format, "date", "{name} 的 version_format");
             assert_eq!(version, sebas_db::schema::SCHEMA_VERSION, "{name} 的版本");
         }
+    }
+
+    // ---- add-agent-settings-and-session-titles 1.2：agents 表注册 ----
+
+    /// fresh 状态目录启动建表：agents 表随 SETTINGS_TABLES 注册自动建立，
+    /// ActiveRecord 的 save/find 经它落库可读。
+    #[test]
+    fn fresh_settings_db_creates_the_agents_table() {
+        let dir = tempdir().unwrap();
+        let mut conn = open_and_sync(&dir.path().join("s.db"), SETTINGS_TABLES)
+            .unwrap()
+            .0;
+        let tables: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            tables.iter().any(|t| t == "agents"),
+            "fresh 库必须自动建 agents 表: {tables:?}"
+        );
+
+        // 存储胶水往返：save → load → delete。
+        let row = sebas_models::agent::AgentRow::from_definition(
+            "seeded",
+            &sebas_models::agent::AgentDefinition {
+                driver: "claude".into(),
+                path: Some("claude".into()),
+                ..Default::default()
+            },
+            "seed",
+        );
+        save_agent(&mut conn, row.clone()).unwrap();
+        let loaded = load_agents(&mut conn).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "seeded");
+        assert!(delete_agent(&mut conn, "seeded").unwrap());
+        assert!(!delete_agent(&mut conn, "seeded").unwrap(), "二次删除如实报不存在");
+        // 软删墓碑：行保留（deleted=1）——目录/解析/种子导入视其不存在，
+        // config 种子 agent 的删除因此可粘住（重启不被回填）。
+        let rows = load_agents(&mut conn).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].is_deleted());
+    }
+
+    /// 旧库（无 agents 表的存量 settings.db）启动 diff-sync 原地补建新表，
+    /// 既有数据零破坏、无备份需求（加表不是破坏步骤）。
+    #[test]
+    fn preexisting_settings_db_gains_agents_table_in_place() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("settings.db");
+
+        // 第一代注册表（只有三表）：先按旧形态建库并写入存量数据。
+        let legacy: &[TableSchema] = &SETTINGS_TABLES[..3];
+        {
+            let (mut conn, _) = open_and_sync(&path, legacy).unwrap();
+            crate::sebas_state::repo::save_persisted_state(
+                &mut conn,
+                &sebas_dispatch::state_store::PersistedState::default(),
+            )
+            .unwrap();
+        }
+
+        // 新注册表（含 agents）重开 → 原地补表，存量 provider 数据完好。
+        let (mut conn, outcome) = open_and_sync(&path, SETTINGS_TABLES).unwrap();
+        assert!(
+            matches!(outcome, sebas_db::schema::SyncOutcome::Synced { .. }),
+            "加表走 Synced，实际 {outcome:?}"
+        );
+        let state = load_persisted_state(&mut conn).unwrap();
+        assert_eq!(state, sebas_dispatch::state_store::PersistedState::default());
+        assert!(load_agents(&mut conn).unwrap().is_empty(), "新表为空但可读");
+
+        // 补表后再写一行 + 再开一次 = UpToDate（幂等稳定）。
+        save_agent(
+            &mut conn,
+            sebas_models::agent::AgentRow::from_definition(
+                "x",
+                &sebas_models::agent::AgentDefinition {
+                    driver: "acp".into(),
+                    path: Some("opencode".into()),
+                    ..Default::default()
+                },
+                "ui",
+            ),
+        )
+        .unwrap();
+        let (conn2, outcome2) = open_and_sync(&path, SETTINGS_TABLES).unwrap();
+        assert_eq!(outcome2, sebas_db::schema::SyncOutcome::UpToDate);
+        drop(conn2);
+        assert_eq!(load_agents(&mut conn).unwrap().len(), 1);
     }
 }

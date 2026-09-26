@@ -74,9 +74,12 @@ writers would discard each other's changes.
 
 A session SHALL record the node and project directory it runs in, and SHALL
 group under the project entry that matches both. A session with no recorded
-project directory — which is every Feishu-originated session — SHALL group under
-a distinct origin-named grouping rather than being hidden or silently attached
-to a project, and SHALL be placed on the configured default execution node.
+project directory — which is every Feishu-originated session, the only source
+of project-less sessions since webui creation always binds a project — SHALL
+stay out of the project rail entirely (no Inbox group exists; see「History
+group is the archive」in project-session-actions): its conversation is
+presented by its originating surface, and it SHALL be placed on the configured
+default execution node.
 
 #### Scenario: workbench-started session attributed
 
@@ -84,12 +87,12 @@ to a project, and SHALL be placed on the configured default execution node.
 - **THEN** that session records the project's node and directory and appears
   under that project
 
-#### Scenario: Feishu session grouped by origin
+#### Scenario: Feishu session stays on its originating surface
 
 - **WHEN** a session originates in Feishu and has no project directory
-- **THEN** it appears under the origin-named grouping, labelled by where it
-  came from, and is not attributed to any registered project
-- **AND** it runs on the default execution node, which its grouping names
+- **THEN** it appears in no rail grouping and is not attributed to any
+  registered project; its conversation remains on the Feishu surface
+- **AND** it runs on the default execution node
 
 #### Scenario: removing a project does not close its sessions
 
@@ -298,7 +301,7 @@ The workbench SHALL provide a modal dialog with a server-side directory browser 
 
 ### Requirement: New session without prompt
 
-The workbench SHALL support creating a 0-turn placeholder session without requiring a prompt. The placeholder SHALL appear in the session list immediately and SHALL be activated. An ACP child SHALL NOT block creation: focusing a placeholder session that has no live child SHALL start the child in the background — resuming the recorded conversation when the session mapping allows it and reporting honestly when it does not — and the first message SHALL also start the child if focus never did (for example the operator submits from the rail preview without switching). Clicking it SHALL open a creation dialog — the ONLY place an agent can be chosen — which SHALL require an explicit agent choice drawn from `/api/agents` (no implicit or "null" agent), SHALL preselect the target project's remembered default agent when one exists, SHALL carry an optional permission-mode choice (`ask | edit | allow | auto`, defaulting to "agent default" which omits the `mode` field on the wire), and MAY carry an optional two-level model choice (provider, then model) drawn from the Settings catalog, preselected per the configured default provider and model. Confirming the dialog SHALL create and activate the placeholder; cancelling SHALL create nothing. A failed background start SHALL NOT kill the placeholder: it stays in the list and the failure is surfaced where it happened.
+The workbench SHALL support creating a 0-turn placeholder session without requiring a prompt. The placeholder SHALL appear in the session list immediately and SHALL be activated. An ACP child SHALL NOT block creation: focusing a placeholder session that has no live child SHALL start the child in the background — resuming the recorded conversation when the session mapping allows it and reporting honestly when it does not — and the first message SHALL also start the child if focus never did (for example the operator submits from the rail preview without switching). Clicking it SHALL open a creation dialog — the ONLY place an agent can be chosen — which SHALL require an explicit agent choice drawn from `/api/agents` (no implicit or "null" agent), SHALL preselect the target project's remembered default agent when one exists, SHALL carry a permission-mode choice (`ask | edit | allow | auto`) prefilled with `ask` and sent unconditionally on the wire (there is no "agent default = omit the field" path), and MAY carry an optional two-level model choice (provider, then model) drawn from the Settings catalog, preselected per the operator's last-used pair (see「Model selector offers the backend catalog before any session」). Confirming the dialog SHALL create and activate the placeholder; cancelling SHALL create nothing. A failed background start SHALL NOT kill the placeholder: it stays in the list and the failure is surfaced where it happened.
 
 #### Scenario: dialog requires an explicit agent
 
@@ -322,8 +325,8 @@ The workbench SHALL support creating a 0-turn placeholder session without requir
 
 #### Scenario: dialog carries the permission-mode choice
 
-- **WHEN** the creation dialog is open and the operator leaves the mode dropdown on its default
-- **THEN** confirming creates the session without a `mode` field on the wire; choosing `edit` creates it with `mode=edit`
+- **WHEN** the creation dialog is open and the operator leaves the mode dropdown on its prefilled default
+- **THEN** confirming creates the session with `mode=ask` on the wire; choosing `edit` creates it with `mode=edit`
 
 #### Scenario: focusing the placeholder starts the child with resume
 
@@ -375,7 +378,7 @@ The History group SHALL contain only archived sessions, listed newest-first by a
 
 ### Requirement: Archive expiry
 
-The system SHALL permanently delete archived sessions whose `archived_at` timestamp is older than the configured retention period. The default retention SHALL be 30 days, configurable via `[webui] archive_retention_days` in the config file. Expired sessions SHALL be removed on WebUI startup and on every session list request.
+The system SHALL permanently delete archived sessions whose `archived_at` timestamp is older than the configured retention period. The default retention SHALL be 30 days, configurable via `[service.webui] archive_retention_days` in the config file. Expired sessions SHALL be removed on WebUI startup and on every session list request.
 
 #### Scenario: expired session cleaned up
 
@@ -384,7 +387,7 @@ The system SHALL permanently delete archived sessions whose `archived_at` timest
 
 #### Scenario: retention configured
 
-- **WHEN** `[webui] archive_retention_days = 7` is set in the config
+- **WHEN** `[service.webui] archive_retention_days = 7` is set in the config
 - **THEN** archived sessions older than 7 days are removed at startup and on list requests
 
 ### Requirement: Execution-body availability is stated, not discovered
@@ -729,6 +732,13 @@ SHALL NEVER see a submitted message followed by silence with no agent-side
 entry. The error entry's summary label SHALL state the actual failure class
 (such as spawn failure or turn stall) rather than a fixed generic string.
 
+Text and thinking deltas that arrive while the turn is in flight SHALL render
+into that turn's text run as they arrive — the operator SHALL see partial
+agent output while the turn is still running, and SHALL NOT have to wait for
+the turn's terminal phase before any of it appears. This live rendering SHALL
+be observable in the browser DOM of the focused conversation, not merely in
+the server-side transcript.
+
 The collapsed affordance of every process fold and second-level fold SHALL be
 a lightweight inline text control — a link-style toggle carrying the fold's
 summary (label and count) — and SHALL NOT be rendered as a large button,
@@ -762,6 +772,11 @@ the conversation's scroll surface gains no lasting nodes.
 
 - **WHEN** thinking and tool entries stream into a process run while its fold is collapsed
 - **THEN** the fold does not open by itself, and its summary row updates live to reflect the running tool and the accumulated entry count
+
+#### Scenario: streamed deltas appear while the turn is still running
+
+- **WHEN** the agent's turn emits text deltas spaced in time and the session is still in its running phase
+- **THEN** the deltas already rendered into the turn's text run are visible in the conversation at that moment, before the turn reaches its terminal phase
 
 #### Scenario: an expanded fold appends streamed entries in place
 

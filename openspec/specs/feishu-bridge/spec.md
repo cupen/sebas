@@ -42,7 +42,7 @@ The system SHALL drop inbound events whose `event_id` has already been seen. The
 #### Scenario: Duplicate event_id is dropped
 
 - **WHEN** an event arrives whose `event_id` is already in the seen-set
-- **THEN** the event is dropped with a debug log and never reaches the router
+- **THEN** the event is dropped with a debug log and never reaches the IM frontend's dispatch path
 
 #### Scenario: Events without event_id always pass
 
@@ -51,7 +51,7 @@ The system SHALL drop inbound events whose `event_id` has already been seen. The
 
 ### Requirement: Chat type filtering
 
-The system SHALL only process inbound events whose chat type is in the configured `allowed_chat_types` list. The default list SHALL be `private` and `group`. An empty configured list SHALL allow all chat types. Events from disallowed chat types SHALL be dropped silently.
+The system SHALL only process inbound events whose chat type is in the configured `allowed_chat_types` list. The default list SHALL be `p2p` and `group` (the Feishu wire values; a configured `private` is accepted as an alias of `p2p`). An empty configured list SHALL allow all chat types. Events from disallowed chat types SHALL be dropped silently.
 
 #### Scenario: Disallowed chat type is dropped
 
@@ -129,7 +129,7 @@ The system SHALL expose four outbound operations: send card, send text, update c
 
 ### Requirement: Inbound event gating and execution routing
 
-The feishu adapter SHALL gate inbound feishu events on: explicit feishu enablement (adapter registered); event deduplication; chat-type filtering against `allowed_chat_types`; group/p2p mention gating when `bot_name` is configured. All gates and the WebSocket loop SHALL run inside the IM service process (`im-service`). After the gates pass, the adapter SHALL present the event to the IM frontend as a neutral event; the frontend SHALL route it through the core session channel to a session execution body: by default the ACP bridge; when the session or an explicit configuration selects the native kernel, to the native `sebas-agent` session under the shared router state.
+The feishu adapter SHALL gate inbound feishu events on: explicit feishu enablement (adapter registered); event deduplication; chat-type filtering against `allowed_chat_types`; group/p2p mention gating when `bot_name` is configured. All gates and the WebSocket loop SHALL run inside the IM service process (`im-service`). After the gates pass, the adapter SHALL present the event to the IM frontend as a neutral event; the frontend SHALL route it through the core session channel to a session execution body: by default the ACP bridge; when the session or an explicit configuration selects the native kernel, to the native `sebas-agent` session (execution facts — child lifetime, ordered turn log, parked approvals — recorded in the core-owned dispatch state).
 
 #### Scenario: Feishu disabled rejects inbound
 
@@ -164,7 +164,7 @@ The Feishu WebSocket ingress and egress SHALL be exposed as an adapter implement
 #### Scenario: inbound feishu event becomes a neutral event
 
 - **WHEN** a Feishu text message arrives with chat id `oc_x` and thread id `t1`
-- **THEN** the adapter emits a neutral text event addressed by `ChannelKey("feishu", "oc_x", Some("t1"))`
+- **THEN** the adapter emits a neutral text event addressed by `ChannelKey { channel: "feishu", reference: "oc_x\0t1" }` (two fields only; the thread id is folded into the single opaque reference with a NUL separator and is never parsed by the core)
 - **AND** the concrete Feishu reply target (root message id) is carried in the event's channel-specific metadata, not surfaced to the core domain
 
 #### Scenario: outbound neutral presentation renders as a feishu card

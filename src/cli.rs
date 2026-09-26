@@ -33,12 +33,10 @@ pub enum Cmd {
     /// Spawned by the watchdog when `[service.webui] enabled = true`.
     #[command(name = "webui")]
     WebUi(WebUiArgs),
-    /// 初始化 / 修改 WebUI 登录用户（多用户库 auth.db，PBKDF2 落盘）。
-    /// 第一个用户默认 root 角色，其后默认 member（--role 显式指定）。
-    /// 配置用户后 webui 全部 API/WS 需登录；非 loopback bind 也只有用户库
-    /// 存在启用用户时才放行。用户库即活数据，改密即时生效。
-    #[command(name = "webui-passwd")]
-    WebUiPasswd(WebUiPasswdArgs),
+    /// WebUI 账户管理组命令（add / passwd / list；语义按动词拆分，见
+    /// openspec/specs/auth-cli/spec.md）。用户库路径取 `SEBAS_WEBUI_AUTH_DB`
+    /// env（缺省 ~/.sebas/auth.db），与运行中 webui 同源；不读 config.toml。
+    Auth(AuthArgs),
     /// Run the watchdog daemon: supervise core/webui/router children and
     /// self-upgrade.
     Run(RunArgs),
@@ -290,26 +288,51 @@ pub struct WebUiArgs {
     pub config: String,
 }
 
-/// `sebas webui-passwd` — create or update a WebUI login user（写 auth.db
-/// 用户库；不读写任何 JSON 凭据文件）。
+/// `sebas auth` 的参数（add-auth-subcommand；子命令语义见 auth-cli spec，
+/// 核心在 src/auth_cmd.rs）。
 #[derive(Parser)]
-pub struct WebUiPasswdArgs {
-    /// 账户用户名（多用户库里没有「现有用户名」可沿用，必填）。
-    #[arg(long)]
-    pub user: Option<String>,
-    /// 新密码（明文；<8 字符仅告警不拦截——测试环境统一 admin/admin）。
-    /// 优先用 --password-stdin，避免密码进入 shell history。
-    #[arg(long)]
-    pub password: Option<String>,
-    /// 从 stdin 读一行作为新密码
-    /// （`printf '%s' 'pw' | sebas webui-passwd --password-stdin`）。
-    #[arg(long, conflicts_with = "password")]
-    pub password_stdin: bool,
-    /// 角色（root/admin/member/viewer）。缺省：库里第一个用户为 root，
-    /// 其后为 member。用户已存在时同时把其角色改为该值（最后一个启用的
-    /// root 受保护，不能被降级/禁用/删除）。
-    #[arg(long)]
-    pub role: Option<String>,
+pub struct AuthArgs {
+    #[command(subcommand)]
+    pub cmd: AuthCmd,
+}
+
+/// `sebas auth` 子命令：add / passwd / list，语义按动词拆分——`add` 只建户、
+/// `passwd` 只改密，无 create-or-update 一体形态（auth-cli spec「auth 组命令
+/// 形态」）。
+#[derive(Subcommand)]
+pub enum AuthCmd {
+    /// 建户：同名（大小写不敏感）已存在则报错并提示用 `auth passwd`。
+    /// 缺省角色：库零用户 → root，否则 member（`--role` 显式覆盖）。
+    Add {
+        /// 账户用户名（位置参数）。
+        username: String,
+        /// 角色（root/admin/member/viewer），显式给出时覆盖缺省规则。
+        #[arg(long)]
+        role: Option<String>,
+        /// 新密码（明文；<8 字符仅告警不拦截——测试环境统一 admin/admin）。
+        /// 优先用 --password-stdin，避免密码进入 shell history。
+        #[arg(long)]
+        password: Option<String>,
+        /// 从 stdin 读一行作为密码
+        /// （`printf '%s' 'pw' | sebas auth add <name> --password-stdin`）。
+        #[arg(long, conflicts_with = "password")]
+        password_stdin: bool,
+    },
+    /// 改密（新盐新哈希）：用户不存在则报错并提示用 `auth add`。不携带
+    /// `--role`——角色调整归 WebUI root 管理面。
+    Passwd {
+        /// 账户用户名（位置参数）。
+        username: String,
+        /// 新密码（明文；<8 字符仅告警不拦截）。优先用 --password-stdin。
+        #[arg(long)]
+        password: Option<String>,
+        /// 从 stdin 读一行作为密码
+        /// （`printf '%s' 'pw' | sebas auth passwd <name> --password-stdin`）。
+        #[arg(long, conflicts_with = "password")]
+        password_stdin: bool,
+    },
+    /// 只读列出用户库账户：用户名 / 角色 / 启用 / 时间戳（不含哈希）。
+    List,
 }
 
 /// `sebas run` — start the watchdog daemon.

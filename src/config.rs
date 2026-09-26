@@ -93,6 +93,64 @@ pub enum AgentConfig {
     },
 }
 
+impl AgentConfig {
+    /// 本定义的完整 launch argv（claude → path + args；acp → command）。
+    pub fn command(&self) -> Vec<String> {
+        match self {
+            AgentConfig::Claude(c) => {
+                let mut v = vec![c.path.clone()];
+                v.extend(c.args.clone());
+                v
+            }
+            AgentConfig::Acp { command, .. } => command.clone(),
+        }
+    }
+
+    /// 静态 launch 策略标签：`"claude"` 或 `"acp"`。
+    pub fn driver_tag(&self) -> &'static str {
+        match self {
+            AgentConfig::Claude(_) => "claude",
+            AgentConfig::Acp { .. } => "acp",
+        }
+    }
+
+    /// 产品展示名（可选 display 字段；缺省 None 由 catalog 层按 id 推导）。
+    pub fn display(&self) -> Option<String> {
+        match self {
+            AgentConfig::Claude(c) => c.display.clone(),
+            AgentConfig::Acp { display, .. } => display.clone(),
+        }
+    }
+
+    /// The configured work directory (Claude only for now).
+    pub fn work_dir(&self) -> Option<String> {
+        match self {
+            AgentConfig::Claude(c) => c.work_dir.clone(),
+            _ => None,
+        }
+    }
+
+    /// The startup timeout for this agent definition.
+    pub fn startup_timeout(&self) -> std::time::Duration {
+        let secs = match self {
+            AgentConfig::Claude(c) => c.startup_timeout_secs,
+            AgentConfig::Acp {
+                startup_timeout_secs,
+                ..
+            } => *startup_timeout_secs,
+        };
+        std::time::Duration::from_secs(secs.max(1))
+    }
+
+    /// The idle-kill timeout for this agent definition (0 = never expire).
+    pub fn idle_kill_secs(&self) -> u64 {
+        match self {
+            AgentConfig::Claude(c) => c.idle_kill_secs,
+            AgentConfig::Acp { idle_kill_secs, .. } => *idle_kill_secs,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct FeishuConfig {
     /// 显式启用开关（feishu 可选，make-feishu-optional-webui-primary）：
@@ -257,67 +315,41 @@ impl AcpConfig {
 
     /// The full argv (executable + args) for an agent kind, if configured.
     pub fn command_for(&self, kind: &str) -> Option<Vec<String>> {
-        self.agents.get(kind).map(|a| match a {
-            AgentConfig::Claude(c) => {
-                let mut v = vec![c.path.clone()];
-                v.extend(c.args.clone());
-                v
-            }
-            AgentConfig::Acp { command, .. } => command.clone(),
-        })
+        self.agents.get(kind).map(AgentConfig::command)
     }
 
     /// 静态 launch 策略标签（配置层概念，不上 wire；workbench-agent-wire-fix
     /// D3/A）：`"claude"` 或 `"acp"`。未知 kind 返回空串。
     pub fn driver_tag_of(&self, kind: &str) -> String {
-        match self.agents.get(kind) {
-            Some(AgentConfig::Claude(_)) => "claude".to_string(),
-            Some(AgentConfig::Acp { .. }) => "acp".to_string(),
-            None => String::new(),
-        }
+        self.agents
+            .get(kind)
+            .map(|a| a.driver_tag().to_string())
+            .unwrap_or_default()
     }
 
     /// 产品展示名（可选 display 字段；缺省 None 由 catalog 层按 driver 推导）。
     pub fn display_for(&self, kind: &str) -> Option<String> {
-        match self.agents.get(kind) {
-            Some(AgentConfig::Claude(c)) => c.display.clone(),
-            Some(AgentConfig::Acp { display, .. }) => display.clone(),
-            None => None,
-        }
+        self.agents.get(kind).and_then(AgentConfig::display)
     }
 
     /// The configured work directory for an agent kind (Claude only for now).
     pub fn work_dir_for(&self, kind: &str) -> Option<String> {
-        match self.agents.get(kind) {
-            Some(AgentConfig::Claude(c)) => c.work_dir.clone(),
-            _ => None,
-        }
+        self.agents.get(kind).and_then(AgentConfig::work_dir)
     }
 
     /// The startup timeout for an agent kind.
     pub fn startup_timeout_for(&self, kind: &str) -> std::time::Duration {
-        let secs = self
-            .agents
+        self.agents
             .get(kind)
-            .map(|a| match a {
-                AgentConfig::Claude(c) => c.startup_timeout_secs,
-                AgentConfig::Acp {
-                    startup_timeout_secs,
-                    ..
-                } => *startup_timeout_secs,
-            })
-            .unwrap_or_else(default_startup_timeout);
-        std::time::Duration::from_secs(secs.max(1))
+            .map(AgentConfig::startup_timeout)
+            .unwrap_or_else(|| std::time::Duration::from_secs(default_startup_timeout().max(1)))
     }
 
     /// The idle-kill timeout for an agent kind (0 = never expire).
     pub fn idle_kill_for(&self, kind: &str) -> u64 {
         self.agents
             .get(kind)
-            .map(|a| match a {
-                AgentConfig::Claude(c) => c.idle_kill_secs,
-                AgentConfig::Acp { idle_kill_secs, .. } => *idle_kill_secs,
-            })
+            .map(AgentConfig::idle_kill_secs)
             .unwrap_or_else(default_idle_kill)
     }
 
@@ -1063,23 +1095,33 @@ fn check_dir_writable(dir: &std::path::Path, what: &str) -> Result<()> {
 /// relative-with-separator) path is checked directly, a bare name is
 /// resolved against PATH. Either way the file must exist and be executable.
 fn check_binary_reachable(path: &str) -> Result<()> {
+    #[cfg(unix)]
     let is_executable = |p: &std::path::Path| -> bool {
         if !p.is_file() {
             return false;
         }
-        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::metadata(p)
                 .map(|m| m.permissions().mode() & 0o111 != 0)
                 .unwrap_or(false)
         }
-        #[cfg(not(unix))]
-        {
-            true
-        }
     };
 
+    // Windows：npm 全局安装的 CLI 是「无扩展名 sh 脚本 + .cmd 包装」，不能按
+    // Unix 可执行位语义校验——解析成实际可 spawn 的形态再验存在性，与 spawn
+    // 侧同一判定（否则校验放行、spawn 报 program not found，见 win_exe 模块）。
+    #[cfg(not(unix))]
+    let found = {
+        let resolved = sebas_acp::resolve_windows_executable(path);
+        let resolved = std::path::Path::new(&resolved);
+        resolved.is_file()
+            && resolved.extension().is_some_and(|e| {
+                ["exe", "cmd", "bat"].contains(&e.to_string_lossy().to_ascii_lowercase().as_str())
+            })
+    };
+
+    #[cfg(unix)]
     let found = if path.contains('/') {
         is_executable(std::path::Path::new(path))
     } else {

@@ -641,3 +641,72 @@ async fn feishu_native_session_continues_via_bridge() {
     );
     let _ = drain(&mut out_rx).await;
 }
+
+// ---------- PlaceholderFirstTurn（add-agent-settings-and-session-titles 6.2） ----------
+
+/// 空 prompt 激活的占位会话（Active 映射、零卡态）收到首条真实消息：
+/// Continue 路由发射一次 PlaceholderFirstTurn（自动标题的触发信号），
+/// prompt 为消息原文。
+#[tokio::test]
+async fn placeholder_first_turn_emits_title_trigger_once() {
+    let map = SessionMap::new();
+    let (router, mut out_rx) = DispatchHandle::new(map);
+    let key = ChannelKey::web_new();
+    router
+        .map
+        .insert(key.clone(), Mapping::active("sid-pt"))
+        .await
+        .expect("active mapping insert");
+
+    router
+        .web_send_message(key.clone(), "first real message".into())
+        .await
+        .expect("send");
+
+    let first = next_out(&mut out_rx).await;
+    match first {
+        Out::PlaceholderFirstTurn { key: k, prompt } => {
+            assert_eq!(k, key);
+            assert_eq!(prompt, "first real message");
+        }
+        other => panic!("expected PlaceholderFirstTurn, got {other:?}"),
+    }
+    let _ = drain(&mut out_rx).await;
+
+    // 第二条消息：卡态已带首轮 prompt，谓词假——不再发触发信号。
+    router
+        .web_send_message(key.clone(), "second message".into())
+        .await
+        .expect("send");
+    let outs = drain(&mut out_rx).await;
+    assert!(
+        !outs
+            .iter()
+            .any(|o| matches!(o, Out::PlaceholderFirstTurn { .. })),
+        "第二条消息不得再发 PlaceholderFirstTurn，got {outs:?}"
+    );
+}
+
+/// resume 链路排除：带 prompt_preview 的 Active 映射（dormant 恢复回填了
+/// 命名来源）即使卡态为空也不发触发信号——resume 不触发自动标题。
+#[tokio::test]
+async fn resumed_session_with_preview_never_emits_title_trigger() {
+    let map = SessionMap::new();
+    let (router, mut out_rx) = DispatchHandle::new(map);
+    let key = ChannelKey::web_new();
+    let mut restored = Mapping::active("sid-restored");
+    restored.prompt_preview = Some("restored preview".into());
+    router.map.insert(key.clone(), restored).await.expect("insert");
+
+    router
+        .web_send_message(key.clone(), "hello again".into())
+        .await
+        .expect("send");
+    let outs = drain(&mut out_rx).await;
+    assert!(
+        !outs
+            .iter()
+            .any(|o| matches!(o, Out::PlaceholderFirstTurn { .. })),
+        "恢复会话首条消息不得触发自动标题，got {outs:?}"
+    );
+}

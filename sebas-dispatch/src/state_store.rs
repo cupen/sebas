@@ -62,6 +62,41 @@ pub trait StateStoreEngine: Send + Sync {
     /// 记录项目级默认 agent（workbench-agent-wire-fix 2.6）。按稳定 id 定位。
     async fn set_project_default_agent(&self, id: &str, agent: &str) -> Result<(), String>;
 
+    // ---- agents 域（add-agent-settings-and-session-titles 1.3）----
+    //
+    // 默认实现只服务未覆盖它们的既有测试替身（它们的被测面不含 agent 目录）；
+    // 生产实现必须如实落库（`DbStateEngine`，settings.db 的 agents 表）。
+
+    /// 全部 agent 行（snapshot 投影源；空表 = 目录只余内置 native）。
+    async fn load_agents(&self) -> Result<Vec<sebas_models::agent::AgentRow>, String> {
+        tracing::debug!("agent catalog load hit the no-op engine default");
+        let _ = self;
+        Ok(Vec::new())
+    }
+
+    /// 单行 upsert（put op 的存储半边；存在性由调用方裁决 create/update）。
+    async fn put_agent(&self, row: sebas_models::agent::AgentRow) -> Result<(), String> {
+        tracing::debug!(id = %row.id, "agent put hit the no-op engine default");
+        let _ = row;
+        Ok(())
+    }
+
+    /// 按 id 删除一行（软删墓碑：行保留、deleted=1，目录/解析/种子导入视
+    /// 其不存在——config 种子 agent 的删除因此可粘住）。返回是否发生了删
+    /// 除（不存在或已是墓碑 = false，typed rejection 的依据）。
+    async fn delete_agent(&self, id: &str) -> Result<bool, String> {
+        tracing::debug!(id = %id, "agent delete hit the no-op engine default");
+        let _ = id;
+        Ok(false)
+    }
+
+    /// 清除引用某 agent 的项目默认（删除守卫的 projects 半边）。返回被清除
+    /// 的项目数。
+    async fn clear_project_default_agent(&self, agent: &str) -> Result<usize, String> {
+        let _ = agent;
+        Ok(0)
+    }
+
     // ---- 会话映射（persist-session-map 2.1）：按变更持久化到状态库 ----
     //
     // 默认实现只服务未覆盖它们的既有测试替身（它们的被测面不含会话映射）；
@@ -832,6 +867,181 @@ pub async fn project_mutation(
     }
 }
 
+// ---- agents 域 mutation 分发（add-agent-settings-and-session-titles 1.3；
+// ---- core channel 服务端与 webui InProcessBackend 共用同一实现）----
+
+/// agent 条目（agents 域 put 载荷）的已知字段集。未知字段 = 非法 payload，
+/// typed rejection（与 providers 域同一把关姿态）。字段语义见
+/// `sebas_models::agent::AgentDefinition`。
+pub const AGENT_ITEM_KNOWN_FIELDS: &[&str] = &[
+    "driver",
+    "path",
+    "args",
+    "display",
+    "models",
+    "startup_timeout_secs",
+    "idle_kill_secs",
+    "work_dir",
+];
+
+/// 校验 agent 条目并归一化为 `AgentDefinition`。`driver` 只认封闭标签
+/// `claude` | `acp`；`path`/`display`/`work_dir` 是字符串槽位（null 归一为
+/// 未配置）；`args`/`models` 是字符串数组（缺省 = 空/未覆盖）；超时两槽位
+/// 是非负整数，下限压到 1（与 config 侧 `startup_timeout_for` 的 max(1)
+/// 同语义——0 会让 spawn 立即超时）。
+pub fn validate_agent_definition(item: &Item) -> Result<sebas_models::agent::AgentDefinition, String> {
+    use sebas_models::agent::AgentDefinition;
+    for key in item.keys() {
+        if !AGENT_ITEM_KNOWN_FIELDS.contains(&key.as_str()) {
+            return Err(format!("put: agent 含未知字段 '{key}'"));
+        }
+    }
+    let driver = item
+        .get("driver")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "put: agent 缺少 driver 字段".to_string())?;
+    if !sebas_models::agent::is_valid_driver(driver) {
+        return Err(format!(
+            "put: agent driver '{driver}' 非法（只支持 claude | acp）"
+        ));
+    }
+    let string_slot = |field: &str| -> Result<Option<String>, String> {
+        match item.get(field) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(s)) => Ok(Some(s.clone())),
+            Some(_) => Err(format!("put: agent 字段 '{field}' 必须是字符串")),
+        }
+    };
+    let list_slot = |field: &str| -> Result<Option<Vec<String>>, String> {
+        match item.get(field) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::Array(arr)) => {
+                let mut out = Vec::with_capacity(arr.len());
+                for el in arr {
+                    out.push(
+                        el.as_str()
+                            .ok_or_else(|| {
+                                format!("put: agent 字段 '{field}' 条目必须是字符串")
+                            })?
+                            .to_string(),
+                    );
+                }
+                Ok(Some(out))
+            }
+            Some(_) => Err(format!("put: agent 字段 '{field}' 必须是字符串数组")),
+        }
+    };
+    let uint_slot = |field: &str, default: u64| -> Result<u64, String> {
+        match item.get(field) {
+            None | Some(Value::Null) => Ok(default),
+            Some(v) => {
+                let n = v.as_u64().ok_or_else(|| {
+                    format!("put: agent 字段 '{field}' 必须是非负整数")
+                })?;
+                Ok(n.max(1))
+            }
+        }
+    };
+    let path = string_slot("path")?;
+    if driver == "acp" && path.as_deref().map(str::trim).filter(|s| !s.is_empty()).is_none() {
+        return Err("put: acp agent 需要非空 path（command 的 argv[0]）".to_string());
+    }
+    Ok(AgentDefinition {
+        driver: driver.to_string(),
+        path,
+        args: list_slot("args")?.unwrap_or_default(),
+        display: string_slot("display")?,
+        models: list_slot("models")?,
+        startup_timeout_secs: uint_slot("startup_timeout_secs", 30)?,
+        idle_kill_secs: uint_slot("idle_kill_secs", 172800)?,
+        work_dir: string_slot("work_dir")?,
+    })
+}
+
+/// agents 域 mutation 分发。payload `op` 子操作：
+/// - `{"op":"put","id":"...","agent":{driver, path, args, ...}}` → upsert
+///   （同 id 覆盖 launch 定义，created_at 保留首次创建时刻）；
+/// - `{"op":"delete","id":"..."}` → 删行 + 清除引用该 id 的项目默认
+///   （删除守卫；两库各一笔事务——settings 行与 projects 默认分属两库，
+///   跨库单事务按分层纪律不存在，design 决策 10 的顺序语义：先清默认再删行，
+///   失败即整体报错不留悬空引用）。
+///
+/// `native` 是内置内核保留 id：不落表、不可写、不可删（spec「built-in
+/// `native` kernel … without being stored or deletable」），两个 op 都显式
+/// 拒绝。
+pub async fn agents_mutation(
+    engine: &(dyn StateStoreEngine + Send + Sync),
+    payload: &Value,
+) -> Result<(), String> {
+    use sebas_models::agent::RESERVED_NATIVE_ID;
+    let op = payload
+        .get("op")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "agents: 缺少 op 字段".to_string())?;
+    match op {
+        "put" => {
+            let id = payload
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| "put: 缺少 id 字段".to_string())?;
+            if id == RESERVED_NATIVE_ID {
+                return Err(format!("put: '{RESERVED_NATIVE_ID}' 是内置内核保留 id，不可占用"));
+            }
+            let item = payload
+                .get("agent")
+                .and_then(Value::as_object)
+                .cloned()
+                .ok_or_else(|| "put: 缺少 agent 对象".to_string())?;
+            let def = validate_agent_definition(&item)?;
+            let mut row = sebas_models::agent::AgentRow::from_definition(id, &def, "ui");
+            // 同 id 覆盖保留首次创建时刻与原 source（更新不改来源账目）。
+            if let Some(existing) = engine
+                .load_agents()
+                .await?
+                .into_iter()
+                .find(|r| r.id == id)
+            {
+                row.created_at = existing.created_at;
+                row.source = existing.source;
+            }
+            engine.put_agent(row).await?;
+            Ok(())
+        }
+        "delete" => {
+            let id = payload
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| "delete: 缺少 id 字段".to_string())?;
+            if id == RESERVED_NATIVE_ID {
+                return Err(format!(
+                    "delete: '{RESERVED_NATIVE_ID}' 是内置内核，不可删除"
+                ));
+            }
+            // 删除守卫（先清默认）：projects 侧引用清干净后再删行。
+            let cleared = engine.clear_project_default_agent(id).await?;
+            if cleared > 0 {
+                tracing::info!(
+                    agent = %id,
+                    projects = cleared,
+                    "cleared project default_agent references for deleted agent"
+                );
+            }
+            let existed = engine.delete_agent(id).await?;
+            if !existed {
+                return Err(format!("agent '{id}' 不存在"));
+            }
+            Ok(())
+        }
+        other => Err(format!("agents: 未知 op '{other}'")),
+    }
+}
+
 /// repair-on-load：若 mode 指向 `deleted` 墓碑里的 provider，重置为 Off。
 ///
 /// **只修 tombstone，不修「not in providers」** —— 后者是合法状态（用户
@@ -1152,5 +1362,146 @@ mod tests {
         // mode 指向 tombstone → repair 为 Off + 清 default。
         assert_eq!(loaded.mode, ProviderMode::Off);
         assert_eq!(loaded.default_selection, None);
+    }
+
+    // ---- agents 域 mutation（add-agent-settings-and-session-titles 1.3）----
+
+    fn agent_item(driver: &str, path: &str, args: &[&str]) -> serde_json::Value {
+        serde_json::json!({
+            "driver": driver,
+            "path": path,
+            "args": args,
+        })
+    }
+
+    /// put → snapshot 可见；同 id 二次 put 覆盖定义并保留创建时刻；
+    /// 非法 payload（未知字段 / 非法 driver / acp 缺 path / native 保留 id）
+    /// 全部 typed 拒绝且不落任何行。
+    #[tokio::test]
+    async fn agents_mutation_put_round_trips_and_rejects_bad_payloads() {
+        async fn put(
+            engine: &crate::test_engine::MemoryEngine,
+            id: &str,
+            item: serde_json::Value,
+        ) -> Result<(), String> {
+            agents_mutation(
+                engine,
+                &serde_json::json!({ "op": "put", "id": id, "agent": item }),
+            )
+            .await
+        }
+        let engine = crate::test_engine::MemoryEngine::new();
+
+        put(&engine, "opencode", agent_item("acp", "opencode", &["acp"]))
+            .await
+            .expect("valid acp put");
+        let rows = engine.load_agents().await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "opencode");
+        assert_eq!(rows[0].driver, "acp");
+        assert_eq!(rows[0].source, "ui");
+
+        // 同 id 覆盖：定义更新、created_at 保留。
+        let created_at = rows[0].created_at;
+        put(
+            &engine,
+            "opencode",
+            serde_json::json!({"driver": "acp", "path": "oc", "display": "Renamed"}),
+        )
+        .await
+        .expect("update overwrites");
+        let rows = engine.load_agents().await.unwrap();
+        assert_eq!(rows.len(), 1, "同 id upsert 不产生第二行");
+        assert_eq!(rows[0].display.as_deref(), Some("Renamed"));
+        assert_eq!(rows[0].args, None, "整体替换：旧 args 不残留");
+        assert_eq!(rows[0].created_at, created_at, "创建时刻保留");
+
+        // 非法 payload 家族：全部拒绝且不落行。
+        assert!(
+            put(&engine, "native", agent_item("acp", "x", &[]))
+                .await
+                .unwrap_err()
+                .contains("native"),
+            "保留 id 拒绝写"
+        );
+        assert!(put(&engine, "g", agent_item("gemini", "x", &[])).await.is_err());
+        assert!(put(&engine, "u", serde_json::json!({"driver": "acp"})).await.is_err());
+        assert!(
+            put(
+                &engine,
+                "k",
+                serde_json::json!({"driver": "claude", "stale": 1})
+            )
+            .await
+            .is_err(),
+            "未知字段拒绝"
+        );
+        assert!(engine.load_agents().await.unwrap().len() == 1, "拒绝不落行");
+    }
+
+    /// delete → 行消失，且引用该 id 的项目默认被清（删除守卫）；未知 id
+    /// 与 native 保留 id 的 delete 如实拒绝。
+    #[tokio::test]
+    async fn agents_mutation_delete_clears_project_defaults() {
+        use sebas_models::project::project_id_for_on;
+        let engine = crate::test_engine::MemoryEngine::new();
+        engine.add_project("local", "/tmp/p1", "p1", 1).await.unwrap();
+        engine
+            .set_project_default_agent(&project_id_for_on("local", "/tmp/p1"), "opencode")
+            .await
+            .unwrap();
+        agents_mutation(
+            &engine,
+            &serde_json::json!({
+                "op": "put",
+                "id": "opencode",
+                "agent": agent_item("acp", "opencode", &["acp"]),
+            }),
+        )
+        .await
+        .unwrap();
+
+        agents_mutation(
+            &engine,
+            &serde_json::json!({"op": "delete", "id": "opencode"}),
+        )
+        .await
+        .expect("delete existing");
+        // 软删墓碑：行保留（deleted=1），普通 load 视角仍见其行——目录/
+        // 解析消费方按 is_deleted 过滤（AgentRow::snapshot_value / resolve
+        // / 种子导入），删除对 config 种子 agent 也可粘住。
+        let rows = engine.load_agents().await.unwrap();
+        assert_eq!(rows.len(), 1, "墓碑行保留");
+        assert!(rows[0].is_deleted());
+        let projects = engine.load_projects().await.unwrap();
+        assert_eq!(
+            projects[0].default_agent, None,
+            "项目默认被删除守卫清除"
+        );
+
+        // 未知 id / native 保留 id 的 delete 如实拒绝。
+        let err = agents_mutation(
+            &engine,
+            &serde_json::json!({"op": "delete", "id": "ghost"}),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("ghost") && err.contains("不存在"), "{err}");
+        assert!(
+            agents_mutation(&engine, &serde_json::json!({"op": "delete", "id": "native"}))
+                .await
+                .is_err()
+        );
+    }
+
+    /// 未知 op / 缺 op 的 payload 报错（domain 前缀点名）。
+    #[tokio::test]
+    async fn agents_mutation_rejects_unknown_ops() {
+        let engine = crate::test_engine::MemoryEngine::new();
+        let err = agents_mutation(&engine, &serde_json::json!({"op": "truncate"}))
+            .await
+            .unwrap_err();
+        assert!(err.contains("agents: ") && err.contains("truncate"), "{err}");
+        assert!(agents_mutation(&engine, &serde_json::json!({})).await.is_err());
     }
 }

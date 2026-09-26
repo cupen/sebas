@@ -14,6 +14,7 @@
 //! `#[cfg(test)]`）是为了让 `tests/` 集成测试也能复用同一份夹具。
 
 use crate::state_store::{PersistedState, StateStoreEngine};
+use sebas_models::agent::AgentRow;
 use sebas_models::project::{ProjectRow, project_id_for_on};
 use sebas_models::session_map::SessionMapRow;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -25,6 +26,8 @@ struct MemoryInner {
     settings: Mutex<Option<serde_json::Value>>,
     projects: Mutex<Vec<ProjectRow>>,
     session_map: Mutex<Vec<SessionMapRow>>,
+    /// agent 目录行（add-agent-settings-and-session-titles 1.3）。
+    agents: Mutex<Vec<AgentRow>>,
 }
 
 /// 纯内存状态引擎。
@@ -110,6 +113,44 @@ impl StateStoreEngine for MemoryEngine {
             }
         }
         Ok(())
+    }
+
+    async fn load_agents(&self) -> Result<Vec<AgentRow>, String> {
+        let mut agents = self.inner.agents.lock().unwrap().clone();
+        agents.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(agents)
+    }
+
+    async fn put_agent(&self, row: AgentRow) -> Result<(), String> {
+        let mut agents = self.inner.agents.lock().unwrap();
+        agents.retain(|r| r.id != row.id);
+        agents.push(row);
+        Ok(())
+    }
+
+    async fn delete_agent(&self, id: &str) -> Result<bool, String> {
+        // 与 SQLite repo 同款软删墓碑语义（trait 合同）：行保留、deleted=1。
+        let mut agents = self.inner.agents.lock().unwrap();
+        let mut deleted = false;
+        for r in agents.iter_mut() {
+            if r.id == id && !r.is_deleted() {
+                r.deleted = 1;
+                deleted = true;
+            }
+        }
+        Ok(deleted)
+    }
+
+    async fn clear_project_default_agent(&self, agent: &str) -> Result<usize, String> {
+        let mut projects = self.inner.projects.lock().unwrap();
+        let mut cleared = 0;
+        for p in projects.iter_mut() {
+            if p.default_agent.as_deref() == Some(agent) {
+                p.default_agent = None;
+                cleared += 1;
+            }
+        }
+        Ok(cleared)
     }
 
     async fn load_session_map(&self) -> Result<Vec<SessionMapRow>, String> {

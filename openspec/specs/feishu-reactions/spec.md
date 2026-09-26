@@ -27,13 +27,14 @@ observes the core's session phase (see `im-service`), not by the core process.
 
 Every inbound user text or media message that passes filtering SHALL receive
 a one-shot `Get` (👌) acknowledgment reaction on that user message before
-processing begins. Acknowledgment reactions are tracked per message id,
-separately from the session's phase-reaction tracker, and are removed
-(best-effort) before the first phase reaction is applied to the same
-message. The IM service's frontend SHALL apply this ack; the core process
-SHALL NOT emit an ack reaction for IM channels. **Deferred**：per-message
-ack 在 im 前端尚未实现（`record_ack`/`take_ack` 已就绪、无调用方）——当前
-用户消息上无即时 ack，相位 reaction 直接落在会话卡片上；启用属小改动。
+processing begins. Acknowledgment reactions are tracked per message id
+(`record_ack`/`is_acked`), separately from the session's phase-reaction
+tracker; a message that already carries the ack (e.g. a duplicate delivery)
+SHALL NOT be re-acked. The ack is NEVER removed: terminal reactions (`DONE`
+on the card, or `CrossMark` on the user message at terminal error) are
+overlaid alongside it as independent receipts, not swapped for it. The IM
+service's frontend SHALL apply this ack; the core process
+SHALL NOT emit an ack reaction for IM channels.
 
 #### Scenario: text message acknowledged
 
@@ -41,11 +42,12 @@ ack 在 im 前端尚未实现（`record_ack`/`take_ack` 已就绪、无调用方
 - **THEN** the IM service reacts `Get` on that message before the turn's
   streaming begins
 
-#### Scenario: ack removed before phase swap
+#### Scenario: ack stays while phases overlay
 
-- **WHEN** a message carrying the 👌 ack transitions to the working phase
-- **THEN** the ack reaction is removed first and the `OnIt` reaction is then
-  applied, an ack-removal failure only warning
+- **WHEN** a message carrying the 👌 ack transitions through working to done
+- **THEN** the ack reaction is never removed; phase/terminal reactions land on
+  their own targets (the card, or the user message for terminal failure) as
+  independent receipts
 
 ### Requirement: Phase state machine
 
@@ -101,11 +103,6 @@ Phase reactions SHALL target the session's root card message
 skipped. (Rationale: the IM frontend renders the card it owns; targeting the
 card is the deployment reality after extract-im-service.)
 
-#### Scenario: user message preferred
-
-- **WHEN** a session spawned from a user message finishes a turn and has a rendered card
-- **THEN** the phase reaction is applied to the session's card message (the IM-owned presentation), not by the core process
-
 #### Scenario: card target
 
 - **WHEN** a session with a rendered card finishes a turn
@@ -119,20 +116,22 @@ card is the deployment reality after extract-im-service.)
 ### Requirement: Terminal states
 
 A finished turn SHALL emit the `DONE` (✅) reaction on the card. A
-terminal error SHALL NOT emit a `FAILED` reaction — the failure is surfaced
-by the ❌ row on the card, and the reaction state machine's `CrossMark`
-terminal is defined but never dispatched.
+terminal error SHALL additionally mark the triggering user message with the
+`CrossMark` (❌) reaction (the card itself still carries no ❌ reaction —
+card flips only rewrite the card face), so the failed turn is visible even
+when the card arrived late or was never rendered; a late-arriving card SHALL
+still be back-filled with the terminal mark.
 
 #### Scenario: finished emits done
 
 - **WHEN** a turn completes successfully
 - **THEN** a `DONE` reaction is applied to the session's card
 
-#### Scenario: terminal error emits no reaction
+#### Scenario: terminal error marks the user message
 
 - **WHEN** the ACP session reports a terminal error
-- **THEN** no `CrossMark` reaction is applied; the card body carries the ❌
-  error row
+- **THEN** the triggering user message receives the `CrossMark` reaction and
+  the card body carries the ❌ error row
 
 ### Requirement: Permission wait keeps reaction
 

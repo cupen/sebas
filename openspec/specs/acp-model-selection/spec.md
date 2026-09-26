@@ -43,10 +43,8 @@ session's list.
 
 #### Scenario: session list and creation-time catalog are independent
 
-- **WHEN** the operator views a session whose agent exposes no model option, while
-  providers with model lists are configured in Settings
-- **THEN** the session offers no model dropdown and no model error, and the
-  creation-time selector still offers the configured catalog for the next session
+- **WHEN** the operator views a session whose agent exposes no model option, while providers with model lists are configured in Settings
+- **THEN** the session offers no model dropdown and no model error, and the creation-time selector still offers the configured catalog for the next session
 
 ### Requirement: Model change via session/set_config_option
 

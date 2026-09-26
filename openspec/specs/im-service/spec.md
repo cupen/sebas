@@ -7,7 +7,7 @@
 
 ### Requirement: im 作为独立服务进程
 
-sebas SHALL 提供 `sebas im -c <config>` 子命令启动独立 IM 服务进程，与 `sebas webui` 同构。im 进程 SHALL 经核心会话通道（Unix socket + 共享密钥）访问核心，SHALL NOT 在本进程内持有 `RouterHandle`、会话映射或 spawn 任何 agent 子进程。watchdog SHALL 将 im 作为受管子进程托管（spawn、崩溃退避重启、状态如实上报、`ServiceSet`/`ServiceRestart` 可操作），配置节为 `[watchdog.im]`。
+sebas SHALL 提供 `sebas im -c <config>` 子命令启动独立 IM 服务进程，与 `sebas webui` 同构。im 进程 SHALL 经核心会话通道（本地 IPC：Unix domain socket / Windows named pipe + 共享密钥）访问核心，SHALL NOT 在本进程内持有 `DispatchHandle`、会话映射或 spawn 任何 agent 子进程。watchdog SHALL 将 im 作为受管子进程托管（spawn、崩溃退避重启、状态如实上报、`ServiceSet`/`ServiceRestart` 可操作），配置节为 `[watchdog.im]`。
 
 #### Scenario: im 独立进程经通道驱动会话
 
@@ -59,7 +59,7 @@ im 服务 SHALL 负责媒体解析（拆分后只有 im 持有飞书凭据）：
 #### Scenario: 入站图片落地为本地附件
 
 - **WHEN** 用户向飞书 bot 发送一张 2 MB 的 PNG 且 `max_file_size` 为 20 MB
-- **THEN** im 下载该图到 `download_dir` 并识别 mime，会话请求携带其本地路径与 mime 上通道，模型最终收到该图内容
+- **THEN** im 下载该图到 `download_dir` 并识别 mime，会话请求以「`[图片已接收: <本地路径>]` 文本标记 + 本地路径附件」的形态携带（模型可见该标记与本地文件引用；把图片升级为 model-visible 内容属 feishu-bridge 的 Deferred 项）
 
 #### Scenario: 超限附件如实拒绝
 
@@ -91,7 +91,7 @@ im 服务 SHALL 持有 watchdog 注入的控制凭据，把 `/upgrade`、`/rollb
 
 ### Requirement: 配置归属
 
-IM 适配器配置（`[feishu]`）、渲染配置（`[card]`）、媒体配置（`[media]`）SHALL 由 im 服务解释并消费；core SHALL NOT 因这些配置建立任何 IM 连接。`[watchdog.im]` 与既有 `[watchdog.*]` 同形（enabled/host 类字段）。
+IM 适配器配置（`[feishu]`）、渲染配置（`[card]`）、媒体配置（`[media]`）SHALL 由 im 服务解释并消费；core SHALL NOT 因这些配置建立任何 IM 连接。进程托管配置的现行为 `[watchdog.im]`（enabled 类字段；host/port 类键已随 simplify-service-config 迁入 `[service.webui]`），与 watchdog 其余受管服务同形。
 
 #### Scenario: core 进程无视 feishu 配置
 

@@ -1,6 +1,6 @@
 //! `sebas skills` CLI 集成测试（add-agent-skills 4.1–4.4）：list / add /
 //! remove / sync 四个子命令，全部经进程内 `run()` 直调（与
-//! webui_passwd_cli_test 同形态）。安全约定：HOME/USERPROFILE 覆写指向
+//! auth_cli_test 同形态）。安全约定：HOME/USERPROFILE 覆写指向
 //! tempdir 沙箱——投影落点（`~/.claude/skills` 等）与仓目录（config
 //! `[skills] dir`）全部钉在沙箱里，绝不写真实 HOME。
 
@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 /// env 是进程全局的：HOME/USERPROFILE 覆写用例共用一把锁串行（同
-/// webui_passwd_cli_test 姿态）。
+/// auth_cli_test 姿态）。
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// HOME/USERPROFILE 覆写守卫：进入时设为沙箱，离开时**恢复原值**（测试

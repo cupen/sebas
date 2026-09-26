@@ -1178,6 +1178,10 @@ export class SebasTranscriptView extends LitElement {
     this.streamEntries.push(...fresh)
     this.rebuildUnits()
     this.recomputeSeam()
+    // （3.1）空流登记的在册会话：首交换的流式到达在此**同步**结算（无
+    // 250ms 防抖窗——「never flashes the badge or the seam」）。未登记/
+    // 已消费即 no-op，防抖路径照旧兜底非首交换的到达。
+    this.settleEmptyStreamAnchor()
     // （3.1/3.2）聚焦 + 文档可见 + 贴底：到达即推进共享游标（亲眼看着到的
     // 内容不再挂未读）；文档隐藏（后台 tab）时不推进——回来看 seam/徽章。
     if (this.sticky && this.docVisible()) {
@@ -1222,15 +1226,24 @@ export class SebasTranscriptView extends LitElement {
 
   /**
    * 空流锚点（3.1）：一个会话若曾以 0 回合在本浏览器渲染过（新建占位），
-   * 它随后的首个回合到达且操作员聚焦、可见、贴底时，就是「亲眼看着到达」
+   * 它的首个回合到达且操作员聚焦、可见、贴底时，就是「亲眼看着到达」
    * 的首交换——锚从空流状态建立，seam 与 rail 徽章都不该出现
    * （session-unread-badge「first focused exchange of a fresh placeholder」）。
    *
    * 登记与消费用模块级表而非实例字段：秒回场景下回复经快照到达，dashboard
    * 可能连同 sessionKey 一起重渲染（组件实例重建、实例内的回合数差值作废），
-   * 模块表跨实例仍有效。消费是一次性的——某个 key 一旦以非空回合渲染过，
-   * 就从此出表，所以表里残留的必然是「仍为空」的会话，切回一个既有会话
-   * 不会误推进它的锚（那种 seam 必须保留）。
+   * 模块表跨实例仍有效。
+   *
+   * 消费纪律（fix-unread-fresh-exchange）：登记只在**锚真的向前推进**时才
+   * 烧掉。首渲染常常只有操作者提交（prompt-only，0 可见段、msg_count 仍
+   * 0）——此刻无可推进水位，**保留登记**；回复随后到达时（快照增长或
+   * turn.append，经 onTurnAppend 也会走到这里）仍按「看着到达」即时结算。
+   * 此前先删后算的顺序把这个中间态挂载变成了登记的唯一消费者：写锚 no-op
+   * 而登记已不在，首交换的回复一旦经新实例挂载（hasUpdated=false 跳过快照
+   * 推进）到达，三条推进路径同时落空，徽章 + 缝永久驻留（GUI 两次复现）。
+   * 特权作废的边界不变：文档隐藏 / 操作员上滚离开贴底 = 不再「看着到达」，
+   * 登记即刻作废、锚原地不动（spec：隐藏期到达保持 unseen，回来看
+   * seam/徽章；上滚后的到达按未读计）。
    */
   private settleEmptyStreamAnchor(): void {
     const key = this.sessionKey
@@ -1239,11 +1252,21 @@ export class SebasTranscriptView extends LitElement {
       emptyStreamSessions.add(key)
       return
     }
-    if (!emptyStreamSessions.delete(key)) return
-    if (!this.sticky || !this.docVisible()) return
-    // （2.3，D3）锚已统一为段计数：写锚 = 当前已渲染段数（含流式尾巴），
-    // 与 seam/rail 徽标同一条锚线；游标模块保证单调不回退，已在这里看到
-    // 的首交换不再挂未读。
+    if (!emptyStreamSessions.has(key)) return
+    if (!this.sticky || !this.docVisible()) {
+      emptyStreamSessions.delete(key)
+      return
+    }
+    // （2.3，D3）锚已统一为段计数：写锚 = max(服务端段数, 本地已渲染段数)，
+    // 与 seam/rail 徽标同一条锚线。锚不落后（含 msg_count 先行于本地渲染的
+    // 一拍）= 无可推进水位 → 保留登记等回复真正到达。
+    const totals = this.segmentTotals()
+    const local = totals.length > 0 ? totals[totals.length - 1]! : 0
+    const wouldAnchor = this.msgCount != null ? Math.max(this.msgCount, local) : local
+    const prev = readAnchorCount(key)
+    if (prev !== null && prev >= wouldAnchor) return
+    if (prev === null && wouldAnchor === 0) return
+    emptyStreamSessions.delete(key)
     this.writeSeen()
     // 同一更新周期内重算：seam 不闪现（写锚后紧接着 render）。
     this.recomputeSeam()

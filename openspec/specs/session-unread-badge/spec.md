@@ -8,7 +8,7 @@ Gives the operator a per-session unread count in the project rail so agent repli
 
 ### Requirement: Chat message counting
 
-For each session the system SHALL maintain a monotonic count of chat messages. A chat message is a transcript entry with operator-visible agent content (`element_type` `markdown` or `error`). Operator prompts, `thinking` entries, and `tool` entries SHALL NOT increment the count. The count SHALL be present in the session list projection and SHALL reach connected clients carried inside the session update event itself (the `session.updated` frame SHALL include the session's current message count) — clients SHALL be able to update the badge from the frame alone, with the rail's periodic refresh remaining only as a fallback. Count-bearing updates SHALL arrive without a manual reload.
+For each session the system SHALL maintain a monotonic count of chat messages. A chat message is a run of operator-visible agent content in the transcript: contiguous `markdown` entries of one agent reply fold into ONE message, an `error` entry counts as one message on its own, and empty entries neither count nor interrupt a run. Operator prompts, `thinking` entries, and `tool` entries SHALL NOT increment the count. The count SHALL be present in the session list projection and SHALL reach connected clients carried inside the session update event itself (the `session.updated` frame SHALL include the session's current message count) — clients SHALL be able to update the badge from the frame alone, with the rail's periodic refresh remaining only as a fallback. Count-bearing updates SHALL arrive without a manual reload. (Note: the badge counts reply segments, while the unseen-turn seam counts turns — the two numbers are different units by design and need not be equal.)
 
 The `session.updated` frame SHALL be the single source of truth for lifecycle semantics on the wire: its shape SHALL be `{ session_id, status_slug, turn_engaged, msg_count, pending }` with every key present on every frame — `status_slug` SHALL be one of `starting | queued | working | done | failed | waiting | dormant` (the projection of `(MappingState, card phase, parked approvals)` into the operator-facing word), `turn_engaged` SHALL be a boolean present on every frame (no "only present when true" rule), `msg_count` SHALL be present on every frame, and `pending` SHALL be the current queue of pending submissions in delivery order. The legacy `status` string field is removed entirely; no backwards-compatibility key is kept, because the core, webui, and frontend ship in the same binary and the wire protocol carries no independent version. The backend emits such a frame on every FSM phase flip — entering Spawning, WORKING start, Finished→DONE, terminal Error→FAILED, parked-approval entry/exit, stall watchdog force-settle — so the wire carries an explicit lifecycle event at every boundary; the rail, the composer submit affordance, and any other surface SHALL consume these flips in real time rather than poll the detail endpoint or fall back to `status_slug === 'working'` string heuristics. The `session.created` frame SHALL carry the same complete field set as `session.updated` (initially `status_slug: "starting"`, `turn_engaged: true`, `msg_count: 0`, `pending: []`).
 
@@ -72,6 +72,16 @@ the anchor: they remain unseen and are flagged when the operator returns.
 
 - **WHEN** visible reply segments stream into the focused session while the operator is scrolled to the bottom
 - **THEN** the badge does not appear and the stored read anchor advances with the streamed content
+
+#### Scenario: first focused exchange of a fresh placeholder
+
+- **WHEN** the operator creates a placeholder session, sends the first message, and watches the spawned child's reply while staying focused at the live edge
+- **THEN** no unread badge appears on the session's rail row and no unseen-turn seam is drawn for that exchange
+
+#### Scenario: hidden-tab arrivals stay unseen
+
+- **WHEN** the focused session receives reply segments while the page is in a hidden background tab
+- **THEN** the read anchor does not advance and the content is reported as unseen when the operator returns
 
 #### Scenario: no badge without unread messages
 

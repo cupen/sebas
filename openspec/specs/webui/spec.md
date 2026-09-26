@@ -1446,7 +1446,7 @@ WebUI SHALL 提供只读端点 `GET /api/env`：读取 **webui 进程自身**的
 
 ### Requirement: 鉴权开关（auth）与首启用户引导
 
-WebUI SHALL 提供 `[service.webui] auth` 配置开关，默认 `true`。开关为 `true` 时，鉴权门 SHALL 恒在：`/api/*` 与 `/ws` 需要有效 会话（已退役的 `/router/api/*` 命名空间由静态回退显式 404，不进入鉴权门）；用户库（auth.db）零用户时 SHALL 不自动生成任何凭据，改为进入 首启引导流程（见 `webui-user-management` 能力：设置页或环境变量建立 root），期间 `GET /api/auth/me` SHALL 报告 `needs_setup: true`。开关为 `false` 时，无论用户库是否存在用户，SHALL 对所有路由（含静态资源） 完全放行，不要求登录且不触发引导；`GET /api/auth/me` SHALL 报告 `enabled: false`（前端据此不渲染登录页）。`sebas webui-passwd` 在开关 关闭时仍可管理用户（为重新启用做准备），但不产生任何强制登录效果。
+WebUI SHALL 提供 `[service.webui] auth` 配置开关，默认 `true`。开关为 `true` 时，鉴权门 SHALL 恒在：`/api/*`、`/router/api/*`、`/ws` 需要有效 会话；用户库（auth.db）零用户时 SHALL 不自动生成任何凭据，改为进入 首启引导流程（见 `webui-user-management` 能力：设置页或环境变量建立 root），期间 `GET /api/auth/me` SHALL 报告 `needs_setup: true`。开关为 `false` 时，无论用户库是否存在用户，SHALL 对所有路由（含静态资源） 完全放行，不要求登录且不触发引导；`GET /api/auth/me` SHALL 报告 `enabled: false`（前端据此不渲染登录页）。`sebas auth`（`add`/`passwd`/`list`）在开关关闭时仍可管理用户（为重新启用做准备），但不产生任何强制登录效果。
 
 #### Scenario: 默认打开且有用户
 

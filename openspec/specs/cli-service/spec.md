@@ -9,7 +9,7 @@ overrides, and the control-plane client.
 ## Requirements
 
 ### Requirement: Subcommand tree
-The CLI SHALL provide subcommands: `service`, `service --install/--uninstall`, `run` (watchdog), `core`, `webui`, `router`, `im` (standalone IM service), `webui-passwd`, `agent-kinds`, `ctl` (alias `control`; subcommand aliases `status`/`services`), `update`, `record`, `replay`, `fake-provider` (本地 Anthropic 线协议假上游，测试与演示用). **补充退出码语义**：每个子命令的进程退出码 SHALL 区分两类失败——启动失败（启动阶段未能达到 ready 或同等成功信号）与运行时崩溃（启动后正常服务中的崩溃）。启动失败 SHALL 以 EX_TEMPFAIL (75) 退出——systemd `Restart=on-failure` 看到 75 会走指数退避（默认 5 s 起跳），避免无限快速重启掩盖错误。运行时崩溃 SHALL 沿用既有退出码语义（典型为 1）。CLI 启动失败 SHALL 同时把失败摘要写入 stderr 的最后一行（"startup-failure: <可读原因>"）以便 CI / 操作员一眼定位。
+The CLI SHALL provide subcommands: `service`, `service --install/--uninstall`, `run` (watchdog), `core`, `webui`, `router`, `im` (standalone IM service), `auth` (组命令：`auth add`/`auth passwd`/`auth list`，见 `auth-cli` 能力), `agent-kinds`, `ctl` (alias `control`; with `status` and `services` available as top-level shorthand commands for `control status` / `control services`), `update`, `record`, `replay`, `node-link` (execution-node link), `agent-bench`, `feishu` (一次性会话外直连飞书发送文本/图片的调试命令), `skills` (skill 仓管理: list/add/remove/sync), `fake-provider` (本地 Anthropic 线协议假上游，测试与演示用). **补充退出码语义**：每个子命令的进程退出码 SHALL 区分两类失败——启动失败（启动阶段未能达到 ready 或同等成功信号）与运行时崩溃（启动后正常服务中的崩溃）。启动失败 SHALL 以 EX_TEMPFAIL (75) 退出——systemd `Restart=on-failure` 看到 75 会走指数退避（默认 5 s 起跳），避免无限快速重启掩盖错误。运行时崩溃 SHALL 沿用既有退出码语义（典型为 1）。CLI 启动失败 SHALL 同时把失败摘要写入 stderr 的最后一行（"startup-failure: <可读原因>"）以便 CI / 操作员一眼定位。
 
 #### Scenario: core startup failure exits 75
 
@@ -52,6 +52,11 @@ The CLI SHALL provide subcommands: `service`, `service --install/--uninstall`, `
 
 - **WHEN** the user runs `sebas fake-provider --listen 127.0.0.1:0`
 - **THEN** the CLI 在 127.0.0.1 上以系统分配端口启动 fake 上游并输出实际绑定地址，Anthropic `/v1/messages` 可被拨号应答
+
+#### Scenario: retired webui-passwd rejected
+
+- **WHEN** the user runs `sebas webui-passwd ...`
+- **THEN** the CLI reports an unknown subcommand and exits nonzero；账户管理改用 `sebas auth`（`add`/`passwd`/`list`）
 
 ### Requirement: Service unit generation
 
@@ -187,13 +192,15 @@ built-in defaults. The env override set comprises `SEBAS_FEISHU_APP_ID`,
 `SEBAS_FEISHU_APP_SECRET`, `SEBAS_LOG_LEVEL` (empty values ignored so a
 blank variable never blanks a configured credential). Additionally
 `SEBAS_CONTROL_SOCKET` and `SEBAS_CONTROL_SECRET` feed the control client,
-`SEBAS_IPC` marks watchdog supervision, `SEBAS_ROUTER_PROVIDER_OVERLAY`
-overrides the router's provider overlay, and `RUST_LOG` drives tracing for
+`SEBAS_IPC` marks watchdog supervision, and `RUST_LOG` drives tracing for
 the router/webui/watchdog entrypoints (the core filters on `[log] level`).
 The pre-rename names `SEBAS_GATEWAY_PROVIDER_OVERLAY`,
 `SEBAS_AGENT_GATEWAY_URL`, and `SEBAS_AGENT_GATEWAY_AUTH` SHALL NOT be
-honored — only the new names (`SEBAS_ROUTER_PROVIDER_OVERLAY`,
-`SEBAS_AGENT_ROUTER_URL`, `SEBAS_AGENT_ROUTER_AUTH`) take effect.
+honored — only the new names (`SEBAS_AGENT_ROUTER_URL`,
+`SEBAS_AGENT_ROUTER_AUTH`) take effect. The retired state-file and
+provider-overlay variables SHALL NOT be honored either: they are no longer
+part of the override set, and setting them SHALL have no effect on where
+state is read or written.
 
 #### Scenario: env satisfies required field
 
@@ -211,6 +218,13 @@ honored — only the new names (`SEBAS_ROUTER_PROVIDER_OVERLAY`,
 - **WHEN** only `SEBAS_GATEWAY_PROVIDER_OVERLAY` is set
 - **THEN** the router uses the provider overlay from its config (or none)
   and never reads the pre-rename variable
+
+#### Scenario: retired state-file variables are not honored
+
+- **WHEN** the retired state-file or provider-overlay variable is exported
+  alongside a configured state database
+- **THEN** the configured state database is used
+- **AND** the retired variable changes neither the read nor the write path
 
 ### Requirement: Control client
 
@@ -236,10 +250,13 @@ response exits with code 2.
 ### Requirement: Router runs standalone-only
 
 The router SHALL run only as a standalone process: `sebas router --config
-<path> [--debug]`. The `run`/`core` entrypoints SHALL NOT embed a router
-server — the `--router` and `--debug` flags on `run`/`core` SHALL be removed
+<path> [--debug]`. The `core` entrypoint SHALL NOT embed a router
+server — the `--router` and `--debug` flags on `core` SHALL be removed
 (BREAKING): passing them SHALL fail with an unknown-argument error rather
-than starting any in-process router. Deployments that want the router SHALL
+than starting any in-process router. `sebas run` retains a `--debug` flag as
+a debugging bypass: it starts the standalone router in debug mode alongside
+the managed services (the router child is force-enabled when `--debug` is
+given even though its service switch defaults to off). Deployments that want the router SHALL
 run `sebas router` as its own process — manually, as a compose sidecar, or
 via the watchdog's managed router child (which spawns the same standalone
 entrypoint). The debug `test` provider remains available via
@@ -263,3 +280,43 @@ entrypoint). The debug `test` provider remains available via
   operator runs `sebas router` manually
 - **THEN** both are the same standalone `sebas router` entrypoint with the
   same HTTP surface
+
+### Requirement: State directory derives every state path
+
+The system SHALL resolve every persisted state location — the layered state databases, the WebUI user store, the archive registry, the project registry, the node-link registry, and the watchdog's service-override file — from a single state directory. The state directory SHALL be settable by one environment variable and SHALL otherwise default to one well-known location, and every derived path SHALL be a fixed filename inside it. A per-file environment variable SHALL remain honored as an explicit override of that one file, taking precedence over the derived path. No state location SHALL default outside the state directory. The retired single-database variable SHALL NOT be honored, so that a leftover value cannot silently point state at a file the system no longer uses.
+
+#### Scenario: one variable relocates every state file
+
+- **WHEN** only the state-directory variable is set
+- **THEN** every state file and database resolves inside that directory
+- **AND** no state file is created or read outside it
+
+#### Scenario: a per-file override wins over the derived path
+
+- **WHEN** the state-directory variable and one per-file variable are both set
+- **THEN** that one file resolves to the per-file value
+- **AND** every other file still resolves inside the state directory
+
+#### Scenario: defaults all live under the default state directory
+
+- **WHEN** neither the state-directory variable nor any per-file variable is set
+- **THEN** every state path resolves inside the default state directory
+- **AND** no state path default points somewhere else, so there is exactly one rule rather than a table of exceptions
+
+#### Scenario: no state write escapes the derived directory
+
+- **WHEN** the state directory is set and the process runs its normal lifecycle including first start, mutations, and shutdown
+- **THEN** every state file that is created or modified lies inside it
+- **AND** a file outside it is a defect, reported by the mechanical check
+
+#### Scenario: a file with no previous override becomes pinnable
+
+- **WHEN** the state directory is set and the service-override file or the node-link registry is written
+- **THEN** it is written inside the state directory
+- **AND** it can be relocated without editing any configuration file
+
+#### Scenario: the retired database variable has no effect
+
+- **WHEN** the retired single-database variable is exported while the state directory is configured
+- **THEN** no database is opened at the retired variable's path
+- **AND** the layered databases resolve from the state directory as normal

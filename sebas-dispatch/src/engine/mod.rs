@@ -192,6 +192,16 @@ pub enum Out {
         model: Option<String>,
         mode: Option<String>,
     },
+    /// add-agent-settings-and-session-titles 6.2：空 prompt 激活的占位会话
+    /// 收到第一条真实消息并开轮（`web_send_message` 的 Continue 路由）。
+    /// 根 crate 的出站泵在此触发自动标题——「首条消息进占位会话」与
+    /// 「spawn 带 prompt」两条到达线的另一条；带 prompt 的占位首条消息走
+    /// SpawnNew → WebSpawn，不经过本事件。resume/dormant 会话不触发
+    /// （已有命名来源）。
+    PlaceholderFirstTurn {
+        key: ChannelKey,
+        prompt: String,
+    },
 }
 
 /// Result of `DispatchHandle::web_close_session` — callers use this to
@@ -888,6 +898,19 @@ impl DispatchHandle {
             Ok(())
         } else {
             Err(crate::state::PendingOpError::Unknown)
+        }
+    }
+
+    /// 写入自动标题（add-agent-settings-and-session-titles 6.2）：label 仍
+    /// 为空才落（操作员已改名 → 静默丢弃标题），写入走既有 set_label 持久
+    /// 化路径并发布 Updated——session.updated 帧天然把新名推给前端。返回
+    /// 是否落了（失败 = 无映射或已有命名，调用方静默即可）。
+    pub async fn web_set_auto_title(&self, key: ChannelKey, title: String) -> bool {
+        if self.map.set_label_if_empty(&key, title).await {
+            self.publish_updated(&key).await;
+            true
+        } else {
+            false
         }
     }
 
@@ -2058,6 +2081,37 @@ impl DispatchHandle {
         }
         match self.map.route_text(key.clone(), message.clone()).await {
             Ok(crate::state::TextRoute::Continue(sid)) => {
+                // add-agent-settings-and-session-titles 6.2：空 prompt 激活
+                // 的占位会话在此开人生第一轮——发 PlaceholderFirstTurn 供根
+                // crate 触发自动标题。三重谓词（每会话只试一次）：
+                // ① 卡态不存在，或仅剩激活语义的空 prompt SEED（开过轮的
+                //    卡态带着 prompt，谓词假）；判定必须在 submit_turn 翻相位
+                //    之前读，开轮后即 WORKING。
+                // ② 映射无 prompt_preview——resume 链路会回填命名来源，空
+                //    激活占位必然没有；借它排除 dormant 恢复会话的首条消息。
+                let (never_turned, unnamed) = {
+                    let preview_empty = self
+                        .map
+                        .get(&key)
+                        .await
+                        .map(|m| m.prompt_preview.is_none())
+                        .unwrap_or(true);
+                    let turned = match self.card_states.snapshot(&sid).await {
+                        None => false,
+                        Some(st) => {
+                            st.status_emoji != crate::card_state::phase::SEED
+                                || !st.user_prompt.is_empty()
+                        }
+                    };
+                    (!turned, preview_empty)
+                };
+                if never_turned && unnamed {
+                    self.emit(Out::PlaceholderFirstTurn {
+                        key: key.clone(),
+                        prompt: message.clone(),
+                    })
+                    .await;
+                }
                 // 共享提交入口（design D3）：WORKING → 入队（不写 transcript、
                 // 不发 SendAcp）；否则开新轮。prompt 一律由 seed_card 在开轮
                 // 时写入 transcript（design D4——提交即写会让在跑回合的输出

@@ -1597,6 +1597,100 @@ describe('unread boundary advances while focused+visible (polish-workbench-walkt
     expect(el.shadowRoot!.querySelector('.seam')?.hasAttribute('hidden')).toBe(true)
     el.remove()
   })
+
+  it('prompt-only 中间态挂载不烧空流登记——回复经 turn.append 到达即时结算（fix-unread-fresh-exchange）', async () => {
+    // GUI 真实时序（session-unread-badge「first focused exchange of a fresh
+    // placeholder」）：创建写锚 0 → 空详情登记 → 首次快照只含操作者提交
+    // （prompt-only 挂载：0 可见段、msg_count 仍 0，写锚 no-op）→ 回复经
+    // turn.append 流式到达。旧实现在此挂载即消费登记：回复到达若组件被
+    // 重建（hasUpdated=false 跳过快照推进），三条推进路径同时落空，徽章 +
+    // 缝永久驻留。修复后无可推进水位不消费；回复到达**同步**结算（无
+    // 250ms 防抖窗，seam 从未画出）。
+    store.set('sebas:seen:oc_test', JSON.stringify({ anchor_count: 0 }))
+    registerEmptyStreamSession('oc_test')
+    const el = await mount({
+      entries: [
+        entry({ position: 0, kind: 'prompt', content: 'hello', created_at_unix: FIXED_DATES.T1 }),
+      ],
+      msgCount: 0,
+    })
+    expect(el.sticky).toBe(true)
+    // 无可推进水位：锚原地不动，登记保留。
+    expect(storedAnchor()).toBe(0)
+    // 回复流式到达（transcript 自身的 turn.append 订阅；含 thinking 前导）。
+    emitTurnAppend('oc_test', [
+      entry({ position: 1, kind: 'content', element_type: 'thinking', content: 'hmm', created_at_unix: FIXED_DATES.T2 }),
+      entry({ position: 2, kind: 'content', content: 'hello world', created_at_unix: FIXED_DATES.T2 }),
+    ])
+    await el.updateComplete
+    // 同步结算（不等防抖）：锚推进到已渲染段数；seam 从未出现。
+    expect(storedAnchor()).toBe(1)
+    expect(el.shadowRoot!.querySelector('.seam')?.hasAttribute('hidden')).toBe(true)
+    el.remove()
+  })
+
+  it('组件在 prompt-only 挂载与回复到达之间被重建——登记跨实例保留，新实例首帧快照仍结算（fix-unread-fresh-exchange）', async () => {
+    // dashboard 的元素重建在真实浏览器里发生在首回合中途：实例 #1 只见到
+    // prompt-only；回复含在实例 #2 的首帧快照里到达（hasUpdated=false 跳过
+    // 快照推进——装载不是到达）。旧实现登记已被实例 #1 烧掉，锚永远停在 0；
+    // 修复后登记跨实例存活，实例 #2 的挂载仍按「看着到达」结算。
+    store.set('sebas:seen:oc_rebuild2', JSON.stringify({ anchor_count: 0 }))
+    registerEmptyStreamSession('oc_rebuild2')
+    const first = await mount({
+      entries: [
+        entry({ position: 0, kind: 'prompt', content: 'hello', created_at_unix: FIXED_DATES.T1 }),
+      ],
+      sessionKey: 'oc_rebuild2',
+      msgCount: 0,
+    })
+    first.remove()
+    const second = await mount({
+      entries: streamedTurn('hello', ['hello world'], FIXED_DATES.T1),
+      sessionKey: 'oc_rebuild2',
+      msgCount: 1,
+    })
+    await second.updateComplete
+    expect(storedAnchor('oc_rebuild2')).toBe(1)
+    expect(second.shadowRoot!.querySelector('.seam')?.hasAttribute('hidden')).toBe(true)
+    second.remove()
+  })
+
+  it('空流登记会话的后台 tab 首交换：锚不推进、登记作废，回来看 seam（3.2）', async () => {
+    // hidden-tab scenario 与空流登记的交叠：隐藏期到达不算「看着到达」——
+    // 锚原地不动，登记即刻作废（翻回 visible 后不被静默结算），到达内容
+    // 如实标未读（seam 在场），由操作员回读/mark all seen 推进。
+    const orig = Object.getOwnPropertyDescriptor(Document.prototype, 'visibilityState')
+    try {
+      Object.defineProperty(Document.prototype, 'visibilityState', {
+        configurable: true,
+        get: () => 'hidden',
+      })
+      store.set('sebas:seen:oc_hidden', JSON.stringify({ anchor_count: 0 }))
+      registerEmptyStreamSession('oc_hidden')
+      const el = await mount({
+        entries: [
+          entry({ position: 0, kind: 'prompt', content: 'hello', created_at_unix: FIXED_DATES.T1 }),
+        ],
+        sessionKey: 'oc_hidden',
+        msgCount: 0,
+      })
+      emitTurnAppend('oc_hidden', [
+        entry({ position: 1, kind: 'content', content: 'arrived hidden', created_at_unix: FIXED_DATES.T2 }),
+      ])
+      await el.updateComplete
+      await debounceWait()
+      await el.updateComplete
+      expect(storedAnchor('oc_hidden')).toBe(0)
+      expect(el.shadowRoot!.querySelector('.seam')?.hasAttribute('hidden')).toBe(false)
+      el.remove()
+    } finally {
+      if (orig) {
+        Object.defineProperty(Document.prototype, 'visibilityState', orig)
+      } else {
+        delete (Document.prototype as { visibilityState?: unknown }).visibilityState
+      }
+    }
+  })
 })
 
 describe('seam template identity (fix-webui-streaming-liveness 4.2)', () => {

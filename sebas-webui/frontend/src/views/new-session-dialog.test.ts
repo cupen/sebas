@@ -204,6 +204,25 @@ describe('sebas-new-session-dialog', () => {
     el.remove()
   })
 
+  it('mode vocabulary is the capitalized Ask/Edit/Allow/Auto with unchanged wire values (7.2)', async () => {
+    // add-agent-settings-and-session-titles 7.2：选项标签首字母大写并移除
+    // 中文注释；空值首项文案来自共享 MODE_DEFAULT_LABEL；wire 值仍是小写
+    // ask/edit/allow/auto。
+    const { MODE_OPTIONS, MODE_DEFAULT_LABEL } = await import('./mode-vocabulary.js')
+    expect(MODE_OPTIONS.map((m) => m.label)).toEqual(['Ask', 'Edit', 'Allow', 'Auto'])
+    expect(MODE_OPTIONS.map((m) => m.value)).toEqual(['ask', 'edit', 'allow', 'auto'])
+    expect(MODE_DEFAULT_LABEL).toBe('默认（Ask）')
+    const el = await mount({ open: true, defaultAgent: 'claude' })
+    const modeSel = el.shadowRoot!.querySelector('[data-testid="dialog-mode-select"]')
+    const options = Array.from(modeSel?.querySelectorAll('wa-option') ?? []).map((o) => ({
+      value: o.getAttribute('value'),
+      label: o.textContent ?? '',
+    }))
+    expect(options[0]!.label).toBe('默认（Ask）')
+    expect(options.map((o) => o.label)).toEqual(['默认（Ask）', 'Ask', 'Edit', 'Allow', 'Auto'])
+    el.remove()
+  })
+
   it('preselects the project default agent; first reachable agent with no record', async () => {
     const el = await mount({ open: true, defaultAgent: null })
     // 无记录 → 首个可达 agent 兜底（spec「first visit falls back honestly」）。

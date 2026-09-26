@@ -226,16 +226,16 @@ The system SHALL reach the LLM exclusively by speaking the Anthropic Messages st
 
 ### Requirement: Streaming event vocabulary
 
-The system SHALL emit incremental events as they occur — text and thinking deltas while streaming, a tool-start event before each tool execution with its name and arguments, and a tool-end event with the result after it completes — using only the existing `AcpEvent` variants. The system SHALL NOT emit new event variants, and SHALL NOT emit permission-request events.
+The system SHALL emit incremental events as they occur — text and thinking deltas while streaming, a tool-start event before each tool execution with its name and arguments, and a tool-end event with the result after it completes — using the session event vocabulary. Policy-gated calls SHALL additionally emit `PermissionRequest` events (and the `ToolPolicy` decision outcome) through the approval seam defined by「Approval-first webui surface and event vocabulary」; the approval surface is the only sanctioned producer of permission-request events.
 
 #### Scenario: Deltas arrive during streaming
 
 - **WHEN** the model streams text or thinking content
 - **THEN** corresponding delta events are emitted as each increment arrives, before the turn completes
 
-### Requirement: Uniform tool interface with six-tool set
+### Requirement: Uniform tool interface with six-tool base set
 
-The system SHALL expose exactly six tools to the model — bash, read, write, edit, glob, grep — each declaring its name, usage description, and JSON-schema parameters. Tool outputs SHALL be size-capped with truncation indicated. File-modifying tools (write, edit) SHALL refuse to modify an existing file that was not read earlier in the same session.
+The system SHALL expose the six-tool base set — bash, read, write, edit, glob, grep — each declaring its name, usage description, and JSON-schema parameters. The web tools (web_search, web_fetch) are part of the always-registered default toolset; refuser-based denial happens at the policy layer, not by unregistering the tool. The LSP tool MAY be added when a language surface is configured. Tool outputs SHALL be size-capped with truncation indicated. File-modifying tools (write, edit) SHALL refuse to modify an existing file that was not read earlier in the same session.
 
 #### Scenario: Write without prior read is refused
 

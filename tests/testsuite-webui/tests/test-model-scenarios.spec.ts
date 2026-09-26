@@ -8,9 +8,11 @@
  * env，本文件只在 native 装配下运行。
  *
  * 覆盖：
- * - `test/tools-parallel`：并行 tool_use 的审批卡片**各自独立**（多张卡同时在
- *   场、各带自己的 request_id 与工具名、逐张决策互不串扰），决策后回合推进到
- *   场景终文本（对应 permission-flow「并行工具调用独立 request_id」）；
+ * - `test/tools-parallel`：审批卡片逐张呈现、各带独立 request_id 与工具名、
+ *   逐张决策互不串扰，决策后回合推进到场景终文本（对应 permission-flow
+ *   「并行工具调用独立 request_id」）。native 内核按响应序执行 tool_use——
+ *   写类工具串行门控（卡片逐张开），只读段并行批量（web_fetch/web_search
+ *   两卡同场），与 ACP 载体的「全批同场」形态不同，属载体已知差异；
  * - `test/empty`：零输出回合在 **native 载体**上也落 notice 中性条目（与 ACP
  *   载体的 empty-turn-notice.spec.ts 双载体同断言，对应会话管理「零输出回合
  *   追加通知」）。
@@ -43,18 +45,17 @@ test.describe('场景模型（native）呈现（extend-test-model-scenarios）',
   })
 
   test.describe('并行工具调用：审批卡片各自独立', () => {
-    test('test/tools-parallel：多张卡片同时在场、各带独立 request_id，逐张决策后回合推进到终文本', async ({
+    test('test/tools-parallel：审批卡逐张呈现、各带独立 request_id，逐张决策后回合推进到终文本', async ({
       page,
     }) => {
-      // 3.10 豁免（实测结论，非环境问题）：native 的审批卡**在 webui 里渲染不出来**。
-      // WS `permission.requested` 对 native 会话携带的 `session_id` 是 ChannelKey 的
-      // JSON 字符串（`{"channel":"feishu","reference":"agent-…"}`），而聚焦会话键是
-      // 编码键（`feishu%00agent-…`）；review-card.ts 的过滤是精确字符串比较
-      // （`event.session_id !== this.sessionKey`），于是事件被丢弃、`sebas-review-cards`
-      // 永远空。native 回合本身的⏳条目与 `POST /api/permissions/{rid}/answer` 决策
-      // 都正常（进程级 journey 3.1/3.2 全绿），缺的只是 webui 侧的卡面。
-      // 关闭该缺口（前端按 ChannelKey 归一匹配）后去掉这行 fixme 即可启用本用例。
-      test.fixme(true, 'native permission cards are invisible in the webui: permission.requested session_id is a ChannelKey JSON string, not the encoded session key (review-card.ts:184)')
+      // 3.10 曾以 fixme 豁免（native 审批卡在 webui 里渲染不出来）：WS
+      // `permission.requested` 对 native 会话携带的 `session_id` 是 ChannelKey
+      // 的 JSON 字符串形，与聚焦会话键的编码形不一致，review-card 的精确匹配
+      // 把事件全丢了。缺口已在源头关闭——NativeAgentBackend 的会话键编码统一
+      // 走 sebas-channels 唯一实现，native 通知与 ACP 通路在 wire 上同形
+      // （编码键），前端精确匹配不需要宽松化；第二层竞态（fake provider 秒回，
+      // 推送先于页面挂载到达）由 native 泊车审批读模型兜底——挂载期拉取
+      // `/api/sessions/{key}/approvals` 即重建卡面，与 ACP 同契约。
       await resetState(page.request)
       await ensureSceneProject(page.request)
       const key = await createSession(page.request, { prompt: null, agent: 'native', mode: 'ask' })
@@ -67,38 +68,51 @@ test.describe('场景模型（native）呈现（extend-test-model-scenarios）',
       const cards = page.locator('sebas-review-cards .review-card')
       await expect(cards.first()).toBeVisible({ timeout: 30_000 })
 
-      // 稳定子集：bash（策略 Ask）+ 两个网络工具（策略 Deny + 升级）必出卡；
-      // 同回合更早的 write 可能让 edit 也进 Ask（工具按声明序推进），故不钉
-      // 总数、只钉「至少这三张 + 每张都有自己的身份」。
-      const tools: string[] = []
-      const ids: string[] = []
-      const count = await cards.count()
-      expect(count, 'the parallel round asks for review').toBeGreaterThanOrEqual(3)
-      for (let i = 0; i < count; i += 1) {
-        const card = cards.nth(i)
-        tools.push((await card.locator('.tool').innerText()).trim())
-        ids.push((await card.getAttribute('data-request-id')) ?? '')
+      // native 内核按响应序执行 tool_use（写类串行门控，只读段并行批量）：
+      // 卡片逐张出现，web 只读对（web_fetch/web_search）两卡同场。逐张决策
+      // ——bash/edit 放行，其余拒绝；每张卡自己的按钮、自己的 request_id，
+      // 决策互不串扰。
+      const seenIds = new Set<string>()
+      const seenTools = new Set<string>()
+      const transcript = page.locator('sebas-transcript-view')
+      const terminalText = 'test provider: tool loop complete.'
+      // getByText 穿透 shadow DOM（宿主元素的 textContent 只含 light DOM），
+      // 折叠块的内容在 DOM 里即算在场——与 toContainText 同口径。
+      const roundCompleted = () => page.getByText(terminalText).count().then((n) => n > 0)
+
+      while (!(await roundCompleted())) {
+        const count = await cards.count()
+        if (count === 0) {
+          await page.waitForTimeout(200)
+          continue
+        }
+        const card = cards.first()
+        const id = (await card.getAttribute('data-request-id')) ?? ''
+        const tool = (await card.locator('.tool').innerText()).trim()
+        expect(id.length, `card for ${tool} carries a request id`).toBeGreaterThan(0)
+        expect(seenIds.has(id), `request id ${id} must be unique across the round`).toBe(false)
+        seenIds.add(id)
+        seenTools.add(tool)
+        const allow = tool === 'bash' || tool === 'edit'
+        // 决策按钮是 Web Awesome 自定义元素（与 permission.spec.ts 的
+        // page-object 选择器同款：wa-button.allow-once / wa-button.deny）。
+        await card.locator(allow ? 'wa-button.allow-once' : 'wa-button.deny').click()
+        // 决策已投递：这张卡退场（墓碑），不阻塞下一张卡的出现。
+        await expect(
+          page.locator(`sebas-review-cards .review-card[data-request-id="${id}"]`),
+        ).toHaveCount(0, { timeout: 15_000 })
       }
+
+      // 稳定子集：bash（策略 Ask）+ 两个网络工具（只读段并行门控，Deny +
+      // 升级）必出卡；write/edit 也各开一张，不钉总数。
       for (const tool of ['bash', 'web_fetch', 'web_search']) {
-        expect(tools, `card for ${tool}`).toContain(tool)
+        expect(seenTools, `card for ${tool}`).toContain(tool)
       }
-      // 每张卡一个独立 request_id：并行调用互不串扰。
-      expect(new Set(ids).size, `independent request ids: ${ids.join(', ')}`).toBe(count)
-      expect(ids.every((id) => id.length > 0)).toBe(true)
+      expect(seenIds.size, 'every card had an independent request id').toBeGreaterThanOrEqual(3)
 
-      // 逐张决策：bash 放行一次，网络工具拒绝（各卡自己的按钮，各卡自己的请求）。
-      for (let i = 0; i < count; i += 1) {
-        const card = page.locator(`sebas-review-cards .review-card[data-request-id="${ids[i]}"]`)
-        const allow = tools[i] === 'bash' || tools[i] === 'edit'
-        await card.locator(allow ? 'button.allow-once' : 'button.deny').click()
-      }
-
-      // 全部决策后回合推进到场景终文本（并行 tool_use → 全部 tool_result → 次轮终文本）。
-      await expect(page.locator('sebas-transcript-view')).toContainText(
-        'test provider: tool loop complete.',
-        { timeout: 60_000 },
-      )
-      await waitStatus(page.request, key, ['done'])
+      // 全部决策后回合推进到场景终文本（并行 tool_use → 全部 tool_result →
+      // 次轮终文本）。
+      await expect(transcript).toContainText(terminalText, { timeout: 60_000 })
       expect(collector.pageErrors).toEqual([])
       expect(collector.consoleErrors).toEqual([])
     })
@@ -130,11 +144,11 @@ test.describe('场景模型（native）呈现（extend-test-model-scenarios）',
       await expect(transcript.locator('.turn-block.is-assistant').last()).toContainText(
         'turn summary',
       )
-      // native 没有 parked-approval 读模型：webui 拉 `/api/sessions/{key}/approvals`
-      // 得到 503，控制台因此留一条网络错误——这是 native 通路的已知形态（不是本
-      // 旅程的失败面），故只把它滤掉，其余控制台错误与 JS 异常照旧零容忍。
+      // native 泊车审批读模型补齐后，挂载期的 `/api/sessions/{key}/approvals`
+      // 拉取返回 200（无泊车 = 空表），不再有旧注释里的 503 网络噪声——
+      // 控制台错误与 JS 异常照旧零容忍。
       expect(collector.pageErrors).toEqual([])
-      expect(collector.consoleErrors.filter((t) => !/\/approvals/.test(t))).toEqual([])
+      expect(collector.consoleErrors).toEqual([])
     })
   })
 })

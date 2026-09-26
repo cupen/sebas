@@ -61,7 +61,10 @@ pub struct AgentEntry {
 
 pub struct SessionManager {
     inner: Arc<Mutex<HashMap<String, SessionMeta>>>,
-    agents: HashMap<String, AgentEntry>,
+    /// kind → driver 注册表。`RwLock`（add-agent-settings-and-session-titles）：
+    /// config 注册表启动闭装，agents-store 行经 `upsert_agent` 在 spawn 时
+    /// 动态登记（免重启生效），因此需要运行时可写。
+    agents: std::sync::RwLock<HashMap<String, AgentEntry>>,
     default: String,
 }
 
@@ -70,9 +73,25 @@ impl SessionManager {
     pub fn new(default: String, agents: HashMap<String, AgentEntry>) -> Self {
         Self {
             inner: Arc::new(Mutex::new(HashMap::new())),
-            agents,
+            agents: std::sync::RwLock::new(agents),
             default,
         }
+    }
+
+    /// Whether the registry holds an entry for `kind`（spawn 前的 unknown-agent
+    /// 预判面；测试与动态解析共用）。
+    pub fn has_agent(&self, kind: &str) -> bool {
+        self.agents.read().expect("agent registry lock").contains_key(kind)
+    }
+
+    /// Upsert a registry entry（add-agent-settings-and-session-titles：store
+    /// 行在 spawn 时动态登记——config 注册表保持启动闭装，agents-store 目录
+    /// 免重启生效；同 kind 重登记是无害覆盖）。
+    pub fn upsert_agent(&self, kind: &str, entry: AgentEntry) {
+        self.agents
+            .write()
+            .expect("agent registry lock")
+            .insert(kind.to_string(), entry);
     }
 
     /// Convenience: a single-Claude registry with the given startup timeout.
@@ -129,16 +148,19 @@ impl SessionManager {
         } else {
             kind.to_string()
         };
-        if self.agents.contains_key(&k) {
+        if self.has_agent(&k) {
             Ok(k)
         } else {
             anyhow::bail!("unknown agent kind {k:?}")
         }
     }
 
-    fn entry(&self, kind: &str) -> anyhow::Result<&AgentEntry> {
+    fn entry(&self, kind: &str) -> anyhow::Result<AgentEntry> {
         self.agents
+            .read()
+            .expect("agent registry lock")
             .get(kind)
+            .cloned()
             .ok_or_else(|| anyhow::anyhow!("unknown agent kind {kind:?}"))
     }
 

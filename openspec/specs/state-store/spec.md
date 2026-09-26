@@ -8,12 +8,13 @@ Owns the SQLite-backed domain state of sebas: where the database lives, how sche
 
 ### Requirement: Database location and single-writer ownership
 
-The domain state SHALL live in a single SQLite database at `~/.sebas/sebas.db` (overridable via environment variable), opened in WAL mode. Paths SHALL expand a leading `~/`. Only the core process SHALL open the database; all other processes access state exclusively through the core channel state methods. All mutations SHALL be applied by the core state store serialized one at a time.
+The domain state SHALL live in a set of purpose-layered SQLite databases inside a single state directory, each opened in WAL mode, rather than in one undifferentiated database. Layering SHALL follow a two-level rule: first by **writing process** — each database SHALL have exactly one writer, and a process that is not a database's writer SHALL NOT open it, accessing that state exclusively through the core channel state methods; then, within the core's own databases, by **growth characteristic** — bounded system configuration (providers, model aliases, card and runtime settings, whose row count is decided by hand-written configuration) SHALL be separated from user data that grows with use (projects, the session map, and the session and message content that follows it). Paths SHALL expand a leading `~/`. All mutations SHALL be applied by the owning process's state store, serialized one at a time per database. Because the databases are layered, an operation that rebuilds or resets one of them SHALL NOT affect the other.
 
 #### Scenario: Environment override relocates the database
 
-- **WHEN** the database-path environment variable points to a custom path
-- **THEN** core opens the database at that path
+- **WHEN** the environment variable for one database points to a custom path
+- **THEN** the owning process opens that database at that path
+- **AND** the other databases keep resolving inside the state directory
 
 #### Scenario: Tilde paths expand to home
 
@@ -25,9 +26,34 @@ The domain state SHALL live in a single SQLite database at `~/.sebas/sebas.db` (
 - **WHEN** two clients issue state mutations concurrently
 - **THEN** both apply in serialization order and a later snapshot reflects the combined result — never a torn or lost update without an explicit error
 
+#### Scenario: bounded configuration is separated from growing user data
+
+- **WHEN** the databases are inspected after extended use
+- **THEN** provider, model-alias, and settings rows live in the bounded configuration database
+- **AND** projects and the session map live in the user-data database
+- **AND** the configuration database's size is not driven by how much the user accumulates
+
+#### Scenario: one database per writer
+
+- **WHEN** the set of databases and their writers is inspected
+- **THEN** each database is written by exactly one process
+- **AND** no database is opened by a process other than its writer
+
+#### Scenario: resetting user data leaves configuration intact
+
+- **WHEN** the user-data database is rebuilt because its structure diverged from the models
+- **THEN** the configuration database is untouched
+- **AND** settings survive the rebuild
+
+#### Scenario: a database's unavailability is reported, not hidden
+
+- **WHEN** one database cannot be opened while another opens successfully
+- **THEN** the unavailable domain reports an explicit unavailable state naming the cause
+- **AND** the process does not present substitute or default values as if the state were current
+
 ### Requirement: State methods on the core channel
 
-The core channel SHALL expose state methods for snapshot queries (providers with model aliases, settings, projects, session map) and mutations (provider/alias/settings/projects CRUD), plus a change subscription that delivers a notification after each committed mutation. Access SHALL be governed by the channel's authentication; unauthorized peers are denied.
+The core channel SHALL expose state methods for snapshot queries (domains `providers` — projected with their model aliases — `settings`, `projects`, `presets`, `sessions`, and `router_activity`) and mutations (provider/alias/settings/projects CRUD; `aliases` is its own mutation domain), plus a change subscription that delivers a notification after each committed mutation. Access SHALL be governed by the channel's authentication; unauthorized peers are denied.
 
 #### Scenario: Snapshot reflects committed mutation
 
@@ -83,7 +109,7 @@ A database that cannot be opened due to corruption SHALL block the affected star
 
 ### Requirement: Runtime state boundaries for persisted session state
 
-The state store SHALL NOT persist the permission allowlist, outstanding permission cards, card states, or in-flight spawn placeholders — these SHALL be reconstructed or re-prompted after a restart. The agent session map is currently persisted by the core as a shutdown-only JSON snapshot to `[dispatch] state_file` (see `session-lifecycle`「Restart recovery with corruption tolerance」, the authoritative behavior source); the state store's `session_map` table is a reserved placeholder and does not yet carry sessions. Migrating the session map into the state store is a deferred design step (see the `add-state-store` change runbook): it SHALL be implemented when the session-mapping change lands, using a table shaped to the mapping structure (`ChannelKey` → DTO with `acp_session_id` / `current_model` / `pending_kind`).
+The state store SHALL NOT persist the permission allowlist, outstanding permission cards, card states, or in-flight spawn placeholders — these SHALL be reconstructed or re-prompted after a restart. The agent session map SHALL be persisted in the state store and written per mutation, so that an unclean exit preserves every committed mapping; `session-lifecycle`「Restart recovery with corruption tolerance」governs how it is restored, and `session-persistence`「Runtime state is not persisted by this store」governs what is deliberately excluded. The state store SHALL NOT keep a second, shutdown-time snapshot of the session map, and no separate session-map file SHALL be written or read.
 
 #### Scenario: Allowlist survives no restart
 
@@ -97,12 +123,19 @@ The state store SHALL NOT persist the permission allowlist, outstanding permissi
 
 #### Scenario: Session map survives unclean exit
 
-- **WHEN** core is terminated without a graceful shutdown (e.g. SIGKILL)
-- **THEN** the session map at next start reflects the snapshot written at the last graceful shutdown, not any in-flight mutations since then (per-mutation durability is a deferred migration, not yet implemented)
+- **WHEN** core is terminated without a graceful shutdown (e.g. SIGKILL) while sessions are active
+- **THEN** the session map at next start reflects every mapping committed before the kill, not the state at the last graceful shutdown
+- **AND** no shutdown-time snapshot of the session map is required to achieve this
 
-### Requirement: Schema self-description and startup sync
+#### Scenario: No separate session-map file exists
 
-The schema SHALL be derived from the code's model objects: each registered table's column set is declared by its model struct, which is the single source of truth. On open, the store SHALL stamp self-describing version metadata as key-value pairs (`version_format` with value `date`, and `version` with a date constant that is bumped when the schema changes — never a wall-clock read) so any database file can be diagnosed as to which schema date produced it. The store SHALL then reconcile each registered table against the live database: missing columns SHALL be added in place (`ALTER TABLE ADD COLUMN`) with their constant default; a structure that cannot be reconciled — a type mismatch, an extra column, a missing table, or an absent/unknown version format — SHALL reset the database: delete the file and rebuild an empty schema from the current models, logging honestly that a schema incompatibility triggered the reset. The version value alone SHALL NOT trigger a reset; structure comparison is the only reset trigger. A reset MUST NOT run for a database that cannot be opened at all — that is corruption, governed by the corrupt-store requirement.
+- **WHEN** sessions are created, mutated, and closed
+- **THEN** no session-map file is created or modified on disk
+- **AND** the state store is the only place the session map is persisted
+
+### Requirement: Schema self-description and non-destructive sync
+
+The schema SHALL be derived from the code's model objects: each registered table's column set is declared by its model struct, which is the single source of truth. On open, the store SHALL stamp self-describing version metadata as key-value pairs (`version_format` with value `date`, and `version` with a date constant that is bumped when the schema changes — never a wall-clock read) so any database file can be diagnosed as to which schema date produced it; this metadata is diagnostic only and SHALL NOT gate any sync action. The store SHALL then reconcile each registered table against the live database without ever deleting the database file: a missing column SHALL be added in place (`ALTER TABLE ADD COLUMN`) with its constant default; a column the model declares as renamed (an explicit rename annotation on the struct field naming the previous column) SHALL be migrated via `ALTER TABLE RENAME COLUMN` with its data preserved, and an undeclared missing-plus-extra pair SHALL be treated as a drop plus an add, never guessed as a rename; a column type mismatch SHALL be resolved by rebuilding the table inside a single transaction (create the new table from the registered DDL, copy existing rows column-by-name with SQLite affinity coercion, swap the names, recreate the indexes) so existing data is carried over; a column present in the database but absent from the model SHALL be dropped with its data discarded, using the same table rebuild when the column is referenced by an index or constraint; a missing table SHALL be created. Missing or unrecognized version metadata SHALL NOT trigger a reset: the same structural reconciliation runs and the reconciliation is logged honestly (including databases produced by the retired migration chain). No sync outcome SHALL delete or recreate the database file; corruption remains governed by the corrupt-store requirement. The version value alone SHALL NOT trigger any action; structural comparison is the only trigger.
 
 #### Scenario: Fresh database is created from current models
 
@@ -114,17 +147,56 @@ The schema SHALL be derived from the code's model objects: each registered table
 - **WHEN** a model struct gains a column and the database lacks it
 - **THEN** startup adds the column via `ALTER TABLE ADD COLUMN` with its constant default, existing rows remain readable, and no other table is touched
 
-#### Scenario: Incompatible structure resets the database
+#### Scenario: Declared rename preserves the column's data
 
-- **WHEN** a table's live structure diverges irreconcilably from the model (type mismatch, extra column, or the table is absent entirely)
-- **THEN** the database is deleted and rebuilt as an empty schema from the current models, and the log names the incompatibility that caused the reset
+- **WHEN** a model field is renamed and annotated with the previous column name, and the database still carries the old column
+- **THEN** startup renames the column in place, every existing row keeps its value under the new column, and no table rebuild occurs
 
-#### Scenario: Unknown version format resets the database
+#### Scenario: Undeclared missing-plus-extra pair is not guessed as a rename
+
+- **WHEN** the model lacks a column the database has, and declares a column the database lacks, with no rename annotation connecting them
+- **THEN** the extra column is dropped and the missing column is added, and the log names both columns so the divergence is visible
+
+#### Scenario: Type change rebuilds the table without losing rows
+
+- **WHEN** a model field's column type diverges from the live column's affinity
+- **THEN** the table is rebuilt inside a single transaction, every existing row is copied into the rebuilt table by column name with SQLite affinity coercion applied, indexes are recreated, and the log names the table and the type mismatch
+
+#### Scenario: Column removed from the model is dropped
+
+- **WHEN** a model field is removed and the database still carries the column, whether or not an index or constraint references it
+- **THEN** the column (and only that column's data) is discarded, the rest of the table's rows survive, and the log names the dropped column
+
+#### Scenario: Unknown version metadata reconciles by structure
 
 - **WHEN** the database lacks the version metadata or carries an unrecognized `version_format` (including databases produced by the retired migration chain)
-- **THEN** the database is reset to the current schema with the reset recorded in the log
+- **THEN** the same structural reconciliation runs without any reset, the database is brought in line with the current models, and the log records that unversioned or unknown-format metadata was reconciled
 
-#### Scenario: Version value alone never resets
+#### Scenario: Version value alone never triggers action
 
 - **WHEN** the stamped `version` differs from the binary's constant but every registered table's structure matches the models exactly
-- **THEN** no reset occurs; the version metadata is updated to the current value
+- **THEN** no migration or rebuild occurs; the version metadata is updated to the current value
+
+### Requirement: Destructive schema migration is backed up and fails closed
+
+The sync path SHALL never delete the database file. Before performing any destructive migration step (a table rebuild or a column drop), the store SHALL write a backup copy of the whole database adjacent to the database file, replacing any previous backup; the backup copy SHALL be tightened to the same owner-only permissions as the database file, because it is a complete copy of the same content (including provider credentials); if the backup cannot be written, the destructive migration SHALL NOT run and startup SHALL abort with a diagnostic naming the backup failure. Every migration SHALL run inside a transaction; if a migration step fails, the transaction SHALL roll back, the database SHALL be left byte-identical to before the attempt, and startup SHALL abort with a diagnostic naming the failed step — the store MUST NOT fall back to resetting or rebuilding the database as a side effect of a failed migration.
+
+#### Scenario: Backup precedes a destructive migration
+
+- **WHEN** a type change or column drop is about to run
+- **THEN** a backup copy of the database is written next to the database file first, and the migration proceeds only after the backup succeeds
+
+#### Scenario: The backup copy is not more permissive than the database
+
+- **WHEN** the backup copy has been written
+- **THEN** its file permissions are owner-only, matching the database file, so the copy does not re-expose content the database itself protects
+
+#### Scenario: Backup failure blocks the destructive migration
+
+- **WHEN** the backup copy cannot be written
+- **THEN** the destructive migration does not run, the database is left untouched, and startup aborts with a diagnostic naming the backup failure
+
+#### Scenario: Failed migration rolls back and refuses startup
+
+- **WHEN** a migration step fails mid-reconciliation (for example, the data copy errors)
+- **THEN** the transaction rolls back leaving the database unchanged, startup aborts with a diagnostic naming the failed step, and no reset or file deletion occurs

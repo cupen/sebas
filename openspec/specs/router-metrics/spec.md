@@ -1,7 +1,7 @@
 # router-metrics Specification
 
 ## Purpose
-router 的可观测性出口：标准 Prometheus 抓取面（`/metrics`）供外部监控系统采集，JSON 摘要（`/admin/stats`）供 webui 数字卡片渲染。
+router 的可观测性出口：标准 Prometheus 抓取面（`/metrics`）供外部监控系统采集，JSON 摘要（`/admin/stats`）供运维自查。WebUI 不是本面的消费者（拓扑原则：WebUI 唯一服务端出边是 core channel）。
 
 ## Requirements
 
@@ -34,7 +34,8 @@ request headers, or request bodies.
 
 ### Requirement: JSON stats summary
 
-`GET /admin/stats` SHALL return a JSON summary for webui rendering:
+`GET /admin/stats` SHALL return a JSON operational summary for operators and
+external monitoring:
 process uptime; totals since start (request count, input/output/cache
 tokens, rate-limited count, upstream error count); per-provider aggregates
 (request count, error count, input/output tokens, average latency in

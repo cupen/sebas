@@ -28,13 +28,12 @@ use sebas_webui::admin::{
     AdminStatus,
 };
 use sebas_webui::auth::{self, AuthHandle};
-use sebas_webui::rbac::Role;
-use sebas_webui::user_store::{StoreError, UserStore};
+use sebas_webui::user_store::StoreError;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{info, warn};
 
-/// Arguments for `sebas webui --config <path>`.
+/// `sebas webui` 参数（CLI 层经 `From` 转入）。
 pub struct WebUiArgs {
     pub config: String,
 }
@@ -43,125 +42,6 @@ impl WebUiArgs {
     pub fn new(config: String) -> Self {
         Self { config }
     }
-}
-
-/// `sebas webui-passwd` 参数（CLI 层经 `From` 转入，字段同 cli::WebUiPasswdArgs）。
-pub struct WebUiPasswdArgs {
-    pub user: Option<String>,
-    pub password: Option<String>,
-    pub password_stdin: bool,
-    /// 显式角色（root/admin/member/viewer）。缺省：库里第一个用户为 root，
-    /// 其后为 member（design D7）。已存在用户时同时把其角色改为该值。
-    pub role: Option<String>,
-}
-
-/// `sebas webui-passwd` — 初始化 / 修改 WebUI 登录用户（写 auth.db 用户库，
-/// add-webui-multiuser-rbac 4.1，design D7）。
-///
-/// 改密 = 重跑同命令（写入新盐新哈希）；用户库即活数据，运行中的 webui
-/// 进程每请求实时读库，改密即时生效、既有会话留待下次请求自然失效（或
-/// 在 WebUI 用户管理里踢掉）。密码来源：`--password-stdin`（一行）或
-/// `--password`。用户名必填（多用户库里没有「现有用户名」可沿用）；库里
-/// 已有同名账户 → 改密（`--role` 同时改角色），否则建户——首个用户默认
-/// root，其后默认 member，`--role` 显式覆盖。不再读写任何 JSON 凭据文件。
-pub fn run_passwd(args: WebUiPasswdArgs) -> Result<()> {
-    let path = auth::default_auth_db();
-    let store = UserStore::open(&path)
-        .map_err(|e| SebasError::Config(format!("打开 WebUI 用户库 {path:?} 失败: {e}")))?;
-
-    let username = match args.user.as_deref().map(str::trim) {
-        Some(u) if !u.is_empty() => u.to_string(),
-        _ => {
-            return Err(SebasError::Config(
-                "缺少用户名：请用 --user <name> 指定要创建或改密的账户".into(),
-            ));
-        }
-    };
-
-    let explicit_role = args
-        .role
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|word| {
-            word.parse::<Role>()
-                .map_err(|e| SebasError::Config(format!("--role 非法: {e}")))
-        })
-        .transpose()?;
-
-    let password = if args.password_stdin {
-        use std::io::Read;
-        let mut line = String::new();
-        std::io::stdin()
-            .read_to_string(&mut line)
-            .map_err(|e| SebasError::Config(format!("read password from stdin: {e}")))?;
-        // 去掉行尾换行（含 Windows CRLF）；其余字符原样参与哈希。
-        line.trim_end_matches(['\r', '\n']).to_string()
-    } else {
-        args.password.ok_or_else(|| {
-            SebasError::Config(
-                "缺少密码：用 --password-stdin（推荐，避免进 shell history）或 --password".into(),
-            )
-        })?
-    };
-    if password.is_empty() {
-        return Err(SebasError::Config("密码不能为空".into()));
-    }
-    if password.chars().count() < 8 {
-        // 不做硬性拦截：测试环境统一用 admin/admin 这类短密码；公网部署
-        // 由部署者自己权衡强度（与首启 setup 页的 ≥8 硬门槛不同）。
-        warn!(
-            "webui password is shorter than 8 chars, weak; use a strong password for public deploys"
-        );
-    }
-
-    let existing = store
-        .get_by_username(&username)
-        .map_err(|e| SebasError::Config(format!("查询用户库失败: {e}")))?;
-    match existing {
-        Some(user) => {
-            store
-                .set_password(user.id, &password)
-                .map_err(|e| SebasError::Config(format!("改密失败: {e}")))?;
-            if let Some(role) = explicit_role {
-                store
-                    .set_role(user.id, role)
-                    .map_err(|e| SebasError::Config(format!("改角色失败: {e}")))?;
-                println!(
-                    "WebUI 用户已更新：用户 {}（角色 {}，{}）",
-                    username,
-                    role,
-                    path.display()
-                );
-            } else {
-                println!("WebUI 密码已更新：用户 {}（{}）", username, path.display());
-            }
-        }
-        None => {
-            // 首个用户默认 root，其后默认 member；`--role` 显式覆盖（design D7）。
-            let role = explicit_role.unwrap_or(if store.count().unwrap_or(0) == 0 {
-                Role::Root
-            } else {
-                Role::Member
-            });
-            store
-                .create(&username, &password, role)
-                .map_err(|e| match e {
-                    StoreError::UsernameTaken => {
-                        SebasError::Config(format!("用户名 {username} 已存在"))
-                    }
-                    other => SebasError::Config(format!("建户失败: {other}")),
-                })?;
-            println!(
-                "WebUI 登录用户已创建：用户 {}（角色 {}，{}）\n现在 webui 的全部 API/WebSocket 都需要登录；\
-                 若需公网部署，把 [service.webui] host 指到 0.0.0.0 即可。",
-                username,
-                role,
-                path.display()
-            );
-        }
-    }
-    Ok(())
 }
 
 /// webui 启动前的鉴权引导（add-webui-multiuser-rbac 3.3，design D4 顺序）：
@@ -232,7 +112,7 @@ pub(crate) fn has_enabled_user(auth: &AuthHandle) -> bool {
 ///   root（spec 场景「开关打开但零用户拒绝公网 bind」）；全禁用 = 无人可
 ///   登录；库损坏 = 鉴权不可用——三者都不得绑公网。先经环境变量
 ///   （`SEBAS_WEBUI_USER` + `SEBAS_WEBUI_PASSWORD`）或
-///   `sebas webui-passwd --user <name>` 建立 root 再绑公网。
+///   `sebas auth add <name>` 建立 root 再绑公网。
 ///
 /// （spec 原文按「存在至少一个启用用户」判定；比只看 `needs_setup()`
 /// （= 零用户）更紧：全禁用/坏库同样拒绝，fail-closed。）
@@ -248,7 +128,7 @@ pub(crate) fn ensure_non_loopback_bind_allowed(auth_on: bool, auth: &AuthHandle)
         return Err(SebasError::Config(
             "service.webui.host 非 loopback：用户库中还没有启用用户（零用户时公网先访问者可抢注 root）。\
              先用 SEBAS_WEBUI_USER + SEBAS_WEBUI_PASSWORD 环境变量或 \
-             `sebas webui-passwd --user <name>` 建立 root，再绑非 loopback 地址"
+             `sebas auth add <name>` 建立 root，再绑非 loopback 地址"
                 .into(),
         ));
     }
@@ -263,13 +143,25 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
         .map_err(|e| SebasError::Config(format!("read config {}: {e}", args.config)))?;
     let cfg = Config::parse(&raw)?;
 
-    // close-acceptance-blind-spots 盲区 2：env posture 启动告警——继承自
-    // shell 且不被 cover 语义覆盖的 ANTHROPIC_* 逐变量 WARN 点名（只报告，
-    // 不篡改 env，design D1）。standalone webui 不初始化状态库，provider
-    // 解析经 `provider_state::load()` 的文件降级读取——与本进程可见的解析
-    // 一致；`[router]` 段解析一次，供此处与下方 router_info 共用。
+    // `[router]` 段解析一次，供下方 router_info 共用。env posture 报告
+    // （close-acceptance-blind-spots 盲区 2）要求 standalone webui 启动日志
+    // 也点名继承变量——本进程无状态库，provider 真相经核心状态通道读取
+    // （有界重试覆盖 core 启动窗口；通道不可达按空状态呈现）。
     let router_cfg = sebas_router::config::RouterConfig::parse(&raw).ok();
-    crate::spawn_env::warn_inherited_provider_env(router_cfg.as_ref());
+    {
+        let secret_file = crate::config::core_secret_file_path(
+            cfg.service.core.secret_file.as_deref(),
+            std::path::Path::new(&args.config),
+        );
+        let channel_secret =
+            crate::core_channel::secret::ChannelSecret::from_env_or_file(Some(secret_file));
+        crate::spawn_env::warn_inherited_provider_env_via_channel(
+            router_cfg.as_ref(),
+            &crate::core_channel::socket_path(&cfg),
+            &channel_secret,
+        )
+        .await;
+    }
 
     // Build the WebUI endpoint from config (enabled, host, port).
     // Returns None when service.webui.enabled is false — we require it to be
@@ -672,10 +564,12 @@ async fn load_card_config(
     let secret_file =
         crate::config::core_secret_file_path(cfg.service.core.secret_file.as_deref(), config_path);
     let secret = crate::core_channel::secret::ChannelSecret::from_env_or_file(Some(secret_file));
-    let payload = crate::core_channel::client::snapshot_domain_once(
+    let payload = crate::core_channel::client::snapshot_domain_with_retry(
         &crate::core_channel::socket_path(cfg),
         &secret,
         "settings",
+        10,
+        std::time::Duration::from_millis(400),
     )
     .await;
     match payload {

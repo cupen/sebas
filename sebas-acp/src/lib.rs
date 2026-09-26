@@ -2,10 +2,12 @@ pub mod acp_driver;
 pub mod agent_driver;
 pub mod claude;
 pub mod session;
+pub mod win_exe;
 
 pub use acp_driver::AcpDriver;
 pub use agent_driver::{AgentDriver, DriverConfig, DriverError, DriverHandle};
 pub use claude::{ClaudeDriver, DEFAULT_CLAUDE_MODEL, builtin_claude_models};
+pub use win_exe::resolve_windows_executable;
 pub use session::{
     AcpCommand, AcpEvent, AcpModelInfo, AcpSessionHandle, AvailableCommand, Decision, SessionMeta,
     TurnUsage,

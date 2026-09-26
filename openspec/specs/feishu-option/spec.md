@@ -14,7 +14,7 @@ sebas SHALL 提供飞书接入的显式开关节 `[feishu] enabled`。`enabled` 
 
 - **WHEN** 配置 `[feishu] enabled = false`（或缺失且凭据双空）
 - **THEN** feishu 适配器不注册、im 服务不建立飞书 WebSocket 连接、不做 token 获取、不出站请求飞书 API
-- **AND** watchdog 默认只启动 webui 服务，core 停用
+- **AND** watchdog 默认拉起 webui 与 core（core 恒启动，见「webui 主控部署形态」），不拉起 im 服务与 router
 
 #### Scenario: 显式开启但凭据不完整
 

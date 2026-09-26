@@ -489,6 +489,23 @@ export interface AgentKindInfo {
   version?: string
 }
 
+/**
+ * agents 域 mutation 的 launch 定义载荷（add-agent-settings-and-session-titles
+ * 5.3）：与 core 校验词表逐字对齐。`driver` 封闭于 `claude` | `acp`（opencode
+ * 是表单预设 = `acp` + `["opencode","acp"]`，不是驱动）。POST 需要完整定义；
+ * PUT 是**部分更新**——只提交改动面，未提交的字段保留存量，显式 `null` 清除。
+ */
+export interface AgentLaunchPayload {
+  driver: string
+  path?: string | null
+  args?: string[] | null
+  display?: string | null
+  models?: string[] | null
+  startup_timeout_secs?: number | null
+  idle_kill_secs?: number | null
+  work_dir?: string | null
+}
+
 export interface AdminStatus {
   adapter_ok: boolean
   status: {
@@ -933,6 +950,19 @@ export const api = {
   env: () => get<{ items: EnvVarEntry[] }>('/api/env'),
   /** Agent catalog（唯一可用性真源；workbench-agent-wire-fix 3.2）。 */
   agents: () => get<{ agents: AgentKindInfo[] }>('/api/agents'),
+  /**
+   * agents 增删改（add-agent-settings-and-session-titles 4.1/5.3）：写经
+   * core 状态库的 agents 域，免重启生效。create 需要完整 launch 定义；
+   * update 是部分更新（只提交改动字段）；delete 即删（core 侧清项目默认
+   * 引用）。`native` 是内置内核保留 id，一律拒绝。业务拒绝（已存在 409 /
+   * 不存在 404 / 非法载荷 400）文案取响应 error 字段；core 不可达 503。
+   */
+  agentsCreate: (id: string, agent: AgentLaunchPayload) =>
+    post<{ created: string }>('/api/agents', { id, ...agent }),
+  agentsUpdate: (id: string, patch: Partial<AgentLaunchPayload>) =>
+    put<{ updated: string }>(`/api/agents/${encodeURIComponent(id)}`, patch),
+  agentsDelete: (id: string) =>
+    del<{ deleted: string }>(`/api/agents/${encodeURIComponent(id)}`),
   /**
    * （add-remote-execution-node 8.2）执行节点可用性。本机节点恒在列且在线；
    * 远端节点来自 core 注册表，`remote_available=false` 表示注册表不可得

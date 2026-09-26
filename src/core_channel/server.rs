@@ -50,8 +50,39 @@ pub fn default_socket_path() -> PathBuf {
 /// Resolve the socket path for the given config: `[service.core] channel_path`
 /// overrides the default.
 pub fn socket_path(cfg: &crate::config::Config) -> PathBuf {
-    match cfg.service.core.channel_path.as_deref() {
-        Some(p) if !p.is_empty() => PathBuf::from(p),
+    resolve_channel_path(cfg.service.core.channel_path.as_deref())
+}
+
+/// [`socket_path`] 的纯函数核：configured 非空且为相对路径时，用
+/// `std::env::current_dir()` join 成绝对路径再返回；空/缺省走
+/// [`default_socket_path`]；绝对路径原样返回。
+///
+/// 为什么相对值要绝对化（Windows 管道冲突缺陷）：IPC 端点名由
+/// `sebas_ipc::fs_name()` 从路径字符串全局映射（`\\.\pipe\sebas/<路径>`），
+/// Windows 命名空间扁平——相对值让**所有**进程映射到同一个全局管道名，
+/// 并行测试沙箱里第一个 bind 成功、其余 core 启动即死（os error 5）。
+/// 绝对化后：
+/// - Unix：UDS 本就按调用方 CWD 解析相对路径，解析结果与既有语义**逐字节
+///   一致**（bind/connect 时 CWD 相同则落点相同），行为不变；
+/// - Windows：管道名随绝对路径（随各进程 CWD）唯一，并行沙箱互不踩踏。
+///
+/// core（[`socket_path`]）与 watchdog 侧（executor 探针、router spec 的
+/// `SEBAS_CORE_SOCKET` 注入）共用本函数，保证多进程解析**同一来源**——
+/// 任一侧单独按旧逻辑解析，绝对化差异会让它们指向不同端点。
+pub fn resolve_channel_path(configured: Option<&str>) -> PathBuf {
+    match configured {
+        Some(p) if !p.is_empty() => {
+            let path = PathBuf::from(p);
+            if path.is_absolute() {
+                return path;
+            }
+            match std::env::current_dir() {
+                Ok(cwd) => cwd.join(path),
+                // CWD 不可得的极端情况：退回原值，让 bind/connect 的报错如实
+                // 呈现，而不是在此处编造一个更错的路径。
+                Err(_) => path,
+            }
+        }
         _ => default_socket_path(),
     }
 }
@@ -617,6 +648,12 @@ async fn snapshot_domain(router: &DispatchHandle, domain: &str) -> serde_json::V
             Ok(projects) => serde_json::json!({ "projects": projects }),
             Err(e) => serde_json::json!({"error": e}),
         },
+        "agents" => match engine.load_agents().await {
+            // 快照形状（活跃行 + 墓碑 id 清单）由 AgentRow::snapshot_value
+            // 统一供给——与 webui InProcessBackend 同一处定义，防止漂移。
+            Ok(rows) => sebas_models::agent::AgentRow::snapshot_value(&rows),
+            Err(e) => serde_json::json!({"error": e}),
+        },
         other => serde_json::json!({"error": format!("unknown domain: {other}")}),
     }
 }
@@ -642,7 +679,7 @@ fn preset_table_value() -> serde_json::Value {
     serde_json::json!({ "presets": out })
 }
 
-/// 全域快照：providers / settings / projects / presets / sessions /
+/// 全域快照：providers / settings / projects / agents / presets / sessions /
 /// router_activity。
 async fn state_snapshot_all(router: &DispatchHandle) -> serde_json::Value {
     let mut domains = serde_json::Map::new();
@@ -650,6 +687,7 @@ async fn state_snapshot_all(router: &DispatchHandle) -> serde_json::Value {
         "providers",
         "settings",
         "projects",
+        "agents",
         "presets",
         "sessions",
         "router_activity",
@@ -1244,6 +1282,12 @@ async fn dispatch(
                         "aliases" => {
                             sebas_dispatch::state_store::aliases_mutation(engine, &payload).await
                         }
+                        // add-agent-settings-and-session-titles 1.4：agents 域
+                        // 与 webui InProcessBackend 共用同一实现（单一实现避免
+                        // 两侧漂移）。
+                        "agents" => {
+                            sebas_dispatch::state_store::agents_mutation(engine, &payload).await
+                        }
                         other => Err(format!("unknown domain: {other}")),
                     };
                     match result {
@@ -1779,6 +1823,10 @@ mod tests {
     // `sebas_router::config::presets()` 逐项一致（只读代码表直出，无存储副本）。
     #[tokio::test]
     async fn presets_domain_serves_the_code_table() {
+        // 本用例断言「引擎不在场」的降级分支：持 SERIAL 锁（install_none）
+        // 与一切装引擎的用例互斥——本模块的 agents 域用例等并发装引擎时不
+        // 会让这里读到「引擎在场」的假象。
+        let _no_engine = sebas_dispatch::test_engine::install_none();
         let (router, _rx) =
             sebas_dispatch::DispatchHandle::new(sebas_dispatch::state::SessionMap::new());
         let payload = snapshot_domain(&router, "presets").await;
@@ -1833,6 +1881,101 @@ mod tests {
         // 未设置 state store 时其余域报错，presets 域不受影响（纯代码表）。
         let missing = snapshot_domain(&router, "providers").await;
         assert!(missing.get("error").is_some());
+    }
+
+    // ---- add-agent-settings-and-session-titles 1.4：agents 域快照 ----
+
+    /// core channel 半边：mutation（共用同一 `agents_mutation`）提交后
+    /// `snapshot_domain("agents")` 立即可见；快照条目是 `AgentRow::to_item`
+    /// 投影（管理面 wire 形状）。与 webui InProcessBackend 的行为一致性由
+    /// 「同一实现」保证，两侧各钉一份接线测试。
+    #[tokio::test]
+    async fn agents_snapshot_reflects_committed_mutation() {
+        let _engine = sebas_dispatch::test_engine::install_fresh();
+        let (router, _rx) =
+            sebas_dispatch::DispatchHandle::new(sebas_dispatch::state::SessionMap::new());
+
+        // 空表快照（catalog 只余 native 的前提）。
+        let empty = snapshot_domain(&router, "agents").await;
+        assert_eq!(
+            empty
+                .get("agents")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
+            Some(0)
+        );
+
+        let engine = sebas_dispatch::state_store::engine().expect("fixture engine");
+        sebas_dispatch::state_store::agents_mutation(
+            engine,
+            &serde_json::json!({
+                "op": "put",
+                "id": "cursor",
+                "agent": {"driver": "acp", "path": "cursor-agent", "args": ["acp"]},
+            }),
+        )
+        .await
+        .expect("agents put");
+
+        let snap = snapshot_domain(&router, "agents").await;
+        let rows = snap
+            .get("agents")
+            .and_then(serde_json::Value::as_array)
+            .expect("agents array");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["id"], "cursor");
+        assert_eq!(rows[0]["driver"], "acp");
+        assert_eq!(rows[0]["source"], "ui");
+
+        // 软删（墓碑）：活跃行从快照消失、id 进 deleted_ids——catalog union
+        // 据此把 config 侧同 id 条目一并排除（spec「删除后从 catalog 消失」）。
+        sebas_dispatch::state_store::agents_mutation(
+            engine,
+            &serde_json::json!({"op": "delete", "id": "cursor"}),
+        )
+        .await
+        .expect("agents delete");
+        let snap = snapshot_domain(&router, "agents").await;
+        assert_eq!(
+            snap.get("agents")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
+            Some(0),
+            "墓碑行不出现在活跃行里"
+        );
+        assert_eq!(
+            snap.get("deleted_ids")
+                .and_then(serde_json::Value::as_array)
+                .map(|a| a.len()),
+            Some(1)
+        );
+        assert_eq!(snap["deleted_ids"][0], "cursor");
+
+        // 同 id 重新 put = 复活：回到活跃行、墓碑清单清空。
+        sebas_dispatch::state_store::agents_mutation(
+            engine,
+            &serde_json::json!({
+                "op": "put",
+                "id": "cursor",
+                "agent": {"driver": "acp", "path": "cursor-agent", "args": ["acp"]},
+            }),
+        )
+        .await
+        .expect("agents put (resurrect)");
+        let snap = snapshot_domain(&router, "agents").await;
+        assert_eq!(
+            snap.get("agents")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
+            Some(1),
+            "put 复活墓碑行"
+        );
+        assert_eq!(
+            snap.get("deleted_ids")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
+            Some(0)
+        );
     }
 
     /// 管理面测试用的注册表句柄（不需要起监听）。

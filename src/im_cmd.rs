@@ -307,10 +307,12 @@ async fn load_card_config(
     cfg: &Config,
     secret: &crate::core_channel::secret::ChannelSecret,
 ) -> sebas_feishu::cards::CardConfig {
-    let payload = crate::core_channel::client::snapshot_domain_once(
+    let payload = crate::core_channel::client::snapshot_domain_with_retry(
         &crate::core_channel::socket_path(cfg),
         secret,
         "settings",
+        10,
+        std::time::Duration::from_millis(400),
     )
     .await;
     match payload {
@@ -326,7 +328,11 @@ async fn load_card_config(
                 cfg.card.clone()
             }
         },
-        _ => {
+        // null payload = core 在场但没有持久化过的 card_config——TOML [card]
+        // 本来就是引导值，静默采用，与 webui_cmd 同口径；「不可达」告警只留给
+        // 重试耗尽的 None（core 真不在）。
+        Some(_) => cfg.card.clone(),
+        None => {
             tracing::warn!("core 状态通道不可达；card 配置按 TOML [card] 引导值呈现");
             cfg.card.clone()
         }

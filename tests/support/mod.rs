@@ -361,9 +361,15 @@ impl Sandbox {
 
         // TOML basic strings reject bare backslashes — normalize to `/`
         // (Windows accepts forward slashes everywhere we touch files).
-        // channel_path is RELATIVE: children run with cwd = sandbox dir, so
-        // the unix socket never depends on the checkout depth (sun_path
-        // caps paths at 108 bytes — deep target/tests trees overflow).
+        // channel_path used to be RELATIVE (children run with cwd = sandbox
+        // dir), but `resolve_channel_path` joins it with
+        // `std::env::current_dir()` — and getcwd() RESOLVES the
+        // `shorten_socket_host` symlink back to the deep physical checkout,
+        // overflowing sun_path's 108-byte cap anyway (seen on
+        // /data/workbench/repos-ai/... checkouts). Write the ABSOLUTE
+        // sandbox-side path instead: when a short link is in play this is
+        // the short path, which the kernel checks verbatim (symlink
+        // resolution happens after the length check).
         let toml = format!(
             r#"[feishu]
 enabled = false
@@ -388,7 +394,7 @@ root = "{}"
 dir = "{}"
 
 [service.core]
-channel_path = "core-channel.sock"
+channel_path = "{}"
 
 [service.webui]
 enabled = true
@@ -396,7 +402,7 @@ host = "127.0.0.1"
 port = {webui_port}
 # auth 默认 true；API 断言沙箱一律免登录，显式关闭（webui 登录旅程由
 # testsuite-webui 专测）。开启形态的凭据走沙箱内 SEBAS_WEBUI_AUTH_DB +
-# env 引导 / webui-passwd，绝不落真实 ~/.sebas。
+# env 引导 / sebas auth add，绝不落真实 ~/.sebas。
 auth = false
 
 # router validate requires >=1 provider with a base_url; the debug `test`
@@ -416,6 +422,7 @@ usage_db = "{}"
             forward_slash(&path.join("downloads")),
             forward_slash(&path),
             forward_slash(&path.join("agents-skills")),
+            forward_slash(&channel_path),
             forward_slash(&usage),
         );
         std::fs::write(&config_path, &toml)
@@ -1341,6 +1348,112 @@ pub async fn spawn_stub_upstream(asked_model: Arc<tokio::sync::Mutex<Option<Stri
 
 fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
     hay.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Title-call stub upstream（add-agent-settings-and-session-titles 6.3 e2e）：
+/// answer any POST with a fixed Anthropic-shaped message whose text is
+/// `title_text`. The answer is HELD until `release` exists on disk (tests
+/// create it) — a deterministic in-flight window: the turn completes, operator
+/// labels land, all while the title call is still pending. Every request's
+/// request line, headers and body are appended as one NDJSON line to
+/// `journal` — assertions on the outbound title call (model, prompt,
+/// credentials) read it offline (written on request arrival, before the wait).
+/// Binds 127.0.0.1 on a probed free port; no external traffic.
+pub async fn spawn_title_stub_upstream(
+    title_text: &str,
+    release: PathBuf,
+    journal: PathBuf,
+) -> u16 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind title stub upstream");
+    let port = listener.local_addr().unwrap().port();
+    let title_text = title_text.to_string();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                continue;
+            };
+            let title_text = title_text.clone();
+            let release = release.clone();
+            let journal = journal.clone();
+            tokio::spawn(async move {
+                // Read until end of headers, then exactly content-length bytes
+                // (same discipline as spawn_stub_upstream).
+                let mut buf: Vec<u8> = Vec::new();
+                let mut chunk = [0u8; 8192];
+                let header_end = loop {
+                    if buf.len() >= chunk.len() * 4 {
+                        return;
+                    }
+                    let n = sock.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        return;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if let Some(pos) = find_subslice(&buf, b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&buf[..pos]).to_lowercase();
+                        let len: usize = headers
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse().ok())
+                            .unwrap_or(0);
+                        if buf.len() >= pos + 4 + len {
+                            break pos + 4 + len;
+                        }
+                    }
+                };
+                // NDJSON: request line, flattened headers, body (all inbound
+                // evidence in one line, written while the call is in flight).
+                let raw = String::from_utf8_lossy(&buf[..header_end]).to_string();
+                let request_line = raw.lines().next().unwrap_or_default().to_string();
+                let (headers, body_start) = match raw.find('{') {
+                    Some(pos) => (raw[..pos].replace("\r\n", " "), pos),
+                    None => (String::new(), raw.len()),
+                };
+                let body = raw[body_start..].trim().to_string();
+                {
+                    use std::io::Write as _;
+                    let mut f = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&journal)
+                        .expect("open title journal");
+                    writeln!(f, "{request_line}\t{headers}\t{body}").expect("append title journal");
+                }
+                // Hold the answer until the test releases it.
+                while !release.exists() {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                // Multi-line title text exercises the one-line sanitize end to
+                // end; leading/trailing blanks exercise the trim. serde_json
+                // builds the body so the embedded newlines stay ESCAPED (a raw
+                // control char would make the response unparseable — the real
+                // wire always carries escaped JSON).
+                let body = serde_json::json!({
+                    "id": "msg_title",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "stub-model",
+                    "content": [{"type": "text", "text": title_text}],
+                    "stop_reason": "end_turn",
+                    "stop_sequence": null,
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                })
+                .to_string();
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.write_all(body.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            });
+        }
+    });
+    port
 }
 
 /// Crude extractor for the first `"model":"…"` value in a JSON body —

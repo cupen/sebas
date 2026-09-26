@@ -559,13 +559,51 @@ pub async fn env_vars() -> Response {
     Json(json!({ "items": items })).into_response()
 }
 
-/// GET /api/agents — the agent catalog（workbench-agent-wire-fix 3.2），
-/// agent 可用性的唯一真源：每个配置的 agent 一行（id/display/reachable/
-/// cause?/version?）+ 内置内核 `"native"` 一行（可用性来自执行体自身的
-/// 凭据上报，与 ACP 的 binary 探测语义不同源，如实区分）。`driver` 是
-/// 配置层概念，不在响应中出现。
+/// GET /api/agents — the agent catalog（workbench-agent-wire-fix 3.2；
+/// add-agent-settings-and-session-titles 3.2 改 **union**）：agents 库全行
+/// （config 种子行与 Settings 创建行同权，store 是唯一权威——同 id 的 config
+/// 注册表条目被 store 行取代）+ config-only 条目（store 暂不可达时的降级
+/// 面）+ 内置内核 `"native"` 一行（可用性来自执行体自身的凭据上报，与 ACP
+/// 的 binary 探测语义不同源，如实区分）。每行探测 reachable/cause/version；
+/// `driver` 是配置层概念，不在响应中出现。
 pub async fn agent_kinds(State(state): State<WebUiState>) -> Response {
     let mut agents = state.agent_kinds.agent_kinds().await;
+    // store union：同 id store 行赢（config 只是种子源）；store 行按 id
+    // 字典序追加，保持确定性。core 不可达 / 快照带 error → 保留 config 面。
+    if let Some(snapshot) = state.backend.state_snapshot("agents").await
+        && snapshot.get("error").is_none()
+    {
+        let rows = snapshot
+            .get("agents")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let store_ids: std::collections::BTreeSet<String> = rows
+            .iter()
+            .filter_map(|r| r.get("id").and_then(serde_json::Value::as_str))
+            .map(str::to_string)
+            .collect();
+        // 墓碑 id：config 种子 agent 被 UI 删除后行以墓碑留存——config 侧
+        // 同 id 条目一并排除，否则删除在读取期被 union 并回（spec「删除后
+        // 从 catalog 消失」）。
+        let deleted_ids: std::collections::BTreeSet<String> = snapshot
+            .get("deleted_ids")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        agents.retain(|a| !store_ids.contains(&a.id) && !deleted_ids.contains(&a.id));
+        let mut sources: Vec<_> = rows
+            .iter()
+            .filter_map(crate::agent_kinds::source_from_store_item)
+            .collect();
+        sources.sort_by(|a, b| a.slug.cmp(&b.slug));
+        for src in &sources {
+            agents.push(crate::agent_kinds::discover_agent(src).await);
+        }
+    }
     let native = state
         .backend
         .execution_bodies()
@@ -2478,25 +2516,22 @@ fn session_event_to_frame(ev: SessionEvent) -> Option<WebUiEvent> {
 async fn recv_broadcast<T: Clone>(
     rx: &mut Option<tokio::sync::broadcast::Receiver<T>>,
 ) -> BroadcastRecv<T> {
-    loop {
-        match rx.as_mut() {
-            // 支路已停用（后端没有该流，或已因 Closed 置 None）：这一臂必须
-            // 永久挂起——返回值会被 select 臂当作「无事发生」立即再轮询，
-            // 退化成 100% CPU 忙等（首版实现的真实事故，测试抓出的）。
-            None => loop {
-                std::future::pending::<()>().await;
-            },
-            Some(r) => match r.recv().await {
-                Ok(ev) => return BroadcastRecv::Event(ev),
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    return BroadcastRecv::Lagged;
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    *rx = None;
-                    return BroadcastRecv::Closed;
-                }
-            },
-        }
+    // 无外层 loop：每条路径要么 return 要么永久挂起，循环体永远到不了
+    // 回边（clippy::never_loop，deny）。挂起语义必须保留——返回值会被
+    // select 臂当作「无事发生」立即再轮询，退化成 100% CPU 忙等（首版
+    // 实现的真实事故，测试抓出的）。
+    match rx.as_mut() {
+        None => loop {
+            std::future::pending::<()>().await;
+        },
+        Some(r) => match r.recv().await {
+            Ok(ev) => BroadcastRecv::Event(ev),
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => BroadcastRecv::Lagged,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                *rx = None;
+                BroadcastRecv::Closed
+            }
+        },
     }
 }
 

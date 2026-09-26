@@ -98,6 +98,10 @@ const apiMocks = vi.hoisted(() => ({
   usersSetRole: vi.fn(),
   usersSetEnabled: vi.fn(),
   usersDelete: vi.fn(),
+  agents: vi.fn(),
+  agentsCreate: vi.fn(),
+  agentsUpdate: vi.fn(),
+  agentsDelete: vi.fn(),
   skillsList: vi.fn(),
   skillDetail: vi.fn(),
   skillsDelete: vi.fn(),
@@ -147,6 +151,10 @@ vi.mock('../api/client.js', () => ({
     usersSetRole: apiMocks.usersSetRole,
     usersSetEnabled: apiMocks.usersSetEnabled,
     usersDelete: apiMocks.usersDelete,
+    agents: apiMocks.agents,
+    agentsCreate: apiMocks.agentsCreate,
+    agentsUpdate: apiMocks.agentsUpdate,
+    agentsDelete: apiMocks.agentsDelete,
     skillsList: apiMocks.skillsList,
     skillDetail: apiMocks.skillDetail,
     skillsDelete: apiMocks.skillsDelete,
@@ -200,6 +208,12 @@ beforeEach(() => {
   // 调用计数跨 test 累积会污染“未调用”断言（如 Services 不得调 /api/router），
   // 先清计数再装实现（clear 只清 calls，不动实现）。
   vi.clearAllMocks()
+  apiMocks.agents.mockResolvedValue({
+    agents: [
+      { id: 'native', display: 'Native Kernel', reachable: true },
+      { id: 'claude', display: 'claude', reachable: true },
+    ],
+  })
   apiMocks.router.mockResolvedValue({
     router: {
       listen: '127.0.0.1:8787',
@@ -364,6 +378,7 @@ describe('sebas-settings-modal sections', () => {
       'Appearance',
       'Services',
       'Models',
+      'Agents',
       'Skills',
       'Env Vars',
       'About',
@@ -407,7 +422,7 @@ describe('sebas-settings-modal sections', () => {
 
   it('renders no maintenance actions anywhere (restart-all and reset retired)', async () => {
     const el = await mount()
-    for (const index of [0, 1, 2, 3, 4, 5, 6]) {
+    for (const index of [0, 1, 2, 3, 4, 5, 6, 7]) {
       await goto(el, index)
       const buttons = waButtons(el).map((b) => b.textContent?.trim())
       expect(buttons).not.toContain('全部进程重启')
@@ -605,7 +620,7 @@ describe('sebas-settings-modal sections', () => {
 
   it('About section shows INSTANCE (overview items) above BUILD (/api/about)', async () => {
     const el = await mount()
-    await goto(el, 6)
+    await goto(el, 7)
     expect(el.section).toBe('about')
     expect(apiMocks.about).toHaveBeenCalled()
     expect(apiMocks.fsBrowseDirs).toHaveBeenCalled()
@@ -635,7 +650,7 @@ describe('sebas-settings-modal sections', () => {
 
   it('About INSTANCE no longer renders the default provider/model row or a Models jump link', async () => {
     const el = await mount()
-    await goto(el, 6)
+    await goto(el, 7)
     const text = el.shadowRoot!.textContent ?? ''
     // preselect-last-used-model 3.1：行已删除——无论配置与否都不渲染，
     // 跳转 Models 的链接随之消失（创建预选改 last-used 语义，该行只是
@@ -650,7 +665,7 @@ describe('sebas-settings-modal sections', () => {
 
   it('About carries the router-side provider count annotation, distinct from the Models registry (round5 4.3)', async () => {
     const el = await mount()
-    await goto(el, 6)
+    await goto(el, 7)
     const text = el.shadowRoot!.textContent ?? ''
     // 口径标注：About 的 Providers 是 router 侧计数（含 debug provider），
     // 与 Models 分区的注册表口径区分，两个数字不一一对应。
@@ -819,7 +834,7 @@ describe('split-env-vars-settings-section：Env Vars 分区（/api/env）', () =
     await settle(el)
     // 懒加载：未访问该分区前不拉取。
     expect(apiMocks.env).not.toHaveBeenCalled()
-    await goto(el, 5)
+    await goto(el, 6)
     expect(el.section).toBe('env-vars')
     expect(apiMocks.env).toHaveBeenCalledTimes(1)
     const rows = envRows(el)
@@ -849,7 +864,7 @@ describe('split-env-vars-settings-section：Env Vars 分区（/api/env）', () =
       ],
     })
     const el = await mount()
-    await goto(el, 5)
+    await goto(el, 6)
     const text = el.shadowRoot!.textContent ?? ''
     expect(text).not.toContain('super-secret-leak')
     expect(text).toContain('已设置')
@@ -870,7 +885,7 @@ describe('split-env-vars-settings-section：Env Vars 分区（/api/env）', () =
       ],
     })
     const el = await mount()
-    await goto(el, 5)
+    await goto(el, 6)
     const rows = envRows(el)
     expect(rows.length).toBe(1)
     expect(rows[0]!.querySelector('.value')?.textContent?.trim()).toBe('无法确定')
@@ -880,7 +895,7 @@ describe('split-env-vars-settings-section：Env Vars 分区（/api/env）', () =
   it('renders an inline error instead of an empty table when /api/env fails', async () => {
     apiMocks.env.mockRejectedValue(new ApiError(500, 'env listing exploded'))
     const el = await mount()
-    await goto(el, 5)
+    await goto(el, 6)
     const err = el.shadowRoot!.querySelector('.callout-error[role="alert"]')
     expect(err).toBeTruthy()
     expect(err!.textContent).toContain('env listing exploded')
@@ -893,7 +908,7 @@ describe('split-env-vars-settings-section：Env Vars 分区（/api/env）', () =
 describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
   /**
    * 导航序（默认 role=null 挂载）：generic(0) appearance(1) services(2)
-   * models(3) skills(4) env-vars(5) about(6)。本 describe 全用 index 4。
+   * models(3) agents(4) skills(5) env-vars(6) about(7)。本 describe 全用 index 5。
    */
   function skillRows(el: SebasSettingsModal): HTMLElement[] {
     return [...el.shadowRoot!.querySelectorAll<HTMLElement>('[data-testid="skill-row"]')]
@@ -904,7 +919,7 @@ describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
     await settle(el)
     // 懒加载：未访问该分区前不拉取。
     expect(apiMocks.skillsList).not.toHaveBeenCalled()
-    await goto(el, 4)
+    await goto(el, 5)
     expect(el.section).toBe('skills')
     expect(apiMocks.skillsList).toHaveBeenCalledTimes(1)
     const rows = skillRows(el)
@@ -921,7 +936,7 @@ describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
 
   it('clicking a row lazily loads the detail and renders sanitized markdown plus attachment list', async () => {
     const el = await mount()
-    await goto(el, 4)
+    await goto(el, 5)
     // 点开前不发详情请求。
     expect(apiMocks.skillDetail).not.toHaveBeenCalled()
     const beads = skillRows(el).find((r) => r.dataset.name === 'beads')!
@@ -945,7 +960,7 @@ describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
 
   it('never offers create or edit: toolbar carries only Refresh and Sync', async () => {
     const el = await mount()
-    await goto(el, 4)
+    await goto(el, 5)
     const buttons = waButtons(el).map((b) => b.textContent?.trim())
     expect(buttons).toContain('Refresh')
     expect(buttons).toContain('Sync')
@@ -959,7 +974,7 @@ describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
 
   it('delete confirm dialog states backend copies are cleaned at next Sync; confirming deletes and refreshes', async () => {
     const el = await mount()
-    await goto(el, 4)
+    await goto(el, 5)
     const callsBefore = apiMocks.skillsList.mock.calls.length
     skillRows(el)
       .find((r) => r.dataset.name === 'broken')!
@@ -997,7 +1012,7 @@ describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
 
   it('Sync renders a result panel with per-backend counts and the no-placement list', async () => {
     const el = await mount()
-    await goto(el, 4)
+    await goto(el, 5)
     waButtons(el)
       .find((b) => b.textContent?.trim() === 'Sync')!
       .click()
@@ -1020,8 +1035,8 @@ describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
   it('renders an inline error instead of an empty list when /api/skills fails', async () => {
     apiMocks.skillsList.mockRejectedValue(new ApiError(500, 'skills listing exploded'))
     const el = await mount()
+    await goto(el, 6)
     await goto(el, 5)
-    await goto(el, 4)
     const err = el.shadowRoot!.querySelector('.callout-error[role="alert"]')
     expect(err).toBeTruthy()
     expect(err!.textContent).toContain('skills listing exploded')
@@ -1031,7 +1046,7 @@ describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
 
   it('Refresh re-reads the store: on-disk additions appear, kept previews survive, vanished previews collapse', async () => {
     const el = await mount()
-    await goto(el, 4)
+    await goto(el, 5)
     // 打开 beads 预览（spec：refresh 后预览属于当前视图状态）。
     skillRows(el)
       .find((r) => r.dataset.name === 'beads')!
@@ -1053,8 +1068,9 @@ describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
     await settle(el)
 
     const rows = skillRows(el)
-    expect(rows.some((r) => r.dataset.name === 'git-cloned')).toBe(true, '新落盘条目出现')
-    expect(rows.some((r) => r.dataset.name === 'broken')).toBe(false, '已消失条目退场')
+    // 新落盘条目出现；已消失条目退场。
+    expect(rows.some((r) => r.dataset.name === 'git-cloned')).toBe(true)
+    expect(rows.some((r) => r.dataset.name === 'broken')).toBe(false)
     expect(el.shadowRoot!.querySelector('.provider-toolbar span.label')?.textContent).toContain(
       '2 skills in store',
     )
@@ -1076,7 +1092,7 @@ describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
   it('renders the empty-store placeholder instead of a list when the store has no entries', async () => {
     apiMocks.skillsList.mockResolvedValue({ skills: [] })
     const el = await mount()
-    await goto(el, 4)
+    await goto(el, 5)
     expect(el.shadowRoot!.querySelector('.provider-toolbar span.label')?.textContent).toContain(
       '0 skills in store',
     )
@@ -1090,7 +1106,7 @@ describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
 
   it('sync failure renders the inline error callout instead of a result panel and unsets busy', async () => {
     const el = await mount()
-    await goto(el, 4)
+    await goto(el, 5)
     apiMocks.skillsSync.mockRejectedValue(new ApiError(500, 'reconcile exploded'))
     waButtons(el)
       .find((b) => b.textContent?.trim() === 'Sync')!
@@ -1110,7 +1126,7 @@ describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
 
   it('preview surfaces a detail fetch failure inline instead of a skeleton', async () => {
     const el = await mount()
-    await goto(el, 4)
+    await goto(el, 5)
     apiMocks.skillDetail.mockRejectedValue(new ApiError(404, '仓里没有条目 "beads"'))
     skillRows(el)
       .find((r) => r.dataset.name === 'beads')!
@@ -1129,7 +1145,7 @@ describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
 
   it('invalid entry preview states the missing SKILL.md honestly (text null on the wire)', async () => {
     const el = await mount()
-    await goto(el, 4)
+    await goto(el, 5)
     apiMocks.skillDetail.mockResolvedValue({ name: 'broken', text: null, attachments: [] })
     skillRows(el)
       .find((r) => r.dataset.name === 'broken')!
@@ -1140,6 +1156,150 @@ describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
     const preview = el.shadowRoot!.querySelector('[data-testid="skill-preview"]')!
     expect(preview.textContent).toContain('SKILL.md 缺失')
     expect(preview.querySelector('.skills-md')).toBeNull()
+    el.remove()
+  })
+})
+
+/**
+ * Agents 分区（add-agent-settings-and-session-titles 5.1）。导航序（默认
+ * role=null 挂载）：generic(0) appearance(1) services(2) models(3)
+ * agents(4) skills(5) env-vars(6) about(7)。本 describe 全用 index 4。
+ */
+describe('add-agent-settings-and-session-titles：Agents 分区（/api/agents*）', () => {
+  /** 导航序（默认 role=null 挂载）：generic(0) appearance(1) services(2)
+   * models(3) agents(4) skills(5) env-vars(6) about(7)。 */
+  function agentRows(el: SebasSettingsModal): HTMLElement[] {
+    return [...el.shadowRoot!.querySelectorAll<HTMLElement>('[data-testid="agent-row"]')]
+  }
+
+  /** 按 label 找对话框（同一弹窗面里 provider 编辑器等对话框常驻 DOM，
+   * 必须 scoped 取按钮，避免误点同文案的别家按钮）。 */
+  function dialogByLabel(el: SebasSettingsModal, label: string): HTMLDialogElement {
+    const dlg = [
+      ...el.shadowRoot!.querySelectorAll<HTMLDialogElement>('wa-dialog'),
+    ].find((d) => d.getAttribute('label') === label)
+    expect(dlg, `dialog ${label} must exist`).toBeTruthy()
+    return dlg!
+  }
+
+  function waButtonsIn(root: Element): HTMLElement[] {
+    return [...root.querySelectorAll<HTMLElement>('wa-button')]
+  }
+
+  function setWaInput(el: SebasSettingsModal, label: string, value: string): void {
+    const input = [
+      ...el.shadowRoot!.querySelectorAll<HTMLInputElement>('wa-input'),
+    ].find((i) => i.getAttribute('label') === label)
+    expect(input, `wa-input ${label} must exist`).toBeTruthy()
+    input!.value = value
+    input!.dispatchEvent(new Event('input', { bubbles: true, composed: true }))
+  }
+
+  it('lazily loads the catalog on first visit; native is read-only with a builtIn badge and no actions', async () => {
+    const el = await mount()
+    await settle(el)
+    expect(apiMocks.agents).not.toHaveBeenCalled()
+    await goto(el, 4)
+    expect(el.section).toBe('agents')
+    expect(apiMocks.agents).toHaveBeenCalledTimes(1)
+    const native = el.shadowRoot!.querySelector('[data-testid="agent-row-native"]')
+    expect(native).toBeTruthy()
+    expect(native!.querySelector('[data-testid="agent-builtin-badge"]')?.textContent).toContain(
+      'builtIn',
+    )
+    // native 行不得有编辑/删除入口。
+    expect(native!.querySelector('button[title="Edit"]')).toBeNull()
+    expect(native!.querySelector('button[title="Delete"]')).toBeNull()
+    // store 行有编辑/删除入口。
+    const row = agentRows(el).find((r) => r.dataset['id'] === 'claude')!
+    expect(row.querySelector('button[title="Edit"]')).toBeTruthy()
+    expect(row.querySelector('button[title="Delete"]')).toBeTruthy()
+    el.remove()
+  })
+
+  it('create form submits the claude-shape payload with the typed id', async () => {
+    apiMocks.agentsCreate.mockResolvedValue({ created: 'myclaude' })
+    const el = await mount()
+    await goto(el, 4)
+    waButtons(el)
+      .find((b) => b.textContent?.includes('New agent'))!
+      .click()
+    await settle(el)
+    const dlg = dialogByLabel(el, 'New agent')
+    setWaInput(el, 'Agent id', 'myclaude')
+    // 形态下拉缺省 claude、路径预填 claude——直接保存。
+    const save = waButtonsIn(dlg).find((b) => b.textContent?.trim() === 'Save')!
+    save.click()
+    await settle(el)
+    expect(apiMocks.agentsCreate).toHaveBeenCalledWith('myclaude', {
+      driver: 'claude',
+      path: 'claude',
+      display: null,
+    })
+    el.remove()
+  })
+
+  it('create form rejects the reserved native id without a request', async () => {
+    const el = await mount()
+    await goto(el, 4)
+    waButtons(el)
+      .find((b) => b.textContent?.includes('New agent'))!
+      .click()
+    await settle(el)
+    setWaInput(el, 'Agent id', 'native')
+    const dlg = dialogByLabel(el, 'New agent')
+    waButtonsIn(dlg)
+      .find((b) => b.textContent?.trim() === 'Save')!
+      .click()
+    await settle(el)
+    expect(apiMocks.agentsCreate).not.toHaveBeenCalled()
+    expect(
+      el.shadowRoot!.querySelector('[data-testid="agent-form-error"]')!.textContent,
+    ).toContain('native')
+    el.remove()
+  })
+
+  it('edit defaults to keeping the launch definition and submits only the display change', async () => {
+    apiMocks.agentsUpdate.mockResolvedValue({ updated: 'claude' })
+    const el = await mount()
+    await goto(el, 4)
+    agentRows(el)
+      .find((r) => r.dataset['id'] === 'claude')!
+      .querySelector<HTMLElement>('button[title="Edit"]')!
+      .click()
+    await settle(el)
+    setWaInput(el, 'Display name (optional)', 'My Claude')
+    const dlg = dialogByLabel(el, 'Edit agent claude')
+    waButtonsIn(dlg)
+      .find((b) => b.textContent?.trim() === 'Save')!
+      .click()
+    await settle(el)
+    // 部分更新：只交 display（launch 定义保留存量——合并语义）。
+    expect(apiMocks.agentsUpdate).toHaveBeenCalledWith('claude', { display: 'My Claude' })
+    el.remove()
+  })
+
+  it('delete is a confirmed action and calls the DELETE endpoint on confirm', async () => {
+    apiMocks.agentsDelete.mockResolvedValue({ deleted: 'claude' })
+    const el = await mount()
+    await goto(el, 4)
+    agentRows(el)
+      .find((r) => r.dataset['id'] === 'claude')!
+      .querySelector<HTMLElement>('button[title="Delete"]')!
+      .click()
+    await settle(el)
+    // 确认弹窗打开、请求未发。
+    expect(apiMocks.agentsDelete).not.toHaveBeenCalled()
+    const dlg = dialogByLabel(el, 'Delete agent')
+    waButtonsIn(dlg)
+      .find((b) => b.textContent?.trim() === 'Delete')!
+      .click()
+    await settle(el)
+    expect(apiMocks.agentsDelete).toHaveBeenCalledWith('claude')
+    // 删除后目录刷新 + 成功提示。
+    expect(el.shadowRoot!.querySelector('[data-testid="agent-action"]')?.textContent).toContain(
+      '已删除',
+    )
     el.remove()
   })
 })
@@ -1908,6 +2068,7 @@ describe('add-webui-multiuser-rbac 5.3/5.4：Users 分区与角色裁剪', () =>
       'Services',
       'Users',
       'Models',
+      'Agents',
       'Skills',
       'Env Vars',
       'About',
@@ -1920,6 +2081,7 @@ describe('add-webui-multiuser-rbac 5.3/5.4：Users 分区与角色裁剪', () =>
       'Appearance',
       'Services',
       'Models',
+      'Agents',
       'Skills',
       'Env Vars',
       'About',
@@ -1943,6 +2105,7 @@ describe('add-webui-multiuser-rbac 5.3/5.4：Users 分区与角色裁剪', () =>
       'Appearance',
       'Services',
       'Models',
+      'Agents',
       'Skills',
       'Env Vars',
       'About',
@@ -2146,7 +2309,7 @@ describe('About / Services display defects (round3 4.3/4.4)', () => {
       default_agent_kind: 'claude',
     })
     const el = await mount()
-    await goto(el, 6)
+    await goto(el, 7)
     const row = [...el.shadowRoot!.querySelectorAll('dl.about-build .kv')].find((kv) =>
       kv.textContent?.includes('Rust toolchain'),
     )
@@ -2158,7 +2321,7 @@ describe('About / Services display defects (round3 4.3/4.4)', () => {
 
   it('About Rust toolchain shows the real value when present (4.3)', async () => {
     const el = await mount()
-    await goto(el, 6)
+    await goto(el, 7)
     const row = [...el.shadowRoot!.querySelectorAll('dl.about-build .kv')].find((kv) =>
       kv.textContent?.includes('Rust toolchain'),
     )

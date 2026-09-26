@@ -52,7 +52,7 @@ The system SHALL keep a channel-neutral outbound presentation model — the chan
 
 ### Requirement: Adapter registry
 
-The IM service SHALL maintain an adapter registry mapping channel names to their adapters; the core process SHALL NOT host IM adapters. A channel's adapter SHALL be active only when its configuration enables it; the registry SHALL be queryable for which channels are active and their health. Registering a new channel SHALL NOT require changing core session routing or domain types.
+Channel adapters SHALL be hosted by their channel frontends, and no frontend SHALL host another channel's adapters: the core process hosts only the `web` adapter (whose frontend is the WebUI) in its registry and SHALL NOT host IM adapters; the IM service hosts the IM adapters (Feishu) without hosting `web`. A channel's adapter SHALL be active only when its configuration enables it; a disabled channel's adapter is never constructed. Registering a new channel SHALL NOT require changing core session routing or domain types. (Reality note: today the registry abstraction lives in the core process for `web`; the IM service wires its concrete adapter directly, and there is no cross-process registry or health query — adding one is future work, not a current contract.)
 
 #### Scenario: disabled channel is absent from registry
 
@@ -62,4 +62,4 @@ The IM service SHALL maintain an adapter registry mapping channel names to their
 #### Scenario: feishu is one registered channel
 
 - **WHEN** feishu is enabled
-- **THEN** `feishu` is one active channel in the IM service's registry alongside `web` (whose frontend remains the WebUI), and removing feishu's adapter requires no change to core session routing
+- **THEN** `feishu` is an active channel whose adapter is hosted by the IM service, alongside `web` (whose adapter remains hosted in the core process for the WebUI), and removing feishu's adapter requires no change to core session routing

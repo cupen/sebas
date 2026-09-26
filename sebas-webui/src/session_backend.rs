@@ -842,6 +842,13 @@ impl SessionBackend for InProcessBackend {
                 let projects = engine.load_projects().await.ok()?;
                 Some(serde_json::json!({ "projects": projects }))
             }
+            // add-agent-settings-and-session-titles 1.4：agents 域与 core
+            // channel 服务端共用同一实现（快照形状 = AgentRow::snapshot_value
+            // ——活跃行 + 墓碑 id 清单，同一处定义防漂移）。
+            "agents" => {
+                let rows = engine.load_agents().await.ok()?;
+                Some(sebas_models::agent::AgentRow::snapshot_value(&rows))
+            }
             _ => None,
         }
     }
@@ -857,6 +864,7 @@ impl SessionBackend for InProcessBackend {
             "providers" => sebas_dispatch::state_store::providers_mutation(engine, &payload).await,
             "aliases" => sebas_dispatch::state_store::aliases_mutation(engine, &payload).await,
             "projects" => sebas_dispatch::state_store::project_mutation(engine, &payload).await,
+            "agents" => sebas_dispatch::state_store::agents_mutation(engine, &payload).await,
             other => Err(format!("unknown domain: {other}")),
         }
     }
@@ -1774,6 +1782,94 @@ mod tests {
         assert_eq!(backend.reachability().await, Reachability::Reachable);
         assert!(backend.snapshot().await.is_empty());
         assert!(backend.focused().await.is_none());
+    }
+
+    // ---- add-agent-settings-and-session-titles 1.4：agents 域双接线 ----
+    //
+    // InProcessBackend 半边：mutation → snapshot 往返、保留字段不回传也可
+    // 写、unknown domain 报错文案不变（与 core channel 服务端共用同一
+    // `agents_mutation` 实现，行为一致由「同一函数」保证，这里钉的是后端
+    // 的接线）。
+
+    #[tokio::test]
+    async fn in_process_backend_agents_snapshot_reflects_mutation() {
+        let _engine = sebas_dispatch::test_engine::install_fresh();
+        let map = sebas_dispatch::SessionMap::new();
+        let (router, _rx) = sebas_dispatch::DispatchHandle::new(map);
+        let backend = InProcessBackend::new(router);
+
+        // 空表快照 = 空 agents 数组（catalog 只余内置 native 的前提）。
+        let empty = backend.state_snapshot("agents").await.unwrap();
+        assert_eq!(
+            empty.get("agents").and_then(serde_json::Value::as_array).map(Vec::len),
+            Some(0)
+        );
+
+        backend
+            .state_mutate(
+                "agents",
+                serde_json::json!({
+                    "op": "put",
+                    "id": "opencode",
+                    "agent": {"driver": "acp", "path": "opencode", "args": ["acp"]},
+                }),
+            )
+            .await
+            .expect("agents put via in-process backend");
+
+        let snap = backend.state_snapshot("agents").await.unwrap();
+        let rows = snap
+            .get("agents")
+            .and_then(serde_json::Value::as_array)
+            .expect("agents array");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["id"], "opencode");
+        assert_eq!(rows[0]["driver"], "acp");
+        assert_eq!(rows[0]["source"], "ui");
+
+        // delete 走同一 seam；unknown domain 报错文案不变。
+        backend
+            .state_mutate("agents", serde_json::json!({"op": "delete", "id": "opencode"}))
+            .await
+            .expect("agents delete via in-process backend");
+        assert!(
+            backend
+                .state_mutate("agents", serde_json::json!({"op": "delete", "id": "opencode"}))
+                .await
+                .unwrap_err()
+                .contains("不存在")
+        );
+        assert_eq!(
+            backend.state_mutate("warp", serde_json::json!({})).await,
+            Err("unknown domain: warp".to_string()),
+            "unknown domain 报错文案保持原样"
+        );
+    }
+
+    #[tokio::test]
+    async fn in_process_backend_agents_put_rejects_native_and_bad_driver() {
+        let _engine = sebas_dispatch::test_engine::install_fresh();
+        let map = sebas_dispatch::SessionMap::new();
+        let (router, _rx) = sebas_dispatch::DispatchHandle::new(map);
+        let backend = InProcessBackend::new(router);
+
+        let native_err = backend
+            .state_mutate(
+                "agents",
+                serde_json::json!({"op": "put", "id": "native", "agent": {"driver": "acp", "path": "x"}}),
+            )
+            .await
+            .unwrap_err();
+        assert!(native_err.contains("native"), "{native_err}");
+
+        let driver_err = backend
+            .state_mutate(
+                "agents",
+                serde_json::json!({"op": "put", "id": "g", "agent": {"driver": "gemini", "path": "x"}}),
+            )
+            .await
+            .unwrap_err();
+        assert!(driver_err.contains("claude | acp"), "{driver_err}");
     }
 
     // 2.3 验收：fake 能驱动每个 trait 方法（无子进程 / socket）。

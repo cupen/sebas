@@ -314,7 +314,7 @@ fn validate_username(username: &str) -> Result<String, StoreError> {
 pub struct UserStore {
     conn: Mutex<Connection>,
     /// 新建/改密的默认迭代次数。生产 = [`PBKDF2_ITERATIONS`]；测试与工具
-    /// （webui-passwd --iterations 等潜在用途）可用 [`Self::open_with_iterations`]
+    /// （`sebas auth` 等潜在用途）可用 [`Self::open_with_iterations`]
     /// 调低提速。
     default_iterations: u32,
 }

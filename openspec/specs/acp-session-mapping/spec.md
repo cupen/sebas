@@ -31,8 +31,8 @@ When a session record has no ACP session id (legacy records, agents without a di
 - **THEN** the driver first attempts `session/load` with the routing id
 - **AND** if the agent rejects the load, a fresh session starts with a new routing id and `resumed` is `false` so the caller can inform the user the old conversation is gone
 
-#### Scenario: Load failure keeps the old mapping intact
+#### Scenario: Load failure re-addresses history to the fresh session
 
 - **WHEN** a resume attempts to load a conversation and the agent rejects it
 - **THEN** the session falls back to fresh with a new routing id
-- **AND** the original routing-id ↔ ACP-id mapping is archived in storage (preserved for inspection; no resume path re-addresses it by default)
+- **AND** the transcript stored under the old routing id is migrated (re-addressed) to the new routing id so the user-visible history is not lost, and the stale routing-id ↔ ACP-id mapping is replaced by the fresh session's record

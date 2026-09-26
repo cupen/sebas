@@ -219,7 +219,7 @@ The generic ACP driver SHALL parse the `configOptions` from a `session/new` or `
 
 ### Requirement: ACP model switch command
 
-The driver SHALL accept a session command to set the model and translate it to the standard ACP `session/set_config_option` (`configId = "model"`). A rejected value SHALL surface an explicit error; an agent without the method or option SHALL report the same explicit error.
+The generic ACP driver SHALL accept a session command to set the model and translate it to the standard ACP `session/set_config_option` (`configId = "model"`). A rejected value SHALL surface an explicit error; an agent without the method or option SHALL report the same explicit error. The Claude driver implements the same operator-facing semantic over its own control protocol (`set_model`), which has no failure receipt: the switch is reflected optimistically and superseded by the next wire frame carrying a model name (see acp-model-selection) — the explicit-error rule does not apply to that path.
 
 #### Scenario: SetModel issues set_config_option
 

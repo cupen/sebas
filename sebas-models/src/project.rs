@@ -343,6 +343,17 @@ pub fn set_project_default_agent(
     Ok(())
 }
 
+/// 清除引用某 agent 的项目默认（add-agent-settings-and-session-titles：
+/// 删除 agent 时不得留下悬空引用）。按值定位（非键列条件的非标准查询），
+/// 返回被清除的项目数。
+pub fn clear_default_agent_for(conn: &mut Connection, agent: &str) -> Result<usize, String> {
+    conn.execute(
+        "UPDATE projects SET default_agent = NULL WHERE default_agent = ?1",
+        sebas_db::rusqlite::params![agent],
+    )
+    .map_err(|e| format!("清除项目默认 agent {agent} 失败: {e}"))
+}
+
 /// 删除项目（按主键 path）。返回是否确有行被删。
 pub fn remove_project(conn: &mut Connection, path: &str) -> Result<bool, String> {
     ProjectRow::delete(conn, path).map_err(|e| format!("删除项目 {path} 失败: {e}"))

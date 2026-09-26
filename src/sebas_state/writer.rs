@@ -4,7 +4,7 @@
 //! open+sync、就绪信号——语义原样）。本模块把**域注册表**（哪几张表）交给
 //! actor——域 schema 事实留在域侧，actor 保持域无关。core 的两库各走一次
 //! open：[`StateWriter::start_settings`]（providers / model_aliases /
-//! settings）与 [`StateWriter::start_projects`]（projects / session_map），
+//! settings / agents）与 [`StateWriter::start_projects`]（projects / session_map），
 //! 各自独立的 WAL / `busy_timeout` / 注册表与版本戳（design D5）。
 
 use crate::sebas_state::repo::{PROJECTS_TABLES, SETTINGS_TABLES};
@@ -27,7 +27,8 @@ impl StateWriter {
         Self::start_settings(db_path)
     }
 
-    /// 启动 settings.db 写者线程（providers / model_aliases / settings）。
+    /// 启动 settings.db 写者线程（providers / model_aliases / settings /
+    /// agents）。
     /// 会自动打开/创建数据库并同步 schema (retire-schema-reset：原位保数据迁移)。
     /// 在同步完成前阻塞, 返回后 DB 已就绪。
     pub fn start_settings(db_path: std::path::PathBuf) -> Result<Self, String> {

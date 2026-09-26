@@ -106,8 +106,8 @@ throwaway webui on port 9879 with auth **disabled by default** (login-free GUI
 testing); `invoke testsuite-webui-sandbox --auth` turns auth on with the test
 account **admin / admin**, provisioned into the sandbox-local
 `SEBAS_WEBUI_AUTH_DB` (add-webui-multiuser-rbac) via
-`sebas webui-passwd --user admin --password-stdin` — the first user in a
-fresh user store defaults to the root role (`webui-passwd` only warns on
+`sebas auth add admin --password-stdin` — the first user in a
+fresh user store defaults to the root role (`sebas auth` only warns on
 passwords shorter than 8 chars; the interactive `--auth` login prompt is
 username `admin` + password `admin`). Ctrl-C stops it and deletes the sandbox
 dir. The same assembly serves
@@ -161,8 +161,8 @@ both live in tasks.py — the old `scripts/*sandbox*.sh` harnesses were removed
      the env var is only for explicitly simulating a wrong-secret refusal.
 
    Provisioning a WebUI login user (only needed when `auth` stays on):
-   either `sebas webui-passwd --user <name> [--password-stdin|--password]
-   [--role root|admin|member|viewer]` against the state-dir-derived
+   either `sebas auth add <name> [--role root|admin|member|viewer]
+   [--password-stdin|--password]` against the state-dir-derived
    `auth.db` (`SEBAS_WEBUI_AUTH_DB` overrides; first user defaults to root,
    later ones to member), or export `SEBAS_WEBUI_USER` + `SEBAS_WEBUI_PASSWORD`
    before starting the webui (bootstraps root at first start, idempotent on
@@ -273,6 +273,12 @@ addr=127.0.0.1:<port>`，router 侧用自定义 provider（`[provider.fake]` 哑
    work_dir = "<SB>/work"
    # args = ["--scenario", "thinking"]            # 键值形式示例
 
+   # add-agent-settings-and-session-titles：`[acp.agents.*]` 只是**种子源**——
+   # core 启动时把条目幂等导入状态库 agents 表（同 id 已存在则 Settings 管理的
+   # store 行赢）。agent 目录的增删改走 WebUI Settings → Agents（免重启生效），
+   # 不写回 config；沙箱里 store 行随 SEBAS_STATE_DIR 落 settings.db，删沙箱
+   # 目录即全清。
+
    # persist-session-map：`[dispatch] state_file` 已退休——会话映射落
    # 状态库（projects.db 的 session_map 表，随 SEBAS_STATE_DIR 派生），
    # 残留该键会在解析期以未知键报错。
@@ -300,7 +306,7 @@ addr=127.0.0.1:<port>`，router 侧用自定义 provider（`[provider.fake]` 哑
    auth = false             # 登录免了：零用户 + 默认开的 auth 会停在首启
                             # 设置页——沙箱内要么显式关，要么把用户库
                             # （状态目录下的 auth.db，SEBAS_WEBUI_AUTH_DB 可
-                            # 覆盖）建上户（webui-passwd / env 引导）
+                            # 覆盖）建上户（sebas auth add / env 引导）
 
    # [router] / [provider.*] 都是可选段——纯会话核心不写它们也能启动。
    # --debug 下省略 [provider.*] 也行：内置 test provider 在 parse 之后注入，

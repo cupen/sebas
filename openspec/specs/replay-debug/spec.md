@@ -39,14 +39,14 @@ write happens before any filtering or parsing.
 #### Scenario: filtered frames recorded
 
 - **WHEN** a non-owner message arrives while recording is on
-- **THEN** it is still dumped to disk even though the router drops it
+- **THEN** it is still dumped to disk even though the dispatch layer drops it
 
 ### Requirement: Replay invocation
 
 `sebas replay --dir <path>` (the flag's only option) SHALL load all `*.json`
 files (case-insensitive extension) from the directory in lexical filename
 order — which preserves capture order given the timestamp-prefixed names —
-and dispatch them sequentially into a fresh router. A missing directory is
+and dispatch them sequentially into a fresh dispatch engine (a fresh `DispatchHandle` over an empty session map). A missing directory is
 a hard error. The run prints the count of successfully dispatched frames.
 
 #### Scenario: ordered dispatch
@@ -72,7 +72,7 @@ warning.
 #### Scenario: same event shape as live
 
 - **WHEN** a captured owner text event is replayed
-- **THEN** the router dispatches the same neutral `ChannelEvent` the live
+- **THEN** the engine dispatches the same neutral `ChannelEvent` the live
   adapter produced, and exercises the same engine routing for it
 
 #### Scenario: blank slate per run
@@ -109,9 +109,9 @@ recorder operator's responsibility.
 
 ### Requirement: Side-effect boundary
 
-Replay SHALL be side-effect-free beyond in-memory router state: it
+Replay SHALL be side-effect-free beyond in-memory engine state: it
 constructs no Feishu client (no tokens, no network calls), spawns no ACP
-child, and starts no server. The router's outbound instructions are emitted
+child, and starts no server. The engine's outbound instructions are emitted
 into a channel whose receiver is held but never consumed — the live-only
 dispatch pump that performs Feishu/ACP side effects does not exist in
 replay. All state mutations are discarded when the process exits.

@@ -7,6 +7,11 @@ app_secret = ""
 # Agent 接入（[acp.agents.<name>]）：
 #   driver = "claude"  → Claude Code CLI（stream-json + control protocol）
 #   driver = "acp"     → 任意支持 Agent Client Protocol v1 的 CLI（opencode/gemini…）
+#
+# 本段只是**种子源**（add-agent-settings-and-session-titles）：core 启动时把
+# 这里的条目幂等导入状态库 agents 表（同 id 已存在则以 Settings 管理的行
+# 为准、本段被忽略）。之后 agent 目录的增删改在 WebUI Settings → Agents
+# 进行（免重启生效），不写回本文件。
 [acp.agents.claude]
 driver = "claude"
 # 附加 CLI 参数必须用键值形式（`--flag value`；fix-webui-qa-defects 6.2）。
@@ -90,7 +95,7 @@ driver = "claude"
 # auth = true          # 登录鉴权开关。开启（默认）= 全部 /api 与 /ws 需登录：
 #                      #   零用户首启走 WebUI 设置页引导建 root（loopback），
 #                      #   或事先用 SEBAS_WEBUI_USER + SEBAS_WEBUI_PASSWORD
-#                      #   环境变量 / `sebas webui-passwd --user <name>`
+#                      #   环境变量 / `sebas auth add <name>`
 #                      #   建户（用户库默认 ~/.sebas/auth.db，env
 #                      #   SEBAS_WEBUI_AUTH_DB 覆盖）。
 #                      # false = 全路由免登录（仅测试用）；host 非 loopback

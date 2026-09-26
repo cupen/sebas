@@ -435,6 +435,72 @@ describe('sebas-dashboard (workbench main area)', () => {
     el.remove()
   })
 
+  it('names the focused header by the rail chain, not the raw id slice (7.1)', async () => {
+    // add-agent-settings-and-session-titles 7.1：聚焦头部与 rail 行同走
+    // fullSessionLabel 链（label → 首条消息预览 → 短 id → 键尾段）——任一
+    // 命名来源在场时不裸显 session_id 截片；title 带全文。
+    apiMocks.summary.mockResolvedValue({
+      ...focusedSummary(),
+      recent_sessions: [
+        row({
+          encoded_key: 'oc_live%00',
+          chat_id: 'chat-live',
+          session_id: 'aaaaaaaa-0009',
+          session_id_short: 'aaaa0009',
+          label: '重构计划',
+          prompt_preview: 'do the thing',
+        }),
+      ],
+    })
+    apiMocks.session.mockResolvedValue(detailFixture())
+    const el = await mount()
+    // 等会话列表与聚焦详情两条取数链都落定（data.recent_sessions 就位）。
+    for (let i = 0; i < 5; i++) {
+      await new Promise((r) => setTimeout(r, 10))
+      await el.updateComplete
+    }
+    const name = el.shadowRoot!.querySelector<HTMLElement>('[data-testid="session-head-name"]')
+    expect(name).toBeTruthy()
+    expect(name!.textContent?.trim()).toBe('重构计划')
+    expect(name!.getAttribute('title')).toBe('重构计划')
+    el.remove()
+
+    // 无 label → 首条消息预览顶上。
+    apiMocks.summary.mockResolvedValue({
+      ...focusedSummary(),
+      recent_sessions: [
+        row({
+          encoded_key: 'oc_live%00',
+          chat_id: 'chat-live',
+          session_id: 'aaaaaaaa-0009',
+          session_id_short: 'aaaa0009',
+          label: null,
+          prompt_preview: 'do the thing',
+        }),
+      ],
+    })
+    const el2 = await mount()
+    for (let i = 0; i < 5; i++) {
+      await new Promise((r) => setTimeout(r, 10))
+      await el2.updateComplete
+    }
+    const name2 = el2.shadowRoot!.querySelector<HTMLElement>('[data-testid="session-head-name"]')
+    expect(name2!.textContent?.trim()).toBe('do the thing')
+    el2.remove()
+
+    // 行不可得（列表尚未就位）→ 保留 id 截片保底（零信息场景）。
+    apiMocks.summary.mockResolvedValue({ ...focusedSummary(), recent_sessions: [] })
+    const el3 = await mount()
+    for (let i = 0; i < 5; i++) {
+      await new Promise((r) => setTimeout(r, 10))
+      await el3.updateComplete
+    }
+    const name3 = el3.shadowRoot!.querySelector<HTMLElement>('[data-testid="session-head-name"]')
+    expect(name3!.textContent?.trim()).toBe('aaaaaaaa-000'.slice(0, 12))
+    expect(name3!.getAttribute('title')).toBe('aaaaaaaa-0009')
+    el3.remove()
+  })
+
   it('gives no session model dropdown when the agent exposes none', async () => {
     apiMocks.summary.mockResolvedValue(focusedSummary())
     const el = await mount()
@@ -1902,6 +1968,87 @@ describe('fresh placeholder first exchange never badges (round3 6.1)', () => {
     await el.updateComplete
     // 锚 = max(服务端段数 2, 本地已渲染 2) = 2：首交换不产生 seam/徽标水位。
     expect(JSON.parse(localStorage.getItem(anchorKey)!)).toEqual({ anchor_count: 2 })
+    const seam = (transcript as unknown as { shadowRoot: ShadowRoot }).shadowRoot.querySelector('.seam')
+    expect(seam?.hasAttribute('hidden')).toBe(true)
+    el.remove()
+  })
+})
+
+describe('fresh placeholder first exchange via live streaming (fix-unread-fresh-exchange)', () => {
+  // GUI 真实时序的 dashboard 级钉（session-unread-badge「first focused
+  // exchange of a fresh placeholder」）：创建写锚 0 → 空详情（登记）→
+  // composer 提交后的乐观重取只含 [prompt]（transcript 以 0 可见段挂载）
+  // → 回复经 turn.append 到达。锚必须在回复的到达帧**同步**推进——徽章水位
+  // （msg_count − 锚）恒 0、seam 从未画出——不依赖 250ms 防抖窗或后续重取。
+  const KEY = 'oc_live%00'
+  const anchorKey = `sebas:seen:${KEY}`
+
+  beforeEach(() => {
+    localStorage.removeItem(anchorKey)
+  })
+  afterEach(() => {
+    localStorage.removeItem(anchorKey)
+  })
+
+  it('prompt-only 挂载后回复经 turn.append 到达：锚即时推进，seam 不画', async () => {
+    // rail confirmNewSession 的创建即写锚 0（「创建即见过」基线）。
+    writeFocusAnchor(KEY, 0)
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    apiMocks.session.mockResolvedValue({ ...detailFixture(), msg_count: 0, entries: [] })
+    const el = await mount()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    // 空态在场：transcript 未挂载，dashboard 侧空流登记已完成。
+    expect(el.shadowRoot!.querySelector('.empty-stream')).toBeTruthy()
+    expect(el.shadowRoot!.querySelector('sebas-transcript-view')).toBeNull()
+
+    // composer 提交完成（composer-sent → loadFocused）：此刻服务端只有 prompt。
+    apiMocks.session.mockResolvedValue({
+      ...detailFixture(),
+      msg_count: 0,
+      turn_engaged: true,
+      entries: [
+        {
+          position: 0,
+          kind: 'prompt',
+          element_type: 'markdown',
+          content: 'hello',
+          created_at_unix: 1_700_000_000,
+        },
+      ],
+    })
+    ;(el as unknown as { onComposerSent: () => void }).onComposerSent()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    const transcript = el.shadowRoot!.querySelector('sebas-transcript-view')
+    expect(transcript).toBeTruthy()
+
+    // 回复流式到达（turn.append：dashboard 合并与 transcript 自身订阅同帧）。
+    wsMocks.emit({
+      type: 'turn.append',
+      session_id: KEY,
+      seq: 2,
+      entries: [
+        {
+          position: 1,
+          kind: 'content',
+          element_type: 'thinking',
+          content: 'hmm',
+          created_at_unix: 1_700_000_100,
+        },
+        {
+          position: 2,
+          kind: 'content',
+          element_type: 'markdown',
+          content: 'hello world',
+          created_at_unix: 1_700_000_100,
+        },
+      ],
+    })
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    // 到达帧同步结算：锚 = 已渲染段数 1（= msg_count，徽章水位 0）。
+    expect(JSON.parse(localStorage.getItem(anchorKey)!)).toEqual({ anchor_count: 1 })
     const seam = (transcript as unknown as { shadowRoot: ShadowRoot }).shadowRoot.querySelector('.seam')
     expect(seam?.hasAttribute('hidden')).toBe(true)
     el.remove()

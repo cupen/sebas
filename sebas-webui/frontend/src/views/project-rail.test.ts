@@ -9,7 +9,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { api, type Project, type SessionRow } from '../api/client.js'
-import { ANCHOR_ADVANCED_EVENT, readAnchorCount, writeFocusAnchor } from './unread-cursor.js'
+import { readAnchorCount, writeFocusAnchor } from './unread-cursor.js'
 import './project-rail.js'
 import {
   SebasProjectRail,

@@ -42,7 +42,7 @@ import {
   saveLastUsedPair,
   type ModelCatalog,
 } from '../api/model-catalog.js'
-import { MODE_OPTIONS } from './mode-vocabulary.js'
+import { MODE_DEFAULT_LABEL, MODE_OPTIONS } from './mode-vocabulary.js'
 import '@awesome.me/webawesome/dist/components/dialog/dialog.js'
 import '@awesome.me/webawesome/dist/components/select/select.js'
 import '@awesome.me/webawesome/dist/components/option/option.js'
@@ -362,8 +362,8 @@ export class SebasNewSessionDialog extends LitElement {
 
           <!-- 权限 mode（3.2，D5b）：预填 Ask，wire 无条件发送——四个控制面
                词都是一等值。（4.1）选项词汇来自共享 MODE_OPTIONS，与 composer
-               面板同源渲染；首项空值 = 历史「agent 默认」条目，选中即落显式
-               ask（this.mode 非空）。 -->
+               面板同源渲染；（7.2）空值首项同样来自共享词汇（原为重复的
+               硬编码「默认（逐次询问）」）。 -->
           <wa-select
             label="Permission mode"
             aria-label="Permission mode"
@@ -374,7 +374,7 @@ export class SebasNewSessionDialog extends LitElement {
               this.mode = (e.target as HTMLSelectElement).value || 'ask'
             }}
           >
-            <wa-option value="">默认（逐次询问）</wa-option>
+            <wa-option value="">${MODE_DEFAULT_LABEL}</wa-option>
             ${MODE_OPTIONS.map((m) => html`<wa-option value=${m.value}>${m.label}</wa-option>`)}
           </wa-select>
           ${this.error

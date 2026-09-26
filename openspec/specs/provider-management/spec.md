@@ -385,7 +385,8 @@ with different model lists, and a preset's own list is never modified by a provi
 The provider management page SHALL let the operator mark a provider as the
 default for new sessions and pick that provider's default model, and SHALL
 show which provider and model are currently the default. Setting the default
-SHALL persist across restarts (router-side, alongside the provider store) and
+SHALL persist across restarts (core-side, in the core state store alongside
+the provider data) and
 SHALL NOT alter any existing session's model. Clearing the default SHALL
 return new sessions to the execution body's built-in default.
 
@@ -393,7 +394,7 @@ return new sessions to the execution body's built-in default.
 
 - **WHEN** the operator marks provider `glm` with model `m2` as the default
 - **THEN** the page shows `glm` / `m2` as the current default, and the value
-  survives a router restart
+  survives a core restart
 
 #### Scenario: existing sessions are untouched
 

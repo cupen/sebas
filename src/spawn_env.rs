@@ -558,16 +558,55 @@ pub fn inherited_provider_env_posture(
     inherited_uncovered_provider_env(&extra_env, |k| std::env::var(k).ok())
 }
 
-/// core/webui 启动接线（close-acceptance-blind-spots 2.2）：存在未覆盖的
-/// 继承变量 → WARN 一条、逐变量点名「继承自 shell、将在 Claude 子进程生效」；
-/// covering 模式全覆盖时完全静默。只报告不篡改——env 的实际传递行为归
-/// claude-env-cover 管，这里只补可观测性（design D1）。
+/// core 启动接线（close-acceptance-blind-spots 2.2）：存在未覆盖的继承变量
+/// → WARN 一条、逐变量点名「继承自 shell、将在 Claude 子进程生效」；covering
+/// 模式全覆盖时完全静默。只报告不篡改——env 的实际传递行为归 claude-env-cover
+/// 管，这里只补可观测性（design D1）。
 ///
-/// core 侧在 state store 初始化之后调用（provider 解析走库权威）；webui 侧
-/// 无状态库，`provider_state::load()` 自行按文件降级读取。
+/// **只在 core 进程调用**（run.rs，state store 初始化之后——provider 解析
+/// 走库权威）。webui 侧用 [`warn_inherited_provider_env_via_channel`]：无引擎
+/// 进程走 [`provider_state::load`](sebas_dispatch::provider_state::load) 会在
+/// 每次启动打出误导性的「state store engine 未初始化」告警（state_store spec：
+/// unavailability is reported, not hidden——报告给真正读库的读者）。
 pub fn warn_inherited_provider_env(router_cfg: Option<&RouterConfig>) {
     let state = sebas_dispatch::provider_state::load();
-    let uncovered = inherited_provider_env_posture(&state, router_cfg);
+    report_env_posture(router_cfg, &state);
+}
+
+/// webui 侧的同一份 posture 报告：本进程无状态库（引擎归 core），provider
+/// 真相经核心状态通道的 `providers` 域快照读取（有界重试覆盖 core 的启动
+/// 窗口）；通道不可达时按空状态呈现——继承变量照常点名，不冒充库权威，
+/// 也绝不触发「state store engine 未初始化」的本地降级告警。
+pub async fn warn_inherited_provider_env_via_channel(
+    router_cfg: Option<&RouterConfig>,
+    path: &std::path::Path,
+    secret: &crate::core_channel::secret::ChannelSecret,
+) {
+    let state = match crate::core_channel::client::snapshot_domain_with_retry(
+        path,
+        secret,
+        "providers",
+        10,
+        std::time::Duration::from_millis(400),
+    )
+    .await
+    {
+        Some(v) if !v.is_null() => {
+            match serde_json::from_value::<sebas_dispatch::state_store::PersistedState>(v) {
+                Ok(persisted) => ProviderRuntimeState::from(&persisted),
+                Err(e) => {
+                    tracing::warn!(error = %e, "providers 域快照解析失败；env posture 按空状态呈现");
+                    ProviderRuntimeState::default()
+                }
+            }
+        }
+        _ => ProviderRuntimeState::default(),
+    };
+    report_env_posture(router_cfg, &state);
+}
+
+fn report_env_posture(router_cfg: Option<&RouterConfig>, state: &ProviderRuntimeState) {
+    let uncovered = inherited_provider_env_posture(state, router_cfg);
     if uncovered.is_empty() {
         return;
     }

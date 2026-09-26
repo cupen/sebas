@@ -2,7 +2,7 @@
 
 ## Purpose
 
-以能力×旅程矩阵为账本的全功能验收套件：对全部能力（30 个、247 条 requirement）维护"关键功能是否被验收命中"的全局账；核心功能集（五簇：agent workbench 相关、项目管理、会话管理、models 管理、通道与监督）命中 ≥90% 为唯一硬指标，其余能力矩阵可见不设门槛，测不了的面以豁免清单明示，并提供一键复跑入口。
+以能力×旅程矩阵为账本的全功能验收套件：对仓库主 specs 的全部能力维护"关键功能是否被验收命中"的全局账（能力数与 requirement 数以 `tests/acceptance/COVERAGE.md` 的复核记录为准，规格正文不固定具体基数）；核心功能集（五簇：agent workbench 相关、项目管理、会话管理、models 管理、通道与监督）命中 ≥90% 为唯一硬指标，其余能力矩阵可见不设门槛，测不了的面以豁免清单明示，并提供一键复跑入口。
 
 ## Requirements
 
@@ -83,12 +83,12 @@
 
 ### Requirement: native 链路验收策略
 
-native 内核链路 SHALL 先经 spike 验证沙箱内 `SEBAS_AGENT_ROUTER_URL → debug router` 通路（in-process 形态）：可通则 native 旅程用例纳入套件；不可通则该面转豁免并把 cause 与证据记入矩阵。detached 形态的 native 验收 MUST 等 `wire-webui-sebas-agent-e2e` 落地后补入，此前不计缺口。
+native 内核旅程 SHALL 以 in-process 沙箱形态（`SEBAS_AGENT_ROUTER_URL → debug router` 通路）纳入套件（`wire-webui-sebas-agent-e2e` 已落地，native 旅程用例已入账；detached 形态的 native 验收以既有豁免/缺口标注管理，不为本 requirement 的前置）。矩阵 SHALL 记录该用例 id 与其命中的 native 相关条目；后续新增 native 旅程（如 detached 形态）按「验收矩阵账本」同步更新。
 
-#### Scenario: spike 结论入账
+#### Scenario: native 旅程入账
 
-- **WHEN** native 通路 spike 完成
-- **THEN** 矩阵中 native 相关条目标注为"已纳入（用例 id）"或"豁免（cause=通路不可通，证据…）"
+- **WHEN** 审阅验收矩阵
+- **THEN** native 相关条目标注为"已纳入"并引用套件内旅程用例 id，不再以 spike 过程叙事作为规约
 
 ### Requirement: 套件运行预算
 
@@ -121,3 +121,31 @@ native 内核链路 SHALL 先经 spike 验证沙箱内 `SEBAS_AGENT_ROUTER_URL �
 
 - **WHEN** 该旅程全程运行
 - **THEN** 不发生任何真实模型调用（节点 agent 为 EchoBody 桩）
+
+### Requirement: 工作台验收载体 = 内置 test 模型
+
+涉及 agent 回合的工作台行为验收（旅程级、进程级与浏览器级）SHALL 以 router 内置 debug `test` 模型的场景模型为标准 LLM 载体：正文、thinking、工具环、权限流、零输出、长文流式、错误呈现等形状一律由 `test/<scenario>` 驱动，而非真实凭据或独立 fake 上游进程。fake 上游与真实上游 journey SHALL 保留，但其职责限定为**拨号透传路径**的验收（header 过滤、key 注入、SSE 透传、限流/用量结算），不承担工作台行为验收。`fake-claude` 桩在浏览器级继续作为其驱动器专属契约（ACP 驱动行为）的权威，其 LLM 形状类用例按账本节奏向 test 模型迁移。载体切换 SHALL NOT 降低覆盖口径：核心五簇账本（`tests/acceptance/COVERAGE.md`）保持 100% 硬指标——证据可以随载体更换重指，requirement 分母与命中率口径不变；账本 SHALL 记录本次载体定向作为变更说明。
+
+#### Scenario: 工作台旅程由 test 模型驱动
+
+- **WHEN** 一条涉及 agent 回合的工作台验收旅程被编写或改写
+- **THEN** 其 LLM 响应来自 `test/<scenario>` 场景模型
+- **AND** 旅程不依赖真实凭据、真实上游或额外 fake 进程
+
+#### Scenario: 拨号路径 journey 职责不变
+
+- **WHEN** 验收对象是 router→上游的透传链路（header 过滤、SSE 透传、限流）
+- **THEN** 该 journey 继续使用 fake 上游（或 fake-provider）
+- **AND** 不被本要求改写为 test 模型
+
+#### Scenario: 载体切换不降低覆盖口径
+
+- **WHEN** 一条既有 journey 的 LLM 载体从 fake 上游或真实凭据换为 test 模型
+- **THEN** 其命中的 requirement 在账本中的证据被重指到新 journey
+- **AND** 核心五簇的 requirement 分母与 100% 命中率口径不变
+
+#### Scenario: 账本记录载体定向
+
+- **WHEN** 载体定向落地
+- **THEN** `COVERAGE.md` 的账本规则段记录「工作台行为验收 = test 模型」及其日期
+- **AND** 核心集增删说明段落载本次定向

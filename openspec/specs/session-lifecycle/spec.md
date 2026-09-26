@@ -169,23 +169,31 @@ The system SHALL enforce a configured maximum number of concurrent sessions. Spa
 
 ### Requirement: Restart recovery with corruption tolerance
 
-On daemon start, the system SHALL restore the persisted session map: a missing or empty file yields an empty table; a valid file restores all entries as Dormant; a corrupt file is quarantined (renamed aside) and the daemon starts with an empty table — the daemon SHALL never refuse to start over session-map state. On daemon shutdown, the snapshot SHALL be written before sessions are killed.
+On daemon start, the system SHALL restore the persisted session map from the state store: an empty store yields an empty table; restored entries become Dormant. Session-map entries SHALL be written per mutation, so that an unclean exit preserves every committed mapping and shutdown ordering no longer decides what survives. The daemon SHALL never refuse to start because of session-map state itself: a session map whose entries cannot be read is reported honestly and the daemon starts with an empty table. A state store that cannot be opened at all is governed by the state store's corruption rule and SHALL NOT be reset or recreated by session-map recovery.
 
 #### Scenario: Corrupt session map is quarantined
 
-- **WHEN** the persisted session map file contains invalid JSON at startup
-- **THEN** the file is renamed to a quarantine name
+- **WHEN** the persisted session-map entries cannot be read at startup
+- **THEN** the unreadable data is set aside rather than presented as valid, with the reason logged
 - **AND** the daemon starts with an empty session table
+- **AND** a store that cannot be opened at all follows the state store's corruption rule instead (refuse to start with a diagnostic, never reset)
 
 #### Scenario: Missing file starts empty
 
-- **WHEN** the session map file does not exist at startup
+- **WHEN** no persisted session map exists at startup
 - **THEN** the daemon starts with an empty table and no error
 
 #### Scenario: Snapshot precedes shutdown kill
 
-- **WHEN** the daemon shuts down
-- **THEN** the session map snapshot is written to disk before any session process is killed
+- **WHEN** the daemon shuts down while sessions are active
+- **THEN** every mapping committed before shutdown is already durable in the state store
+- **AND** shutdown ordering cannot lose a mapping, because no shutdown-time snapshot is required to persist it
+
+#### Scenario: Unclean exit keeps the mapping
+
+- **WHEN** the daemon is killed without a graceful shutdown while sessions are active
+- **THEN** after restart the session map contains every mapping committed before the kill
+- **AND** it does not depend on a snapshot having been written at the last graceful shutdown
 
 ### Requirement: Pending submissions are observable and manageable
 
@@ -260,3 +268,52 @@ While one session is working, the workbench SHALL present other sessions' startu
 
 - **WHEN** a session's spawn fails and the operator focuses or submits to it
 - **THEN** the workbench states the failure reason inline at the composer and the submission surface allows retry
+
+### Requirement: Session map is persisted per mutation
+
+Each committed change to a session's mapping SHALL be durable in the state store before it is observable to clients, so that an abrupt process exit cannot roll a mapping back to an earlier state. The session map SHALL NOT be persisted only at shutdown.
+
+#### Scenario: A committed mapping survives a kill
+
+- **WHEN** a session is created and its mapping is observable to a client, and the daemon is then killed immediately
+- **THEN** after restart the mapping is present with the same session identity and desired mode
+
+#### Scenario: Rolling back a mapping is not observable
+
+- **WHEN** a mapping change is committed and a client then reads the session map
+- **THEN** the read reflects the committed change
+- **AND** a subsequent abrupt exit does not revert it
+
+### Requirement: Session state vocabulary is shared and closed
+
+The session state vocabulary — the session phase reported by the control plane and by an execution node, and the session mode (`desired` / `effective`) — SHALL be carried by a single shared definition rather than by ad-hoc strings redeclared per layer. The set of accepted values SHALL be closed and their spellings SHALL be fixed: the control plane and the execution node SHALL agree on one value set even though each emits only the subset valid for its own role. An unrecognized value received from a peer SHALL NOT fail deserialization, drop the message, or close the connection; it SHALL be carried as an explicitly-marked unknown value. The user-facing status shown by each channel surface SHALL be derived from the phase by a type-checked mapping, never by matching on string literals.
+
+#### Scenario: Both sides share one value set with fixed spellings
+
+- **WHEN** the control plane reports a session phase and an execution node reports the same session's phase
+- **THEN** both values come from the same shared definition
+- **AND** every value retains the exact spelling it had before this vocabulary was typed (including hyphenated forms such as the spawn-failure phase)
+
+#### Scenario: An unknown phase from a newer peer is tolerated
+
+- **WHEN** a peer sends a phase value this build does not know
+- **THEN** the message is still accepted and the session remains observable
+- **AND** the value is surfaced as an unknown phase rather than causing a deserialization failure or a dropped frame
+
+#### Scenario: Adding a phase value cannot silently miss a handler
+
+- **WHEN** a new phase value is added to the shared definition
+- **THEN** every consumer that branches on the phase fails to compile until it handles the new value
+- **AND** no consumer relies on a string comparison that would silently take a default branch instead
+
+#### Scenario: Display status is derived, not string-matched
+
+- **WHEN** a channel surface renders a session's status for the user
+- **THEN** the status is produced by mapping the shared phase value to the presentation status
+- **AND** a phase whose presentation mapping is missing is a compile-time omission, not a silently wrong label
+
+#### Scenario: Session mode crosses every layer as one type
+
+- **WHEN** a session's desired or effective mode is read, set, or forwarded through the channel, the node link, or the web UI request surface
+- **THEN** it is carried as the shared mode type rather than as a free-form string
+- **AND** an unrecognized mode from a peer is tolerated as an unknown mode instead of being rejected
