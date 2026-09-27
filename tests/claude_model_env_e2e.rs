@@ -146,7 +146,7 @@ async fn drain_until<F: Fn(&AcpEvent) -> bool>(
 ///
 /// 不存在「env 算对了但 child 没拿到」的失败模式（SDK 把 extra_env 拼进
 /// Command::envs，理论上必到）——但理论上的事情就是要拿真进程验证一次。
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn direct_provider_injects_endpoint_and_5_key_cover_env_into_claude_child() {
     let _g = ENV_LOCK.lock().unwrap();
     let journal_path = journal("cover_env");
@@ -289,7 +289,7 @@ async fn direct_provider_injects_endpoint_and_5_key_cover_env_into_claude_child(
 /// "deepseek-v4-pro"，但 fake-claude 跑 hello 场景时 set_model("opus")
 /// 切完下一回合报 "opus"；切回 "default" 时 fake 的 init 帧 "fake" 覆盖
 /// 乐观值（D5 自愈）。
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn set_model_after_cover_env_takes_effect_from_next_turn() {
     let _g = ENV_LOCK.lock().unwrap();
     let journal_path = journal("set_model_under_cover");
