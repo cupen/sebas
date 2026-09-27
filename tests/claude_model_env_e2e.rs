@@ -23,14 +23,15 @@ use sebas_acp::claude::manager::SessionManager;
 use sebas_acp::claude::session::{AcpCommand, AcpEvent};
 use sebas_acp::claude::ClaudeCodeDriver;
 use sebas_dispatch::provider_state::{ProviderMode, ProviderRuntimeState};
-use sebas_dispatch::state_store::DefaultSelection;
+use sebas_dispatch::state_store::{DefaultSelection, PersistedState};
+use sebas_dispatch::test_engine;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
 
-/// 串行化所有与 `state_store` / `SEBAS_ROUTER_PROVIDER_OVERLAY` 相关的
-/// 全局副作用（与 `src/spawn_env.rs` 测试同惯例）。env var 跨进程可见，
-/// 并发跑会让别的测试误读错的值。
+/// 串行化所有 env 读写（api key 变量跨进程可见，并发跑会让别的测试误读
+/// 错的值；与 `src/spawn_env.rs` 测试同惯例）。状态库隔离由 test_engine
+/// 的全局串行锁自理。
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn workspace_target() -> PathBuf {
@@ -74,50 +75,44 @@ fn wait_meta_env(journal_path: &PathBuf) -> serde_json::Value {
     );
 }
 
-/// 写一个临时 overlay 文件覆盖 `state_store::load()` 的查找路径，再 export
-/// provider 用的 API key 环境变量。RAII guard 在析构时还原全局 env 状态。
-struct EnvGuard {
-    _dir: tempfile::TempDir,
-    prev_overlay: Option<String>,
+/// 装一个预置 provider 条目的内存状态引擎（retire-legacy-state-json 3.4：
+/// provider 目录只认状态库，overlay 文件与 `SEBAS_ROUTER_PROVIDER_OVERLAY`
+/// env 已退休），再 export provider 用的 API key 环境变量。RAII guard 在
+/// 析构时还原 env 并清空引擎（`EngineGuard` 自带的全局串行锁与 ENV_LOCK
+/// 互不冲突——前者只锁引擎安装，后者锁 env）。
+struct FixtureGuard {
+    _engine_guard: test_engine::EngineGuard,
     api_key_env: String,
 }
 
-impl EnvGuard {
-    fn new(provider: &str, api_key_env: &str, api_key_value: &str, overlay_body: &str) -> Self {
+impl FixtureGuard {
+    fn new(provider: &str, api_key_env: &str, api_key_value: &str, provider_body: &str) -> Self {
         // `provider` is documentation for the call site — asserts that
-        // overlay_body actually names it (catches copy-paste typos).
+        // provider_body actually names it (catches copy-paste typos).
         assert!(
-            overlay_body.contains(&format!("\"{provider}\"")),
-            "overlay body must mention provider {provider:?}"
+            provider_body.contains(&format!("\"{provider}\"")),
+            "provider body must mention provider {provider:?}"
         );
-        let dir = tempfile::tempdir().expect("tempdir");
-        let overlay_path = dir.path().join("providers.json");
-        std::fs::write(&overlay_path, overlay_body).expect("write overlay");
-        let prev_overlay = std::env::var("SEBAS_ROUTER_PROVIDER_OVERLAY").ok();
+        let item: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(provider_body).expect("provider item JSON");
+        let mut state = PersistedState::default();
+        state.providers.insert(provider.to_string(), item);
+        let (_, guard) = test_engine::install_fresh_with(state);
         // SAFETY: ENV_LOCK held across the whole test body.
         unsafe {
-            std::env::set_var(
-                "SEBAS_ROUTER_PROVIDER_OVERLAY",
-                overlay_path.to_str().unwrap(),
-            );
             std::env::set_var(api_key_env, api_key_value);
         }
         Self {
-            _dir: dir,
-            prev_overlay,
+            _engine_guard: guard,
             api_key_env: api_key_env.to_string(),
         }
     }
 }
 
-impl Drop for EnvGuard {
+impl Drop for FixtureGuard {
     fn drop(&mut self) {
         // SAFETY: ENV_LOCK held across the whole test body.
         unsafe {
-            match &self.prev_overlay {
-                Some(v) => std::env::set_var("SEBAS_ROUTER_PROVIDER_OVERLAY", v),
-                None => std::env::remove_var("SEBAS_ROUTER_PROVIDER_OVERLAY"),
-            }
             std::env::remove_var(&self.api_key_env);
         }
     }
@@ -165,24 +160,20 @@ async fn direct_provider_injects_endpoint_and_5_key_cover_env_into_claude_child(
     };
     // preset = "deepseek" 让 compute_provider_resolution 从内置预设拿
     // base_url_anthropic；models 自定义覆盖（preset 默认 models 也行，
-    // 这里用自定义短列表 + 显式能力标注保证映射稳定）。
-    // Overlay 形状必须包 `providers` 顶层键（state_store::OverlayWire
-    // 只 deserialize 这个 key；裸 `{deepseek: …}` 会被静默丢空）。
-    let _env_guard = EnvGuard::new(
+    // 这里用自定义短列表保证映射稳定）。
+    // 条目按状态库 provider 表形状（一 provider 一 Item），由
+    // install_fresh_with 预置进内存引擎。
+    let _env_guard = FixtureGuard::new(
         "deepseek",
         "DEEPSEEK_API_KEY",
         "sk-test-deepseek",
         r#"{
-            "providers": {
-                "deepseek": {
-                    "preset": "deepseek",
-                    "api_key_env": "DEEPSEEK_API_KEY",
-                    "models": [
-                        {"id": "deepseek-v4-pro"},
-                        {"id": "deepseek-v4-flash"}
-                    ]
-                }
-            }
+            "preset": "deepseek",
+            "api_key_env": "DEEPSEEK_API_KEY",
+            "models": [
+                {"id": "deepseek-v4-pro"},
+                {"id": "deepseek-v4-flash"}
+            ]
         }"#,
     );
 
@@ -304,21 +295,17 @@ async fn set_model_after_cover_env_takes_effect_from_next_turn() {
     let journal_path = journal("set_model_under_cover");
     let _ = std::fs::remove_file(&journal_path);
 
-    let _env_guard = EnvGuard::new(
+    let _env_guard = FixtureGuard::new(
         "deepseek",
         "DEEPSEEK_API_KEY",
         "sk-test-deepseek",
         r#"{
-            "providers": {
-                "deepseek": {
-                    "preset": "deepseek",
-                    "api_key_env": "DEEPSEEK_API_KEY",
-                    "models": [
-                        {"id": "deepseek-v4-pro"},
-                        {"id": "deepseek-v4-flash"}
-                    ]
-                }
-            }
+            "preset": "deepseek",
+            "api_key_env": "DEEPSEEK_API_KEY",
+            "models": [
+                {"id": "deepseek-v4-pro"},
+                {"id": "deepseek-v4-flash"}
+            ]
         }"#,
     );
 
