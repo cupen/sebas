@@ -55,6 +55,10 @@ export class ErrorCollector {
       // user-delete-error), not network silence.
       if (text.includes('409') && /\/api\/users$/.test(url)) return
       if (text.includes('400') && /\/api\/users\//.test(url)) return
+      // Intentional agents-guard rejection (agents journey): recreating an
+      // existing agent id answers 409 BY DESIGN — the journey asserts the
+      // honest inline copy (agent-form-error), not network silence.
+      if (text.includes('409') && /\/api\/agents$/.test(url)) return
       // Intentional typed-rejection probe (5.2 release journey): deciding a
       // parked request that a stop already released answers 404 on the
       // review-card's own POST — the card honestly degrades to expired.

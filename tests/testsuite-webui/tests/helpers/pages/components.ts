@@ -349,15 +349,17 @@ export class SettingsModal {
   /**
    * Switch to a settings section by its nav label; waits for load to settle.
    * Order is the spec (settings-modal SECTIONS): Generic → Appearance →
-   *〔分隔线〕Services · Users(仅 root) → Models · Skills →〔压底分隔线〕Env
-   * Vars · About. The former Settings overview and standalone Env sections
-   * are gone; split-env-vars-settings-section 迁出的 Env 表住底部只读组
-   * 「Env Vars」；Skills 为 add-agent-skills 5.2 新增（Models 之后）。
+   *〔分隔线〕Services · Users(仅 root) → Models · Agents · Skills →
+   *〔压底分隔线〕Env Vars · About. The former Settings overview and
+   * standalone Env sections are gone; split-env-vars-settings-section 迁出的
+   * Env 表住底部只读组「Env Vars」；Agents 为 add-agent-settings-and-session-
+   * titles 5.1 新增（Models 之后）。
    */
   async openSection(
     label:
       | 'Generic'
       | 'Models'
+      | 'Agents'
       | 'Skills'
       | 'Services'
       | 'Users'
