@@ -245,6 +245,18 @@ export interface ProviderAdmin {
   model_map?: Record<string, string> | null
 }
 
+/** （fix-webui-qa-findings M7）config.toml 种子 provider 行（Models 页只读视图）。 */
+export interface ConfigSeededProvider {
+  name: string
+  preset?: string | null
+  base_url_anthropic: string | null
+  base_url_openai_chat: string | null
+  base_url_openai_responses: string | null
+  source: 'config'
+  editable: false
+  /** store 已有同名行 = store 赢（运行时权威），config 行仅存档语义。 */
+  also_in_store: boolean
+}
 /** /api/provider-presets 的条目（内置 preset 表只读视图，跟随代码）。 */
 export interface ProviderPreset {
   name: string
@@ -462,10 +474,24 @@ export interface SessionList {
   active_session_key: string | null
 }
 
+/**
+ * （fix-webui-qa-findings M9）Rust toolchain 探测三态：`ok`（版本在
+ * `version`）/ `missing`（未安装）/ `error`（探测失败，`cause` 说明）。
+ * About 据此区分「没装」与「没探测到」，不再显示裸「未知」。
+ */
+export interface ToolchainProbe {
+  state: 'ok' | 'missing' | 'error'
+  version?: string
+  cause?: string
+}
+
 export interface About {
   uptime: string
   version: string
-  rustc_version: string
+  /** （M9）运行时探测的 toolchain 三态。 */
+  rustc: ToolchainProbe
+  /** 编译期要求的最低 Rust 版本（构建门槛，与运行时探测是两个语义）。 */
+  rustc_required: string
   router_listen: string | null
   provider_count: number
   /**
@@ -1158,7 +1184,8 @@ export const api = {
     ),
 
   // Provider 管理（BFF → core 状态库；preset 表跟随代码）。
-  providers: () => get<{ providers: ProviderAdmin[] }>('/api/providers'),
+  providers: () =>
+    get<{ providers: ProviderAdmin[]; config_providers?: ConfigSeededProvider[] }>('/api/providers'),
   /**
    * （workbench-conversation-view 4.1）默认 provider/model 预选数据。数据
    * 真源是 core 状态库（BFF 经状态 seam 读）；未设置 → 双 null；core 不可达

@@ -670,6 +670,29 @@ describe('submit control state machine (4.3, design D4)', () => {
     expect(stateOf(el)).toBe('disabled')
   })
 
+  it('accepted cancel flips the control to the pending「停止中…」state before any agent output (fix-webui-qa-findings D3)', async () => {
+    const el = await mount({ ...focus, turnInFlight: true })
+    const btn = () =>
+      el.shadowRoot?.querySelector('[data-testid="submit-control"]') as HTMLButtonElement
+    expect(stateOf(el)).toBe('stop')
+    btn().click()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    // cancel 被服务端受理即翻 pending-cancel「停止中…」：即时确认，不等
+    // agent 的下一帧输出（spec「点击停止即时有反馈」）。
+    expect(api.cancelSession).toHaveBeenCalledWith('web%00web-1')
+    expect(stateOf(el)).toBe('stopping')
+    expect(btn().getAttribute('aria-label')).toBe('停止中…')
+    // 静默期里仍可点击重发 cancel（幂等受理，不伪装成不可达）。
+    btn().click()
+    await new Promise((r) => setTimeout(r, 0))
+    expect(api.cancelSession).toHaveBeenCalledTimes(2)
+    // 回合终态到达（turnInFlight 翻 false）→ pending 形态复位。
+    el.turnInFlight = false
+    await el.updateComplete
+    expect(stateOf(el)).toBe('disabled')
+  })
+
   it('streaming with text offers the queued affordance; submitting enqueues via sendMessage', async () => {
     const el = await mount({ ...focus, turnInFlight: true })
     await type(el, 'line up behind the turn')

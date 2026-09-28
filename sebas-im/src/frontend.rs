@@ -1428,6 +1428,7 @@ mod tests {
             parked_approvals: 0,
             label: None,
             available_commands: Vec::new(),
+            first_prompt_preview: None,
         };
         fe.on_session_info(info.clone()).await;
         {
@@ -1670,6 +1671,7 @@ mod tests {
             parked_approvals: 0,
             label: None,
             available_commands: Vec::new(),
+            first_prompt_preview: None,
         })
         .await;
         fe.perm_cards
@@ -1869,6 +1871,7 @@ mod tests {
             parked_approvals: 0,
             label: None,
             available_commands: Vec::new(),
+            first_prompt_preview: None,
         }
     }
 

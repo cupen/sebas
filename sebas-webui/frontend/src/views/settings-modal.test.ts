@@ -93,6 +93,7 @@ const apiMocks = vi.hoisted(() => ({
   restartService: vi.fn(),
   fsBrowseDirs: vi.fn(),
   usersList: vi.fn(),
+  authMe: vi.fn(),
   usersCreate: vi.fn(),
   usersSetPassword: vi.fn(),
   usersSetRole: vi.fn(),
@@ -146,6 +147,7 @@ vi.mock('../api/client.js', () => ({
     restartService: apiMocks.restartService,
     fsBrowseDirs: apiMocks.fsBrowseDirs,
     usersList: apiMocks.usersList,
+    authMe: apiMocks.authMe,
     usersCreate: apiMocks.usersCreate,
     usersSetPassword: apiMocks.usersSetPassword,
     usersSetRole: apiMocks.usersSetRole,
@@ -266,6 +268,9 @@ beforeEach(() => {
   apiMocks.usersSetRole.mockResolvedValue({ status: 'ok' })
   apiMocks.usersSetEnabled.mockResolvedValue({ status: 'ok' })
   apiMocks.usersDelete.mockResolvedValue({ status: 'ok' })
+  // （fix-webui-qa-findings OB2）默认身份 = 非列表内用户：无自指行，
+  // 危险控件不因 self 误禁；自指用例在各自 describe 覆写。
+  apiMocks.authMe.mockResolvedValue({ enabled: true, authenticated: true, username: 'someone-else' })
   // Skills 分区（add-agent-skills 5.2）默认桩：两个有效条目 + 一个 invalid。
   apiMocks.skillsList.mockResolvedValue({
     skills: [
@@ -323,7 +328,8 @@ beforeEach(() => {
   apiMocks.about.mockResolvedValue({
     uptime: '3h 12m',
     version: '0.4.2',
-    rustc_version: '1.88',
+    rustc: { state: 'ok', version: 'rustc 1.88.0 (hash)' },
+    rustc_required: '1.90',
     router_listen: '127.0.0.1:8787',
     provider_count: 2,
     default_agent_kind: 'claude',
@@ -2299,11 +2305,12 @@ describe('no horizontal overflow in the settings modal (polish-workbench-walkthr
 // ── fix-webui-qa-defects-round3：About 空值兜底（4.3）+ 命令名不断行（4.4）──
 
 describe('About / Services display defects (round3 4.3/4.4)', () => {
-  it('About Rust toolchain falls back to 未知 when the build-time inject is empty (4.3)', async () => {
+  it('About toolchain：探测失败时点名成因，不再显示裸「未知」（fix-webui-qa-findings M9）', async () => {
     apiMocks.about.mockResolvedValue({
       uptime: '3h 12m',
       version: '0.4.2',
-      rustc_version: '',
+      rustc: { state: 'error', cause: 'rustc 不在 PATH' },
+      rustc_required: '1.90',
       router_listen: '127.0.0.1:8787',
       provider_count: 2,
       default_agent_kind: 'claude',
@@ -2314,18 +2321,38 @@ describe('About / Services display defects (round3 4.3/4.4)', () => {
       kv.textContent?.includes('Rust toolchain'),
     )
     expect(row).toBeTruthy()
-    // 构建期注入失败 = 「未知」，不再渲染空值行。
-    expect(row!.querySelector('dd')!.textContent!.trim()).toBe('未知')
+    // 探测失败 = 「探测失败（成因）」，不是裸「未知」。
+    expect(row!.querySelector('[data-testid="about-toolchain"]')!.textContent).toContain('探测失败')
+    expect(row!.querySelector('[data-testid="about-toolchain"]')!.textContent).toContain('rustc 不在 PATH')
     el.remove()
   })
 
-  it('About Rust toolchain shows the real value when present (4.3)', async () => {
+  it('About toolchain：探测成功显示版本（fix-webui-qa-findings M9）', async () => {
     const el = await mount()
     await goto(el, 7)
     const row = [...el.shadowRoot!.querySelectorAll('dl.about-build .kv')].find((kv) =>
       kv.textContent?.includes('Rust toolchain'),
     )
-    expect(row!.querySelector('dd')!.textContent!.trim()).toBe('1.88')
+    expect(row!.querySelector('[data-testid="about-toolchain"]')!.textContent).toContain('rustc 1.88.0')
+    el.remove()
+  })
+
+  it('About toolchain：未安装显示「未安装」而非「未知」（fix-webui-qa-findings M9）', async () => {
+    apiMocks.about.mockResolvedValue({
+      uptime: '3h 12m',
+      version: '0.4.2',
+      rustc: { state: 'missing', cause: '未安装（找不到 rustc 可执行文件）' },
+      rustc_required: '1.90',
+      router_listen: '127.0.0.1:8787',
+      provider_count: 2,
+      default_agent_kind: 'claude',
+    })
+    const el = await mount()
+    await goto(el, 7)
+    const row = [...el.shadowRoot!.querySelectorAll('dl.about-build .kv')].find((kv) =>
+      kv.textContent?.includes('Rust toolchain'),
+    )
+    expect(row!.querySelector('[data-testid="about-toolchain"]')!.textContent).toContain('未安装')
     el.remove()
   })
 

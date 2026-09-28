@@ -68,6 +68,7 @@ import {
   type AgentLaunchPayload,
   type EnvVarEntry,
   type ProviderAdmin,
+  type ConfigSeededProvider,
   type ProviderPreset,
   type ProviderPayload,
   type ProviderModelEntry,
@@ -300,6 +301,12 @@ export class SebasSettingsModal extends LitElement {
     null
   /** 删除确认（error 就地承载最后-root/自删保护文案）。 */
   @state() private userDelete: { id: number; username: string; error: string } | null = null
+  /**
+   * （fix-webui-qa-findings OB2）当前登录用户名：对自己行的危险控件
+   * （降权/禁用/删除）呈禁用态——双闸的前端半边，服务端 40x 兜底不变；
+   * 自助改密（🔑）不受影响。
+   */
+  @state() private selfUsername: string | null = null
   // ---- Skills 分区（add-agent-skills 5.2，/api/skills*）----
   /** 仓内条目列表；null = 尚未加载或加载失败（skillsError 置位、内联错误态）。 */
   @state() private skills: SkillEntry[] | null = null
@@ -352,6 +359,8 @@ export class SebasSettingsModal extends LitElement {
   @state() private rootCopied = false
   /** provider 管理面（/api/providers + /api/provider-presets）。 */
   @state() private adminProviders: ProviderAdmin[] | null = null
+  /** （fix-webui-qa-findings M7）config.toml 种子 provider 行（本页只读）。 */
+  @state() private configProviders: ConfigSeededProvider[] = []
   @state() private adminError = ''
   @state() private presets: ProviderPreset[] | null = null
   /**
@@ -658,6 +667,24 @@ export class SebasSettingsModal extends LitElement {
       background: var(--sebas-accent-soft);
       border-color: var(--sebas-accent-border);
       color: var(--sebas-accent);
+    }
+    /* （fix-webui-qa-findings M7）config 种子行的来源章与两来源说明。 */
+    .provider-badge.config {
+      background: var(--sebas-surface-2);
+      border-color: var(--sebas-border);
+      color: var(--sebas-text-dim);
+    }
+    .provider-source-note {
+      margin: var(--sebas-space-2) 0 0;
+      font-size: 0.75rem;
+      line-height: 1.5;
+      color: var(--sebas-text-faint);
+    }
+    /* （fix-webui-qa-findings M9）About toolchain 行的编译门槛注记。 */
+    .toolchain-required {
+      margin-left: var(--sebas-space-2);
+      font-size: 0.7rem;
+      color: var(--sebas-text-faint);
     }
     .provider-key {
       flex: 0 0 auto;
@@ -1462,6 +1489,15 @@ export class SebasSettingsModal extends LitElement {
    * 渲染空表假象；401 仍由全局未授权钩子接管（会话过期回登录页）。
    */
   private loadUsers(): void {
+    // （OB2）当前身份随用户列表一并刷新（auth 未启用时为 null，无自指行）。
+    api
+      .authMe()
+      .then((me) => {
+        this.selfUsername = me.authenticated ? (me.username ?? null) : null
+      })
+      .catch(() => {
+        this.selfUsername = null
+      })
     this.usersError = ''
     api
       .usersList()
@@ -1795,10 +1831,12 @@ export class SebasSettingsModal extends LitElement {
       .providers()
       .then((d) => {
         this.adminProviders = d.providers
+        this.configProviders = d.config_providers ?? []
       })
       .catch((e) => {
         this.adminError = e instanceof ApiError ? e.message : String(e)
         this.adminProviders = []
+        this.configProviders = []
       })
     if (this.presets === null) {
       api
@@ -1818,6 +1856,7 @@ export class SebasSettingsModal extends LitElement {
       .providers()
       .then((d) => {
         this.adminProviders = d.providers
+        this.configProviders = d.config_providers ?? []
       })
       .catch((e) => {
         this.adminError = e instanceof ApiError ? e.message : String(e)
@@ -2190,7 +2229,7 @@ export class SebasSettingsModal extends LitElement {
         ? html`
             <div class="panel panel-pad">
               <div class="skel-row"><div class="skel skel-line" style="width:60%"></div></div>
-              <div class="skel-row"><div class="skel skel-line" style="width:40%"></div></div>
+              <div class="skel skel-line" style="width:40%"></div></div>
             </div>
           `
         : html`
@@ -2198,8 +2237,15 @@ export class SebasSettingsModal extends LitElement {
               ${providers.length === 0
                 ? html`<div class="provider-row-empty">No providers configured.</div>`
                 : providers.map((p) => this.renderProviderRow(p))}
+              ${this.configProviders.map((c) => this.renderConfigProviderRow(c))}
             </div>
           `}
+      <p class="provider-source-note" data-testid="provider-source-note">
+        列表分两类：store 行（可编辑，配置存于状态库）与 config 行
+        （<code>config.toml</code> 的 <code>[provider.*]</code> 种子，本页只读，
+        编辑请改配置文件后重启）。New-session 目录的模型来自会话上报的
+        configOptions 与别名表，与这里的 provider 集合同源（按会话能力呈现）。
+      </p>
     `
   }
 
@@ -2256,6 +2302,27 @@ export class SebasSettingsModal extends LitElement {
     `
   }
 
+  /**
+   * （fix-webui-qa-findings M7）config.toml 种子 provider 行：只读 + 来源
+   * 标注——config 行 governing 会话行为时不再从 Models 页「隐身」。与
+   * store 同名的行标注 store 赢（运行时权威）；无编辑/删除/默认按钮，
+   * 编辑引导写在行内。
+   */
+  private renderConfigProviderRow(c: ConfigSeededProvider) {
+    const url = c.base_url_anthropic ?? c.base_url_openai_chat ?? c.base_url_openai_responses
+    return html`
+      <div class="provider-row config-seeded" data-testid="config-provider-row">
+        <div class="provider-row-main">
+          <span class="provider-row-name">${c.name}</span>
+          <span class="provider-badge config" data-testid="provider-source-badge">config.toml · 只读</span>
+          ${c.also_in_store
+            ? html`<span class="provider-badge preset">store 同名行生效中</span>`
+            : nothing}
+          <span class="provider-row-url" title=${url ?? ''}>${url ?? 'no base url'}</span>
+        </div>
+      </div>
+    `
+  }
   /**
    * Agents 分区（add-agent-settings-and-session-titles 5.1）：agent 目录
    * 管理。builtIn `native` 行只读恒在（spec「built-in `native` kernel …
@@ -3066,10 +3133,16 @@ export class SebasSettingsModal extends LitElement {
     `
   }
 
-  /** 单个用户行：用户名 / 角色徽标 / 启用态 / 创建时间 + 行内动作。 */
+  /**
+   * 单个用户行：用户名 / 角色徽标 / 启用态 / 创建时间 + 行内动作。
+   * （fix-webui-qa-findings OB2）自己的行：角色下拉、启停、删除禁用
+   * （带成因 title），🔑 改密保留——自锁防护的前端半边。
+   */
   private renderUserRow(u: UserRecord) {
+    const isSelf = this.selfUsername !== null && u.username === this.selfUsername
+    const selfGuardTitle = '不能对自己行执行该操作（自锁防护）'
     return html`
-      <div class="provider-row" data-testid="user-row" data-username=${u.username}>
+      <div class="provider-row" data-testid="user-row" data-username=${u.username} data-self=${isSelf ? "true" : "false"}>
         <div class="provider-row-main">
           <span class="provider-row-name">${u.username}</span>
           <span class="provider-badge ${u.role === 'root' ? 'preset' : ''}">${u.role}</span>
@@ -3082,7 +3155,8 @@ export class SebasSettingsModal extends LitElement {
               class="user-role"
               aria-label="Role of ${u.username}"
               value=${u.role}
-              ?disabled=${this.userBusy}
+              ?disabled=${this.userBusy || isSelf}
+              title=${isSelf ? selfGuardTitle : nothing}
               @change=${(e: Event) =>
                 void this.setUserRole(u, (e.target as HTMLSelectElement).value as Role)}
             >
@@ -3091,16 +3165,16 @@ export class SebasSettingsModal extends LitElement {
             ${u.enabled
               ? html`<button
                   class="row-action"
-                  title="Disable user"
-                  ?disabled=${this.userBusy}
+                  title=${isSelf ? selfGuardTitle : "Disable user"}
+                  ?disabled=${this.userBusy || isSelf}
                   @click=${() => void this.setUserEnabled(u, false)}
                 >
                   ■
                 </button>`
               : html`<button
                   class="row-action"
-                  title="Enable user"
-                  ?disabled=${this.userBusy}
+                  title=${isSelf ? selfGuardTitle : "Enable user"}
+                  ?disabled=${this.userBusy || isSelf}
                   @click=${() => void this.setUserEnabled(u, true)}
                 >
                   ▶
@@ -3115,8 +3189,8 @@ export class SebasSettingsModal extends LitElement {
             </button>
             <button
               class="row-action danger"
-              title="Delete user"
-              ?disabled=${this.userBusy}
+              title=${isSelf ? selfGuardTitle : "Delete user"}
+              ?disabled=${this.userBusy || isSelf}
               @click=${() => this.openUserDelete(u)}
             >
               🗑
@@ -3225,7 +3299,14 @@ export class SebasSettingsModal extends LitElement {
         </div>
         <div class="kv">
           <dt>Rust toolchain</dt>
-          <dd>${a.rustc_version || '未知'}</dd>
+          <dd data-testid="about-toolchain">
+            ${a.rustc?.state === 'ok'
+              ? a.rustc.version
+              : a.rustc?.state === 'missing'
+                ? `未安装（${a.rustc.cause ?? '找不到 rustc'}）`
+                : `探测失败（${a.rustc?.cause ?? '未知原因'}）`}
+            <span class="toolchain-required" title="编译本程序要求的最低 Rust 版本">要求 ≥ ${a.rustc_required}</span>
+          </dd>
         </div>
         <div class="kv">
           <dt>Router listen</dt>

@@ -969,6 +969,7 @@ impl RemoteProjection {
             // 活跃（OnIt）或在等审批即占用。远端队列不归本进程（Non-goal：
             // 不动远端节点会话），保守取这两个可见事实。
             turn_engaged: parked > 0 || matches!(node_phase, SessionPhase::Active),
+first_prompt_preview: None,
         })
     }
 }

@@ -103,7 +103,13 @@ import './dashboard.js'
 // RAIL_FOCUS_EVENT：rail 切换成功的窗口级聚焦事件（4.1，design D3）。
 import { RAIL_FOCUS_EVENT } from './project-rail.js'
 // PROJECT_FOLLOW_EVENT / focusedProjectPath：聚焦反投影项目上下文（本 change 4.1）。
-import { PROJECT_FOLLOW_EVENT, focusedProjectPath, receiptPhaseActive } from './dashboard.js'
+// displayedProjectResolved：displayed project 调和（fix-webui-qa-findings D4）。
+import {
+  PROJECT_FOLLOW_EVENT,
+  displayedProjectResolved,
+  focusedProjectPath,
+  receiptPhaseActive,
+} from './dashboard.js'
 // writeFocusAnchor：焦点处立读锚的既有锚点写入（round3 3.1）。
 import { writeFocusAnchor } from './unread-cursor.js'
 import type { SebasDashboard } from './dashboard.js'
@@ -2047,8 +2053,12 @@ describe('fresh placeholder first exchange via live streaming (fix-unread-fresh-
     })
     await new Promise((r) => setTimeout(r, 0))
     await el.updateComplete
-    // 到达帧同步结算：锚 = 已渲染段数 1（= msg_count，徽章水位 0）。
-    expect(JSON.parse(localStorage.getItem(anchorKey)!)).toEqual({ anchor_count: 1 })
+    // （fix-webui-qa-findings DD3 修订语义）流式中的在飞尾段**未定稿**：
+    // 锚停在 0，不把「只看到开头」的段整体读作已读——否则操作者中途切走
+    // 后整段永远读作已读（QA DD3：长流式回复开始时看着、其余未看，徽标
+    // 却不再出现）。此刻 seam 也不画（在飞段不参与未读判定）——聚焦贴底
+    // 的呈现面就是 live 本身，无「未读缝闪现」。
+    expect(JSON.parse(localStorage.getItem(anchorKey)!)).toEqual({ anchor_count: 0 })
     const seam = (transcript as unknown as { shadowRoot: ShadowRoot }).shadowRoot.querySelector('.seam')
     expect(seam?.hasAttribute('hidden')).toBe(true)
     el.remove()
@@ -2161,5 +2171,95 @@ describe('deep link binds the project title (round3 4.2)', () => {
       window.removeEventListener(PROJECT_FOLLOW_EVENT, listener)
       el.remove()
     }
+  })
+})
+
+// ── fix-webui-qa-findings D4：displayed project 变化/移除的焦点调和 ──────
+
+describe('displayed-project reconciliation (fix-webui-qa-findings D4)', () => {
+  it('resolves only while the selected path is still registered (pure helper)', () => {
+    const projects = [{ path: '/home/me/sebas' }, { path: '/home/me/other' }]
+    expect(displayedProjectResolved(projects, '/home/me/sebas')).toBe(true)
+    expect(displayedProjectResolved(projects, '/home/me/gone')).toBe(false)
+    expect(displayedProjectResolved([], '/home/me/sebas')).toBe(false)
+    expect(displayedProjectResolved(projects, null)).toBe(false)
+  })
+
+  it('removing the displayed project drops the header to 未选择项目 and the stale focused conversation to the removed-project empty state', async () => {
+    // 项目 sebas 已被移除：注册表只剩 other；展示路径仍指被移除项目，聚焦
+    // 会话恰属于它（QA round2 report-A A2 复现的残留形态）。
+    apiMocks.projectsList.mockResolvedValue({
+      projects: [{ id: 'proj-other', path: '/home/me/other', name: 'other', added_at: 0 }],
+    })
+    apiMocks.summary.mockResolvedValue({
+      ...focusedSummary(),
+      recent_sessions: [row({ encoded_key: 'oc_live%00', chat_id: 'chat-live' })],
+    })
+    const el = await mount()
+    el.selectedPath = '/home/me/sebas'
+    await el.updateComplete
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+
+    // 头部不再以被移除项目为名（回落「未选择项目」），focused-link 不再锚向
+    // 未展示的会话——侧栏该行已删，主面板不再残留。
+    const header = el.shadowRoot!.querySelector('.project-header')
+    expect(header?.textContent).not.toContain('sebas')
+    expect(header?.textContent).toContain('未选择项目')
+    expect(header?.querySelector('a.focused-link')).toBeNull()
+    // 对话不残留：无 transcript，空态点名「已被移除」而不是「该项目暂无」。
+    expect(el.shadowRoot!.querySelector('sebas-transcript-view')).toBeNull()
+    const empty = el.shadowRoot!.querySelector('.empty-stream')
+    expect(empty?.textContent).toContain('已被移除')
+    expect(empty?.textContent).not.toContain('该项目暂无聚焦会话')
+    // composer 侧让位为 stale 占位，而不是可用输入面。
+    expect(el.shadowRoot!.querySelector('[data-testid="composer-stale-project"]')).toBeTruthy()
+    el.remove()
+  })
+
+  it('removing a non-displayed project leaves the displayed project and its focused conversation untouched', async () => {
+    apiMocks.projectsList.mockResolvedValue({
+      projects: [
+        { id: 'proj-sebas', path: '/home/me/sebas', name: 'sebas', added_at: 0 },
+        { id: 'proj-other', path: '/home/me/other', name: 'other', added_at: 1 },
+      ],
+    })
+    apiMocks.summary.mockResolvedValue({
+      ...focusedSummary(),
+      recent_sessions: [row({ encoded_key: 'oc_live%00', chat_id: 'chat-live' })],
+    })
+    const el = await mount()
+    el.selectedPath = '/home/me/sebas'
+    await el.updateComplete
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+
+    // 移除的是别的项目：展示项目仍成立，头部与对话原样保留。
+    const header = el.shadowRoot!.querySelector('.project-header')
+    expect(header?.textContent).toContain('sebas')
+    expect(header?.querySelector('a.focused-link')).toBeTruthy()
+    expect(el.shadowRoot!.querySelector('sebas-transcript-view')).toBeTruthy()
+    expect(el.shadowRoot!.querySelector('.empty-stream')).toBeNull()
+    el.remove()
+  })
+
+  it('removing the last project leaves the honest empty state instead of a lingering header', async () => {
+    // 清空最后一项：注册表为空、无聚焦（QA report-A A2 的零项目残留形态：
+    // rail 已是「尚未注册项目」，主面板不得再显示已移除项目名）。
+    apiMocks.projectsList.mockResolvedValue({ projects: [] })
+    const el = await mount()
+    el.selectedPath = '/home/me/sebas'
+    await el.updateComplete
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+
+    const header = el.shadowRoot!.querySelector('.project-header')
+    expect(header?.textContent).not.toContain('sebas')
+    expect(header?.textContent).toContain('未选择项目')
+    const empty = el.shadowRoot!.querySelector('.empty-stream')
+    expect(empty?.textContent).toContain('未聚焦任何会话')
+    // 无聚焦会话被调和 → 不点名「已被移除」，用 generic 空态文案。
+    expect(empty?.textContent).not.toContain('已被移除')
+    el.remove()
   })
 })

@@ -1467,6 +1467,7 @@ impl SessionBackend for FakeBackend {
             spawn_failure_reason: None,
             parked_approvals: 0,
             label: None,
+            first_prompt_preview: None,
         };
         let ev = SessionEvent::Created { session };
         if let SessionEvent::Created { session } = &ev {
@@ -1999,6 +2000,7 @@ mod tests {
                 spawn_failure_reason: None,
                 parked_approvals: 0,
                 label: None,
+                first_prompt_preview: None,
             }])
             .await;
         backend.push_turn("s9", "prompt", "p1").await;

@@ -629,20 +629,21 @@ describe('unread badge focused-session boundaries (fix-webui-qa-defects-round3 6
     // 记差值断言。
     const switchCallsBefore = mockOf(apiMock.switchSession).mock.calls.length
 
-    // 首次点击：聚焦写锚推进到当前 count → 徽标清零。
+    // 首次点击：聚焦呈现徽标清零（rowUnread 的聚焦可见 gate），但**不**
+    // 把锚推进到当前 count（fix-webui-qa-findings M3：switch 写锚只做
+    // 「缺锚立基」——否则回到有未读内容的会话时 seam 永远推不出来）。
     ;(items()[0] as HTMLElement).click()
     await new Promise((r) => setTimeout(r, 0))
     await el.updateComplete
     expect(el.shadowRoot!.querySelector('[data-testid="session-unread"]')).toBeNull()
-    expect(readAnchorCount(target.encoded_key)).toBe(5)
+    expect(readAnchorCount(target.encoded_key)).toBe(2)
 
-    // 同会话重复点击（no-op switch）：锚不回退、徽标不复活——聚焦写锚照常
-    // 执行（单调游标拦截同值写入），行按同一水位渲染。
+    // 同会话重复点击（no-op switch）：锚保持、徽标不复活（聚焦 gate）。
     ;(items()[0] as HTMLElement).click()
     await new Promise((r) => setTimeout(r, 0))
     await el.updateComplete
     expect(el.shadowRoot!.querySelector('[data-testid="session-unread"]')).toBeNull()
-    expect(readAnchorCount(target.encoded_key)).toBe(5)
+    expect(readAnchorCount(target.encoded_key)).toBe(2)
     expect(mockOf(apiMock.switchSession).mock.calls.length - switchCallsBefore).toBe(2)
     el.remove()
   })
@@ -723,7 +724,9 @@ describe('unread badge focused-session boundaries (fix-webui-qa-defects-round3 6
       await new Promise((r) => setTimeout(r, 0))
       await el.updateComplete
       expect(items()[0]!.querySelector('[data-testid="session-unread"]')?.textContent?.trim()).toBe('2')
-      // 点回 A：聚焦写锚推进到当前 count → 清零。
+      // 点回 A：聚焦可见 gate 清掉徽标；锚保持 1（switch 不再抬锚——
+      // fix-webui-qa-findings M3），未读分界线由此可在 transcript 呈现，
+      // 锚推进交给「读到分界线」的 transcript 路径。
       mockOf(apiMock.switchSession).mockResolvedValue({
         status: 'switched',
         redirect: `/sessions/${a.encoded_key}`,
@@ -733,7 +736,7 @@ describe('unread badge focused-session boundaries (fix-webui-qa-defects-round3 6
       await new Promise((r) => setTimeout(r, 0))
       await el.updateComplete
       expect(items()[0]!.querySelector('[data-testid="session-unread"]')).toBeNull()
-      expect(readAnchorCount(a.encoded_key)).toBe(3)
+      expect(readAnchorCount(a.encoded_key)).toBe(1)
       el.remove()
     } finally {
       restore()

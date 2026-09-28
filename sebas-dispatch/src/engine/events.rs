@@ -199,6 +199,7 @@ mod tests {
                     hint: None,
                 },
             ],
+            first_prompt_preview: None,
         };
         let cases = vec![
             SessionEvent::Created {
@@ -272,6 +273,7 @@ mod tests {
             label: None,
             // session-slash-commands：无发现能力会话的命令表恒空。
             available_commands: Vec::new(),
+            first_prompt_preview: None,
         };
         assert_eq!(info.channel, "feishu");
         assert_eq!(info.key, "oc_x\0t1");
@@ -440,6 +442,7 @@ fn session_info_usage_field_is_additive() {
         parked_approvals: 0,
             label: None,
         available_commands: Vec::new(),
+        first_prompt_preview: None,
     };
     let json = serde_json::to_string(&full).unwrap();
     let back: SessionInfo = serde_json::from_str(&json).unwrap();
@@ -490,6 +493,7 @@ fn session_info_available_commands_field_is_additive() {
             description: "Set a goal".into(),
             hint: Some("<condition>".into()),
         }],
+        first_prompt_preview: None,
     };
     let json = serde_json::to_string(&full).unwrap();
     let back: SessionInfo = serde_json::from_str(&json).unwrap();
@@ -661,6 +665,7 @@ fn session_info_turn_engaged_field_is_additive() {
         parked_approvals: 0,
             label: None,
         available_commands: Vec::new(),
+        first_prompt_preview: None,
     };
     let json = serde_json::to_string(&engaged).unwrap();
     let back: SessionInfo = serde_json::from_str(&json).unwrap();

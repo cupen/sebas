@@ -79,6 +79,8 @@ import { icon } from '../components/icons.js'
 import { renderMarkdown } from '../components/markdown.js'
 import { readAnchorCount, writeSeen as writeCursor } from './unread-cursor.js'
 import { sharedWs } from '../api/shared-ws.js'
+// （fix-webui-qa-findings D2）mode 契约条目的控制面词 → 人读标签。
+import { modeBadgeLabel } from './mode-vocabulary.js'
 // 4.5：「查看全部」隔离弹层（独立于会话滚动容器的 wa-dialog）。
 import '@awesome.me/webawesome/dist/components/dialog/dialog.js'
 
@@ -281,7 +283,18 @@ export interface NoticeUnit {
   entry: ConversationEntryView
 }
 
-export type TurnUnit = OperatorUnit | AgentUnit | ErrorUnit | NoticeUnit
+/**
+ * （fix-webui-qa-findings D2）模式切换契约条目单元：`permission_mode_result`
+ * 是一等条目类型（权限 spec「first-class entry, not folded into generic
+ * markdown」），content 是 JSON 载荷 `{request_id, ok, mode, detail}`。
+ * 渲染为模式标签条：成功显示生效模式，失败显示失败成因（可辨识）。
+ */
+export interface ModeResultUnit {
+  kind: 'mode_result'
+  entry: ConversationEntryView
+}
+
+export type TurnUnit = OperatorUnit | AgentUnit | ErrorUnit | NoticeUnit | ModeResultUnit
 
 /** 过程条目（D1）：进入过程 run 的 element_type 词表。 */
 function isProcessEntry(e: ConversationEntryView): boolean {
@@ -364,6 +377,12 @@ export function groupConversation(entries: ErrorCountedView[]): TurnUnit[] {
       units.push({ kind: 'notice', entry: e })
       continue
     }
+    // （fix-webui-qa-findings D2）模式切换契约条目独立成单元（一等渲染）。
+    if (e.element_type === 'permission_mode_result') {
+      flush()
+      units.push({ kind: 'mode_result', entry: e })
+      continue
+    }
     if (e.kind === 'prompt') {
       flush()
       units.push({ kind: 'operator', entry: e })
@@ -377,7 +396,7 @@ export function groupConversation(entries: ErrorCountedView[]): TurnUnit[] {
 
 /** The newest entry timestamp of a turn — the turn's seam edge (D5). */
 export function unitMaxTs(unit: TurnUnit): number {
-  if (unit.kind === 'operator' || unit.kind === 'error' || unit.kind === 'notice') {
+  if (unit.kind === 'operator' || unit.kind === 'error' || unit.kind === 'notice' || unit.kind === 'mode_result') {
     return unit.entry.created_at_unix || 0
   }
   return unit.maxTs
@@ -392,9 +411,31 @@ export function unitMaxTs(unit: TurnUnit): number {
  * seam 与徽标共用同一份段锚。
  */
 export function unitSegmentCount(unit: TurnUnit): number {
-  if (unit.kind === 'operator' || unit.kind === 'notice') return 0
+  if (unit.kind === 'operator' || unit.kind === 'notice' || unit.kind === 'mode_result') return 0
   if (unit.kind === 'error') return unit.entry.count ?? 1
   return unit.runs.filter((r) => r.type === 'text').length
+}
+
+/**
+ * （fix-webui-qa-findings D2）模式契约条目的载荷解析（纯函数）：content 是
+ * `{request_id, ok, mode, detail}` JSON；解析失败按未知处理（mode 原文展示、
+ * ok=false），绝不因坏载荷抛错炸掉整棵转录。
+ */
+export function parseModeResultPayload(content: string): {
+  ok: boolean
+  mode: string
+  detail: string
+} {
+  try {
+    const v = JSON.parse(content) as Record<string, unknown>
+    return {
+      ok: v['ok'] !== false,
+      mode: typeof v['mode'] === 'string' ? v['mode'] : 'unknown',
+      detail: typeof v['detail'] === 'string' ? v['detail'] : '',
+    }
+  } catch {
+    return { ok: false, mode: 'unknown', detail: content }
+  }
 }
 
 // ---- fold title helpers（2.3，D5）---------------------------------------
@@ -510,6 +551,19 @@ export function processRunSummary(run: ProcessRun): { label: string; full: strin
   return processItemLabel(last)
 }
 
+/**
+ * （fix-webui-qa-findings M1）工具 run 的顶层执行结果（纯函数）：
+ * `ok` = 已执行（末条目带完成标记）、`denied` = 被拒绝（显式拒绝记号）、
+ * `null` = 仍在跑（无完成标记）。折叠 summary 行据此直接呈现
+ * 「已执行/已拒绝」章——决策结果不再只藏在两层折叠之内。
+ */
+export function processRunOutcome(run: ProcessRun): 'ok' | 'denied' | null {
+  const last = run.items[run.items.length - 1]
+  if (!last) return null
+  if (toolResultDenied(last.content, last.title)) return 'denied'
+  if (typeof last.title === 'string' && /^[\u2713\u2717]/.test(last.title.trim())) return 'ok'
+  return null
+}
 /**
  * （5.6）摘要行的拒绝角标：run 内任一条目被拒即整行不显示成功语义——
  * 摘要行是「最近条目」的标签，挂 ✓ 的拒绝结果属于误报。
@@ -834,6 +888,19 @@ export class SebasTranscriptView extends LitElement {
       border-color: var(--sebas-border);
       font-weight: 700;
     }
+    /* （fix-webui-qa-findings D2）mode 契约条目的模式词与失败态：
+       模式词挂 mono 章（与头部 mode-tag 同视觉语言）；失败挂失败色。 */
+    .turn-block .body .mode-mode {
+      font-family: var(--sebas-font-mono);
+      font-size: 0.78rem;
+      background: var(--sebas-surface-3);
+      border-radius: var(--sebas-radius-full);
+      padding: 1px 8px;
+      white-space: nowrap;
+    }
+    .turn-block .body .mode-failed {
+      color: var(--sebas-status-failed, #b91c1c);
+    }
     .turn-block .bubble.notice {
       background: var(--sebas-surface-2, #f0f2f7);
       border-color: var(--sebas-border);
@@ -1015,6 +1082,23 @@ export class SebasTranscriptView extends LitElement {
     .turn-block .fold-link .fold-count {
       color: var(--sebas-accent);
       font-variant-numeric: tabular-nums;
+    }
+    /* （fix-webui-qa-findings M1）决策结果的顶层章：已执行/已拒绝直接
+       挂在折叠 summary 行上，不需要展开任何一层。 */
+    .turn-block .fold-link .outcome {
+      font-size: 0.68rem;
+      font-weight: 600;
+      border-radius: var(--sebas-radius-full);
+      padding: 0 7px;
+      white-space: nowrap;
+    }
+    .turn-block .fold-link .outcome-ok {
+      color: var(--sebas-status-done, #15803d);
+      background: var(--sebas-surface-2);
+    }
+    .turn-block .fold-link .outcome-denied {
+      color: var(--sebas-status-failed, #b91c1c);
+      background: var(--sebas-status-failed-bg, #fee2e2);
     }
     /* 展开内容：work-block-body 同款（0.82rem/1.6 + 虚线顶边）。挂 .body
        复用 markdown 排版规则（后写的字号覆盖之）。 */
@@ -1259,10 +1343,9 @@ export class SebasTranscriptView extends LitElement {
     }
     // （2.3，D3）锚已统一为段计数：写锚 = max(服务端段数, 本地已渲染段数)，
     // 与 seam/rail 徽标同一条锚线。锚不落后（含 msg_count 先行于本地渲染的
-    // 一拍）= 无可推进水位 → 保留登记等回复真正到达。
-    const totals = this.segmentTotals()
-    const local = totals.length > 0 ? totals[totals.length - 1]! : 0
-    const wouldAnchor = this.msgCount != null ? Math.max(this.msgCount, local) : local
+    // 一拍）= 无可推进水位 → 保留登记等回复真正到达。（DD3）turnLive 时
+    // 在飞尾段不计入候选——首交换流式中锚停在 0，登记保留，定稿后结算。
+    const wouldAnchor = this.anchorCandidate()
     const prev = readAnchorCount(key)
     if (prev !== null && prev >= wouldAnchor) return
     if (prev === null && wouldAnchor === 0) return
@@ -1298,25 +1381,69 @@ export class SebasTranscriptView extends LitElement {
   /**
    * 已渲染回合序列的可见段数累计（`unitSegmentCount` 前缀和）：第 i 项 =
    * 读到第 i 个回合为止已见的段数，seam 判定与 mark-seen 写入共用。
+   *
+   * `excludeLiveTail`（fix-webui-qa-findings DD3）：turnLive 时把在飞尾段
+   * 从累计中扣除——seam 与锚都不把「只看到了开头」的未定稿段读作已读；
+   * 回合定稿（turnLive 翻 false，随新快照到达）后该段计入，锚随贴底
+   * mark-seen 一次性推进。
    */
-  private segmentTotals(): number[] {
+  /**
+   * （fix-webui-qa-findings DD3）在飞尾段的存在判定：turnLive 且最后一个
+   * agent 回合的末尾是 text run。该段还在增长，操作者只「看着开始」而非
+   * 「看着完整到达」——未定稿不计已读。
+   */
+  private hasLiveTextTail(): boolean {
+    if (!this.turnLive) return false
+    const last = this.turnUnits[this.turnUnits.length - 1]
+    if (!last || last.kind !== 'agent') return false
+    const tail = last.runs[last.runs.length - 1]
+    return tail?.type === 'text'
+  }
+  private segmentTotals(excludeLiveTail = false): number[] {
     const totals: number[] = []
     let acc = 0
     for (const unit of this.turnUnits) {
       acc += unitSegmentCount(unit)
       totals.push(acc)
     }
+    if (excludeLiveTail && this.hasLiveTextTail() && totals.length > 0) {
+      // 尾段是序列的最后一段贡献：只有最后一个回合的累计含它。
+      for (let i = this.turnUnits.length - 1; i < totals.length; i++) totals[i] -= 1
+    }
     return totals
+  }
+
+  /**
+   * （fix-webui-qa-findings DD3）锚写入的候选水位：turnLive 期间，最后一个
+   * agent 回合的**末尾在飞 text run**不计入——它还在增长，操作者只「看着
+   * 开始」而非「看着完整到达」。排除它使锚停在已完成段的水位；回合定稿
+   * （turnLive 翻 false，随新快照到达）时该段计入，锚随贴底 mark-seen 推进。
+   * 若操作者中途切走，transcript 卸载、锚停在离开时的水位——定稿后
+   * msg_count 超过锚 → rail 徽标如实出现（DD3：开始看着、其余未看的长流式
+   * 回复必须计未读；此前锚经 `max(msgCount, local)` 被在飞段的首个 delta
+   * 一次性抬到顶，整段永远读作已读）。
+   *
+   * turnLive 但末尾不是 text run（流式工具/思考中、或末单元是操作者提交）
+   * 时无可排除的在飞正文段：按既有口径取 max(服务端段数, 本地段数)。
+   */
+  private anchorCandidate(): number {
+    const totals = this.segmentTotals()
+    const local = totals.length > 0 ? totals[totals.length - 1]! : 0
+    if (this.hasLiveTextTail()) {
+      // 在飞尾 text run 尚未定稿（DD3）：从本地段数中扣除它的贡献，且不取
+      // msgCount（服务端计数已把该段的首个 delta 算作一段——max 会把
+      // 「只看到开头」的段整体抬进已读，正是 DD3 的根因）。
+      return Math.max(0, local - 1)
+    }
+    return this.msgCount != null ? Math.max(this.msgCount, local) : local
   }
 
   private writeSeen(): void {
     // 写入锚 = max(服务端段数, 本地已渲染段数)——流式期间快照未追上的
     // 可见段（6.1）已含在本地渲染里，rail 徽标与 seam 不闪现；单调 max
-    // 由游标模块保证。
-    const totals = this.segmentTotals()
-    const local = totals.length > 0 ? totals[totals.length - 1]! : 0
-    const anchor = this.msgCount != null ? Math.max(this.msgCount, local) : local
-    writeCursor(this.sessionKey, anchor)
+    // 由游标模块保证。（DD3）turnLive 期间在飞尾段不计入（见
+    // anchorCandidate），定稿后随 mark-seen 一次性推进。
+    writeCursor(this.sessionKey, this.anchorCandidate())
   }
 
   // ---- seam logic -------------------------------------------------------
@@ -1341,8 +1468,10 @@ export class SebasTranscriptView extends LitElement {
       return
     }
     // seam 落在第一个「可见段累计超过锚」的回合上方——按回合计数、绝不
-    // 切开回合（D5），且与徽标读的是同一条段锚。
-    const totals = this.segmentTotals()
+    // 切开回合（D5），且与徽标读的是同一条段锚。（DD3）turnLive 时在飞
+    // 尾段不参与未读判定：正看着长出来的内容不在其上画缝，定稿后随新
+    // 快照照常参与。
+    const totals = this.segmentTotals(this.turnLive)
     const idx = totals.findIndex((total) => total > anchor)
     if (idx === -1) {
       this.seamIndex = null
@@ -1389,10 +1518,11 @@ export class SebasTranscriptView extends LitElement {
 
   /** Push the seen-boundary forward to the newest rendered turn. */
   private commitMarkSeen(): void {
-    const totals = this.segmentTotals()
-    const local = totals.length > 0 ? totals[totals.length - 1]! : 0
+    // （DD3）候选水位经 anchorCandidate——turnLive 时在飞尾段不计入：
+    // 流式中贴底读不推进锚到未定稿段，定稿后本方法把它一次性覆盖。
+    const candidate = this.anchorCandidate()
     const anchor = this.readSeen() ?? 0
-    if (this.turnUnits.length > 0 && local > anchor) {
+    if (this.turnUnits.length > 0 && candidate > anchor) {
       this.writeSeen()
       // The seam may have moved or disappeared; update internal state
       // and re-render without scheduling another auto-scroll — the user
@@ -1409,9 +1539,30 @@ export class SebasTranscriptView extends LitElement {
    * 滚动定位——seam 只是标记与「mark all seen」出口，想读旧内容向上滚动
    * 即自然解除 sticky。
    */
+  /**
+   * 会话首帧布局的记忆键：换会话后（或组件重挂载后）的第一次滚动定位走
+   * 「开卷」语义（见 applyAutoScroll），后续更新保持既有贴底跟随。
+   */
+  private lastScrollKey: string | null = null
+
   private applyAutoScroll(): void {
     const el = this.scrollEl
-    if (!el || !this.sticky) return
+    if (!el) return
+    // （fix-webui-qa-findings M3）开卷定位：打开一个带未读缝的会话时，
+    // 首帧把 seam 滚进视野（而不是贴底）并解除 sticky——操作者第一眼看到
+    // 「上次读到哪里」；贴底 pin 的滚动事件不会触发 mark-seen（人不在
+    // 底部），seam 稳定呈现，读到边界（滚动贴底）时锚才推进。全部已读
+    // （seam 不在场）或后续到达帧保持既有贴底跟随。
+    if (this.lastScrollKey !== this.sessionKey) {
+      this.lastScrollKey = this.sessionKey
+      const seam = el.querySelector<HTMLElement>('.seam:not([hidden])')
+      if (seam && typeof seam.scrollIntoView === 'function') {
+        this.sticky = false
+        seam.scrollIntoView({ block: 'center', behavior: 'auto' })
+        return
+      }
+    }
+    if (!this.sticky) return
     const previous = el.style.scrollBehavior
     el.style.scrollBehavior = 'auto'
     el.scrollTop = el.scrollHeight
@@ -1484,8 +1635,37 @@ export class SebasTranscriptView extends LitElement {
   private renderUnit(u: TurnUnit, receipt: boolean) {
     if (u.kind === 'error') return this.renderErrorUnit(u)
     if (u.kind === 'notice') return this.renderNoticeUnit(u)
+    if (u.kind === 'mode_result') return this.renderModeResultUnit(u)
     if (u.kind === 'operator') return this.renderOperatorUnit(u, receipt)
     return this.renderAgentUnit(u)
+  }
+
+  /**
+   * （fix-webui-qa-findings D2）模式切换契约条目的第一类渲染：中性模式章
+   * （i 头像 + 生效模式词），成功显示「已切换 → {mode}」，失败挂失败色与
+   * 成因——拒绝与成功一眼可辨（与权限 spec「denial distinguishable」一致）。
+   */
+  private renderModeResultUnit(u: ModeResultUnit) {
+    const e = u.entry
+    const iso = isoTime(e.created_at_unix)
+    const ts = formatTime(e.created_at_unix)
+    const payload = parseModeResultPayload(e.content)
+    return html`
+      <div class="turn-block is-notice" data-testid="mode-result-entry" data-mode-ok=${payload.ok}>
+        <div class="avatar notice">i</div>
+        <div class="bubble notice">
+          <div class="meta">
+            <span class="author notice">权限模式</span>
+            <time class="time" datetime=${iso || nothing}>${ts}</time>
+          </div>
+          <div class="body">
+            ${payload.ok
+              ? html`<p>权限模式已切换：<span class="mode-mode">${modeBadgeLabel(payload.mode)}</span></p>`
+              : html`<p class="mode-failed">模式切换失败：${payload.detail || '执行体未接受'}</p>`}
+          </div>
+        </div>
+      </div>
+    `
   }
 
   /**
@@ -1639,6 +1819,12 @@ export class SebasTranscriptView extends LitElement {
           <span class="label">process</span>
           <span class="running">${label}</span>
           <span class="fold-count">${r.items.length}</span>
+          ${processRunOutcome(r) === 'ok'
+            ? html`<span class="outcome outcome-ok" data-testid="tool-outcome">✓ 已执行</span>`
+            : nothing}
+          ${processRunOutcome(r) === 'denied'
+            ? html`<span class="outcome outcome-denied" data-testid="tool-outcome-denied">✗ 已拒绝</span>`
+            : nothing}
         </button>
         ${open
           ? html`<div class="body fold-body">

@@ -144,6 +144,7 @@ impl NativeSession {
             spawn_failure_reason: None,
             parked_approvals: 0,
             label: None,
+            first_prompt_preview: None,
         }
     }
 }

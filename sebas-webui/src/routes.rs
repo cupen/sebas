@@ -273,8 +273,10 @@ fn admin_provider_row(
 }
 
 /// GET /api/providers：provider 列表（core 状态库快照投影，管理页
-/// 数据源）。墓碑不出现；config 种子 provider 不在此列（store 是唯一事实
-/// 来源，种子-only 机器如实显示空表）。core 不可达 → 503。
+/// 数据源）。墓碑不出现；core 不可达 → 503。
+/// （fix-webui-qa-findings M7）响应扩展 `config_providers` 段：config.toml
+/// 的 `[provider.*]` 种子行随响应可见（本页只读，`source: "config"` 标注）
+/// ——两来源一页可读，config 行 governing 行为时不再「静默隐身」。
 pub async fn providers_list(State(state): State<WebUiState>) -> axum::response::Response {
     let Some(snapshot) = providers_snapshot(&state).await else {
         return err_503_core_unreachable();
@@ -303,7 +305,32 @@ pub async fn providers_list(State(state): State<WebUiState>) -> axum::response::
         .filter(|(name, _)| !deleted.contains(name))
         .map(|(name, item)| admin_provider_row(name, item))
         .collect();
-    axum::Json(serde_json::json!({ "providers": out })).into_response()
+    // （fix-webui-qa-findings M7）config 种子行：来自装配时注入的
+    // RouterInfo.providers（config.toml `[provider.*]` 的读面）。store 行与
+    // config 行同名时 store 赢（store 是运行时权威），config 段照列并以
+    // `also_in_store` 如实标注。本页对 config 行只读——编辑引导由前端呈现。
+    let config_providers: Vec<serde_json::Value> = state
+        .router
+        .providers
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "name": p.name,
+                "preset": p.preset,
+                "base_url_anthropic": p.base_url_anthropic,
+                "base_url_openai_chat": p.base_url_openai_chat,
+                "base_url_openai_responses": p.base_url_openai_responses,
+                "source": "config",
+                "editable": false,
+                "also_in_store": out.iter().any(|row| row.get("name").and_then(serde_json::Value::as_str) == Some(p.name.as_str())),
+            })
+        })
+        .collect();
+    axum::Json(serde_json::json!({
+        "providers": out,
+        "config_providers": config_providers,
+    }))
+    .into_response()
 }
 
 /// GET /api/provider-defaults：默认 provider/model 预选数据（workbench-

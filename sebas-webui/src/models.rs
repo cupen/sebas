@@ -346,6 +346,11 @@ impl ConversationEntryView {
                 | sebas_domain::session::TurnElementType::Tool
                 | sebas_domain::session::TurnElementType::Error
                 | sebas_domain::session::TurnElementType::Notice
+                // （fix-webui-qa-findings D2）模式切换契约条目保持一等词表：
+                // 不再归一为 generic markdown——前端 transcript 按独立条目
+                // 类型渲染（权限 spec「first-class entry, not folded into
+                // generic markdown」）。
+                | sebas_domain::session::TurnElementType::PermissionModeResult
         ) {
             self.element_type = "markdown".to_string();
         }
@@ -403,7 +408,15 @@ impl From<&sebas_dispatch::SessionInfo> for SessionRow {
             // 8.1 会话归属项目按 `(节点, 路径)`：远端会话的 project_dir 若按
             // 本机公式算 id，会挂到「本机同路径项目」下。
             project_id: crate::projects::project_id_for_session(info),
-            prompt_preview: info.user_prompt.clone(),
+            // （fix-webui-qa-findings DD2）行命名预览锚定**首条**用户消息
+            // （first_prompt_preview）；旧快照无锚定值时回退 user_prompt。
+            // 后续消息绝不移动行名（user_prompt 是「当前回合」语义，只服务
+            // 飞书卡面与回执判定，不再进行名）。
+            prompt_preview: info
+                .first_prompt_preview
+                .clone()
+                .filter(|p| !p.is_empty())
+                .or_else(|| info.user_prompt.clone().filter(|p| !p.is_empty())),
             // （5.1，design D6）label 随行下发。
             label: info.label.clone(),
             current_model: info.current_model.clone(),
@@ -456,9 +469,9 @@ mod tests {
             ("content", "tool"),
             ("content", "error"),
             ("content", "notice"),
-            // `permission_mode_result` 不是会话条目：渲染归一为 markdown（既有行为，
-            // 该条目由 handle_mode_result_entry 消费）。
-            ("content", "markdown"),
+            // fix-webui-qa-findings D2：`permission_mode_result` 保持一等条目
+            // 类型（不再归一为 markdown——权限 spec「first-class entry」）。
+            ("content", "permission_mode_result"),
         ];
         assert_eq!(entries.len(), baseline.len(), "黄金转录条目数变了");
 
@@ -643,6 +656,7 @@ mod conversion_tests {
             spawn_failure_reason: None,
             parked_approvals: 0,
             label: Some("标签".into()),
+            first_prompt_preview: None,
         }
     }
 

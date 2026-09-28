@@ -28,7 +28,8 @@ import { sharedWs } from '../api/shared-ws.js'
 import type { WsEvent } from '../api/ws.js'
 import { icon } from '../components/icons.js'
 import { guardedHide } from '../components/wa-hide-guard.js'
-import { ANCHOR_ADVANCED_EVENT, unreadCount, writeFocusAnchor } from './unread-cursor.js'
+import { ANCHOR_ADVANCED_EVENT, readAnchorCount, unreadCount, writeFocusAnchor } from './unread-cursor.js'
+import { notify } from '../notify.js'
 import { COMPOSER_FOCUS_REQUEST } from './workbench-composer.js'
 import type { NewSessionDialogConfirm } from './new-session-dialog.js'
 import '../components/folder-picker.js'
@@ -260,6 +261,9 @@ export class SebasProjectRail extends LitElement {
         ev.type === 'session.updated'
           ? this.sessions.find((r) => r.encoded_key === ev.session_id)
           : undefined
+      // （fix-webui-qa-findings DD1）命名来源就地补丁：帧携带的 label 与
+      // prompt_preview（首条消息预览，DD2 锚定）直接写进行——首条消息的
+      // 预览出现/自动标题到达时行名即时更新，不等防抖重取或 10s 轮询。
       const patch = (row: SessionRow): SessionRow =>
         row.encoded_key === ev.session_id
           ? {
@@ -268,17 +272,24 @@ export class SebasProjectRail extends LitElement {
               turn_engaged: ev.turn_engaged,
               msg_count: ev.msg_count,
               pending_count: ev.pending.length,
+              ...(ev.label !== undefined ? { label: ev.label } : {}),
+              ...(ev.prompt_preview !== undefined
+                ? { prompt_preview: ev.prompt_preview }
+                : {}),
             }
           : row
       this.sessions = this.sessions.map(patch)
       // （fix-webui-qa-defects-round5 3.2/6.3，design 决策 4 收窄）相位帧
       // 不改命名之外的任何行名来源；label 随帧载荷扩展下发（6.3）。对
-      // 已存在行的 updated 帧，先比对帧 label 与该行当前已知 label——一致
-      // （含同为空/同为退化回退态）说明命名没有变化，跳过调度；仅真实
-      // 命名变化（label 写入、清空回退）才进入防抖重取。session.created
-      // 与 rail 中不存在的会话保持现行为（要建行，必须重取列表）。
+      // 已存在行的 updated 帧，先比对帧 label/preview 与该行当前已知值——
+      // 一致（含同为空/同为退化回退态）说明命名没有变化，跳过调度；仅真实
+      // 命名变化（label 写入、清空回退、首条预览出现）才进入防抖重取。
+      // session.created 与 rail 中不存在的会话保持现行为（要建行，必须重取
+      // 列表）。
       const namingChanged =
-        known === undefined || (ev.label ?? null) !== (known.label ?? null)
+        known === undefined ||
+        (ev.label ?? null) !== (known.label ?? null) ||
+        (ev.prompt_preview ?? null) !== (known.prompt_preview ?? null)
       if (!namingChanged) return
       this.scheduleLabelRefresh()
       return
@@ -700,7 +711,16 @@ export class SebasProjectRail extends LitElement {
     this.focusedKey = row.encoded_key
     // rail-declutter-unread D3：switch 成功 = 聚焦写锚——读锚推进到当前
     // msg_count，徽标清零（无锚点会话自此刻起开始累计未读）。
-    writeFocusAnchor(row.encoded_key, row.msg_count)
+    // （fix-webui-qa-findings M3 修订）写锚只做「缺锚立基」：已有锚的会话
+    // **不**在 switch 时推进到当前计数——否则回到有未读内容的会话时锚被
+    // 瞬间抬到顶，transcript 永远推不出 seen/unseen 分界线（QA M3：「打开
+    // 即全部标记已读」）。徽标在聚焦会话上的消失由 rowUnread 的聚焦可见
+    // gate 承担；锚推进回到「读到分界线」时由 transcript 贴底/滚动路径承担
+    // （spec：focusing clears the badge + seam shows where reading left off，
+    // 两句并存的唯一一致实现）。
+    if (readAnchorCount(row.encoded_key) === null) {
+      writeFocusAnchor(row.encoded_key, row.msg_count)
+    }
     if (location.pathname !== '/') navigate('/')
     // fix-webui-qa-defects 4.1（design D3）：switch 只写服务端指针、不发任何
     // 事件——dashboard 的焦点视图此前要等下一个无关会话事件刷新 summary 才
@@ -755,6 +775,8 @@ export class SebasProjectRail extends LitElement {
       // 因此永远推不出未读徽章（QA 缺陷 3 的根因）。游标单调：重复创建/
       // 已有更高锚不回退。
       writeFocusAnchor(created.key, 0)
+      // （fix-webui-qa-findings M6）创建成功回执。
+      notify({ level: 'info', message: `已在「${p.name}」创建新会话。` })
       this.closeNewSessionDialog()
       // workbench-rail-polish 3.1/D2：创建成功后的焦点链三步显式化，不再
       // 借用 onSelect 的 toggle——从已展开的项目行「+」进来会把组误折叠，
@@ -803,8 +825,14 @@ export class SebasProjectRail extends LitElement {
     this.removeError = null
     try {
       await api.projects.remove(p.id)
+      // （fix-webui-qa-findings M6）移除成功回执（失败仍走对话框就地错误，
+      // 不双弹）。
+      notify({ level: 'info', message: `项目「${p.name}」已移除注册，可重新添加。` })
       this.closeRemoveDialog()
       void this.refresh()
+      // （fix-webui-qa-findings review F1）注册表变化广播给 dashboard 等消费
+      // 面——否则 D4 焦点调和读到陈旧 projects，主面板继续挂着被移除项目。
+      window.dispatchEvent(new Event('sebas:refetch'))
     } catch (err) {
       this.removeError = err instanceof Error ? err.message : String(err)
     } finally {
@@ -841,6 +869,12 @@ export class SebasProjectRail extends LitElement {
     this.archiving = true
     try {
       await api.archiveSession(row.encoded_key)
+      // （fix-webui-qa-findings M6）归档成功回执：效果落在 History 组（行
+      // 从项目列表消失），toast 点名会话。
+      notify({
+        level: 'info',
+        message: `会话「${truncateName(fullSessionLabel(row))}」已归档，可在 History 中查看或恢复。`,
+      })
       this.closeConfirmDialog()
       void this.refresh()
     } catch (err) {
@@ -886,6 +920,14 @@ export class SebasProjectRail extends LitElement {
     try {
       // 空输入 = 清空（wire 语义单一出处：服务端把空白归一为 None）。
       await api.setSessionLabel(row.encoded_key, label || null)
+      // （fix-webui-qa-findings M6）成功回执走 notify 层：重命名的效果落在
+      // rail 行与聚焦头部两处，info toast 点名「改成什么」。
+      notify({
+        level: 'info',
+        message: label
+          ? `会话已重命名为「${label}」。`
+          : `已清除会话名称，回退到首条消息预览。`,
+      })
       this.closeRenameDialog()
       await this.refresh()
     } catch (err) {
@@ -1003,6 +1045,10 @@ export class SebasProjectRail extends LitElement {
       // 降级标记就地呈现（refresh 已清 hint，add 的响应说了算）：核心不可达
       // 时项目仍落栏（本地注册表），但操作者不再直到新建会话才得知。
       this.degradedHint = p.degraded?.cause ? `核心不可达（${p.degraded.cause}），已写入本地注册表` : null
+      // （fix-webui-qa-findings M6）注册成功回执。
+      notify({ level: 'info', message: `项目「${p.name}」已注册。` })
+      // （fix-webui-qa-findings review F1）同移除：注册表变化广播给消费面。
+      window.dispatchEvent(new Event('sebas:refetch'))
       this.onSelect(p.path)
     } catch (e) {
       // （round3 4.4）「项目已注册」等服务端点名消息里的路径随展示归一，

@@ -35,6 +35,10 @@ import type { PendingSubmission } from './client.js'
  * （fix-webui-qa-defects-round5 6.3）载荷扩展 `label`（既有帧的载荷扩展，
  * 非新帧型）：操作者命名随每次帧如实下发——rail 据此把帧触发的行名重取
  * 收窄为「帧 label 与行已知 label 不一致才调度」，无关相位帧不再放大请求。
+ *
+ * （fix-webui-qa-findings DD1/DD2）载荷再扩展 `prompt_preview`：首条消息
+ * 预览（锚定不随最新消息漂移）随帧下发——rail/dashboard 据此把行名与聚焦
+ * 头部的命名变化就地补丁，回合产生的首条预览/自动标题免刷新上屏。
  */
 export interface SessionPhaseFrame {
   /** 七词相位 starting|queued|working|done|failed|waiting|dormant。 */
@@ -47,6 +51,8 @@ export interface SessionPhaseFrame {
   pending: PendingSubmission[]
   /** 操作者命名；null = 未设置（行名回退预览/短 id），每帧必带。 */
   label: string | null
+  /** 首条用户消息预览（DD1/DD2）；缺省 = 旧 core 不带（行名等全量收敛）。 */
+  prompt_preview?: string | null
 }
 
 export interface WsEvents {

@@ -235,6 +235,13 @@ pub struct SessionInfo {
     /// `#[serde(default, skip_serializing_if)]` 兼容旧快照/旧事件，None 不上 wire。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// （fix-webui-qa-findings DD2）**锚定首条用户消息**的命名预览：会话的
+    /// 第一条 prompt（归档恢复迁移位优先），后续消息绝不移动它。
+    /// 与 [`SessionInfo::user_prompt`]（当前回合的 prompt，飞书卡面语义）
+    /// 刻意分开——行命名链读这里，不读「最新 prompt」。
+    /// `#[serde(default, skip_serializing_if)]` 兼容旧快照/旧事件。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_prompt_preview: Option<String>,
 }
 
 /// （3.2，design D5b）`desired_mode` 的反序列化兼容：旧 core-channel 报文
@@ -586,6 +593,7 @@ mod tests {
             spawn_failure_reason: None,
             parked_approvals: 0,
             label: None,
+            first_prompt_preview: None,
         };
         let v = serde_json::to_value(&info).unwrap();
         assert_eq!(v["channel"], "web");

@@ -28,6 +28,7 @@ use futures_util::future::BoxFuture;
 use futures_util::{SinkExt, StreamExt};
 use sebas_dispatch::{SessionEvent, SessionInfo};
 use serde::Deserialize;
+use serde::Serialize;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -405,12 +406,98 @@ pub async fn settings(State(state): State<WebUiState>) -> Response {
     Json(data).into_response()
 }
 
+/// （fix-webui-qa-findings M9）Rust toolchain 探测的三态结果：
+/// `ok`（检出版本）/ `missing`（未安装）/ `error`（探测失败，携带成因）。
+/// About 据此区分「没装」与「没探测到」，不再显示裸「未知」。
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolchainProbe {
+    pub state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cause: Option<String>,
+}
+
+/// 运行 `rustc --version`（2s 超时）解析第一行版本输出。探测按请求执行
+/// （About 打开频度极低；进程 spawn 失败即「未安装」如实上报，不缓存
+/// 「没装」——装上 toolchain 后下一次 About 立即可见）。
+pub(crate) async fn probe_rust_toolchain() -> ToolchainProbe {
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        tokio::process::Command::new("rustc")
+            .arg("--version")
+            .output(),
+    )
+    .await
+    {
+        Err(_) => ToolchainProbe {
+            state: "error",
+            version: None,
+            cause: Some("探测超时（2s）".to_string()),
+        },
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => ToolchainProbe {
+            state: "missing",
+            version: None,
+            cause: Some("未安装（找不到 rustc 可执行文件）".to_string()),
+        },
+        Ok(Err(e)) => ToolchainProbe {
+            state: "error",
+            version: None,
+            cause: Some(format!("无法启动 rustc：{e}")),
+        },
+        Ok(Ok(out)) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let first = stdout.lines().next().unwrap_or("").trim().to_string();
+            if !out.status.success() {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                ToolchainProbe {
+                    state: "error",
+                    version: None,
+                    cause: Some(format!(
+                        "rustc 退出码 {:?}：{}",
+                        out.status.code(),
+                        stderr.lines().next().unwrap_or("").trim()
+                    )),
+                }
+            } else if first.is_empty() {
+                ToolchainProbe {
+                    state: "error",
+                    version: None,
+                    cause: Some("rustc 无版本输出".to_string()),
+                }
+            } else {
+                ToolchainProbe {
+                    state: "ok",
+                    version: Some(first),
+                    cause: None,
+                }
+            }
+        }
+    }
+}
+
+/// 解析 `rustc --version` 输出的第一行（M9 单测锚）：合法输出返回版本行
+/// 原文；空输出返回 None。探测的**状态**判定（ok/missing/error）在
+/// [`probe_rust_toolchain`]，这里只钉「行 → 版本」的解析口径。
+pub(crate) fn parse_rustc_version_line(stdout: &str) -> Option<String> {
+    stdout
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(str::to_string)
+}
+
 /// GET /api/about — version info and system status.
 pub async fn about(State(state): State<WebUiState>) -> Response {
+    let rustc = probe_rust_toolchain().await;
     let data = json!({
         "uptime": format_uptime(state.started_at.elapsed()),
         "version": env!("CARGO_PKG_VERSION"),
-        "rustc_version": env!("CARGO_PKG_RUST_VERSION"),
+        // （M9）toolchain 三态：{state: ok|missing|error, version?, cause?}。
+        // 编译期要求的最低 rust-version 保留在 `rustc_required`，与运行时
+        // 探测是两个语义（前者是构建门槛，后者是本机可用性）。
+        "rustc": rustc,
+        "rustc_required": env!("CARGO_PKG_RUST_VERSION"),
         "router_listen": state.router.listen,
         "provider_count": state.router.provider_count,
         // preselect-last-used-model 3.2：About INSTANCE 段的 default agent
@@ -992,14 +1079,26 @@ pub struct SetUserRoleForm {
 /// POST /api/users/{id}/role — 修改角色。角色每请求实时解析（design D5），
 /// 在线用户的下一个请求即按新角色执法，无需重新登录。降级最后一个启用的
 /// root 在存储层被拒（400）。
+/// （fix-webui-qa-findings OB2）root 对**自己**的降权 SHALL 被显式拒绝
+/// （400）：自降权让「最后一个启用的 root」防护形同虚设（自己仍是启用
+/// root，绕过存储层检查），是自锁入口。
 pub async fn users_set_role(
     State(state): State<WebUiState>,
+    identity: Option<Extension<Identity>>,
     Path(id): Path<i64>,
     Json(form): Json<SetUserRoleForm>,
 ) -> Response {
     let Some(store) = state.auth.user_store() else {
         return api_error(StatusCode::SERVICE_UNAVAILABLE, USERS_STORE_UNAVAILABLE);
     };
+    if let Some(Extension(identity)) = identity
+        && identity.user_id == id
+    {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "不能修改自己的角色——root 对自己行的降权被拒绝（自锁防护）",
+        );
+    }
     let Some(role_word) = form
         .role
         .as_deref()
@@ -1031,14 +1130,26 @@ pub struct SetUserEnabledForm {
 /// POST /api/users/{id}/enabled — 启用/禁用。禁用立即踢掉该用户全部会话
 /// （spec「禁用用户即刻失效」）；启用不影响会话。禁用最后一个启用的 root
 /// 在存储层被拒（400）。
+/// （fix-webui-qa-findings OB2）root 禁用**自己**同样被显式拒绝（400）——
+/// 最后一个 root 自禁是自锁；多个 root 时自禁也易失手，服务端一律挡下
+/// （自助改密路径不受影响）。
 pub async fn users_set_enabled(
     State(state): State<WebUiState>,
+    identity: Option<Extension<Identity>>,
     Path(id): Path<i64>,
     Json(form): Json<SetUserEnabledForm>,
 ) -> Response {
     let Some(store) = state.auth.user_store() else {
         return api_error(StatusCode::SERVICE_UNAVAILABLE, USERS_STORE_UNAVAILABLE);
     };
+    if let Some(Extension(identity)) = identity
+        && identity.user_id == id
+    {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "不能禁用当前登录的用户自己（自锁防护）",
+        );
+    }
     let Some(enabled) = form.enabled else {
         return api_error(StatusCode::BAD_REQUEST, "enabled 字段必填（布尔）");
     };
@@ -2310,11 +2421,18 @@ pub async fn archive_session(State(state): State<WebUiState>, Path(key): Path<St
     };
 
     let project_path = info.project_dir.clone().unwrap_or_default();
-    let label = info.user_prompt.clone().unwrap_or_else(|| {
-        info.session_id
-            .clone()
-            .unwrap_or_else(|| "unnamed".to_string())
-    });
+    // （fix-webui-qa-findings DD2）归档 label 与命名迁移位取**首条**消息
+    // 预览（锚定不随最新消息漂移）；旧快照无锚定值时回退 user_prompt。
+    let label = info
+        .first_prompt_preview
+        .clone()
+        .filter(|p| !p.is_empty())
+        .or_else(|| info.user_prompt.clone().filter(|p| !p.is_empty()))
+        .unwrap_or_else(|| {
+            info.session_id
+                .clone()
+                .unwrap_or_else(|| "unnamed".to_string())
+        });
 
     // polish-workbench-walkthrough-ux 2.1：close 会丢弃内存 transcript，
     // 归档视图的只读回看要在 close 前把对话快照进归档条目。
@@ -2348,7 +2466,11 @@ pub async fn archive_session(State(state): State<WebUiState>, Path(key): Path<St
         state.archive_retention_days,
         transcript,
         info.label.clone(),
-        info.user_prompt.clone(),
+        // （fix-webui-qa-findings DD2）迁移位同样锚定首条消息预览。
+        info.first_prompt_preview
+            .clone()
+            .filter(|p| !p.is_empty())
+            .or_else(|| info.user_prompt.clone().filter(|p| !p.is_empty())),
     ) {
         Ok(entry) => (
             StatusCode::OK,
@@ -2517,12 +2639,21 @@ fn session_phase_frame(info: &SessionInfo) -> crate::events::SessionPhaseFrame {
         .map_or(info.parked_approvals, |r| r.parked_approvals);
     let derived = SessionStatus::derive(&info.status, info.phase.as_ref())
         .with_parked_approvals(parked);
+    // （fix-webui-qa-findings DD2）行命名链的预览取**首条消息锚定值**——
+    // first_prompt_preview（引擎投影：迁移位/转录首条 Prompt）优先，旧快照
+    // 无该值时回退 user_prompt（旧行为，等下一次全量收敛）。
+    let prompt_preview = info
+        .first_prompt_preview
+        .clone()
+        .filter(|p| !p.is_empty())
+        .or_else(|| info.user_prompt.clone().filter(|p| !p.is_empty()));
     crate::events::SessionPhaseFrame {
         status_slug: derived.slug().to_string(),
         turn_engaged: info.turn_engaged,
         msg_count: info.msg_count,
         pending: info.pending.clone(),
         label: info.label.clone(),
+        prompt_preview,
     }
 }
 
@@ -3203,6 +3334,7 @@ mod session_phase_frame_label_tests {
             spawn_failure_reason: None,
             parked_approvals: 0,
             label,
+            first_prompt_preview: None,
         }
     }
 
@@ -3357,6 +3489,7 @@ mod approvals_label_route_tests {
                 spawn_failure_reason: None,
                 parked_approvals: 0,
                 label: None,
+                first_prompt_preview: None,
             }])
             .await;
         crate::routes::encode_session_key(&key)

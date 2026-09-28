@@ -1732,6 +1732,7 @@ mod workspace_root_tests {
             spawn_failure_reason: None,
             parked_approvals: 0,
             label: None,
+            first_prompt_preview: None,
         }
     }
 

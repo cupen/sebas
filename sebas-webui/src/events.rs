@@ -36,6 +36,11 @@ pub struct SessionPhaseFrame {
     pub pending: Vec<sebas_dispatch::PendingSubmission>,
     /// 操作者命名（5.1，design D6；None = 未设置，行名回退预览/短 id）。
     pub label: Option<String>,
+    /// （fix-webui-qa-findings DD1/DD2）首条消息预览随帧下发（行命名链的
+    /// 锚定来源）。`#[serde(default, skip_serializing_if)]`：既有帧的载荷
+    /// 扩展——旧对端不发能读，本侧 None 不上 wire（协议演进规则 1）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_preview: Option<String>,
 }
 
 /// Events that the WebUI can push to connected clients.
@@ -167,6 +172,7 @@ mod tests {
                 priority: false,
             }],
             label: Some("renamed-by-operator".into()),
+            prompt_preview: Some("first hello".into()),
         };
         let cases: Vec<(WebUiEvent, serde_json::Value)> = vec![
             (
@@ -178,6 +184,7 @@ mod tests {
                         msg_count: 0,
                         pending: Vec::new(),
                         label: None,
+                        prompt_preview: None,
                     },
                 },
                 json!({
@@ -219,6 +226,7 @@ mod tests {
                         msg_count: 0,
                         pending: Vec::new(),
                         label: None,
+                        prompt_preview: None,
                     },
                 },
                 json!({

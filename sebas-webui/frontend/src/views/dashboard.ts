@@ -50,6 +50,35 @@ export function focusedProjectPath(
   if (!projectId) return null
   return projects.find((p) => p.id === projectId)?.path ?? null
 }
+
+/**
+ * （fix-webui-qa-findings D4，纯函数）聚焦会话是否属于**当前展示项目**的
+ * 可见集合：`selectedPath` 未设 = 无门禁（现状行为）；已设时聚焦会话的
+ * 项目路径必须与展示路径一致——项目被移除（路径解析为 null）或聚焦属于
+ * 另一个项目都不属于可见集合，主面板调和到空态。
+ */
+export function focusInDisplayedProject(
+  projects: Array<{ id: string; path: string }>,
+  focusedProjectId: string | null | undefined,
+  selectedPath: string | null,
+): boolean {
+  if (selectedPath === null) return true
+  return focusedProjectPath(projects, focusedProjectId) === selectedPath
+}
+
+/**
+ * （fix-webui-qa-findings D4，纯函数）displayed project 是否仍然成立：展示
+ * 路径还能在注册项目列表里解析到（项目未被移除）。移除**非展示**项目不影响
+ * 当前展示；展示项目被移除（含清空最后一项）后路径解析不到——主面板的头部
+ * 不再以被移除项目为名，与侧栏（该行已删）一致。
+ */
+export function displayedProjectResolved(
+  projects: Array<{ path: string }>,
+  selectedPath: string | null,
+): boolean {
+  if (selectedPath === null) return false
+  return projects.some((p) => p.path === selectedPath)
+}
 import { viewStyles } from '../styles/shared.js'
 import {
   clampComposerHeight,
@@ -162,12 +191,12 @@ export class SebasDashboard extends LitElement {
    * pointer only）。会话关闭/焦点他移后由 effective-focus 收敛逻辑清空。
    */
   @property({ attribute: false }) deepLinkKey: string | null = null
-  /**
-   * Selected project path — owned by the app-shell（侧栏项目树驱动），
-   * 这里只消费。`null` = 未选择项目。The selection only affects the
-   * workbench main area — never the focused-session pointer or any
-   * session state.
-   */
+/**
+ * Selected project path — owned by the app-shell（侧栏项目树驱动），
+ * 这里只消费。`null` = 未选择项目。The selection only affects the
+ * workbench main area — never the focused-session pointer or any
+ * session state.
+ */
   @property({ attribute: false })
   selectedPath: string | null = null
   /**
@@ -295,7 +324,26 @@ export class SebasDashboard extends LitElement {
         this.applyTurnAppend(ev)
         return
       case 'session.created':
-      case 'session.updated':
+      case 'session.updated': {
+        // （fix-webui-qa-findings M8/DD1）行命名就地补丁：帧携带的 label 与
+        // prompt_preview（首条消息预览）直接写进 summary 的 recent_sessions
+        // 行——聚焦头部的命名链（fullSessionLabel）即时拿到新值。重命名、
+        // 自动标题到达、首条预览出现不再等 500ms 节流刷新，且**不重载**。
+        if (this.data?.recent_sessions && (ev.label !== undefined || ev.prompt_preview !== undefined)) {
+          const rows = this.data.recent_sessions
+          const i = rows.findIndex((r) => r.encoded_key === ev.session_id)
+          if (i >= 0) {
+            const next = [...rows]
+            next[i] = {
+              ...next[i],
+              ...(ev.label !== undefined ? { label: ev.label } : {}),
+              ...(ev.prompt_preview !== undefined
+                ? { prompt_preview: ev.prompt_preview }
+                : {}),
+            }
+            this.data = { ...this.data, recent_sessions: next }
+          }
+        }
         // （2.2，design D2）相位帧就地补丁：composer 提交控件、pending-stack、
         // childStarting 形态从帧字段真读、即时翻转——不等下一次 HTTP 详情
         // 取回，也不做任何 status_slug 字符串回退。五键帧每次必带；随后的
@@ -311,6 +359,7 @@ export class SebasDashboard extends LitElement {
         }
         this.scheduleListRefresh()
         return
+      }
       case 'session.turn_stalled':
         this.scheduleListRefresh()
         return
@@ -855,7 +904,13 @@ export class SebasDashboard extends LitElement {
     // 被「亲眼看着到达」写锚，徽标永远不亮（unread-badge × rail-focus 互斥
     // 的根因）。事件携带的目标 key 在此立即生效，summary 追平后清除。
     const key = (ev as CustomEvent<{ key?: string }>).detail?.key
-    if (key) this.focusOverride = key
+    if (key) {
+      this.focusOverride = key
+      // （fix-webui-qa-findings review F2）rail 聚焦是显式动作：重置投影
+      // 幂等闸，同会话重选可再次反投影（D4 门禁隐藏后的显式恢复路径）；
+      // 重复派发仍被 followFocusedProject 的 path===selectedPath 挡住。
+      this.lastFollowedFocusKey = null
+    }
     this.scheduleListRefresh()
   }
 
@@ -1228,6 +1283,20 @@ export class SebasDashboard extends LitElement {
     return found?.display || kind
   }
 
+  /**
+   * （fix-webui-qa-findings D4）聚焦会话是否应显示在当前展示项目的主面板：
+   * 深链/ rail 即时覆盖是显式操作者动作，不做惯性调和（followFocusedProject
+   * 会随后把 selectedPath 对齐到会话项目）；仅当焦点由服务端指针惯性驱动
+   * 且会话不属于展示项目的可见集合（项目被移除/展示项目切换）时调和到空态。
+   */
+  private focusVisibleInDisplayedProject(focusKey: string | null): boolean {
+    if (focusKey === null) return true
+    if (this.deepLinkKey !== null || this.focusOverride !== null) return true
+    const row = this.data?.recent_sessions?.find((r) => r.encoded_key === focusKey)
+    const pid = row?.project_id ?? this.focusedDetail?.project_id ?? null
+    return focusInDisplayedProject(this.projects, pid, this.selectedPath)
+  }
+
   render() {
     if (this.error)
       return html`
@@ -1242,6 +1311,10 @@ export class SebasDashboard extends LitElement {
     // 换成归档形态（对话快照只读 + 显式恢复按钮）。
     if (this.archivedEntry) return this.renderArchivedWorkbench()
     const focusKey = this.effectiveFocusKey()
+    // （fix-webui-qa-findings D4）焦点调和：聚焦不属于展示项目可见集合 →
+    // 主面板到空态（服务端指针不动，点会话行可显式恢复）。
+    const staleForDisplayedProject = !this.focusVisibleInDisplayedProject(focusKey)
+    const visibleFocusKey = staleForDisplayedProject ? null : focusKey
     const nodeGate = this.selectedNodeGate()
     const selectedNodeId = this.projects.find((x) => x.path === this.selectedPath)?.node_id || LOCAL_NODE
     // 注册表落的是 canonicalize_plain 的反斜杠普通形（Windows）——basename
@@ -1249,6 +1322,15 @@ export class SebasDashboard extends LitElement {
     const projectName = this.selectedPath
       ? (this.selectedPath.split(/[\\/]/).filter(Boolean).pop() ?? this.selectedPath)
       : null
+    // （fix-webui-qa-findings D4）displayed project 的焦点调和（呈现层）：
+    // 展示路径已从注册项目列表消失（项目被移除 / 清空最后一项）→ 头部不再
+    // 以被移除项目为名（回落「未选择项目」），与侧栏（该行已删）一致；聚焦
+    // 会话若正属于被移除项目，空态文案点名「已移除」而不是「该项目暂无」。
+    // 选择指针本身不清空：rail 里该行已删、无高亮，指针不可见，下一次显式
+    // 选择/聚焦反投影即治愈——清成 null 反而让 selectedPath===null 逃过既有
+    // stale 门禁，被移除项目的旧对话会继续残留（spec 明令禁止）。
+    const projectResolved = displayedProjectResolved(this.projects, this.selectedPath)
+    const removedWhileDisplayed = this.selectedPath !== null && !projectResolved
     // fix-pending-queue-liveness 3.1 + （2.1，design D2）：「turn 在飞」只
     // 消费引擎的结构化事实 `turn_engaged`（WORKING ∨ 泊车 ∨ spawn 窗口）。
     // （session-parallel-liveness-and-unread-polish 2.1）帧/详情五键必带，
@@ -1272,7 +1354,7 @@ export class SebasDashboard extends LitElement {
         <div slot="start" class="stage-col">
           <div class="stage-island" data-testid="stage-island">
             <header class="project-header">
-              ${projectName
+              ${projectName && projectResolved
                 ? html`
                     <span class="path" title=${this.selectedPath ?? ''}>${projectName}</span>
                     <span class="node-chip" data-testid="header-node" data-node-status=${nodeGate?.status ?? 'online'} title=${nodeGate ? `节点 ${nodeGate.nodeId} 不可用：${nodeGate.cause}` : `执行节点 ${selectedNodeId}`}>${nodeGate ? '⚠ ' : ''}${selectedNodeId}</span>
@@ -1283,9 +1365,11 @@ export class SebasDashboard extends LitElement {
                 : html`<span class="path muted">未选择项目</span>`}
               <!-- （3.6，design D6b）会话状态只挂 rail 行首圆点一处：
                    project-header 不再复述「X sessions · active/idle」，也不再
-                   内嵌第二枚 status-badge——focused-link 只留 chat_id 锚点。 -->
+                   内嵌第二枚 status-badge——focused-link 只留 chat_id 锚点。
+                   （fix-webui-qa-findings D4）聚焦会话被 stale 门禁挡住（不属于
+                   展示项目 / 其项目已被移除）时头部不再锚向未展示的会话。 -->
               <span class="project-meta">
-                ${d.active_session
+                ${d.active_session && !staleForDisplayedProject
                   ? html`
                       <a
                         class="focused-link"
@@ -1300,16 +1384,20 @@ export class SebasDashboard extends LitElement {
               </span>
             </header>
 
-            ${focusKey
+            ${visibleFocusKey && !staleForDisplayedProject
               ? this.renderTurnStream()
               : html`
                   <div class="empty-stream">
                     <span class="glyph">${icon('message', 20)}</span>
-                    <span class="title">未聚焦任何会话</span>
+                    <span class="title">${staleForDisplayedProject && !removedWhileDisplayed ? '该项目暂无聚焦会话' : '未聚焦任何会话'}</span>
                     <p class="hint">
-                      ${this.narrow
-                        ? '点左上角的 ☰ 打开项目树——选项目、进会话，或用项目行的 + 新建。'
-                        : '从左侧项目树选择一个会话——或用项目行的 + 新建。'}
+                      ${staleForDisplayedProject
+                        ? removedWhileDisplayed
+                          ? '当前聚焦的会话所属项目已被移除——从左侧项目树选择会话，或重新注册该项目。'
+                          : '当前聚焦的会话属于其他项目（或已被移除）——从左侧项目树选择会话，或用项目行的 + 新建。'
+                        : this.narrow
+                          ? '点左上角的 ☰ 打开项目树——选项目、进会话，或用项目行的 + 新建。'
+                          : '从左侧项目树选择一个会话——或用项目行的 + 新建。'}
                     </p>
                   </div>
                 `}
@@ -1324,15 +1412,25 @@ export class SebasDashboard extends LitElement {
                   </span>
                 </div>
               </div>`
-            : html`
+            : staleForDisplayedProject
+              ? html`<div class="composer-area">
+                  <div class="composer no-focus" data-testid="composer-stale-project">
+                    <span class="no-focus-hint">
+                      ${removedWhileDisplayed
+                        ? '聚焦的会话所属项目已被移除——请在左侧项目树重新选择，或重新注册该项目。'
+                        : '主面板已切换到当前展示项目——上方会话属于其他项目，如需继续请在左侧项目树重新选择。'}
+                    </span>
+                  </div>
+                </div>`
+              : html`
           <div class="composer-area">
             <sebas-review-cards
-              .sessionKey=${focusKey}
+              .sessionKey=${visibleFocusKey}
               .sessionPhase=${this.focusedDetail?.status_slug ?? d.active_session?.status_slug ?? null}
               @review-pending-changed=${this.onReviewPendingChanged}
             ></sebas-review-cards>
             <sebas-pending-stack
-              .sessionKey=${focusKey}
+              .sessionKey=${visibleFocusKey}
               .pending=${this.focusedDetail?.pending ?? []}
               .dropped=${this.droppedPending}
               .turnEngaged=${turnEngaged}
@@ -1346,7 +1444,7 @@ export class SebasDashboard extends LitElement {
                  的属性绑定会退化成文本节点（本行曾因此丢掉 modeEditable /
                  currentMode / composer-sent）。 -->
             <sebas-workbench-composer
-              .sessionKey=${focusKey}
+              .sessionKey=${visibleFocusKey}
               .turnInFlight=${turnEngaged}
               .awaitingReceipt=${receiptPhaseActive(this.focusedDetail?.entries, this.focusedDetail?.status_slug ?? d.active_session?.status_slug ?? null)}
               .waitingApproval=${waitingApproval}

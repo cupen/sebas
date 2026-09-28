@@ -1121,12 +1121,30 @@ fn check_binary_reachable(path: &str) -> Result<()> {
     // 侧同一判定（否则校验放行、spawn 报 program not found，见 win_exe 模块）。
     #[cfg(not(unix))]
     let found = {
-        let resolved = sebas_acp::resolve_windows_executable(path);
-        let resolved = std::path::Path::new(&resolved);
-        resolved.is_file()
-            && resolved.extension().is_some_and(|e| {
+        let spawnable = |p: &std::path::Path| {
+            p.extension().is_some_and(|e| {
                 ["exe", "cmd", "bat"].contains(&e.to_string_lossy().to_ascii_lowercase().as_str())
             })
+        };
+        let resolved_string = sebas_acp::resolve_windows_executable(path);
+        let resolved = std::path::Path::new(&resolved_string);
+        let file_ok = |cand: &std::path::Path| cand.is_file() && spawnable(cand);
+        // 裸名字（无分隔符）：spawn 侧 CreateProcess 按 PATH 搜索，校验侧用
+        // 同一判定——逐 PATH 目录核对存在性。否则 CWD 相对的 is_file 恒假，
+        // PATH 可达的裸名二进制（如 cmd.exe）被误拒
+        // （红灯 = tests/config_test.rs
+        // validate_runtime_accepts_reachable_binary_and_writable_dirs）。
+        if resolved.parent().is_some_and(|d| d.as_os_str().is_empty()) {
+            std::env::var_os("PATH")
+                .map(|paths| {
+                    std::env::split_paths(&paths).any(|dir| {
+                        file_ok(&dir.join(resolved.file_name().unwrap_or_default()))
+                    })
+                })
+                .unwrap_or(false)
+        } else {
+            file_ok(resolved)
+        }
     };
 
     #[cfg(unix)]

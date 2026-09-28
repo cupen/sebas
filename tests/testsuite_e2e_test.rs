@@ -9518,9 +9518,18 @@ mod agent_catalog {
         wait_turn_done(&cli, &sb, &format!("{}/api/sessions/{key}", sb.webui_url())).await;
 
         // 优雅停机（SIGTERM：状态落盘 + socket 摘除——重启路径的前提）。
-        let pid = core.id().expect("core pid") as libc::pid_t;
-        unsafe {
-            libc::kill(pid, libc::SIGTERM);
+        // Windows 无 SIGTERM/kill：走进程句柄强杀（test-only 容器进程，优雅
+        // 语义由 unix 侧钉住——与文件内既有 cfg(unix) 守卫同一取舍）。
+        #[cfg(unix)]
+        {
+            let pid = core.id().expect("core pid") as libc::pid_t;
+            unsafe {
+                libc::kill(pid, libc::SIGTERM);
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            core.kill().await.expect("kill core on windows");
         }
         core.wait().await.expect("core exits gracefully");
 

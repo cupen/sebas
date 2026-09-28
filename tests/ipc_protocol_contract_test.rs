@@ -139,6 +139,7 @@ fn sample_info() -> SessionInfo {
         spawn_failure_reason: None,
         parked_approvals: 0,
         label: Some("demo".into()),
+        first_prompt_preview: None,
         available_commands: Vec::new(),
     }
 }

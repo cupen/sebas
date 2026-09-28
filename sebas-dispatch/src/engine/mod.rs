@@ -544,12 +544,32 @@ impl DispatchHandle {
         // [`count_chat_messages`]）。transcript 只追加、随映射删除（Dormant/
         // Spawning 无可寻址 transcript → 0），单调性由 transcript 保证，无需
         // 第二份计数状态；随 `session.updated` 广播 + rail 10s 轮询兜底。
-        let msg_count = match m.transcript_id() {
+        // （fix-webui-qa-findings DD2）同一把读锁里再取**首条用户消息预览**：
+        // 命名链的 fallback 锚定首条 prompt——映射迁移位（归档恢复）优先，
+        // 否则转录里第一条 Prompt 条目。后续消息绝不移动它（user_prompt 是
+        // 「当前回合 prompt」，那是飞书卡面语义，不再进行名）。
+        let (msg_count, first_prompt_preview) = match m.transcript_id() {
             Some(tid) => {
                 let g = self.turn_log.read().await;
-                g.get(tid).map(|log| count_chat_messages(log)).unwrap_or(0)
+                let log = g.get(tid);
+                let msg_count = log.map(|l| count_chat_messages(l)).unwrap_or(0);
+                let anchored = m
+                    .prompt_preview
+                    .clone()
+                    .filter(|p| !p.is_empty())
+                    .or_else(|| {
+                        log.and_then(|l| {
+                            l.iter()
+                                .find(|e| e.kind == TurnKind::Prompt && !e.content.is_empty())
+                                .map(|e| e.content.clone())
+                        })
+                    });
+                (msg_count, anchored)
             }
-            None => 0,
+            None => (
+                0,
+                m.prompt_preview.clone().filter(|p| !p.is_empty()),
+            ),
         };
         // fix-pending-queue-liveness 2.3（design D3）：「回合占用」的引擎事实
         // ——WORKING 相位 ∨ 接收回执相位（round4 2.2：提交已接受、prompt 已
@@ -621,6 +641,9 @@ impl DispatchHandle {
             parked_approvals,
             // （5.1，design D6）操作者 label 随快照下发（None 不上 wire）。
             label: m.label.clone(),
+            // （fix-webui-qa-findings DD2）首条消息预览随快照/事件下发（行
+            // 命名链的锚定数据源；None 不上 wire）。
+            first_prompt_preview,
         })
     }
 
@@ -980,6 +1003,70 @@ impl DispatchHandle {
         }
     }
 
+    /// （fix-webui-qa-findings D5）驱动确认子进程死亡（事件流关闭 = 管道
+    /// 关闭）时的提前终态化。此前 pump 的通道关闭臂只 `drop_card`：映射留在
+    /// Active、无任何可见终态——下一条消息走 Continue 路由投给死会话
+    /// id，永远没有事件回来，会话停在 Queued/Working 僵尸态，唯一出口是
+    /// stall watchdog 的强制收尾（QA D5 实证）。现在：
+    ///
+    /// 1. 回合仍在开（SEED/WORKING 卡）→ 落一条**可见错误条目**（带成因）
+    ///    并把卡翻 FAILED——transcript 不让死亡无声消失；
+    /// 2. 映射 Active → Dormant 退役（terminal-error teardown 同款：记录与
+    ///    转录保留，活跃绑定清除）——后续消息走 Resume 惰性拉起（agent 拒载
+    ///    时既有 fallback-fresh 语义），不再等 watchdog；
+    /// 3. 泊车/时钟/msgid/自动切换记录随会话死亡清空（复用 id 不继承 stale）；
+    /// 4. 发布 Updated——退役对外可见，rail/详情不等轮询。
+    ///
+    /// stall watchdog 保留为兜底（慢/静默子进程场景不变）；本方法只服务
+    /// 「死亡已确认」的会话。映射已不在场（显式 close / 正常 terminal error
+    /// 已拆）→ 幂等 no-op。
+    pub async fn finalize_dead_child(&self, session_id: &str) {
+        self.drop_card(session_id).await;
+        let Some(key) = self.map.lookup_key_by_session(session_id).await else {
+            tracing::debug!(%session_id, "channel closed after teardown; nothing live to finalize");
+            return;
+        };
+        // ① 可见错误条目 + 卡翻 FAILED（仅回合仍开时；终态卡不重复报错）。
+        use crate::card_state::phase::{FAILED, SEED, WORKING};
+        let turn_open = self
+            .card_states
+            .apply(session_id, |st| {
+                if matches!(st.status_emoji.as_str(), SEED | WORKING) {
+                    st.status_emoji = FAILED.into();
+                    true
+                } else {
+                    false
+                }
+            })
+            .await;
+        if turn_open {
+            let entry = TurnEntry::error(0, "agent 进程已退出（连接关闭），本回合终止".to_string())
+                .with_failure_class(crate::engine::events::failure_class::GENERIC);
+            self.transcript_push(session_id, entry).await;
+            self.flush_card(session_id).await;
+        }
+        // ② Active → Dormant 退役（与 terminal-error teardown 同语义）。
+        let preview = self
+            .card_states
+            .snapshot(session_id)
+            .await
+            .map(|st| st.user_prompt)
+            .filter(|p| !p.is_empty());
+        let retired = self.map.retire_to_record(session_id, preview).await.is_some();
+        // ③ 死亡会话的随行状态清空。
+        let _ = self.auto_mode_switches.take(session_id).await;
+        self.msgid.drop(session_id).await;
+        self.stall.drop_session(session_id).await;
+        // ④ 退役对外可见。
+        if retired {
+            self.publish_updated(&key).await;
+        }
+        tracing::info!(
+            %session_id,
+            "channel closed with a live mapping; finalized as child death (D5)"
+        );
+    }
+
     /// 回填一个原生权限决定。返回 false = 该 request_id 不在桥的待决表
     /// （可能是 acp 会话的权限，或已过期）。供 webui 审查卡先试 native
     /// 再回退 acp。
@@ -1182,12 +1269,32 @@ impl DispatchHandle {
         // ModeChanged（add-agent-mode-selection）：运行时权限模式切换被
         // agent 接受——更新映射的 effective mode 并发布 Updated，快照立即
         // 反映（与 ModelChanged 同一到达线覆盖）。
+        // （fix-webui-qa-findings D2）应用点落持久化契约条目：driver 的
+        // ModeChanged 只在 SetMode 被执行体接受时发出（sebas-acp driver 唯一
+        // 发射点），因此这里写 `permission_mode_result`（ok=true，载荷形状
+        // 与 auto-gate 失败条目同族——im 等消费端按 `ok` 分派，request_id
+        // 空串 = 操作者显式切换、无权限请求关联）。失败路径不写成功条目
+        // （MODE_UNCHANGED_MARKER 错误由 report_auto_mode_switch_failed /
+        // typed 错误面承载）。
         if let AcpEvent::ModeChanged { mode, .. } = event
             && let Some(key) = self.map.lookup_key_by_session(session_id).await
         {
             self.map
                 .set_effective_mode(&key, Some(SessionMode::from_wire(&mode)))
                 .await;
+            self.transcript_push(
+                session_id,
+                TurnEntry::permission_mode_result(
+                    0,
+                    serde_json::json!({
+                        "request_id": "",
+                        "ok": true,
+                        "mode": mode,
+                        "detail": "权限模式已切换",
+                    }),
+                ),
+            )
+            .await;
             self.publish_updated(&key).await;
         }
         // AvailableCommands（session-slash-commands 2.1）：agent 广告的命令

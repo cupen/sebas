@@ -377,7 +377,12 @@ pub fn spawn_acp_pump_with_idle(
             tokio::select! {
                 maybe_evt = rx.recv() => {
                     let Some(evt) = maybe_evt else {
-                        router.drop_card(&session_id).await;
+                        // （fix-webui-qa-findings D5）通道关闭 = 驱动确认子进程
+                        // 死亡（exit 事件缺失但管道关闭可观测）。提前终态化：
+                        // 可见错误条目 + 映射退役——会话不再僵尸 Queued 等
+                        // watchdog，后续消息走 Resume/fallback-fresh。幂等：
+                        // 正常 terminal error 已拆活映射时是 no-op。
+                        router.finalize_dead_child(&session_id).await;
                         break;
                     };
                     // 任意事件重置 idle 计时。

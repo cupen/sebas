@@ -1879,6 +1879,7 @@ mod tests {
             label: None,
             spawn_failure_reason: None,
             available_commands: Vec::new(),
+            first_prompt_preview: None,
         }
     }
 

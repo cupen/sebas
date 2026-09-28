@@ -79,6 +79,7 @@ import {
 import { renderMarkdown } from '../components/markdown.js'
 import { MODE_OPTIONS } from './mode-vocabulary.js'
 import { icon } from '../components/icons.js'
+import { notify } from '../notify.js'
 import { viewStyles } from '../styles/shared.js'
 import { isNarrowViewport, onNarrowChange } from './split-persist.js'
 import '@awesome.me/webawesome/dist/components/textarea/textarea.js'
@@ -107,7 +108,14 @@ function parseSlashCommandName(text: string): string | null {
  * 启动中（spawn 窗口、无在飞 turn）且有字——提交被暂存给正在启动的子进程，
  * 与「在跑回合的排队」（queued）是两回事，形态必须可分辨。
  */
-type SubmitState = 'disabled' | 'send' | 'sending' | 'stop' | 'queued' | 'starting'
+type SubmitState =
+  | 'disabled'
+  | 'send'
+  | 'sending'
+  | 'stop'
+  | 'stopping'
+  | 'queued'
+  | 'starting'
 
 /**
  * 一次性 composer 对焦请求的事件名（workbench-rail-polish 3.2/D2）：rail
@@ -234,6 +242,15 @@ export class SebasWorkbenchComposer extends LitElement {
    */
   @state() private optimisticQueued: string | null = null
   /**
+   * （fix-webui-qa-findings D3，spec「取消请求即时确认」）pending-cancel：
+   * cancel 请求被服务端接受（POST resolve）即置位——提交控件立即翻
+   * 「停止中…」pending 形态，**不等** agent 的下一帧输出。静默期里回合
+   * 看起来还在跑，但操作者能看到「停止已受理、正在等待子进程变得可中断」。
+   * turn 结束（turnInFlight/awaitingReceipt 翻 false）即清除；聚焦会话
+   * 切换时同样复位。
+   */
+  @state() private cancelPending = false
+  /**
    * （workbench-composer-input-polish 3.2/D3）命令面板 hover 行下标：hover
    * 与键盘高亮两态同源出泡——hover 优先，未 hover 时回落到键盘高亮行。
    * `null` = 指针不在任何行上。
@@ -293,8 +310,21 @@ export class SebasWorkbenchComposer extends LitElement {
       this.paletteIndex = 0
       this.hoverIndex = null
       this.slashNotice = null
+      // （fix-webui-qa-findings D3）pending-cancel 随旧会话作废。
+      this.cancelPending = false
       const prev = changed.get('sessionKey')
       if (prev !== undefined && this.sessionKey !== prev) this.text = ''
+    }
+    // （fix-webui-qa-findings D3）回合结束（引擎 turn_engaged 翻 false /
+    // 接收回执相位退出）= pending-cancel 使命完成——已停止终态由转写呈现，
+    // 提交控件回 send 态。
+    if (
+      this.cancelPending &&
+      (changed.has('turnInFlight') || changed.has('awaitingReceipt')) &&
+      !this.turnInFlight &&
+      !this.awaitingReceipt
+    ) {
+      this.cancelPending = false
     }
     // 文本变化（打字/补全/提交清空）：面板重新获得开启资格、高亮回首位，
     // 撤销上一次的 Esc 作废；拦截提示就地清除（4.1「改字后可再提交」）。
@@ -343,6 +373,10 @@ export class SebasWorkbenchComposer extends LitElement {
     const hasText = this.text.trim().length > 0
     if (this.childStarting && hasText) return 'starting'
     const inFlight = this.turnInFlight || this.awaitingReceipt
+    // （fix-webui-qa-findings D3）cancel 已受理：停止态翻 pending-cancel
+    // 「停止中…」形态——即时确认，不等 agent 下一帧；点击仍可重发 cancel
+    // （幂等：服务端打标取 or）。
+    if (inFlight && this.cancelPending) return 'stopping'
     if (inFlight) return hasText ? 'queued' : 'stop'
     return hasText ? 'send' : 'disabled'
   }
@@ -378,11 +412,21 @@ export class SebasWorkbenchComposer extends LitElement {
     // （close-acceptance-blind-spots 4.3）乐观排队呈现：POST 发出即刻置位，
     // 提交面 5 秒内（实为同步）出现可见排队指示，不等后端确认。
     this.optimisticQueued = prompt
+    // （fix-webui-qa-findings M2）斜杠命令提交的回执标记：命令词提取自提交
+    // 文本，成功后发 notify 层 info 回执（可见回执），拒绝命令保持既有
+    // inline slashNotice（接受/拒绝可区分）。非命令提交为 null。
+    const commandReceipt = prompt.startsWith('/') ? prompt.split(/\s+/)[0] : null
     try {
       // turn 在飞时服务端自动排队（workbench-turn-queue）——composer 不区分
       // 开轮与排队，提交语义一条路径。
       await api.sendMessage(key, prompt)
       this.text = ''
+      if (commandReceipt) {
+        notify({
+          level: 'info',
+          message: `命令 ${commandReceipt} 已提交。`,
+        })
+      }
       // 舞台就地刷新：dashboard 监听后立刻重取聚焦 detail（WS 推送之外的
       // 乐观刷新，避免等下一个 summary 周期）。
       this.dispatchEvent(
@@ -402,6 +446,8 @@ export class SebasWorkbenchComposer extends LitElement {
    * 停止（design D5）：点击红色方块 → 新 cancel 链路
    * （POST /api/sessions/{key}/cancel）。错误走既有 callout；turn 结束
    * （WS 推送 turnInFlight=false）自动回到 send 态。
+   * （fix-webui-qa-findings D3）请求被接受即翻 pending-cancel「停止中…」
+   * ——即时确认不依赖 agent 下一帧；终态到达后 updated() 复位。
    */
   private async cancelTurn(): Promise<void> {
     const key = this.sessionKey
@@ -409,6 +455,7 @@ export class SebasWorkbenchComposer extends LitElement {
     this.error = null
     try {
       await api.cancelSession(key)
+      this.cancelPending = true
       this.dispatchEvent(
         new CustomEvent('composer-sent', { detail: { key }, bubbles: true, composed: true }),
       )
@@ -846,6 +893,13 @@ export class SebasWorkbenchComposer extends LitElement {
         disabled: true,
       },
       stop: { label: '停止回复', icon: icon('stop', 14), disabled: false },
+      // （fix-webui-qa-findings D3）cancel 受理后的 pending 形态：即时确认
+      // 「停止已受理」——静默期里不再呈现为普通 running；仍可点击重发。
+      stopping: {
+        label: '停止中…',
+        icon: html`<span class="spinner" aria-hidden="true"></span>`,
+        disabled: false,
+      },
       queued: { label: '排队提交', icon: icon('clock', 14), disabled: false },
       // （3.4）启动形态：与排队同色系分离（starting token 底色）——
       // 提交被暂存给正在启动的子进程，不是排在某个在跑回合后面。
@@ -853,7 +907,7 @@ export class SebasWorkbenchComposer extends LitElement {
     }
     const m = meta[state]
     const onClick =
-      state === 'stop'
+      state === 'stop' || state === 'stopping'
         ? () => void this.cancelTurn()
         : state === 'send' || state === 'queued' || state === 'starting'
           ? () => void this.submit()
@@ -1355,6 +1409,22 @@ export class SebasWorkbenchComposer extends LitElement {
       .send-button.stop {
         background: var(--sebas-status-failed);
         opacity: 1;
+      }
+      /* （fix-webui-qa-findings D3）停止已受理的 pending 形态：同 failed 系
+         但降透明度 + 慢脉冲——「正在等子进程停下」与「还没点」可分辨。 */
+      .send-button.stopping {
+        background: var(--sebas-status-failed);
+        opacity: 0.75;
+        animation: stopping-pulse 1.2s ease-in-out infinite;
+      }
+      @keyframes stopping-pulse {
+        0%,
+        100% {
+          opacity: 0.75;
+        }
+        50% {
+          opacity: 0.4;
+        }
       }
       /* 流式且有字：排队形态（queued 色，提交进既有 turn-queue）。 */
       .send-button.queued {

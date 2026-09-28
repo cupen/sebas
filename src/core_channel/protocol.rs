@@ -283,6 +283,7 @@ mod tests {
             parked_approvals: 0,
             label: None,
             available_commands: Vec::new(),
+            first_prompt_preview: None,
         };
         let frames = vec![
             SessionStreamFrame::Snapshot {
