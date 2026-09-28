@@ -577,7 +577,21 @@ mod tests {
 
     #[test]
     fn default_socket_path_ends_with_control_sock() {
+        // 读的是进程 env 派生路径，必须持 home_env_test_lock 并钉住覆盖变量，
+        // 否则与改 env 的测试并行交错时会读到对方设的 SEBAS_CONTROL_SOCKET。
+        let lock = crate::home_env_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::var("SEBAS_CONTROL_SOCKET").ok();
+        unsafe { std::env::remove_var("SEBAS_CONTROL_SOCKET") };
         assert!(default_socket_path().ends_with("control.sock"));
+        unsafe {
+            match saved {
+                Some(v) => std::env::set_var("SEBAS_CONTROL_SOCKET", v),
+                None => std::env::remove_var("SEBAS_CONTROL_SOCKET"),
+            }
+        }
+        drop(lock);
     }
 
     /// unify-sebas-home 3.2：控制面 socket 缺省两级解析——`SEBAS_CONTROL_

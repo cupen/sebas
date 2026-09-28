@@ -1968,11 +1968,18 @@ mod tests {
             }
         }
 
-        // 两段文本 = 两条独立 turn 事件，先于收尾标记到达。
+        // 两段文本 = 两条独立 turn 事件，先于收尾标记到达。汇总行只钉前缀：
+        // 耗时字段随机器负载波动（0/1ms），精确匹配会间歇性翻红。
+        let contents: Vec<&str> = streamed.iter().map(|e| e.content.as_str()).collect();
         assert_eq!(
-            streamed.iter().map(|e| e.content.as_str()).collect::<Vec<_>>(),
-            vec!["chunk one ", "chunk two", "🗒 turn summary — 1 model calls, 0 tools, 0ms"],
+            &contents[..2],
+            &["chunk one ", "chunk two"],
             "deltas must stream as separate live entries before the turn-end marker: {streamed:?}"
+        );
+        assert!(
+            contents[2].starts_with("🗒 turn summary — 1 model calls, 0 tools, ")
+                && contents[2].ends_with("ms"),
+            "turn-end marker content unexpected: {streamed:?}"
         );
         assert_eq!(
             streamed.iter().map(|e| e.position).collect::<Vec<_>>(),
@@ -2055,13 +2062,16 @@ mod tests {
             .map(|e| (e.element_type.as_str(), e.content.as_str()))
             .collect();
         assert_eq!(
-            kinds,
-            vec![
-                ("thinking", "weighing the options"),
-                ("markdown", "final answer"),
-                ("markdown", "🗒 turn summary — 1 model calls, 0 tools, 0ms"),
-            ],
+            &kinds[..2],
+            &[("thinking", "weighing the options"), ("markdown", "final answer")],
             "thinking must land as its own entry before the text: {streamed:?}"
+        );
+        // 汇总行的耗时字段随机器负载波动（0/1ms），只钉前缀不钉 ms 值。
+        assert!(
+            kinds[2].0 == "markdown"
+                && kinds[2].1.starts_with("🗒 turn summary — 1 model calls, 0 tools, ")
+                && kinds[2].1.ends_with("ms"),
+            "turn summary entry unexpected: {streamed:?}"
         );
         // 可见回复段数（派生口径）不数 thinking。
         let snapshotted = backend.turns(key.clone(), 0).await.unwrap();
