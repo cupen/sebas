@@ -67,23 +67,34 @@ pub fn repo_full_name() -> &'static str {
     "cupen/sebas"
 }
 
-/// 获取数据目录（`data_dir` 或 XDG 默认）。
+/// 获取数据目录（unify-sebas-home 4.3：`[watchdog.storage] data_dir` 显式键
+/// 优先；缺省锚换到 `<SEBAS_HOME>/upgrade`——原 `<XDG data dir>/sebas`
+/// 退役）。
 ///
-/// 运行时的 watchdog `/`installer 用 `dirs::data_dir()`（即当前用户 home）。
-/// `service --install` 需要按目标 `--user` 解析，走 [`data_dir_for_user`]。
+/// 运行时的 watchdog 用本函数（`SEBAS_HOME` 派生）。`service --install`
+/// 需要按目标 `--user` 解析，走 [`data_dir_for_user`]。
 pub fn data_dir(cfg: &WatchdogConfig) -> PathBuf {
-    data_dir_for_user(cfg.storage.data_dir.as_str(), dirs::data_dir())
+    let cfg_dir = cfg.storage.data_dir.as_str();
+    if cfg_dir.trim().is_empty() {
+        sebas_domain::state_paths::StatePath::UpgradeDataDir.resolve()
+    } else {
+        // PathBuf 形态：唯一实现在 `sebas_domain::prim`（add-domain-layer 2.4）。
+        PathBuf::from(sebas_domain::prim::expand_tilde(cfg_dir))
+    }
 }
 
-/// 按显式 `data_dir` 配置 + 一个「默认 home」解析数据目录。
+/// 按显式 `data_dir` 配置 + 一个「默认 home」解析数据目录（installer 侧）。
 ///
 /// `default_home` 在 `service --install` 时传 `--user` 的 home（而非 installer
-/// root 的），确保服务自升级写入的目录归服务用户所有。
+/// root 的），确保服务自升级写入的目录归服务用户所有。缺省锚随
+/// unify-sebas-home 一起换到 `<user home>/.sebas/upgrade`（与运行时同一
+/// home 布局，只是 home 本身取目标用户的）。
 pub fn data_dir_for_user(data_dir_cfg: &str, default_home: Option<PathBuf>) -> PathBuf {
-    if data_dir_cfg.is_empty() {
+    if data_dir_cfg.trim().is_empty() {
         default_home
-            .unwrap_or_else(|| PathBuf::from("~/.local/share"))
-            .join("sebas")
+            .unwrap_or_else(|| PathBuf::from("~"))
+            .join(".sebas")
+            .join("upgrade")
     } else {
         // PathBuf 形态：唯一实现在 `sebas_domain::prim`（add-domain-layer 2.4）。
         PathBuf::from(sebas_domain::prim::expand_tilde(data_dir_cfg))
@@ -707,13 +718,19 @@ mod tests {
 
     #[test]
     fn test_data_dir_default() {
+        // unify-sebas-home 4.3：运行时缺省锚 = <SEBAS_HOME>/upgrade（原
+        // `<XDG data>/sebas` 退役）。env 用例共用 crate 级 home 锁。
+        let lock = crate::home_env_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let cfg = WatchdogConfig::default();
         let dir = data_dir(&cfg);
         assert!(
-            dir.ends_with("sebas"),
-            "默认数据目录应以 sebas 结尾: {:?}",
+            dir.ends_with("upgrade"),
+            "默认数据目录应以 upgrade 结尾: {:?}",
             dir
         );
+        drop(lock);
     }
 
     #[test]
@@ -752,16 +769,53 @@ mod tests {
 
     #[test]
     fn test_data_dir_for_user() {
+        // unify-sebas-home 4.3：installer 侧缺省锚 = <user home>/.sebas/upgrade。
         let dir = data_dir_for_user("", Some(PathBuf::from("/home/svc")));
-        assert_eq!(dir, PathBuf::from("/home/svc/sebas"));
+        assert_eq!(dir, PathBuf::from("/home/svc/.sebas/upgrade"));
 
-        // 空默认 home 时退回占位
+        // 空默认 home 时退回占位（同一 home 布局）
         let dir2 = data_dir_for_user("", None);
-        assert!(dir2.ends_with("sebas"));
+        assert!(dir2.ends_with(".sebas/upgrade"), "{dir2:?}");
 
         // 显式 data_dir 优先
         let dir3 = data_dir_for_user("/var/lib/sebas", Some(PathBuf::from("/home/svc")));
         assert_eq!(dir3, PathBuf::from("/var/lib/sebas"));
+    }
+
+    /// unify-sebas-home 4.3：运行时 watchdog 的升级数据缺省随 SEBAS_HOME
+    /// （`<home>/upgrade`）；`[watchdog.storage] data_dir` 显式键优先不变；
+    /// 显式值的 `~/` 前缀照旧展开。
+    #[test]
+    fn runtime_data_dir_follows_sebas_home_unless_configured() {
+        let lock = crate::home_env_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let saved_home = std::env::var("SEBAS_HOME").ok();
+        let saved_alias = std::env::var("SEBAS_STATE_DIR").ok();
+        let pin = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("SEBAS_HOME", pin.path());
+            std::env::remove_var("SEBAS_STATE_DIR");
+        }
+        let unset = WatchdogConfig::default();
+        assert_eq!(
+            data_dir(&unset),
+            pin.path().join("upgrade"),
+            "缺省 = <SEBAS_HOME>/upgrade"
+        );
+        // 显式配置键优先（tilde 展开）。
+        let mut configured = WatchdogConfig::default();
+        configured.storage.data_dir = "/var/lib/sebas-upgrade".into();
+        assert_eq!(data_dir(&configured), PathBuf::from("/var/lib/sebas-upgrade"));
+        unsafe {
+            match saved_home {
+                Some(v) => std::env::set_var("SEBAS_HOME", v),
+                None => std::env::remove_var("SEBAS_HOME"),
+            }
+            match saved_alias {
+                Some(v) => std::env::set_var("SEBAS_STATE_DIR", v),
+                None => std::env::remove_var("SEBAS_STATE_DIR"),
+            }
+        }
+        drop(lock);
     }
 
     // 同 test_install_and_rollback：断言 unix symlink 语义。

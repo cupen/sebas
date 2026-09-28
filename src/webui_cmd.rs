@@ -138,6 +138,7 @@ pub(crate) fn ensure_non_loopback_bind_allowed(auth_on: bool, auth: &AuthHandle)
 /// CLI entry: read + parse the config, then run the standalone WebUI server.
 pub async fn run(args: WebUiArgs) -> Result<()> {
     init_tracing(None);
+    crate::run::log_env_posture_warnings();
 
     let raw = std::fs::read_to_string(&args.config)
         .map_err(|e| SebasError::Config(format!("read config {}: {e}", args.config)))?;

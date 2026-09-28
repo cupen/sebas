@@ -99,7 +99,8 @@ sebas-node \
 
 - `--control-plane` 指向 **core 的 `[node_link] listen` 端点**（默认端口 9878）。
 - `--state-dir` 也可用环境变量 `SEBAS_NODE_DIR`，或用配置文件里的 `[node] state_dir`；
-  都缺省时落在 `<系统 data_dir>/sebas-node`。
+  都缺省时落在 `<SEBAS_HOME>/node/`（unify-sebas-home D5：`SEBAS_HOME` 缺省
+  `~/.sebas`；原 `<系统 data_dir>/sebas-node` 缺省已退役）。
 - `--node-id` 缺省时：复用状态目录里已存的 id；从未存过则生成一个并落盘。重装后
   沿用同一个 id 可让既有的项目/会话继续指得中。
 

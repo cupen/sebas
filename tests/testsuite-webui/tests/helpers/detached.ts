@@ -63,8 +63,10 @@ export function sebasBin(): string {
 export function detachedCoreEnv(scene: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env }
   delete env.SEBAS_CORE_SECRET
+  // unify-sebas-home: SEBAS_HOME is the canonical variable now; pinning the
+  // SEBAS_STATE_DIR alias too would trip the startup conflict warn.
   env.SEBAS_HOME = scene
-  env.SEBAS_STATE_DIR = scene
+  delete env.SEBAS_STATE_DIR
   env.SEBAS_WEBUI_AUTH_DB = path.join(scene, 'auth.db')
   // add-agent-skills：skills sync 的 backend 落点经 HOME 的 env-first 解析
   // （skills::resolve_home），harness 侧已钉（tasks.py _sandbox_env）——重启的

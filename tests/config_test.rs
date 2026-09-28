@@ -153,9 +153,9 @@ app_secret = "sec"
 owner_id = "ou_x"
 "#;
     let cfg = Config::parse(toml).unwrap();
-    // persist-session-map 3.3：sessions.json 默认键退休；tilde 展开断言落在
-    // 仍带 `~` 的既有默认（media download_dir = ~/.cache/sebas/downloads）
-    // 上——with_expanded_paths 在 parse 末尾跑，`~` 展开为 HOME 下绝对路径。
+    // unify-sebas-home 4.1：media download_dir 缺省 = `<SEBAS_HOME>/cache/
+    // downloads`——`SEBAS_HOME` 经同源 expand_tilde 解析，HOME 钉住时落点
+    // 仍以其为前缀（该断言保留作为「缺省已展开为绝对路径」的回归）。
     assert!(
         cfg.media
             .download_dir

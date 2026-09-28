@@ -43,7 +43,8 @@ fn create_control_secret() -> String {
 }
 
 /// watchdog 服务期望态覆盖层（`services.json`）的落点（single-state-dir
-/// 5.1）：从状态目录派生（`SEBAS_STATE_DIR` > `SEBAS_HOME` > `~/.sebas`），
+/// 5.1）：从 sebas home 派生（`SEBAS_HOME` > 兼容别名 `SEBAS_STATE_DIR` >
+/// `~/.sebas`，unify-sebas-home 正名反转），
 /// `SEBAS_SERVICES_FILE` 可显式覆盖。此前它硬编码在 `~/.sebas`、无 env 无
 /// 配置键——是「今天就无法被钉进沙箱」的越界点；本文件的性质仍是操作员
 /// 配置（design D6：watchdog 不引入持久层），只是落点收编进映射表。
@@ -382,6 +383,9 @@ pub async fn run_watchdog(
     log_filter: Option<String>,
 ) -> Result<()> {
     init_watchdog_tracing(log_filter.as_deref());
+    // env posture 告警（unify-sebas-home 3c）：watchdog 是常驻监督者，别名/
+    // 退休变量提示不能只挂在 core 启动。
+    crate::run::log_env_posture_warnings();
     let dbg = debug;
     tracing::info!(debug_enabled = dbg, "watchdog started");
     let control = Arc::new(Mutex::new(ControlService::new()));
@@ -633,8 +637,9 @@ mod tests {
 
     // ── single-state-dir 5.1：services.json 落点从状态目录派生 ──
 
-    /// 本组用例的进程级 env 串行锁（动 HOME / SEBAS_STATE_DIR 全局变量）。
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // （本组用例的进程级 env 串行锁已并入 crate::home_env_test_lock——
+    // unify-sebas-home：SEBAS_STATE_DIR / SEBAS_HOME 与 config、upgrade、
+    // services 的 env 用例互斥。）
 
     struct EnvPin {
         saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
@@ -644,7 +649,9 @@ mod tests {
     impl EnvPin {
         /// 钉住状态目录与 HOME（fake 操作员主目录），清掉全部逐文件覆盖。
         fn pin(state_dir: &std::path::Path, fake_home: &std::path::Path) -> Self {
-            let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let lock = crate::home_env_test_lock()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             let vars: &[&'static str] = &[
                 "SEBAS_STATE_DIR",
                 "SEBAS_HOME",

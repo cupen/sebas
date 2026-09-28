@@ -8,10 +8,10 @@
 //! Persistence uses the same atomic tmp+rename pattern as `projects.rs`.
 //!
 //! polish-workbench-walkthrough-ux 1.1 + single-state-dir 4.1：归档文件路径
-//! 收敛——解析顺序为 `SEBAS_ARCHIVE_PATH`（显式覆盖）> 状态目录派生
-//! （`sebas_domain::state_paths`：`SEBAS_STATE_DIR` > `SEBAS_HOME` >
-//! `~/.sebas` + `archive.json`）。旧路径只作迁移源/降级读写位，语义见
-//! [`migrate_once`]。
+//! 收敛——解析顺序为 `SEBAS_ARCHIVE_PATH`（显式覆盖）> sebas home 派生
+//! （`sebas_domain::state_paths`：`SEBAS_HOME` > 兼容别名 `SEBAS_STATE_DIR` >
+//! `~/.sebas` + `archive.json`；unify-sebas-home 正名反转）。旧路径只作迁移
+//! 源/降级读写位，语义见 [`migrate_once`]。
 
 use sebas_dispatch::SessionIdentity;
 use serde::{Deserialize, Serialize};

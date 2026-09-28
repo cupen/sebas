@@ -71,6 +71,13 @@
 
 ## 领域概念
 
+- **sebas home(sebas 主目录)**:`SEBAS_HOME` 指向的目录(unify-sebas-home
+  正名;缺省 `~/.sebas`),sebas 全部自有落点的唯一缺省锚——四库与
+  archive/services/nodes json 平铺其根,config.toml 缺省、core.secret、
+  socket(`run/`)、media 缓存(`cache/downloads/`)、node 状态(`node/`)、
+  watchdog 升级数据(`upgrade/`)均从它派生。逐文件 env/config 键显式覆盖
+  一律优先。`SEBAS_STATE_DIR` 是仍生效的兼容别名(同设时正名赢,启动 warn);
+  旧单库变量 `SEBAS_STATE_DB` 已退休。(cli-service;state-store)
 - **agent(执行 agent)**:实际执行任务的智能体统称。具体形态见"执行体"。
   消歧:不要与 *agent 会话*(一次会话实例)、*sebas-agent*(原生内核 crate)、
   *ACP agent*(经 ACP 驱动的外部 agent,如 Claude Code)混用。

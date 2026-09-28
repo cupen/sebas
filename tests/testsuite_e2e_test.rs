@@ -3796,8 +3796,9 @@ async fn secret_rotation_self_heal_across_core_restart() {
 async fn watchdog_supervised_core_recovery() {
     let sb = Sandbox::new("testsuite_e2e", "watchdog-recovery");
     sb.enable_supervised_core();
-    // 控制socket（control.sock）按 XDG_RUNTIME_DIR 解析——钉进沙箱，绝不
-    // 触碰宿主机上可能存在的真实实例控制面。
+    // 控制 socket（control.sock）缺省落 `<SEBAS_HOME>/run/`（unify-sebas-home；
+    // XDG_RUNTIME_DIR 不再参与）——SEBAS_HOME 已钉进沙箱，绝不触碰宿主机上
+    // 可能存在的真实实例控制面。
     let xdg_run = sb.path.join("xdg-run");
     std::fs::create_dir_all(&xdg_run).expect("mkdir xdg-run");
     let xdg = support::forward_slash(&xdg_run);
@@ -5596,26 +5597,95 @@ async fn workspace_root_enforcement_after_tightening() {
     );
 }
 
-/// cli-service「one variable relocates every state file」+「no state write
-/// escapes the derived directory」的旅程级机械化（任务 8.3 的常驻自动化版）：
-/// 只钉 `SEBAS_STATE_DIR`（HOME 一并钉进沙箱 = fake 操作员主目录）跑完整
-/// core 旅程，随后断言——
-/// 1. 两库都在目录内且**域分离**：settings.db 只装 providers/model_aliases/
-///    settings 三表，projects.db 只装 projects/session_map 两表；
-/// 2. 写进的数据落在正确的库里：provider 行在 settings.db，project 行在
-///    projects.db（bounded config vs growing user data 的文件级证据）；
-/// 3. fake 主目录下没有 `.sebas`（任何经 HOME 兜底的写都会落在
-///    `<沙箱>/.sebas`，其不存在 = 无一处逃逸派生目录）；
-/// 4. 退休名 `sebas.db` 无处出现；
-/// 5. SIGTERM 优雅退出移除 channel socket。
+/// cli-service RENAMED「Sebas home derives every file location」的旅程级
+/// 机械化（unify-sebas-home 5.2，原 `single_state_dir_journey_pins_every_
+/// state_location` 扩族版）：只钉正名 `SEBAS_HOME`（HOME 一并钉进沙箱 =
+/// fake 操作员主目录），config 特意不带 channel_path / [media] download_dir
+/// / usage_db 三个键——它们的派生形态正是断言面。四进程完整旅程：core 免
+/// `-c`（auto-arm）+ webui 免 `-c`（secret 文件发现）+ router --debug（免
+/// 密订阅派生 socket）+ 真 sebas-node 免 `--state-dir` 配对。随后断言——
+/// 1. config 缺省解析：core/webui 都不带 `-c`，靠 `<SEBAS_HOME>/config.toml`
+///    起来（webui 端口在场上 = 配置已加载）；auto-arm 的 core.secret 落在
+///    缺省 config 同目录 = home 根；
+/// 2. 四库三 json 全在 home 内且域分离：settings/projects/auth/usage 四库
+///    + archive/nodes 两 json 实物（services.json 本拓扑无 watchdog 写入者
+///    ——映射表派生断言兜底，实物由 watchdog 覆盖层旅程负责）；
+/// 3. `run/`（派生 core.sock 在场、SIGTERM 后移除）、`cache/downloads`
+///    （core 的 config 可写性校验建出）、`node/`（节点的派生状态目录）都在
+///    home 内；
+/// 4. fake 主目录无痕（无 `.sebas/`）、退休名（sebas.db / projects.json）
+///    无处出现、启动日志无别名/退休变量告警（别名另行专测）；
+/// 5. router 订阅侧（5.4 复核的套件内证据）：config 无 channel_path 时
+///    router 按同一映射表派生 `<home>/run/core.sock` 订阅成功。
 #[tokio::test]
 #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn single_state_dir_journey_pins_every_state_location() {
-    let sb = Sandbox::new("testsuite_e2e", "state-dir");
+async fn sebas_home_journey_pins_every_file_location() {
+    let sb = Sandbox::new_derived_home("testsuite_e2e", "home");
+    sb.enable_node_link_derived_registry();
     let cli = http_client();
-    let mut core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
+    let mut core = sb.spawn_core_default_config_no_secret();
+    let _webui = sb.spawn_webui_default_config_no_secret();
     wait_reachable(&cli, &sb).await;
+
+    // 1) config 缺省解析 + secret 锚定：免密 core 起来 = `<SEBAS_HOME>/
+    //    config.toml` 被读走（webui 端口来自该文件）；auto-arm 把钥匙写在
+    //    缺省 config 同目录 = home 根（webui 能连上 = 发现自这个文件）。
+    let secret_file = sb.path.join("core.secret");
+    assert!(
+        secret_file.exists(),
+        "auto-arm must write core.secret next to the default config (home root)"
+    );
+
+    // auth.db 的写入者是 webui 用户库；`auth = false` 的沙箱不开它——经
+    // CLI 供应一个用户（AGENTS.md 菜谱同款）让派生 `<home>/auth.db` 有实物
+    // （auth 子命令无 `-c`：用户库纯由 SEBAS_HOME 派生）。
+    let auth_log = sb.path.join("auth-cli.log");
+    let mut auth = sb.spawn(
+        &["auth", "add", "admin", "--password", "admin-pass-9"],
+        &sb.core_secret,
+        &[],
+        &auth_log,
+    );
+    let auth_exit = auth.wait().await.expect("auth add exit");
+    assert!(
+        auth_exit.success(),
+        "sebas auth add must succeed against the derived <home>/auth.db"
+    );
+
+    // 5) router：无 channel_path 键 → 订阅侧按同一映射表派生 run/core.sock；
+    //    免密 → 钥匙经 secret 文件发现（core 换钥自愈的同一机制）。
+    let _router = sb.spawn_router_debug_no_secret();
+    let router_addr = wait_router_addr(&sb).await;
+    {
+        let hint = sb.path.clone();
+        let log = sb.router_log.clone();
+        wait_for(
+            "router to subscribe on the derived <home>/run/core.sock",
+            Duration::from_secs(20),
+            &hint,
+            move || {
+                let log = log.clone();
+                Box::pin(async move {
+                    let text = std::fs::read_to_string(&log).ok()?;
+                    text.contains("core channel subscribed").then_some(())
+                })
+            },
+        )
+        .await;
+    }
+    // router 自有库无 usage_db 键 → 派生 `<home>/usage.db`：跑一回合让行落库。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{router_addr}/v1/messages"),
+        serde_json::json!({
+            "model": "test",
+            "max_tokens": 16,
+            "messages": [{ "role": "user", "content": "hi" }]
+        }),
+    )
+    .await
+    .expect("router debug test turn");
+    assert_eq!(status, 200, "debug test provider must answer: {body}");
 
     // 项目注册（core projects.db 的 add 写入）。
     let project_id = scene_project_id(&cli, &sb).await;
@@ -5636,7 +5706,7 @@ async fn single_state_dir_journey_pins_every_state_location() {
     .expect("create provider");
     assert_eq!(status, 201, "provider create: {body}");
 
-    // fake-claude 会话回合（完整旅程）。
+    // fake-claude 会话回合（完整旅程）→ archive（archive.json 的写入者）。
     let (s, resp) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
@@ -5648,6 +5718,68 @@ async fn single_state_dir_journey_pins_every_state_location() {
     let key = resp["key"].as_str().expect("session key").to_string();
     let detail = state_dir_wait_done(&cli, &sb, &key).await;
     assert_eq!(detail["status_slug"], "done", "turn must complete");
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions/{key}/archive", sb.webui_url()),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("archive session");
+    assert_eq!(status, 200, "archive: {body}");
+
+    // 节点配对：注册表落派生 `<home>/nodes.json`，节点状态目录落派生
+    // `<home>/node/`（--state-dir/--state_dir env/config 键三层全缺席）。
+    let token = wait_bootstrap_token(&sb).await;
+    let _node = sb.spawn_node_home("home-journey-node", Some(&token));
+    wait_node_status(&cli, &sb, "home-journey-node", "online").await;
+
+    // cache/downloads：core 启动的 config 可写性校验把派生 media 目录建出来。
+    let cache_downloads = sb.path.join("cache/downloads");
+    assert!(
+        cache_downloads.is_dir(),
+        "core's config validation must materialize <home>/cache/downloads"
+    );
+    // run/：派生 socket 在场（0700 目录 + 0600 socket 的形态断言在单测侧；
+    // 这里证实物与位置）。
+    let derived_socket = sb.path.join("run/core.sock");
+    assert!(
+        derived_socket.exists(),
+        "the derived channel socket must live at <home>/run/core.sock"
+    );
+    // node/：真节点的派生状态目录（身份已写入）。
+    let node_dir = sb.path.join("node");
+    assert!(
+        node_dir.is_dir(),
+        "the node state dir must derive to <home>/node"
+    );
+
+    // 映射表派生断言：全族 15 行——含本拓扑没有写入者的 services.json 与
+    // upgrade/（实物分别由 watchdog 覆盖层旅程 / 真实升级负责，派生归属性
+    // 在这里机械化）。
+    for p in [
+        sebas_domain::state_paths::StatePath::SettingsDb,
+        sebas_domain::state_paths::StatePath::ProjectsDb,
+        sebas_domain::state_paths::StatePath::AuthDb,
+        sebas_domain::state_paths::StatePath::UsageDb,
+        sebas_domain::state_paths::StatePath::Archive,
+        sebas_domain::state_paths::StatePath::ProjectRegistry,
+        sebas_domain::state_paths::StatePath::NodeRegistry,
+        sebas_domain::state_paths::StatePath::ServicesOverride,
+        sebas_domain::state_paths::StatePath::ConfigDefault,
+        sebas_domain::state_paths::StatePath::CoreSecretDefault,
+        sebas_domain::state_paths::StatePath::ChannelSocket,
+        sebas_domain::state_paths::StatePath::ControlSocket,
+        sebas_domain::state_paths::StatePath::MediaDownloads,
+        sebas_domain::state_paths::StatePath::NodeStateDir,
+        sebas_domain::state_paths::StatePath::UpgradeDataDir,
+    ] {
+        let derived = p.derived_in(&sb.path);
+        assert_eq!(
+            derived,
+            sb.path.join(p.rel_path()),
+            "{p:?} must derive inside the sebas home"
+        );
+    }
 
     // SIGTERM core：优雅退出（state-store 通道生命周期）。
     #[cfg(unix)]
@@ -5660,35 +5792,47 @@ async fn single_state_dir_journey_pins_every_state_location() {
     let _ = core.wait().await;
     assert!(
         !sb.channel_path.exists(),
-        "graceful exit must remove the channel socket"
+        "graceful exit must remove the derived channel socket"
     );
 
-    // ── 机械断言：全部状态产物都在钉住的目录内 ──
+    // ── 机械断言：全部状态产物都在钉住的 home 内 ──
     let files = state_dir_walk(&sb.path);
-    // 3) 无 `.sebas`：HOME 钉在沙箱，HOME 兜底的任何写都会露形为
-    //    `<沙箱>/.sebas/...`——其不存在 = 旅程中没有一处状态逃出派生目录。
+    // fake 主目录无痕：HOME 钉在沙箱，HOME 兜底的任何写都会露形为
+    // `<沙箱>/.sebas/...`——其不存在 = 旅程中没有一处状态逃出派生 home。
     assert!(
         files.iter().all(|f| !f.starts_with(".sebas/")),
         "no state may escape into a home-relative .sebas: {files:?}"
     );
-    // 4) 退休名从不被创建（任何层级、任何子目录）。
+    // 退休名从不被创建（任何层级、任何子目录）。
     assert!(
         files.iter().all(|f| !f.ends_with("/sebas.db") && f != "sebas.db"),
         "the retired single-DB file name must never appear: {files:?}"
     );
     // migrate-project-registry 7.1：注册表落 `projects.db`，**`projects.json`
-    // 全程未被创建**（独立 webui 拓扑下也不许有第二个存储：文件回退已删除）。
+    // 全程未被创建**。
     assert!(
         files
             .iter()
             .all(|f| !f.ends_with("/projects.json") && f != "projects.json"),
         "the retired project-registry file must never be created: {files:?}"
     );
-    // 1) 两库在场且域分离。
+    // 启动日志安静面：正名钉法下不得出现别名/退休变量告警（别名形态另行
+    // 专测 legacy_alias_state_dir_still_works_and_warns）。
+    let core_log_text = std::fs::read_to_string(&sb.core_log).unwrap_or_default();
+    assert!(
+        !core_log_text.contains("SEBAS_STATE_DIR"),
+        "canonical pin must not emit alias or retired-var warnings: {}",
+        sb.core_log.display()
+    );
+    // 1) 四库在场且域分离。
     let settings_db = sb.path.join("settings.db");
     let projects_db = sb.path.join("projects.db");
-    assert!(settings_db.exists(), "settings.db must exist in the state dir");
-    assert!(projects_db.exists(), "projects.db must exist in the state dir");
+    let auth_db = sb.path.join("auth.db");
+    let usage_db = sb.path.join("usage.db");
+    assert!(settings_db.exists(), "settings.db must exist in the home");
+    assert!(projects_db.exists(), "projects.db must exist in the home");
+    assert!(auth_db.exists(), "auth.db (webui user store) must exist in the home");
+    assert!(usage_db.exists(), "usage.db (router) must derive into the home");
     assert_eq!(
         state_dir_table_count(&settings_db, &["providers", "model_aliases", "settings"]),
         3,
@@ -5741,13 +5885,91 @@ async fn single_state_dir_journey_pins_every_state_location() {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
-        assert!(path.contains("state-dir"), "registered scene project row: {path}");
+        assert!(path.contains("home"), "registered scene project row: {path}");
         assert_eq!(node_id, "local", "本机项目落 node_id = local");
         assert!(
             id.as_deref().is_some_and(|i| i.starts_with("proj-")),
             "注册即落库稳定 id（不得留 NULL 等读路径回填）: {id:?}"
         );
     }
+    // 三 json 之二：archive（会话归档登记册）与 nodes（节点链路注册表，
+    // 注册表键未钉 → 派生缺省）都落 home 根。
+    let archive_json = sb.path.join("archive.json");
+    let nodes_json = sb.path.join("nodes.json");
+    assert!(
+        archive_json.exists(),
+        "the archive registry must derive into the home root"
+    );
+    assert!(
+        nodes_json.exists(),
+        "the node-link registry must derive into the home root when unpinned"
+    );
+}
+
+/// cli-service「the legacy alias still works but warns」（unify-sebas-home
+/// 5.3）的进程级固化：**只钉旧名 `SEBAS_STATE_DIR`**（兼容别名）跑冒烟旅程
+/// ——解析与正名逐落点等价（冒烟全绿 = 行为等价的证据），启动日志点名
+/// `SEBAS_HOME` 为正名，且没有冲突告警（正名缺席 ≠ 冲突态）。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn legacy_alias_state_dir_still_works_and_warns() {
+    let mut sb = Sandbox::new("testsuite_e2e", "alias");
+    sb.pin_home_via_legacy_alias();
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    // 冒烟：项目注册 + fake-claude 一回合 Done——别名下的解析与正名完全
+    // 等价（路径解析共用同一映射表，SEBAS_STATE_DIR 只是 home 的别名来源）。
+    let project_id = scene_project_id(&cli, &sb).await;
+    let (s, resp) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "project_id": project_id, "prompt": "hello", "agent": "claude" }),
+    )
+    .await
+    .expect("create session");
+    assert_eq!(s, 201, "create session under the legacy alias: {resp}");
+    let key = resp["key"].as_str().expect("session key").to_string();
+    let detail = state_dir_wait_done(&cli, &sb, &key).await;
+    assert_eq!(detail["status_slug"], "done", "turn must complete");
+
+    // 落点等价的实物证据：两库照常落在别名目录（= 沙箱目录）。
+    assert!(
+        sb.path.join("settings.db").exists(),
+        "settings.db must resolve from the alias dir exactly as from SEBAS_HOME"
+    );
+    assert!(
+        sb.path.join("projects.db").exists(),
+        "projects.db must resolve from the alias dir exactly as from SEBAS_HOME"
+    );
+
+    // 启动 warn：core 的启动日志点名正名 SEBAS_HOME（run.rs 的别名检出）。
+    let hint = sb.path.clone();
+    let log = sb.core_log.clone();
+    wait_for(
+        "core logs the legacy-alias warning naming SEBAS_HOME",
+        Duration::from_secs(10),
+        &hint,
+        move || {
+            let log = log.clone();
+            Box::pin(async move {
+                let text = std::fs::read_to_string(&log).ok()?;
+                (text.contains("SEBAS_STATE_DIR")
+                    && text.contains("SEBAS_HOME")
+                    && text.contains("旧名"))
+                .then_some(())
+            })
+        },
+    )
+    .await;
+    // 且只是别名提示，不是冲突告警（正名缺席）。
+    let core_log_text = std::fs::read_to_string(&sb.core_log).unwrap_or_default();
+    assert!(
+        !core_log_text.contains("同时设置"),
+        "alias-only posture must not emit the both-set conflict warning"
+    );
 }
 
 /// cli-service「the retired database variable has no effect」（任务 6.1 的
@@ -5850,7 +6072,8 @@ async fn projects_db_override_relocates_only_that_database() {
 async fn watchdog_service_override_lives_in_state_dir_and_survives_restart() {
     let sb = Sandbox::new("testsuite_e2e", "watchdog-state-dir");
     sb.enable_supervised_core();
-    // 控制socket（control.sock）按 XDG_RUNTIME_DIR 解析——钉进沙箱。
+    // 控制 socket（control.sock）缺省落 `<SEBAS_HOME>/run/`——SEBAS_HOME 已
+    // 钉进沙箱（XDG_RUNTIME_DIR 不再参与解析，保留注入无害）。
     let xdg_run = sb.path.join("xdg-run");
     std::fs::create_dir_all(&xdg_run).expect("mkdir xdg-run");
     let xdg = support::forward_slash(&xdg_run);

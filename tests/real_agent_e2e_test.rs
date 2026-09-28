@@ -256,9 +256,9 @@ usage_db = "{usage}"
     /// `$HOME`; only sebas's own state is sandboxed.
     fn envs(&self) -> Vec<(&'static str, String)> {
         vec![
-            // single-state-dir：一个目录变量钉住全部状态落点（HOME 有意继承
-            // ——agent CLI 需要自己的凭据；sebas 的状态全在目录内）。
-            ("SEBAS_STATE_DIR", fs_string(&self.path)),
+            // unify-sebas-home：一个 sebas home 变量钉住全部自有落点（HOME
+            // 有意继承——agent CLI 需要自己的凭据；sebas 的状态全在目录内）。
+            ("SEBAS_HOME", fs_string(&self.path)),
             ("SEBAS_CORE_SECRET", "real-agent-e2e-secret".to_string()),
             // Router admin-plane auth (webui RouterClient bearer + embedded
             // router check): PUT /api/agent-defaults and sibling mutations

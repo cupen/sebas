@@ -484,7 +484,15 @@ impl Default for MediaConfig {
 }
 
 fn default_download_dir() -> String {
-    "~/.cache/sebas/downloads".into()
+    // unify-sebas-home 4.1：media 下载缓存收编进 sebas home
+    // （`<SEBAS_HOME>/cache/downloads`），不再落 `~/.cache/sebas`。serde
+    // 缺省在 config 装载期求值——env 在场即生效；显式 `[media] download_dir`
+    // 键照旧覆盖。返回值已是绝对路径（sebas_home 内部展开 tilde），后续
+    // expand_tilde 对绝对路径是空操作。
+    sebas_domain::state_paths::StatePath::MediaDownloads
+        .resolve()
+        .display()
+        .to_string()
 }
 fn default_max_file_size() -> u64 {
     52_428_800
@@ -562,8 +570,8 @@ fn default_max_spawn_failures() -> u32 {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ServiceCoreConfig {
     /// core session channel 的 Unix socket 路径（openspec/changes/
-    /// add-core-session-channel）。空/缺省 → `$XDG_RUNTIME_DIR/sebas/core.sock`
-    /// （或 per-uid 临时目录回退）。
+    /// add-core-session-channel）。空/缺省 → `<SEBAS_HOME>/run/core.sock`
+    /// （unify-sebas-home D4；XDG_RUNTIME_DIR 不再参与）。
     #[serde(default)]
     pub channel_path: Option<String>,
     /// core session channel 的握手 secret 文件路径（harden-core-channel-deployment
@@ -1271,6 +1279,49 @@ args = [\"verbose\"]
     }
 
     #[test]
+    fn media_download_dir_default_follows_sebas_home_and_override_wins() {
+        // unify-sebas-home 4.1：media 下载缓存缺省 `<SEBAS_HOME>/cache/
+        // downloads`（不再 `~/.cache/sebas/downloads`）；`[media]
+        // download_dir` 键照旧优先；空白取值视同未配置。serde 缺省在 parse
+        // 期读 env——动 env 的用例持锁串行并保存/恢复。
+        let lock = crate::home_env_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let saved_home = std::env::var("SEBAS_HOME").ok();
+        let saved_alias = std::env::var("SEBAS_STATE_DIR").ok();
+        let pin = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("SEBAS_HOME", pin.path());
+            std::env::remove_var("SEBAS_STATE_DIR");
+        }
+        let norm = |s: String| s.replace('\\', "/");
+        let cfg = Config::parse("").expect("空配置应可解析");
+        assert_eq!(
+            norm(cfg.media.download_dir),
+            norm(pin.path().join("cache/downloads").display().to_string()),
+            "缺省 = <SEBAS_HOME>/cache/downloads"
+        );
+        // 显式键覆盖生效。
+        let elsewhere = tempfile::tempdir().unwrap();
+        let override_dir = norm(elsewhere.path().join("dl").display().to_string());
+        let cfg =
+            Config::parse(&format!("[media]\ndownload_dir = \"{override_dir}\"\n"))
+                .expect("[media] download_dir 应可解析");
+        assert_eq!(norm(cfg.media.download_dir), override_dir, "显式覆盖生效");
+        // （注：`[media] download_dir` 没有空白归一语义——显式空白值按字面
+        // 量保留，与 `skills_dir` 的 trim 语义不同；缺省只看键缺不缺。）
+        unsafe {
+            match saved_home {
+                Some(v) => std::env::set_var("SEBAS_HOME", v),
+                None => std::env::remove_var("SEBAS_HOME"),
+            }
+            match saved_alias {
+                Some(v) => std::env::set_var("SEBAS_STATE_DIR", v),
+                None => std::env::remove_var("SEBAS_STATE_DIR"),
+            }
+        }
+        drop(lock);
+    }
+
+    #[test]
     fn webui_enabled_by_default_and_router_disabled() {
         // watchdog 默认服务面（enable-core-by-default）：core 恒启动（无
         // enabled 开关），webui 默认开，router 默认关。
@@ -1349,6 +1400,38 @@ args = [\"verbose\"]
             dir.path().join("nested").join("core.secret"),
             "空字符串 secret_file 回退缺省推导"
         );
+
+        // unify-sebas-home 2.2：home 缺省形态——config 用 `-c` 缺省
+        // （<SEBAS_HOME>/config.toml）时，secret 随「与 config 同目录」规则
+        // 一起落 home 根（<SEBAS_HOME>/core.secret）。
+        let lock = crate::home_env_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let saved_home = std::env::var("SEBAS_HOME").ok();
+        let saved_alias = std::env::var("SEBAS_STATE_DIR").ok();
+        let home = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("SEBAS_HOME", home.path());
+            std::env::remove_var("SEBAS_STATE_DIR");
+        }
+        let home_config = sebas_domain::state_paths::default_config_path();
+        let cfg_home = Config::parse("").expect("空配置应可解析");
+        assert_eq!(
+            cfg_home.service.core.secret_file_path(&home_config),
+            home.path().join("core.secret"),
+            "config 缺省（home 根）时 secret 同落 home 根"
+        );
+        unsafe {
+            match saved_home {
+                Some(v) => std::env::set_var("SEBAS_HOME", v),
+                None => std::env::remove_var("SEBAS_HOME"),
+            }
+            match saved_alias {
+                Some(v) => std::env::set_var("SEBAS_STATE_DIR", v),
+                None => std::env::remove_var("SEBAS_STATE_DIR"),
+            }
+        }
+        drop(lock);
     }
 
     #[test]
@@ -1673,11 +1756,16 @@ bootstrap_token_ttl_secs = 120
     }
 
     /// single-state-dir 4.2：无配置键时 nodes.json 从**状态目录**派生
-    /// （「配置键 > 目录派生 > 默认」中的后两级——目录派生就是状态目录
+    /// （「配置键 > 目录派生 > 默认」中的后两级——目录派生就是 sebas home
     /// 解析，未设变量时落在默认 ~/.sebas）。这是唯一发生迁移的落点
-    /// （此前默认是 config 文件同目录）。
+    /// （此前默认是 config 文件同目录）。unify-sebas-home 后 SEBAS_STATE_DIR
+    /// 是兼容别名（仍生效），SEBAS_HOME 是正名——env 用例共用
+    /// [`crate::home_env_test_lock`]。
     #[test]
     fn node_link_registry_defaults_inside_the_state_dir() {
+        let lock = crate::home_env_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let pin = tempfile::tempdir().unwrap();
         let saved = std::env::var_os("SEBAS_STATE_DIR");
         unsafe { std::env::set_var("SEBAS_STATE_DIR", pin.path()) };
@@ -1703,6 +1791,7 @@ bootstrap_token_ttl_secs = 120
         }
         let expected = sebas_domain::state_paths::StatePath::NodeRegistry.resolve();
         assert_eq!(derived, expected, "目录派生与映射表一致");
+        drop(lock);
     }
 
     #[test]

@@ -48,6 +48,32 @@ cargo build --release
 
 ---
 
+## sebas home（数据与落点）
+
+sebas 的全部自有落点从**一个 sebas home 目录**派生（环境变量 `SEBAS_HOME`，缺省 `~/.sebas`）：
+分层状态库（`settings.db` / `projects.db` / `auth.db` / `usage.db`）、登记册（`archive.json` /
+`services.json` / `nodes.json`）、config 缺省（`<SEBAS_HOME>/config.toml`）与 `core.secret`、
+IPC socket（`run/core.sock`、`run/control.sock`）、media 下载缓存（`cache/downloads`）、
+节点状态（`node/`）与升级数据（`upgrade/`）。逐文件变量（`SEBAS_SETTINGS_DB` 等）仍可
+覆盖单个落点；`SEBAS_STATE_DIR` 是旧名，仍生效但启动 warn，与 `SEBAS_HOME` 同设时以
+`SEBAS_HOME` 为准。
+
+**从旧版本升级（unify-sebas-home 两条 BREAKING）**：
+
+1. **config 缺省**：`-c` 不再看当前目录的 `./config.toml`，缺省改为
+   `<SEBAS_HOME>/config.toml`。已有安装把 config 放在 `~/.sebas/config.toml` 或显式传
+   `-c` 的都不受影响；依赖 cwd 缺省的脚本请改为显式 `-c`。
+2. **socket 缺省**：核心通道与控制面 socket 从 `$XDG_RUNTIME_DIR/sebas/` 改到
+   `<SEBAS_HOME>/run/`。socket 是易逝文件，重启自动重建，无需迁移；NFS 等网络主目录上
+   Unix socket 不可靠的部署，请用既有 `SEBAS_CORE_SOCKET` / `[service.core] channel_path`
+   显式指到本地盘。
+
+**想把数据搬到新目录**（无自动迁移）：停机（`systemctl stop sebas` 或 Ctrl-C）→
+`mv ~/.sebas /new/home` → 起机（`SEBAS_HOME=/new/home` 或保持缺省）。socket 不用搬
+（`run/` 自动重建）；升级产物可重新下载；`node/` 整目录搬移即保留节点身份。
+
+---
+
 ## 工作区根目录
 
 WebUI 的项目注册、项目列表、会话打开与目录浏览都收敛在**一个 workspace root**之内。建议显式配置：

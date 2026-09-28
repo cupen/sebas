@@ -588,4 +588,17 @@ mod tests {
         let err = validate_user(&nonce).unwrap_err();
         assert_eq!(exit_code_of(&err), Some(4));
     }
+
+    /// unify-sebas-home 6.4：unit 渲染与 watchdog spawn 不依赖 cwd config
+    /// 缺省——`service --install` 拒绝相对 `-c`（unit 里的 ExecStart 永远
+    /// 烤显式绝对路径，与 watchdog 子进程 `--config <abs>` 同一纪律）。
+    #[test]
+    fn validate_rejects_relative_config_path() {
+        let err = validate_config("./config.toml").unwrap_err();
+        assert_eq!(exit_code_of(&err), Some(5));
+        assert!(
+            err.to_string().contains("absolute"),
+            "报错须点名相对路径: {err}"
+        );
+    }
 }

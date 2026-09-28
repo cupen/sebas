@@ -170,37 +170,27 @@ pub struct RpcControlEvent {
     pub public_message: String,
 }
 
+/// Default control-plane socket: `<SEBAS_HOME>/run/control.sock`
+/// (unify-sebas-home D4 — the sebas home's ephemeral `run/` directory;
+/// `XDG_RUNTIME_DIR` and per-uid temp dirs are no longer consulted).
+/// `SEBAS_CONTROL_SOCKET` is the per-file env override from the mapping
+/// table; the CLI `--socket` flag anchors one layer above it.
 pub fn default_socket_path() -> PathBuf {
-    if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR") {
-        return PathBuf::from(runtime_dir).join("sebas/control.sock");
-    }
-    // XDG_RUNTIME_DIR unset (common in containers / non-login shells): fall
-    // back to a per-user temp dir so multiple users on the same host do not
-    // stomp on each other. Always end in `control.sock` so clients can rely
-    // on the suffix.
-    let base = std::env::temp_dir().join("sebas");
-    if let Some(uid) = users_uid() {
-        base.join(format!("uid{uid}")).join("control.sock")
-    } else {
-        base.join("control.sock")
-    }
-}
-
-#[cfg(unix)]
-fn users_uid() -> Option<u32> {
-    // nix crate is not a dependency, so use libc directly to avoid pulling a
-    // new crate just for getuid(). Already used elsewhere in this crate.
-    unsafe { Some(libc::getuid()) }
-}
-
-#[cfg(not(unix))]
-fn users_uid() -> Option<u32> {
-    None
+    sebas_domain::state_paths::StatePath::ControlSocket.resolve()
 }
 
 pub async fn serve(path: PathBuf, secret: String, executor: ControlExecutor) -> Result<()> {
     if let Some(parent) = path.parent() {
+        // unify-sebas-home D4：缺省形态的父目录是 <home>/run/——随启动创建；
+        // **本次新建**的目录收紧 owner-only（0700），既有目录不动权限。
+        #[cfg(unix)]
+        let parent_existed = parent.exists();
         tokio::fs::create_dir_all(parent).await?;
+        #[cfg(unix)]
+        if !parent_existed {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        }
     }
     if path.exists() {
         let _ = tokio::fs::remove_file(&path).await;
@@ -588,6 +578,56 @@ mod tests {
     #[test]
     fn default_socket_path_ends_with_control_sock() {
         assert!(default_socket_path().ends_with("control.sock"));
+    }
+
+    /// unify-sebas-home 3.2：控制面 socket 缺省两级解析——`SEBAS_CONTROL_
+    /// SOCKET` 逐落点覆盖优先；缺席时落 `<SEBAS_HOME>/run/control.sock`
+    /// （不再查 XDG_RUNTIME_DIR / per-uid 临时目录）。CLI `--socket` 在
+    /// main.rs 的消费点压过 env（旗标 > env > 派生）。
+    #[test]
+    fn control_socket_default_follows_sebas_home_and_env_override() {
+        let lock = crate::home_env_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let saved = (
+            std::env::var("SEBAS_HOME").ok(),
+            std::env::var("SEBAS_STATE_DIR").ok(),
+            std::env::var("SEBAS_CONTROL_SOCKET").ok(),
+        );
+        let home = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("SEBAS_HOME", home.path());
+            std::env::remove_var("SEBAS_STATE_DIR");
+            std::env::remove_var("SEBAS_CONTROL_SOCKET");
+        }
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", "/xdg-should-be-ignored") };
+        assert_eq!(
+            default_socket_path(),
+            home.path().join("run/control.sock"),
+            "缺省锚 = <SEBAS_HOME>/run/control.sock，XDG 不再参与"
+        );
+        unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
+        unsafe { std::env::set_var("SEBAS_CONTROL_SOCKET", "/elsewhere/ctl.sock") };
+        assert_eq!(
+            default_socket_path(),
+            std::path::PathBuf::from("/elsewhere/ctl.sock"),
+            "SEBAS_CONTROL_SOCKET 覆盖优先"
+        );
+        unsafe {
+            match saved.0 {
+                Some(v) => std::env::set_var("SEBAS_HOME", v),
+                None => std::env::remove_var("SEBAS_HOME"),
+            }
+            match saved.1 {
+                Some(v) => std::env::set_var("SEBAS_STATE_DIR", v),
+                None => std::env::remove_var("SEBAS_STATE_DIR"),
+            }
+            match saved.2 {
+                Some(v) => std::env::set_var("SEBAS_CONTROL_SOCKET", v),
+                None => std::env::remove_var("SEBAS_CONTROL_SOCKET"),
+            }
+        }
+        drop(lock);
     }
 
     /// unify-router-process-shape 2.2：旧客户端 wire 兼容——ServiceSet 报文

@@ -54,6 +54,49 @@ fn build_agent_registry(cfg: &Config) -> HashMap<String, AgentEntry> {
         .collect()
 }
 
+/// 启动时 env posture 告警（unify-sebas-home 1.2 / close-acceptance-blind-spots）：
+/// 退休变量残留、`SEBAS_STATE_DIR` 别名/冲突提示。core 之外，watchdog 与
+/// router/webui 独立进程启动也各调一次——告警只报告、不改变任何行为。
+pub(crate) fn log_env_posture_warnings() {
+    // 退休变量提示（single-state-dir 6.1）：SEBAS_STATE_DB 随单库退休，
+    // 不再被读取；残留值只提示，不改变任何行为。
+    let retired = sebas_domain::state_paths::retired_env_vars_present();
+    for var in retired {
+        tracing::warn!(
+            "{var} 已退休：sebas.db 不复存在，该变量不会被读取。\
+             落点改由 SEBAS_HOME（sebas home 正名）派生，逐库覆盖变量 \
+             （SEBAS_SETTINGS_DB / SEBAS_PROJECTS_DB / SEBAS_WEBUI_AUTH_DB / \
+             SEBAS_ROUTER_USAGE_DB）按需显式设置。"
+        );
+    }
+    // 别名提示（unify-sebas-home 1.2）：SEBAS_STATE_DIR 降为 SEBAS_HOME
+    // 的兼容别名——单独设置仍完整生效（行为等价），但启动点名正名；
+    // 二者同设是冲突态：正名赢，别名被忽略（优先级反转，BREAKING）。
+    if sebas_domain::state_paths::alias_conflict_set() {
+        tracing::warn!(
+            "SEBAS_STATE_DIR 与 SEBAS_HOME 同时设置：SEBAS_HOME 是正名、\
+             优先生效，SEBAS_STATE_DIR 被忽略。请只设置 SEBAS_HOME。"
+        );
+    } else if sebas_domain::state_paths::legacy_alias_set() {
+        tracing::warn!(
+            "SEBAS_STATE_DIR 是旧名：SEBAS_HOME 是正名，两者语义相同\
+             （本次落点按 SEBAS_STATE_DIR 解析）。建议改用 SEBAS_HOME。"
+        );
+    }
+    // 退休变量提示（retire-legacy-state-json 3.3）：遗留状态文件与它们的
+    // 路径变量都已退休——文件不再被写、不再被读、也不再被导入，变量导出
+    // 不改变任何行为。只报告，不读取其值。
+    if !sebas_dispatch::state_store::retired_file_env_vars_present().is_empty() {
+        tracing::warn!(
+            "{} / {} 已退休：state.json 与 providers.json 不再被读写、也不\
+             会被导入，导出这两个变量不改变任何行为。provider 与运行态状态\
+             的唯一权威是状态库。",
+            sebas_dispatch::state_store::RETIRED_STATE_FILE_VAR,
+            sebas_dispatch::state_store::RETIRED_PROVIDER_OVERLAY_VAR,
+        );
+    }
+}
+
 pub async fn run(
     cfg: Config,
     raw_config: String,
@@ -110,8 +153,8 @@ pub async fn run(
     // 5.5: 初始化状态库 (add-state-store)；single-state-dir D2/D5：core 的
     // 库按增长特征拆成 settings.db（providers/model_aliases/settings，有界）
     // 与 projects.db（projects/session_map，增长），两库各开一次、路径由
-    // 状态目录映射表派生（SEBAS_STATE_DIR > SEBAS_HOME > ~/.sebas，逐库
-    // 变量可显式覆盖）。
+    // 落点映射表派生（SEBAS_HOME > 兼容别名 SEBAS_STATE_DIR > ~/.sebas，
+    // 逐库变量可显式覆盖；unify-sebas-home 正名反转）。
     // fail-fast-on-startup-errors 任务 1.3：settings 库不可写是启动失败
     // （它是配置主干，没有它 provider/settings 域无从谈起）；projects 库
     // 不可用则**该域降级并如实报告**（state-store spec「unavailability is
@@ -122,29 +165,7 @@ pub async fn run(
     // /条目不可读绝不阻塞启动（session-lifecycle「Restart recovery with
     // corruption tolerance」；库本身打不开归状态库的损坏规则管辖）。
     {
-        // 退休变量提示（single-state-dir 6.1）：SEBAS_STATE_DB 随单库退休，
-        // 不再被读取；残留值只提示，不改变任何行为。
-        let retired = sebas_domain::state_paths::retired_env_vars_present();
-        for var in retired {
-            tracing::warn!(
-                "{var} 已退休：sebas.db 不复存在，该变量不会被读取。\
-                 状态落点改由 SEBAS_STATE_DIR（状态目录）派生，逐库覆盖变量 \
-                 （SEBAS_SETTINGS_DB / SEBAS_PROJECTS_DB / SEBAS_WEBUI_AUTH_DB / \
-                 SEBAS_ROUTER_USAGE_DB）按需显式设置。"
-            );
-        }
-        // 退休变量提示（retire-legacy-state-json 3.3）：遗留状态文件与它们的
-        // 路径变量都已退休——文件不再被写、不再被读、也不再被导入，变量导出
-        // 不改变任何行为。只报告，不读取其值。
-        if !sebas_dispatch::state_store::retired_file_env_vars_present().is_empty() {
-            tracing::warn!(
-                "{} / {} 已退休：state.json 与 providers.json 不再被读写、也不\
-                 会被导入，导出这两个变量不改变任何行为。provider 与运行态状态\
-                 的唯一权威是状态库。",
-                sebas_dispatch::state_store::RETIRED_STATE_FILE_VAR,
-                sebas_dispatch::state_store::RETIRED_PROVIDER_OVERLAY_VAR,
-            );
-        }
+        log_env_posture_warnings();
 
         let settings_path = sebas_domain::state_paths::Database::Settings.resolve();
         let projects_path = sebas_domain::state_paths::Database::Projects.resolve();

@@ -14,14 +14,15 @@ use crate::sebas_state::writer::StateHandle;
 use sebas_dispatch::state_store::DefaultSelection;
 use sebas_models::runtime_state;
 
-/// legacy defaults.json 路径：状态目录下的 `defaults.json`（与旧 router admin
-/// 的 `defaults_path` 同一落点）。
+/// legacy defaults.json 路径：sebas home 根下的 `defaults.json`（与旧 router
+/// admin 的 `defaults_path` 同一落点）。
 ///
 /// retire-legacy-state-json 3.x：这条派生原本经 `providers.json` 的路径
 /// （`SEBAS_ROUTER_PROVIDER_OVERLAY`）算出来，两个变量都已退休；现在直接取
-/// 状态目录（`SEBAS_STATE_DIR` 派生），不依赖任何已退休的 env。
+/// sebas home（`SEBAS_HOME` 派生，unify-sebas-home 正名），不依赖任何已退休
+/// 的 env。
 pub fn legacy_defaults_path() -> std::path::PathBuf {
-    sebas_domain::state_paths::state_dir().join("defaults.json")
+    sebas_domain::state_paths::sebas_home().join("defaults.json")
 }
 
 /// legacy defaults 文件的 wire 形状（与旧 router `read_defaults` 同一解析：

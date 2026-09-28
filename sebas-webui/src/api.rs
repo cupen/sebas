@@ -530,7 +530,7 @@ const ENV_VAR_SPECS: &[EnvVarSpec] = &[
         name: "SEBAS_ROUTER_CONFIG",
         what: "Router config file path",
         kind: EnvVarKind::Plain,
-        unset_default: Some("~/.sebas/config.toml"),
+        unset_default: Some("<SEBAS_HOME>/config.toml"),
     },
     EnvVarSpec {
         name: "SEBAS_ROUTER_LISTEN",
@@ -539,8 +539,14 @@ const ENV_VAR_SPECS: &[EnvVarSpec] = &[
         unset_default: Some("127.0.0.1:8787"),
     },
     EnvVarSpec {
+        name: "SEBAS_HOME",
+        what: "Sebas home: every sebas-owned file location derives from it (per-file vars override)",
+        kind: EnvVarKind::Plain,
+        unset_default: Some("~/.sebas"),
+    },
+    EnvVarSpec {
         name: "SEBAS_STATE_DIR",
-        what: "State directory: every state file/DB derives from it (per-file vars override)",
+        what: "Legacy alias of SEBAS_HOME (still honored; startup warns; SEBAS_HOME wins when both are set)",
         kind: EnvVarKind::Plain,
         unset_default: Some("~/.sebas"),
     },

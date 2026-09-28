@@ -119,7 +119,9 @@ both live in tasks.py — the old `scripts/*sandbox*.sh` harnesses were removed
 1. Keep every sandbox path under one throwaway dir (e.g. `/tmp/sebas-itest/`)
    and override **all** defaults that would fall back to the real `~/.sebas`:
 
-   - config `-c` path (no sandbox-safe default exists), with
+   - config `-c` path (with `SEBAS_HOME` pinned the default resolves to
+     `<SEBAS_HOME>/config.toml` — the recipe still passes `-c` explicitly to
+     guard against a mis-pinned home), with
      `[media] download_dir`,
      `[acp.agents.<name>] sessions_dir` / `work_dir`,
      `[service.core] channel_path`, `[skills] dir` (defaults to the real
@@ -140,15 +142,21 @@ both live in tasks.py — the old `scripts/*sandbox*.sh` harnesses were removed
      boundary for project register/list, session detail/message/switch, and
      browse-dirs; left unset it falls back to the process cwd with a startup
      warn, and sandbox journeys break in confusing ways;
-   - env: **one state-directory variable** (`SEBAS_STATE_DIR`, single-state-dir)
-     pins every state location — the layered databases `settings.db`
+   - env: **one home variable** (`SEBAS_HOME`, unify-sebas-home) pins every
+     sebas-owned location — the layered databases `settings.db`
      (providers / model_aliases / settings) and `projects.db` (projects /
-     session_map), plus `auth.db`, `archive.json`,
-     `services.json` and `nodes.json` all derive as fixed filenames inside it.
+     session_map), plus `auth.db`, `archive.json`, `services.json`,
+     `nodes.json`, the config default (`<SEBAS_HOME>/config.toml`),
+     `core.secret`, the sockets (`run/core.sock`, `run/control.sock`), the
+     media cache (`cache/downloads`), sebas-node state (`node/`) and watchdog
+     upgrade data (`upgrade/`) all derive inside it.
      Per-file variables (`SEBAS_SETTINGS_DB`, `SEBAS_PROJECTS_DB`,
      `SEBAS_WEBUI_AUTH_DB`, `SEBAS_ROUTER_USAGE_DB`, `SEBAS_ARCHIVE_PATH`,
-     `SEBAS_SERVICES_FILE`) are optional explicit
-     overrides — no longer mandatory pins. `SEBAS_STATE_DB` is **retired**:
+     `SEBAS_SERVICES_FILE`, `SEBAS_CORE_SOCKET`, `SEBAS_CONTROL_SOCKET`,
+     `SEBAS_NODE_DIR`) are optional explicit
+     overrides — no longer mandatory pins. `SEBAS_STATE_DIR` is now a
+     **legacy alias** (still honored, startup warns; `SEBAS_HOME` wins when
+     both are set) — pin `SEBAS_HOME`, not the alias. `SEBAS_STATE_DB` is **retired**:
      exporting it changes nothing (startup logs a warning if it is set).
      `SEBAS_PROJECTS_PATH` is **retired** too (migrate-project-registry): the
      project registry lives in `projects.db`, there is no `projects.json` any
@@ -172,11 +180,15 @@ both live in tasks.py — the old `scripts/*sandbox*.sh` harnesses were removed
 2. Run the two halves exactly as the watchdog would:
 
    ```bash
-   SEBAS_STATE_DIR=/tmp/sebas-itest \
+   SEBAS_HOME=/tmp/sebas-itest \
      target/debug/sebas core -c /tmp/sebas-itest/config.toml         # core
-   SEBAS_STATE_DIR=/tmp/sebas-itest \
+   SEBAS_HOME=/tmp/sebas-itest \
      target/debug/sebas webui -c /tmp/sebas-itest/config.toml        # webui
    ```
+
+   With `SEBAS_HOME` pinned, `-c` may be omitted (the config default resolves
+   to `<SEBAS_HOME>/config.toml`) — but the recipe keeps the explicit `-c` to
+   guard against a mis-pinned home.
 
 3. Verify over HTTP on the sandbox port (`/health`, `/api/summary`,
    `/api/sessions`, `POST /api/sessions` + `/{key}/message`), and/or open
@@ -191,8 +203,9 @@ both live in tasks.py — the old `scripts/*sandbox*.sh` harnesses were removed
 
 watchdog 的服务期望态覆盖层 `services.json` 此前硬编码 `~/.sebas/services.json`
 （无 env、无配置键）——是「今天就无法被钉进沙箱」的越界点。single-state-dir
-已把它收编进状态目录映射表：默认 `<SEBAS_STATE_DIR>/services.json` 派生，
-`SEBAS_SERVICES_FILE` 可显式覆盖——钉住状态目录即钉住它，漏钉风险消失。
+已把它收编进落点映射表（unify-sebas-home 后即 sebas home 映射表）：默认
+`<SEBAS_HOME>/services.json` 派生，`SEBAS_SERVICES_FILE` 可显式覆盖——钉住
+sebas home 即钉住它，漏钉风险消失。
 
 它**仍是普通文件**、不进任何库：写入者是 watchdog 自己（ServiceSet 的终点是
 watchdog 的 control RPC socket，core 不在路径上），而 `settings.db` 的写入者
@@ -200,7 +213,7 @@ watchdog 的 control RPC socket，core 不在路径上），而 `settings.db` �
 的心跳（core 挂掉时恰恰最需要记录 `router: off`）。它是操作员配置（与
 config.toml 同类），watchdog 对它只做「启动时读、ServiceSet 时写」，不引入
 持久层。**验证方式**：`src/watchdog/services.rs` 的
-`pinned_lifecycle_never_touches_operator_home`（钉住状态目录跑完整覆盖层
+`pinned_lifecycle_never_touches_operator_home`（钉住 sebas home 跑完整覆盖层
 生命周期，断言 fake 操作员主目录的清单与 mtime 逐项未变）+
 `src/watchdog.rs` 的落点派生两条单测。
 
@@ -276,11 +289,11 @@ addr=127.0.0.1:<port>`，router 侧用自定义 provider（`[provider.fake]` 哑
    # add-agent-settings-and-session-titles：`[acp.agents.*]` 只是**种子源**——
    # core 启动时把条目幂等导入状态库 agents 表（同 id 已存在则 Settings 管理的
    # store 行赢）。agent 目录的增删改走 WebUI Settings → Agents（免重启生效），
-   # 不写回 config；沙箱里 store 行随 SEBAS_STATE_DIR 落 settings.db，删沙箱
+   # 不写回 config；沙箱里 store 行随 SEBAS_HOME 落 settings.db，删沙箱
    # 目录即全清。
 
    # persist-session-map：`[dispatch] state_file` 已退休——会话映射落
-   # 状态库（projects.db 的 session_map 表，随 SEBAS_STATE_DIR 派生），
+   # 状态库（projects.db 的 session_map 表，随 SEBAS_HOME 派生），
    # 残留该键会在解析期以未知键报错。
 
    [media]
@@ -305,7 +318,7 @@ addr=127.0.0.1:<port>`，router 侧用自定义 provider（`[provider.fake]` 哑
    enabled = false          # bare core owns the webui via --webui-port
    auth = false             # 登录免了：零用户 + 默认开的 auth 会停在首启
                             # 设置页——沙箱内要么显式关，要么把用户库
-                            # （状态目录下的 auth.db，SEBAS_WEBUI_AUTH_DB 可
+                            # （sebas home 下的 auth.db，SEBAS_WEBUI_AUTH_DB 可
                             # 覆盖）建上户（sebas auth add / env 引导）
 
    # [router] / [provider.*] 都是可选段——纯会话核心不写它们也能启动。
@@ -318,7 +331,7 @@ addr=127.0.0.1:<port>`，router 侧用自定义 provider（`[provider.fake]` 哑
    # `provider_overlay` 已退休（retire-legacy-state-json 3.5）——router 不再读
    # 任何 provider overlay 文件，写这个键不再有任何效果（provider 变更经
    # core state channel 下发）。
-   # persist-router-usage：用量落 router 自有的 SQLite 库（默认状态目录下的
+   # persist-router-usage：用量落 router 自有的 SQLite 库（默认 sebas home 下的
    # usage.db，SEBAS_ROUTER_USAGE_DB 可覆盖）。旧的 `usage_file`（NDJSON）键
    # 已删除——残留会以未知键报错。保留期双闸（默认 30 天 / 20 万行，后台
    # 每小时清理）见 config/config.toml.example。
@@ -328,17 +341,18 @@ addr=127.0.0.1:<port>`，router 侧用自定义 provider（`[provider.fake]` 哑
 2. Start the two processes（unify-router-process-shape：router 只以独立进程
    `sebas router --config <path> [--debug]` 运行，core 旗标里没有 router）
    with no `SEBAS_CORE_SECRET` — auto-arm writes the generated key to
-   `<SB>/core.secret` and clients discover it. single-state-dir 起状态 env
-   只需 `SEBAS_STATE_DIR` 一个（两库 settings.db / projects.db 与
-   auth.db / archive.json / services.json / nodes.json 全部
-   由它派生）：
+   `<SB>/core.secret` and clients discover it. unify-sebas-home 起 env
+   只需 `SEBAS_HOME` 一个（两库 settings.db / projects.db 与
+   auth.db / archive.json / services.json / nodes.json、config 缺省、
+   `run/` socket、`cache/downloads`、`node/`、`upgrade/` 全部由它派生；
+   `[service.core] channel_path` 显式钉进 `<SB>` 的写法照旧可用）：
 
    ```bash
    cargo build
-   SEBAS_STATE_DIR="<SB>" \
+   SEBAS_HOME="<SB>" \
      target/debug/sebas core -c "<SB>/config.toml" \
      --webui --webui-port 9877 > "<SB>/core.log" 2>&1
-   SEBAS_STATE_DIR="<SB>" \
+   SEBAS_HOME="<SB>" \
      target/debug/sebas router -c "<SB>/config.toml" \
      --debug > "<SB>/router.log" 2>&1 &
    ```
@@ -405,9 +419,9 @@ env posture 结论。
   （`{"base_url_anthropic": "https://…", "api_key": "sk-…"}`
   或 `{"api_key_env": "变量名"}`）——指向真实 `~/.sebas` 之下会被拒绝。
 - **拓扑**：AGENTS.md 沙箱菜谱的最简单进程形态——单进程 bare core
-  （`--webui --webui-port 9877`）+ 真实 `claude` CLI（PATH 查找）。全部状态
-  路径（config、dispatch、media、acp、workspace、skills、channel、
-  `SEBAS_STATE_DIR`）钉进一次性目录
+  （`--webui --webui-port 9877`）+ 真实 `claude` CLI（PATH 查找）。全部
+  自有落点（config、dispatch、media、acp、workspace、skills、channel、
+  `SEBAS_HOME`）钉进一次性目录
   `sebas-smoke-*`，跑完即毁（`--keep` 留现场调试）。
   不起独立 router：凭据走继承 env（provider 模式 Off），router 不在回合路径
   上，省掉真实凭据落盘。

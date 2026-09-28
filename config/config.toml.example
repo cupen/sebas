@@ -49,7 +49,7 @@ driver = "claude"
 #
 # 用量库（persist-router-usage）：router 自有的 SQLite 文件，一行一条记录
 # （时间戳/协议/模型/provider/上游模型/状态/延迟/ttft/四类 token 计数/error；
-# key 字段恒空——无 per-key 归属）。缺省落在状态目录下（`usage.db`，
+# key 字段恒空——无 per-key 归属）。缺省落在 sebas home 下（`usage.db`，
 # SEBAS_ROUTER_USAGE_DB 可覆盖）；router 是唯一写入者，且**不打开** core 的
 # 状态库。
 # 旧的 `usage_file`（NDJSON）键已删除——残留会以未知键报错。
@@ -103,8 +103,10 @@ driver = "claude"
 #
 # core 恒启动（会话核心，无开关）。[service.core] 只配置通道路径：
 # [service.core]
-# channel_path = "~/.sebas/core.sock"   # 缺省 XDG_RUNTIME_DIR/sebas/core.sock
-# secret_file = "~/.sebas/core.secret"  # 缺省 <config 目录>/core.secret
+# channel_path = "~/.sebas/run/core.sock"  # 缺省 <SEBAS_HOME>/run/core.sock
+#                                          # （unify-sebas-home；不再查 XDG）
+# secret_file = "~/.sebas/core.secret"     # 缺省 <config 目录>/core.secret
+#                                          # （config 缺省即 <SEBAS_HOME>/）
 #
 # [service.router]    # router 受管子进程；watchdog --debug 强制启用
 # enabled = true

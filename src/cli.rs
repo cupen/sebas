@@ -7,6 +7,23 @@ pub struct Cli {
     pub cmd: Cmd,
 }
 
+/// `-c` 缺省解析（unify-sebas-home D3）：显式值优先（原样保留，含相对路径
+/// ——相对值由消费点按既有语义解析）；缺席/空白 → `<SEBAS_HOME>/config.toml`
+/// （[`sebas_domain::state_paths::default_config_path`]，全部子命令共用同一
+/// 解析器）。
+///
+/// 为什么不经 clap `default_value`/`default_value_t`：前者是静态字符串解析
+/// 不了 env；后者被 clap_derive 包进 `OnceLock`——**进程内首次 parse 即冻结**
+/// （测试与多阶段 parse 全部踩坑），所以缺省收敛到本函数、消费点解析。
+pub fn resolve_config(config: &Option<String>) -> String {
+    match config.as_deref() {
+        Some(v) if !v.trim().is_empty() => v.to_string(),
+        _ => sebas_domain::state_paths::default_config_path()
+            .display()
+            .to_string(),
+    }
+}
+
 #[derive(Subcommand)]
 pub enum Cmd {
     /// Run the long-lived sebas core service (sessions, adapters, channels).
@@ -76,9 +93,10 @@ pub enum Cmd {
 /// `sebas feishu` — 会话外飞书交互（通知用户、投递图片等）。
 #[derive(Parser)]
 pub struct FeishuArgs {
-    /// Path to the sebas config.toml（提供 [feishu] 凭据）。
-    #[arg(short = 'c', long, default_value = "./config.toml")]
-    pub config: String,
+    /// Path to the sebas config.toml（提供 [feishu] 凭据）。缺省
+    /// `<SEBAS_HOME>/config.toml`（unify-sebas-home D3）。
+    #[arg(short = 'c', long)]
+    pub config: Option<String>,
 
     /// 目标会话 chat_id（`oc_` 开头；p2p 会话 id 见日志里的 open_chat_id）。
     #[arg(long, global = true)]
@@ -107,11 +125,12 @@ pub enum FeishuCmd {
 /// 这里只是薄壳的薄壳）。
 #[derive(Parser)]
 pub struct SkillsArgs {
-    /// Path to the sebas config.toml（仓目录 = `[skills] dir`，缺省
-    /// `~/.agents/skills`；sync 的投影对象 = `[acp.agents.*]`）。global：
+    /// Path to the sebas config.toml（缺省 `<SEBAS_HOME>/config.toml`；
+    /// 仓目录 = `[skills] dir`，缺省 `~/.agents/skills`；sync 的投影对象 =
+    /// `[acp.agents.*]`）。global：
     /// `sebas skills -c <path> list` 与 `sebas skills list -c <path>` 皆可。
-    #[arg(short = 'c', long, default_value = "./config.toml", global = true)]
-    pub config: String,
+    #[arg(short = 'c', long, global = true)]
+    pub config: Option<String>,
 
     #[command(subcommand)]
     pub cmd: SkillsCmd,
@@ -164,8 +183,8 @@ pub struct AgentBenchArgs {
 /// Core mode — the long-lived sebas core service.
 #[derive(Parser)]
 pub struct CoreArgs {
-    #[arg(short = 'c', long, default_value = "./config.toml")]
-    pub config: String,
+    #[arg(short = 'c', long)]
+    pub config: Option<String>,
 
     // unify-router-process-shape 1.1：内嵌 router 退役，`--router`/`--debug`
     // 旗标已删除（传入即 unknown-argument 报错）。需要 router 就跑独立进程：
@@ -213,8 +232,9 @@ pub struct ServiceArgs {
     pub force: bool,
 
     /// Path to the sebas config.toml to bake into ExecStart. Must be absolute.
-    #[arg(short = 'c', long, default_value = "./config.toml")]
-    pub config: String,
+    /// Default: `<SEBAS_HOME>/config.toml` (unify-sebas-home).
+    #[arg(short = 'c', long)]
+    pub config: Option<String>,
 
     /// Bake a specific RUST_LOG value into the unit. When omitted, the installing
     /// environment's RUST_LOG is inherited (falling back to info). Install-only.
@@ -238,8 +258,8 @@ pub struct RecordArgs {
     pub output: String,
 
     /// Config supplying acp.claude.path/args for the agent to record.
-    #[arg(short = 'c', long, default_value = "./config.toml")]
-    pub config: String,
+    #[arg(short = 'c', long)]
+    pub config: Option<String>,
 
     /// Extra args for the agent binary, after `--`
     /// (appended to the configured acp.claude.args).
@@ -250,8 +270,8 @@ pub struct RecordArgs {
 /// `sebas router` — run the LLM provider router.
 #[derive(Parser)]
 pub struct RouterArgs {
-    #[arg(short = 'c', long, default_value = "./config.toml")]
-    pub config: String,
+    #[arg(short = 'c', long)]
+    pub config: Option<String>,
 
     /// 启用 debug 模式：增加内置 `test` 模型，router 自身应答
     /// （固定文字 + 回显输入），不转发外部上游。
@@ -283,9 +303,9 @@ pub struct FakeProviderArgs {
 /// Spawned by the watchdog when `[service.webui] enabled = true`.
 #[derive(Parser)]
 pub struct WebUiArgs {
-    /// Path to the sebas config.toml.
-    #[arg(short = 'c', long, default_value = "./config.toml")]
-    pub config: String,
+    /// Path to the sebas config.toml. Default: `<SEBAS_HOME>/config.toml`.
+    #[arg(short = 'c', long)]
+    pub config: Option<String>,
 }
 
 /// `sebas auth` 的参数（add-auth-subcommand；子命令语义见 auth-cli spec，
@@ -339,9 +359,9 @@ pub enum AuthCmd {
 /// Manages the sebas child processes and handles self-upgrade.
 #[derive(Parser)]
 pub struct RunArgs {
-    /// Path to the sebas config.toml.
-    #[arg(short = 'c', long, default_value = "./config.toml")]
-    pub config: String,
+    /// Path to the sebas config.toml. Default: `<SEBAS_HOME>/config.toml`.
+    #[arg(short = 'c', long)]
+    pub config: Option<String>,
 
     /// 同时在固定端口上以 debug 模式额外启动一个独立 router HTTP 服务
     /// （内置 `test` 模型自应答、不转发上游），便于本地 curl 调试。
@@ -359,9 +379,9 @@ pub struct RunArgs {
 /// `sebas update` — one-shot update implementation used by watchdog.
 #[derive(Parser)]
 pub struct UpdateArgs {
-    /// Path to the sebas config.toml.
-    #[arg(short = 'c', long, default_value = "./config.toml")]
-    pub config: String,
+    /// Path to the sebas config.toml. Default: `<SEBAS_HOME>/config.toml`.
+    #[arg(short = 'c', long)]
+    pub config: Option<String>,
 
     /// Build from a local checkout instead of downloading a release.
     #[arg(long)]
@@ -384,7 +404,8 @@ pub struct UpdateArgs {
 #[derive(Parser)]
 pub struct ControlArgs {
     /// Path to the watchdog control socket.
-    /// Precedence: --socket > $SEBAS_CONTROL_SOCKET > XDG_RUNTIME_DIR/sebas/control.sock.
+    /// Precedence: --socket > $SEBAS_CONTROL_SOCKET > <SEBAS_HOME>/run/control.sock
+    /// (unify-sebas-home: no XDG_RUNTIME_DIR lookup any more).
     #[arg(long)]
     pub socket: Option<String>,
 
@@ -407,7 +428,8 @@ pub struct ControlArgs {
 #[derive(Parser)]
 pub struct ControlStatusArgs {
     /// Path to the watchdog control socket.
-    /// Precedence: --socket > $SEBAS_CONTROL_SOCKET > XDG_RUNTIME_DIR/sebas/control.sock.
+    /// Precedence: --socket > $SEBAS_CONTROL_SOCKET > <SEBAS_HOME>/run/control.sock
+    /// (unify-sebas-home: no XDG_RUNTIME_DIR lookup any more).
     #[arg(long)]
     pub socket: Option<String>,
 
@@ -432,8 +454,8 @@ pub enum OutputFormat {
 #[derive(Args, Debug, Clone)]
 pub struct NodeLinkArgs {
     /// 主控配置文件（用于发现 core socket 与 secret）。
-    #[arg(short = 'c', long, default_value = "./config.toml")]
-    pub config: String,
+    #[arg(short = 'c', long)]
+    pub config: Option<String>,
     /// 管理操作。
     #[command(subcommand)]
     pub cmd: NodeLinkCmd,
@@ -460,8 +482,8 @@ pub enum NodeLinkCmd {
 /// `sebas im` 的参数。
 #[derive(Args, Debug, Clone)]
 pub struct ImArgs {
-    #[arg(short = 'c', long, default_value = "./config.toml")]
-    pub config: String,
+    #[arg(short = 'c', long)]
+    pub config: Option<String>,
     /// Optional startup test message (sent to this receive_id as chat_id).
     #[arg(long)]
     pub test_msg: Option<String>,
@@ -521,9 +543,9 @@ pub enum AgentKindsCmd {
 
 #[derive(Parser)]
 pub struct AgentKindsListArgs {
-    /// Path to the sebas config.toml.
-    #[arg(short = 'c', long, default_value = "./config.toml")]
-    pub config: String,
+    /// Path to the sebas config.toml. Default: `<SEBAS_HOME>/config.toml`.
+    #[arg(short = 'c', long)]
+    pub config: Option<String>,
 
     /// Output the raw `AgentKindInfo` list as JSON instead of the table.
     #[arg(long)]

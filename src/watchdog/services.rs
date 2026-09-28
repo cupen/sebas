@@ -589,8 +589,8 @@ port = 9798
 
     // ── single-state-dir 5.1/5.2：落点收编 + 越界回归 ──
 
-    /// 本组用例的进程级 env 串行锁（动 HOME / SEBAS_STATE_DIR 全局变量）。
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // （进程级 env 串行锁已并入 crate::home_env_test_lock——unify-sebas-home：
+    // SEBAS_STATE_DIR / SEBAS_HOME 与 config、upgrade 的 env 用例互斥。）
 
     /// env 钉住 + 保存/恢复护栏。
     struct PinnedEnv {
@@ -600,8 +600,11 @@ port = 9798
 
     impl PinnedEnv {
         /// 状态目录 = pin，操作员主目录 = fake_home，无逐文件覆盖。
+        ///
+        /// unify-sebas-home：锁共用 crate 级 home_env_test_lock——本表动的
+        /// SEBAS_STATE_DIR/SEBAS_HOME 与 config/upgrade 的 env 用例互斥。
         fn pin(pin: &Path, fake_home: &Path) -> Self {
-            let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let lock = crate::home_env_test_lock().lock().unwrap_or_else(|e| e.into_inner());
             let vars: &[&'static str] = &[
                 "SEBAS_STATE_DIR",
                 "SEBAS_HOME",
@@ -702,6 +705,31 @@ port = 9798
             before,
             "fake 操作员主目录的清单与 mtime 逐项未变"
         );
+
+        // ── unify-sebas-home 4.3 扩断言：新收编族（socket / cache / node /
+        // upgrade）的缺省解析同样跟随钉住的目录（SEBAS_STATE_DIR 别名生效），
+        // 不落 fake 操作员主目录；fake home 根下也无 run/cache/node/upgrade
+        // 残留（易逝目录与缓存都进了 home 语义，越界即缺陷）。
+        use sebas_domain::state_paths::StatePath;
+        for p in [
+            StatePath::ChannelSocket,
+            StatePath::ControlSocket,
+            StatePath::MediaDownloads,
+            StatePath::NodeStateDir,
+            StatePath::UpgradeDataDir,
+        ] {
+            let resolved = p.resolve();
+            assert!(
+                resolved.starts_with(pin_dir.path()),
+                "{p:?} 必须落在钉住的目录内: {resolved:?}"
+            );
+        }
+        for sub in ["run", "cache", "node", "upgrade", ".sebas"] {
+            assert!(
+                !fake_home.path().join(sub).exists(),
+                "fake 操作员主目录不得出现 {sub}/"
+            );
+        }
     }
 
     /// 5.1 验收的读写行为半边：落点收编后，覆盖层的读取/写入行为与改造前

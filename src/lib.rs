@@ -1,5 +1,17 @@
 //! sebas library crate: runtime modules shared by the CLI binary.
 
+/// SEBAS_HOME / SEBAS_STATE_DIR 两个 env 变量的**测试互斥锁**
+/// （unify-sebas-home）：这两个变量被多个模块在测试里 set/remove（config
+/// 缺省、upgrade 缺省、watchdog PinnedEnv……），而 env 是进程全局的——
+/// 并行用例必须共用这一把锁，否则 A 用例 set、B 用例 restore 会互相踩。
+/// 同 crate 的单元测试（lib 目标）用 [`crate::home_env_test_lock`]；
+/// bin 目标（main.rs tests）是独立进程，自持锁即可。
+#[cfg(test)]
+pub fn home_env_test_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    &LOCK
+}
+
 /// The long-lived core subcommand (`sebas core`). The watchdog spawns its
 /// child with exactly this argv (see `watchdog::CoreSpawner`). The binary's
 /// clap subcommand must stay in sync — rename the `Cmd::Core` variant and

@@ -184,7 +184,7 @@ pub(crate) fn rebuild_from_seed(state: &AppState) -> Result<RouterConfig, String
     let mut cfg = RouterConfig::parse(&raw_toml).map_err(|e| format!("解析失败: {e}"))?;
     // `config_source` 是**重载自身的定位器**：reload 每次都靠它重读种子。
     // parse 只能从 `SEBAS_ROUTER_CONFIG` env 认出来（缺省退
-    // `~/.sebas/config.toml`），而独立 router 进程未必有这个 env——不在这里
+    // `<SEBAS_HOME>/config.toml`），而独立 router 进程未必有这个 env——不在这里
     // 回填，第二次 reload 就会去读操作员的真实配置（或直接失败），provider
     // 变更静默不生效（retire-legacy-state-json 3.5：channel 是唯一热重载路径）。
     cfg.config_source = core.cfg.config_source.clone();
@@ -465,7 +465,7 @@ mod tests {
     ///
     /// 为什么是回归点：overlay 文件退休后 channel 投影是热重载的唯一路径，
     /// 而每次 reload 都靠 `config_source` 重读 config.toml 取 `[provider.*]`
-    /// 种子。parse 只认 `SEBAS_ROUTER_CONFIG`（缺省 `~/.sebas/config.toml`），
+    /// 种子。parse 只认 `SEBAS_ROUTER_CONFIG`（缺省 `<SEBAS_HOME>/config.toml`），
     /// 独立 router 进程未必有该 env——不沿用就会去读操作员的真实配置（或直接
     /// 失败），provider 变更静默不生效。
     #[tokio::test(flavor = "multi_thread")]

@@ -33,18 +33,13 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::broadcast;
 use tracing::{info, warn};
 
-/// Default socket path: `$XDG_RUNTIME_DIR/sebas/core.sock`, falling back to a
-/// per-uid temp dir (same convention as the control RPC socket).
+/// Default socket path: `<SEBAS_HOME>/run/core.sock` (unify-sebas-home D4 —
+/// the sebas home's ephemeral `run/` directory; `XDG_RUNTIME_DIR` and per-uid
+/// temp dirs are no longer consulted). `SEBAS_CORE_SOCKET` is the per-file
+/// env override from the mapping table; `[service.core] channel_path` is
+/// anchored one layer above in [`resolve_channel_path`].
 pub fn default_socket_path() -> PathBuf {
-    if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR") {
-        return PathBuf::from(runtime_dir).join("sebas/core.sock");
-    }
-    let base = std::env::temp_dir().join("sebas");
-    #[cfg(unix)]
-    if let Some(uid) = unsafe { Some(libc::getuid()) } {
-        return base.join(format!("uid{uid}")).join("core.sock");
-    }
-    base.join("core.sock")
+    sebas_domain::state_paths::StatePath::ChannelSocket.resolve()
 }
 
 /// Resolve the socket path for the given config: `[service.core] channel_path`
@@ -90,9 +85,37 @@ pub fn resolve_channel_path(configured: Option<&str>) -> PathBuf {
 /// Bind the IPC listener at `path` with mode 0600 (unix), reclaiming a stale
 /// socket file (task 5.1). A socket that still accepts connections means a
 /// live server — that's an error, not a stale file.
+///
+/// unify-sebas-home D4：socket 的父目录（缺省形态即 `<home>/run/`）随 bind
+/// 创建；**本次新建**的目录收紧 owner-only（0700）——显式指进既有共享目录
+/// 时绝不偷偷改别人目录的权限。socket 路径超过 Unix `sun_path` 上限时给
+/// 出点名路径的可读报错，而不是 std 的裸 "SUN_LEN" 一句。
 pub fn bind_channel_socket(path: &Path) -> Result<IpcListener> {
+    #[cfg(unix)]
+    {
+        // Linux sun_path=108、macOS=104——取保守下界，超限在 bind 前给出
+        // 可读错误（design Risks：深层沙箱目录两方案同险，命中时报错必须
+        // 能读）。
+        const SUN_PATH_LIMIT: usize = 104;
+        let bytes = path.as_os_str().len();
+        if bytes >= SUN_PATH_LIMIT {
+            return Err(SebasError::Config(format!(
+                "core session channel socket path is {bytes} bytes, over the Unix \
+                 socket path limit ({SUN_PATH_LIMIT}): {} — pin a shorter \
+                 SEBAS_HOME or set an explicit [service.core] channel_path",
+                path.display()
+            )));
+        }
+    }
     if let Some(parent) = path.parent() {
+        #[cfg(unix)]
+        let parent_existed = parent.exists();
         std::fs::create_dir_all(parent)?;
+        #[cfg(unix)]
+        if !parent_existed {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        }
     }
     #[cfg(unix)]
     if path.exists() {

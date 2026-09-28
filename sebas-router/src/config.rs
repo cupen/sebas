@@ -95,7 +95,7 @@ pub struct RouterConfig {
     pub model_aliases: HashMap<String, Option<String>>,
     /// 本配置来自的 config.toml 路径（reload 用）。`#[serde(skip)]`：
     /// wire 上不存在；由调用方（router_cmd / admin reload）注入。
-    /// 缺省读 `SEBAS_ROUTER_CONFIG`，再退 `~/.sebas/config.toml`。
+    /// 缺省读 `SEBAS_ROUTER_CONFIG`，再退 `<SEBAS_HOME>/config.toml`。
     #[serde(skip)]
     pub config_source: String,
 }
@@ -172,13 +172,19 @@ fn default_usage_max_rows() -> u64 {
 fn default_usage_prune_interval_secs() -> u64 {
     3600
 }
-/// reload 用的 config.toml 来源：`SEBAS_ROUTER_CONFIG` env，退
-/// `~/.sebas/config.toml`。调用方（router_cmd）可在 parse 后覆盖。
+/// reload 用的 config.toml 来源：`SEBAS_ROUTER_CONFIG` env 最优先；缺席时
+/// 退 `<SEBAS_HOME>/config.toml`（unify-sebas-home D3：与 `-c` 缺省共用
+/// `state_paths::default_config_path()` 同一解析器，不再写死
+/// `~/.sebas/config.toml`）。调用方（router_cmd）可在 parse 后覆盖。
 fn default_config_source() -> String {
     std::env::var("SEBAS_ROUTER_CONFIG")
         .ok()
             .filter(|v| !v.is_empty())
-            .unwrap_or_else(|| "~/.sebas/config.toml".into())
+            .unwrap_or_else(|| {
+                sebas_domain::state_paths::default_config_path()
+                    .display()
+                    .to_string()
+            })
 }
 
 /// 上游 provider。`api_key_env` 优先；明文 `api_key` 由 UI/overlay 正常
@@ -1041,6 +1047,49 @@ mod tests {
     /// 作为「经 parse 且受 LOCK 保护」的调用点收口。
     fn parse_isolated(raw: &str) -> Result<RouterConfig> {
         RouterConfig::parse(raw)
+    }
+
+    /// unify-sebas-home 2.1：reload 的 config 来源优先级——
+    /// `SEBAS_ROUTER_CONFIG` 仍最优先；缺席时退 `<SEBAS_HOME>/config.toml`
+    /// （与 CLI `-c` 缺省共用 `default_config_path()`，不再写死
+    /// `~/.sebas/config.toml`）。
+    #[test]
+    fn reload_config_source_env_wins_then_falls_back_to_home() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved_router = std::env::var("SEBAS_ROUTER_CONFIG").ok();
+        let saved_home = std::env::var("SEBAS_HOME").ok();
+        let saved_alias = std::env::var("SEBAS_STATE_DIR").ok();
+        let dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("SEBAS_HOME", dir.path());
+            std::env::remove_var("SEBAS_STATE_DIR");
+            std::env::remove_var("SEBAS_ROUTER_CONFIG");
+        }
+        // env 缺席 → home 派生（与 -c 缺省同源）。
+        assert_eq!(
+            default_config_source(),
+            dir.path().join("config.toml").display().to_string(),
+            "SEBAS_ROUTER_CONFIG 缺席时 reload 回落 <SEBAS_HOME>/config.toml"
+        );
+        // env 在场 → 仍最优先。
+        unsafe { std::env::set_var("SEBAS_ROUTER_CONFIG", "/elsewhere/router.toml") };
+        assert_eq!(
+            default_config_source(),
+            "/elsewhere/router.toml",
+            "SEBAS_ROUTER_CONFIG 必须压过 home 派生"
+        );
+        for (var, prev) in [
+            ("SEBAS_ROUTER_CONFIG", saved_router),
+            ("SEBAS_HOME", saved_home),
+            ("SEBAS_STATE_DIR", saved_alias),
+        ] {
+            unsafe {
+                match prev {
+                    Some(v) => std::env::set_var(var, v),
+                    None => std::env::remove_var(var),
+                }
+            }
+        }
     }
 
     #[test]

@@ -1190,6 +1190,65 @@ fn missing_or_empty_channel_path_falls_back_to_default() {
     );
 }
 
+    /// unify-sebas-home 3.1：缺省两级解析——`SEBAS_CORE_SOCKET` 逐落点覆盖
+    /// 优先；缺席时落 `<SEBAS_HOME>/run/core.sock` 派生（不再查
+    /// XDG_RUNTIME_DIR）。config 的 `[service.core] channel_path` 仍压过 env
+    /// （消费点锚在映射表之上）。
+    #[test]
+    fn channel_socket_default_follows_sebas_home_and_env_override() {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = (
+            std::env::var("SEBAS_HOME").ok(),
+            std::env::var("SEBAS_STATE_DIR").ok(),
+            std::env::var("SEBAS_CORE_SOCKET").ok(),
+        );
+        let home = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("SEBAS_HOME", home.path());
+            std::env::remove_var("SEBAS_STATE_DIR");
+            std::env::remove_var("SEBAS_CORE_SOCKET");
+        }
+        // 缺省 = <home>/run/core.sock（XDG_RUNTIME_DIR 即使在场也不参与）。
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", "/xdg-should-be-ignored") };
+        assert_eq!(
+            server::default_socket_path(),
+            home.path().join("run/core.sock"),
+            "缺省锚 = <SEBAS_HOME>/run/core.sock，XDG 不再参与"
+        );
+        unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
+        // env 覆盖赢过派生。
+        unsafe { std::env::set_var("SEBAS_CORE_SOCKET", "/elsewhere/core.sock") };
+        assert_eq!(
+            server::default_socket_path(),
+            StdPath::new("/elsewhere/core.sock"),
+            "SEBAS_CORE_SOCKET 覆盖优先"
+        );
+        // config 键仍压过 env。
+        let cfg = crate::config::Config::parse("[service.core]\nchannel_path = \"/from-config/core.sock\"\n")
+            .expect("config channel_path parses");
+        assert_eq!(
+            server::socket_path(&cfg),
+            StdPath::new("/from-config/core.sock"),
+            "config channel_path > env > 派生"
+        );
+        unsafe {
+            match saved.0 {
+                Some(v) => std::env::set_var("SEBAS_HOME", v),
+                None => std::env::remove_var("SEBAS_HOME"),
+            }
+            match saved.1 {
+                Some(v) => std::env::set_var("SEBAS_STATE_DIR", v),
+                None => std::env::remove_var("SEBAS_STATE_DIR"),
+            }
+            match saved.2 {
+                Some(v) => std::env::set_var("SEBAS_CORE_SOCKET", v),
+                None => std::env::remove_var("SEBAS_CORE_SOCKET"),
+            }
+        }
+        drop(lock);
+    }
+
 async fn arm_for_test(dir: &StdPath) -> crate::run::ArmedChannel {
     let (cfg, config_path) = arm_config(dir);
     let (router, _out_rx) = DispatchHandle::new(SessionMap::new());

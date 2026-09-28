@@ -46,22 +46,25 @@ fn channel_secret() -> String {
     ChannelSecret::from_env_or_file(file).current()
 }
 
-/// 核心通道 socket 路径, 由 `SEBAS_CORE_SOCKET` 环境变量指定。
-/// 未设置时返回 `None` (通道不可用, 保持最后有效配置)。
+/// 核心通道 socket 路径（unify-sebas-home 1.1/3.1：消费点读共享落点映射表
+/// ——`SEBAS_CORE_SOCKET` 逐落点覆盖优先，缺席时落 `<SEBAS_HOME>/run/
+/// core.sock` 派生缺省，与 core 服务端同一解析函数，双端不再分叉）。
+///
+/// 行为注记：env 缺席时旧实现返回 `None`（不订阅、配置原样保留）；现在
+/// 返回派生缺省——裸起 router（无 watchdog 注入）也能按 home 语义发现
+/// core。core 不在场时连接失败走既有退避重连（never-connected 只记
+/// debug），不产生额外写动作。
 pub(crate) fn socket_path() -> Option<PathBuf> {
-    let raw = std::env::var("SEBAS_CORE_SOCKET").ok()?;
-    if raw.is_empty() {
-        return None;
-    }
-    Some(PathBuf::from(raw))
+    let path = sebas_domain::state_paths::StatePath::ChannelSocket.resolve();
+    Some(path)
 }
 
-/// 启动核心通道订阅循环 (tokio task)。
-/// 当 socket 路径可用时, 连接并订阅状态变更; 不可用时静默返回。
+/// 启动核心通道订阅循环 (tokio task)。socket 路径解析永不失败（覆盖 env >
+/// home 派生，见 [`socket_path`]）——分支保留只为 None 形态的调用方健壮性。
 pub fn spawn_subscriber(state: AppState) {
     let Some(path) = socket_path() else {
         tracing::info!(
-            "core channel socket not set (SEBAS_CORE_SOCKET), keeping config as-is (no file fallback)"
+            "core channel socket unavailable, keeping config as-is (no file fallback)"
         );
         return;
     };
@@ -330,5 +333,58 @@ async fn subscribe_once(state: &AppState, path: &Path) -> Result<(), String> {
                 tracing::debug!("core channel sent an unknown frame; ignoring it");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// unify-sebas-home 3.1：订阅侧解析——`SEBAS_CORE_SOCKET` 逐落点覆盖
+    /// 优先；缺席时落 `<SEBAS_HOME>/run/core.sock`（与 core 服务端同一
+    /// 映射表，双端同源，不再各查各的）。
+    #[test]
+    fn socket_path_env_wins_then_home_derived() {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = (
+            std::env::var("SEBAS_CORE_SOCKET").ok(),
+            std::env::var("SEBAS_HOME").ok(),
+            std::env::var("SEBAS_STATE_DIR").ok(),
+        );
+        let home = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("SEBAS_HOME", home.path());
+            std::env::remove_var("SEBAS_STATE_DIR");
+            std::env::remove_var("SEBAS_CORE_SOCKET");
+        }
+        assert_eq!(
+            socket_path(),
+            Some(home.path().join("run/core.sock")),
+            "env 缺席 → home 派生缺省"
+        );
+        unsafe {
+            std::env::set_var("SEBAS_CORE_SOCKET", "/elsewhere/core.sock");
+        }
+        assert_eq!(
+            socket_path(),
+            Some(PathBuf::from("/elsewhere/core.sock")),
+            "逐落点 env 覆盖优先"
+        );
+        unsafe {
+            match saved.0 {
+                Some(v) => std::env::set_var("SEBAS_CORE_SOCKET", v),
+                None => std::env::remove_var("SEBAS_CORE_SOCKET"),
+            }
+            match saved.1 {
+                Some(v) => std::env::set_var("SEBAS_HOME", v),
+                None => std::env::remove_var("SEBAS_HOME"),
+            }
+            match saved.2 {
+                Some(v) => std::env::set_var("SEBAS_STATE_DIR", v),
+                None => std::env::remove_var("SEBAS_STATE_DIR"),
+            }
+        }
+        drop(lock);
     }
 }

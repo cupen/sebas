@@ -25,9 +25,6 @@ pub const WORKSPACE_ROOT_ENV: &str = "SEBAS_WORKSPACE_ROOT";
 pub const DEFAULT_MAX_SESSIONS: u32 = 8;
 /// 缺省本地 turn 日志保留天数（与 webui 归档保留期的缺省口径一致）。
 pub const DEFAULT_LOG_RETENTION_DAYS: u32 = 30;
-/// 状态目录缺省名（`<data_dir>/sebas-node`）。
-const DEFAULT_STATE_DIR_NAME: &str = "sebas-node";
-
 /// 模型流量的上游：节点本地凭据（缺省）或经主控 router 出网（节点零凭据）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
@@ -598,7 +595,10 @@ pub fn resolve_workspace_root(explicit: Option<PathBuf>, cwd: &Path) -> (PathBuf
     }
 }
 
-/// 状态目录：`--state-dir` > `SEBAS_NODE_DIR` > `[node] state_dir` > `<data_dir>/sebas-node`。
+/// 状态目录：`--state-dir` > `SEBAS_NODE_DIR` > `[node] state_dir` >
+/// `<SEBAS_HOME>/node`（unify-sebas-home D5：只换最底层的缺省锚——原来的
+/// 系统 data dir 缺省退役；链上其余优先级原序保留。缺省解析取共享落点
+/// 映射表，不本地复刻 home 规则）。
 fn resolve_state_dir(cli: Option<PathBuf>, from_file: Option<String>) -> Result<PathBuf, NodeError> {
     if let Some(dir) = cli {
         return Ok(dir);
@@ -609,12 +609,7 @@ fn resolve_state_dir(cli: Option<PathBuf>, from_file: Option<String>) -> Result<
     if let Some(dir) = non_empty(from_file) {
         return Ok(PathBuf::from(dir));
     }
-    let data = dirs::data_dir().ok_or_else(|| {
-        NodeError::state_dir(format!(
-            "无法推断数据目录；请显式设置 --state-dir 或 {STATE_DIR_ENV}"
-        ))
-    })?;
-    Ok(data.join(DEFAULT_STATE_DIR_NAME))
+    Ok(sebas_domain::state_paths::StatePath::NodeStateDir.resolve())
 }
 
 /// 取第一个非空（trim 后）的候选。
@@ -737,6 +732,66 @@ id = "file-id"
         assert_eq!(cfg.control_plane, "wss://from-cli/ws");
         assert_eq!(cfg.state_dir, PathBuf::from("/from/cli"));
         assert_eq!(cfg.id.as_deref(), Some("cli-id"));
+    }
+
+    /// unify-sebas-home 4.2：四层优先级全链——cli > SEBAS_NODE_DIR env >
+    /// 文件 `[node] state_dir` > SEBAS_HOME 下的 node 目录（最底层的系统
+    /// data dir 缺省锚换到 sebas home，design D5）。
+    #[test]
+    fn state_dir_falls_back_to_sebas_home_node_dir() {
+        let _env = ENV_LOCK.lock().unwrap();
+        let saved_home = std::env::var("SEBAS_HOME").ok();
+        let saved_alias = std::env::var("SEBAS_STATE_DIR").ok();
+        let pin = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("SEBAS_HOME", pin.path());
+            std::env::remove_var("SEBAS_STATE_DIR");
+            std::env::remove_var(STATE_DIR_ENV);
+        }
+        // 无 cli、无 env、文件无 state_dir → 缺省锚 = <SEBAS_HOME>/node。
+        let text = r#"
+[node]
+control_plane = "wss://x/ws"
+"#;
+        let file = NodeConfig::parse(text).unwrap();
+        let cli = Cli {
+            config: None,
+            join_token: None,
+            node_id: None,
+            control_plane: None,
+            state_dir: None,
+            check: false,
+        };
+        let cfg = NodeConfig::resolve(file, &cli).unwrap();
+        assert_eq!(
+            cfg.state_dir,
+            pin.path().join("node"),
+            "缺省锚 = <SEBAS_HOME>/node"
+        );
+
+        // 文件层仍在缺省锚之上。
+        let text = r#"
+[node]
+control_plane = "wss://x/ws"
+state_dir = "/from/file"
+"#;
+        let file = NodeConfig::parse(text).unwrap();
+        let cfg = NodeConfig::resolve(file.clone(), &cli).unwrap();
+        assert_eq!(cfg.state_dir, PathBuf::from("/from/file"));
+        // cli 仍在文件层之上。
+        let cfg = NodeConfig::resolve(file, &cli_with(Path::new("/from/cli"))).unwrap();
+        assert_eq!(cfg.state_dir, PathBuf::from("/from/cli"));
+
+        unsafe {
+            match saved_home {
+                Some(v) => std::env::set_var("SEBAS_HOME", v),
+                None => std::env::remove_var("SEBAS_HOME"),
+            }
+            match saved_alias {
+                Some(v) => std::env::set_var("SEBAS_STATE_DIR", v),
+                None => std::env::remove_var("SEBAS_STATE_DIR"),
+            }
+        }
     }
 
     #[test]

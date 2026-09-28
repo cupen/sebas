@@ -71,7 +71,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::AgentKinds(args) => match args.cmd {
             AgentKindsCmd::List(list) => {
                 if let Err(e) = sebas::agent_kinds::run(sebas::agent_kinds::ListArgs {
-                    config: list.config,
+                    config: cli::resolve_config(&list.config),
                     json: list.json,
                 })
                 .await
@@ -84,7 +84,7 @@ async fn main() -> anyhow::Result<()> {
         },
         Cmd::NodeLink(args) => {
             let args = sebas::node_link_cmd::Args {
-                config: args.config,
+                config: cli::resolve_config(&args.config),
                 cmd: match args.cmd {
                     cli::NodeLinkCmd::Token { ttl } => {
                         sebas::node_link_cmd::Cmd::Token { ttl_secs: ttl }
@@ -104,7 +104,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Im(args) => {
             let args = sebas::im_cmd::ImArgs {
-                config: args.config,
+                config: cli::resolve_config(&args.config),
                 test_msg: args.test_msg,
                 dump_inbound: args.dump_inbound,
                 log_level: args.log_level,
@@ -156,7 +156,9 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Services(args) => run_control_status(args, ControlCmd::Services).await,
         Cmd::Ctl(args) => run_control(args).await,
         Cmd::Run(args) => {
-            let raw = std::fs::read_to_string(&args.config).unwrap_or_default();
+            // unify-sebas-home D3：`-c` 缺席在消费点解析为 home 缺省。
+            let config_path = cli::resolve_config(&args.config);
+            let raw = std::fs::read_to_string(&config_path).unwrap_or_default();
             let cfg = match sebas::config::Config::parse(&raw).map_err(|e| anyhow::anyhow!("{e}")) {
                 Ok(cfg) => cfg,
                 Err(e) => startup_failure_exit(&e),
@@ -164,7 +166,7 @@ async fn main() -> anyhow::Result<()> {
             if let Err(e) = sebas::watchdog::run_watchdog(
                 cfg.service,
                 cfg.watchdog,
-                args.config,
+                config_path,
                 args.debug,
                 cfg.feishu.is_enabled(),
                 args.log_level,
@@ -180,7 +182,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Feishu(args) => {
             // 会话外直连飞书（一次性命令）：失败即退出码 1，无启动失败语义。
             let args = sebas::feishu_cmd::FeishuArgs {
-                config: args.config,
+                config: cli::resolve_config(&args.config),
                 chat: args.chat,
                 cmd: match args.cmd {
                     cli::FeishuCmd::Text { message } => {
@@ -198,7 +200,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Skills(args) => {
             // 一次性管理命令（非服务）：失败按普通错误退出 1。
             let args = sebas::skills_cmd::SkillsArgs {
-                config: args.config,
+                config: cli::resolve_config(&args.config),
                 cmd: match args.cmd {
                     cli::SkillsCmd::List => sebas::skills_cmd::SkillsCmd::List,
                     cli::SkillsCmd::Add { source } => sebas::skills_cmd::SkillsCmd::Add { source },
@@ -238,7 +240,10 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Core(run) => {
-            let raw = std::fs::read_to_string(&run.config).unwrap_or_else(|_| {
+            // unify-sebas-home D3：`-c` 缺席在消费点解析为 `<SEBAS_HOME>/config.toml`
+            // （无安全 cwd 缺省——home 未设时即 ~/.sebas/config.toml）。
+            let config_path = cli::resolve_config(&run.config);
+            let raw = std::fs::read_to_string(&config_path).unwrap_or_else(|_| {
                 // No file -> use minimal defaults; require env vars for credentials
                 let app_id = std::env::var("SEBAS_FEISHU_APP_ID").unwrap_or_default();
                 let app_secret = std::env::var("SEBAS_FEISHU_APP_SECRET").unwrap_or_default();
@@ -263,7 +268,7 @@ async fn main() -> anyhow::Result<()> {
                 run.webui,
                 run.webui_port,
                 run.webui_host,
-                run.config,
+                config_path,
             )
             .await
             {
@@ -291,15 +296,13 @@ async fn run_control(args: ControlArgs) -> anyhow::Result<()> {
         request,
     };
 
-    // Resolve socket: --socket > $SEBAS_CONTROL_SOCKET > XDG default.
+    // Resolve socket: --socket > $SEBAS_CONTROL_SOCKET > <SEBAS_HOME>/run/
+    // control.sock. The env override and the derived default both live in the
+    // shared mapping table (unify-sebas-home D4) — `default_socket_path`
+    // already honors the env, so only the flag is anchored here.
     let path = args
         .socket
         .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var("SEBAS_CONTROL_SOCKET")
-                .ok()
-                .map(PathBuf::from)
-        })
         .unwrap_or_else(default_socket_path);
 
     // Resolve secret: --secret > $SEBAS_CONTROL_SECRET.
@@ -563,7 +566,7 @@ impl From<ServiceArgs> for sebas::service::Args {
             user: a.user,
             auto_start: a.auto_start,
             force: a.force,
-            config: a.config,
+            config: cli::resolve_config(&a.config),
             log_level: a.log_level.unwrap_or_default(),
         }
     }
@@ -581,7 +584,7 @@ impl From<RecordArgs> for sebas::record::RecordArgs {
     fn from(a: RecordArgs) -> Self {
         Self {
             output: PathBuf::from(a.output),
-            config: a.config,
+            config: cli::resolve_config(&a.config),
             agent_args: a.agent_args,
         }
     }
@@ -600,7 +603,7 @@ impl From<cli::FakeProviderArgs> for sebas::fake_provider_cmd::FakeProviderArgs 
 impl From<RouterArgs> for sebas::router_cmd::RouterArgs {
     fn from(a: RouterArgs) -> Self {
         Self {
-            config: a.config,
+            config: cli::resolve_config(&a.config),
             debug: a.debug,
         }
     }
@@ -608,14 +611,14 @@ impl From<RouterArgs> for sebas::router_cmd::RouterArgs {
 
 impl From<WebUiArgs> for sebas::webui_cmd::WebUiArgs {
     fn from(a: WebUiArgs) -> Self {
-        Self::new(a.config)
+        Self::new(cli::resolve_config(&a.config))
     }
 }
 
 impl From<cli::UpdateArgs> for sebas::update::UpdateArgs {
     fn from(a: cli::UpdateArgs) -> Self {
         Self {
-            config: a.config,
+            config: cli::resolve_config(&a.config),
             dev: a.dev,
             dry_run: a.dry_run,
             rollback: a.rollback,
@@ -628,6 +631,45 @@ impl From<cli::UpdateArgs> for sebas::update::UpdateArgs {
 mod tests {
     use super::*;
 
+    /// unify-sebas-home 2.1：`-c` 缺省是动态的（`<SEBAS_HOME>/config.toml`，
+    /// 解析期读 env）。动 env 的 parse 用例经此护栏串行并保存/恢复；根 crate
+    /// 测试二进制内没有其他测试设置 SEBAS_HOME / SEBAS_STATE_DIR，锁只是
+    /// 防御性的。
+    struct HomeEnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl HomeEnvGuard {
+        fn pin_home(home: &std::path::Path) -> Self {
+            static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let vars = ["SEBAS_HOME", "SEBAS_STATE_DIR"];
+            let saved = vars
+                .iter()
+                .map(|v| (*v, std::env::var(v).ok()))
+                .collect::<Vec<_>>();
+            unsafe {
+                std::env::set_var("SEBAS_HOME", home);
+                std::env::remove_var("SEBAS_STATE_DIR");
+            }
+            Self { _lock: lock, saved }
+        }
+    }
+
+    impl Drop for HomeEnvGuard {
+        fn drop(&mut self) {
+            for (v, prev) in &self.saved {
+                unsafe {
+                    match prev {
+                        Some(val) => std::env::set_var(v, val),
+                        None => std::env::remove_var(v),
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn run_subcommand_accepts_config_flag() {
         let cli = Cli::try_parse_from(["sebas", "core", "--config", "x.toml"])
@@ -635,7 +677,7 @@ mod tests {
         let Cmd::Core(args) = cli.cmd else {
             panic!("expected Run subcommand");
         };
-        assert_eq!(args.config, "x.toml");
+        assert_eq!(args.config.as_deref(), Some("x.toml"));
     }
 
     /// The watchdog spawns its child and `service` bakes an `ExecStart`
@@ -649,13 +691,44 @@ mod tests {
         assert!(matches!(cli.cmd, Cmd::Core(_)));
     }
 
+    /// unify-sebas-home 2.1：`-c` 缺席 → `<SEBAS_HOME>/config.toml`（不再
+    /// 看 cwd 的 `./config.toml`，BREAKING）。
     #[test]
-    fn run_subcommand_config_defaults_to_cwd_config_toml() {
+    fn run_subcommand_config_defaults_to_sebas_home() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _env = HomeEnvGuard::pin_home(dir.path());
         let cli = Cli::try_parse_from(["sebas", "core"]).expect("bare `run` must parse");
         let Cmd::Core(args) = cli.cmd else {
             panic!("expected Run subcommand");
         };
-        assert_eq!(args.config, "./config.toml");
+        assert!(
+            args.config.is_none(),
+            "clap 层不再有缺省（default_value_t 会被 OnceLock 冻结）"
+        );
+        assert_eq!(
+            cli::resolve_config(&args.config),
+            dir.path().join("config.toml").display().to_string(),
+            "-c 缺席时解析进 sebas home（消费点解析，D3）"
+        );
+    }
+
+    /// unify-sebas-home 2.1：显式 `-c` 永远赢过 home 缺省（spec「explicit
+    /// flag wins」——home 指别处时加载的是 cwd 相对文件）。
+    #[test]
+    fn explicit_config_flag_wins_over_sebas_home_default() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _env = HomeEnvGuard::pin_home(dir.path());
+        let cli = Cli::try_parse_from(["sebas", "core", "-c", "./config.toml"])
+            .expect("`sebas core -c <relative>` must parse");
+        let Cmd::Core(args) = cli.cmd else {
+            panic!("expected Run subcommand");
+        };
+        assert_eq!(args.config.as_deref(), Some("./config.toml"));
+        assert_eq!(
+            cli::resolve_config(&args.config),
+            "./config.toml",
+            "显式 -c 原样保留（cwd 相对），home 不参与"
+        );
     }
 
     #[test]
@@ -681,7 +754,7 @@ mod tests {
         let Cmd::Core(args) = cli.cmd else {
             panic!("expected Run subcommand");
         };
-        assert_eq!(args.config, "x.toml");
+        assert_eq!(args.config.as_deref(), Some("x.toml"));
     }
 
     #[test]
@@ -697,7 +770,7 @@ mod tests {
         let Cmd::Router(args) = cli.cmd else {
             panic!("expected Router subcommand");
         };
-        assert_eq!(args.config, "x.toml");
+        assert_eq!(args.config.as_deref(), Some("x.toml"));
     }
 
     #[test]
@@ -707,7 +780,7 @@ mod tests {
         let Cmd::Router(args) = cli.cmd else {
             panic!("expected Router subcommand");
         };
-        assert_eq!(args.config, "x.toml");
+        assert_eq!(args.config.as_deref(), Some("x.toml"));
     }
 
     #[test]
@@ -762,7 +835,7 @@ mod tests {
             panic!("expected AgentKinds subcommand");
         };
         let AgentKindsCmd::List(list) = args.cmd;
-        assert_eq!(list.config, "x.toml");
+        assert_eq!(list.config.as_deref(), Some("x.toml"));
         assert!(!list.json, "--json 默认应为 false");
     }
 
@@ -822,7 +895,7 @@ mod tests {
         assert!(args.dev);
         assert!(args.dry_run);
         assert_eq!(args.project_dir.as_deref(), Some("/tmp/sebas"));
-        assert_eq!(args.config, "x.toml");
+        assert_eq!(args.config.as_deref(), Some("x.toml"));
     }
 
     #[test]
@@ -837,7 +910,7 @@ mod tests {
         let Cmd::WebUi(args) = cli.cmd else {
             panic!("expected WebUi subcommand");
         };
-        assert_eq!(args.config, "x.toml");
+        assert_eq!(args.config.as_deref(), Some("x.toml"));
     }
 
     #[test]
@@ -847,16 +920,22 @@ mod tests {
         let Cmd::WebUi(args) = cli.cmd else {
             panic!("expected WebUi subcommand");
         };
-        assert_eq!(args.config, "x.toml");
+        assert_eq!(args.config.as_deref(), Some("x.toml"));
     }
 
     #[test]
-    fn webui_subcommand_defaults_to_cwd_config_toml() {
+    fn webui_subcommand_defaults_to_sebas_home_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _env = HomeEnvGuard::pin_home(dir.path());
         let cli = Cli::try_parse_from(["sebas", "webui"]).expect("bare `sebas webui` must parse");
         let Cmd::WebUi(args) = cli.cmd else {
             panic!("expected WebUi subcommand");
         };
-        assert_eq!(args.config, "./config.toml");
+        assert_eq!(
+            cli::resolve_config(&args.config),
+            dir.path().join("config.toml").display().to_string(),
+            "webui 的 -c 缺省同样解析进 sebas home（消费点解析，D3）"
+        );
     }
 
     #[test]
@@ -1031,13 +1110,18 @@ mod tests {
     #[test]
     fn skills_subcommand_parses_all_four_verbs() {
         // add-agent-skills 4.1–4.4：list / add / remove / sync 四个子命令，
-        // `-c` 沿用全仓惯例（缺省 ./config.toml）。
+        // `-c` 沿用全仓惯例（缺省 <SEBAS_HOME>/config.toml，unify-sebas-home）。
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _env = HomeEnvGuard::pin_home(dir.path());
         let cli = Cli::try_parse_from(["sebas", "skills", "list"])
             .expect("`sebas skills list` must parse");
         let Cmd::Skills(args) = cli.cmd else {
             panic!("expected Skills subcommand");
         };
-        assert_eq!(args.config, "./config.toml");
+        assert_eq!(
+            cli::resolve_config(&args.config),
+            dir.path().join("config.toml").display().to_string()
+        );
         assert!(matches!(args.cmd, cli::SkillsCmd::List));
 
         let cli = Cli::try_parse_from(["sebas", "skills", "-c", "x.toml", "add", "./my-skill"])
@@ -1045,7 +1129,7 @@ mod tests {
         let Cmd::Skills(args) = cli.cmd else {
             panic!("expected Skills subcommand");
         };
-        assert_eq!(args.config, "x.toml");
+        assert_eq!(args.config.as_deref(), Some("x.toml"));
         let cli::SkillsCmd::Add { source } = args.cmd else {
             panic!("expected Add subcommand");
         };

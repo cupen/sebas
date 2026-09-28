@@ -33,8 +33,11 @@ sebas_deploy_home: "/home/{{ sebas_deploy_user }}"
 # — `service --install` rejects relative paths (validate_config in src/service.rs).
 sebas_config_path: "{{ sebas_deploy_home }}/.sebas/config.toml"
 
-# Where sebas keeps its mutable state (sessions DB, downloads, gateway usage
-# logs, acp.claude working dir). Passed into [watchdog.storage].data_dir.
+# The sebas home (unify-sebas-home): every sebas-owned location — the layered
+# databases, registries, config default, core.secret, run/ sockets,
+# cache/downloads, node/ and upgrade/ — lives inside it, and uninstall
+# removes it wholesale. Passed into [watchdog.storage].data_dir so upgrade
+# artifacts stay pinned here too.
 sebas_data_dir: "{{ sebas_deploy_home }}/.sebas"
 
 # --- webui listen ---------------------------------------------------------

@@ -331,6 +331,9 @@ pub struct Sandbox {
     pub router_port: u16,
     /// The one fake secret shared by core and (matching) webui processes.
     pub core_secret: String,
+    /// 5.3 别名兼容旅程旗标：env 钉法从正名 `SEBAS_HOME` 换成旧名
+    /// `SEBAS_STATE_DIR`（默认 false）。见 [`Self::pin_home_via_legacy_alias`]。
+    pin_home_via_alias: bool,
     /// Holds the drop guard (kept alive for the sandbox's whole life).
     _dir: Arc<SandboxDir>,
 }
@@ -339,6 +342,21 @@ impl Sandbox {
     /// Fresh sandbox with a written config: every path inside the sandbox,
     /// webui on a probed free port, fake-claude from the workspace build.
     pub fn new(test_name: &str, sub: &str) -> Self {
+        Self::build(test_name, sub, false)
+    }
+
+    /// unify-sebas-home 5.2 home-journey 变体：config 特意**不写**三个键——
+    /// `[service.core] channel_path`（→ 派生 `<home>/run/core.sock`）、
+    /// `[media] download_dir`（→ 派生 `<home>/cache/downloads`，core 启动的
+    /// config 可写性校验会建出）、`[router] usage_db`（→ 派生
+    /// `<home>/usage.db`）。[`Self::channel_path`] 指向派生 socket 供 fs
+    /// 断言。其余边界（workspace/skills/acp 目录、webui 端口）照旧显式钉：
+    /// 它们不是派生族的成员。
+    pub fn new_derived_home(test_name: &str, sub: &str) -> Self {
+        Self::build(test_name, sub, true)
+    }
+
+    fn build(test_name: &str, sub: &str, derived_home: bool) -> Self {
         let dir = SandboxDir::new(test_name, sub);
         let path = dir.path.clone();
         let mkdir = |d: &Path| {
@@ -346,12 +364,21 @@ impl Sandbox {
         };
         mkdir(&path.join("work"));
         mkdir(&path.join("claude-sessions"));
-        mkdir(&path.join("downloads"));
+        if !derived_home {
+            // 派生形态不预建 downloads：`<home>/cache/downloads` 必须由 core
+            // 的 config 可写性校验自己建出来（旅程断言的证据面）。
+            mkdir(&path.join("downloads"));
+        }
 
         let webui_port = free_port();
         let router_port = free_port();
         let config_path = path.join("config.toml");
-        let channel_path = path.join("core-channel.sock");
+        let channel_path = if derived_home {
+            // 派生缺省 socket（home 的 run/ 目录），供 SIGTERM 后的移除断言。
+            path.join("run/core.sock")
+        } else {
+            path.join("core-channel.sock")
+        };
         let core_log = path.join("core.log");
         let webui_log = path.join("webui.log");
         let router_log = path.join("router.log");
@@ -370,6 +397,36 @@ impl Sandbox {
         // sandbox-side path instead: when a short link is in play this is
         // the short path, which the kernel checks verbatim (symlink
         // resolution happens after the length check).
+        // 三个派生族成员的键位：派生形态整段省略（缺省派生生效），常规形态
+        // 显式钉（结果与历史模板逐字节一致）。
+        let media_section = if derived_home {
+            " # unify-sebas-home 4.1：[media] download_dir 不钉——缺省派生\n\
+             # <home>/cache/downloads，core 启动的 config 可写性校验建出它。\n\n"
+                .to_string()
+        } else {
+            format!(
+                "[media]\ndownload_dir = \"{}\"\n\n",
+                forward_slash(&path.join("downloads"))
+            )
+        };
+        let channel_section = if derived_home {
+            " # unify-sebas-home 3.1：[service.core] channel_path 不钉——缺省派生\n\
+             # <home>/run/core.sock（XDG_RUNTIME_DIR 不再参与）。\n\n"
+                .to_string()
+        } else {
+            format!(
+                "[service.core]\nchannel_path = \"{}\"\n\n",
+                forward_slash(&channel_path)
+            )
+        };
+        let usage_db_line = if derived_home {
+            " # unify-sebas-home：usage_db 不钉——缺省派生 <home>/usage.db。\n".to_string()
+        } else {
+            format!(
+                "# persist-router-usage：用量落 router 自有的 SQLite 库（usage.db）。\nusage_db = \"{}\"\n",
+                forward_slash(&usage)
+            )
+        };
         let toml = format!(
             r#"[feishu]
 enabled = false
@@ -380,10 +437,7 @@ path = "{fake_claude}"
 sessions_dir = "{}"
 work_dir = "{}"
 
-[media]
-download_dir = "{}"
-
-# add-workspace-root 4.1：沙箱钉根——项目注册/列表/会话面/browse-dirs 的唯一
+{media_section}# add-workspace-root 4.1：沙箱钉根——项目注册/列表/会话面/browse-dirs 的唯一
 # 边界收敛在沙箱目录内。不配会回退进程 cwd（= 仓库根）并打启动告警。
 [workspace]
 root = "{}"
@@ -393,10 +447,7 @@ root = "{}"
 [skills]
 dir = "{}"
 
-[service.core]
-channel_path = "{}"
-
-[service.webui]
+{channel_section}[service.webui]
 enabled = true
 host = "127.0.0.1"
 port = {webui_port}
@@ -414,16 +465,11 @@ api_key = "sk-sandbox-dummy"
 [router]
 # 默认 listen 是固定 8787——并行用例互踩，每个沙箱钉一个 probed 端口。
 listen = "127.0.0.1:{router_port}"
-# persist-router-usage：用量落 router 自有的 SQLite 库（usage.db）。
-usage_db = "{}"
-"#,
+{usage_db_line}"#,
             forward_slash(&path.join("claude-sessions")),
             forward_slash(&path.join("work")),
-            forward_slash(&path.join("downloads")),
             forward_slash(&path),
             forward_slash(&path.join("agents-skills")),
-            forward_slash(&channel_path),
-            forward_slash(&usage),
         );
         std::fs::write(&config_path, &toml)
             .unwrap_or_else(|e| panic!("write config {}: {e}", config_path.display()));
@@ -438,6 +484,7 @@ usage_db = "{}"
             router_log,
             router_port,
             core_secret: "sandbox-secret".into(),
+            pin_home_via_alias: false,
             _dir: dir,
         }
     }
@@ -447,21 +494,26 @@ usage_db = "{}"
     /// `SEBAS_CORE_SECRET` entirely — the no-secret assembly journeys
     /// (auto-arm + secret-file discovery) need a genuinely unset env.
     ///
-    /// single-state-dir：状态落点收敛为**一个目录变量**——`SEBAS_STATE_DIR`
-    /// 派生全部落点（settings.db / projects.db / auth.db / archive.json /
-    /// services.json / nodes.json），逐文件变量降级为显式
-    /// 覆盖，不再需要逐个钉。retire-legacy-state-json 之后 `SEBAS_STATE_FILE`
-    /// / `SEBAS_ROUTER_PROVIDER_OVERLAY` 也已退休——导出它们不改变任何行为，
-    /// 所以这里不再钉（钉了反而让读者以为它们还有效）。
-    /// `HOME` 钉进沙箱（skills sync 的落点等仍经 home 解析）。
+    /// unify-sebas-home：**正名** `SEBAS_HOME` 钉进沙箱——config 缺省、
+    /// `run/` socket、`cache/downloads`、`node/`、`upgrade/` 与四库三 json
+    /// 全部落进沙箱，连 `-c` 都可省（菜谱仍显式传，防 home 误指）。
+    /// single-state-dir 时代的 `SEBAS_STATE_DIR` 已降为兼容别名（仍生效、
+    /// 启动 warn）——这里不再钉它（钉别名会触发每进程一条启动 warn 噪音）。
+    /// retire-legacy-state-json 的 `SEBAS_STATE_FILE` /
+    /// `SEBAS_ROUTER_PROVIDER_OVERLAY` 依旧退休不钉。`HOME` 钉进沙箱
+    /// （skills sync 的落点等仍经 home 解析）。
     fn envs(&self, secret: Option<&str>) -> Vec<(&'static str, String)> {
+        // sebas home：一个变量钉住全部落点（unify-sebas-home）。派生值与
+        // 映射表取同源（不用新增硬编码）。别名旗标翻开时改钉旧名
+        // `SEBAS_STATE_DIR`——解析等价、启动 warn（5.3 别名兼容旅程的被测
+        // 形态），除此之外与正名钉法逐字节相同。
+        let home_pin = if self.pin_home_via_alias {
+            ("SEBAS_STATE_DIR", forward_slash(&self.path))
+        } else {
+            ("SEBAS_HOME", forward_slash(&self.path))
+        };
         let mut envs = vec![
-            // 状态目录：一个变量钉住全部落点（single-state-dir）。派生值与
-            // 映射表取同源（不用新增硬编码）。
-            (
-                "SEBAS_STATE_DIR",
-                forward_slash(&self.path),
-            ),
+            home_pin,
             // add-agent-skills：skills sync 的 backend 落点（claude →
             // ~/.claude/skills）经 `skills::resolve_home()` 的 env-first
             // （HOME > USERPROFILE > Known Folder）解析——钉进沙箱，core/webui
@@ -478,6 +530,13 @@ usage_db = "{}"
             envs.push(("SEBAS_CORE_SECRET", secret.to_string()));
         }
         envs
+    }
+
+    /// 5.3 别名兼容旅程专用：把 env 钉法从正名 `SEBAS_HOME` 换成旧名
+    /// `SEBAS_STATE_DIR`（single-state-dir 时代的正名，现为兼容别名——仍
+    /// 完整生效、启动 warn 点名正名）。必须在任何 spawn 之前调用。
+    pub fn pin_home_via_legacy_alias(&mut self) {
+        self.pin_home_via_alias = true;
     }
 
     /// Spawn an arbitrary subcommand with the sandbox env + extra env vars
@@ -636,6 +695,51 @@ usage_db = "{}"
         child
     }
 
+    /// 节点进程（unify-sebas-home 5.2 home journey 形态）：**不带
+    /// `--state-dir`**、env 钉正名 `SEBAS_HOME`——状态目录落到派生锚
+    /// `<home>/node/`（`--state-dir` > `SEBAS_NODE_DIR` > `[node] state_dir`
+    /// 链上三层全缺席，第四层派生锚正是本用例的证据面）。
+    pub fn spawn_node_home(&self, node_id: &str, join_token: Option<&str>) -> tokio::process::Child {
+        let log = self.path.join("node.log");
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log)
+            .unwrap_or_else(|e| panic!("open log {}: {e}", log.display()));
+        let log_err = log_file
+            .try_clone()
+            .unwrap_or_else(|e| panic!("clone log handle: {e}"));
+        let mut args: Vec<String> = vec![
+            "--node-id".into(),
+            node_id.into(),
+            "--control-plane".into(),
+            format!("ws://127.0.0.1:{}", self.node_link_port()),
+        ];
+        if let Some(token) = join_token {
+            args.push("--join-token".into());
+            args.push(token.into());
+        }
+        let mut cmd = tokio::process::Command::new(sebas_node_bin());
+        cmd.args(&args)
+            .current_dir(&self.path)
+            // 派生锚解析只读环境变量：正名钉进沙箱（HOME 一并钉——节点状态
+            // 目录不依赖它，但 skills/tilde 类路径仍经 home 解析）。
+            .env("SEBAS_HOME", forward_slash(&self.path))
+            .env("HOME", forward_slash(&self.path))
+            .env("SEBAS_WORKSPACE_ROOT", forward_slash(&self.path))
+            .env("NO_COLOR", "1")
+            .stdout(Stdio::from(log_file))
+            .stderr(Stdio::from(log_err))
+            .kill_on_drop(true);
+        set_process_group(&mut cmd);
+        let child = cmd
+            .spawn()
+            .unwrap_or_else(|e| panic!("spawn sebas-node {args:?}: {e}"));
+        self._dir
+            .register_group_leader(child.id().expect("freshly spawned child has a pid"));
+        child
+    }
+
     /// 节点链路监听端口（`enable_node_link` 之后才有意义）。
     ///
     /// 按 section 作用域解析：config 里 `[router] listen` 也在（两进程形态给
@@ -657,6 +761,23 @@ usage_db = "{}"
             }
         }
         panic!("配置里没有 [node_link] listen（先调 enable_node_link）")
+    }
+
+    /// 5.2 home journey 变体：开节点链路但**不钉 `registry_file`**——注册表
+    /// 落派生缺省 `<home>/nodes.json`（`node_link_registry_path` 的缺省臂 =
+    /// `StatePath::NodeRegistry.resolve()`），旅程据此断言三 json 之一的
+    /// nodes.json 落在 home 根。必须在 spawn core 之前调用。
+    pub fn enable_node_link_derived_registry(&self) -> u16 {
+        let port = free_port();
+        let mut config = std::fs::read_to_string(&self.config_path)
+            .unwrap_or_else(|e| panic!("read config {}: {e}", self.config_path.display()));
+        config.push_str(&format!(
+            "\n[node_link]\nenabled = true\nlisten = \"127.0.0.1:{port}\"\n\
+             bootstrap_token_ttl_secs = 600\n"
+        ));
+        std::fs::write(&self.config_path, config)
+            .unwrap_or_else(|e| panic!("write config {}: {e}", self.config_path.display()));
+        port
     }
 
     /// Core: `sebas core -c <config>`（bare core，无 router——需要 router 就
@@ -687,6 +808,21 @@ usage_db = "{}"
         )
     }
 
+    /// unify-sebas-home 5.2 home journey：core **不带 `-c`**——config 缺省
+    /// 解析 `<SEBAS_HOME>/config.toml`。core 起来并加载了沙箱配置（webui
+    /// 端口在场上）就是「缺省解析」的进程级证据。
+    pub fn spawn_core_default_config(&self) -> tokio::process::Child {
+        self.spawn(&["core"], &self.core_secret, &[], &self.core_log)
+    }
+
+    /// Same as [`Self::spawn_core_default_config`] with NO
+    /// `SEBAS_CORE_SECRET`: auto-arm writes the generated key next to the
+    /// resolved default config — `<home>/core.secret`（secret 缺省随 config
+    /// 落 home 根的进程级证据）。
+    pub fn spawn_core_default_config_no_secret(&self) -> tokio::process::Child {
+        self.spawn_no_secret(&["core"], &[], &self.core_log)
+    }
+
     /// Router 子进程（unify-router-process-shape D5 两进程形态）：
     /// `sebas router -c <config> --debug`（内置 test provider、下游免鉴权）。
     /// 地址从 [`wait_router_addr`] 读 router.log 获得；进程保活在返回的
@@ -711,6 +847,20 @@ usage_db = "{}"
         )
     }
 
+    /// Router 子进程、`--debug` 且**不带** `SEBAS_CORE_SECRET`（5.2 home
+    /// journey 形态）：core 是 auto-arm 时 router 经 secret 文件发现钥匙——
+    /// 发现锚 = `SEBAS_ROUTER_CONFIG` 所指 config 同目录的 core.secret（与
+    /// watchdog RouterSpawner 对 router 子进程的注入一致）；订阅侧无
+    /// `SEBAS_CORE_SOCKET` env → 按映射表派生 `<home>/run/core.sock`。
+    pub fn spawn_router_debug_no_secret(&self) -> tokio::process::Child {
+        let cfg = forward_slash(&self.config_path);
+        self.spawn_no_secret(
+            &["router", "-c", &cfg, "--debug"],
+            &[("SEBAS_ROUTER_CONFIG", &cfg)],
+            &self.router_log,
+        )
+    }
+
     /// Standalone webui with NO `SEBAS_CORE_SECRET`: the client discovers
     /// the key from the secret file at connect time (5.1/5.2).
     pub fn spawn_webui_no_secret(&self) -> tokio::process::Child {
@@ -719,6 +869,13 @@ usage_db = "{}"
             &[],
             &self.webui_log,
         )
+    }
+
+    /// Standalone webui **不带 `-c`** 且无 `SEBAS_CORE_SECRET`（5.2 home
+    /// journey 形态）：config 缺省解析 `<SEBAS_HOME>/config.toml`，钥匙经
+    /// auto-arm 的 secret 文件发现。
+    pub fn spawn_webui_default_config_no_secret(&self) -> tokio::process::Child {
+        self.spawn_no_secret(&["webui"], &[], &self.webui_log)
     }
 
     /// Where the core writes the generated channel key (config dir, D1).
