@@ -312,6 +312,10 @@ export interface AboutInfo {
   provider_count: number
   /** 新会话缺省 agent kind（preselect-last-used-model 3.2 的载荷字段）。 */
   default_agent_kind: string
+  /** add-about-build-info：BUILD 段构建信息（编译期不可得时为 'unknown'）。 */
+  build_time: string
+  git_branch: string
+  git_hash: string
 }
 
 /** Router gateway card backing the settings Models section (listen/debug/auth). */

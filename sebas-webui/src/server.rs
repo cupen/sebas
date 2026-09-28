@@ -22,6 +22,37 @@ use sebas_feishu::cards::CardConfig;
 use std::sync::Arc;
 use std::time::Instant;
 
+/// 构建信息（add-about-build-info D1）：`/api/about` BUILD 段的数据源。
+///
+/// 根 `build.rs` 注入的 `GIT_BRANCH` / `GIT_HASH` / `BUILD_TIME` 只对根
+/// crate 可见（`option_env!` 按编译 crate 求值），sebas-webui 读不到真值
+/// ——由装配方（root 的 webui_cmd / run 两处装配点）在启动时构造传入；
+/// 测试与最小装配用 [`BuildInfo::unknown`] 诚实退化。
+#[derive(Clone, Debug)]
+pub struct BuildInfo {
+    /// 版本号：与 `sebas --version` 同源（根 `CARGO_PKG_VERSION`）。
+    pub version: String,
+    /// UTC 构建时刻，`YYYY-MM-DD HH:mm` 分钟精度。
+    pub build_time: String,
+    /// Git 分支名（`--abbrev-ref`）。
+    pub git_branch: String,
+    /// Git 短 hash（`--short`）。
+    pub git_hash: String,
+}
+
+impl BuildInfo {
+    /// 拿不到根注入值时的兜底（design D3）：全部字段如实 `"unknown"`，
+    /// About 不隐藏对应行。
+    pub fn unknown() -> Self {
+        Self {
+            version: "unknown".to_string(),
+            build_time: "unknown".to_string(),
+            git_branch: "unknown".to_string(),
+            git_hash: "unknown".to_string(),
+        }
+    }
+}
+
 /// Shared state for the WebUI server. All session data flows through the
 /// backend seam — the webui crate never touches `DispatchHandle` (the
 /// in-process case wraps it inside `InProcessBackend`; the standalone case
@@ -54,6 +85,9 @@ pub struct WebUiState {
     /// skills 管理面（add-agent-skills 5.1）：仓操作接缝，实现在主 crate
     /// （复用 core 的扫仓/删除/投影），未接线的最小装配按空仓诚实退化。
     pub skills: Arc<dyn SkillsService>,
+    /// 构建信息（add-about-build-info D1）：装配点传入，`/api/about` 只读
+    /// 透出；最小装配按 [`BuildInfo::unknown`] 退化。
+    pub build: BuildInfo,
 }
 
 /// 便捷装配形态（测试 / 最小入口）的 workspace root 缺省：进程 cwd 回退、
@@ -79,6 +113,7 @@ pub fn build_router(
         Arc::new(AuthHandle::disabled()),
         fallback_workspace_root(),
         Arc::new(UnwiredSkills),
+        BuildInfo::unknown(),
     )
 }
 
@@ -100,10 +135,11 @@ pub fn build_router_with_agent_kind_provider(
         Arc::new(AuthHandle::disabled()),
         fallback_workspace_root(),
         Arc::new(UnwiredSkills),
+        BuildInfo::unknown(),
     )
 }
 
-/// Build the axum Router with optional watchdog admin adapter.
+/// Build the axum Router with an optional watchdog admin adapter.
 pub fn build_router_with_admin_adapter(
     backend: Arc<dyn SessionBackend>,
     router: RouterInfo,
@@ -120,6 +156,7 @@ pub fn build_router_with_admin_adapter(
         Arc::new(AuthHandle::disabled()),
         fallback_workspace_root(),
         Arc::new(UnwiredSkills),
+        BuildInfo::unknown(),
     )
 }
 
@@ -143,6 +180,7 @@ pub fn build_router_with_auth(
         auth,
         fallback_workspace_root(),
         Arc::new(UnwiredSkills),
+        BuildInfo::unknown(),
     )
 }
 
@@ -167,6 +205,7 @@ pub fn build_router_with_workspace_root(
         auth,
         workspace_root,
         Arc::new(UnwiredSkills),
+        BuildInfo::unknown(),
     )
 }
 
@@ -192,6 +231,7 @@ pub fn build_router_with_skills(
         auth,
         workspace_root,
         skills,
+        BuildInfo::unknown(),
     )
 }
 
@@ -206,6 +246,7 @@ fn build_router_full(
     auth: Arc<AuthHandle>,
     workspace_root: std::path::PathBuf,
     skills: Arc<dyn SkillsService>,
+    build: BuildInfo,
 ) -> Router {
     let state = WebUiState {
         backend,
@@ -217,6 +258,7 @@ fn build_router_full(
         auth,
         workspace_root,
         skills,
+        build,
     };
 
     // Core SPA + API + WS routes, bound to WebUiState.
@@ -588,6 +630,9 @@ pub async fn run(
         Arc::new(AuthHandle::disabled()),
         fallback_workspace_root(),
         Arc::new(UnwiredSkills),
+        // 薄包装拿不到根 build.rs 注入值（option_env! 按编译 crate 求值，
+        // add-about-build-info D1）——BuildInfo 只能按 unknown 诚实退化。
+        BuildInfo::unknown(),
     )
     .await;
 }
@@ -612,6 +657,8 @@ pub async fn run_with_admin_adapter(
         Arc::new(AuthHandle::disabled()),
         fallback_workspace_root(),
         Arc::new(UnwiredSkills),
+        // 同 `run`：薄包装按 unknown 退化（add-about-build-info D1）。
+        BuildInfo::unknown(),
     )
     .await;
 }
@@ -624,6 +671,8 @@ pub async fn run_with_admin_adapter(
 /// webui_cmd / run 注入 config 装配的真实现）。`agent_kinds` 由装配点以
 /// `ConfigAgentKindProvider::with_default_kind` 构造（preselect-last-used-model
 /// 3.2：default agent kind 一并从 config 注入，供 /api/about 下发）。
+/// `build` 是构建信息（add-about-build-info D1）：真值只在 root crate 的
+/// 编译期可见，由两个装配点构造传入；拿不到时传 [`BuildInfo::unknown`]。
 #[allow(clippy::too_many_arguments)]
 pub async fn run_with_admin_adapter_and_auth(
     backend: Arc<dyn SessionBackend>,
@@ -636,6 +685,7 @@ pub async fn run_with_admin_adapter_and_auth(
     workspace_root: std::path::PathBuf,
     archive_retention_days: u64,
     skills: Arc<dyn SkillsService>,
+    build: BuildInfo,
 ) {
     run_full(
         backend,
@@ -648,6 +698,7 @@ pub async fn run_with_admin_adapter_and_auth(
         auth,
         workspace_root,
         skills,
+        build,
     )
     .await;
 }
@@ -674,6 +725,7 @@ async fn run_full(
     auth: Arc<AuthHandle>,
     workspace_root: std::path::PathBuf,
     skills: Arc<dyn SkillsService>,
+    build: BuildInfo,
 ) {
     let addr = listener.local_addr().expect("bound listener");
     // 引导用户：就绪日志直接给出可点开的访问地址 + 按鉴权形态的下一步提示。
@@ -702,6 +754,7 @@ async fn run_full(
         auth,
         workspace_root,
         skills,
+        build,
     );
     tracing::info!(%url, hint, "webui dashboard started");
     if let Err(e) = serve(

@@ -24,8 +24,8 @@ pub mod ws_rpc;
 #[doc(hidden)]
 pub use server::WebUiState;
 pub use server::{
-    build_router, build_router_with_admin_adapter, build_router_with_agent_kind_provider,
-    build_router_with_auth, build_router_with_skills, run, run_with_admin_adapter,
-    run_with_admin_adapter_and_auth,
+    BuildInfo, build_router, build_router_with_admin_adapter,
+    build_router_with_agent_kind_provider, build_router_with_auth, build_router_with_skills, run,
+    run_with_admin_adapter, run_with_admin_adapter_and_auth,
 };
 pub use session_backend::{Reachability, SessionBackend, SessionRejection};

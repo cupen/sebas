@@ -492,7 +492,13 @@ pub async fn about(State(state): State<WebUiState>) -> Response {
     let rustc = probe_rust_toolchain().await;
     let data = json!({
         "uptime": format_uptime(state.started_at.elapsed()),
-        "version": env!("CARGO_PKG_VERSION"),
+        // add-about-build-info 2.2：version 改读装配点传入的 BuildInfo，与
+        // `sebas --version` 同源（design D1）；BUILD 段三字段只增不改，缺省
+        // 路径（薄包装/最小装配）如实 `"unknown"`（D3）。
+        "version": state.build.version,
+        "build_time": state.build.build_time,
+        "git_branch": state.build.git_branch,
+        "git_hash": state.build.git_hash,
         // （M9）toolchain 三态：{state: ok|missing|error, version?, cause?}。
         // 编译期要求的最低 rust-version 保留在 `rustc_required`，与运行时
         // 探测是两个语义（前者是构建门槛，后者是本机可用性）。
@@ -3699,6 +3705,88 @@ mod approvals_label_route_tests {
             let message = body["error"].as_str().unwrap_or_default();
             assert!(message.contains("此后端不承载待执行队列"), "{message}");
             assert!(!message.contains("核心不可达"), "{message}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod about_build_info_tests {
+    //! add-about-build-info 2.2 路由级单测：`/api/about` 的 BUILD 段数据面。
+    //! - known 路径：装配点传入真 BuildInfo → 四字段原样透出（version 与
+    //!   `sebas --version` 同源、build_time 分钟精度、git 两字段）；
+    //! - unknown 路径：最小装配（`build_router` 薄包装）→ spec「构建信息
+    //!   缺失时如实呈现 unknown」——字段在场且为 `"unknown"`，不缺字段。
+
+    use super::*;
+    use crate::auth::AuthHandle;
+    use crate::models::RouterInfo;
+    use crate::server::{BuildInfo, build_router};
+    use crate::session_backend::FakeBackend;
+    use crate::skills::UnwiredSkills;
+    use axum::body::Body;
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use sebas_feishu::cards::CardConfig;
+    use std::time::Instant;
+    use tower::ServiceExt;
+
+    /// 手工装配 WebUiState：公开 build_router* 包装不收 BuildInfo（恒
+    /// unknown），真值路径只能在 handler 级直接驱动。
+    fn state_with_build(build: BuildInfo) -> WebUiState {
+        WebUiState {
+            backend: Arc::new(FakeBackend::new()),
+            router: RouterInfo::default(),
+            started_at: Instant::now(),
+            card_config: CardConfig::default(),
+            agent_kinds: Arc::new(crate::agent_kinds::ConfigAgentKindProvider::new(Vec::new())),
+            archive_retention_days: 30,
+            auth: Arc::new(AuthHandle::disabled()),
+            workspace_root: std::env::current_dir().unwrap_or_else(|_| ".".into()),
+            skills: Arc::new(UnwiredSkills),
+            build,
+        }
+    }
+
+    async fn about_json(state: WebUiState) -> serde_json::Value {
+        let resp = about(State(state)).await;
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&bytes).expect("about body must be JSON")
+    }
+
+    #[tokio::test]
+    async fn about_reports_known_build_info_from_assembly() {
+        let state = state_with_build(BuildInfo {
+            version: "0.1.0".into(),
+            build_time: "2026-09-29 08:30".into(),
+            git_branch: "feat/about-build-info".into(),
+            git_hash: "abc1234".into(),
+        });
+        let v = about_json(state).await;
+        assert_eq!(v["version"], "0.1.0", "{v}");
+        assert_eq!(v["build_time"], "2026-09-29 08:30", "{v}");
+        assert_eq!(v["git_branch"], "feat/about-build-info", "{v}");
+        assert_eq!(v["git_hash"], "abc1234", "{v}");
+    }
+
+    #[tokio::test]
+    async fn about_reports_unknown_fields_when_build_info_missing() {
+        // 走 build_router 薄包装路径（BuildInfo::unknown）：spec「构建信息
+        // 缺失时如实呈现 unknown」——四个字段必须**在场**且为 unknown。
+        let app = build_router(Arc::new(FakeBackend::new()), RouterInfo::default(), CardConfig::default());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/about")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        for field in ["version", "build_time", "git_branch", "git_hash"] {
+            assert_eq!(v[field], "unknown", "field {field} must surface unknown: {v}");
         }
     }
 }

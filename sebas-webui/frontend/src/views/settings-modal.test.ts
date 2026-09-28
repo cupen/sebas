@@ -328,6 +328,9 @@ beforeEach(() => {
   apiMocks.about.mockResolvedValue({
     uptime: '3h 12m',
     version: '0.4.2',
+    build_time: '2026-09-29 08:30',
+    git_branch: 'main',
+    git_hash: 'abc1234',
     rustc: { state: 'ok', version: 'rustc 1.88.0 (hash)' },
     rustc_required: '1.90',
     router_listen: '127.0.0.1:8787',
@@ -2309,6 +2312,9 @@ describe('About / Services display defects (round3 4.3/4.4)', () => {
     apiMocks.about.mockResolvedValue({
       uptime: '3h 12m',
       version: '0.4.2',
+      build_time: '2026-09-29 08:30',
+      git_branch: 'main',
+      git_hash: 'abc1234',
       rustc: { state: 'error', cause: 'rustc 不在 PATH' },
       rustc_required: '1.90',
       router_listen: '127.0.0.1:8787',
@@ -2341,6 +2347,9 @@ describe('About / Services display defects (round3 4.3/4.4)', () => {
     apiMocks.about.mockResolvedValue({
       uptime: '3h 12m',
       version: '0.4.2',
+      build_time: '2026-09-29 08:30',
+      git_branch: 'main',
+      git_hash: 'abc1234',
       rustc: { state: 'missing', cause: '未安装（找不到 rustc 可执行文件）' },
       rustc_required: '1.90',
       router_listen: '127.0.0.1:8787',
@@ -2374,5 +2383,61 @@ describe('About / Services display defects (round3 4.3/4.4)', () => {
     // .run-cmd 规则存在且为整体不断行（白空间策略）。
     expect(css).toContain('.run-cmd')
     expect(css).toMatch(/\.run-cmd\s*\{[^}]*white-space:\s*nowrap/)
+  })
+})
+
+// ── add-about-build-info：BUILD 段构建时间行 + Git 信息行 ──
+
+describe('About BUILD section shows build time and git info (add-about-build-info)', () => {
+  it('renders a build-time row (UTC labelled) and a standalone git row under the version chip', async () => {
+    const el = await mount()
+    await goto(el, 7)
+    const buildRows = [
+      ...el.shadowRoot!.querySelectorAll('dl.about-build .kv'),
+    ]
+    // 行序（design D4）：Version → Build time → Git → 现状行（Uptime…）。
+    const labels = buildRows.map((kv) => kv.querySelector('dt')?.textContent?.trim())
+    expect(labels[0]).toBe('Version')
+    expect(labels[1]).toBe('Build time')
+    expect(labels[2]).toBe('Git')
+    expect(labels).toContain('Uptime')
+    expect(labels).toContain('Rust toolchain')
+    expect(labels).toContain('Router listen')
+    expect(labels).toContain('Providers')
+
+    // 构建时间行：值 + UTC 标注（标注放展示层）。
+    const buildTime = buildRows[1]!.querySelector('[data-testid="about-build-time"]')
+    expect(buildTime!.textContent).toContain('2026-09-29 08:30')
+    expect(buildTime!.textContent).toContain('UTC')
+
+    // Git 行独立一行，形态 `分支名@短hash`。
+    const git = buildRows[2]!.querySelector('[data-testid="about-git"]')
+    expect(git!.textContent).toBe('main@abc1234')
+    el.remove()
+  })
+
+  it('renders unknown values verbatim instead of hiding the rows', async () => {
+    apiMocks.about.mockResolvedValue({
+      uptime: '3h 12m',
+      version: '0.4.2',
+      build_time: 'unknown',
+      git_branch: 'unknown',
+      git_hash: 'unknown',
+      rustc: { state: 'ok', version: 'rustc 1.88.0 (hash)' },
+      rustc_required: '1.90',
+      router_listen: '127.0.0.1:8787',
+      provider_count: 2,
+      default_agent_kind: 'claude',
+    })
+    const el = await mount()
+    await goto(el, 7)
+    // spec「构建信息缺失时如实呈现 unknown」：行不隐藏、照实显示。
+    expect(
+      el.shadowRoot!.querySelector('[data-testid="about-build-time"]')!.textContent,
+    ).toContain('unknown')
+    expect(el.shadowRoot!.querySelector('[data-testid="about-git"]')!.textContent).toBe(
+      'unknown@unknown',
+    )
+    el.remove()
   })
 })

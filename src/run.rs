@@ -522,6 +522,15 @@ pub async fn run(
                     default_kind,
                 ),
             );
+        // add-about-build-info 3.1：构建信息只在根 crate 编译期可见（build.rs
+        // 注入 + upgrade.rs 助手），由本装配点构造传入——About 的 version
+        // 从此与 `sebas --version` 同源。
+        let build_info = sebas_webui::BuildInfo {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            build_time: crate::upgrade::build_time().to_string(),
+            git_branch: crate::upgrade::git_branch().to_string(),
+            git_hash: crate::upgrade::git_hash().to_string(),
+        };
         tokio::spawn(async move {
             sebas_webui::run_with_admin_adapter_and_auth(
                 backend,
@@ -534,6 +543,7 @@ pub async fn run(
                 webui_workspace_root,
                 cfg.service.webui.archive_retention_days,
                 skills,
+                build_info,
             )
             .await;
         });

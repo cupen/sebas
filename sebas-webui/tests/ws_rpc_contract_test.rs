@@ -134,6 +134,7 @@ fn all_seven_events_travel_as_notifications_with_params_verbatim() {
         msg_count: 2,
         pending: Vec::new(),
         label: Some("renamed".into()),
+        prompt_preview: None,
     };
     let events: Vec<WebUiEvent> = vec![
         WebUiEvent::SessionCreated {
@@ -144,6 +145,7 @@ fn all_seven_events_travel_as_notifications_with_params_verbatim() {
                 msg_count: 0,
                 pending: Vec::new(),
                 label: None,
+                prompt_preview: None,
             },
         },
         WebUiEvent::SessionUpdated {

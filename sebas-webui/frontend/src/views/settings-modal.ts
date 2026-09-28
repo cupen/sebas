@@ -3293,6 +3293,20 @@ export class SebasSettingsModal extends LitElement {
           <dt>Version</dt>
           <dd><span class="version-chip">${a.version}</span></dd>
         </div>
+        <!-- add-about-build-info：Version chip 之下依次是构建时间行（UTC
+             标注放展示层，design D3/D4 行序「是什么版本 → 何时构建 → 来自
+             哪个提交」）与独立一行的 Git 信息（分支名@短hash）。构建信息
+             缺失时后端如实下发 unknown——照实显示，不隐藏行。 -->
+        <div class="kv">
+          <dt>Build time</dt>
+          <dd data-testid="about-build-time">
+            ${a.build_time}<span class="service-sub">UTC</span>
+          </dd>
+        </div>
+        <div class="kv">
+          <dt>Git</dt>
+          <dd data-testid="about-git">${a.git_branch}@${a.git_hash}</dd>
+        </div>
         <div class="kv">
           <dt>Uptime</dt>
           <dd>${a.uptime}</dd>

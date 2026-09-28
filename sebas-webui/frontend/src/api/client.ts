@@ -488,6 +488,15 @@ export interface ToolchainProbe {
 export interface About {
   uptime: string
   version: string
+  /**
+   * 构建时间（add-about-build-info）：UTC 口径 `YYYY-MM-DD HH:mm` 分钟精度；
+   * 编译期不可得时为 `'unknown'`（照实显示，不隐藏行）。
+   */
+  build_time: string
+  /** Git 分支名（add-about-build-info），编译期不可得时为 `'unknown'`。 */
+  git_branch: string
+  /** Git 短 hash（add-about-build-info），编译期不可得时为 `'unknown'`。 */
+  git_hash: string
   /** （M9）运行时探测的 toolchain 三态。 */
   rustc: ToolchainProbe
   /** 编译期要求的最低 Rust 版本（构建门槛，与运行时探测是两个语义）。 */

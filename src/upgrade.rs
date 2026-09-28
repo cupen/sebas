@@ -62,6 +62,28 @@ pub fn current_version_raw() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+// ─── 构建信息助手（add-about-build-info）──────────────────
+//
+// 根 build.rs 以 `cargo:rustc-env` 注入（只对拥有 build 脚本的包生效，即仅
+// 根 crate 可读）；缺省回落 `"unknown"`，与 [`current_version`] 的 fallback
+// 惯例一致。装配点（webui_cmd / run）用它们构造 `sebas_webui::BuildInfo`
+// 传给 webui——sebas-webui 自己读不到这些值，真值只能走装配点 DI。
+
+/// 构建时刻（UTC，`YYYY-MM-DD HH:mm` 分钟精度；`BUILD_TIME` 编译期注入）。
+pub fn build_time() -> &'static str {
+    option_env!("BUILD_TIME").unwrap_or("unknown")
+}
+
+/// Git 分支名（`--abbrev-ref`，`GIT_BRANCH` 编译期注入）。
+pub fn git_branch() -> &'static str {
+    option_env!("GIT_BRANCH").unwrap_or("unknown")
+}
+
+/// Git 短 hash（`--short`，`GIT_HASH` 编译期注入）。
+pub fn git_hash() -> &'static str {
+    option_env!("GIT_HASH").unwrap_or("unknown")
+}
+
 /// GitHub 仓库全名（owner/repo）
 pub fn repo_full_name() -> &'static str {
     "cupen/sebas"
@@ -591,6 +613,36 @@ pub fn seed_stable_binary(binary: &Path, data_dir: &Path) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use std::fs;
+
+    // add-about-build-info 1.2：BUILD_TIME 注入格式钉死——UTC 分钟精度
+    // `YYYY-MM-DD HH:mm`；build 脚本没跑成（无该 env）时是字面 `"unknown"`。
+    #[test]
+    fn test_build_time_format_or_unknown() {
+        let t = build_time();
+        if t == "unknown" {
+            return;
+        }
+        assert_eq!(t.len(), 16, "expected YYYY-MM-DD HH:mm, got: {t}");
+        let b = t.as_bytes();
+        for (i, ch) in b.iter().enumerate() {
+            match i {
+                4 | 7 => assert_eq!(*ch, b'-', "date separator at {i}: {t}"),
+                10 => assert_eq!(*ch, b' ', "date/time separator: {t}"),
+                13 => assert_eq!(*ch, b':', "time separator: {t}"),
+                _ => assert!(ch.is_ascii_digit(), "digit at {i}: {t}"),
+            }
+        }
+    }
+
+    // add-about-build-info 3.1 伴生钉：git 两个助手有值（注入成功时为分支名
+    // /短 hash，失败时是 unknown），绝不允许空串上 wire。
+    #[test]
+    fn test_git_helpers_never_empty() {
+        for v in [git_branch(), git_hash()] {
+            assert!(!v.is_empty(), "git info helper returned empty string");
+            assert!(!v.contains('\n'), "git info must be trimmed: {v:?}");
+        }
+    }
 
     #[test]
     fn test_is_newer() {

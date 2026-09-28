@@ -14,7 +14,10 @@
  * retired — per-service restart lives only in Services). Since
  * split-env-vars-settings-section the former Env table lives in its own
  * read-only「Env Vars」section in the bottom group (above About, pushed to
- * the bottom by the tail separator). Services reads the watchdog managed-service
+ * the bottom by the tail separator). Since add-about-build-info the BUILD
+ * segment also carries the build-time row (UTC labelled) and a standalone git
+ * row (branch@shorthash), reconciled to /api/about truth; missing build info
+ * degrades to 'unknown' with the rows kept. Services reads the watchdog managed-service
  * surface (/api/admin/services, response-driven — the sandbox assembly is a
  * variable, never enumerate concrete services). Since
  * redesign-provider-models-settings the Models section carries provider
@@ -127,6 +130,16 @@ test.describe('设置面', () => {
       // the row's attachment, not its visibility or value.
       await expect(row('Rust toolchain')).toBeAttached()
       await expect(row('Uptime')).not.toBeEmpty()
+
+      // add-about-build-info: the build-time row (UTC labelled) and the
+      // standalone git row (branch@shorthash) reconcile to API truth too —
+      // the sandbox injects real values via build.rs, but the assertion is
+      // literal-free so it also holds when they degrade to 'unknown'.
+      await expect(row('Build time')).toContainText(truth.build_time)
+      await expect(row('Build time')).toContainText('UTC')
+      await expect(row('Git')).toContainText(
+        `${truth.git_branch}@${truth.git_hash}`,
+      )
 
       // DOM order pins the segment order: instance above build.
       const lists = settings.panel.locator('dl.about-list')
