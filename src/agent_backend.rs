@@ -2063,14 +2063,18 @@ mod tests {
             .collect();
         assert_eq!(
             &kinds[..2],
-            &[("thinking", "weighing the options"), ("markdown", "final answer")],
+            &[
+                ("thinking", "weighing the options"),
+                ("markdown", "final answer")
+            ],
             "thinking must land as its own entry before the text: {streamed:?}"
         );
         // 汇总行的耗时字段随机器负载波动（0/1ms），只钉前缀不钉 ms 值。
+        let summary = kinds[2].1;
         assert!(
             kinds[2].0 == "markdown"
-                && kinds[2].1.starts_with("🗒 turn summary — 1 model calls, 0 tools, ")
-                && kinds[2].1.ends_with("ms"),
+                && summary.starts_with("🗒 turn summary — 1 model calls, 0 tools, ")
+                && summary.ends_with("ms"),
             "turn summary entry unexpected: {streamed:?}"
         );
         // 可见回复段数（派生口径）不数 thinking。
