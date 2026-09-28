@@ -44,6 +44,8 @@ import { PROJECT_FOLLOW_EVENT } from './views/dashboard.js'
 import './views/settings-modal.js'
 import './views/login-view.js'
 import './views/setup-view.js'
+// （add-usage-statistics 4.2）用量看数面（`/usage` 路由出口）。
+import './views/usage.js'
 import '@awesome.me/webawesome/dist/components/split-panel/split-panel.js'
 
 // Exported for tests: the route resolution audit iterates these. IA v2 keeps
@@ -58,6 +60,8 @@ export const ROUTES: RouteDef[] = [
   // `/sessions` stays routed (History group header link + old deep links).
   { id: 'sessions', pattern: '/sessions' },
   { id: 'session-deep-link', pattern: '/sessions/:key' },
+  // （add-usage-statistics 4.2）用量看数面：独立视图（design D5），可深链。
+  { id: 'usage', pattern: '/usage' },
 ]
 
 @customElement('sebas-app')
@@ -259,6 +263,38 @@ export class SebasApp extends LitElement {
       letter-spacing: 0.09em;
       text-transform: uppercase;
       color: var(--sebas-text-faint);
+    }
+    /* （add-usage-statistics 4.2）侧栏「用量」入口：与 settings-btn 同款
+       视觉（链接形态，SPA 侧导航由 document 级 click 拦截承接）。 */
+    .usage-link {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      width: 100%;
+      padding: 7px 10px;
+      border-radius: var(--sebas-radius-md);
+      background: none;
+      color: var(--sebas-text-dim);
+      font: inherit;
+      font-size: 0.85rem;
+      font-weight: 500;
+      text-align: left;
+      text-decoration: none;
+      transition:
+        background var(--sebas-dur) var(--sebas-ease),
+        color var(--sebas-dur) var(--sebas-ease);
+    }
+    .usage-link:hover {
+      background: var(--sebas-surface-2);
+      color: var(--sebas-text-bright);
+    }
+    .usage-link svg {
+      opacity: 0.8;
+      flex: 0 0 auto;
+    }
+    .usage-link:focus-visible {
+      outline: var(--sebas-focus-ring);
+      outline-offset: 2px;
     }
     /* Pinned settings entry (预览原型同款 sticky footer)：树滚动时按钮
      * 始终钉在侧栏可见底部。 */
@@ -780,6 +816,9 @@ export class SebasApp extends LitElement {
         ></sebas-dashboard>`
       case 'sessions':
         return html`<sebas-sessions></sebas-sessions>`
+      // （add-usage-statistics 4.2）用量看数面（文档型路由，padded 列宽）。
+      case 'usage':
+        return html`<sebas-usage></sebas-usage>`
       case 'session-deep-link':
         // 深链渲染同一个工作台并聚焦该会话（读 detail 即设置服务端焦点
         // 指针）——没有独立详情页。
@@ -850,6 +889,9 @@ export class SebasApp extends LitElement {
           <a class="brand" href="/" aria-label="sebas console home">
             <span class="mark" aria-hidden="true">❯</span>
             <span class="name">sebas<small>${APP_TAGLINE}</small></span>
+          </a>
+          <a class="usage-link" href="/usage" aria-label="用量统计" title="用量统计">
+            ${icon('usage', 16)}<span>用量</span>
           </a>
           <sebas-project-rail
             .activePath=${this.selectedPath}

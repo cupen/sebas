@@ -139,8 +139,9 @@ pub async fn serve(
     let listener = bind_channel_socket(&path)?;
     // 兼容入口不带节点管理面（测试与既有调用方）。生产路径（core）走带句柄的
     // `serve_bound`，让节点管理入口与监听共享同一份注册表写者。
+    // router_listen = None：兼容入口不承载 usage 反代（add-usage-statistics）。
     serve_bound(
-        backend, router, path, secret, listener, None, None, shutdown,
+        backend, router, path, secret, listener, None, None, None, shutdown,
     )
     .await
 }
@@ -160,6 +161,9 @@ pub async fn serve_bound(
     // 远端会话投影（5.1）：`None` = 节点链路未启用。有了它，快照与订阅流里才会
     // 出现"跑在别的机器上"的会话；没有它就只有本机会话（行为与今日完全一致）。
     projection: Option<Arc<crate::node_link::RemoteProjection>>,
+    // （add-usage-statistics 2.2）config `[router] listen`（如 "127.0.0.1:8787"）：
+    // `None` = router 未随部署启用——usage 反代请求如实回不可达。
+    router_listen: Option<String>,
     shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
     info!(
@@ -183,10 +187,11 @@ pub async fn serve_bound(
                 let secret = secret.clone();
                 let node_link = node_link.clone();
                 let projection = projection.clone();
+                let router_listen = router_listen.clone();
                 let mut close_rx = close_rx.clone();
                 tokio::spawn(async move {
                     tokio::select! {
-                        r = handle_connection(stream, backend, router, secret, node_link, projection) => {
+                        r = handle_connection(stream, backend, router, secret, node_link, projection, router_listen) => {
                             if let Err(e) = r {
                                 warn!(?e, "core channel connection failed");
                             }
@@ -291,6 +296,8 @@ async fn handle_connection(
     secret: String,
     node_link: Option<Arc<tokio::sync::Mutex<crate::node_link::NodeRegistry>>>,
     projection: Option<Arc<crate::node_link::RemoteProjection>>,
+    // （add-usage-statistics）config `[router] listen`；None = router 未启用。
+    router_listen: Option<String>,
 ) -> Result<()> {
     if !peer_uid_ok(&stream) {
         // 5.2: reject before reading anything.
@@ -357,7 +364,9 @@ async fn handle_connection(
                 return serve_state_subscription(router, writer).await;
             }
             other => {
-                let resp = dispatch(&backend, &router, &node_link, &projection, other).await;
+                let resp =
+                    dispatch(&backend, &router, &node_link, &projection, router_listen.as_deref(), other)
+                        .await;
                 write_response(&mut writer, &resp).await?;
             }
         }
@@ -868,6 +877,8 @@ async fn dispatch(
     node_link: &Option<Arc<tokio::sync::Mutex<crate::node_link::NodeRegistry>>>,
     // 远端会话投影（5.1）：快照与转写读都要把"跑在节点上的会话"算进来。
     projection: &Option<Arc<crate::node_link::RemoteProjection>>,
+    // （add-usage-statistics）config `[router] listen`；None = router 未启用。
+    router_listen: Option<&str>,
     req: CoreChannelRequest,
 ) -> CoreChannelResponse {
     match req {
@@ -1350,6 +1361,54 @@ async fn dispatch(
                 Err(e) => node_link_rejection(e),
             }
         }
+        CoreChannelRequest::UsageTimeseries {
+            granularity,
+            days,
+            tz_offset,
+        } => {
+            // （add-usage-statistics 2.2）usage 聚合的 core 分支：loopback
+            // HTTP 反代 router admin（地址 = config `[router] listen`，Bearer
+            // 控制密钥，5s 短超时）。router 未启用 / 拒绝 / 超时 → 结构化
+            // cause（`router_unreachable` 前缀）；router 的非 200 应答按原
+            // 状态透传（参数 400 原样到达浏览器）。聚合查询是 router 侧只读
+            // SELECT，绝不影响本通道其余请求（D7）。
+            if !sebas_router::usage_query::Granularity::from_wire(&granularity)
+                .is_some_and(|g| g.as_str() == granularity)
+            {
+                // 非法粒度不出 core：合成 router 同形的 400 透传。
+                return CoreChannelResponse::UsageTimeseries {
+                    status: 400,
+                    payload: serde_json::json!({
+                        "error": format!("invalid granularity {granularity:?}: expected \"day\" or \"hour\"")
+                    }),
+                };
+            }
+            let Some(listen) = router_listen else {
+                return CoreChannelResponse::Rejected {
+                    rejection: SessionRejection::Unavailable {
+                        cause: crate::router_admin::ROUTER_NOT_CONFIGURED_CAUSE.to_string(),
+                    },
+                };
+            };
+            match crate::router_admin::fetch_usage_timeseries(listen, &granularity, days, tz_offset)
+                .await
+            {
+                Ok(payload) => CoreChannelResponse::UsageTimeseries {
+                    status: 200,
+                    payload,
+                },
+                Err(crate::router_admin::UsageProxyError::RouterError { status, body }) => {
+                    CoreChannelResponse::UsageTimeseries { status, payload: body }
+                }
+                Err(e @ crate::router_admin::UsageProxyError::Unreachable { .. }) => {
+                    CoreChannelResponse::Rejected {
+                        rejection: SessionRejection::Unavailable {
+                            cause: e.cause(),
+                        },
+                    }
+                }
+            }
+        }
         // （6.1）对端发来本 build 不认识的命令（对端比本端新）：类型化拒绝，
         // **不执行任何动作**、不断连。这是「未知值不失败解码」的落地——
         // 帧被接受并如实拒绝，而不是整条连接因一个看不懂的 cmd 断掉。
@@ -1554,6 +1613,101 @@ fn usable_project_dir(dir: &str) -> bool {
 mod tests {
     use super::turn_coalescer;
     use sebas_dispatch::{TurnEntry, TurnStreamEvent};
+
+    /// （add-usage-statistics 2.2）usage 反代的 dispatch 分支：router 未启用
+    /// 与不可达都映射为带 `router_unreachable` 前缀的结构化 cause（其余通道
+    /// 请求不受影响由通道本身的多连接模型保证，这里钉 cause 形状）。
+    #[tokio::test]
+    async fn usage_timeseries_dispatch_maps_unreachable_to_a_typed_cause() {
+        let map = sebas_dispatch::state::SessionMap::new();
+        let (router, _out_rx) = sebas_dispatch::DispatchHandle::new(map);
+        let backend: std::sync::Arc<dyn sebas_webui::session_backend::SessionBackend> =
+            std::sync::Arc::new(sebas_webui::session_backend::FakeBackend::new());
+
+        // router 未启用（listen = None）→ 结构化不可达 cause。
+        let resp = dispatch(
+            &backend,
+            &router,
+            &None,
+            &None,
+            None,
+            CoreChannelRequest::UsageTimeseries {
+                granularity: "day".into(),
+                days: 14,
+                tz_offset: 0,
+            },
+        )
+        .await;
+        let SessionRejection::Unavailable { cause } = (match resp {
+            CoreChannelResponse::Rejected { rejection } => rejection,
+            other => panic!("expected Rejected, got {other:?}"),
+        }) else {
+            panic!("expected Unavailable rejection")
+        };
+        assert!(
+            cause.starts_with(crate::router_admin::ROUTER_UNREACHABLE_CAUSE),
+            "cause 必须以 router_unreachable 点名: {cause}"
+        );
+
+        // 非法 granularity 不出 core：合成 router 同形的 400 透传。
+        let resp = dispatch(
+            &backend,
+            &router,
+            &None,
+            &None,
+            Some("127.0.0.1:1"),
+            CoreChannelRequest::UsageTimeseries {
+                granularity: "week".into(),
+                days: 14,
+                tz_offset: 0,
+            },
+        )
+        .await;
+        match resp {
+            CoreChannelResponse::UsageTimeseries { status, payload } => {
+                assert_eq!(status, 400);
+                assert!(
+                    payload["error"].as_str().unwrap().contains("granularity"),
+                    "400 点名非法粒度: {payload}"
+                );
+            }
+            other => panic!("expected UsageTimeseries 400, got {other:?}"),
+        }
+
+        // 死端口（listen 在场但无人监听）→ promptly 返回不可达 cause。
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let started = std::time::Instant::now();
+        let resp = dispatch(
+            &backend,
+            &router,
+            &None,
+            &None,
+            Some(&format!("127.0.0.1:{port}")),
+            CoreChannelRequest::UsageTimeseries {
+                granularity: "day".into(),
+                days: 14,
+                tz_offset: 0,
+            },
+        )
+        .await;
+        let SessionRejection::Unavailable { cause } = (match resp {
+            CoreChannelResponse::Rejected { rejection } => rejection,
+            other => panic!("expected Rejected, got {other:?}"),
+        }) else {
+            panic!("expected Unavailable rejection")
+        };
+        assert!(
+            cause.starts_with(crate::router_admin::ROUTER_UNREACHABLE_CAUSE),
+            "死端口必须回不可达 cause: {cause}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "不可达必须 promptly 返回，实测 {:?}",
+            started.elapsed()
+        );
+    }
 
     /// workbench-live-conversation-flow 1.1：同窗批帧——窗口内同会话的多条
     /// 追加合成一帧（entries 按落库序）；超 4KB 立即冲刷不等窗口。

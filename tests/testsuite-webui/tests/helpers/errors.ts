@@ -70,6 +70,11 @@ export class ErrorCollector {
       // journeys assert the honest UI presentation (inline error, unchanged
       // lists, explicit unavailability), not network silence.
       if (text.includes('503') && /\/api\/providers|\/api\/provider-defaults/.test(url)) return
+      // Intentional honest-degradation probe (usage journey US4): the webui
+      // usage proxy answers 503 + router_unreachable while the router is down
+      // and chromium logs the failed resource load; the journey asserts the
+      // honest empty-state presentation, not network silence.
+      if (text.includes('503') && /\/api\/usage\//.test(url)) return
       // Deliberate core-outage windows (deployment journey, detached
       // topology): core-proxied reads answer 502 while the channel is down
       // by design — the journey asserts the honest UI (banner / gating /

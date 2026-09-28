@@ -199,9 +199,18 @@ impl Default for RetentionPolicy {
 #[derive(Clone)]
 pub struct UsageSink {
     tx: mpsc::Sender<UsageRecord>,
+    /// 只读查询句柄（add-usage-statistics）：与写入/清理共用同一条单写线程
+    /// 命令队列，聚合 SELECT 在其上串行执行（毫秒级，不影响转发）。
+    query: StateHandle,
 }
 
 impl UsageSink {
+    /// usage 库的查询句柄（`/admin/usage/timeseries` 聚合 SELECT 用）。
+    /// 与写入同一 writer 线程——绝不打开第二个连接，也不新建连接配方。
+    pub fn query_handle(&self) -> &StateHandle {
+        &self.query
+    }
+
     /// 打开 router 自有用量库并起后台 writer task。
     ///
     /// 父目录先建（同步，一次性，启动时）；库由 `sebas_db` 的 schema 同步
@@ -288,7 +297,10 @@ impl UsageSink {
             });
         }
 
-        Ok(UsageSink { tx })
+        Ok(UsageSink {
+            tx,
+            query: handle,
+        })
     }
 
     /// 投递一条 record。mpsc(256) 满则 warn 丢弃（warn 不含 key 材料——

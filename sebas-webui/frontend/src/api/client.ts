@@ -561,6 +561,34 @@ export interface EnvVarEntry {
   set?: boolean
 }
 
+// ─── usage 时序聚合（add-usage-statistics；router 聚合端点的原样形状）──────
+
+/** 一桶内单模型的四类 token 明细 + 请求数。 */
+export interface UsageModelUsage {
+  /** 路由模型名；router 侧 `model` 为 NULL 的记录归 `(unknown)` 桶。 */
+  model: string
+  requests: number
+  input_tokens: number
+  output_tokens: number
+  cache_read_tokens: number
+  cache_creation_tokens: number
+}
+
+/** 一个时间桶：天粒度 `bucket` = `YYYY-MM-DD`；小时粒度 = `00`–`23`。 */
+export interface UsageBucket {
+  bucket: string
+  models: UsageModelUsage[]
+}
+
+/** 聚合响应：零填充完整窗口 + 全窗合计。 */
+export interface UsageTimeseries {
+  granularity: 'day' | 'hour'
+  days: number
+  tz_offset: number
+  buckets: UsageBucket[]
+  totals: UsageModelUsage
+}
+
 /**
  * Execution-backend hint sent with `POST /api/sessions`. `"native"` spawns the
  * built-in kernel; `"acp"` (the default) spawns the configured default
@@ -770,6 +798,9 @@ const NOTIFY_EXEMPT_PATHS: RegExp[] = [
   /^\/api\/nodes$/, // rail/composer 节点面（remote_available=false 内联退化）
   /^\/api\/admin(\/|$)/, // services 分区（*Safe 包装 + 内联退化呈现）
   /^\/api\/fs\//, // folder-picker（内联错误态）
+  // usage 视图（add-usage-statistics）：不可达空态 / 无数据空态都就地呈现，
+  // 不再全局弹 warn。
+  /^\/api\/usage\//,
 ]
 
 /**
@@ -969,6 +1000,20 @@ export const api = {
    * （与「没有远端节点」是两回事——前端不许混为一谈）。
    */
   nodes: () => get<NodesResponse>('/api/nodes'),
+  /**
+   * （add-usage-statistics 3.1）usage 时序聚合：router 聚合端点经 core 反代
+   * 的原样载荷。router 未启用 / 不可达时服务端 503，`ApiError.code` 为
+   * `"router_unreachable"`（视图据此呈「router 不可达」空态，与「无数据」
+   * 空态分开）。
+   */
+  usageTimeseries: (params: { granularity: 'day' | 'hour'; days?: number; tzOffset?: number }) =>
+    get<UsageTimeseries>(
+      withQuery('/api/usage/timeseries', {
+        granularity: params.granularity,
+        days: params.days === undefined ? undefined : String(params.days),
+        tz_offset: params.tzOffset === undefined ? undefined : String(params.tzOffset),
+      }),
+    ),
 
   // Auth（webui 多用户登录鉴权，add-webui-multiuser-rbac D5/D6）：me 探明
   // enabled/authenticated/needs_setup/role；login 只收 {username,password}

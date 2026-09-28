@@ -35,6 +35,9 @@ pub mod server;
 pub mod sse;
 pub mod test_provider;
 pub mod usage;
+/// usage 时序聚合查询（add-usage-statistics）：纯查询面——参数解析、
+/// 桶切分纯函数与参数化 SQL（零新表、零后台任务）。
+pub mod usage_query;
 
 #[cfg(test)]
 pub(crate) mod test_util {

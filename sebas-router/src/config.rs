@@ -776,6 +776,15 @@ fn warn_deprecated_routes_key(raw: &str) {
     }
 }
 
+/// config 是否显式声明了 `[router]` 段。`RouterConfig::parse` 对缺段也给全
+/// 默认（纯会话核心是合法态），所以 parse 成败不能当「router 未随部署启用」
+/// 的信号——usage 反代等消费方以本函数为准判定 None。
+pub fn declares_router_section(raw: &str) -> bool {
+    toml::from_str::<RouterFile>(raw)
+        .map(|f| f.router.is_some())
+        .unwrap_or(false)
+}
+
 impl RouterConfig {
     /// 解析顺序对齐 root house style（src/config.rs）：
     /// toml → preset 填充（raw → resolved）→ env 覆盖（`SEBAS_ROUTER_LISTEN`）
@@ -1032,6 +1041,18 @@ mod tests {
     /// 作为「经 parse 且受 LOCK 保护」的调用点收口。
     fn parse_isolated(raw: &str) -> Result<RouterConfig> {
         RouterConfig::parse(raw)
+    }
+
+    #[test]
+    fn declares_router_section_tracks_the_raw_section_not_parse_success() {
+        // 缺段时 parse 也成功（全默认），但声明判定必须是 false——usage 反代
+        // 的「router 未随部署启用」以它为准。
+        assert!(!declares_router_section("[feishu]\nenabled = false\n"));
+        assert!(declares_router_section(
+            "[router]\nlisten = \"127.0.0.1:18787\"\n"
+        ));
+        // 解析失败按未声明处理。
+        assert!(!declares_router_section("not toml at all [[["));
     }
 
     const FULL_EXAMPLE: &str = r#"

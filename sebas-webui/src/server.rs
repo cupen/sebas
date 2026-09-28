@@ -266,6 +266,9 @@ fn build_router_full(
         .route("/api/provider-defaults", get(routes::provider_defaults))
         .route("/api/providers", get(routes::providers_list))
         .route("/api/about", get(api::about))
+        // add-usage-statistics 3.1：usage 时序聚合反代（登录即可见，四角色
+        // 一致——required_permission 对它无权限词，RBAC 中央表不用改）。
+        .route("/api/usage/timeseries", get(api::usage_timeseries))
         // split-env-vars-settings-section 1.1：环境变量只读清单（webui 自身
         // env，不依赖 core 通道）。/api/ 前缀落进既有 auth_guard。
         .route("/api/env", get(api::env_vars))

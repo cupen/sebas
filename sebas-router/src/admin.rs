@@ -14,7 +14,7 @@
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 
-use axum::extract::{ConnectInfo, Request, State};
+use axum::extract::{ConnectInfo, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -55,6 +55,8 @@ pub fn build_admin_router(state: AppState) -> Router {
         .route("/admin/model-aliases/{alias}", any(route_retired))
         .route("/admin/reload", post(reload))
         .route("/admin/stats", get(stats))
+        // add-usage-statistics 1.2：usage 库的只读时序聚合（同 admin_auth）。
+        .route("/admin/usage/timeseries", get(usage_timeseries))
         .route("/metrics", get(metrics))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -233,6 +235,48 @@ async fn list_presets() -> Response {
 }
 
 // -------------------- reload / stats / metrics --------------------
+
+/// GET /admin/usage/timeseries（add-usage-statistics）：`usage_records` 的
+/// 只读时序聚合。参数解析/收界与桶切分全部在 [`crate::usage_query`]（纯
+/// 函数 + 参数化 SQL，`ts` 窗口走既有索引）；非法参数 400（逐条文案见
+/// `ParamError`）。聚合是单写线程上的只读 SELECT（毫秒级），绝不影响转发。
+async fn usage_timeseries(
+    Query(q): Query<BTreeMap<String, String>>,
+    State(state): State<AppState>,
+) -> Response {
+    let params = match crate::usage_query::parse_params(
+        q.get("granularity").map(String::as_str),
+        q.get("days").map(String::as_str),
+        q.get("tz_offset").map(String::as_str),
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    };
+    match crate::usage_query::query_timeseries(state.sink.query_handle(), params, chrono::Utc::now())
+        .await
+    {
+        Ok(ts) => match serde_json::to_value(&ts) {
+            Ok(v) => Json(v).into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("serialize timeseries failed: {e}") })),
+            )
+                .into_response(),
+        },
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e })),
+        )
+            .into_response(),
+    }
+}
+
 
 /// POST /admin/reload：手动重读 + 热替换。成功返回摘要，失败返回错误文本。
 async fn reload(State(state): State<AppState>) -> Response {

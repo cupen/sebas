@@ -1024,6 +1024,55 @@ impl SessionBackend for CoreChannelBackend {
         }
     }
 
+    /// （add-usage-statistics 2.2/3.1）usage 时序聚合经 core channel 反代：
+    /// `UsageTimeseries` 应答原样承载 router 的状态与载荷；不可达（含旧 core
+    /// 的 unknown-cmd 拒绝——它同样意味着这条取数路径不可用）归一为
+    /// `RouterUnreachable`，router 的非 200（参数 400 等）原样透传。
+    async fn usage_timeseries(
+        &self,
+        granularity: &str,
+        days: u32,
+        tz_offset: i32,
+    ) -> Result<serde_json::Value, sebas_webui::session_backend::UsageQueryError> {
+        use sebas_webui::session_backend::UsageQueryError;
+        let rejection_err = |rejection: SessionRejection| match rejection {
+            SessionRejection::Unavailable { cause } => {
+                UsageQueryError::RouterUnreachable { cause }
+            }
+            other => UsageQueryError::RouterUnreachable {
+                cause: format!("router_unreachable: usage 查询被拒绝: {other}"),
+            },
+        };
+        match self
+            .request(&CoreChannelRequest::UsageTimeseries {
+                granularity: granularity.to_string(),
+                days,
+                tz_offset,
+            })
+            .await
+        {
+            Ok(CoreChannelResponse::UsageTimeseries {
+                status: 200,
+                payload,
+            }) => Ok(payload),
+            Ok(CoreChannelResponse::UsageTimeseries { status, payload }) => {
+                Err(UsageQueryError::RouterError {
+                    status,
+                    message: payload
+                        .get("error")
+                        .and_then(|e| e.as_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("router 应答状态 {status}")),
+                })
+            }
+            Ok(CoreChannelResponse::Rejected { rejection }) => Err(rejection_err(rejection)),
+            Ok(other) => Err(UsageQueryError::RouterUnreachable {
+                cause: format!("router_unreachable: usage 查询得到非预期应答: {other:?}"),
+            }),
+            Err(rejection) => Err(rejection_err(rejection)),
+        }
+    }
+
     fn permission_requests(&self) -> Option<broadcast::Receiver<PermissionNotice>> {
         Some(self.notices.subscribe())
     }

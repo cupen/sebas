@@ -98,6 +98,17 @@ pub struct ExecutionBodyStatus {
     pub cause: Option<String>,
 }
 
+/// （add-usage-statistics 3.1）usage 聚合反代的失败面：视图据此区分
+/// 「router 不可达」空态与其它失败（design D7）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UsageQueryError {
+    /// router 未启用 / 连接拒绝 / 超时——视图呈「router 不可达」空态。
+    /// cause 以 `router_unreachable` 前缀点名（core 侧既有约定）。
+    RouterUnreachable { cause: String },
+    /// router 应答了非 200（如参数 400）——状态码与可读文案原样透传。
+    RouterError { status: u16, message: String },
+}
+
 /// The seam every session-data source must satisfy.
 #[async_trait]
 pub trait SessionBackend: Send + Sync {
@@ -346,6 +357,22 @@ pub trait SessionBackend: Send + Sync {
     /// 实现诚实不可用——不承载 core providers 域的后端没有抓取能力。
     async fn fetch_provider_models(&self, _provider: &str) -> Result<Vec<String>, String> {
         Err("模型列表抓取不可用：core providers 域未由此后端承载".into())
+    }
+
+    /// （add-usage-statistics 3.1）usage 时序聚合读模型：granularity
+    /// （`day` | `hour`）、天窗口与分钟时区偏移透传给 core，成功返回 router
+    /// 的聚合载荷（原样 JSON）。默认诚实不可用——不承载 router 反代的后端
+    /// 没有这条取数路径；生产两侧（core channel 客户端与 core 进程内复合
+    /// 后端）都覆写本方法。
+    async fn usage_timeseries(
+        &self,
+        _granularity: &str,
+        _days: u32,
+        _tz_offset: i32,
+    ) -> Result<serde_json::Value, UsageQueryError> {
+        Err(UsageQueryError::RouterUnreachable {
+            cause: "router_unreachable: 此后端不承载 usage 聚合查询".into(),
+        })
     }
 
     /// Create a 0-turn placeholder session without spawning an agent child
@@ -1128,6 +1155,12 @@ pub struct FakeBackend {
     /// fix-webui-qa-defects-round5 1.2（route 层测试用）：pending 管理面
     /// （remove/move）的类型化拒绝注入。`None` = 缺省诚实不可用（Unavailable）。
     pending_op_rejection: std::sync::Mutex<Option<PendingReason>>,
+    /// add-usage-statistics 3.1（route 层测试用）：注入的 usage 聚合结果。
+    /// `None` = 走 trait 缺省（诚实不可达）。
+    usage_result: std::sync::Mutex<Option<Result<serde_json::Value, UsageQueryError>>>,
+    /// add-usage-statistics 3.1（route 层测试用）：最近一次 usage 查询的
+    /// `(granularity, days, tz_offset)`。`None` = 还没调用过。
+    last_usage_query: std::sync::Mutex<Option<(String, u32, i32)>>,
 }
 
 #[derive(Default)]
@@ -1163,7 +1196,25 @@ impl FakeBackend {
             approvals: std::sync::Mutex::new(HashMap::new()),
             last_label: std::sync::Mutex::new(None),
             pending_op_rejection: std::sync::Mutex::new(None),
+            usage_result: std::sync::Mutex::new(None),
+            last_usage_query: std::sync::Mutex::new(None),
         }
+    }
+
+    /// add-usage-statistics 3.1：最近一次 usage 查询的入参（route 层断言
+    /// 参数透传）。
+    pub fn last_usage_query(&self) -> Option<(String, u32, i32)> {
+        self.last_usage_query
+            .lock()
+            .expect("last usage query lock")
+            .clone()
+    }
+
+    /// add-usage-statistics 3.1：注入 usage 聚合结果（`Ok(载荷)` /
+    /// `Err(RouterUnreachable)` / `Err(RouterError)`），route 层测试据此钉
+    /// 透传与空态判别。
+    pub fn set_usage_result(&self, result: Result<serde_json::Value, UsageQueryError>) {
+        *self.usage_result.lock().expect("usage result lock") = Some(result);
     }
 
     /// fix-webui-approval-restore-and-session-identity 1.2（route 层测试用）：
@@ -1546,6 +1597,26 @@ impl SessionBackend for FakeBackend {
             .get(&sid)
             .map(|log| log.iter().filter(|e| e.position >= from).cloned().collect())
             .unwrap_or_default())
+    }
+
+    /// add-usage-statistics 3.1：注入的结果；未注入 = trait 缺省（不可达）。
+    async fn usage_timeseries(
+        &self,
+        granularity: &str,
+        days: u32,
+        tz_offset: i32,
+    ) -> Result<serde_json::Value, UsageQueryError> {
+        // 记录最近一次入参，route 层据此断言参数透传。
+        *self
+            .last_usage_query
+            .lock()
+            .expect("last usage query lock") = Some((granularity.to_string(), days, tz_offset));
+        match self.usage_result.lock().expect("usage result lock").clone() {
+            Some(result) => result,
+            None => Err(UsageQueryError::RouterUnreachable {
+                cause: "router_unreachable: 此后端不承载 usage 聚合查询".into(),
+            }),
+        }
     }
 
     /// fix-webui-qa-defects 2.2：reachable = 记录调用并成功；unreachable =

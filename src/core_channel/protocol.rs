@@ -188,6 +188,13 @@ mod tests {
                 request_id: "toolu_1".into(),
                 decision: PermissionDecision::AllowOnce,
             },
+            // （add-usage-statistics）usage 聚合查询：字段全缺省的旧对端形态
+            // 必须可读（wire 新增变体，serde 默认值兜底）。
+            CoreChannelRequest::UsageTimeseries {
+                granularity: "hour".into(),
+                days: 7,
+                tz_offset: 480,
+            },
         ];
         for r in &requests {
             roundtrip(r);
@@ -235,6 +242,11 @@ mod tests {
             CoreChannelResponse::Models {
                 provider: "p".into(),
                 models: vec!["m1".into()],
+            },
+            // （add-usage-statistics）反代应答：router 状态 + 载荷原样承载。
+            CoreChannelResponse::UsageTimeseries {
+                status: 200,
+                payload: serde_json::json!({"buckets": []}),
             },
         ];
         for r in &responses {

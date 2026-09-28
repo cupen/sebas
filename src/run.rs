@@ -389,13 +389,21 @@ pub async fn run(
     );
     let _registry = registry;
 
+    // （add-usage-statistics 3c 勘误）usage 反代的取数目标：config 显式声明了
+    // `[router]` 段才取 listen；`None` = router 未随部署启用（usage 请求如实回
+    // 「未配置」cause，而不是把缺省 8787 当可拨目标）。
+    let usage_router_listen = router_cfg
+        .as_ref()
+        .filter(|_| sebas_router::config::declares_router_section(&raw_config))
+        .map(|c| c.listen.clone());
+
     // Start WebUI dashboard server if requested. 双执行后端（Claude Code 桥 +
     // 原生内核；sebas-agent-next 5.1/5.2）。核心常驻一份，webui 与核心通道
     // server 共享（design D1 of wire-webui-sebas-agent-e2e）：复用上方为飞书
     // 原生桥构建的同一个 `native_mgr`，detached 形态下经通道 spawn 的 native 会
     // 话与 in-process 看到的是同一个内核 manager。
     let webui_backend: std::sync::Arc<dyn sebas_webui::SessionBackend> =
-        crate::agent_backend::DualSessionBackend::new(
+        crate::agent_backend::DualSessionBackend::with_usage_listen(
             std::sync::Arc::new(sebas_webui::session_backend::InProcessBackend::new(
                 router.clone(),
             )),
@@ -405,6 +413,9 @@ pub async fn run(
                 native_available_models,
                 native_default_model,
             ),
+            // （add-usage-statistics 2.2）内嵌 webui 的 usage 聚合直接在本进程
+            // 取数（core = 本进程），与通道服务端的 usage 分支同源。
+            usage_router_listen.clone(),
         );
     if webui {
         // The core IS this process: serve the dashboard over the in-process
@@ -544,6 +555,11 @@ pub async fn run(
         &router,
         node_registry.clone(),
         projection.clone(),
+        // add-usage-statistics：config 声明的 `[router] listen`。以原始 config
+        // 是否含 `[router]` 段为准判定「router 未随部署启用」（3c 勘误）——
+        // RouterConfig::parse 对缺段也给缺省 listen，parse 成败当信号会把
+        // 未配置伪成可拨 8787。
+        usage_router_listen,
     )
     .await?;
 
@@ -796,6 +812,10 @@ pub(crate) async fn arm_core_channel(
     // 远端会话投影（5.1）：`None` = 节点链路未启用。有了它，通道快照/订阅流里
     // 才会出现跑在节点上的会话；没有它就与今日完全一致。
     projection: Option<std::sync::Arc<crate::node_link::RemoteProjection>>,
+    // （add-usage-statistics 2.2）config 声明的 `[router] listen`：usage 聚合
+    // 反代的 loopback 目标。`None` = router 未随部署启用（usage 请求如实回
+    // 不可达，不影响其余通道请求）。
+    router_listen: Option<String>,
 ) -> Result<ArmedChannel> {
     let channel_path = crate::core_channel::socket_path(cfg);
     // bind 先行（1.3/D4）：路径被存活进程占用 → 硬错误，调用方在 ready 之前
@@ -821,6 +841,7 @@ pub(crate) async fn arm_core_channel(
     let (close_tx, close_rx) = tokio::sync::watch::channel(false);
     let serve_router = router.clone();
     let serve_secret = secret.clone();
+    let serve_router_listen = router_listen.clone();
     tokio::spawn(async move {
         match crate::core_channel::server::serve_bound(
             backend,
@@ -830,6 +851,7 @@ pub(crate) async fn arm_core_channel(
             listener,
             node_registry,
             projection,
+            serve_router_listen,
             close_rx,
         )
         .await

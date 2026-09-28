@@ -1099,3 +1099,197 @@ mod multiuser_rbac {
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
 }
+
+// （add-usage-statistics 3.1）`GET /api/usage/timeseries` 的路由级单测：
+// 未登录被既有鉴权拦、登录（四角色一致，此处钉 viewer）即透传聚合载荷、
+// router 不可达返回结构化 cause 且其余 API 不受影响、参数透传到 seam。
+mod usage_timeseries_route {
+    use axum::body::Body;
+    use axum::extract::ConnectInfo;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use sebas_feishu::cards::CardConfig;
+    use sebas_webui::auth::AuthHandle;
+    use sebas_webui::build_router_with_auth;
+    use sebas_webui::models::RouterInfo;
+    use sebas_webui::rbac::Role;
+    use sebas_webui::session_backend::{FakeBackend, UsageQueryError};
+    use serde_json::Value;
+    use std::net::{IpAddr, SocketAddr};
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    fn test_addr() -> SocketAddr {
+        SocketAddr::new(IpAddr::from([127, 0, 0, 1]), 12345)
+    }
+
+    /// viewer（权限最低的角色）+ 开启鉴权的 app——能过即四角色一致
+    /// （required_permission 对该路径无权限词，更高的角色只会更松）。
+    async fn app_with_viewer() -> (axum::Router, Arc<FakeBackend>, String, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let auth = Arc::new(AuthHandle::open_with_iterations(
+            dir.path().join("auth.db"),
+            1000,
+        ));
+        let backend = Arc::new(FakeBackend::new());
+        let app = build_router_with_auth(
+            backend.clone(),
+            RouterInfo::default(),
+            CardConfig::default(),
+            None,
+            Arc::new(sebas_webui::agent_kinds::ConfigAgentKindProvider::new(
+                Vec::new(),
+            )),
+            30,
+            auth.clone(),
+        );
+        auth.setup_root("alice", "password8").await.unwrap();
+        auth.user_store()
+            .unwrap()
+            .create("vic", "password8", Role::Viewer)
+            .unwrap();
+        // 登录换会话 cookie。
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/auth/login")
+            .header("host", "127.0.0.1:12345")
+            .extension(ConnectInfo(test_addr()))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"username":"vic","password":"password8"}"#))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "viewer 登录");
+        let cookie = resp
+            .headers()
+            .get("set-cookie")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        assert!(cookie.starts_with("sebas_webui_session="), "{cookie}");
+        (app, backend, cookie, dir)
+    }
+
+    async fn get(
+        app: &axum::Router,
+        uri: &str,
+        cookie: Option<&str>,
+    ) -> (StatusCode, Value) {
+        let mut builder = Request::builder()
+            .uri(uri)
+            .header("host", "127.0.0.1:12345")
+            .extension(ConnectInfo(test_addr()));
+        if let Some(c) = cookie {
+            builder = builder.header("cookie", c);
+        }
+        let resp = app
+            .clone()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let v = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes)
+                .unwrap_or_else(|e| panic!("non-JSON body from {uri} [{status}]: {e}"))
+        };
+        (status, v)
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_request_is_rejected_by_the_existing_auth_gate() {
+        let (app, _backend, _cookie, _dir) = app_with_viewer().await;
+        let (status, body) = get(&app, "/api/usage/timeseries", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "未登录 401（与其它 /api/* 同门）");
+        assert_eq!(body["error"], "authentication required");
+    }
+
+    #[tokio::test]
+    async fn authenticated_viewer_receives_the_aggregation_payload_unchanged() {
+        let (app, backend, cookie, _dir) = app_with_viewer().await;
+        let payload = serde_json::json!({
+            "granularity": "day", "days": 3, "tz_offset": 480,
+            "buckets": [
+                {"bucket": "2026-09-29", "models": [
+                    {"model": "claude-sonnet", "requests": 2, "input_tokens": 10,
+                     "output_tokens": 50, "cache_read_tokens": 5, "cache_creation_tokens": 2}
+                ]},
+                {"bucket": "2026-09-28", "models": []},
+                {"bucket": "2026-09-27", "models": []}
+            ]
+        });
+        backend.set_usage_result(Ok(payload.clone()));
+
+        let (status, body) =
+            get(&app, "/api/usage/timeseries?granularity=day&days=3&tz_offset=480", Some(&cookie))
+                .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, payload, "聚合载荷原样回传");
+
+        // 参数透传到 seam（granularity/days/tz_offset 逐字）。
+        assert_eq!(
+            backend.last_usage_query(),
+            Some(("day".into(), 3, 480)),
+            "查询参数逐字透传到后端缝"
+        );
+    }
+
+    #[tokio::test]
+    async fn router_unreachable_returns_a_structured_cause_and_other_apis_are_unaffected() {
+        let (app, backend, cookie, _dir) = app_with_viewer().await;
+        backend.set_usage_result(Err(UsageQueryError::RouterUnreachable {
+            cause: "router_unreachable: connection refused".into(),
+        }));
+
+        let (status, body) = get(&app, "/api/usage/timeseries", Some(&cookie)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["cause"], "router_unreachable", "结构化 cause 点名不可达");
+        assert_eq!(body["code"], "router_unreachable");
+        assert_eq!(body["error"], "router_unreachable: connection refused");
+
+        // 其余 API 不受影响：summary 照常 200。
+        let (status, summary) = get(&app, "/api/summary", Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK, "router 不可达不拖垮其余 API");
+        assert!(summary.get("reachability").is_some(), "summary 结构完好");
+    }
+
+    #[tokio::test]
+    async fn router_error_status_passes_through() {
+        let (app, backend, cookie, _dir) = app_with_viewer().await;
+        backend.set_usage_result(Err(UsageQueryError::RouterError {
+            status: 400,
+            message: "invalid granularity \"week\"".into(),
+        }));
+        let (status, body) = get(&app, "/api/usage/timeseries?granularity=week", Some(&cookie)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "router 的 400 原状态透传");
+        assert_eq!(body["cause"], "router_error");
+        assert!(body["error"].as_str().unwrap().contains("granularity"));
+    }
+
+
+    #[tokio::test]
+    async fn absent_params_default_to_day_14_utc() {
+        let (app, backend, cookie, _dir) = app_with_viewer().await;
+        backend.set_usage_result(Ok(serde_json::json!({"granularity": "day"})));
+        let (status, _) = get(&app, "/api/usage/timeseries", Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK);
+        // 缺省参数逐字等于 router 端点口径：day / 14 / UTC（0）。
+        assert_eq!(
+            backend.last_usage_query(),
+            Some(("day".into(), 14, 0)),
+            "无参调用按 day/14/0 缺省透传"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_numeric_days_is_rejected_locally() {
+        let (app, _backend, cookie, _dir) = app_with_viewer().await;
+        let (status, body) = get(&app, "/api/usage/timeseries?days=abc", Some(&cookie)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["cause"], "invalid_param");
+    }
+}

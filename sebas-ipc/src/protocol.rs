@@ -274,6 +274,23 @@ pub enum CoreChannelRequest {
         /// 待判定的路径（节点上的绝对路径）。
         path: String,
     },
+    /// （add-usage-statistics）usage 时序聚合查询：core 收到后经 loopback
+    /// HTTP 反代 router admin 的 `/admin/usage/timeseries`。参数校验与收界
+    /// 全部在 router 端——本帧只是透传载体。
+    ///
+    /// 三个字段全带 serde 默认值（协议演进规则 1：旧对端不发等价缺省
+    /// `day`/14/0，wire 兼容，无删改）。
+    UsageTimeseries {
+        /// 聚合粒度，`"day"`（缺省）| `"hour"`；非法拼写由 router 400。
+        #[serde(default = "default_usage_granularity")]
+        granularity: String,
+        /// 天粒度窗口（缺省 14，clamp 1–30 在 router 端；hour 忽略）。
+        #[serde(default = "default_usage_days")]
+        days: u32,
+        /// 分钟东偏（缺省 0 = UTC；clamp ±840 在 router 端）。
+        #[serde(default)]
+        tz_offset: i32,
+    },
     /// 对端发来本 build 不认识的 `cmd`（对端比本端新）。
     ///
     /// `#[serde(other)]`：容忍未知命令而不是让整帧解析失败——连接不关、
@@ -281,6 +298,16 @@ pub enum CoreChannelRequest {
     /// fail the message」）。语义上**永不执行**任何动作（fail closed）。
     #[serde(other)]
     Unknown,
+}
+
+/// `CoreChannelRequest::UsageTimeseries::granularity` 的 serde 缺省。
+fn default_usage_granularity() -> String {
+    "day".to_string()
+}
+
+/// `CoreChannelRequest::UsageTimeseries::days` 的 serde 缺省。
+fn default_usage_days() -> u32 {
+    14
 }
 
 /// 节点链路管理操作。
@@ -379,10 +406,30 @@ pub enum CoreChannelResponse {
         #[serde(default = "default_true")]
         within_workspace: bool,
     },
+    /// （add-usage-statistics）usage 聚合的反代应答：router 的 HTTP 状态与
+    /// JSON 载荷**原样承载**（`status` = 200 时 `payload` 是聚合结果；非 200
+    /// 时 `payload` 是 router 的错误体——400 参数错误等按原状态透传，不在此
+    /// 归一）。core→router 不可达（未启用 / 连接拒绝 / 超时）不走本变体：
+    /// 走 `Rejected` 的 `Unavailable`（cause 以 `router_unreachable` 前缀点名，
+    /// webui 据此呈现「router 不可达」空态）。字段全带 serde 默认值（演进
+    /// 规则 1）。
+    UsageTimeseries {
+        /// router 的 HTTP 状态码。
+        #[serde(default = "default_usage_status")]
+        status: u16,
+        /// router 的 JSON 应答体（body 非 JSON 时为 `null`）。
+        #[serde(default)]
+        payload: serde_json::Value,
+    },
     /// 对端发来本 build 不认识的 `cmd`（对端比本端新）：按「操作不可用」如实
     /// 呈现，不假装成功。
     #[serde(other)]
     Unknown,
+}
+
+/// `CoreChannelResponse::UsageTimeseries::status` 的 serde 缺省。
+fn default_usage_status() -> u16 {
+    200
 }
 
 /// `NodePath::within_workspace` 的 serde 缺省：缺字段 = 界内（兼容旧应答）。
@@ -674,6 +721,51 @@ mod tests {
         assert_eq!(ack, ChannelHandshakeAck::Unknown);
         assert!(!ack.is_ok(), "看不懂的握手应答绝不能当成功");
         assert!(ack.cause().is_some());
+    }
+
+    // ---- （add-usage-statistics）usage 时序聚合的 wire 形状 ----
+
+    /// 新请求/响应变体往返保真 + 旧对端形态（全字段缺省）可读——协议演进
+    /// 规则 1（新字段带 serde 默认值 = 纯 additive，旧对端不发也能读）。
+    #[test]
+    fn usage_timeseries_wire_round_trips_and_defaults() {
+        let full = CoreChannelRequest::UsageTimeseries {
+            granularity: "hour".into(),
+            days: 7,
+            tz_offset: 480,
+        };
+        roundtrip(&full);
+        let line = full.to_line().unwrap();
+        assert_eq!(
+            line,
+            "{\"cmd\":\"usage_timeseries\",\"granularity\":\"hour\",\"days\":7,\"tz_offset\":480}\n"
+        );
+        // 旧对端不发字段：等价缺省 day/14/0。
+        let legacy: CoreChannelRequest = decode_line("{\"cmd\":\"usage_timeseries\"}").unwrap();
+        assert_eq!(
+            legacy,
+            CoreChannelRequest::UsageTimeseries {
+                granularity: "day".into(),
+                days: 14,
+                tz_offset: 0,
+            }
+        );
+
+        let resp = CoreChannelResponse::UsageTimeseries {
+            status: 400,
+            payload: serde_json::json!({"error": "invalid granularity"}),
+        };
+        roundtrip(&resp);
+        // 缺字段应答（旧对端）：status 缺省 200、payload 缺省 null。
+        let legacy_resp: CoreChannelResponse =
+            decode_line("{\"cmd\":\"usage_timeseries\"}").unwrap();
+        assert_eq!(
+            legacy_resp,
+            CoreChannelResponse::UsageTimeseries {
+                status: 200,
+                payload: serde_json::Value::Null,
+            }
+        );
     }
 
     // ---- 未知命令 / 帧 / 操作不失败解码（6.1） ----

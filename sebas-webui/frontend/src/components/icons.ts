@@ -51,6 +51,9 @@ const PATHS: Record<string, string> = {
   // fix-webui-mobile-polish：窄屏项目抽屉的开关（lucide menu / x）。
   menu: '<line x1="4" x2="20" y1="6" y2="6"/><line x1="4" x2="20" y1="12" y2="12"/><line x1="4" x2="20" y1="18" y2="18"/>',
   x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+  // add-usage-statistics 4.2：侧栏「用量」入口（lucide line-chart）。
+  usage:
+    '<path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="m7 13 3-3 4 4 5-5"/>',
 }
 
 /** Render a decorative inline-SVG icon by name; empty string when unknown.

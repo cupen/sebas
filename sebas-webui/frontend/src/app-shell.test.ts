@@ -170,7 +170,9 @@ describe('sidebar IA v2', () => {
     expect(settingsBtn?.textContent ?? '').toContain('Settings')
     // NAV_ITEMS 链接列表整体删除：无导航链接，退役路径一个都不出现。
     const hrefs = [...el.shadowRoot!.querySelectorAll('nav a')].map((a) => a.getAttribute('href'))
-    expect(hrefs).toEqual(['/']) // 仅剩品牌回链
+    // 仅剩品牌回链 + 用量入口（add-usage-statistics 4.2：`/usage` 看数面
+    // 的侧栏入口，design D5 独立视图）。
+    expect(hrefs).toEqual(['/', '/usage'])
     expect(hrefs).not.toContain('/settings')
     expect(hrefs).not.toContain('/gateway')
     expect(hrefs).not.toContain('/about')

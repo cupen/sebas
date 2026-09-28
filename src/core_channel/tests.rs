@@ -1197,7 +1197,7 @@ async fn arm_for_test(dir: &StdPath) -> crate::run::ArmedChannel {
         sebas_webui::session_backend::InProcessBackend::new(router.clone()),
     );
     let _keep = _out_rx;
-    crate::run::arm_core_channel(&cfg, &config_path, backend, &router, None, None)
+    crate::run::arm_core_channel(&cfg, &config_path, backend, &router, None, None, None)
         .await
         .expect("arm succeeds in sandbox")
 }
@@ -1286,7 +1286,7 @@ async fn arm_fails_hard_when_socket_path_is_taken_by_live_listener() {
         sebas_webui::session_backend::InProcessBackend::new(router.clone()),
     );
     let _keep = _out_rx;
-    let err = crate::run::arm_core_channel(&cfg, &config_path, backend, &router, None, None)
+    let err = crate::run::arm_core_channel(&cfg, &config_path, backend, &router, None, None, None)
         .await
         .expect_err("live occupant must fail the arm");
     let msg = err.to_string();

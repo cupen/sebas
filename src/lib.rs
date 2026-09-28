@@ -37,6 +37,8 @@ pub mod native_dispatch_bridge;
 pub mod node_link;
 pub mod node_link_cmd;
 pub mod provider;
+/// core→router admin 的 loopback HTTP 反代取数（add-usage-statistics D1/D7）。
+pub mod router_admin;
 pub mod router_cmd;
 pub mod service;
 /// 操作者级 skill 仓 + 多 backend 方言投影（add-agent-skills）。

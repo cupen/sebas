@@ -883,6 +883,11 @@ pub struct DualSessionBackend {
     /// Claude/ACP permission request reaches the webui review card through the
     /// same channel as a native gated call.
     notices: broadcast::Sender<PermissionNotice>,
+    /// （add-usage-statistics 2.2）config `[router] listen`：usage 聚合反代的
+    /// loopback 目标（内嵌 webui 的 backend 就在本进程 = core，直接取数，与
+    /// 通道服务端的 usage 分支共用 `router_admin` 同一实现）。`None` =
+    /// router 未随部署启用（usage 请求如实回不可达）。
+    usage_listen: Option<String>,
 }
 
 impl DualSessionBackend {
@@ -903,6 +908,17 @@ impl DualSessionBackend {
     }
 
     pub fn new(acp: Arc<dyn SessionBackend>, native: Arc<NativeAgentBackend>) -> Arc<Self> {
+        Self::with_usage_listen(acp, native, None)
+    }
+
+    /// （add-usage-statistics 2.2）带 config `[router] listen` 的构造：run.rs
+    /// 装配内嵌 webui 时传入（usage 聚合直接在本进程取数）；`None` = router
+    /// 未随部署启用。
+    pub fn with_usage_listen(
+        acp: Arc<dyn SessionBackend>,
+        native: Arc<NativeAgentBackend>,
+        usage_listen: Option<String>,
+    ) -> Arc<Self> {
         let (events, _) = broadcast::channel(256);
         let (turn_events, _) = broadcast::channel(256);
         let (notices, _) = broadcast::channel(64);
@@ -1006,6 +1022,7 @@ impl DualSessionBackend {
             events,
             turn_events,
             notices,
+            usage_listen,
         })
     }
 
@@ -1106,6 +1123,41 @@ impl SessionBackend for DualSessionBackend {
     // 复合后端转发到承载状态库的一侧。
     async fn fetch_provider_models(&self, provider: &str) -> Result<Vec<String>, String> {
         self.acp.fetch_provider_models(provider).await
+    }
+
+    /// （add-usage-statistics 2.2）usage 聚合：本复合后端跑在 core 进程内，
+    /// 与通道服务端的 usage 分支共用 `router_admin` 同一 loopback 取数实现
+    /// （单一实现防两侧漂移）。router 未启用 → 结构化不可达 cause。
+    async fn usage_timeseries(
+        &self,
+        granularity: &str,
+        days: u32,
+        tz_offset: i32,
+    ) -> Result<serde_json::Value, sebas_webui::session_backend::UsageQueryError> {
+        use sebas_webui::session_backend::UsageQueryError;
+        let Some(listen) = self.usage_listen.as_deref() else {
+            return Err(UsageQueryError::RouterUnreachable {
+                cause: crate::router_admin::ROUTER_NOT_CONFIGURED_CAUSE.to_string(),
+            });
+        };
+        match crate::router_admin::fetch_usage_timeseries(listen, granularity, days, tz_offset)
+            .await
+        {
+            Ok(payload) => Ok(payload),
+            Err(crate::router_admin::UsageProxyError::RouterError { status, body }) => {
+                Err(UsageQueryError::RouterError {
+                    status,
+                    message: body
+                        .get("error")
+                        .and_then(|e| e.as_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("router 应答状态 {status}")),
+                })
+            }
+            Err(e @ crate::router_admin::UsageProxyError::Unreachable { .. }) => {
+                Err(UsageQueryError::RouterUnreachable { cause: e.cause() })
+            }
+        }
     }
 
     async fn spawn(

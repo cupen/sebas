@@ -421,6 +421,76 @@ pub async fn about(State(state): State<WebUiState>) -> Response {
     Json(data).into_response()
 }
 
+// ---- Usage timeseries（add-usage-statistics 3.1）----
+
+/// `GET /api/usage/timeseries`：usage 时序聚合的 webui 反代面。登录（四角色
+/// 一致——`required_permission` 对它无额外权限词）即可见；参数经
+/// `SessionBackend::usage_timeseries` 缝透传 core，聚合载荷原样回传。
+///
+/// 响应契约（design D7）：
+/// - 200 = router 聚合载荷（原样 JSON）；
+/// - 503 + `cause: "router_unreachable"` = router 未启用 / 拒绝 / 超时
+///   （结构化 cause，前端据此呈「router 不可达」空态；其余 API 不受影响）；
+/// - router 的非 200（如参数 400）按原状态透传 + `cause: "router_error"`。
+pub async fn usage_timeseries(
+    State(state): State<WebUiState>,
+    Query(params): Query<std::collections::BTreeMap<String, String>>,
+) -> Response {
+    // 参数透传：granularity 缺省 day（与 router 端点同缺省；非 day/hour 的
+    // 拼写由 core 校验并合成 router 同形 400）；days / tz_offset 缺省走 wire
+    // 默认（14 / 0），非数字在本层 400（wire 类型是数值，走不到 core）。
+    let granularity = match params.get("granularity").filter(|g| !g.is_empty()) {
+        None => "day".to_string(),
+        Some(g) => g.clone(),
+    };
+    let days = match params.get("days").filter(|d| !d.is_empty()) {
+        None => 14,
+        Some(d) => match d.parse::<u32>() {
+            Ok(v) => v,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": format!("invalid days {d:?}: expected a number"), "cause": "invalid_param"})),
+                )
+                    .into_response()
+            }
+        },
+    };
+    let tz_offset = match params.get("tz_offset").filter(|t| !t.is_empty()) {
+        None => 0,
+        Some(t) => match t.parse::<i32>() {
+            Ok(v) => v,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": format!("invalid tz_offset {t:?}: expected minutes as a number"), "cause": "invalid_param"})),
+                )
+                    .into_response()
+            }
+        },
+    };
+    match state
+        .backend
+        .usage_timeseries(&granularity, days, tz_offset)
+        .await
+    {
+        Ok(payload) => Json(payload).into_response(),
+        Err(crate::session_backend::UsageQueryError::RouterError { status, message }) => {
+            let status = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
+            (status, Json(json!({"error": message, "cause": "router_error"}))).into_response()
+        }
+        Err(crate::session_backend::UsageQueryError::RouterUnreachable { cause }) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": cause,
+                "code": "router_unreachable",
+                "cause": "router_unreachable",
+            })),
+        )
+            .into_response(),
+    }
+}
+
 // ---- Env endpoint（split-env-vars-settings-section 1.1）----
 
 /// `/api/env` 的变量分类（design D2）：`plain` = 非敏感（路径/开关类），已
