@@ -22,9 +22,6 @@
 
 （本节需 git 合并 / 推 tag / 观察 Actions 真跑，实现沙箱不打 tag 不推远端——整体留给操作员按序执行；下列框保持未勾。）
 
-
-## 5. v0.1.0 首发实战验收
-
 - [x] 5.1 改动经评审流程合入 main（feat 分支 rebase + --no-ff）。验证：`git log` 可见合并提交且 workflow 文件与任务 1–4 产物一致
 - [ ] 5.2 向用户确认后推送 `v0.1.0`，盯 Release 与 Docker 两个 workflow 运行至全绿。验证：Actions 两 workflow 结论 success
 - [ ] 5.3 验收 GitHub Release：非 draft、非 pre-release、正文含自动生成 notes；资产 = linux tar.gz + windows zip + 各自 `.sha256` 共 4 件；下载解包含 `sebas` 与 `sebas-node`，`sha256sum -c` 通过。验证：逐项对照 spec「发布归档含双二进制与 sha256」场景
