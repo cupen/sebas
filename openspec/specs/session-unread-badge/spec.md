@@ -88,16 +88,6 @@ the anchor: they remain unseen and are flagged when the operator returns.
 - **WHEN** a session's message count equals its stored read anchor
 - **THEN** its rail row shows no unread badge
 
-#### Scenario: first focused exchange of a fresh placeholder
-
-- **WHEN** the operator creates a placeholder session, sends the first message, and watches the spawned child's reply while staying focused at the live edge
-- **THEN** no unread badge appears on the session's rail row and no unseen-turn seam is drawn for that exchange
-
-#### Scenario: hidden-tab arrivals stay unseen
-
-- **WHEN** the focused session receives reply segments while the page is in a hidden background tab
-- **THEN** the read anchor does not advance and the content is reported as unseen when the operator returns
-
 ### Requirement: Unread cursor is per-browser and shared with the seen boundary
 
 The read anchor SHALL be stored per browser (localStorage), keyed by session, and SHALL NOT be recorded server-side. The anchor SHALL be the segment count: every surface that marks content as read — focusing the session, streaming-while-reading, and reading the transcript down to the seen boundary — SHALL advance the same stored segment count, so the unread badge and the transcript's seen-boundary never disagree about what has been read. A session with no stored anchor SHALL be treated as fully read, so history never surfaces as unread after a cache clear or a first visit from a new browser.

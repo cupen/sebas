@@ -32,9 +32,11 @@ permission-mode switch), `POST /api/sessions/{key}/activate` (start the
 child in the background for a placeholder/dormant session), `GET
 /api/sessions/{key}/approvals` (approval read model for restoring pending
 review cards), `POST /api/sessions/{key}/label` (set the operator label),
-the agent catalog `GET /api/agents` (each configured
-agent plus the built-in native kernel, with id, display name, reachability,
-optional cause and version), `GET /api/nodes` (remote execution node list),
+the agent management cluster `GET /api/agents` (the built-in native kernel
+plus every agents-store row — config-seeded or UI-created — with id, display
+name, reachability, optional cause and version), `POST /api/agents` (create),
+`PUT /api/agents/{id}` (update) and `DELETE /api/agents/{id}` (delete),
+`GET /api/nodes` (remote execution node list),
 the skills surface `GET/POST /api/skills` (store listing; sync trigger) and
 `GET/DELETE /api/skills/{name}`, `GET /api/provider-presets` (read-only preset
 table), `POST /api/auth/login` (the login page itself is rendered by the SPA),
@@ -57,7 +59,8 @@ posture as the existing session APIs. The provider management cluster under
 /api/model-aliases/{alias}`; the alias table is read through the providers
 projection rather than a dedicated list endpoint) SHALL be fulfilled by the WebUI backend from the
 core-owned provider store over the core channel, never by proxying the router
-process. The retired `/router/api/*` namespace (including `POST
+process; the agent management cluster SHALL likewise be fulfilled from the
+core-owned agents store over the core channel. The retired `/router/api/*` namespace (including `POST
 /router/api/reload`) and the retired `GET /api/router` endpoint SHALL NOT be
 served. Without a reachable core these routes SHALL fail honestly (503) and
 SHALL NOT serve a stale snapshot. The JSON admin API `/api/admin/*` (status,
@@ -135,11 +138,19 @@ position, disposition (`staging` | `turn`) and priority flag.
 #### Scenario: agents catalog lists configured agents and native
 
 - **WHEN** the browser requests `GET /api/agents`
-- **THEN** the response lists one entry per configured agent (`id` = the
-  config key, `display` = its display name) plus one entry for the native
-  kernel (`id = "native"`), each with `reachable`, an optional `cause` when
-  unreachable, and an optional `version`; no `driver` or
-  backend-implementation field appears in the payload
+- **THEN** the response lists one entry for the native kernel (`id =
+  "native"`) plus one entry per agents-store row (`id` = the store row id —
+  config-seeded or UI-created, `display` = its display name), each with
+  `reachable`, an optional `cause` when unreachable, and an optional
+  `version`; no `driver` or backend-implementation field appears in the
+  payload
+
+#### Scenario: agents CRUD mutations reach the store
+
+- **WHEN** the browser creates, updates, or deletes an agent through
+  `POST /api/agents`, `PUT /api/agents/{id}`, or `DELETE /api/agents/{id}`
+- **THEN** the mutation commits to the agents store and a subsequent
+  `GET /api/agents` reflects it without a WebUI or core restart
 
 #### Scenario: create session requires an explicit agent
 
@@ -966,11 +977,13 @@ webui 在为会话派生 acp 子进程（web_spawn）时 SHALL 把 spawn failure
 - **THEN** 新 turn 正常进入 transcript；之前的 spawn-failed 错误事件保留为历史（不删除），但会话状态恢复为非 spawn-failed
 
 ### Requirement: 设置弹窗分区与缺省首项
-设置弹窗 SHALL 暴露分区导航，分区 SHALL 按下列顺序排列：`Generic` → `Appearance` →（组间分隔线）`Services` → `Models` →（弹性留白 + 组间分隔线，压底）`Env Vars` · `About`。打开弹窗时缺省聚焦 `Generic` 分区；用户上次停留分区 SHALL 在新会话首次打开时被记住（localStorage），之后打开仍按记忆回到上次分区；记忆中的值若已不存在于分区表（如旧值 `settings`），SHALL 回退到缺省分区。
+设置弹窗 SHALL 暴露分区导航，分区 SHALL 按下列顺序排列：`Generic` → `Appearance` →（组间分隔线）`Services` → `Models` → `Agents` →（弹性留白 + 组间分隔线，压底）`Env Vars` · `About`。打开弹窗时缺省聚焦 `Generic` 分区；用户上次停留分区 SHALL 在新会话首次打开时被记住（localStorage），之后打开仍按记忆回到上次分区；记忆中的值若已不存在于分区表（如旧值 `settings`），SHALL 回退到缺省分区。
 
 导航项 SHALL 提供足够的点击目标与选中可见性：行高约 36px、字号不低于 0.875rem、整行 hover 反馈、当前项以左侧 accent 竖条标示。
 
 `Generic` 分区 SHALL 收敛为纯通用可配置项分区，不再承载环境变量表；在语言切换等偏好落地前，主区 SHALL 呈现说明占位文案（指明偏好项后续提供）。
+
+`Agents` 分区 SHALL 承载 agent 目录管理（见 agent-settings 能力）：builtIn `native` 行只读恒在，其余条目可增删改；创建/编辑表单提供 `claude` / `opencode` / 自定义 ACP 三种驱动形态，保存后免重启生效。
 
 `Env Vars` 分区 SHALL 承载环境变量只读表（数据来自 `GET /api/env`，见「环境变量只读展示」），与 `About` 同属底部只读参考组。
 
@@ -996,12 +1009,17 @@ webui 在为会话派生 acp 子进程（web_spawn）时 SHALL 把 spawn failure
 #### Scenario: 分区顺序与底部只读组
 
 - **WHEN** 设置弹窗渲染左导航
-- **THEN** 分区按 `Generic → Appearance → Services → Models → Env Vars · About` 排列，`Appearance` 与 `Services` 之间有组间分隔线；`Env Vars` 与 `About` 通过弹性留白压在导航底部、上方有分隔线，与功能区视觉分离
+- **THEN** 分区按 `Generic → Appearance → Services → Models → Agents → Env Vars · About` 排列，`Appearance` 与 `Services` 之间有组间分隔线；`Env Vars` 与 `About` 通过弹性留白压在导航底部、上方有分隔线，与功能区视觉分离
 
 #### Scenario: 分区顺序与 About 压底
 
 - **WHEN** 设置弹窗渲染左导航
-- **THEN** 功能分区按 `Generic → Appearance → Services → Models` 排列，`About` 与 `Env Vars` 同处底部只读组、整体通过弹性留白压底且上方有分隔线
+- **THEN** 功能分区按 `Generic → Appearance → Services → Models → Agents` 排列，`About` 与 `Env Vars` 同处底部只读组、整体通过弹性留白压底且上方有分隔线
+
+#### Scenario: 聚焦 Agents 分区
+
+- **WHEN** 操作员聚焦 `Agents` 分区
+- **THEN** 主区列出 builtIn `native` 行（只读）与全部 agent 条目（可编辑、可删除），并提供新建入口（`claude` / `opencode` / 自定义 ACP 三种驱动形态）
 
 #### Scenario: Settings 分区总览
 
