@@ -86,7 +86,7 @@ When an upgrade (non-dry-run, non-rollback) just completed and the freshly start
 ### Requirement: Control RPC transport and authentication
 
 The control plane SHALL speak JSON-Lines over a Unix domain socket at
-`$XDG_RUNTIME_DIR/sebas/control.sock` (fallback `$TMPDIR/sebas/uid<uid>/`),
+`<SEBAS_HOME>/run/control.sock` (the sebas home's run directory),
 mode 0600, one task per accepted stream. Every envelope SHALL carry
 `version` (must be 1), a `secret` matching the watchdog's per-instance
 startup secret, and an `actor` of either `Cli { uid }` or
@@ -106,6 +106,14 @@ invalidates outstanding clients.
 
 - **WHEN** a client sends an envelope whose actor field claims `system`
 - **THEN** deserialization rejects it before any handler runs
+
+#### Scenario: endpoint follows the sebas home
+
+- **WHEN** `SEBAS_HOME` is pinned and the watchdog starts with no explicit
+  socket override
+- **THEN** the control socket is created at `<SEBAS_HOME>/run/control.sock`
+- **AND** no path under `XDG_RUNTIME_DIR` or a per-uid temporary directory
+  is consulted
 
 ### Requirement: Control request surface
 

@@ -8,13 +8,13 @@ Owns the SQLite-backed domain state of sebas: where the database lives, how sche
 
 ### Requirement: Database location and single-writer ownership
 
-The domain state SHALL live in a set of purpose-layered SQLite databases inside a single state directory, each opened in WAL mode, rather than in one undifferentiated database. Layering SHALL follow a two-level rule: first by **writing process** — each database SHALL have exactly one writer, and a process that is not a database's writer SHALL NOT open it, accessing that state exclusively through the core channel state methods; then, within the core's own databases, by **growth characteristic** — bounded system configuration (providers, model aliases, card and runtime settings, whose row count is decided by hand-written configuration) SHALL be separated from user data that grows with use (projects, the session map, and the session and message content that follows it). Paths SHALL expand a leading `~/`. All mutations SHALL be applied by the owning process's state store, serialized one at a time per database. Because the databases are layered, an operation that rebuilds or resets one of them SHALL NOT affect the other.
+The domain state SHALL live in a set of purpose-layered SQLite databases inside the single sebas home directory (`SEBAS_HOME`, defaulting to `~/.sebas`), each opened in WAL mode, rather than in one undifferentiated database. Layering SHALL follow a two-level rule: first by **writing process** — each database SHALL have exactly one writer, and a process that is not a database's writer SHALL NOT open it, accessing that state exclusively through the core channel state methods; then, within the core's own databases, by **growth characteristic** — bounded system configuration (providers, model aliases, card and runtime settings, whose row count is decided by hand-written configuration) SHALL be separated from user data that grows with use (projects, the session map, and the session and message content that follows it). Database paths SHALL expand a leading `~/`. All mutations SHALL be applied by the owning process's state store, serialized one at a time per database. Because the databases are layered, an operation that rebuilds or resets one of them SHALL NOT affect the other.
 
 #### Scenario: Environment override relocates the database
 
 - **WHEN** the environment variable for one database points to a custom path
 - **THEN** the owning process opens that database at that path
-- **AND** the other databases keep resolving inside the state directory
+- **AND** the other databases keep resolving inside the sebas home
 
 #### Scenario: Tilde paths expand to home
 

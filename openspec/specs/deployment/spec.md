@@ -21,12 +21,12 @@ The role SHALL select its behavior from the `sebas_action` variable with exactly
 
 ### Requirement: Uninstall removes service, binaries, data, and user
 
-The uninstall flow SHALL converge the target host to "sebas 从未存在"：stop and remove the systemd service, remove both managed binaries, delete the data and secret surface, and remove the deploy user with its home. Every step SHALL be idempotent — re-running uninstall on an already-clean host SHALL succeed without errors — and tolerate partial states (service already gone, binary already missing). The flow SHALL use `sebas service --uninstall` as the authoritative teardown step when the binary is present; when it is absent, the role SHALL fall back to direct systemctl stop/disable plus unit-file removal. The data cleanup SHALL include the data directory (sessions DB, `core.secret`, downloads, usage logs), the rendered config file, and `~/.config/sebas`. The deploy user SHALL be removed together with its home directory. Cleanup of controller-side temporary artifacts (downloaded tarball and extraction directory under `/tmp`) SHALL run on the control node and remain best-effort — its failure SHALL NOT fail the play.
+The uninstall flow SHALL converge the target host to "sebas 从未存在"：stop and remove the systemd service, remove both managed binaries, delete the data and secret surface, and remove the deploy user with its home. Every step SHALL be idempotent — re-running uninstall on an already-clean host SHALL succeed without errors — and tolerate partial states (service already gone, binary already missing). The flow SHALL use `sebas service --uninstall` as the authoritative teardown step when the binary is present; when it is absent, the role SHALL fall back to direct systemctl stop/disable plus unit-file removal. The data cleanup SHALL include the sebas home directory (the state databases, `core.secret`, sockets and run state, media downloads, usage logs, and upgrade artifacts), the rendered config file wherever it was rendered, and `~/.config/sebas` from legacy installs. The deploy user SHALL be removed together with its home directory. Cleanup of controller-side temporary artifacts (downloaded tarball and extraction directory under `/tmp`) SHALL run on the control node and remain best-effort — its failure SHALL NOT fail the play.
 
 #### Scenario: Full uninstall on a live install
 
 - **WHEN** uninstall runs against a host with a running sebas service
-- **THEN** the service is stopped and its unit removed, both binaries are gone, the data directory and config (including `core.secret`) are deleted, the deploy user and home are removed, and the play reports success
+- **THEN** the service is stopped and its unit removed, both binaries are gone, the sebas home and rendered config (including `core.secret`) are deleted, the deploy user and home are removed, and the play reports success
 
 #### Scenario: Uninstall is idempotent
 

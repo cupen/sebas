@@ -32,7 +32,18 @@ independent authority.
   value on the next snapshot or event
 
 ### Requirement: Channel transport and authentication
-The core SHALL expose the channel on a local IPC endpoint at a configurable path defaulting to `$XDG_RUNTIME_DIR/sebas/core.sock` (falling back to a per-uid temporary directory when `XDG_RUNTIME_DIR` is unset): a Unix domain socket with owner-only permissions (0600) on Unix, mapped deterministically to a named pipe (`\\.\pipe\sebas/<path>`) on Windows. On Unix every connection SHALL be authenticated by both peer credentials — the connecting uid MUST equal the core's own uid — and a shared secret supplied out of band, in the same posture as the watchdog control RPC; on Windows, where peer-uid credentials are not available, the shared secret plus the default named-pipe ACL carry the authentication (peer-uid checks are a Unix-only guarantee). A connection failing either check SHALL be rejected and closed without processing any request. The channel SHALL NOT be exposed over TCP.
+The core SHALL expose the channel on a local IPC endpoint at a configurable
+path defaulting to `<SEBAS_HOME>/run/core.sock` (the sebas home's run
+directory): a Unix domain socket with owner-only permissions (0600) on Unix,
+mapped deterministically to a named pipe (`\\.\pipe\sebas/<path>`) on
+Windows. On Unix every connection SHALL be authenticated by both peer
+credentials — the connecting uid MUST equal the core's own uid — and a
+shared secret supplied out of band, in the same posture as the watchdog
+control RPC; on Windows, where peer-uid credentials are not available, the
+shared secret plus the default named-pipe ACL carry the authentication
+(peer-uid checks are a Unix-only guarantee). A connection failing either
+check SHALL be rejected and closed without processing any request. The
+channel SHALL NOT be exposed over TCP.
 
 #### Scenario: foreign uid rejected
 
@@ -54,6 +65,13 @@ The core SHALL expose the channel on a local IPC endpoint at a configurable path
 - **WHEN** the core starts and a socket file already exists at the path with no
   live listener behind it
 - **THEN** the core removes the stale file and binds a fresh socket
+
+#### Scenario: endpoint follows the sebas home
+
+- **WHEN** `SEBAS_HOME` is pinned and the core starts with no explicit
+  channel path configured
+- **THEN** the channel socket is created at `<SEBAS_HOME>/run/core.sock`
+- **AND** no path under `XDG_RUNTIME_DIR` is consulted
 
 ### Requirement: Session observation methods
 

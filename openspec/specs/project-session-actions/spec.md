@@ -267,11 +267,13 @@ A project row SHALL expose exactly two hover-revealed affordances, in order: an 
 
 A rail session row SHALL display a name for the session: if the operator has set a label for the session, the label SHALL be shown; otherwise, if an auto-generated title exists, the title SHALL be shown; otherwise the preview of the session's first user message SHALL be used. A session that has neither a label, nor an auto-generated title, nor any user message (a zero-turn placeholder) SHALL fall back to its short session identifier. Names longer than the implementation-defined display cap SHALL be truncated with an ellipsis, while the row's hover title SHALL carry the full text. When the first message is sent to a placeholder session, its name SHALL update from the identifier to the message preview without a page reload — unless an operator label is set, which SHALL stay stable. The operator SHALL be able to set and change the label from the rail (row actions), and the rail's session dialogs SHALL name the session by the same label as its row.
 
-The workbench focused-session header SHALL name the session by the same chain (operator label, then auto-generated title, then first-message preview, then identifier) — it SHALL NOT display a raw session identifier or its truncation while any naming source exists.
+The workbench focused-session header SHALL name the session by the same chain (operator label, then auto-generated title, then first-message preview, then identifier) — it SHALL NOT display a raw session identifier or its truncation while any naming source exists. A rename SHALL reach the focused-session header through the same live update as the rail row: after a confirmed label write, the header SHALL show the new label without a page reload and without waiting for the next turn.
 
 Restoring an archived session SHALL preserve the naming inputs captured at archive time: the first-prompt preview and the operator label (if any) SHALL survive the restore, so the restored row is named exactly as before archival and never regresses to the raw session identifier while a naming source exists.
 
 A label write that the server accepts SHALL reach connected clients as a session update event, and every connected client's rail SHALL re-render that row's name from the event without a page reload — the same liveness the first-message preview already enjoys, regardless of whether the write came from the rail dialog or the API. The rename dialog SHALL persist exactly the value it displays: submitting the dialog SHALL deliver the shown text to the label write path, and a confirmed save SHALL never leave the stored label unchanged while the dialog rendered a non-empty value.
+
+Naming inputs produced by a turn (the first-message preview appearing, the auto-title arriving) SHALL update the rail row and the focused-session header live through the session update stream, without a page reload; a row that keeps a stale name until the next full list fetch SHALL be treated as a violation.
 
 #### Scenario: named by the first message
 
@@ -293,6 +295,11 @@ A label write that the server accepts SHALL reach connected clients as a session
 - **WHEN** the operator sends the first message into a placeholder session without a label
 - **THEN** the row's name becomes the message preview without a page reload
 
+#### Scenario: preview stays anchored to the first message
+
+- **WHEN** a session without label or auto-title receives a second, different user message
+- **THEN** the row name and the focused-session header keep showing a preview of the FIRST user message — they SHALL NOT drift to the latest message
+
 #### Scenario: operator label takes precedence
 
 - **WHEN** the operator sets a label on a session that already has messages
@@ -303,6 +310,11 @@ A label write that the server accepts SHALL reach connected clients as a session
 - **WHEN** a session has no operator label and its auto-generated title has arrived
 - **THEN** the rail row and the focused-session header show the title (not the preview or the identifier), updated live without a page reload
 
+#### Scenario: turn-produced naming updates live
+
+- **WHEN** a turn produces a naming change (first preview appears or an auto-title arrives) while the rail is open
+- **THEN** the affected row (and the focused header, if applicable) re-renders the new name without a page reload or list refetch
+
 #### Scenario: renaming from the rail
 
 - **WHEN** the operator picks rename in a rail session row's overflow menu and submits a new label
@@ -312,6 +324,11 @@ A label write that the server accepts SHALL reach connected clients as a session
 
 - **WHEN** the operator types a non-empty name into the rail's rename dialog and confirms the save
 - **THEN** the stored label equals the displayed text, and a subsequent page load shows the same name (a confirmed save is never a silent no-op)
+
+#### Scenario: header follows the rename immediately
+
+- **WHEN** the operator renames the focused session
+- **THEN** the focused-session header shows the new label without a page reload, instead of continuing to display the identifier truncation
 
 #### Scenario: label writes through any path update the row live
 
@@ -326,6 +343,8 @@ A label write that the server accepts SHALL reach connected clients as a session
 ### Requirement: Sessions are auto-titled from the first prompt
 
 On a session's first user message (a spawn carrying a prompt, or the first message into a placeholder), the system SHALL asynchronously generate a title from that message with a one-shot LLM call and store it as the session's auto-title: the call SHALL use the provider store's default selection (default provider and model), SHALL NOT block or delay the message being dispatched to the agent, and SHALL NOT overwrite an operator label. When the title is produced it SHALL reach connected clients through the normal session update liveness. If no default provider is configured, or the call fails, the system SHALL fall back silently — the first-message preview remains the name, and no error is surfaced to the operator. The title SHALL be sanitized to a single line with a display-length cap. A cleared operator label SHALL fall back per the naming rule without triggering re-generation.
+
+The fallback preview SHALL be computed from the session's FIRST user message and SHALL stay anchored to it: later messages SHALL NOT move the fallback name. The naming chain and its liveness rules are defined by「Session rows are named by the first prompt」.
 
 #### Scenario: title arrives without delaying the first turn
 
@@ -351,3 +370,22 @@ On a session's first user message (a spawn carrying a prompt, or the first messa
 
 - **WHEN** the generated title contains newlines or exceeds the display cap
 - **THEN** the stored title is collapsed to a single line and truncated to the cap
+
+#### Scenario: fallback preview does not follow the latest message
+
+- **WHEN** the auto-title path fell back to the preview and the session receives subsequent messages
+- **THEN** the name remains the first message's preview across turns and reloads
+
+### Requirement: Project path input fidelity
+
+项目注册的路径输入 SHALL 保真：操作员键入的路径在提交与校验前不得被静默删除或改写任何字符（含 Windows 路径分隔符 `\`）。校验反馈 SHALL 对键入突发做去抖——不得每次键击都发起注定被拒的网络请求，也不得在提交前闪烁与真实原因不符的错误文案；拒绝时 SHALL 陈述真实原因。
+
+#### Scenario: typed Windows path reaches validation intact
+
+- **WHEN** 操作员在路径输入框键入含反斜杠的路径并提交
+- **THEN** 提交的路径与键入字符逐一一致，校验按真实结果通过或给出真实原因的失败提示
+
+#### Scenario: no per-keystroke rejection storm
+
+- **WHEN** 操作员正在键入一个尚不完整的路径
+- **THEN** UI 不逐键击发起被 400 拒绝的请求，也不显示误导性错误（如「路径不存在」）直到提交或去抖窗口结束

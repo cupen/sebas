@@ -987,7 +987,7 @@ webui 在为会话派生 acp 子进程（web_spawn）时 SHALL 把 spawn failure
 
 `Env Vars` 分区 SHALL 承载环境变量只读表（数据来自 `GET /api/env`，见「环境变量只读展示」），与 `About` 同属底部只读参考组。
 
-`About` 分区 SHALL 分两段呈现：INSTANCE 段在上（工作区根目录 + 复制按钮、当前 default agent kind——读自运行时数据而非写死字面量；不呈现 default provider/model 行——创建预选不再依赖配置默认，见 agent-workbench「Model selector offers the backend catalog before any session」），BUILD 段在下（`/api/about` 的运行时构建信息）。
+`About` 分区 SHALL 分两段呈现：INSTANCE 段在上（工作区根目录 + 复制按钮、当前 default agent kind——读自运行时数据而非写死字面量；不呈现 default provider/model 行——创建预选不再依赖配置默认，见 agent-workbench「Model selector offers the backend catalog before any session」），BUILD 段在下（`/api/about` 的运行时构建信息——`build_time` / `git_branch` / `git_hash` 字段）。BUILD 段 SHALL 在版本 chip 之下依次呈现构建时间行与 Git 信息行：构建时间行以 UTC 口径呈现（`YYYY-MM-DD HH:mm` 分钟精度，附 UTC 标注）；Git 信息行独立一行，以 `分支名@短hash` 形态呈现。构建信息在编译期不可得（无 git 环境）时 SHALL 以 `unknown` 如实呈现，SHALL NOT 隐藏对应行。
 
 原 `Settings` 总览分区移除，其维护动作「全部进程重启」与「重置 Settings」SHALL 一并移除——逐服务 restart 由 Services 分区承载，不做广播式入口。
 
@@ -1024,7 +1024,7 @@ webui 在为会话派生 acp 子进程（web_spawn）时 SHALL 把 spawn failure
 #### Scenario: Settings 分区总览
 
 - **WHEN** 聚焦 `About` 分区
-- **THEN** 主区先呈现 INSTANCE 段——工作区根目录（路径 + 复制按钮）、default agent kind（只读，取真实运行时值），后呈现 BUILD 段（版本、commit、构建时间）；INSTANCE 段不含 default provider/model 行
+- **THEN** 主区先呈现 INSTANCE 段——工作区根目录（路径 + 复制按钮）、default agent kind（只读，取真实运行时值），后呈现 BUILD 段（版本 chip、构建时间行、Git 信息行）；INSTANCE 段不含 default provider/model 行
 
 #### Scenario: Generic 分区不再有环境变量表
 
@@ -1039,7 +1039,7 @@ webui 在为会话派生 acp 子进程（web_spawn）时 SHALL 把 spawn failure
 #### Scenario: About 分区承载实例信息
 
 - **WHEN** 聚焦 `About` 分区
-- **THEN** 主区先呈现 INSTANCE 段（工作区根目录 + 复制按钮、default agent kind 只读真实值），后呈现 BUILD 段（版本、commit、构建时间）
+- **THEN** 主区先呈现 INSTANCE 段（工作区根目录 + 复制按钮、default agent kind 只读真实值），后呈现 BUILD 段（版本 chip、构建时间行、Git 信息行）
 
 #### Scenario: About 不再呈现 default provider/model
 
@@ -1050,6 +1050,16 @@ webui 在为会话派生 acp 子进程（web_spawn）时 SHALL 把 spawn failure
 
 - **WHEN** 设置弹窗任意分区渲染
 - **THEN** 不存在「全部进程重启」与「重置 Settings」入口——原高危动作已随 `Settings` 总览分区删除，确认对话框随之消失；逐服务 restart 只在 Services 分区出现
+
+#### Scenario: BUILD 段呈现构建时间与 Git 信息
+
+- **WHEN** 已认证操作员聚焦 `About` 分区，`/api/about` 返回 `build_time` / `git_branch` / `git_hash`
+- **THEN** BUILD 段在版本 chip 之下呈现构建时间行（`YYYY-MM-DD HH:mm`，附 UTC 标注）与独立一行的 Git 信息（`分支名@短hash`）
+
+#### Scenario: 构建信息缺失时如实呈现 unknown
+
+- **WHEN** 二进制编译环境无 git 可用，构建信息字段为 `unknown`
+- **THEN** BUILD 段照实显示 `unknown`，对应行不隐藏、不报错
 
 ### Requirement: 全局核心可达性横幅
 
@@ -1577,3 +1587,150 @@ fatal、单个视图 / 能力不可用 = error、单个操作失败且可立即�
 
 - **WHEN** 登录态下 `/ws` 因鉴权被拒而断开（而非网络断开），且重连退避在运行
 - **THEN** 不弹出「服务器断开」warn 横幅（避免误导为服务故障）；页面就绪即重连并清空退避，连接恢复后一切照常
+
+### Requirement: 项目注册与移除后的焦点一致性
+
+Registering a new project, removing a project, or switching the displayed
+project in the rail SHALL reconcile the focused-session view with the rail's
+new state: if the currently focused session belongs to a project that was
+removed (or is no longer displayed), the workbench SHALL drop to the
+session-less empty state for the newly displayed project instead of
+continuing to render the stale session's conversation. The main panel SHALL
+NOT display a session whose project is absent from the rail while the rail
+shows a different project as current. The stale view MAY be restored by
+explicit operator action (selecting the session again where still
+available), never by inertia.
+
+#### Scenario: 注册新项目后主面板不残留旧会话
+
+- **WHEN** the operator focuses a session of project A, then registers
+  project B (the rail switches the displayed project to B)
+- **THEN** the workbench shows project B's empty state instead of project
+  A's focused conversation
+
+#### Scenario: 移除项目后主面板不残留
+
+- **WHEN** the operator removes the project that owns the currently focused
+  session
+- **THEN** the workbench drops to the session-less empty state (or the newly
+  displayed project's state), never a lingering view of the removed
+  project's session
+
+### Requirement: 关键操作回执
+
+Successful state-changing operator actions with no other visible effect
+SHALL produce a transient info-level acknowledgement through the
+notification layer, so the operator can confirm the action landed. At
+minimum this covers: archiving a session, restoring a session, registering
+a project, removing a project, renaming a session, and creating a session.
+Actions whose success is already visible in place (the rail row updates,
+the dialog closes on a visible new row) MAY keep the row update as the sole
+receipt; actions whose effect lands elsewhere or is otherwise easy to miss
+SHALL get the toast. The acknowledgement SHALL follow the existing
+notification-layer levels and stack rules.
+
+#### Scenario: 归档成功有回执
+
+- **WHEN** the operator confirms archiving a session
+- **THEN** a transient info acknowledgement naming the action appears (in
+  addition to the rail's History group updating)
+
+#### Scenario: 项目移除成功有回执
+
+- **WHEN** a project removal is confirmed and applied
+- **THEN** a transient info acknowledgement appears; a rejected removal
+  surfaces its typed failure instead
+
+### Requirement: About 分区的 toolchain 探测
+
+The About section SHALL attempt to detect the Rust toolchain version and
+display the result. When detection fails or the toolchain is absent, the
+field SHALL state an explicit unavailable reason (for example「未安装」or
+「探测失败」) instead of a bare「未知」placeholder, so the operator can
+distinguish「没装」from「没探测到」. The remainder of the About fields
+(version, uptime, default agent, router listen, provider count) keep their
+current behavior; richer build segments remain owned by the
+`add-about-build-info` change.
+
+#### Scenario: toolchain 存在时显示版本
+
+- **WHEN** the runtime has a detectable Rust toolchain and the operator
+  opens About
+- **THEN** the toolchain field shows the detected version
+
+#### Scenario: toolchain 缺失时显示明确原因
+
+- **WHEN** detection fails or no toolchain is installed
+- **THEN** the field names the cause explicitly instead of showing「未知」
+
+### Requirement: Models 页 provider 来源可解释
+
+The Settings→Models page SHALL make the two provider sources legible:
+providers managed in the store AND providers seeded from `config.toml`
+SHALL both be visible, with each row indicating its source (store-managed
+vs config-seeded). A config-seeded provider SHALL NOT silently vanish from
+the page while it governs session behavior; if config-seeded entries are
+read-only in the page, the page SHALL say so. The New-session model catalog
+and the Models page SHALL present a consistent picture of what providers
+exist.
+
+#### Scenario: config 来源的 provider 可见
+
+- **WHEN** `config.toml` seeds a provider and the operator opens the Models
+  page
+- **THEN** that provider appears in the list marked as config-sourced, and
+  the page indicates whether it is editable in place
+
+#### Scenario: 创建对话框与 Models 页一致
+
+- **WHEN** the New-session dialog's provider/model catalog is shown
+  alongside the Models page
+- **THEN** both surfaces reflect the same set of providers (or the Models
+  page explains the difference)
+
+### Requirement: Transcript ingest stays responsive under burst
+
+单回合摄入突发转写条目（数百条量级）SHALL 不长时间阻塞主线程——不出现秒级以上的交互/快照冻结；渲染层可采用摘要或虚拟化，但摄入完成后完整转写 SHALL 保持可滚动、可读。
+
+#### Scenario: flood turn stays interactive
+
+- **WHEN** 一个回合连续投递约 1200 个条目
+- **THEN** 摄入期间页面保持可交互（无多秒级冻结），摄入完成后转写完整且可滚动
+
+### Requirement: Settings surface detail corrections
+
+设置面的细节行 SHALL 如实、可读地呈现：About 的 Rust toolchain 行 SHALL 呈现探测值；配置了最低版本界限时 SHALL 一并呈现，未配置时 SHALL NOT 渲染悬空的界限标签（不得出现有标签无值的行）；Env Vars 表格在常规宽度下 SHALL 保持每列可读（不得一词一行挤压、长值不得贴面板边缘）；Add-project 弹窗的目录列表、分隔符与相邻区块 SHALL 在任意滚动位置保持清晰间距。
+
+#### Scenario: toolchain row shows its bound
+
+- **WHEN** 操作员打开 Settings → About
+- **THEN** Rust toolchain 行显示探测到的工具链版本；若配置了要求的最低版本则同 show 其界限，未配置则不出现悬空界限标签
+
+#### Scenario: env vars table readable
+
+- **WHEN** Env Vars 表格渲染含长值的行
+- **THEN** 各列保持可读，无一词一行换行、无边缘贴碰
+
+#### Scenario: add-project modal spacing
+
+- **WHEN** 目录列表滚动到最后一行
+- **THEN** 分隔符与相邻区块之间仍保持清晰间距，不与列表底边拥挤
+
+### Requirement: Workbench operational polish
+
+工作台运营细节 SHALL 保持可信：会话行的 last active 计时 SHALL 持续更新（不冻结在创建值）；多条 toast SHALL 依次堆叠而不相互重叠遮盖；同名/同 id 的 agent 或场景重复创建 SHALL 有可见提示；工作台模型 chip SHALL 如实呈现会话生效模型及其来源（fake/测试模型不冒充真实模型名）。
+
+#### Scenario: last active keeps ticking
+
+- **WHEN** 会话列表展示超过一分钟
+- **THEN** 行内 last active 计时随时间更新，不冻结
+
+#### Scenario: toasts stack visibly
+
+- **WHEN** 短时间内连续触发多条操作反馈
+- **THEN** toast 依次堆叠呈现，任一条不被其它条遮挡致不可读
+
+#### Scenario: duplicate creation warns
+
+- **WHEN** 操作员以已存在的 id 创建 agent
+- **THEN** UI 给出可见的重名提示，不静默产生歧义条目

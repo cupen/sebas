@@ -81,3 +81,45 @@ A composer submission beginning with `/` SHALL be delivered to the agent unchang
 
 - **WHEN** the operator submits a slash command while the session's turn is in flight
 - **THEN** the command follows the existing queued-submission path and executes after the current turn
+
+### Requirement: 命令提交回执可见
+
+Submitting an advertised slash command (including the built-in `/compact`)
+SHALL produce a visible receipt in the submitting client: either a
+transcript entry for the command invocation, or a notification-layer
+acknowledgement naming the command. Silence — no transcript entry, no
+notification, no state change the operator can see beyond `last active` —
+SHALL NOT satisfy this requirement. The receipt SHALL distinguish accepted
+commands from rejected ones: a rejected command keeps the existing inline
+rejection, an accepted one gets a positive receipt.
+
+#### Scenario: /compact 提交有回执
+
+- **WHEN** the operator submits `/compact` to a started session
+- **THEN** a visible receipt (transcript entry or notification naming the
+  command) appears without a page reload
+
+#### Scenario: 接受与拒绝可区分
+
+- **WHEN** an accepted command and a rejected command are each submitted
+- **THEN** the accepted one produces a positive receipt while the rejected
+  one produces the existing typed inline rejection
+
+### Requirement: Command submission has a transcript receipt and one dispatch path
+
+提交受支持的 slash 命令 SHALL 在转写产生可见的回执条目（不得只有瞬态 toast）；命令的产出 SHALL 作为独立条目呈现，不得并入前一条 assistant 段落。composer 对以 `/` 开头的文本 SHALL 单一分派路径——经键盘提交与经发送按钮提交得到一致的命令/普通消息判定。
+
+#### Scenario: compact leaves a receipt
+
+- **WHEN** 操作员提交 /compact
+- **THEN** 转写出现该命令提交的回执条目，命令产出（若有）作为独立条目呈现
+
+#### Scenario: enter and button dispatch identically
+
+- **WHEN** 同一段 slash 文本分别经键盘与发送按钮提交
+- **THEN** 两次走同一分派路径（按命令或按普通消息的判定一致）
+
+#### Scenario: unknown command feedback
+
+- **WHEN** 操作员提交该会话 agent 不支持的 slash 命令
+- **THEN** UI 给出可见的不支持反馈，输入内容保留
