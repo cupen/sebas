@@ -23,24 +23,14 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 
 WORKDIR /app
 
-COPY Cargo.toml Cargo.lock ./
-COPY src ./src
-COPY tests ./tests
-COPY xtask ./xtask
-COPY sebas-router ./sebas-router
-COPY sebas-feishu ./sebas-feishu
-COPY sebas-acp ./sebas-acp
-COPY sebas-dispatch ./sebas-dispatch
-COPY sebas-im ./sebas-im
-COPY sebas-channels ./sebas-channels
-COPY sebas-agent ./sebas-agent
-COPY sebas-ipc ./sebas-ipc
-COPY sebas-webui ./sebas-webui
-# sebas-startup / sebas-node 是 workspace 成员：cargo 解析 workspace 需要每个成员的
-# 清单存在，缺 COPY 会让构建在解析阶段失败。镜像带双二进制：主控 `sebas` 与
-# 执行节点 `sebas-node`（节点机 `docker run <image> sebas-node …` 覆盖 command 使用）。
-COPY sebas-startup ./sebas-startup
-COPY sebas-node ./sebas-node
+# 整仓拷贝 + .dockerignore 瘦身：cargo 解析 workspace 需要每个成员的清单存在，
+# 逐成员 COPY 的清单已经两次漏掉新成员（sebas-node-link、后来的 sebas-db 系），
+# 每次漏都让镜像构建在解析阶段以 101 失败。整仓拷贝对新成员免疫；
+# .dockerignore 排除 target/、node_modules、**/dist 等，context 保持在几 MB。
+COPY . .
+
+# 镜像带双二进制：主控 `sebas` 与执行节点 `sebas-node`
+# （节点机 `docker run <image> sebas-node …` 覆盖 command 使用）。
 
 RUN cargo build --release --locked --bin sebas
 # sebas-node 是独立二进制的执行节点。必须带 -p：`--bin` 只在默认包里解析
