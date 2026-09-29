@@ -863,6 +863,7 @@ const AGENT_WRITABLE_FIELDS: &[&str] = &[
     "startup_timeout_secs",
     "idle_kill_secs",
     "work_dir",
+    "sessions_dir",
 ];
 
 /// PUT 载荷 → 合并后的 mutation item：body 键逐个覆盖 store 行同名字段，

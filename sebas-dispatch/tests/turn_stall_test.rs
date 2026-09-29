@@ -726,3 +726,58 @@ async fn parked_entry_and_exit_each_publish_updated_with_parked_count() {
         "permission resolution must emit an Updated frame"
     );
 }
+
+// （fix-webui-qa-round2 1.2，D-B215）激活语义的 seed（空 prompt）不是开轮：
+// 不起停滞时钟、不向转录注入空 prompt 条目。此前两者都做——空 prompt 条目
+// 让前端「已收到」回执相位恒真（composer 停止态、发送被阻塞），时钟 + 既有
+// 转录让看门狗把空闲拉起的会话误判成停滞回合，600s 后强收并注入「回合停滞」
+// 合成错误——崩溃会话重聚焦后最长 600s 无法发送的僵尸窗。
+#[tokio::test]
+async fn activation_seed_empty_prompt_opens_no_turn_and_starts_no_clock() {
+    let map = SessionMap::new();
+    let key = web_key("activate-idle");
+    let (router, _rx) = DispatchHandle::new(map);
+    router.set_turn_stall_timeout(600);
+
+    router
+        .map
+        .insert(key.clone(), Mapping::active("s-idle"))
+        .await
+        .unwrap();
+    router.seed_card("s-idle".to_string(), String::new()).await;
+
+    // 相位是 SEED（卡在），但没有停滞时钟——扫描看不见它。
+    assert_eq!(
+        router.card_state_status_emoji("s-idle").await.as_deref(),
+        Some(phase::SEED)
+    );
+    let facts = router.stall_registry().stalled_sessions().await;
+    assert!(
+        facts.iter().all(|f| f.session_id != "s-idle"),
+        "an activation seed must not arm the stall clock"
+    );
+
+    // 转录里没有空 prompt 条目（非空内容照常落账的对照在下面断言）。
+    let turns = router.session_turns(&key, 0).await.unwrap();
+    assert!(
+        turns.is_empty(),
+        "activation seed must not push a prompt transcript entry"
+    );
+
+    // 真 prompt 的 seed（首轮开轮）照旧起时钟 + 落 prompt 条目。
+    let key2 = web_key("activate-real");
+    router
+        .map
+        .insert(key2.clone(), Mapping::active("s-real"))
+        .await
+        .unwrap();
+    router.seed_card("s-real".to_string(), "run".into()).await;
+    let turns2 = router.session_turns(&key2, 0).await.unwrap();
+    assert_eq!(turns2.len(), 1, "real seed pushes the prompt entry");
+    router.stall_registry().rewind_last_event_for_test("s-real", 3600).await;
+    let facts = router.stall_registry().stalled_sessions().await;
+    assert!(
+        facts.iter().any(|f| f.session_id == "s-real"),
+        "a real seed arms the stall clock as before"
+    );
+}

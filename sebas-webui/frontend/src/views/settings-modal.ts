@@ -344,6 +344,16 @@ export class SebasSettingsModal extends LitElement {
     shape: '' | 'claude' | 'opencode' | 'custom'
     path: string
     commandText: string
+    /** （fix-webui-qa-round2 2.4，M-A4）sessions 目录覆盖（claude 形态）。 */
+    sessionsDir: string
+    /** （fix-webui-qa-round2 2.4，M-A4）工作目录覆盖。 */
+    workDir: string
+    /**
+     * （fix-webui-qa-round2 2.4，M-A4）启动参数：空格分隔的 argv 词元
+     * （与 config `args = ["--flag", "value"]` 数组逐词对应；编辑回填 =
+     * 存量数组按空格 join）。
+     */
+    argsText: string
     error: string
   } | null = null
   /** agent 删除二次确认对话框（error 就地承载拒绝文案）。 */
@@ -1066,6 +1076,18 @@ export class SebasSettingsModal extends LitElement {
       width: 100%;
       border-collapse: collapse;
       font-size: 0.85rem;
+      /* （fix-webui-qa-round2 3.1，D-A10）固定布局 + 定宽列：USED FOR 不再被
+         VALUE 的 nowrap 挤成一词一行，长值换行且不贴面板右缘。 */
+      table-layout: fixed;
+    }
+    .env-table th:nth-child(1) {
+      width: 34%;
+    }
+    .env-table th:nth-child(2) {
+      width: 38%;
+    }
+    .env-table th:nth-child(3) {
+      width: 28%;
     }
     .env-table th {
       text-align: left;
@@ -1093,12 +1115,16 @@ export class SebasSettingsModal extends LitElement {
     }
     .env-table .what {
       color: var(--sebas-text-dim);
+      overflow-wrap: break-word;
     }
     .env-table .value {
       font-family: var(--sebas-font-mono);
       font-size: 0.75rem;
       color: var(--sebas-text-faint);
-      white-space: nowrap;
+      /* （D-A10）长值换行呈现 + 右缘留白，不再 nowrap 顶到面板边。 */
+      white-space: normal;
+      overflow-wrap: anywhere;
+      padding-right: var(--sebas-space-4);
     }
     /* Skills 分区（add-agent-skills 5.2）：条目列表（名字/invalid 徽标/
      * description/attachment 数/删除）+ 点开的预览（markdown 渲染 + 随附
@@ -2457,39 +2483,85 @@ export class SebasSettingsModal extends LitElement {
       shape: 'claude',
       path: 'claude',
       commandText: 'opencode acp',
+      sessionsDir: '',
+      workDir: '',
+      argsText: '',
       error: '',
     }
   }
 
   private openAgentEdit(a: AgentKindInfo): void {
     this.agentAction = null
+    // （fix-webui-qa-round2 2.4，D-A4）display 回填以未兜底的 display_raw
+    // 为准——`display` 缺省回退 id，「显式设置为与 id 相同」与「从未设置」
+    // 在它面前可区分（此前回填丢失正是 QA 观测的保真缺陷）。
+    const display = a.display_raw ?? (a.display !== a.id ? a.display : '')
     this.agentForm = {
       mode: 'edit',
       id: a.id,
-      display: a.display !== a.id ? a.display : '',
+      display,
       shape: '',
       path: 'claude',
       commandText: 'opencode acp',
+      sessionsDir: a.sessions_dir ?? '',
+      workDir: a.work_dir ?? '',
+      argsText: (a.args ?? []).join(' '),
       error: '',
     }
   }
 
+  /** 启动参数输入 → argv 数组（空格分隔词元；空白 = null = 清除/缺省）。 */
+  private parseArgsText(text: string): string[] | null {
+    const argv = text.trim().split(/\s+/).filter((s) => s.length > 0)
+    return argv.length > 0 ? argv : null
+  }
+
   /** 表单形态 → 提交载荷（create 全量 launch 定义；edit 只交改动面——
-   * 形态保持「不改」时不携带任何 launch 字段，PUT 合并语义保留存量）。 */
+   * 形态保持「不改」时携带 display 与目录/参数三个 spawn 字段（PUT 合并
+   * 语义逐字段保留/清除存量），不携带形态自身的 path/command 改动）。 */
   private agentFormPayload(form: NonNullable<typeof this.agentForm>): Partial<AgentLaunchPayload> {
-    if (form.mode === 'edit' && form.shape === '') {
-      // 不改 launch 定义：只提交 display 改动面（清空 = 回退 id 展示）。
-      return { display: form.display.trim() || null }
-    }
     const display = form.display.trim() || null
+    const args = this.parseArgsText(form.argsText)
+    const workDir = form.workDir.trim() || null
+    const sessionsDir = form.sessionsDir.trim() || null
+    if (form.mode === 'edit' && form.shape === '') {
+      // 不改 launch 定义形态：display + spawn 目录/参数改动面（spec「编辑
+      // 表单以存储值预填全部字段」的可写半边）。sessions_dir 是 claude 形态
+      // 的合法 launch 键——review P3：不改形态臂此前静默丢弃它。
+      const isClaude =
+        form.mode !== 'edit' ||
+        (this.agentsCatalog ?? []).find((x) => x.id === form.id)?.driver_raw === 'claude'
+      return isClaude ? { display, work_dir: workDir, sessions_dir: sessionsDir, args } : { display, work_dir: workDir, args }
+    }
     if (form.shape === 'claude') {
-      return { driver: 'claude', path: form.path.trim() || 'claude', display }
+      return {
+        driver: 'claude',
+        path: form.path.trim() || 'claude',
+        args,
+        display,
+        work_dir: workDir,
+        sessions_dir: sessionsDir,
+      }
     }
     if (form.shape === 'opencode') {
-      return { driver: 'acp', path: 'opencode', args: ['acp'], display }
+      const extra = args ?? []
+      return { driver: 'acp', path: 'opencode', args: ['acp', ...extra], display, work_dir: workDir }
     }
     const argv = form.commandText.trim().split(/\s+/).filter((s) => s.length > 0)
-    return { driver: 'acp', path: argv[0] ?? '', args: argv.slice(1), display }
+    return { driver: 'acp', path: argv[0] ?? '', args: [...argv.slice(1), ...(args ?? [])], display, work_dir: workDir }
+  }
+
+  /**
+   * （fix-webui-qa-round2 3.3，C10）重名创建的可见提示：新建 id 与目录中
+   * 既有条目同名（含 tombstone 之外的活行）= 保存将覆盖其启动定义——
+   * 表单就地点名，不再静默产生歧义条目。编辑模式天然覆盖自身 id，不提示。
+   */
+  private duplicateAgentWarning(form: NonNullable<typeof this.agentForm>): string | null {
+    if (form.mode !== 'create') return null
+    const id = form.id.trim()
+    if (!id) return null
+    const exists = (this.agentsCatalog ?? []).some((a) => a.id === id)
+    return exists ? `目录中已存在 agent「${id}」——保存将覆盖它的启动定义（删除过的 id 会借此复活）。` : null
   }
 
   private async submitAgentForm(): Promise<void> {
@@ -2666,6 +2738,53 @@ export class SebasSettingsModal extends LitElement {
                   : nothing}
                 ${form.shape === 'opencode'
                   ? html`<p class="prefs-placeholder">命令已预填：<code>opencode acp</code></p>`
+                  : nothing}
+                <!-- （fix-webui-qa-round2 2.4，M-A4）spawn 关键字段：sessions
+                     目录（claude 形态独有——acp 驱动没有该概念）、工作目录与
+                     启动参数。留空 = 缺省（PUT 语义：null 清除存量）。自定义
+                     ACP 的参数就是命令行本身，args 只作追加。 -->
+                ${(form.shape === 'claude' || (form.mode === 'edit' && form.shape === '' && (this.agentsCatalog ?? []).find((x) => x.id === form.id)?.driver_raw === 'claude'))
+                  ? html`
+                      <wa-input
+                        label="Sessions dir (optional)"
+                        placeholder="~/.claude/sessions"
+                        .value=${form.sessionsDir}
+                        @input=${(ev: Event) =>
+                          (this.agentForm = {
+                            ...form,
+                            sessionsDir: (ev.target as HTMLInputElement).value,
+                          })}
+                      ></wa-input>
+                    `
+                  : nothing}
+                <wa-input
+                  label="Work dir (optional)"
+                  placeholder="agent 子进程的工作目录"
+                  .value=${form.workDir}
+                  @input=${(ev: Event) =>
+                    (this.agentForm = {
+                      ...form,
+                      workDir: (ev.target as HTMLInputElement).value,
+                    })}
+                ></wa-input>
+                <wa-input
+                  label="Args (space separated)"
+                  placeholder="--scenario thinking"
+                  .value=${form.argsText}
+                  @input=${(ev: Event) =>
+                    (this.agentForm = {
+                      ...form,
+                      argsText: (ev.target as HTMLInputElement).value,
+                    })}
+                ></wa-input>
+                ${this.duplicateAgentWarning(form)
+                  ? html`<div
+                      class="callout callout-warning"
+                      role="status"
+                      data-testid="agent-duplicate-warning"
+                    >
+                      ${icon('alert')}<span>${this.duplicateAgentWarning(form)}</span>
+                    </div>`
                   : nothing}
               </div>
             `}
@@ -3318,8 +3437,11 @@ export class SebasSettingsModal extends LitElement {
               ? a.rustc.version
               : a.rustc?.state === 'missing'
                 ? `未安装（${a.rustc.cause ?? '找不到 rustc'}）`
-                : `探测失败（${a.rustc?.cause ?? '未知原因'}）`}
-            <span class="toolchain-required" title="编译本程序要求的最低 Rust 版本">要求 ≥ ${a.rustc_required}</span>
+                : `探测失败（${a.rustc?.cause ?? '未知原因'}）`}${a.rustc_required
+              ? html`<span class="toolchain-required" title="编译本程序要求的最低 Rust 版本"
+                  >要求 ≥ ${a.rustc_required}</span
+                >`
+              : nothing}
           </dd>
         </div>
         <div class="kv">

@@ -269,6 +269,10 @@ pub async fn session_detail(
         // SPA tolerates a null here.
         "msg_id": Option::<String>::None,
         "last_active": format_relative_time(info.last_active_unix),
+        // （fix-webui-qa-round2 3.3）unix 原值随 detail 下发：前端按本机时钟
+        // 持续重渲「last active」相对时间——服务端预格式化串只在数据事件时
+        // 刷新，曾把头部计时冻结在取值瞬间。
+        "last_active_unix": info.last_active_unix,
         "encoded_key": encode_session_key(&session_key),
         // （add-acp-model-selection）会话模型面：无模型选项的 agent（如
         // Claude）这两个字段为 null —— 前端不显示模型 UI。
@@ -739,6 +743,9 @@ pub async fn agent_kinds(State(state): State<WebUiState>) -> Response {
     let mut agents = state.agent_kinds.agent_kinds().await;
     // store union：同 id store 行赢（config 只是种子源）；store 行按 id
     // 字典序追加，保持确定性。core 不可达 / 快照带 error → 保留 config 面。
+    // （fix-webui-qa-round2 2.4）store 行原始条目提升到 union 块外：catalog
+    // 富化（launch 定义字段回填面）在 union 之外也要按 id 取行。
+    let mut store_rows: Vec<serde_json::Value> = Vec::new();
     if let Some(snapshot) = state.backend.state_snapshot("agents").await
         && snapshot.get("error").is_none()
     {
@@ -747,6 +754,7 @@ pub async fn agent_kinds(State(state): State<WebUiState>) -> Response {
             .and_then(serde_json::Value::as_array)
             .cloned()
             .unwrap_or_default();
+        store_rows = rows.clone();
         let store_ids: std::collections::BTreeSet<String> = rows
             .iter()
             .filter_map(|r| r.get("id").and_then(serde_json::Value::as_str))
@@ -784,8 +792,48 @@ pub async fn agent_kinds(State(state): State<WebUiState>) -> Response {
         reachable: native.as_ref().map(|n| n.ok).unwrap_or(false),
         cause: native.and_then(|n| n.cause),
         version: None,
+        display_raw: None,
     });
-    Json(json!({ "agents": agents })).into_response()
+    // （fix-webui-qa-round2 2.4，M-A4+D-A4）编辑表单的存量回填面：store 行
+    // 的 launch 定义字段（args / work_dir / sessions_dir）与未兜底的原始
+    // display 随 catalog 行透传（键缺省 = 未设置）。catalog 基形不带这些
+    // 字段——探测面与配置面词表分离是既有合同，这里按 id 只对 store 行
+    // **加键**，不改动其它消费面。
+    let launch_by_id: std::collections::BTreeMap<String, serde_json::Map<String, serde_json::Value>> =
+        store_rows
+            .iter()
+            .filter_map(|r| {
+                r.get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|id| id.to_string())
+            })
+            .zip(store_rows.iter().filter_map(|r| r.as_object().cloned()))
+            .collect();
+    let enriched: Vec<serde_json::Value> = agents
+        .into_iter()
+        .map(|a| {
+            let mut v = serde_json::to_value(&a).unwrap_or(serde_json::Value::Null);
+            if let (Some(obj), Some(launch)) = (v.as_object_mut(), launch_by_id.get(&a.id)) {
+                if let Some(d) = launch.get("driver") {
+                    obj.insert("driver_raw".into(), d.clone());
+                }
+                if let Some(d) = launch.get("display") {
+                    obj.insert("display_raw".into(), d.clone());
+                }
+                if let Some(args) = launch.get("args") {
+                    obj.insert("args".into(), args.clone());
+                }
+                if let Some(w) = launch.get("work_dir") {
+                    obj.insert("work_dir".into(), w.clone());
+                }
+                if let Some(sd) = launch.get("sessions_dir") {
+                    obj.insert("sessions_dir".into(), sd.clone());
+                }
+            }
+            v
+        })
+        .collect();
+    Json(json!({ "agents": enriched })).into_response()
 }
 
 // ---- Auth endpoints（webui 登录鉴权，见 `auth` 模块） ----
@@ -1456,6 +1504,12 @@ pub async fn send_message(
         Some(k) => k,
         None => return api_error(StatusCode::BAD_REQUEST, "Invalid session key"),
     };
+    // （review P3）空/纯空白消息拒绝在服务端：composer 客户端挡了空提交，
+    // 但 API 直发会在 seed_card 修正后开一个无停滞时钟、无 prompt 条目的
+    // 裸回合——这里补最后一刀。
+    if req.message.trim().is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "Message must not be empty");
+    }
     // add-workspace-root 2.3：越界本机项目的会话拒绝投递（不产生任何 turn）。
     if let Some(rej) = out_of_scope_session_rejection(&state, &session_key).await {
         return rej;

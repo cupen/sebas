@@ -1225,20 +1225,30 @@ impl DispatchHandle {
 
     /// seed_card：SpawnAcp 臂发完 root 卡后调用（dispatch_out）。
     /// 幂等：已存在则保留（防 SpawnAcp 重入冲掉已累积状态）。openspec/specs/feishu-cards/spec.md。
+    ///
+    /// （fix-webui-qa-round2 1.2，D-B215）空 prompt = 激活语义（聚焦即拉起 /
+    /// resume 拉起），**不是开轮**：既不起停滞时钟、也不向转录注入空 prompt
+    /// 条目。此前两者都做——空 prompt 条目让前端「已收到」回执相位恒真
+    /// （composer 停止态、发送被阻塞），时钟 + 既有转录让停滞看门狗把空闲
+    /// 拉起的会话误判成停滞回合，600s 后强收并注入「回合停滞」合成错误
+    /// ——正是崩溃会话重聚焦后最长 600s 无法发送的僵尸窗。真回合开轮
+    /// （prompt 非空）照旧。
     pub async fn seed_card(&self, session_id: String, user_prompt: String) {
         let seeded = self
             .card_states
             .seed_and_report(session_id.as_str(), &user_prompt)
             .await;
         if seeded {
-            // fix-pending-queue-liveness 2.1：回合开轮点之一（spawn 首轮 /
-            // emit_turn_card 开轮都经此）——停滞时钟以本轮开轮时刻起算，排队
-            // 回合不继承上一回合的等待时长。
-            self.stall.touch(&session_id).await;
-            // 幂等语义：只有真正新建（而非重入保留）才记录 prompt，防止
-            // 重入把同一条 prompt 重复追加进 transcript。
-            self.transcript_push(&session_id, TurnEntry::prompt(0, user_prompt.clone()))
-                .await;
+            if !user_prompt.is_empty() {
+                // fix-pending-queue-liveness 2.1：回合开轮点之一（spawn 首轮 /
+                // emit_turn_card 开轮都经此）——停滞时钟以本轮开轮时刻起算，
+                // 排队回合不继承上一回合的等待时长。
+                self.stall.touch(&session_id).await;
+                // 幂等语义：只有真正新建（而非重入保留）才记录 prompt，防止
+                // 重入把同一条 prompt 重复追加进 transcript。
+                self.transcript_push(&session_id, TurnEntry::prompt(0, user_prompt.clone()))
+                    .await;
+            }
             if let Some(key) = self.map.lookup_key_by_session(&session_id).await {
                 self.publish_updated(&key).await;
             }
@@ -2142,14 +2152,20 @@ impl DispatchHandle {
                     .await
                     .and_then(|m| m.session_id().map(str::to_owned));
                 if let Some(sid) = sid {
+                    // （fix-webui-qa-round2 2.2，D-B218）命令提交的转写回执
+                    // 与 feishu 路径（inbound.rs Compact 臂）同语义：prompt
+                    // 条目先落账——转录里可见「提交过 /compact」，产出文本
+                    // 与历史段落之间隔着这条 prompt，不再并入前段。
+                    self.transcript_push(&sid, TurnEntry::prompt(0, message.clone()))
+                        .await;
+                    self.publish_updated(&key).await;
                     // compact 回合与 submit_turn 的 settled 路径同语义：先把
                     // DONE/FAILED 翻成 WORKING 再转发。不翻的后果：compact
                     // 期间在飞检查视会话为空闲，新提交走 settled 臂提前 seed
                     // 下一个 prompt——迟到的前一回合 Finished 落在「最后一条
                     // prompt 之后为空」的窗口里，零输出检测误追加 notice
                     // （close-acceptance-blind-spots 门禁抓到的回合重叠）。
-                    // compact 不写 transcript prompt（回复并入尾随气泡），
-                    // 因此这里只翻相位、不 emit_turn_card。
+                    // 回执已由上面的 prompt 条目承担，这里不再 emit_turn_card。
                     self.card_states
                         .apply(&sid, |st| {
                             if matches!(

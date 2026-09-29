@@ -27,7 +27,12 @@ import { modeBadgeLabel } from './mode-vocabulary.js'
 // 命名链，truncateName 提供展示截断（全文进 title）。
 import { fullSessionLabel, truncateName, RAIL_FOCUS_EVENT } from './project-rail.js'
 // （round3 3.1）焦点处立读锚：详情到达时为本浏览器缺锚的聚焦会话立锚。
-import { readAnchorCount, writeFocusAnchor } from './unread-cursor.js'
+import {
+  armOpeningSeam,
+  peekOpeningSeam,
+  readAnchorCount,
+  writeFocusAnchor,
+} from './unread-cursor.js'
 
 /**
  * 聚焦会话反投影项目上下文的窗口级事件（fix-webui-approval-restore-and-
@@ -123,6 +128,26 @@ import '@awesome.me/webawesome/dist/components/split-panel/split-panel.js'
 
 /** 本机节点标识（与后端 projects::LOCAL_NODE_ID 同一词表）。 */
 const LOCAL_NODE = 'local'
+
+/**
+ * last active 相对时间（fix-webui-qa-round2 3.3，C10）：按本机时钟对 unix
+ * 原值现算——服务端预格式化串只在数据事件时刷新，曾把会话头部的计时冻结
+ * 在取值瞬间（「2s ago」驻留 45s+）。`nowSecs` 由组件的秒级 tick 供数；
+ * unix 缺席（旧 payload）回退服务端串。与 `sebas-webui` 后端
+ * `format_relative_time` 同一文案词表（s/m/h/d）。
+ */
+export function relativeActiveLabel(
+  unixSecs: number | undefined | null,
+  nowSecs: number,
+  fallback: string,
+): string {
+  if (unixSecs === undefined || unixSecs === null || unixSecs <= 0) return fallback
+  const diff = Math.max(0, nowSecs - unixSecs)
+  if (diff < 60) return `${diff}s ago`
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
+  return `${Math.floor(diff / 86400)}d ago`
+}
 
 /**
  * 增量 merge（conversation-incremental-sync D1/D3）：滤掉 `<= 游标` 的条目
@@ -246,6 +271,12 @@ export class SebasDashboard extends LitElement {
    * 的节点标注因此**免刷新**恢复/收紧。disconnectedCallback 清理。
    */
   private nodeTimer: number | undefined = undefined
+  /**
+   * （fix-webui-qa-round2 3.3）秒级时钟：last active 计时的现算基准。
+   * 1s tick 只翻这个数字（轻量重渲），相对时间随真实时间推进、不再冻结。
+   */
+  @state() private clockSecs = Math.floor(Date.now() / 1000)
+  private clockTimer: number | undefined = undefined
   /** 窄屏媒体查询退订句柄（5.2）。 */
   private unlistenNarrow: (() => void) | null = null
   /**
@@ -968,6 +999,9 @@ export class SebasDashboard extends LitElement {
     // 一次性派发，落地走下面的短窗重试）。
     window.addEventListener(COMPOSER_FOCUS_REQUEST, this.onComposerFocusRequest)
     this.nodeTimer = window.setInterval(() => { void this.loadNodes() }, NODE_POLL_MS)
+    this.clockTimer = window.setInterval(() => {
+      this.clockSecs = Math.floor(Date.now() / 1000)
+    }, 1000)
     // 5.2：窄屏翻转 → 分割线禁拖（布局退化由 CSS 媒体查询承接）。
     this.unlistenNarrow = onNarrowChange((n) => (this.narrow = n))
   }
@@ -982,6 +1016,10 @@ export class SebasDashboard extends LitElement {
     if (this.listRefreshTimer !== null) {
       window.clearTimeout(this.listRefreshTimer)
       this.listRefreshTimer = null
+    }
+    if (this.clockTimer !== undefined) {
+      window.clearInterval(this.clockTimer)
+      this.clockTimer = undefined
     }
     if (this.nodeTimer !== undefined) {
       window.clearInterval(this.nodeTimer)
@@ -1094,6 +1132,11 @@ export class SebasDashboard extends LitElement {
 
   /** 上一次触发过 activate 的焦点 key（每焦点一次，防重复请求）。 */
   private activatedFocusKey: string | null = null
+  /**
+   * （fix-webui-qa-round2 2.6）已做过「聚焦推进」的会话 key：推进只在焦点
+   * 转换后的首次详情装载发生，驻留刷新不重复推进（滚动语义归 transcript）。
+   */
+  private establishedFocusKey: string | null = null
 
   /**
    * session.* 元数据刷新的节流状态（3.2，D4）：排定的计时器 + 上次执行
@@ -1674,7 +1717,26 @@ export class SebasDashboard extends LitElement {
         // 的装载不算「看着」——锚留空，回到页面的下一次详情装载再立）；
         // 锚已存在绝不回写（流式/隐藏 tab 的推进语义归 transcript，单调由
         // 游标模块保证）。
-        if (document.visibilityState === 'visible' && readAnchorCount(d.encoded_key) === null) {
+        // （fix-webui-qa-round2 2.6，D-R2A）立锚改推进：聚焦路径以服务端
+        // 当前计数为准（已有锚也推进，单调 max），深链/恢复聚焦不再停在
+        // 回合前的旧值；「已有锚不覆写」的旧门让 unread-badge 的靶子场景
+        // （第二回合完成后立即聚焦）把锚停在下界。后台 tab 装载仍不写。
+        // 推进只发生在**焦点转换**后的首次详情装载（establishedFocusKey
+        // 门）——驻留期间的刷新不推进：上滚未跟读时到达的内容须由
+        // transcript 的 sticky 语义裁决，仪表盘不得代盖已读章。推进**前**
+        // 先登记开卷边界（与 rail switch 同序），transcript 挂载据此补绘
+        // 分界线——锚到顶与 seam 可见互不牵制。
+        if (
+          document.visibilityState === 'visible' &&
+          d.encoded_key !== this.establishedFocusKey
+        ) {
+          this.establishedFocusKey = d.encoded_key
+          // （review P2）rail 聚焦已先臂（带推进前锚）——此处覆写会把登记
+          // 换成已推进后的锚，seam 永远「无线可画」。先臂者赢：仅在无登记
+          // 时补臂（深链直达无 rail 登记的窗口照常成立）。
+          if (peekOpeningSeam(d.encoded_key) === undefined) {
+            armOpeningSeam(d.encoded_key, readAnchorCount(d.encoded_key))
+          }
           writeFocusAnchor(d.encoded_key, d.msg_count ?? 0)
         }
         // （round3 4.2）深链窗口的归属核对：detail 到达时 summary 的焦点
@@ -1847,7 +1909,9 @@ export class SebasDashboard extends LitElement {
             <!-- （workbench-live-conversation-flow 4.2）头部去交互化：mode
                  切换迁至输入框底沿、模型切换归 composer 芯片、归档是
                  rail 行溢出菜单的唯一入口——头部只留展示。 -->
-            <span>last active ${d.last_active}</span>
+            <span data-testid="last-active"
+              >last active ${relativeActiveLabel(d.last_active_unix, this.clockSecs, d.last_active)}</span
+            >
           </span>
         </div>
       </div>

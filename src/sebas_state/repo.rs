@@ -87,6 +87,7 @@ pub static SETTINGS_TABLES: &[TableSchema] = &[
             startup_timeout_secs INTEGER NOT NULL DEFAULT 30,
             idle_kill_secs       INTEGER NOT NULL DEFAULT 172800,
             work_dir             TEXT,
+            sessions_dir         TEXT,
             source               TEXT NOT NULL DEFAULT 'seed',
             deleted              INTEGER NOT NULL DEFAULT 0,
             created_at           INTEGER NOT NULL,
@@ -736,6 +737,96 @@ mod tests {
 
     // ---- registered_tables_match_v2_baseline_columns（4.5 基线的拆库版）----
 
+    // （fix-webui-qa-round2 2.4，3b 复核钉子）agents 表新增 sessions_dir 列
+    // 对**旧库行**的兼容：旧形态（sessions_dir 落地前）的 settings.db + 存量
+    // 行 → 启动同步原位补列（无重建、无迁移脚本）→ 旧行可读、sessions_dir
+    // 读回 NULL（`AgentRow.sessions_dir: Option<String>` 的「走既有默认」
+    // 语义），新行照常携带该列写入。
+    #[test]
+    fn legacy_agents_table_gains_sessions_dir_and_old_rows_stay_readable() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("settings.db");
+        {
+            let conn = sebas_db::conn::open(&db).unwrap();
+            // 旧形态 agents 表：列清单 = sessions_dir 落地前的注册基线
+            // （registered_tables_match_baseline_columns 的 agents 段去掉
+            // sessions_dir 一行），存量行按旧列集写入。
+            conn.execute_batch(
+                "CREATE TABLE agents (
+                    id                   TEXT PRIMARY KEY,
+                    driver               TEXT NOT NULL,
+                    path                 TEXT,
+                    args                 TEXT,
+                    display              TEXT,
+                    models               TEXT,
+                    startup_timeout_secs INTEGER NOT NULL DEFAULT 30,
+                    idle_kill_secs       INTEGER NOT NULL DEFAULT 172800,
+                    work_dir             TEXT,
+                    source               TEXT NOT NULL DEFAULT 'seed',
+                    deleted              INTEGER NOT NULL DEFAULT 0,
+                    created_at           INTEGER NOT NULL,
+                    updated_at           INTEGER NOT NULL
+                );
+                INSERT INTO agents (id, driver, path, args, display, models,
+                                    startup_timeout_secs, idle_kill_secs, work_dir,
+                                    source, deleted, created_at, updated_at)
+                VALUES ('legacy', 'claude', 'claude', NULL, NULL, NULL,
+                        30, 172800, '/w/legacy', 'seed', 0, 1, 1);",
+            )
+            .unwrap();
+        }
+        let (conn, outcome) = open_and_sync(&db, SETTINGS_TABLES).unwrap();
+        assert_eq!(
+            outcome,
+            sebas_db::schema::SyncOutcome::Synced {
+                added_columns: 1,
+                renamed: 0,
+                rebuilt: 0,
+                dropped: 0,
+            },
+            "sessions_dir 是唯一缺列，原位补齐"
+        );
+        // 旧行保值：既有列原样读回，新列读 NULL。
+        let (driver, work_dir): (String, String) = conn
+            .query_row(
+                "SELECT driver, work_dir FROM agents WHERE id = 'legacy'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(driver, "claude");
+        assert_eq!(work_dir, "/w/legacy");
+        let sessions_dir: Option<String> = conn
+            .query_row(
+                "SELECT sessions_dir FROM agents WHERE id = 'legacy'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            sessions_dir, None,
+            "旧行的 sessions_dir 为 NULL = 走既有默认（零迁移语义）"
+        );
+        // 新列真实在表上：新行可携带 sessions_dir 写入并读回。
+        conn.execute(
+            "INSERT INTO agents (id, driver, path, args, display, models,
+                                 startup_timeout_secs, idle_kill_secs, work_dir,
+                                 sessions_dir, source, deleted, created_at, updated_at)
+              VALUES ('fresh', 'claude', 'claude', NULL, NULL, NULL,
+                      30, 172800, NULL, '/tmp/sessions', 'ui', 0, 2, 2)",
+            [],
+        )
+        .unwrap();
+        let fresh: String = conn
+            .query_row(
+                "SELECT sessions_dir FROM agents WHERE id = 'fresh'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(fresh, "/tmp/sessions");
+    }
+
     #[test]
     fn registered_tables_match_baseline_columns() {
         // 派生列与基线对齐的护栏: 列名 + 亲和逐一核对。
@@ -784,6 +875,7 @@ mod tests {
                     ("startup_timeout_secs", "INTEGER"),
                     ("idle_kill_secs", "INTEGER"),
                     ("work_dir", "TEXT"),
+                    ("sessions_dir", "TEXT"),
                     ("source", "TEXT"),
                     ("deleted", "INTEGER"),
                     ("created_at", "INTEGER"),

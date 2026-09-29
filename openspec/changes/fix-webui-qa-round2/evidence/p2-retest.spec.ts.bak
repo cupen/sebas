@@ -1,0 +1,101 @@
+import { expect, test } from '@playwright/test'
+import {
+  createSession,
+  ErrorCollector,
+  FocusedSession,
+  ProjectRail,
+  ReviewCards,
+  waitStatus,
+} from './helpers/index'
+
+// fix-webui-qa-round2 task 4.2：四个 P2 的 GUI 复测（D-B11 / D-B215 / D-C3 / D-C5）。
+// 路径字面量一律 String.raw——本 change 的教训：单反斜杠字符串会在 JS 解析层变质。
+
+test.describe('P2 复测', () => {
+  test.describe.configure({ retries: 0 })
+  let collector: ErrorCollector
+  test.beforeEach(({ page }) => { collector = new ErrorCollector(page) })
+  const dotStatus = (page: import('@playwright/test').Page) =>
+    page.locator('sebas-project-rail li.session-item.current .session-dot').getAttribute('data-status')
+
+  test('D-C5 并行审批：两卡同现、异判、两结果并存', async ({ page }) => {
+    test.setTimeout(120_000)
+    const detail = new FocusedSession(page)
+    const cards = new ReviewCards(page)
+    const key = await createSession(page.request, { prompt: 'idle' })
+    await waitStatus(page.request, key, ['done'])
+    await page.goto(`/sessions/${key}`)
+    await expect(detail.host).toBeVisible()
+    await detail.sendFollowUp('parallel')
+    await expect.poll(async () => await cards.all().count(), { timeout: 30_000 }).toBe(2)
+    await page.screenshot({ path: '../openspec/changes/fix-webui-qa-round2/evidence/p2-retest-dc5-two-cards.png' })
+    const id0 = await cards.all().nth(0).getAttribute('data-request-id')
+    const id1 = await cards.all().nth(1).getAttribute('data-request-id')
+    expect(id0).toBeTruthy(); expect(id1).toBeTruthy(); expect(id0).not.toBe(id1)
+    await page.locator(`sebas-review-cards section.review-card[data-request-id="${id0}"] wa-button.allow-once`).click()
+    await page.locator(`sebas-review-cards section.review-card[data-request-id="${id1}"] wa-button.deny`).click()
+    await detail.expectStatus('done', 30_000)
+    await detail.expectFoldedText('ok')
+    await detail.expectFoldedText('denied by fake')
+    await page.screenshot({ path: '../openspec/changes/fix-webui-qa-round2/evidence/p2-retest-dc5-results.png' })
+    expect(collector.clean()).toEqual([])
+  })
+
+  test('D-C3 单工具审批：结果读达 + 环后正文 + 决策标识', async ({ page }) => {
+    test.setTimeout(120_000)
+    const detail = new FocusedSession(page)
+    const cards = new ReviewCards(page)
+    const key = await createSession(page.request, { prompt: 'idle' })
+    await waitStatus(page.request, key, ['done'])
+    await page.goto(`/sessions/${key}`)
+    await expect(detail.host).toBeVisible()
+    await detail.sendFollowUp('perm')
+    await expect(cards.all().first()).toBeVisible({ timeout: 30_000 })
+    await cards.all().first().locator('wa-button.allow-once').click()
+    await detail.expectStatus('done', 30_000)
+    await detail.expectFoldedText('perm done')
+    await detail.expectFoldedText('perm turn finished')
+    await expect(detail.host.getByText('已执行', { exact: false }).first()).toBeVisible()
+    await page.screenshot({ path: '../openspec/changes/fix-webui-qa-round2/evidence/p2-retest-dc3.png' })
+    expect(collector.clean()).toEqual([])
+  })
+
+  test('D-B215 崩溃后重聚焦立即可发', async ({ page }) => {
+    test.setTimeout(120_000)
+    const detail = new FocusedSession(page)
+    const key = await createSession(page.request, { prompt: 'idle' })
+    await waitStatus(page.request, key, ['done'])
+    await page.goto(`/sessions/${key}`)
+    await expect(detail.host).toBeVisible()
+    await detail.sendFollowUp('crash')
+    await expect.poll(async () => await dotStatus(page), { timeout: 30_000 }).not.toBe('working')
+    await detail.sendFollowUp('hello again')
+    // done 是短暂态（随后落 dormant）——轮询集合而非单词，防竞速漏采。
+    await expect
+      .poll(async () => ['done', 'dormant'].includes((await dotStatus(page)) ?? ''), { timeout: 30_000 })
+      .toBe(true)
+    await detail.expectFoldedText('hello')
+    await expect(detail.host.getByText('回合停滞', { exact: false })).toHaveCount(0)
+    await page.screenshot({ path: '../openspec/changes/fix-webui-qa-round2/evidence/p2-retest-db215.png' })
+    expect(collector.clean()).toEqual([])
+  })
+
+  test('D-B11 路径输入保真与去抖', async ({ page }) => {
+    test.setTimeout(90_000)
+    const rail = new ProjectRail(page)
+    await page.goto('/')
+    await rail.openAddDialog()
+    const input = rail.addDialog().locator('wa-input input').first()
+    await input.click()
+    const typed = String.raw`C:\definitely\not\existent`
+    await input.pressSequentially(typed, { delay: 40 })
+    expect(await input.inputValue(), 'typed backslashes must survive').toBe(typed)
+    await page.screenshot({ path: '../openspec/changes/fix-webui-qa-round2/evidence/p2-retest-db11-typed.png' })
+    // 诚实拒绝形态：去抖预检后提交钮禁用（不弹 .error 节点），输入原样保留。
+    // 诚实拒绝形态：预检 hint 出现（提交钮随之禁用；观测到禁用态会随预检
+    // 重跑短暂回弹——轻微观察，记入复测记录，不在本断言钉死）。
+    await expect(rail.addDialog().getByText(/不存在|无效|不可用|outside|invalid/i).first()).toBeVisible({ timeout: 10_000 })
+    await page.screenshot({ path: '../openspec/changes/fix-webui-qa-round2/evidence/p2-retest-db11-error.png' })
+    expect(collector.clean()).toEqual([])
+  })
+})

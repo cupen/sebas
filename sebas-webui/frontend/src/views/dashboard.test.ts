@@ -1894,15 +1894,17 @@ describe('focus establishes the read anchor (round3 3.1)', () => {
     el.remove()
   })
 
-  it('an existing anchor is never overwritten by the establishment pass', async () => {
-    // 锚已存在（rail 点击建立 / 流式推进）：立锚不回写，单调归游标模块。
+  it('the focus-establishment pass advances an existing anchor to the server count (round2 2.6)', async () => {
+    // （fix-webui-qa-round2 2.6，D-R2A）锚已存在也随聚焦推进到服务端当前
+    // 计数（单调 max）——聚焦写锚以服务端当前计数为准，不得停在回合前的
+    // 旧值；分界线呈现由开卷冻结边界承担，锚到顶不再吞线。
     writeFocusAnchor(KEY, 1)
     apiMocks.summary.mockResolvedValue(focusedSummary())
     apiMocks.session.mockResolvedValue(detailFixture())
     const el = await mount()
     await new Promise((r) => setTimeout(r, 0))
     await el.updateComplete
-    expect(JSON.parse(localStorage.getItem(anchorKey)!)).toEqual({ anchor_count: 1 })
+    expect(JSON.parse(localStorage.getItem(anchorKey)!)).toEqual({ anchor_count: 2 })
     el.remove()
   })
 
@@ -2261,5 +2263,21 @@ describe('displayed-project reconciliation (fix-webui-qa-findings D4)', () => {
     // 无聚焦会话被调和 → 不点名「已被移除」，用 generic 空态文案。
     expect(empty?.textContent).not.toContain('已被移除')
     el.remove()
+  })
+})
+
+// ── fix-webui-qa-round2 3.3（C10）：last active 计时持续更新 ─────────────────
+
+describe('last-active relative label ticks with the local clock (round2 3.3)', () => {
+  it('relativeActiveLabel recomputes from unix as time advances', async () => {
+    const { relativeActiveLabel } = await import('./dashboard.js')
+    const now = 1_000_000
+    expect(relativeActiveLabel(now - 5, now, '5s ago')).toBe('5s ago')
+    expect(relativeActiveLabel(now - 90, now, 'fallback')).toBe('1m ago')
+    expect(relativeActiveLabel(now - 7200, now, 'fallback')).toBe('2h ago')
+    expect(relativeActiveLabel(now - 172800, now, 'fallback')).toBe('2d ago')
+    // unix 缺席回退服务端串（旧 payload 兼容）。
+    expect(relativeActiveLabel(undefined, now, 'server form')).toBe('server form')
+    expect(relativeActiveLabel(0, now, 'server form')).toBe('server form')
   })
 })

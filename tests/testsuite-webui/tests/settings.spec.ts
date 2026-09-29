@@ -433,8 +433,15 @@ test.describe('设置面', () => {
       await presetEditor.locator('wa-input[label="API key"] input').fill('sk-spec-preset')
       await presetEditor.locator('wa-button').filter({ hasText: 'Save' }).click()
       await expect(presetEditor).toBeHidden({ timeout: 10_000 })
+      // fix-webui-qa-round2 3.4（D-R2B 归因修复）：裸 hasText 'anthropic'
+      // 是歧义定位——deepseek 预设的 base URL 恰好含 '/anthropic' 子串、
+      // config.toml 种子行与新建 preset 行同名（anthropic），三行同命中使
+      // 断言 strict-violation（QA 观测的「config 行不可见」是旧构建；当前
+      // 渲染是好的）。改按 store 行的 preset 徽章精确锚定新 preset 行。
       await expect(
-        settings.panel.locator('.provider-row').filter({ hasText: 'anthropic' }),
+        settings.panel.locator('.provider-row').filter({
+          has: page.locator('.provider-badge.preset', { hasText: 'anthropic · code' }),
+        }),
       ).toBeVisible({ timeout: 10_000 })
       const presetResp = await page.request.get('/api/providers')
       const presetBody = (await presetResp.json()) as {

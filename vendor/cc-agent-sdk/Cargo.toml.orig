@@ -1,0 +1,53 @@
+[package]
+name = "cc-agent-sdk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+description = "claude agent sdk"
+keywords = ["claude", "anthropic", "ai", "agent", "sdk"]
+categories = ["api-bindings", "development-tools"]
+
+[lib]
+name = "claude_agent_sdk"
+
+[dependencies]
+# Workspace dependencies
+tokio = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+async-stream = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true, optional = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+chrono = { workspace = true }
+uuid = { workspace = true }
+regex = { workspace = true }
+indexmap = { workspace = true }
+semver = { workspace = true }
+paste = { workspace = true }
+typed-builder = { workspace = true }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# Optional dependencies (defined locally, not from workspace)
+notify = { version = "7.0", optional = true }
+notify-debouncer-mini = { version = "0.5", optional = true }
+wasm-sandbox = { version = "0.1", optional = true }
+
+[features]
+default = ["yaml"]
+yaml = ["serde_yaml"]
+sandbox = ["wasm-sandbox"]
+hot-reload = ["notify", "notify-debouncer-mini"]
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+tempfile = { workspace = true }

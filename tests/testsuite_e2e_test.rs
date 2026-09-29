@@ -9408,6 +9408,40 @@ mod agent_catalog {
         )
         .await;
         assert_eq!(listed["display"], "Stub Agent", "{listed}");
+        // （fix-webui-qa-round2 2.4，M-A4+D-A4）store 行富化面：catalog 行按
+        // id 带上 launch 定义回填键与**未兜底**的原始 display（编辑表单回填
+        // 面；键缺省 = 未设置）。stub 创建时未带 work_dir/sessions_dir →
+        // 缺键；display 显式设置 → display_raw 必须在（display 兜底 id 的
+        // catalog 基形无法区分「显式 = id」与「从未设置」，D-A4 根因）。
+        assert_eq!(
+            listed["display_raw"], "Stub Agent",
+            "the raw display rides the catalog row for edit prefill: {listed}"
+        );
+        assert!(
+            listed.get("work_dir").is_none() && listed.get("sessions_dir").is_none(),
+            "unset launch fields stay absent (键缺省 = 未设置): {listed}"
+        );
+
+        // config 种子的 claude 行（Claude 变体定义带 sessions_dir 缺省值）：
+        // 富化面同样生效——spawn 关键字段可被编辑表单回填。
+        let (_status, catalog) = get_json_status(&cli, &agents_url).await.expect("catalog");
+        let claude_row = catalog["agents"]
+            .as_array()
+            .and_then(|a| a.iter().find(|a| a["id"] == "claude").cloned())
+            .expect("config seed claude row");
+        assert!(
+            claude_row.get("sessions_dir").is_some_and(|v| v.is_string()),
+            "claude seed row carries its sessions_dir: {claude_row}"
+        );
+        // native 是内置保留 id（无 store 行）：不得被富化出 launch 键。
+        let native_row = catalog["agents"]
+            .as_array()
+            .and_then(|a| a.iter().find(|a| a["id"] == "native").cloned())
+            .expect("native row");
+        assert!(
+            native_row.get("sessions_dir").is_none() && native_row.get("display_raw").is_none(),
+            "native must not grow launch backfill keys: {native_row}"
+        );
 
         // 3) 立即建会话：store-only agent 完成一回合（spawn 动态解析）。
         let (status, body) = post_json(

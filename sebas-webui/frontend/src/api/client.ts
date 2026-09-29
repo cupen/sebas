@@ -376,6 +376,8 @@ export interface SessionDetail {
   entries: ConversationEntryView[]
   msg_id: string | null
   last_active: string
+  /** （fix-webui-qa-round2 3.3）unix 原值：前端按本机时钟持续重渲相对时间。 */
+  last_active_unix?: number
   encoded_key: string
   /**
    * rail-declutter-unread：服务端累计的可见回复段数。transcript 标记已读时
@@ -522,6 +524,18 @@ export interface AgentKindInfo {
   reachable: boolean
   cause?: string
   version?: string
+  /**
+   * （fix-webui-qa-round2 2.4，D-A4）未兜底的原始 display 配置（null = 未
+   * 设置）。`display` 缺省回退 id，编辑表单回填以此字段为准才能区分
+   * 「显式设置为与 id 相同」与「从未设置」。
+   */
+  display_raw?: string | null
+  // ---- 以下为 store 行的 launch 定义回填面（fix-webui-qa-round2 2.4，
+  // ---- M-A4）：仅 /api/agents 对 store 行富化时出现；键缺省 = 未设置。
+  driver_raw?: string
+  args?: string[]
+  work_dir?: string | null
+  sessions_dir?: string | null
 }
 
 /**
@@ -539,6 +553,8 @@ export interface AgentLaunchPayload {
   startup_timeout_secs?: number | null
   idle_kill_secs?: number | null
   work_dir?: string | null
+  /** （fix-webui-qa-round2 2.4，M-A4）claude 驱动的 sessions 目录覆盖。 */
+  sessions_dir?: string | null
 }
 
 export interface AdminStatus {

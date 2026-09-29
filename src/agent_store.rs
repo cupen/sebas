@@ -35,6 +35,7 @@ pub fn definition_of(agent: &AgentConfig) -> AgentDefinition {
             startup_timeout_secs: c.startup_timeout_secs,
             idle_kill_secs: c.idle_kill_secs,
             work_dir: c.work_dir.clone(),
+            sessions_dir: Some(c.sessions_dir.clone()),
         },
         AgentConfig::Acp {
             command,
@@ -55,6 +56,7 @@ pub fn definition_of(agent: &AgentConfig) -> AgentDefinition {
                 startup_timeout_secs: *startup_timeout_secs,
                 idle_kill_secs: *idle_kill_secs,
                 work_dir: None,
+                sessions_dir: None,
             }
         }
     }
@@ -69,8 +71,12 @@ pub fn config_of_definition(def: &AgentDefinition) -> AgentConfig {
             }),
             args: def.args.clone(),
             display: def.display.clone(),
-            // sessions_dir 不入表（决策 1）：缺省走既有默认。
-            sessions_dir: "~/.claude/sessions".to_string(),
+            // （fix-webui-qa-round2 2.4）sessions_dir 随定义入表/回填：
+            // store 行带操作员显式值，缺省（None）走 config 同款默认。
+            sessions_dir: def
+                .sessions_dir
+                .clone()
+                .unwrap_or_else(|| "~/.claude/sessions".to_string()),
             work_dir: def.work_dir.clone(),
             startup_timeout_secs: def.startup_timeout_secs,
             idle_kill_secs: def.idle_kill_secs,

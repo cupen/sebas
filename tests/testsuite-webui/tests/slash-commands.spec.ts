@@ -16,9 +16,11 @@
  * - 透传与分流: `/goal …` is passed through verbatim (own turn bubble, turn
  *   converges to Done, 3.3). `/compact` is a sebas dispatch built-in
  *   (Command::Compact): the composer lets it through (no「不支持」notice),
- *   the engine forwards `/compact` to the agent and NO user-turn bubble
- *   renders (the compact flow carries no prompt transcript entry) — the
- *   assertion is acceptance + the agent turn converging.
+ *   the engine forwards `/compact` to the agent — AND (fix-webui-qa-round2
+ *   2.2, D-B218) a prompt receipt entry lands in the transcript first, so
+ *   the compact reply opens its own turn block instead of merging into the
+ *   trailing agent bubble. Assertion: receipt bubble + reply in its own
+ *   block + turn converging.
  * - 拦截: a slash command outside (advertised ∪ {compact}) is blocked with
  *   the inline「不支持」notice and nothing is submitted (4.1).
  */
@@ -106,14 +108,17 @@ test.describe('slash 命令面板（session-slash-commands）', () => {
 
       // Enter submits. `/compact` is the dispatch built-in: accepted (no
       // 「不支持」notice, input cleared) and forwarded to the agent. The
-      // compact flow writes no user prompt entry, so its reply MERGES into
-      // the trailing agent bubble instead of opening a new turn block —
-      // assert the reply text landed in the transcript.
+      // engine writes a prompt RECEIPT entry first (fix-webui-qa-round2
+      // 2.2, D-B218): the operator sees the submission in the transcript and
+      // the reply opens its OWN turn block instead of merging into the
+      // trailing agent bubble (the old contract asserted the merged
+      // 「hello worldhello world」 text — retired with D-B218).
       await workbench.composerTextarea.press('Enter')
       const notice = page.locator('sebas-workbench-composer [data-testid="slash-unsupported"]')
       await expect(notice).toHaveCount(0)
       await expect(workbench.composerTextarea).toHaveValue('')
-      const compactReply = /hello world[\s\S]*hello world/
+      await expect(detail.userTurn('/compact')).toBeVisible({ timeout: 20_000 })
+      const compactReply = /hello world/
       await expect
         .poll(
           async () =>

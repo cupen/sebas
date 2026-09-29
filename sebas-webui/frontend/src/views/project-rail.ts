@@ -28,7 +28,13 @@ import { sharedWs } from '../api/shared-ws.js'
 import type { WsEvent } from '../api/ws.js'
 import { icon } from '../components/icons.js'
 import { guardedHide } from '../components/wa-hide-guard.js'
-import { ANCHOR_ADVANCED_EVENT, readAnchorCount, unreadCount, writeFocusAnchor } from './unread-cursor.js'
+import {
+  ANCHOR_ADVANCED_EVENT,
+  armOpeningSeam,
+  readAnchorCount,
+  unreadCount,
+  writeFocusAnchor,
+} from './unread-cursor.js'
 import { notify } from '../notify.js'
 import { COMPOSER_FOCUS_REQUEST } from './workbench-composer.js'
 import type { NewSessionDialogConfirm } from './new-session-dialog.js'
@@ -56,6 +62,14 @@ const UNREAD_BADGE_CAP = 99
  * 多帧合并为一次列表重取，队列高频翻转不放大请求量。
  */
 export const LABEL_REFRESH_DEBOUNCE_MS = 400
+
+/**
+ * （fix-webui-qa-round2 1.1，D-B11）手填路径预检的键入去抖窗口：去抖静止
+ * 300ms 才发起一次 browse-dirs 预检——每次键击一发注定被拒的请求（400
+ * 风暴）正是本轮 QA 观测到的形态。输入值本身**保真**：任何字符（含
+ * Windows 路径分隔符 `\`）在提交与校验前不得被改写或删除。
+ */
+export const ADD_PATH_VALIDATE_DEBOUNCE_MS = 300
 
 /**
  * rail 切换会话成功后的窗口级聚焦事件（fix-webui-qa-defects 4.1，design
@@ -711,16 +725,15 @@ export class SebasProjectRail extends LitElement {
     this.focusedKey = row.encoded_key
     // rail-declutter-unread D3：switch 成功 = 聚焦写锚——读锚推进到当前
     // msg_count，徽标清零（无锚点会话自此刻起开始累计未读）。
-    // （fix-webui-qa-findings M3 修订）写锚只做「缺锚立基」：已有锚的会话
-    // **不**在 switch 时推进到当前计数——否则回到有未读内容的会话时锚被
-    // 瞬间抬到顶，transcript 永远推不出 seen/unseen 分界线（QA M3：「打开
-    // 即全部标记已读」）。徽标在聚焦会话上的消失由 rowUnread 的聚焦可见
-    // gate 承担；锚推进回到「读到分界线」时由 transcript 贴底/滚动路径承担
-    // （spec：focusing clears the badge + seam shows where reading left off，
-    // 两句并存的唯一一致实现）。
-    if (readAnchorCount(row.encoded_key) === null) {
-      writeFocusAnchor(row.encoded_key, row.msg_count)
-    }
+    // （fix-webui-qa-round2 2.6，D-R2A 修订）聚焦写锚以服务端当前计数为准：
+    // 已有锚也随 switch 推进到当前 msg_count（单调 max，不回退）——聚焦动作
+    // 与回合定稿竞速时锚不得停在回合前的旧值（unread-badge 靶子场景：
+    // 第二回合完成后立即聚焦，锚必须停在 2 而非 1）。M3 的「分界线必须
+    // 仍可呈现」由 seam 开卷捕获承担：推进**之前**先在 unread-cursor 登记
+    // 本次的未读边界（armOpeningSeam），transcript 挂载时消费并按它补绘
+    // 分界线——锚已到顶、分界线照画，两句合同不再互斥。
+    armOpeningSeam(row.encoded_key, readAnchorCount(row.encoded_key))
+    writeFocusAnchor(row.encoded_key, row.msg_count)
     if (location.pathname !== '/') navigate('/')
     // fix-webui-qa-defects 4.1（design D3）：switch 只写服务端指针、不发任何
     // 事件——dashboard 的焦点视图此前要等下一个无关会话事件刷新 summary 才
@@ -996,6 +1009,8 @@ export class SebasProjectRail extends LitElement {
     this.addPath = ''
     this.addError = null
     this.addPathScopeHint = null
+    // （fix-webui-qa-round2 1.1）去抖预检随对话框关闭作废。
+    this.cancelAddPathScopeCheck()
   }
   private onFolderSelected(e: CustomEvent) {
     // （round3 4.4）picker 回填值即展示值：分隔符归一后再进输入框，避免
@@ -1012,6 +1027,7 @@ export class SebasProjectRail extends LitElement {
    * 拦截，留给注册接口的点名报错。
    */
   private addPathScopeSeq = 0
+  private addPathScopeTimer: ReturnType<typeof setTimeout> | null = null
   private async checkAddPathScope(path: string) {
     const trimmed = path.trim()
     const seq = ++this.addPathScopeSeq
@@ -1025,6 +1041,28 @@ export class SebasProjectRail extends LitElement {
     } catch (e) {
       if (seq !== this.addPathScopeSeq) return
       this.addPathScopeHint = addPathScopeHintFrom(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  /**
+   * （fix-webui-qa-round2 1.1，D-B11）键入突发去抖：窗口内每次键击重置
+   * 计时，静止 {@link ADD_PATH_VALIDATE_DEBOUNCE_MS} 后才发起一次预检；
+   * 键击即刻清掉旧 hint（陈旧文案对新输入是「与真实原因不符的错误」）。
+   * 输入值原样保存原样提交——这里不做任何字符改写。
+   */
+  private scheduleAddPathScopeCheck(path: string): void {
+    if (this.addPathScopeTimer !== null) clearTimeout(this.addPathScopeTimer)
+    this.addPathScopeHint = null
+    this.addPathScopeTimer = setTimeout(() => {
+      this.addPathScopeTimer = null
+      void this.checkAddPathScope(path)
+    }, ADD_PATH_VALIDATE_DEBOUNCE_MS)
+  }
+
+  private cancelAddPathScopeCheck(): void {
+    if (this.addPathScopeTimer !== null) {
+      clearTimeout(this.addPathScopeTimer)
+      this.addPathScopeTimer = null
     }
   }
   private async submitAddProject() {
@@ -1279,7 +1317,10 @@ export class SebasProjectRail extends LitElement {
         <div class="wa-stack" style="gap:var(--sebas-space-4);">
           <p style="font-size:0.85rem;color:var(--sebas-text);margin:0;">Choose a directory to add as a project:</p>
           <sebas-folder-picker class="folder-picker" @folder-selected=${this.onFolderSelected}></sebas-folder-picker>
-          <p style="font-size:0.8rem;color:var(--sebas-text-faint);margin:0;text-align:center;">or</p>
+          <!-- （fix-webui-qa-round2 3.2，D-A2）分隔符不贴边：目录列表滚到
+               最后一行时 or 标签与滚动视口底边仍留一行呼吸（上下 margin
+               独立于栈 gap，不与列表末行拥挤）。 -->
+          <p style="font-size:0.8rem;color:var(--sebas-text-faint);margin:var(--sebas-space-3) 0;text-align:center;">or</p>
           <!-- Web Awesome 3.x 派发标准 input 事件（不派发 wa-input），手动路径才能联动启用提交按钮。
                fix-webui-qa-defects 7.2：手填路径即时预检越界（禁用不再静默）。
                fix-webui-approval-restore-and-session-identity 5.2：本行行尾曾有
@@ -1287,7 +1328,7 @@ export class SebasProjectRail extends LitElement {
                属性未加引号，该引号被并进属性值，把 @input 的 EventPart 降级成
                普通属性 part，listener 永不挂接（历轮「手填路径失灵」的根因）；
                同时把引号灌进 .value 值。引号已除，@input 绑定恢复。 -->
-          <wa-input label="Project path" placeholder="/absolute/path/to/repo" .value=${this.addPath} @input=${(e: any) => { this.addPath = e.target.value; void this.checkAddPathScope(this.addPath) }}>
+          <wa-input label="Project path" placeholder="/absolute/path/to/repo" .value=${this.addPath} @input=${(e: any) => { this.addPath = e.target.value; this.scheduleAddPathScopeCheck(this.addPath) }}>
             <wa-icon slot="start" name="folder" aria-hidden="true"></wa-icon>
           </wa-input>
           <!-- 8.1：节点维度。空值 = 本机隐式注册（既有行为）；选远端时路径由

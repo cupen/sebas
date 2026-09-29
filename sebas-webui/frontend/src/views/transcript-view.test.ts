@@ -47,8 +47,10 @@ import {
   awaitingReceipt,
   deniedDetailContent,
   deniedLabel,
+  entriesAwaitReceipt,
   errorEntryLabel,
   groupConversation,
+  isDecidedToolResult,
   mergeSpawnErrors,
   middleTruncate,
   processItemLabel,
@@ -62,8 +64,13 @@ import {
   unitMaxTs,
   unitSegmentCount,
 } from './transcript-view.js'
-import type { ProcessItem, ProcessRun } from './transcript-view.js'
+import type { ProcessItem, ProcessRun, ToolResultRun } from './transcript-view.js'
 import type { SebasTranscriptView } from './transcript-view.js'
+import {
+  armOpeningSeam,
+  clearOpeningSeam,
+  peekOpeningSeam,
+} from './unread-cursor.js'
 
 // ---- markdown mock（4.3 计数面）-----------------------------------------
 // 全文件以可计数的替身替换 markdown 管线：正文断言只依赖 textContent（
@@ -1003,17 +1010,20 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     // 4.2：seam 节点恒渲染（hidden 属性切换显隐）——全部已读时 hidden。
     let seam = el.shadowRoot?.querySelector<HTMLElement>('.seam')
     expect(seam?.hasAttribute('hidden')).toBe(true)
+    el.remove()
 
-    // 未读态（锚=0）→ mark all seen → 游标写入当前段数、seam 消失。
+    // （fix-webui-qa-round2 2.1）未读态要看到 seam 需要一次**新的开卷**：
+    // 分界线边界在开卷帧捕获（锚=0 < 段数 1）。mark all seen → 游标写入
+    // 当前段数、seam 消失、开卷登记作废。
     store.set('sebas:seen:oc_test', JSON.stringify({ anchor_count: 0 }))
-    el.entries = [...entries]
-    await el.updateComplete
+    const el2 = await mount({ entries })
+    await el2.updateComplete
     await new Promise((r) => requestAnimationFrame(() => r(null)))
-    await el.updateComplete
-    seam = el.shadowRoot?.querySelector<HTMLElement>('.seam')
+    await el2.updateComplete
+    seam = el2.shadowRoot?.querySelector<HTMLElement>('.seam')
     expect(seam?.hasAttribute('hidden')).toBe(false)
     seam!.querySelector<HTMLButtonElement>('button.link')!.click()
-    await el.updateComplete
+    await el2.updateComplete
     // （2.3，D3）单字段段锚：存储只有 anchor_count；无 msgCount payload 时
     // 写本地已渲染段数（相邻 md 合并 = 1）。
     const stored = JSON.parse(store.get('sebas:seen:oc_test')!) as {
@@ -1021,7 +1031,8 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     }
     expect(Object.keys(stored)).toEqual(['anchor_count'])
     expect(stored.anchor_count).toBe(1)
-    expect(el.shadowRoot?.querySelector<HTMLElement>('.seam')?.hasAttribute('hidden')).toBe(true)
+    expect(el2.shadowRoot?.querySelector<HTMLElement>('.seam')?.hasAttribute('hidden')).toBe(true)
+    el2.remove()
   })
 
   it('mark-all-seen advances the shared badge anchor when msgCount rides the payload (D3)', async () => {
@@ -1029,9 +1040,10 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     // 段数锚推进到 max(服务端段数, 本地已渲染段数)——读到底部 = seam 清零 +
     // 徽标清零（两者同锚）。
     const entries = streamedTurn('do it', ['a', 'b'], FIXED_DATES.T1)
-    const el = await mount({ entries, msgCount: 3 })
+    // （fix-webui-qa-round2 2.1）锚=0 在**开卷前**就位：边界在开卷帧捕获，
+    // seam 对开卷时未读的内容呈现。
     store.set('sebas:seen:oc_test', JSON.stringify({ anchor_count: 0 }))
-    el.entries = [...entries]
+    const el = await mount({ entries, msgCount: 3 })
     await el.updateComplete
     await new Promise((r) => requestAnimationFrame(() => r(null)))
     await el.updateComplete
@@ -1543,8 +1555,10 @@ describe('unread boundary advances while focused+visible (polish-workbench-walkt
     })
     await debounceWait()
     await el.updateComplete
-    // 打开动作本身不是「看着到达」：锚留在 1 段，第二回合仍标未读。
-    expect(storedAnchor()).toBe(1)
+    // （fix-webui-qa-round2 2.6，D-R2A）开卷推进读锚：以服务端当前计数为准
+    // （锚=4，不再停在回合前的 1）；分界线呈现由开卷冻结边界承担——锚到顶
+    // 与 seam 可见从此互不牵制，第二回合之上的分界线照画。
+    expect(storedAnchor()).toBe(4)
     expect(el.shadowRoot!.querySelector('.seam')?.hasAttribute('hidden')).toBe(false)
     el.remove()
   })
@@ -1703,6 +1717,10 @@ describe('seam template identity (fix-webui-streaming-liveness 4.2)', () => {
     await el.updateComplete
     expect(link.getAttribute('aria-expanded')).toBe('true')
     const firstBlock = el.shadowRoot!.querySelector('.turn-block.is-assistant')!
+    // （fix-webui-qa-round2 2.1）操作员已上滚（不贴底）：到达不再是「看着
+    // 到达」，开卷边界不因此清账——越过边界的新回合之上有 seam。
+    el.sticky = false
+    await el.updateComplete
 
     // 流式追加新回合（段数越过读锚）→ seam 出现。
     emitTurnAppend('oc_test', [
@@ -1980,5 +1998,206 @@ describe('notice entries (close-acceptance-blind-spots 4.2, design D3)', () => {
     expect(bubble).toContain('border-color: var(--sebas-border')
     // 中性 = 不借用任何失败/警示语义色。
     expect(styleText.match(/\.notice[^{]*\{[^}]*status-failed/g)).toBeNull()
+  })
+})
+
+// ── fix-webui-qa-round2 1.3（D-C3a）：已决工具结果顶层化 ─────────────────────
+
+describe('decided tool results lift to top-level runs (round2 1.3, D-C3a)', () => {
+  const requestEntry = (pos: number): ConversationEntryView => ({
+    position: pos,
+    kind: 'content',
+    element_type: 'tool',
+    content: '📖 **Bash**\n```json\n{"command": "rm -rf /"}\n```',
+    title: 'Bash · rm -rf /',
+    created_at_unix: FIXED_DATES.T1,
+  })
+  const resultEntry = (
+    pos: number,
+    content = '✓ **Bash**\nperm done\n',
+  ): ConversationEntryView => ({
+    position: pos,
+    kind: 'content',
+    element_type: 'tool',
+    content,
+    title: '✓ Bash',
+    created_at_unix: FIXED_DATES.T1,
+  })
+  const toView = (it: ProcessItem): ConversationEntryView => ({
+    position: it.position,
+    kind: 'content',
+    element_type: 'tool',
+    content: it.content,
+    title: it.title,
+    created_at_unix: FIXED_DATES.T1,
+  })
+
+  it('isDecidedToolResult: ✓/✗ titled tool entries lift; requests and thinking stay', () => {
+    expect(isDecidedToolResult(resultEntry(0))).toBe(true)
+    expect(isDecidedToolResult(resultEntry(0, '✗ **Bash**\ndenied by fake'))).toBe(true)
+    expect(isDecidedToolResult(requestEntry(0))).toBe(false)
+    expect(
+      isDecidedToolResult({
+        element_type: 'thinking',
+        content: 'the request was denied earlier',
+        title: null,
+      }),
+    // thinking entries never lift even when the text mentions denial.
+    ).toBe(false)
+  })
+
+  it('splitAgentRuns: decided results become standalone runs between process frames', () => {
+    const runs = splitAgentRuns([requestEntry(0), resultEntry(1)])
+    expect(runs.map((r) => r.type)).toEqual(['process', 'tool_result'])
+    const fold = runs[0] as ProcessRun
+    // the fold keeps only the pre-decision frame.
+    expect(fold.items).toHaveLength(1)
+    const lifted = runs[1] as ToolResultRun
+    expect(lifted.item.title).toBe('✓ Bash')
+    expect(lifted.position).toBe(1)
+  })
+
+  it('parallel: two requests share the fold, both results lift separately', () => {
+    const runs = splitAgentRuns([
+      requestEntry(0),
+      { ...requestEntry(1), title: 'Read · /tmp/x' },
+      resultEntry(2),
+      resultEntry(3, '✗ **Read**\ndenied by fake'),
+    ])
+    expect(runs.map((r) => r.type)).toEqual(['process', 'tool_result', 'tool_result'])
+  })
+
+  it('render: top-level block with a persistent outcome chip and independent toggle', async () => {
+    const runs = splitAgentRuns([requestEntry(1), resultEntry(2)])
+    const entries: ConversationEntryView[] = [
+      {
+        position: 0,
+        kind: 'prompt',
+        element_type: 'markdown',
+        content: 'perm',
+        created_at_unix: FIXED_DATES.T1,
+      },
+      ...runs.flatMap((r) =>
+        r.type === 'process'
+          ? r.items.map(toView)
+          : [toView((r as ToolResultRun).item)],
+      ),
+    ]
+    const el = await mount({ entries })
+    // 结果块在顶层（不在 .process-fold 内），章常驻、展开体默认可见。
+    const block = el.shadowRoot!.querySelector('[data-testid="tool-result-entry"]')
+    expect(block).toBeTruthy()
+    expect(block!.closest('.process-fold')).toBeNull()
+    expect(block!.textContent).toContain('✓ 已执行')
+    expect(el.shadowRoot!.querySelector('[data-testid="tool-outcome"]')).toBeTruthy()
+    const body = block!.querySelector('.result-body')
+    expect(body?.textContent).toContain('perm done')
+    // 开合独立：点结果块不连带过程折叠（aria-expanded 只翻自己）。
+    const foldLink = el.shadowRoot!.querySelector<HTMLButtonElement>(
+      '.process-fold button.fold-link',
+    )!
+    const before = foldLink.getAttribute('aria-expanded')
+    block!.querySelector<HTMLButtonElement>('[data-testid="tool-result-link"]')!.click()
+    await el.updateComplete
+    expect(
+      el.shadowRoot!.querySelector('.process-fold button.fold-link')!.getAttribute('aria-expanded'),
+    // the process fold must not toggle with the result block.
+    ).toBe(before)
+    // 收起后章仍在头部可见（决策标识常驻）。
+    expect(
+      el.shadowRoot!.querySelector('[data-testid="tool-result-entry"] [data-testid="tool-outcome"]'),
+    ).toBeTruthy()
+    el.remove()
+  })
+
+  it('denied result renders the ✗ chip', async () => {
+    const runs = splitAgentRuns([
+      { ...resultEntry(0), content: '✓ **Bash**\ndenied by fake' },
+    ])
+    const el = await mount({ entries: runs.flatMap((r) => [toView((r as ToolResultRun).item)]) })
+    expect(el.shadowRoot!.querySelector('[data-testid="tool-outcome-denied"]')).toBeTruthy()
+    expect(el.shadowRoot!.querySelector('[data-testid="tool-outcome"]')).toBeNull()
+    el.remove()
+  })
+})
+
+// ── fix-webui-qa-round2 1.2/3.3：回执相位对空 prompt 条目的防御 ──────────────
+
+describe('entriesAwaitReceipt ignores empty prompt entries (round2 1.2)', () => {
+  it('an empty-content prompt tail is not a submission', () => {
+    expect(
+      entriesAwaitReceipt([
+        { kind: 'content', content: 'hi' },
+        { kind: 'prompt', content: '' },
+      ]),
+    ).toBe(false)
+    expect(
+      entriesAwaitReceipt([
+        { kind: 'content', content: 'hi' },
+        { kind: 'prompt', content: '/compact' },
+      ]),
+    ).toBe(true)
+    // content 字段缺席（旧调用方形状）按非空对待，语义不变。
+    expect(entriesAwaitReceipt([{ kind: 'prompt' }])).toBe(true)
+    expect(entriesAwaitReceipt([{ kind: 'content', content: 'x' }])).toBe(false)
+  })
+})
+
+// ── fix-webui-qa-round2 2.1：开卷边界登记（unread-cursor 侧） ────────────────
+
+describe('opening-seam registry (round2 2.1)', () => {
+  it('arm/peek/clear round-trips per session key', () => {
+    armOpeningSeam('k1', 3)
+    expect(peekOpeningSeam('k1')).toBe(3)
+    armOpeningSeam('k2', null)
+    expect(peekOpeningSeam('k2')).toBeNull()
+    expect(peekOpeningSeam('k3')).toBeUndefined()
+    // 同会话重复聚焦覆盖登记。
+    armOpeningSeam('k1', 5)
+    expect(peekOpeningSeam('k1')).toBe(5)
+    clearOpeningSeam('k1')
+    expect(peekOpeningSeam('k1')).toBeUndefined()
+  })
+})
+
+// ── fix-webui-qa-round2 2.5（D-B13）：大批量分片摄入 ─────────────────────────
+
+describe('flood ingest drains in chunks (round2 2.5, D-B13)', () => {
+  it('a >50-entry turn.append queues and drains over frames without loss', async () => {
+    const el = await mount({
+      entries: [
+        {
+          position: 0,
+          kind: 'prompt',
+          element_type: 'markdown',
+          content: 'flood',
+          created_at_unix: FIXED_DATES.T1,
+        },
+      ],
+    })
+    const total = 1200
+    const incoming: ConversationEntryView[] = Array.from({ length: total }, (_, i) => ({
+      position: i + 1,
+      kind: 'content',
+      element_type: 'markdown',
+      content: 'f'.concat(String(i)),
+      created_at_unix: FIXED_DATES.T1,
+    }))
+    emitTurnAppend('oc_test', incoming)
+    // 直渲染被分片路径替代：经若干 rAF 片段后全量收敛、顺序保真、零丢失。
+    await el.updateComplete
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => requestAnimationFrame(() => r(null)))
+      await el.updateComplete
+      if ((el as unknown as { streamQueue: unknown[] }).streamQueue.length === 0) break
+    }
+    const sebasEntries = (el as unknown as { streamEntries: ConversationEntryView[] })
+      .streamEntries
+    expect(sebasEntries).toHaveLength(total)
+    expect(sebasEntries[0]!.content).toBe('f0')
+    expect(sebasEntries[total - 1]!.content).toBe('f1199')
+    const text = el.shadowRoot!.textContent ?? ''
+    expect(text).toContain('f1199')
+    el.remove()
   })
 })

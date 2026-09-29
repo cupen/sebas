@@ -118,6 +118,7 @@ mod tests {
                 reachable: true,
                 cause: None,
                 version: Some("claude v1.2.3".into()),
+                display_raw: Some("Claude Code".into()),
             },
             AgentKindInfo {
                 id: "gemini".into(),
@@ -125,6 +126,7 @@ mod tests {
                 reachable: false,
                 cause: Some("command not found".into()),
                 version: None,
+                display_raw: None,
             },
         ];
         assert_eq!(

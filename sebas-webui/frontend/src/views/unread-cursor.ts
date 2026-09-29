@@ -114,3 +114,34 @@ export function unreadCount(sessionKey: string, msgCount: number): number {
   if (anchor === null) return 0
   return Math.max(0, msgCount - anchor)
 }
+
+/**
+ * （fix-webui-qa-round2 2.1/2.6，D5+D-R2A）未读分界线的开卷边界登记表。
+ *
+ * 聚焦写锚改为「推进到服务端当前计数」（D-R2A：聚焦不得停在回合前旧值），
+ * 但已读/未读的**分界线呈现**依赖推进前的旧锚——两个事实在此解耦：rail
+ * switch 在写锚**之前**用 [`armOpeningSeam`] 登记本次开卷的边界（当时的
+ * 读锚，`null` = 无锚/fully read），transcript 挂载时经 [`takeOpeningSeam`]
+ * 消费并按边界补绘分界线；锚到顶不再阻挡分界线呈现。
+ *
+ * 模块级 Map 而非组件字段：秒回场景下 dashboard 会重建 transcript 实例，
+ * 登记必须跨实例存活。同会话重复聚焦覆盖登记（后一次边界为准）；读取
+ * （消费）不删除——组件重挂载仍能按同一边界重绘，滚读/清账时经
+ * [`clearOpeningSeam`] 显式作废。
+ */
+const openingSeams = new Map<string, number | null>()
+
+export function armOpeningSeam(sessionKey: string, anchor: number | null): void {
+  if (!sessionKey) return
+  openingSeams.set(sessionKey, anchor)
+}
+
+/** 取当前登记的开卷边界（未登记 = `undefined`，调用方回退现读锚）。 */
+export function peekOpeningSeam(sessionKey: string): number | null | undefined {
+  return openingSeams.get(sessionKey)
+}
+
+/** 边界已读（滚到底 / mark all seen）：登记作废，重进不再按旧边界重绘。 */
+export function clearOpeningSeam(sessionKey: string): void {
+  openingSeams.delete(sessionKey)
+}

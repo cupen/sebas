@@ -636,14 +636,17 @@ describe('unread badge focused-session boundaries (fix-webui-qa-defects-round3 6
     await new Promise((r) => setTimeout(r, 0))
     await el.updateComplete
     expect(el.shadowRoot!.querySelector('[data-testid="session-unread"]')).toBeNull()
-    expect(readAnchorCount(target.encoded_key)).toBe(2)
+    // （fix-webui-qa-round2 2.6，D-R2A）聚焦写锚推进到服务端当前计数：
+    // switch 不再只「缺锚立基」——锚从 2 推进到 5，徽标由聚焦 gate 与
+    // count−anchor 双门保持清零。
+    expect(readAnchorCount(target.encoded_key)).toBe(5)
 
-    // 同会话重复点击（no-op switch）：锚保持、徽标不复活（聚焦 gate）。
+    // 同会话重复点击（no-op switch）：锚单调保持、徽标不复活（聚焦 gate）。
     ;(items()[0] as HTMLElement).click()
     await new Promise((r) => setTimeout(r, 0))
     await el.updateComplete
     expect(el.shadowRoot!.querySelector('[data-testid="session-unread"]')).toBeNull()
-    expect(readAnchorCount(target.encoded_key)).toBe(2)
+    expect(readAnchorCount(target.encoded_key)).toBe(5)
     expect(mockOf(apiMock.switchSession).mock.calls.length - switchCallsBefore).toBe(2)
     el.remove()
   })
@@ -736,7 +739,10 @@ describe('unread badge focused-session boundaries (fix-webui-qa-defects-round3 6
       await new Promise((r) => setTimeout(r, 0))
       await el.updateComplete
       expect(items()[0]!.querySelector('[data-testid="session-unread"]')).toBeNull()
-      expect(readAnchorCount(a.encoded_key)).toBe(1)
+      // （fix-webui-qa-round2 2.6，D-R2A）点回聚焦即推进锚到服务端当前
+      // 计数（3）——徽标不再复燃；未读分界线由开卷冻结边界（推进前的 1）
+      // 在 transcript 呈现，锚推进与 seam 可见解耦。
+      expect(readAnchorCount(a.encoded_key)).toBe(3)
       el.remove()
     } finally {
       restore()
@@ -2240,6 +2246,94 @@ describe('unread badge journey after creation (round3 3.1)', () => {
     const badge = items()[0]!.querySelector('[data-testid="session-unread"]')
     expect(badge).toBeTruthy()
     expect(badge!.textContent).toBe('1')
+    el.remove()
+  })
+})
+
+// ── fix-webui-qa-round2 1.1（D-B11）：路径输入保真 + 校验去抖 ────────────────
+
+describe('add-project path input fidelity + debounced precheck (round2 1.1)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  async function openDialog(): Promise<SebasProjectRail> {
+    mockOf(apiMock.fsBrowseDirs).mockResolvedValue({ entries: [], root: 'D:/work' })
+    const el = await mountReal()
+    ;(el as any).addDialogOpen = true
+    await (el as any).updateComplete
+    // 目录选择器自身初始化会 browse 一次（空路径 = 根，异步落账）：清掉
+    // 调用记录并冲刷微任务，本组断言只关心**键击路径**的请求量。
+    await vi.advanceTimersByTimeAsync(1)
+    mockOf(apiMock.fsBrowseDirs).mockClear()
+    return el
+  }
+
+  // mount() 的多轮 setTimeout(0) 冲刷与 fake timers 冲突：这里用直接挂载。
+  async function mountReal(): Promise<SebasProjectRail> {
+    const el = document.createElement('sebas-project-rail') as SebasProjectRail
+    document.body.appendChild(el)
+    await (el as any).updateComplete
+    return el
+  }
+
+  function typeInto(el: SebasProjectRail, text: string): void {
+    const input = el.shadowRoot!.querySelector('wa-input[label="Project path"]') as any
+    expect(input).toBeTruthy()
+    // 逐字符键击：每次 input 事件携带累计值（真输入框语义）。
+    for (let i = 1; i <= text.length; i++) {
+      input.value = text.slice(0, i)
+      input.dispatchEvent(new Event('input'))
+    }
+  }
+
+  it('typing preserves backslashes verbatim through state AND the submit payload (round2 1.1)', async () => {
+    // 3b 复测加固：含 \f / \n / \t / \p 拼写的路径（String.raw 书写，
+    // 逐字符 = 反斜杠+字母，绝无控制字符）——真 dialog 渲染、input 事件链、
+    // 提交载荷三层逐一对照。此前的组件级写法只断言了 state 半边。
+    const value = String.raw`C:\fill\path\test`
+    // 探针等价断言：值内恰三处反斜杠（92），零控制字符（9/10/12/13）。
+    expect([...value].map((c) => c.charCodeAt(0)).join(',')).toBe(
+      '67,58,92,102,105,108,108,92,112,97,116,104,92,116,101,115,116',
+    )
+    const el = await openDialog()
+    typeInto(el as SebasProjectRail, value)
+    expect((el as any).addPath).toBe(value)
+    // 提交载荷：mock 捕获 api.projects.add 的 path 实参，逐字符一致。
+    const submitted: string[] = []
+    mockOf(apiMock.projects.add).mockImplementation(async (path: string) => {
+      submitted.push(path)
+      return { id: 'p1', path, name: 'test', added_at: 0 }
+    })
+    await (el as any).submitAddProject()
+    expect(submitted).toEqual([value])
+    el.remove()
+  })
+
+  it('the precheck fires once after the debounce window, not per keystroke', async () => {
+    const el = await openDialog()
+    typeInto(el as SebasProjectRail, String.raw`C:\a\b`)
+    // 键击突发期间零网络请求（400 风暴的根因即逐键预检）。
+    expect(mockOf(apiMock.fsBrowseDirs)).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(299)
+    expect(mockOf(apiMock.fsBrowseDirs)).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(mockOf(apiMock.fsBrowseDirs)).toHaveBeenCalledTimes(1)
+    // 去抖窗口内的旧预检结果不滞留为误导性文案：键击即清 hint。
+    expect((el as any).addPathScopeHint).toBeNull()
+    el.remove()
+  })
+
+  it('the scope hint maps the real server cause after the debounced check', async () => {
+    const el = await openDialog()
+    mockOf(apiMock.fsBrowseDirs).mockRejectedValue(new Error(String.raw`路径不存在或无法访问: C:\a\b`))
+    typeInto(el as SebasProjectRail, String.raw`C:\a\b`)
+    await vi.advanceTimersByTimeAsync(300)
+    await (el as any).updateComplete
+    expect((el as any).addPathScopeHint).toContain('不存在')
     el.remove()
   })
 })

@@ -7,7 +7,7 @@
 //! 通道相关的门禁（chat_type / 群聊 @ bot 检测 / 去重）已下沉到各通道适配器，
 //! 核心只看到中立事件与 `ChannelKey`。
 
-use super::{DispatchHandle, Out, compose_media_prompt, text_from_caption};
+use super::{DispatchHandle, Out, TurnEntry, compose_media_prompt, text_from_caption};
 use crate::cards::{CardConfig, ThinkingDisplay};
 use crate::cards_ui;
 use crate::commands::{Command, RouterAction, parse_command};
@@ -357,6 +357,17 @@ impl DispatchHandle {
                     .await
                     .and_then(|m| m.session_id().map(str::to_owned));
                 if let Some(sid) = sid {
+                    // （fix-webui-qa-round2 2.2，D-B218）命令提交的转写回执：
+                    // /compact 此前只有 toast/进度卡、转录里零痕迹，且命令
+                    // 产出（compact 后的首段回复）与前一条 assistant 段落
+                    // 相邻合并（「hello worldhello world」）。回执以 prompt
+                    // 条目落账——转录里可见「提交过 /compact」，产出的文本
+                    // 段与历史段落之间隔着这条 prompt，不再并入前段。
+                    self.transcript_push(&sid, TurnEntry::prompt(0, text.clone()))
+                        .await;
+                    if let Some(k) = self.map.lookup_key_by_session(&sid).await {
+                        self.publish_updated(&k).await;
+                    }
                     self.forward_compact(&sid, key.clone()).await;
                 } else {
                     // 无会话明确报错（sebas-ixv）：HelpText 在 dispatch 层是

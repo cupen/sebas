@@ -30,12 +30,17 @@ export interface ModeOption {
  * an empty or placeholder mode state」），解释语义经 description 以
  * title/hint 通道回归——wire 值 `ask|edit|allow|auto` 不变，dashboard
  * 的中文徽标走 modeBadgeLabel（同样不动）。
+ *
+ * （fix-webui-qa-round2 2.3，M-C6）描述如实：`allow` 与 `auto` 在门控行为
+ * 上是**同一档**（同映射 bypass tier，permission-flow spec 明文）——两段
+ * 描述都写「全部放行 + 留审计」并**互相点名等价**，不暗示任何不存在的
+ * 行为差异（QA：两模式在 GUI 上观测无差异，旧文案却措辞各异像有两档）。
  */
 export const MODE_OPTIONS: readonly ModeOption[] = [
-  { value: 'ask', label: 'Ask', description: '逐次询问' },
-  { value: 'edit', label: 'Edit', description: '自动接受编辑' },
-  { value: 'allow', label: 'Allow', description: '放行并留审计' },
-  { value: 'auto', label: 'Auto', description: '自动执行（不门控，留审计）' },
+  { value: 'ask', label: 'Ask', description: '逐次询问：每个工具先问你' },
+  { value: 'edit', label: 'Edit', description: '自动接受编辑，其余工具先问你' },
+  { value: 'allow', label: 'Allow', description: '全部放行、留审计（与 Auto 等价）' },
+  { value: 'auto', label: 'Auto', description: '全部放行、留审计（与 Allow 等价）' },
 ]
 
 /**

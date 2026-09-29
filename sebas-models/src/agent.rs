@@ -14,8 +14,9 @@
 //!   与 config 同名键同义；
 //! - `source`：行来源 `seed`（config 种子导入）| `ui`（Settings 创建），
 //!   纯呈现信息，不影响行为；
-//! - claude 变体的 `sessions_dir` 不入表（UI 管理场景不需要，缺省走既有
-//!   默认——决策 1 原文）。
+//! - claude 变体的 `sessions_dir` 入表（fix-webui-qa-round2 2.4 解除早期
+//!   「不入表」决策：Settings 表单要能建出 spawn 可用的 agent——sessions
+//!   目录是 spawn 关键字段；可空 = 走既有默认，旧行为零迁移语义）。
 //!
 //! PRIMARY KEY 等约束只在根 crate 注册表（SETTINGS_TABLES）的 DDL 里表达。
 
@@ -49,6 +50,11 @@ pub struct AgentRow {
     pub idle_kill_secs: i64,
     /// 会话工作目录覆盖（可空）。
     pub work_dir: Option<String>,
+    /// （fix-webui-qa-round2 2.4，M-A4）claude 驱动的 sessions 目录覆盖
+    /// （可空 = 走既有默认）。此前决策「不入表」随 GUI 建目录能力一并
+    /// 解除：表单建出的 agent 要能配到可用形态（spec「Agent form covers
+    /// spawn-critical fields」），sessions 目录是 spawn 关键字段之一。
+    pub sessions_dir: Option<String>,
     /// 行来源：`seed`（config 种子导入）| `ui`（Settings 创建）。
     #[column(default = "seed")]
     pub source: String,
@@ -81,6 +87,9 @@ pub struct AgentDefinition {
     pub idle_kill_secs: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_dir: Option<String>,
+    /// （fix-webui-qa-round2 2.4，M-A4）claude 驱动的 sessions 目录覆盖。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sessions_dir: Option<String>,
 }
 
 fn default_startup_timeout() -> u64 {
@@ -107,6 +116,7 @@ impl Default for AgentDefinition {
             startup_timeout_secs: default_startup_timeout(),
             idle_kill_secs: default_idle_kill(),
             work_dir: None,
+            sessions_dir: None,
         }
     }
 }
@@ -191,6 +201,7 @@ impl AgentRow {
             startup_timeout_secs: def.startup_timeout_secs as i64,
             idle_kill_secs: def.idle_kill_secs as i64,
             work_dir: def.work_dir.clone(),
+            sessions_dir: def.sessions_dir.clone(),
             source: source.to_string(),
             deleted: 0,
             created_at: now,
@@ -209,6 +220,7 @@ impl AgentRow {
             startup_timeout_secs: self.startup_timeout_secs.max(0) as u64,
             idle_kill_secs: self.idle_kill_secs.max(0) as u64,
             work_dir: self.work_dir.clone(),
+            sessions_dir: self.sessions_dir.clone(),
         }
     }
 
@@ -251,6 +263,9 @@ impl AgentRow {
         );
         if let Some(w) = &self.work_dir {
             item.insert("work_dir".into(), Value::String(w.clone()));
+        }
+        if let Some(sd) = &self.sessions_dir {
+            item.insert("sessions_dir".into(), Value::String(sd.clone()));
         }
         item.insert("source".into(), Value::String(self.source.clone()));
         item.insert("created_at".into(), Value::from(self.created_at));
@@ -295,6 +310,7 @@ mod tests {
             startup_timeout_secs: 30,
             idle_kill_secs: 172800,
             work_dir: None,
+            sessions_dir: None,
         }
     }
 
@@ -311,6 +327,7 @@ mod tests {
             startup_timeout_secs: 45,
             idle_kill_secs: 0,
             work_dir: Some("/tmp/work".into()),
+            sessions_dir: None,
         };
         let row = AgentRow::from_definition("myclaude", &def, "seed");
         assert_eq!(row.id, "myclaude");
@@ -379,6 +396,7 @@ mod tests {
             startup_timeout_secs: 60,
             idle_kill_secs: 3600,
             work_dir: None,
+            sessions_dir: None,
         };
         let item = AgentRow::from_definition("opencode", &def, "ui").to_item();
         assert_eq!(item.get("id").and_then(Value::as_str), Some("opencode"));
@@ -423,6 +441,7 @@ mod tests {
                 "startup_timeout_secs",
                 "idle_kill_secs",
                 "work_dir",
+                "sessions_dir",
                 "source",
                 "deleted",
                 "created_at",
@@ -444,6 +463,7 @@ mod tests {
                 startup_timeout_secs INTEGER NOT NULL DEFAULT 30,
                 idle_kill_secs       INTEGER NOT NULL DEFAULT 172800,
                 work_dir             TEXT,
+                sessions_dir         TEXT,
                 source               TEXT NOT NULL DEFAULT 'seed',
                 deleted              INTEGER NOT NULL DEFAULT 0,
                 created_at           INTEGER NOT NULL,
@@ -464,6 +484,7 @@ mod tests {
             startup_timeout_secs: 60,
             idle_kill_secs: 3600,
             work_dir: Some("/tmp/oc".into()),
+            sessions_dir: None,
         };
         let row = AgentRow::from_definition("opencode", &def, "ui");
         row.save(&conn).unwrap();

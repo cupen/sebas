@@ -111,43 +111,42 @@ test.describe('对话视图（workbench-conversation-view）', () => {
       await cards.allowOnce().click()
       await expect(cards.all()).toHaveCount(0, { timeout: 15_000 })
 
-      // The turn's process entries collect into ONE outer fold — NOT
-      // ordinary prose（workbench-natural-conversation-flow：折叠行三段式
-      // = `process` 标签 + 尾条目结构化 title（实时「进行中工具」）+ 条目
-      // 计数；collapsed by default, the invocation payload hidden until
-      // expanded——展开体懒渲染，收起时不在 DOM）.
+      // fix-webui-qa-round2 1.3（D-C3a）：决策后的 tool_result 不再嵌进过程
+      // 折叠——它提升为转写层级的独立结果块（章常驻、展开体默认可见、开合
+      // 与过程折叠互不连带）；过程折叠只包未决策前的过程帧（请求），折叠行
+      // 三段式（`process` 标签 + 尾条目 title + 计数）不变。
       const fold = detail.processFold().first()
       await expect(fold).toBeVisible({ timeout: 15_000 })
       const outerLink = fold.locator('[data-testid="process-fold-link"]')
       await expect(outerLink.locator('.label')).toHaveText('process')
-      // 尾条目 = tool_result（结构化 title 同二级折叠），计数 = 2。
-      await expect(outerLink.locator('.running')).toHaveText('✓ Bash')
-      await expect(outerLink.locator('.fold-count')).toHaveText('2')
+      // 尾条目 = 工具请求（结果已顶层化），计数 = 1。
+      await expect(outerLink.locator('.running')).toHaveText('Bash · rm -rf /')
+      await expect(outerLink.locator('.fold-count')).toHaveText('1')
       await expect(outerLink).toHaveAttribute('aria-expanded', 'false')
       await expect(fold.locator('.fold-body')).toHaveCount(0)
+      // 折叠无已决章（结果标识移到了顶层结果块上）。
+      await expect(fold.locator('[data-testid="tool-outcome"]')).toHaveCount(0)
 
-      // Expand the outer fold（键盘用户对折叠行按 Enter 的同一动作）:
-      // second-level per-entry folds appear, themselves collapsed by default
-      // (2.2), titled by the backend's structured title.
+      // 顶层结果块：✓已执行章常驻、内容零折叠可达。
+      const resultBlock = detail.host.locator('[data-testid="tool-result-entry"]')
+      await expect(resultBlock).toBeVisible()
+      await expect(resultBlock.locator('[data-testid="tool-outcome"]')).toHaveText('✓ 已执行')
+      await expect(resultBlock.locator('.result-body')).toContainText('perm done')
+
+      // 展开过程折叠：只剩请求帧本身（第二级折叠仍在，独立开合）。
       await outerLink.click()
       await expect(outerLink).toHaveAttribute('aria-expanded', 'true')
       const items = detail.processItems()
-      await expect(items).toHaveCount(2)
+      await expect(items).toHaveCount(1)
       await expect(items.nth(0).locator('.item-title')).toHaveText('Bash · rm -rf /')
-      await expect(items.nth(1).locator('.item-title')).toHaveText('✓ Bash')
-      for (let i = 0; i < 2; i++) {
-        await expect(items.nth(i).locator('[data-testid="process-item-link"]')).toHaveAttribute(
-          'aria-expanded',
-          'false',
-        )
-        await expect(items.nth(i).locator('.item-body')).toHaveCount(0)
-      }
-
-      // Second-level expand reveals the invocation detail (its result text).
-      await items.nth(1).locator('[data-testid="process-item-link"]').click()
-      await expect(items.nth(1).locator('.item-body')).toContainText('perm done')
-      // The sibling fold stays collapsed — expansion is per entry.
       await expect(items.nth(0).locator('.item-body')).toHaveCount(0)
+      await items.nth(0).locator('[data-testid="process-item-link"]').click()
+      await expect(items.nth(0).locator('.item-body')).toContainText('rm -rf /')
+
+      // 开合互不连带：收起过程折叠不影响结果块的展开体（反之亦然）。
+      await outerLink.click()
+      await expect(outerLink).toHaveAttribute('aria-expanded', 'false')
+      await expect(resultBlock.locator('.result-body')).toBeVisible()
 
       expect(collector.clean()).toEqual([])
     })

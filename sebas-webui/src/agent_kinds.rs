@@ -30,6 +30,12 @@ pub struct AgentKindInfo {
     /// The first line of `<exe> --version`, when available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// （fix-webui-qa-round2 2.4，D-A4）**未兜底**的原始 display 配置：
+    /// `display` 字段缺省时回退 id，编辑表单据此无法区分「显式设置为与
+    /// id 相同」与「从未设置」——回填丢失正是 QA 观测的 display 保真缺陷。
+    /// 原始值随 wire 透传（None = 未设置），表单回填以此为准。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_raw: Option<String>,
 }
 
 /// A configured agent to probe: its id, full launch argv, driver tag
@@ -63,6 +69,7 @@ pub async fn discover_agent(source: &AgentKindSource) -> AgentKindInfo {
         .display
         .clone()
         .unwrap_or_else(|| source.fallback_display());
+    let display_raw = source.display.clone();
     let command = source.command.as_slice();
     let Some(exe) = command.first().filter(|e| !e.is_empty()) else {
         return AgentKindInfo {
@@ -71,6 +78,7 @@ pub async fn discover_agent(source: &AgentKindSource) -> AgentKindInfo {
             reachable: false,
             cause: Some("empty command".to_string()),
             version: None,
+            display_raw,
         };
     };
 
@@ -81,6 +89,7 @@ pub async fn discover_agent(source: &AgentKindSource) -> AgentKindInfo {
             reachable: false,
             cause: Some("command not found".to_string()),
             version: None,
+            display_raw,
         };
     }
 
@@ -111,6 +120,7 @@ pub async fn discover_agent(source: &AgentKindSource) -> AgentKindInfo {
         reachable: true,
         cause: None,
         version,
+        display_raw,
     }
 }
 

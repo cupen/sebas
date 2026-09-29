@@ -584,7 +584,8 @@ fn main() {
 }
 
 /// "perm" prompt: Bash(rm -rf /) gated by the hook; the tool_result reflects
-/// the decision, then the turn ends.
+/// the decision, then a post-loop assistant text + result close the turn
+/// （fix-webui-qa-round2 1.4：与 tool-loop/parallel 同形态，环后正文不缺席）.
 fn perm_turn(
     flags: &Flags,
     io: &mut Io,
@@ -632,6 +633,12 @@ fn perm_turn(
     } else {
         io.emit(&tool_result_frame(sid, "tc-1", "denied by fake", true));
     }
+    // （fix-webui-qa-round2 1.4，D-C3b）环后正文：单工具审批回合与
+    // parallel_turn 同形态——tool_result 之后一段 assistant 正文再收尾。
+    // 此前 perm 回合缺这段帧，GUI「单工具回合丢环后正文」的观测即源于此
+    // （投影层经 dispatch 单测钉住 tool_result 后的 assistant 文本完整
+    // 保留，缺陷在夹具不在投影）。
+    emit_assistant_text(io, sid, "perm turn finished", reported_model(flags));
     io.emit(&result_frame(sid, "success", false));
 }
 

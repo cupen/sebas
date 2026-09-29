@@ -882,6 +882,7 @@ pub const AGENT_ITEM_KNOWN_FIELDS: &[&str] = &[
     "startup_timeout_secs",
     "idle_kill_secs",
     "work_dir",
+    "sessions_dir",
 ];
 
 /// 校验 agent 条目并归一化为 `AgentDefinition`。`driver` 只认封闭标签
@@ -957,6 +958,8 @@ pub fn validate_agent_definition(item: &Item) -> Result<sebas_models::agent::Age
         startup_timeout_secs: uint_slot("startup_timeout_secs", 30)?,
         idle_kill_secs: uint_slot("idle_kill_secs", 172800)?,
         work_dir: string_slot("work_dir")?,
+        // （fix-webui-qa-round2 2.4，M-A4）sessions 目录随 put 载荷入表。
+        sessions_dir: string_slot("sessions_dir")?,
     })
 }
 

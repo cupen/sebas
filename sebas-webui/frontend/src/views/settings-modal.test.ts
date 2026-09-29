@@ -1240,10 +1240,15 @@ describe('add-agent-settings-and-session-titles：Agents 分区（/api/agents*�
     const save = waButtonsIn(dlg).find((b) => b.textContent?.trim() === 'Save')!
     save.click()
     await settle(el)
+    // （fix-webui-qa-round2 2.4）spawn 目录/参数字段随 create 全量上 wire
+    // （留空 = null = 缺省/清除）。
     expect(apiMocks.agentsCreate).toHaveBeenCalledWith('myclaude', {
       driver: 'claude',
       path: 'claude',
       display: null,
+      args: null,
+      work_dir: null,
+      sessions_dir: null,
     })
     el.remove()
   })
@@ -1283,8 +1288,13 @@ describe('add-agent-settings-and-session-titles：Agents 分区（/api/agents*�
       .find((b) => b.textContent?.trim() === 'Save')!
       .click()
     await settle(el)
-    // 部分更新：只交 display（launch 定义保留存量——合并语义）。
-    expect(apiMocks.agentsUpdate).toHaveBeenCalledWith('claude', { display: 'My Claude' })
+    // 部分更新：display + spawn 目录/参数改动面（launch 形态保留存量——
+    // 合并语义逐字段生效；fix-webui-qa-round2 2.4）。
+    expect(apiMocks.agentsUpdate).toHaveBeenCalledWith('claude', {
+      display: 'My Claude',
+      work_dir: null,
+      args: null,
+    })
     el.remove()
   })
 
@@ -1309,6 +1319,82 @@ describe('add-agent-settings-and-session-titles：Agents 分区（/api/agents*�
     expect(el.shadowRoot!.querySelector('[data-testid="agent-action"]')?.textContent).toContain(
       '已删除',
     )
+    el.remove()
+  })
+
+  // ── fix-webui-qa-round2 2.4（M-A4+D-A4）：表单覆盖 spawn 关键字段 + display 回填 ──
+
+  it('edit prefills display from the raw value and maps sessions/work/args into the payload', async () => {
+    apiMocks.agents.mockResolvedValue({
+      agents: [
+        {
+          id: 'myagent',
+          display: 'myagent',
+          display_raw: 'My Agent!',
+          reachable: true,
+          driver_raw: 'claude',
+          args: ['--scenario', 'thinking'],
+          work_dir: 'D:/sb/work',
+          sessions_dir: 'D:/sb/sessions',
+        },
+      ],
+    })
+    apiMocks.agentsUpdate.mockResolvedValue({ updated: 'myagent' })
+    const el = await mount()
+    await goto(el, 4)
+    agentRows(el)
+      .find((r) => r.dataset['id'] === 'myagent')!
+      .querySelector<HTMLElement>('button[title="Edit"]')!
+      .click()
+    await settle(el)
+    const dlg = dialogByLabel(el, 'Edit agent myagent')
+    // D-A4：display 以未兜底的 display_raw 回填（display === id 不再丢失）。
+    const displayInput = [...dlg.querySelectorAll('wa-input')].find(
+      (i) => i.getAttribute('label') === 'Display name (optional)',
+    )
+    expect(
+      (displayInput as unknown as { value: string } | null)?.value,
+    ).toBe('My Agent!')
+    // M-A4：存量 launch 字段逐项回填。
+    const sessionsInput = [...dlg.querySelectorAll('wa-input')].find(
+      (i) => i.getAttribute('label') === 'Sessions dir (optional)',
+    )
+    expect(
+      (sessionsInput as unknown as { value: string } | null)?.value,
+    ).toBe('D:/sb/sessions')
+    // 改 args 后保存：claude 驱动的 put 携带三个 spawn 字段。
+    const argsInput = [...dlg.querySelectorAll('wa-input')].find(
+      (i) => i.getAttribute('label') === 'Args (space separated)',
+    ) as unknown as HTMLInputElement
+    argsInput.value = '--scenario drip'
+    argsInput.dispatchEvent(new Event('input', { bubbles: true, composed: true }))
+    waButtonsIn(dlg)
+      .find((b) => b.textContent?.trim() === 'Save')!
+      .click()
+    await settle(el)
+    expect(apiMocks.agentsUpdate).toHaveBeenCalledWith('myagent', {
+      display: 'My Agent!',
+      work_dir: 'D:/sb/work',
+      // review P3 修复后：不改形态臂对 claude 行也携带 sessions_dir
+      // （表单显示且可编辑的字段必须随保存上 wire，不再静默丢弃）。
+      sessions_dir: 'D:/sb/sessions',
+      args: ['--scenario', 'drip'],
+    })
+    el.remove()
+  })
+
+  it('duplicate agent id at create time shows a visible warning (round2 3.3)', async () => {
+    const el = await mount()
+    await goto(el, 4)
+    waButtons(el)
+      .find((b) => b.textContent?.trim() === '＋ New agent')!
+      .click()
+    await settle(el)
+    setWaInput(el, 'Agent id', 'claude')
+    await settle(el)
+    const warn = el.shadowRoot!.querySelector('[data-testid="agent-duplicate-warning"]')
+    expect(warn).toBeTruthy()
+    expect(warn!.textContent).toContain('覆盖')
     el.remove()
   })
 })
@@ -2440,4 +2526,46 @@ describe('About BUILD section shows build time and git info (add-about-build-inf
     )
     el.remove()
   })
+
+  // ── fix-webui-qa-round2 3.1（D-A7）：toolchain 行的「要求 ≥」界限如实呈现 ──
+  // 配置了界限才渲染标签；未配置不得出现悬空界限（有标签无值的行）。
+
+  it('About toolchain：配置了最低版本时同 show「要求 ≥」界限 (round2 3.1)', async () => {
+    const el = await mount()
+    await goto(el, 7)
+    const row = [...el.shadowRoot!.querySelectorAll('dl.about-build .kv')].find((kv) =>
+      kv.textContent?.includes('Rust toolchain'),
+    )
+    const bound = row!.querySelector('.toolchain-required')
+    expect(bound).toBeTruthy()
+    expect(bound!.textContent).toContain('要求 ≥ 1.90')
+    el.remove()
+  })
+
+  it('About toolchain：未配置界限时不渲染悬空的「要求 ≥」标签 (round2 3.1)', async () => {
+    apiMocks.about.mockResolvedValue({
+      uptime: '3h 12m',
+      version: '0.4.2',
+      build_time: '2026-09-29 08:30',
+      git_branch: 'main',
+      git_hash: 'abc1234',
+      rustc: { state: 'ok', version: 'rustc 1.88.0 (hash)' },
+      rustc_required: '',
+      router_listen: '127.0.0.1:8787',
+      provider_count: 2,
+      default_agent_kind: 'claude',
+    })
+    const el = await mount()
+    await goto(el, 7)
+    const row = [...el.shadowRoot!.querySelectorAll('dl.about-build .kv')].find((kv) =>
+      kv.textContent?.includes('Rust toolchain'),
+    )
+    // 探测值照常呈现，界限标签缺席。
+    expect(row!.querySelector('[data-testid="about-toolchain"]')!.textContent).toContain(
+      'rustc 1.88.0',
+    )
+    expect(row!.querySelector('.toolchain-required')).toBeNull()
+    el.remove()
+  })
+
 })

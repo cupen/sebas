@@ -39,6 +39,7 @@ fn info(id: &str, reachable: bool, cause: Option<&str>, version: Option<&str>) -
         reachable,
         cause: cause.map(str::to_string),
         version: version.map(str::to_string),
+        display_raw: None,
     }
 }
 

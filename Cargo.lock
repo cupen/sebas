@@ -439,8 +439,6 @@ dependencies = [
 [[package]]
 name = "cc-agent-sdk"
 version = "0.1.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5a63a4f6673401c4b0960e93e66634b4d787e5875dccb334a6bb78353ef9a08"
 dependencies = [
  "anyhow",
  "async-stream",

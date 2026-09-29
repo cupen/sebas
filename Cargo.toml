@@ -79,6 +79,11 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # dev-dependency，运行时路径现在也要用。
 tempfile = "3"
 
+# add-about-build-info 1.1：build.rs 以 chrono 格式化 UTC 编译时刻注入
+# BUILD_TIME（分钟精度）；只进 build 脚本依赖图，不进运行时。
+[build-dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
 [dev-dependencies]
 tempfile = "3"
 libc = "0.2"
@@ -99,3 +104,12 @@ path = "src/main.rs"
 [[bin]]
 name = "fake-claude"
 path = "tests/bin/fake-claude.rs"
+
+# （fix-webui-qa-round2 1.5，D-C5）vendor 补丁：cc-agent-sdk 0.1.7 的
+# hook_callback 处理在 await hook future 期间持有 hook_callbacks 注册表
+# 锁——并行 tool_use 的第二个 PreToolUse 请求被串行阻塞到第一个审批出结果
+# （GUI 验收 D-C5「并行审批一次只渲染一张卡」的根因）。0.1.7 是 crates.io
+# 最新版（无上游修复可升），故 vendor 一份并做最小修复：克隆回调后、
+# await 之前先放锁。除该处与注释外与 0.1.7 逐字节一致。
+[patch.crates-io]
+cc-agent-sdk = { path = "vendor/cc-agent-sdk" }

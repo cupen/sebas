@@ -776,16 +776,24 @@ export class SebasWorkbenchComposer extends LitElement {
     }
     const groups = this.modelGroups()
     const flat = groups.length === 1 && groups[0]!.provider === null
-    const label = this.currentModel ?? this.sessionModels[0]!
+    // （fix-webui-qa-round2 3.3，C10）chip 如实呈现「生效模型 + 来源」：
+    // 有会话上报的 current 才显示模型名（来源=执行体上报）；否则如实显示
+    // 「默认」占位——不把候选表第一项冒充成生效模型。stub 场景上报的
+    // "fake" 也照实显示（title 注明来源），不洗成真实模型名。
+    const label = this.currentModel ?? '默认'
+    const chipTitle = this.currentModel
+      ? `会话生效模型 ${this.currentModel}（执行体上报；切换走 session/set_config_option）`
+      : '尚未锁定模型——用 agent 默认；菜单里是执行体提供的可选项'
     return html`
       <div class="model-wrap">
         <button
           class="chip"
           type="button"
           data-testid="model-chip"
+          data-confirmed=${this.currentModel !== null}
           aria-haspopup="listbox"
           aria-expanded=${this.modelMenuOpen ? 'true' : 'false'}
-          title="模型选项来自会话执行体（切换走 session/set_config_option）"
+          title=${chipTitle}
           @click=${() =>
             this.modelMenuOpen ? this.closeModelMenu() : this.openModelMenu()}
         >

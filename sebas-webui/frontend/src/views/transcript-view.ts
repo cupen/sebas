@@ -77,7 +77,12 @@ import { unsafeHTML } from 'lit/directives/unsafe-html.js'
 import type { ConversationEntryView } from '../api/client.js'
 import { icon } from '../components/icons.js'
 import { renderMarkdown } from '../components/markdown.js'
-import { readAnchorCount, writeSeen as writeCursor } from './unread-cursor.js'
+import {
+  clearOpeningSeam,
+  peekOpeningSeam,
+  readAnchorCount,
+  writeSeen as writeCursor,
+} from './unread-cursor.js'
 import { sharedWs } from '../api/shared-ws.js'
 // （fix-webui-qa-findings D2）mode 契约条目的控制面词 → 人读标签。
 import { modeBadgeLabel } from './mode-vocabulary.js'
@@ -88,6 +93,12 @@ import '@awesome.me/webawesome/dist/components/dialog/dialog.js'
 const NEAR_BOTTOM_PX = 80
 /** Debounce window for mark-as-seen writes. */
 const MARK_SEEN_DEBOUNCE_MS = 250
+/**
+ * （fix-webui-qa-round2 2.5，D-B13）大批量分片阈值：单帧到达条数超过它的
+ * 部分进入 rAF 分片摄入（每片 ≤FLOOD_CHUNK 条），避免一次 append 上千条
+ * 造成的秒级主线程冻结；小批量（drip 首包）仍直渲染。
+ */
+const FLOOD_CHUNK = 50
 
 /**
  * 曾以「空流」（0 回合）渲染过的会话 key（polish-workbench-walkthrough-ux 3.1）：
@@ -247,7 +258,19 @@ export interface ProcessRun {
   position: number
 }
 
-export type AgentRun = TextRun | ProcessRun
+/**
+ * （fix-webui-qa-round2 1.3，D-C3a）已决策的工具结果：从过程折叠里提升到
+ * 转写层级的独立条目。此前结果与请求同折在 process fold 内，二级折叠点击
+ * 会连带父级收起——结果内容实际上不可达。提升后：✓已执行/✗已拒绝章常驻
+ * 条目、展开体独立开合（与过程折叠互不连带）。
+ */
+export interface ToolResultRun {
+  type: 'tool_result'
+  item: ProcessItem
+  position: number
+}
+
+export type AgentRun = TextRun | ProcessRun | ToolResultRun
 
 /** The operator's submission — its own turn. */
 export interface OperatorUnit {
@@ -302,18 +325,50 @@ function isProcessEntry(e: ConversationEntryView): boolean {
 }
 
 /**
+ * （fix-webui-qa-round2 1.3，D-C3a）工具结果条目的已决判定（纯函数）：仅
+ * `tool` 条目参与——完成态标题带 ✓/✗ 前缀（引擎 ToolEnd 的稳定约定），或
+ * 内容携带显式拒绝记号。thinking 条目绝不参与（正文提及「denied」不属于
+ * 结果）。未完成工具（仅 ToolStart）不满足任一条件，留在过程折叠内。
+ */
+export function isDecidedToolResult(e: {
+  element_type?: string
+  content: string
+  title?: string | null
+}): boolean {
+  if (e.element_type !== undefined && e.element_type !== 'tool') return false
+  if (toolResultDenied(e.content, e.title)) return true
+  return typeof e.title === 'string' && /^[\u2713\u2717]/.test(e.title.trim())
+}
+
+/**
  * Split ONE agent turn's entry sequence into alternating runs（2.1，D1 —
  * 纯函数）: contiguous markdown entries concatenate into a text run,
  * contiguous thinking/tool entries accumulate into a process run. A kind
  * change opens the next run — that is what keeps each process fold at the
  * position where its entries actually happened, between the text segments.
- * Error entries never reach this function: `groupConversation` routes them
- * into standalone counted bubbles upstream (D5). Callers pre-filter empty
- * entries (they carry nothing to display and do not break a run).
+ * （fix-webui-qa-round2 1.3，D-C3a）已决策的工具结果不入过程折叠：它们
+ * 提升为独立的 tool_result run（过程折叠只包未决策的过程帧，结果条目
+ * 顶层可读、开合互不连带）。Error entries never reach this function:
+ * `groupConversation` routes them into standalone counted bubbles upstream
+ * (D5). Callers pre-filter empty entries (they carry nothing to display
+ * and do not break a run).
  */
 export function splitAgentRuns(entries: ConversationEntryView[]): AgentRun[] {
   const runs: AgentRun[] = []
   for (const e of entries) {
+    if (isDecidedToolResult(e)) {
+      runs.push({
+        type: 'tool_result',
+        item: {
+          elementType: e.element_type,
+          content: e.content,
+          title: e.title ?? null,
+          position: e.position,
+        },
+        position: e.position,
+      })
+      continue
+    }
     const item: ProcessItem = {
       elementType: e.element_type,
       content: e.content,
@@ -607,9 +662,19 @@ export function awaitingReceipt(units: TurnUnit[]): boolean {
  * 的 entries（转录流推送即时到达），无需先经 transcript-view 的分组管线；
  * 与 [`awaitingReceipt`] 是同一事实的两张皮（分组前后），漂移由各自单测
  * 钉住。
+ *
+ * （fix-webui-qa-round2 1.2，D-B215 防御半边）空内容 prompt 条目不是提交
+ * ——它没有可等待回复的文本（引擎侧激活拉起曾注入空 prompt 条目，令本
+ * 判定恒真、composer 卡死在停止态）。content 字段缺席（旧调用方形状）按
+ * 非空对待，不改变既有语义。
  */
-export function entriesAwaitReceipt(entries: readonly { kind: string }[]): boolean {
-  return entries.length > 0 && entries[entries.length - 1].kind === 'prompt'
+export function entriesAwaitReceipt(
+  entries: readonly { kind: string; content?: string }[],
+): boolean {
+  if (entries.length === 0) return false
+  const last = entries[entries.length - 1]!
+  if (last.kind !== 'prompt') return false
+  return last.content === undefined || last.content.length > 0
 }
 
 /**
@@ -691,6 +756,15 @@ export class SebasTranscriptView extends LitElement {
   @state() private unseenCount = 0
   /** Index of the first unseen turn; null when everything is seen. */
   @state() private seamIndex: number | null = 0
+  /**
+   * （fix-webui-qa-round2 2.1/2.6，D5+D-R2A）开卷未读边界：聚焦进入会话时
+   * 捕获的「推进前读锚」（null = 无未读边界，不画线）。聚焦写锚此后推进到
+   * 服务端当前计数（spec「Focus anchors at the server's current count」），
+   * 分界线呈现改由这份冻结边界驱动——锚到顶与分界线可见从此互不牵制。
+   * 边界的清账：滚读到底、mark all seen、聚焦中看着到达（sticky 流式）——
+   * 三条都是「边界以下内容已被看过」的可达路径。
+   */
+  @state() private seamBoundary: number | null = null
   /**
    * 渲染管线输入：错误合并 → 回合分组（seam/滚动/渲染都以此为准，
    * 分组后索引与回合一一对应）。
@@ -1100,6 +1174,35 @@ export class SebasTranscriptView extends LitElement {
       color: var(--sebas-status-failed, #b91c1c);
       background: var(--sebas-status-failed-bg, #fee2e2);
     }
+    /* （fix-webui-qa-round2 1.3，D-C3a）顶层工具结果块：轻分区（虚线左边
+       界 + 常驻决策章），展开体默认可见。与过程折叠同视觉语言但独立开合。 */
+    .turn-block .tool-result {
+      margin: var(--sebas-space-2) 0;
+      padding-left: var(--sebas-space-3);
+      border-left: 2px dashed var(--sebas-border);
+      min-width: 0;
+    }
+    .turn-block .tool-result .result-link .running {
+      font-family: var(--sebas-font-mono);
+      font-size: 0.76rem;
+      color: var(--sebas-text-faint);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .turn-block .tool-result .result-icon {
+      background: var(--sebas-surface-2);
+      color: var(--sebas-text-dim);
+    }
+    .turn-block .tool-result[data-denied='true'] .result-icon {
+      background: var(--sebas-status-failed-bg, #fee2e2);
+      color: var(--sebas-status-failed, #b91c1c);
+    }
+    .turn-block .tool-result .result-body {
+      padding: var(--sebas-space-1) 0 0;
+      font-size: 0.8rem;
+      line-height: 1.6;
+    }
     /* 展开内容：work-block-body 同款（0.82rem/1.6 + 虚线顶边）。挂 .body
        复用 markdown 排版规则（后写的字号覆盖之）。 */
     .turn-block .fold-body {
@@ -1190,6 +1293,7 @@ export class SebasTranscriptView extends LitElement {
     document.removeEventListener('visibilitychange', this.boundOnVisibility)
     this.unsubscribeTurn?.()
     this.unsubscribeTurn = null
+    this.cancelStreamDrain()
     if (this.markSeenTimer !== null) {
       clearTimeout(this.markSeenTimer)
       this.markSeenTimer = null
@@ -1202,6 +1306,16 @@ export class SebasTranscriptView extends LitElement {
       // 折叠展开状态同样作废（run id 只在会话内有意义，D2）。
       this.streamEntries = []
       this.foldOpen.clear()
+      this.streamQueue.length = 0
+      this.cancelStreamDrain()
+      // （fix-webui-qa-round2 2.1/2.6）开卷边界：优先消费 rail switch 在写
+      // 锚前登记的边界（跨实例存活）；深链等未经 rail 的聚焦回退用当前
+      // 读锚（此刻还没人推进过它）。turnLive 开卷（聚焦撞上在飞回合）不
+      // 画线——在飞内容正被看着，旧边界没有呈现意义。placeholder 首交换
+      // 规则不变：空会话边界即全读，无线可画。
+      const armed = peekOpeningSeam(this.sessionKey)
+      const pre = armed !== undefined ? armed : readAnchorCount(this.sessionKey)
+      this.seamBoundary = this.turnLive ? null : pre
     }
     if (changed.has('entries') || changed.has('sessionKey')) {
       // 快照收敛：position 已被属性覆盖的流式条目裁掉，只留快照还没
@@ -1228,6 +1342,28 @@ export class SebasTranscriptView extends LitElement {
       ) {
         this.scheduleMarkSeen()
       }
+      // （2.6，D-R2A）开卷即按服务端当前计数写锚：聚焦推进 SHALL 以服务端
+      // 当前段计数为准（锚不得停在回合前的旧值），分界线呈现已由
+      // seamBoundary 冻结边界承担，锚到顶不再吞线。挂载帧（含深链首开）
+      // 与换会话帧都执行；candidate 取 max(服务端 msgCount, 本地已渲染)，
+      // 单调不回退。**严格推进**：无可推进水位（占位空会话 candidate=0、
+      // 已读重开 candidate≤锚）不写——空会话写 0 会污染下一次开卷的边界
+      // 登记（登记=null 表示「无线可画」，写成 0 会凭空造出一条）。
+      if (
+        this.sessionKey &&
+        (changed.has('sessionKey') || !this.hasUpdated) &&
+        // 后台 tab 的装载不算「看着」——锚留空/不动（dashboard 立锚同一
+        // 边界），回可见后的下一次装载/到达再推进。
+        this.docVisible() &&
+        // 空流在册的占位会话不在此写锚：首交换的「看着到达」结算（含登记
+        // 消费与边界清账）归 settleEmptyStreamAnchor 专管——开卷写会抢走
+        // 水位、让登记失去结算机会。
+        !emptyStreamSessions.has(this.sessionKey)
+      ) {
+        const prev = this.readSeen()
+        const candidate = this.anchorCandidate()
+        if (prev === null ? candidate > 0 : candidate > prev) this.writeSeen()
+      }
       // （3.1）空流建立锚点：占位会话从 0 回合转出首回合、且操作员聚焦、
       // 文档可见、贴底时，这是「亲眼看着到达」的首交换——锚从空流状态建立，
       // 不画 seam、不闪徽章（session-unread-badge「first focused exchange of a
@@ -1236,6 +1372,12 @@ export class SebasTranscriptView extends LitElement {
       // 所以判据用模块级「该会话曾以空流渲染过」而非实例内的回合数差值。
       // 打开既有会话不在此列：那种会话从没以空流出现过，seam 必须保留。
       this.settleEmptyStreamAnchor()
+    }
+    // （2.6，D-R2A）turnLive 竞速补写：末帧经 turn.append 收敛后 entries 可
+    // 能不再变化，定稿（turnLive 翻 false）若不触发推进，锚就停在「扣除在
+    // 飞尾段」的旧值——聚焦路径的确定性红。定稿瞬间补一次贴底推进。
+    if (changed.has('turnLive') && this.hasUpdated && !this.turnLive) {
+      if (this.sticky && this.docVisible()) this.scheduleMarkSeen()
     }
   }
 
@@ -1250,6 +1392,14 @@ export class SebasTranscriptView extends LitElement {
    * 去重后并入渲染管线。聚焦且贴底（sticky）时随渲染推进读锚——角标不闪、
    * 已读缝不出现；未贴底不写锚，照常计未读（session-unread-badge 语义）。
    * 思考/工具条目不进段数锚增量（与 msg_count 只数可见回复段的口径一致）。
+   *
+   * （fix-webui-qa-round2 2.5，D-B13）大批量路径分片摄入：单帧携带 >50 条
+   * （flood 的 1200 chunks）先入队，逐 rAF 片段（每片 ≤50 条）重渲——
+   * 一次性全量 append 曾造成 ~1.2s 主线程冻结。小批量（含 drip 首包）照旧
+   * 直渲染，首包即时性不变。
+   *
+   * （fix-webui-qa-round2 2.1）聚焦 + 贴底的到达是「看着到达」：开卷边界
+   * 之下没有未读内容了，冻结边界就地清账（seam 不再对看着到达的内容亮出）。
    */
   private onTurnAppend(sessionId: string, incoming: ConversationEntryView[]): void {
     if (sessionId !== this.sessionKey || incoming.length === 0) return
@@ -1259,19 +1409,59 @@ export class SebasTranscriptView extends LitElement {
     )
     const fresh = incoming.filter((e) => e.position > maxKnown)
     if (fresh.length === 0) return
-    this.streamEntries.push(...fresh)
-    this.rebuildUnits()
-    this.recomputeSeam()
+    const watched = this.sticky && this.docVisible()
+    if (watched && this.seamBoundary !== null) {
+      // 看着到达：边界以下全部已见，分界线清账（登记一并作废）。
+      this.seamBoundary = null
+      clearOpeningSeam(this.sessionKey)
+      this.seamIndex = null
+      this.unseenCount = 0
+    }
+    if (fresh.length <= FLOOD_CHUNK) {
+      this.streamEntries.push(...fresh)
+      this.rebuildUnits()
+      this.recomputeSeam()
+    } else {
+      this.streamQueue.push(...fresh)
+      this.scheduleStreamDrain()
+    }
     // （3.1）空流登记的在册会话：首交换的流式到达在此**同步**结算（无
     // 250ms 防抖窗——「never flashes the badge or the seam」）。未登记/
     // 已消费即 no-op，防抖路径照旧兜底非首交换的到达。
     this.settleEmptyStreamAnchor()
     // （3.1/3.2）聚焦 + 文档可见 + 贴底：到达即推进共享游标（亲眼看着到的
     // 内容不再挂未读）；文档隐藏（后台 tab）时不推进——回来看 seam/徽章。
-    if (this.sticky && this.docVisible()) {
+    if (watched) {
       // 贴底读流：段锚随渲染推进（写的是与徽标同一个 anchor_count 字段，
       // 2.3）——本地已渲染段数已含流式尾巴，无需另设增量补丁。
       this.scheduleMarkSeen()
+    }
+  }
+
+  // ---- 大批量分片摄入（fix-webui-qa-round2 2.5，D-B13）--------------------
+
+  /** 待摄入的流式条目队列（>FLOOD_CHUNK 的到达先排队，逐片入渲）。 */
+  private streamQueue: ConversationEntryView[] = []
+  /** 下一片的 rAF 句柄；null = 无排片。 */
+  private streamDrainHandle: number | null = null
+
+  private scheduleStreamDrain(): void {
+    if (this.streamDrainHandle !== null) return
+    this.streamDrainHandle = requestAnimationFrame(() => {
+      this.streamDrainHandle = null
+      const batch = this.streamQueue.splice(0, FLOOD_CHUNK)
+      if (batch.length === 0) return
+      this.streamEntries.push(...batch)
+      this.rebuildUnits()
+      this.recomputeSeam()
+      if (this.streamQueue.length > 0) this.scheduleStreamDrain()
+    })
+  }
+
+  private cancelStreamDrain(): void {
+    if (this.streamDrainHandle !== null) {
+      cancelAnimationFrame(this.streamDrainHandle)
+      this.streamDrainHandle = null
     }
   }
 
@@ -1351,7 +1541,10 @@ export class SebasTranscriptView extends LitElement {
     if (prev === null && wouldAnchor === 0) return
     emptyStreamSessions.delete(key)
     this.writeSeen()
-    // 同一更新周期内重算：seam 不闪现（写锚后紧接着 render）。
+    // （fix-webui-qa-round2 2.1）首交换是「看着到达」：开卷边界（若有）
+    // 一并清账——边界若停在 0，锚推进后 recompute 会把看着长出来的内容
+    // 误标成未读（seam 闪现）。清账 + 同一更新周期内重算：seam 不闪现。
+    this.dismissSeam()
     this.recomputeSeam()
   }
 
@@ -1450,29 +1643,26 @@ export class SebasTranscriptView extends LitElement {
 
   /**
    * Recompute `seamIndex` and `unseenCount` from the current turns and the
-   * stored seen-boundary（D5，按回合计数）. A turn is unseen when ANY of
-   * its entries is newer than the stored value — so the boundary can never
-   * fall inside a turn: it sits above the first turn whose newest entry
-   * crossed it, and the count is turns-below, not entries. Turns without
-   * a timestamp (legacy, value 0) cannot advance the seam: anchoring on
-   * them would let an unknown-time turn push the seam onto a clearly-seen
-   * neighbour.
+   * open boundary（D5，按回合计数）.
+   *
+   * （fix-webui-qa-round2 2.1/2.6）边界源换成开卷冻结边界
+   * {@link seamBoundary}（换会话时从开卷登记/读锚捕获）：聚焦写锚随开卷
+   * 推进到服务端当前计数后，实时锚不再是「未读」的判据——分界线对开卷时
+   * 尚未看过的内容呈现一次，滚读/看着到达/mark-all-seen 清账。`null` 边界
+   * = 无线可画（无锚开卷、已读开卷、看着到达清账后）。 turnLive 时在飞
+   * 尾段不参与未读判定（DD3 既有口径不变）。
    */
   private recomputeSeam(): void {
-    const anchor = this.readSeen()
-    if (anchor === null || this.turnUnits.length === 0) {
-      // 无锚 = fully read（首次访问 / 清缓存 / 旧 seen_ts 数据）：历史不
-      // 因换浏览器集体冒缝（2.3，spec「first visit shows no unread」）。
+    const boundary = this.seamBoundary
+    if (boundary === null || this.turnUnits.length === 0) {
       this.seamIndex = null
       this.unseenCount = 0
       return
     }
-    // seam 落在第一个「可见段累计超过锚」的回合上方——按回合计数、绝不
-    // 切开回合（D5），且与徽标读的是同一条段锚。（DD3）turnLive 时在飞
-    // 尾段不参与未读判定：正看着长出来的内容不在其上画缝，定稿后随新
-    // 快照照常参与。
+    // seam 落在第一个「可见段累计超过边界」的回合上方——按回合计数、绝不
+    // 切开回合（D5）。开卷后到达且被看着的内容不延长边界（看着到达清账）。
     const totals = this.segmentTotals(this.turnLive)
-    const idx = totals.findIndex((total) => total > anchor)
+    const idx = totals.findIndex((total) => total > boundary)
     if (idx === -1) {
       this.seamIndex = null
       this.unseenCount = 0
@@ -1486,8 +1676,18 @@ export class SebasTranscriptView extends LitElement {
 
   private markAllSeen = (): void => {
     this.writeSeen()
+    this.dismissSeam()
+  }
+
+  /**
+   * 分界线清账（fix-webui-qa-round2 2.1）：滚读到底 / mark all seen /
+   * 看着到达共用——开卷登记一并作废（同会话重挂载不再按旧边界重绘）。
+   */
+  private dismissSeam(): void {
+    this.seamBoundary = null
     this.seamIndex = null
     this.unseenCount = 0
+    if (this.sessionKey) clearOpeningSeam(this.sessionKey)
   }
 
   // ---- scroll handling --------------------------------------------------
@@ -1495,6 +1695,9 @@ export class SebasTranscriptView extends LitElement {
   private onScroll(): void {
     const el = this.scrollEl
     if (!el) return
+    // （review round2-3）开卷定位自身的滚动事件不是阅读动作：整事件忽略
+    // （含 sticky 判定与 mark-seen 排定——详见 openingScrollUntil 注）。
+    if (Date.now() < this.openingScrollUntil) return
     // 4.1（D5.1）：贴底跟随判定只看几何——距底 ≤ 阈值即（重新）贴底跟随，
     // 更远即用户主动上滚（停止跟随）。不再用 seam 相对位移：旧判定把
     // 「自动滚到 seam 中心」的编程滚动误读成用户上滚，sticky 被翻 false
@@ -1524,13 +1727,10 @@ export class SebasTranscriptView extends LitElement {
     const anchor = this.readSeen() ?? 0
     if (this.turnUnits.length > 0 && candidate > anchor) {
       this.writeSeen()
-      // The seam may have moved or disappeared; update internal state
-      // and re-render without scheduling another auto-scroll — the user
-      // is already where they want to be.
-      const prev = this.seamIndex
-      this.recomputeSeam()
-      if (prev !== this.seamIndex) this.requestUpdate('seamIndex')
     }
+    // 贴底 = 边界以下内容已被读过：分界线清账（边界可能随 mark-seen 推进，
+    // 也可能本就为 null——dismiss 幂等）。
+    if (this.seamBoundary !== null) this.dismissSeam()
   }
 
   /**
@@ -1545,11 +1745,21 @@ export class SebasTranscriptView extends LitElement {
    */
   private lastScrollKey: string | null = null
 
+  /**
+   * （review round2-3）开卷定位（seam 居中）自身引发的滚动事件窗口：这是
+   * 程序化定位，不是「读到贴底」。不设窗的话，未读尾段很短（末回合矮）时
+   * 居中落点距底 ≤ NEAR_BOTTOM_PX，onScroll 会把 sticky 重新贴底并排定
+   * mark-seen——commitMarkSeen 的清账不问阅读意图，刚画出的分界线在
+   * 250ms 内自灭，「重聚焦必现 seam」随内容高度偶发失败（QA D-B12 的
+   * 残留形态）。真实操作员的下一次滚动在窗口之外，语义不变。
+   */
+  private openingScrollUntil = 0
+
   private applyAutoScroll(): void {
     const el = this.scrollEl
     if (!el) return
     // （fix-webui-qa-findings M3）开卷定位：打开一个带未读缝的会话时，
-    // 首帧把 seam 滚进视野（而不是贴底）并解除 sticky——操作者第一眼看到
+    // 首帧把 seam 滚进视野（而不是贴底）并解除 sticky——操作员第一眼看到
     // 「上次读到哪里」；贴底 pin 的滚动事件不会触发 mark-seen（人不在
     // 底部），seam 稳定呈现，读到边界（滚动贴底）时锚才推进。全部已读
     // （seam 不在场）或后续到达帧保持既有贴底跟随。
@@ -1558,6 +1768,7 @@ export class SebasTranscriptView extends LitElement {
       const seam = el.querySelector<HTMLElement>('.seam:not([hidden])')
       if (seam && typeof seam.scrollIntoView === 'function') {
         this.sticky = false
+        this.openingScrollUntil = Date.now() + 150
         seam.scrollIntoView({ block: 'center', behavior: 'auto' })
         return
       }
@@ -1789,7 +2000,67 @@ export class SebasTranscriptView extends LitElement {
       }
       return html`<div class="body">${unsafeHTML(renderMarkdown(r.content))}</div>`
     }
+    if (r.type === 'tool_result') {
+      return this.renderToolResultRun(r)
+    }
     return this.renderProcessRun(r)
+  }
+
+  /**
+   * （fix-webui-qa-round2 1.3，D-C3a）顶层工具结果块：✓已执行/✗已拒绝章
+   * 常驻头部（含刷新后——条目从转录重推导，决策标识永不丢失），展开体
+   * **默认展开**（结果内容零折叠可达，spec「无需折叠任何其它条目即可读
+   * 到 tool 结果内容」），开合状态独立托管（`result:<position>` 键）——
+   * 与过程折叠互不连带。被拒条目的展开详情与标题同挂 ✗（既有口径）。
+   */
+  private renderToolResultRun(r: ToolResultRun) {
+    const id = `result:${r.position}`
+    const open = this.foldOpen.get(id) !== false
+    const denied = toolResultDenied(r.item.content, r.item.title)
+    const { full } = processItemLabel(r.item)
+    return html`
+      <div class="tool-result" data-testid="tool-result-entry" data-denied=${denied}>
+        <div class="tool-result-head">
+          <button
+            type="button"
+            class="fold-link result-link"
+            data-testid="tool-result-link"
+            aria-expanded=${open}
+            title=${full ?? nothing}
+            @click=${this.toggleFold(id)}
+          >
+            <span class="kind-icon result-icon" aria-hidden="true"
+              >${icon(denied ? 'stop' : 'forward', 11)}</span
+            >
+            <span class="running">${full ?? r.item.elementType}</span>
+            ${denied
+              ? html`<span class="outcome outcome-denied" data-testid="tool-outcome-denied"
+                  >✗ 已拒绝</span
+                >`
+              : html`<span class="outcome outcome-ok" data-testid="tool-outcome">✓ 已执行</span>`}
+          </button>
+        </div>
+        ${open ? html`<div class="body result-body">${this.renderResultBody(r.item)}</div>` : nothing}
+      </div>
+    `
+  }
+
+  /** 结果块展开体：与二级条目同一截断口径（超长走「查看全部」弹层）。 */
+  private renderResultBody(it: ProcessItem) {
+    const content = deniedDetailContent(it.content, it.title)
+    const cut = truncateHtml({ ...it, content })
+    if (!cut.truncated) {
+      return html`${unsafeHTML(renderMarkdown(content))}`
+    }
+    return html`
+      ${unsafeHTML(renderMarkdown(cut.preview))}
+      <p class="truncation-note" data-testid="truncation-note">
+        已截断：省略 ${cut.omittedLines} 行 / ${cut.omittedChars} 字符
+        <button type="button" class="view-all" @click=${() => this.openViewAll(it)}>
+          查看全部
+        </button>
+      </p>
+    `
   }
 
   /**

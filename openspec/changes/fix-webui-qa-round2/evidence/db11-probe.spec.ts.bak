@@ -1,0 +1,81 @@
+/**
+ * D-B11 probe（fix-webui-qa-round2 3b 复测）：Add-project 手动路径输入框的
+ * 逐字符保真探针。分层读值定位「第一处变质点」：
+ *   L0  fill / pressSequentially 后的内层原生 input 值（立即读）
+ *   L1a 升级后的 wa-input host `.value`（内部 input → host 同步链）
+ *   L1b 组件 state `addPath`（input 事件处理链之后）
+ *   L2  去抖预检请求（GET /api/fs/browse-dirs?path=…，URL 解码后）——
+ *       手填路径不存在（按钮禁用），注册 POST 不发，预检即该链路上行载荷
+ * 每层输出 JSON.stringify + charCode 序列（92 = `\`；对照控制字符 9/10/12/13）。
+ *
+ * 价值字符串一律用 String.raw 书写：此前一版探针把单反斜杠直接写进源码，
+ * 值在探针自身的字符串字面量解析期就变成了 FF/TAB/LF（`\f`/`\t`/`\n` 被
+ * JS 字面量语义吃掉、未知转义 `\p`/`\a` 丢反斜杠留字母）——「变质点」在
+ * 探针不在应用。
+ */
+import { expect, test } from '@playwright/test'
+import { ProjectRail } from './helpers/index'
+
+const VALUE = String.raw`C:\fill\path\test`
+const EXPECTED_CODES = '67,58,92,102,105,108,108,92,112,97,116,104,92,116,101,115,116'
+const codes = (v: string): string => [...v].map((c) => c.charCodeAt(0)).join(',')
+
+test('D-B11 probe: fill vs type, char-code traced through host, state and wire', async ({
+  page,
+}) => {
+  const rail = new ProjectRail(page)
+  await page.goto('/')
+  await rail.openAddDialog()
+  const input = rail.addDialog().locator('wa-input input').first()
+
+  // 捕获去抖预检的路径（L2，URL 解码）。
+  const precheckPaths: string[] = []
+  await page.route('**/api/fs/browse-dirs**', (route) => {
+    const url = new URL(route.request().url())
+    precheckPaths.push(decodeURIComponent(url.searchParams.get('path') ?? ''))
+    void route.continue()
+  })
+
+  expect(codes(VALUE)).toBe(EXPECTED_CODES, 'probe sanity: literal backslashes (92)')
+
+  // ── 1) fill 直设 ──
+  await input.fill(VALUE)
+  const afterFill = await input.inputValue()
+  console.log('L0 AFTER_FILL:', JSON.stringify(afterFill), '| codes:', codes(afterFill))
+  // 等 input 事件链 + Lit 重渲染 + host 同步 + 300ms 去抖窗过去。
+  await page.waitForTimeout(450)
+  const hostValue = await rail
+    .addDialog()
+    .locator('wa-input')
+    .first()
+    .evaluate((host) => (host as unknown as { value?: string }).value ?? '')
+  console.log('L1a HOST_VALUE:', JSON.stringify(hostValue), '| codes:', codes(hostValue))
+  // document.querySelector 穿不透 app 的嵌套 shadow root（light DOM 是空
+  // 壳）——经 Playwright locator（自动 pierce）拿组件实例读私有 state。
+  const stateAddPath = await page
+    .locator('sebas-project-rail')
+    .evaluate((el) => (el as unknown as { addPath?: string }).addPath ?? '')
+  console.log('L1b STATE_ADD_PATH:', JSON.stringify(stateAddPath), '| codes:', codes(stateAddPath))
+  console.log('L2 PRECHECK_PATHS:', JSON.stringify(precheckPaths))
+
+  // ── 2) 清空后逐键 ──
+  precheckPaths.length = 0
+  await input.fill('')
+  await input.pressSequentially(VALUE, { delay: 20 })
+  const afterType = await input.inputValue()
+  console.log('L0 AFTER_TYPE:', JSON.stringify(afterType), '| codes:', codes(afterType))
+  await page.waitForTimeout(450)
+  const stateAfterType = await page
+    .locator('sebas-project-rail')
+    .evaluate((el) => (el as unknown as { addPath?: string }).addPath ?? '')
+  console.log('L1b STATE_AFTER_TYPE:', JSON.stringify(stateAfterType), '| codes:', codes(stateAfterType))
+  console.log('L2 PRECHECK_PATHS_TYPED:', JSON.stringify(precheckPaths))
+
+  // ── 3) 保真断言：逐字符一致 ──
+  expect(afterFill).toBe(VALUE)
+  expect(hostValue).toBe(VALUE)
+  expect(stateAddPath).toBe(VALUE)
+  expect(afterType).toBe(VALUE)
+  expect(stateAfterType).toBe(VALUE)
+  expect(precheckPaths.filter((p) => p === VALUE).length).toBeGreaterThan(0)
+})

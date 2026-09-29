@@ -142,3 +142,127 @@ async fn apply_event_to_out_renders_update_card() {
         other => panic!("expected UpdateCard, got {other:?}"),
     }
 }
+
+// （fix-webui-qa-round2 1.4，D-C3b）投影契约：tool_result 之后到达的
+// assistant 正文完整保留在转录里（顺序不乱、不被并入工具条目）。QA 观测
+// 的「单工具审批回合丢环后正文」根因在夹具（fake-claude 的 perm 场景缺
+// 环后正文帧，已补），本测试把投影半边的合同钉住：TextDelta 一条一段，
+// 紧跟 ToolEnd 之后原序落账。
+#[tokio::test]
+async fn assistant_text_after_tool_result_lands_in_order() {
+    let (router, _rx) = DispatchHandle::new(SessionMap::new());
+    let key = ChannelKey::new("web", "post-tool-text");
+    router
+        .map
+        .insert(key.clone(), Mapping::active("s-posttool"))
+        .await
+        .unwrap();
+    router.seed_card("s-posttool".to_string(), "perm".into()).await;
+
+    let sid = "s-posttool";
+    for evt in [
+        AcpEvent::ToolStart {
+            session_id: sid.into(),
+            tool_name: "Bash".into(),
+            args: serde_json::json!({"command": "rm -rf /"}),
+        },
+        AcpEvent::ToolEnd {
+            session_id: sid.into(),
+            tool_name: "Bash".into(),
+            result: "perm done\n".into(),
+        },
+        AcpEvent::TextDelta {
+            session_id: sid.into(),
+            delta: "perm turn finished".into(),
+        },
+    ] {
+        router.apply_event_to_out(sid.into(), &evt).await;
+    }
+
+    let turns = router.session_turns(&key, 0).await.unwrap();
+    let kinds: Vec<&str> = turns
+        .iter()
+        .map(|t| match t.kind {
+            sebas_domain::vocabulary::TurnKind::Prompt => "prompt",
+            sebas_domain::vocabulary::TurnKind::Content => match t.element_type {
+                sebas_domain::vocabulary::TurnElementType::Tool => "tool",
+                _ => "markdown",
+            },
+            _ => "other",
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        vec!["prompt", "tool", "tool", "markdown"],
+        "tool request, tool result, and the post-loop text must all land in order"
+    );
+    assert!(
+        turns[3].content.contains("perm turn finished"),
+        "the post-loop assistant text is preserved verbatim"
+    );
+}
+
+// （fix-webui-qa-round2 2.2，D-B218）session-slash-commands「Command
+// submission has a transcript receipt and one dispatch path」的后端半边：
+// /compact 提交必须在转写里落一条 prompt 回执条目（此前只有 toast/进度卡、
+// 转录零痕迹，命令产出因此与前一条 assistant 段落相邻合并成
+// 「hello worldhello world」）。回执先于转发落账——前端按 prompt 条目开新
+// 回合，命令产出自然独立成段。
+#[tokio::test]
+async fn compact_command_leaves_a_transcript_receipt_before_forwarding() {
+    use sebas_acp::claude::session::AcpCommand;
+
+    let (router, mut out_rx) = DispatchHandle::new(SessionMap::new());
+    let key = ChannelKey::new("web", "compact-receipt");
+    router
+        .map
+        .insert(key.clone(), Mapping::active("s-compact"))
+        .await
+        .unwrap();
+
+    router
+        .dispatch(ChannelEvent::Text {
+            key: key.clone(),
+            text: "/compact".into(),
+            reply_target: None,
+        })
+        .await;
+
+    // 转发半边（既有行为，不回归）：进度卡在前，ContinueSession 携带
+    // /compact 原文。
+    let card = tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(card, Out::SendCard { .. }),
+        "progress card is emitted first, got {card:?}"
+    );
+    let out = tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    match out {
+        Out::SendAcp { session_id, cmd, .. } => {
+            assert_eq!(session_id, "s-compact");
+            match cmd {
+                AcpCommand::ContinueSession { prompt, .. } => {
+                    assert_eq!(prompt, "/compact", "the command text is forwarded verbatim");
+                }
+                other => panic!("expected ContinueSession, got {other:?}"),
+            }
+        }
+        other => panic!("expected SendAcp, got {other:?}"),
+    }
+
+    // 回执半边（本轮新合同）：转写里恰好一条 prompt 条目、内容 = 命令原文
+    // ——后续命令产出（TextDelta）落在这条 prompt 之后的独立回合。
+    let turns = router.session_turns(&key, 0).await.unwrap();
+    assert_eq!(turns.len(), 1, "the receipt is the only entry so far");
+    assert_eq!(
+        turns[0].kind,
+        sebas_domain::vocabulary::TurnKind::Prompt,
+        "the receipt is a prompt entry (opens the operator turn)"
+    );
+    assert_eq!(turns[0].content, "/compact", "receipt carries the verbatim command");
+}

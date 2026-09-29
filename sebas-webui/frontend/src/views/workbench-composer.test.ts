@@ -1402,3 +1402,92 @@ describe('optimistic queued indicator (close-acceptance-blind-spots 4.3)', () =>
     el.remove()
   })
 })
+
+
+// ── fix-webui-qa-round2 2.2（D-B218）：slash 文本单一分派路径 ────────────────
+
+describe('slash text dispatches identically via Enter and the send button (round2 2.2)', () => {
+  beforeEach(() => {
+    ;(api.sendMessage as ReturnType<typeof vi.fn>).mockReset()
+    ;(api.sendMessage as ReturnType<typeof vi.fn>).mockResolvedValue({ status: 'delivered' })
+  })
+
+  async function typeText(el: SebasWorkbenchComposer, text: string): Promise<void> {
+    const ta = el.shadowRoot!.querySelector('wa-textarea')
+    ;(ta as unknown as { value: string }).value = text
+    ta!.dispatchEvent(new Event('input', { bubbles: true, composed: true }))
+    await el.updateComplete
+  }
+
+  it('Enter and button produce the identical sendMessage payload for /goal', async () => {
+    const commands = [{ name: 'goal', description: 'Track a goal', hint: '<condition>' }]
+    // 键盘路径。
+    const viaKeyboard = await mount({ sessionKey: 'web%00web-1', sessionCommands: commands })
+    await typeText(viaKeyboard, '/goal ship it')
+    const ta = viaKeyboard.shadowRoot!.querySelector('wa-textarea')!
+    ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, composed: true }))
+    await new Promise((r) => setTimeout(r, 0))
+    expect(api.sendMessage).toHaveBeenCalledTimes(1)
+    expect(api.sendMessage).toHaveBeenCalledWith('web%00web-1', '/goal ship it')
+    viaKeyboard.remove()
+
+    // 按钮路径：同一文本、同一断言。
+    const viaButton = await mount({ sessionKey: 'web%00web-1', sessionCommands: commands })
+    await typeText(viaButton, '/goal ship it')
+    ;(viaButton.shadowRoot!.querySelector('[data-testid="submit-control"]') as HTMLElement).click()
+    await new Promise((r) => setTimeout(r, 0))
+    expect(api.sendMessage).toHaveBeenCalledTimes(2)
+    expect(api.sendMessage).toHaveBeenLastCalledWith('web%00web-1', '/goal ship it')
+    viaButton.remove()
+  })
+
+  it('an unsupported command is intercepted identically on both paths (text retained)', async () => {
+    const commands = [{ name: 'goal', description: 'Track a goal', hint: '' }]
+    const viaKeyboard = await mount({ sessionKey: 'web%00web-2', sessionCommands: commands })
+    await typeText(viaKeyboard, '/nonexistent')
+    const ta = viaKeyboard.shadowRoot!.querySelector('wa-textarea')!
+    ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, composed: true }))
+    await new Promise((r) => setTimeout(r, 0))
+    expect(api.sendMessage).not.toHaveBeenCalled()
+    expect(
+      viaKeyboard.shadowRoot!.querySelector('[data-testid="slash-unsupported"]'),
+    ).toBeTruthy()
+    expect((ta as unknown as { value: string }).value).toContain('/nonexistent')
+    viaKeyboard.remove()
+
+    const viaButton = await mount({ sessionKey: 'web%00web-2', sessionCommands: commands })
+    await typeText(viaButton, '/nonexistent')
+    ;(viaButton.shadowRoot!.querySelector('[data-testid="submit-control"]') as HTMLElement).click()
+    await new Promise((r) => setTimeout(r, 0))
+    expect(api.sendMessage).not.toHaveBeenCalled()
+    expect(
+      viaButton.shadowRoot!.querySelector('[data-testid="slash-unsupported"]'),
+    ).toBeTruthy()
+    viaButton.remove()
+  })
+
+  it('the model chip states the source honestly (current vs default, round2 3.3)', async () => {
+    // 未锁定模型：chip 显示「默认」而不是把候选表首项冒充生效模型。
+    const undecided = await mount({
+      sessionKey: 'web%00web-3',
+      sessionModels: ['Fake', 'gpt-x'],
+    })
+    const chip1 = undecided.shadowRoot!.querySelector('[data-testid="model-chip"]')!
+    expect(chip1.textContent).toContain('默认')
+    expect(chip1.getAttribute('data-confirmed')).toBe('false')
+    undecided.remove()
+
+    // 会话上报 current 后：chip 如实显示（stub 上报的 "Fake" 也照实呈现），
+    // title 注明来源。
+    const decided = await mount({
+      sessionKey: 'web%00web-3',
+      sessionModels: ['Fake'],
+      currentModel: 'Fake',
+    })
+    const chip2 = decided.shadowRoot!.querySelector('[data-testid="model-chip"]')!
+    expect(chip2.textContent).toContain('Fake')
+    expect(chip2.getAttribute('data-confirmed')).toBe('true')
+    expect(chip2.getAttribute('title')).toContain('执行体上报')
+    decided.remove()
+  })
+})
