@@ -20,11 +20,11 @@
 
 ## 5. v0.1.0 首发实战验收
 
-（本节需 git 合并 / 推 tag / 观察 Actions 真跑，实现沙箱不打 tag 不推远端——整体留给操作员按序执行；下列框保持未勾。）
+（执行记录：首发共三轮——run4/5 两次失败（`gh create` 子命令缺失、Windows 前端占位页），按 5.5 预案各删 tag 修复重推；run6 全绿后 release 对象被外部转为 draft，run7 按幂等路径把资产重传进 draft。）
 
 - [x] 5.1 改动经评审流程合入 main（feat 分支 rebase + --no-ff）。验证：`git log` 可见合并提交且 workflow 文件与任务 1–4 产物一致
-- [ ] 5.2 向用户确认后推送 `v0.1.0`，盯 Release 与 Docker 两个 workflow 运行至全绿。验证：Actions 两 workflow 结论 success
-- [ ] 5.3 验收 GitHub Release：非 draft、非 pre-release、正文含自动生成 notes；资产 = linux tar.gz + windows zip + 各自 `.sha256` 共 4 件；下载解包含 `sebas` 与 `sebas-node`，`sha256sum -c` 通过。验证：逐项对照 spec「发布归档含双二进制与 sha256」场景
-- [ ] 5.4 验收镜像：`docker pull ghcr.io/cupen/sebas:v0.1.0`，`sebas --version` 与 `sebas-node --version` 均出版本号，不带 command 启动冒烟进 sebas core；本地无法跑容器则以 registry manifest API + 推送日志为证。验证：对照 spec「docker 镜像含双二进制」场景；顺带提醒用户检查 ghcr package 可见性
-- [ ] 5.5 若首发失败：删除 Release 与远端 tag（`git push --delete origin v0.1.0`）修复后重推，仅限无人消费窗口；预案执行情况记入报告。验证：最终以全绿的 Actions 运行与 5.3/5.4 验收结果为准
-- [ ] 5.6 交付报告：发布结论、ghcr 可见性提醒、预发布路径未经真实发布验证的声明（留待首个 rc tag）。验证：报告覆盖上述三点
+- [x] 5.2 向用户确认后推送 `v0.1.0`，盯 Release 与 Docker 两个 workflow 运行至全绿。验证：Actions 两 workflow 结论 success（run6 与 run7 均 success；Docker main run182 顺带转绿，18 天红史终结）
+- [ ] 5.3 验收 GitHub Release：非 draft、非 pre-release、正文含自动生成 notes；资产 = linux tar.gz + windows zip + 各自 `.sha256` 共 4 件；下载解包含 `sebas` 与 `sebas-node`，`sha256sum -c` 通过。验证：逐项对照 spec「发布归档含双二进制与 sha256」场景（**阻塞**：release 对象现为 draft，匿名 API/下载不可见；4 件资产已确认上传过（run6 后清单核验 + windows zip 下载解包含双二进制且无占位页标记）；待 operator publish 后补 sha256sum -c 与完整四件下载核验）
+- [x] 5.4 验收镜像：`docker pull ghcr.io/cupen/sebas:v0.1.0`，`sebas --version` 与 `sebas-node --version` 均出版本号，不带 command 启动冒烟进 sebas core；本地无法跑容器则以 registry manifest API + 推送日志为证。验证：对照 spec「docker 镜像含双二进制」场景；顺带提醒用户检查 ghcr package 可见性（已过：pull 成功 128MB；双 `--version` = `0.1.0`；挂最小配置启动 core——双库初始化、channel listening、`sebas started`、容器存活；ghcr 匿名可拉 = 公开可见）
+- [x] 5.5 若首发失败：删除 Release 与远端 tag（`git push --delete origin v0.1.0`）修复后重推，仅限无人消费窗口；预案执行情况记入报告。验证：最终以全绿的 Actions 运行与 5.3/5.4 验收结果为准（执行两轮：round1 修 gh 子命令 + Dockerfile 漏 COPY 成员；round2 修 Windows pnpm spawn + create 步幂等；均无人消费窗口内完成）
+- [x] 5.6 交付报告：发布结论、ghcr 可见性提醒、预发布路径未经真实发布验证的声明（留待首个 rc tag）。验证：报告覆盖上述三点（见会话交付报告；预发布 `--prerelease` 分支未经真实 rc tag 验证，留待首个 rc）
