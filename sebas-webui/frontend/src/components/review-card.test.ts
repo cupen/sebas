@@ -599,6 +599,118 @@ describe('sebas-review-cards', () => {
     }
   })
 
+  // ---- fix-parallel-approval-routing 1.1：卡片内容 ↔ request_id 配对 ----
+
+  /** 两张并行卡的固定数据（与 fake-claude `parallel` 剧本同构：Bash 先登记）。 */
+  const BASH_ROW = {
+    request_id: 'claude:tc-par-1',
+    tool_name: 'Bash',
+    args: { command: 'echo first' },
+  }
+  const READ_ROW = {
+    request_id: 'claude:tc-par-2',
+    tool_name: 'Read',
+    args: { file_path: '/tmp/fake-parallel.txt' },
+  }
+
+  /** 逐卡点击 Allow once，断言每次提交携带**该卡自己**的 request_id。 */
+  async function clickAllowPerCardAndCapture(el: SebasReviewCards): Promise<string[]> {
+    const submitted: string[] = []
+    while (cards(el).length > 0) {
+      const card = cards(el)[0]!
+      const id = card.dataset.requestId!
+      ;(card.querySelector('wa-button.allow-once') as HTMLElement).click()
+      await flush(el)
+      const last = answerMock.mock.calls.at(-1)
+      expect(last?.[0]).toBe(id)
+      submitted.push(id)
+    }
+    return submitted
+  }
+
+  /** 断言每张卡的呈现内容（工具名 + 参数）与其 data-request-id 配对一致。 */
+  function expectContentMatchesId(el: SebasReviewCards): void {
+    for (const card of cards(el)) {
+      const id = card.dataset.requestId!
+      const tool = card.querySelector('.tool')?.textContent
+      const argsText = card.querySelector('.args')?.textContent ?? ''
+      const row = [BASH_ROW, READ_ROW].find((r) => r.request_id === id)
+      expect(row, `card id ${id} must be one of the parked requests`).toBeTruthy()
+      expect(tool).toBe(row!.tool_name)
+      expect(argsText).toContain(JSON.stringify(row!.args, null, 2))
+    }
+  }
+
+  it('pairs content with id across arrival orders: GET first, WS second (inverted)', async () => {
+    approvalsMock.mockResolvedValue({ approvals: [BASH_ROW, READ_ROW] })
+    const el = await mount('oc_enc')
+    await flush(el)
+    expect(cards(el).length).toBe(2)
+    // 推送以相反顺序重放同一集合：去重合并，不得出现第二张卡或内容换位。
+    ws.emit(permFrame({ ...READ_ROW, session_id: 'oc_enc', reason: '' }))
+    ws.emit(permFrame({ ...BASH_ROW, session_id: 'oc_enc', reason: '' }))
+    await el.updateComplete
+    expect(cards(el).length).toBe(2)
+    expectContentMatchesId(el)
+    const submitted = await clickAllowPerCardAndCapture(el)
+    expect([...submitted].sort()).toEqual([BASH_ROW.request_id, READ_ROW.request_id])
+  })
+
+  it('pairs content with id across arrival orders: WS first, GET second', async () => {
+    approvalsMock.mockResolvedValue({ approvals: [] })
+    const el = await mount('oc_enc')
+    ws.emit(permFrame({ ...READ_ROW, session_id: 'oc_enc', reason: '' }))
+    ws.emit(permFrame({ ...BASH_ROW, session_id: 'oc_enc', reason: '' }))
+    await el.updateComplete
+    expect(cards(el).length).toBe(2)
+    // 后到的读模型重放同一集合（顺序无关）：幂等合并不重建不换位。
+    approvalsMock.mockResolvedValue({ approvals: [BASH_ROW, READ_ROW] })
+    await el['pullApprovals']('oc_enc')
+    await flush(el)
+    expect(cards(el).length).toBe(2)
+    expectContentMatchesId(el)
+    const submitted = await clickAllowPerCardAndCapture(el)
+    expect([...submitted].sort()).toEqual([BASH_ROW.request_id, READ_ROW.request_id])
+  })
+
+  it('pairs content with id across arrival orders: interleaved GET/WS with duplicate frames', async () => {
+    approvalsMock.mockResolvedValue({ approvals: [BASH_ROW] })
+    const el = await mount('oc_enc')
+    ws.emit(permFrame({ ...READ_ROW, session_id: 'oc_enc', reason: '' }))
+    await el.updateComplete
+    expect(cards(el).length).toBe(2)
+    // 交错重放：GET 重复帧 + WS 重复帧（广播重连），一张卡只建一次。
+    approvalsMock.mockResolvedValue({ approvals: [BASH_ROW, READ_ROW] })
+    await el['pullApprovals']('oc_enc')
+    ws.emit(permFrame({ ...BASH_ROW, session_id: 'oc_enc', reason: '' }))
+    ws.emit(permFrame({ ...READ_ROW, session_id: 'oc_enc', reason: '' }))
+    await flush(el)
+    expect(cards(el).length).toBe(2)
+    expectContentMatchesId(el)
+    const submitted = await clickAllowPerCardAndCapture(el)
+    expect([...submitted].sort()).toEqual([BASH_ROW.request_id, READ_ROW.request_id])
+  })
+
+  it('renders the same pending set in one deterministic order whatever the arrival order (spec: pending card order is stable)', async () => {
+    // 同一待批集合：读模型序（[tc-1, tc-2]）与推送到达序（[tc-2, tc-1]，真实
+    // 沙箱实测可倒置）必须呈现为**同一**显示序——排序键与读模型一致
+    // （request_id 字典序），刷新前后不得无因翻转。
+    approvalsMock.mockResolvedValue({ approvals: [BASH_ROW, READ_ROW] })
+    const elReload = await mount('oc_enc')
+    await flush(elReload)
+    const reloadOrder = [...cards(elReload)].map((c) => c.dataset.requestId)
+
+    approvalsMock.mockResolvedValue({ approvals: [] })
+    const elLive = await mount('oc_enc')
+    ws.emit(permFrame({ ...READ_ROW, session_id: 'oc_enc', reason: '' }))
+    ws.emit(permFrame({ ...BASH_ROW, session_id: 'oc_enc', reason: '' }))
+    await elLive.updateComplete
+    const liveOrder = [...cards(elLive)].map((c) => c.dataset.requestId)
+
+    expect(liveOrder).toEqual(reloadOrder)
+    expect(liveOrder).toEqual([BASH_ROW.request_id, READ_ROW.request_id])
+  })
+
   it('a retry firing while a resync pull is in flight shares that GET (7.1 × 7.2 竞态)', async () => {
     // 退避计时器与共享在途 GET 的竞态：resync 先触发一次拉取（在飞），
     // 退避到点的 reconcile 加入同一次 GET——始终不多发请求；扑空后两条

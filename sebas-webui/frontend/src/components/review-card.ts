@@ -6,7 +6,11 @@
  * store, the store is the only thing that renders. Merging is keyed by
  * `request_id` (duplicate frames never create a second card) and decided
  * ids are tombstoned (a late push or stale read-model row cannot resurrect
- * a settled card). While the phase feed says the session is `waiting` but
+ * a settled card). Cards render in one deterministic order — sorted by
+ * `request_id`, the same key the read model enumerates by (parallel pushes
+ * arrive in unreliable order; see mergeRows) — so the live surface and the
+ * rebuilt-after-reload surface present the same pending set identically.
+ * While the phase feed says the session is `waiting` but
  * the store holds no live card (a lost push), the read model is re-pulled
  * through the same entry so the card recovers without a reload; an empty
  * pull (the read model raced ahead of the approval being persisted) backs
@@ -236,6 +240,14 @@ export class SebasReviewCards extends LitElement {
    * （round3 2.2）store → 渲染的唯一入口：推送帧与读模型行都归一为
    * ApprovalRow 经这里合并进 cards。已决墓碑优先（迟到推送/陈旧读模型行
    * 都不复活卡片），request_id 去重（重建与推送竞速也只建一张卡）。
+   *
+   * （fix-parallel-approval-routing 2.1）合并不改变显示序的确定性：cards
+   * 始终按 request_id 字典序输出——与读模型枚举（引擎泊车登记投影）同一
+   * 排序键。并行推送的到达序不可靠（vendor 每条 hook_callback 一个任务，
+   * 两条的 AcpEvent 发送序可倒置，实测沙箱复现），若按到达序渲染，同一
+   * 待批集合在推送面与刷新重建面呈现为两种顺序（QA w2「刷新后顺序翻转」
+   * 的根源）；以 id 为键排序后任意到达序收敛到同一显示序，卡片内容与
+   * request_id 的配对不受呈现顺序影响。
    */
   private mergeRows(rows: ApprovalRow[]): void {
     const fresh = rows.filter(
@@ -244,7 +256,7 @@ export class SebasReviewCards extends LitElement {
         !this.cards.some((c) => c.request_id === r.request_id),
     )
     if (fresh.length === 0) return
-    this.cards = [
+    this.cards = this.orderCards([
       ...this.cards,
       ...fresh.map((r) => ({
         ...r,
@@ -252,7 +264,14 @@ export class SebasReviewCards extends LitElement {
         error: '',
         escalateReason: '',
       })),
-    ]
+    ])
+  }
+
+  /** 显示序投影（fix-parallel-approval-routing 2.1）：request_id 字典序。 */
+  private orderCards(cards: ReviewCard[]): ReviewCard[] {
+    return [...cards].sort((a, b) =>
+      a.request_id < b.request_id ? -1 : a.request_id > b.request_id ? 1 : 0,
+    )
   }
 
   /**

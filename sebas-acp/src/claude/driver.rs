@@ -1784,6 +1784,76 @@ mod tests {
         assert!(rig.pending.lock().await.is_empty());
     }
 
+    // ---- fix-parallel-approval-routing 1.3：并行泊车乱序决策各归其位 ----
+
+    /// 两个并行 hook_callback 同时泊车后，决定按**乱序**回填（先答后泊的、
+    /// 再答先泊的）：每个 hook future 必须收到**自己 request_id** 的决定，
+    /// 结果不互换。这是 manager `send(PermissionReply)` 按键摘除 oneshot 的
+    /// 路由语义回归钉——vendor 补丁（round2 D-C5）放开并发 hook 后，两条
+    /// hook_callback 同时在飞成为常态，路由若按到达序弹队就会在此暴露。
+    #[tokio::test]
+    async fn out_of_order_decisions_route_to_their_own_parked_request() {
+        let mut rig = hook_rig(claude_agent_sdk::PermissionMode::Default);
+        let hook = rig.hook.clone();
+        // 两个并行咨询（fake-claude `parallel` 剧本同构：Bash 先泊、Read 后泊）。
+        let bash = {
+            let hook = hook.clone();
+            tokio::spawn(async move {
+                hook(pre_tool_use_input("Bash"), Some("tc-par-1".into()), hook_ctx()).await
+            })
+        };
+        let read = tokio::spawn(async move {
+            hook(pre_tool_use_input("Read"), Some("tc-par-2".into()), hook_ctx()).await
+        });
+
+        // 两条 PermissionRequest 都到齐（并发泊车——vendor 补丁后的常态）。
+        let mut ids = Vec::new();
+        for tool in ["Bash", "Read"] {
+            let evt = tokio::time::timeout(Duration::from_secs(2), rig.evt_rx.recv())
+                .await
+                .expect("event timeout")
+                .expect("event channel open");
+            let AcpEvent::PermissionRequest { request_id, tool_name, .. } = evt else {
+                panic!("parallel consult must produce PermissionRequest");
+            };
+            assert_eq!(tool_name, tool, "requests arrive parked in order {tool}");
+            ids.push(request_id);
+        }
+        assert_eq!(rig.pending.lock().await.len(), 2, "both decisions parked");
+
+        // 乱序回填：先答**后**泊的 Read（allow），再答**先**泊的 Bash（deny）。
+        // 摘除方式与 manager.send 逐字同构：按 request_id 从映射摘除 oneshot。
+        let read_slot = rig
+            .pending
+            .lock()
+            .await
+            .remove(&ids[1])
+            .expect("read responder parked");
+        read_slot.send(Decision::AllowOnce).expect("resolve read");
+        let bash_slot = rig
+            .pending
+            .lock()
+            .await
+            .remove(&ids[0])
+            .expect("bash responder parked");
+        bash_slot.send(Decision::Deny).expect("resolve bash");
+
+        // 各归其位：Bash 的 hook 拿到 deny，Read 的 hook 拿到 allow——不互换。
+        let bash_out = bash.await.expect("bash hook joins");
+        let read_out = read.await.expect("read hook joins");
+        assert_eq!(
+            permission_decision(&bash_out),
+            Some("deny"),
+            "the first-parked request must receive ITS OWN deny"
+        );
+        assert_eq!(
+            permission_decision(&read_out),
+            Some("allow"),
+            "the second-parked request must receive ITS OWN allow despite the reversed order"
+        );
+        assert!(rig.pending.lock().await.is_empty(), "parking fully consumed");
+    }
+
     // ---- session-slash-commands 1.2：初始化载荷 commands 的防御性映射 ----
 
     #[test]

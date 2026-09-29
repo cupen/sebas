@@ -104,6 +104,77 @@ async fn parked_requests_are_listed_and_clear_after_the_reply() {
     assert!(saw_reply, "the reply must leave through the out channel");
 }
 
+/// （fix-parallel-approval-routing 1.2）读模型枚举稳定序：同一待批集合两次
+/// 枚举顺序一致，且与登记序的稳定投影（request_id 字典序——前端渲染与刷新
+/// 重建共用的同一排序键）一致。泊车登记在 HashMap 里，枚举若无序即随哈希
+/// 遍历序漂移；此测把键钉死，读模型与审批面刷新才有一致的呈现序。
+#[tokio::test]
+async fn pending_permission_requests_enumerate_in_a_stable_sorted_order() {
+    let (router, _rx) = DispatchHandle::new(SessionMap::new());
+    let key = web_key("order");
+    router
+        .map
+        .insert(key.clone(), Mapping::active("s-order"))
+        .await
+        .unwrap();
+    // 两条并行泊车（登记序 tc-9 在前、tc-1 在后——与字典序相反，投影序才
+    // 会被真正考到）。
+    for (req_id, tool) in [
+        ("claude:tc-par-9", "Read"),
+        ("claude:tc-par-1", "Bash"),
+    ] {
+        router
+            .dispatch_acp_event(AcpEvent::PermissionRequest {
+                session_id: "s-order".into(),
+                request_id: req_id.to_string(),
+                tool_name: tool.into(),
+                args: serde_json::json!({"k": req_id}),
+            })
+            .await;
+    }
+
+    let first = router
+        .pending_permission_requests(&key)
+        .await
+        .expect("known session");
+    let second = router
+        .pending_permission_requests(&key)
+        .await
+        .expect("known session");
+
+    let ids: Vec<&str> = first.iter().map(|p| p.request_id.as_str()).collect();
+    assert_eq!(
+        ids,
+        ["claude:tc-par-1", "claude:tc-par-9"],
+        "enumeration follows the pinned sort key (request_id lexicographic), not map order"
+    );
+    assert_eq!(first, second, "two enumerations of the same set must agree");
+    // 内容随行：投影序里的每个条目仍携带自己的工具（内容 ↔ id 不因排序错位）。
+    assert_eq!(first[0].tool_name, "Bash");
+    assert_eq!(first[1].tool_name, "Read");
+
+    // 批复其一后枚举：剩余集合仍按同一键稳定输出。
+    router
+        .emit(Out::SendAcp {
+            session_id: "s-order".into(),
+            cmd: AcpCommand::PermissionReply {
+                session_id: "s-order".into(),
+                request_id: "claude:tc-par-1".into(),
+                decision: Decision::Deny,
+            },
+        })
+        .await;
+    let after = router
+        .pending_permission_requests(&key)
+        .await
+        .expect("known session");
+    assert_eq!(
+        after.iter().map(|p| p.request_id.as_str()).collect::<Vec<_>>(),
+        ["claude:tc-par-9"],
+        "the surviving entry keeps the read model consistent"
+    );
+}
+
 /// 1.1 补口：未知会话读模型返回 None（路由转 404）；泊车在等的会话
 /// `turn_engaged = true`（waiting 投影事实）。
 #[tokio::test]

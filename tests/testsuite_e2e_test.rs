@@ -8935,15 +8935,15 @@ async fn unknown_scenario_arg_fails_the_turn_loudly() {
 // webui 用户面（HTTP API：创建会话 / 读泊车审批 / 应答决定）驱动，不读内核
 // 内部状态；子进程是 fake-claude 桩，零真实上游外呼。
 //
-// ⚠ 实测事实（design D3 的「重叠泊车」假设在 SDK 边界不成立，如实落账）：
-// cc-agent-sdk 0.1.7 在 hook 回调分发处**跨 await 持有回调表锁**
-// (`internal/query_full.rs`：`let callbacks = hook_callbacks.lock().await;`
-// 后 `callback(...).await`)——桩连发的两条 hook_callback 中，第二条的回调要等
-// 第一条（也就是等操作者决定）返回后才开始执行。驱动侧因此一次只泊一条：
-// 第一张卡决策后才出现第二张。桩侧的「连发 / 第二个发出时第一个仍待批」是
-// wire 契约，由 journal 单独钉死（见 `parallel_scenario_...` 用例）。本组
-// 用例断言的是「两个 request_id 各自独立泊车与决策、逐一推进、终态正确」，
-// 不假设两卡同时在读模型里。
+// ⚠ 实测事实（fix-webui-qa-round2 D-C5 补丁后已**反转**，如实改账）：上游
+// cc-agent-sdk 0.1.7 曾在 hook 回调分发处跨 await 持有回调表锁（第二条
+// hook_callback 的回调要等第一条决定返回），本仓 vendor 补丁（`query_full.rs`
+// 「clone 后先放锁再 await」）放开了并发——两条 hook_callback **同时在飞、
+// 同时泊车**自此成为常态（driver 单测 `out_of_order_decisions_route_to...`
+// 与 GUI 手测均实证）。早先「一次只泊一条」的观察只对补丁前的上游成立；
+// `parallel_scenario_reverse_order_answers_route_to_their_own_tool` 据此把
+// 「同一读模型快照同时列出两条 + 倒序应答各归其位」钉进进程级。本组用例
+// 断言「两个 request_id 各自独立泊车与决策、推进、终态正确」。
 
 /// 驱动一个 `parallel` 回合：按 `decisions`（工具名 → 决定）逐一「等新泊车 →
 /// 应答」。工具名匹配（而非泊车次序）保证即使 SDK 未来放开并发、或两条回调
@@ -9314,6 +9314,151 @@ async fn parallel_scenario_transcript_shape_is_deterministic_across_runs() {
     assert_eq!(
         first, second,
         "the same parallel journey must produce an identical transcript shape (ids/timestamps aside)"
+    );
+}
+
+/// fix-parallel-approval-routing：并行泊车**同一快照共存** + **倒序应答**各归
+/// 其位。既有 journey（`drive_parallel_turn`）按读模型枚举序逐一应答——「同一
+/// 读模型快照同时列出两条」「先答枚举序靠后的」从未在进程级钉过；vendor D-C5
+/// 补丁放开并发 hook 后两条同时在飞是常态，倒序应答正是原始缺陷（按待批队列
+/// 序隐式配对）的最小复现形态。前端乱序合并/显示序由浏览器套件与单测守护，
+/// 本用例钉的是 webui 应答端点 → core → dispatch → hook 回填的全链路由：
+/// 每个决定只认 request_id，与应答顺序无关。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn parallel_scenario_reverse_order_answers_route_to_their_own_tool() {
+    let sb = Sandbox::new("testsuite_e2e", "fake-parallel-reverse");
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+    let project_id = scene_project_id(&cli, &sb).await;
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "project_id": project_id, "prompt": "parallel", "agent": "claude" }),
+    )
+    .await
+    .expect("create session");
+    assert_eq!(status, 201, "create session: {body}");
+    let key = body["key"].as_str().expect("key").to_string();
+
+    // 两条**同时**泊车：读模型的一个快照里同时列出（乱序决策的先决条件——
+    // 旧 journey 逐一找「未见过的」一条，从未断言共存）。
+    let approvals_url = format!("{}/api/sessions/{key}/approvals", sb.webui_url());
+    let both = wait_for(
+        "both parallel approvals parked in one snapshot",
+        Duration::from_secs(30),
+        &sb.path,
+        {
+            let cli = cli.clone();
+            let approvals_url = approvals_url.clone();
+            move || {
+                let cli = cli.clone();
+                let approvals_url = approvals_url.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&approvals_url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    let approvals = v["approvals"].as_array()?;
+                    (approvals.len() == 2).then(|| approvals.clone())
+                })
+            }
+        },
+    )
+    .await;
+    assert_eq!(both.len(), 2, "both approvals must be listed together: {both:?}");
+    let ids: Vec<&str> = both
+        .iter()
+        .map(|n| n["request_id"].as_str().unwrap_or(""))
+        .collect();
+    assert_ne!(ids[0], ids[1], "each request carries its own request_id");
+    // 读模型枚举序 = request_id 字典序（与前端显示序同一键，倒序应答的参照）。
+    let mut sorted = ids.clone();
+    sorted.sort();
+    assert_eq!(
+        ids, sorted,
+        "the read model enumerates by request_id lexicographic: {both:?}"
+    );
+    let by_tool = |tool: &str| {
+        both.iter()
+            .find(|n| n["tool_name"] == tool)
+            .unwrap_or_else(|| panic!("no parked {tool}: {both:?}"))
+    };
+    assert_eq!(by_tool("Bash")["args"]["command"], "echo first");
+    assert_eq!(
+        by_tool("Read")["args"]["file_path"],
+        "/tmp/fake-parallel.txt"
+    );
+    let bash_id = by_tool("Bash")["request_id"]
+        .as_str()
+        .expect("bash request_id")
+        .to_string();
+    let read_id = by_tool("Read")["request_id"]
+        .as_str()
+        .expect("read request_id")
+        .to_string();
+
+    // 倒序应答：先答枚举序靠后的（Read → deny），再答靠前的（Bash → allow）。
+    let (st, b) = post_json(
+        &cli,
+        &format!("{}/api/permissions/{read_id}/answer", sb.webui_url()),
+        serde_json::json!({ "decision": { "decision": "deny" } }),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("answer {read_id}: {e}"));
+    assert_eq!(st, 200, "deny {read_id} must be delivered: {b}");
+    let (st, b) = post_json(
+        &cli,
+        &format!("{}/api/permissions/{bash_id}/answer", sb.webui_url()),
+        serde_json::json!({ "decision": { "decision": "allow_once" } }),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("answer {bash_id}: {e}"));
+    assert_eq!(st, 200, "allow {bash_id} must be delivered: {b}");
+
+    // 回合收敛，结果各归其位：Bash 被执行（自己的 allow），Read 被拒（自己的
+    // deny）——互换（按队列序配对的原始缺陷）在这里当场爆。
+    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+    wait_turn_done(&cli, &sb, &detail_url).await;
+    let (_status, detail) = get_json_status(&cli, &detail_url)
+        .await
+        .expect("session detail");
+    assert_eq!(
+        detail["status_slug"].as_str(),
+        Some("done"),
+        "turn must settle after the reversed answers: {detail}"
+    );
+    let entries = detail["entries"].as_array().cloned().unwrap_or_default();
+    let tool_result = |tool: &str| -> String {
+        entries
+            .iter()
+            .filter(|e| e["element_type"].as_str() == Some("tool"))
+            .filter_map(|e| e["content"].as_str())
+            .find(|c| c.starts_with(&format!("✓ **{tool}**")))
+            .unwrap_or_else(|| panic!("no tool_result for {tool}: {entries:?}"))
+            .to_string()
+    };
+    let bash_entry = tool_result("Bash");
+    let read_entry = tool_result("Read");
+    assert!(
+        bash_entry.contains("Bash ok"),
+        "Bash must follow ITS OWN allow despite the reversed answer order: {bash_entry}"
+    );
+    assert!(
+        read_entry.contains("denied by fake"),
+        "Read must follow ITS OWN deny despite the reversed answer order: {read_entry}"
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|e| e["content"].as_str() == Some("parallel tools finished")),
+        "the reversed answer order must not stop the turn close: {entries:?}"
     );
 }
 }
