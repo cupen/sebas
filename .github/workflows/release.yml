@@ -31,6 +31,12 @@ jobs:
           IS_PRERELEASE: ${{ steps.verify.outputs.is_prerelease }}
         run: |
           set -euo pipefail
+          # 幂等：release 对象已存在（重试/重推场景）就跳过创建——已有资产由
+          # upload-assets 的 gh release upload --clobber 原名覆盖。
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME already exists — skip create, assets will be clobbered"
+            exit 0
+          fi
           # 子命令必须是 `release create`——只写 `create` 是不存在的顶层命令，
           # gh 立即 exit 1（v0.1.0 首发即栽在这里，8 秒失败无网络痕迹）。
           args=(release create "$GITHUB_REF_NAME" --generate-notes --verify-tag)

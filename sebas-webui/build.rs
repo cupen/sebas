@@ -121,8 +121,7 @@ fn discover_pnpm() -> Option<Vec<String>> {
         vec!["pnpm".to_string()],
         vec!["corepack".to_string(), "pnpm".to_string()],
     ] {
-        let ok = Command::new(&prefix[0])
-            .args(&prefix[1..])
+        let ok = command_for(&prefix)
             .arg("--version")
             .output()
             .map(|o| o.status.success())
@@ -134,9 +133,25 @@ fn discover_pnpm() -> Option<Vec<String>> {
     None
 }
 
+/// Build a `Command` for a tool invocation. On Windows, pnpm/corepack 通常只以
+/// `.cmd` shim 存在（npm 全局安装、GitHub runner 的 pnpm/action-setup 都是这种
+/// 形态），而 CreateProcess 只解析 `.exe`——直接 `Command::new("pnpm")` 会
+/// NotFound，前端构建被静默降级为占位页（v0.1.0 首发即因此在 Windows 资产上
+/// 翻车）。经 `cmd /C` 走 PATH+PATHEXT 解析。参数均为静态字面量，无注入面。
+fn command_for(tokens: &[String]) -> Command {
+    if cfg!(windows) {
+        let mut cmd = Command::new("cmd");
+        cmd.arg("/C").arg(tokens.join(" "));
+        cmd
+    } else {
+        let mut cmd = Command::new(&tokens[0]);
+        cmd.args(&tokens[1..]);
+        cmd
+    }
+}
+
 fn run(cmd: &[String], dir: &Path, args: &[&str], what: &str) -> bool {
-    let output = Command::new(&cmd[0])
-        .args(&cmd[1..])
+    let output = command_for(cmd)
         .args(args)
         .current_dir(dir)
         .output();
