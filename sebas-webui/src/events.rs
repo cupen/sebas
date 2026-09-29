@@ -212,7 +212,10 @@ mod tests {
                         {"id": 9, "text": "queued behind the live turn", "position": 0,
                          "disposition": "turn", "priority": false}
                     ],
-                    "label": "renamed-by-operator"
+                    "label": "renamed-by-operator",
+                    // fix-webui-qa-findings DD1：Some 上 wire；None 帧（上/
+                    // 下两案）按 skip_serializing_if 缺省不出现。
+                    "prompt_preview": "first hello"
                 }),
             ),
             // 非占用相位同样键齐全：turn_engaged=false 显式上 wire（D2：

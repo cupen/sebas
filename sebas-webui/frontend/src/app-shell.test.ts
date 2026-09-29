@@ -751,7 +751,8 @@ describe('multiuser auth gate (add-webui-multiuser-rbac 5.2/5.4)', () => {
     expect(el.shadowRoot!.querySelector('sebas-setup')).toBeNull()
     // 身份重探带回 root：设置弹窗收到角色（5.4 分区裁剪的数据源）。
     expect(modalRole(el)).toBe('root')
-    expect(el.shadowRoot!.textContent).toContain('退出 (cupen)')
+    // 角色展示位（gate-agent-directory-writes 2.2）：侧栏用户区随角色收尾。
+    expect(el.shadowRoot!.textContent).toContain('退出 (cupen · root)')
     el.remove()
   })
 
@@ -781,6 +782,60 @@ describe('multiuser auth gate (add-webui-multiuser-rbac 5.2/5.4)', () => {
     const el = await mountShell()
     expect(el.shadowRoot!.querySelector('.outlet')).toBeTruthy()
     expect(modalRole(el)).toBeNull()
+    el.remove()
+  })
+})
+
+describe('当前角色可见（gate-agent-directory-writes 2.2）', () => {
+  function railOf(el: SebasApp): { role: string | null } {
+    return el.shadowRoot!.querySelector('sebas-project-rail') as unknown as {
+      role: string | null
+    }
+  }
+
+  function logoutLabel(el: SebasApp): string {
+    const btn = el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="Sign out"]')
+    return btn?.textContent ?? ''
+  }
+
+  it('侧栏用户区展示「退出 (name · role)」，并把角色下传 rail（入口裁剪数据源）', async () => {
+    apiMocks.authMe.mockResolvedValue({
+      enabled: true,
+      authenticated: true,
+      username: 'bob',
+      role: 'viewer',
+    })
+    const el = await mountShell()
+    expect(logoutLabel(el)).toContain('退出 (bob · viewer)')
+    expect(railOf(el).role).toBe('viewer')
+    el.remove()
+  })
+
+  it('me 未带 role（旧服务端过渡期）回退纯用户名，不残留悬空分隔符', async () => {
+    apiMocks.authMe.mockResolvedValue({ enabled: true, authenticated: true, username: 'amy' })
+    const el = await mountShell()
+    expect(logoutLabel(el)).toContain('退出 (amy)')
+    expect(logoutLabel(el)).not.toContain(' · ')
+    el.remove()
+  })
+
+  it('登出后无残留：用户名与角色一并清空，回到登录页', async () => {
+    apiMocks.authMe.mockResolvedValue({
+      enabled: true,
+      authenticated: true,
+      username: 'alice',
+      role: 'admin',
+    })
+    const el = await mountShell()
+    expect(logoutLabel(el)).toContain('退出 (alice · admin)')
+    // authLogout 的 fetch 在 jsdom 无服务可达即抛——onLogout 照样走 showLogin。
+    el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="Sign out"]')!.click()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('sebas-login')).toBeTruthy()
+    const inner = el as unknown as { authUsername: string | null; authRole: string | null }
+    expect(inner.authUsername).toBeNull()
+    expect(inner.authRole).toBeNull()
     el.remove()
   })
 })

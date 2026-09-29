@@ -1399,6 +1399,80 @@ describe('add-agent-settings-and-session-titles：Agents 分区（/api/agents*�
   })
 })
 
+describe('gate-agent-directory-writes 2.1：Agents 写入口随角色裁剪', () => {
+  /** 带角色挂载（role=null = 鉴权关闭的宿主，保持既有可用）。 */
+  async function mountAs(
+    role: 'root' | 'admin' | 'member' | 'viewer' | null,
+  ): Promise<SebasSettingsModal> {
+    const el = document.createElement('sebas-settings-modal') as SebasSettingsModal
+    if (role !== null) el.role = role
+    el.open = true
+    document.body.appendChild(el)
+    await el.updateComplete
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    return el
+  }
+
+  /** 切到 Agents 分区（导航按角色裁剪，序号不能写死）。 */
+  async function gotoAgents(el: SebasSettingsModal): Promise<void> {
+    const labels = [...el.shadowRoot!.querySelectorAll<HTMLElement>('.nav .nav-item')].map(
+      (b) => b.textContent?.trim(),
+    )
+    const index = labels.indexOf('Agents')
+    expect(index).toBeGreaterThanOrEqual(0)
+    await goto(el, index)
+  }
+
+  function newAgentButton(el: SebasSettingsModal): HTMLElement | null {
+    return waButtons(el).find((b) => b.textContent?.includes('New agent')) ?? null
+  }
+
+  it('member/viewer 只读：New/Edit/Delete 全部不呈现（分区本身保留可浏览）', async () => {
+    for (const role of ['member', 'viewer'] as const) {
+      const el = await mountAs(role)
+      await gotoAgents(el)
+      expect(el.section).toBe('agents')
+      // 目录仍加载（读保持登录门，浏览不受影响）。
+      expect(apiMocks.agents).toHaveBeenCalled()
+      expect(el.shadowRoot!.querySelector('[data-testid="agent-row-native"]')).toBeTruthy()
+      expect(el.shadowRoot!.querySelectorAll('[data-testid="agent-row"]').length).toBeGreaterThan(0)
+      // 写入口全部不呈现。
+      expect(newAgentButton(el), `${role} 不得见 New agent`).toBeNull()
+      for (const row of el.shadowRoot!.querySelectorAll<HTMLElement>('[data-testid="agent-row"]')) {
+        expect(row.querySelector('button[title="Edit"]'), `${role} 不得见 Edit`).toBeNull()
+        expect(row.querySelector('button[title="Delete"]'), `${role} 不得见 Delete`).toBeNull()
+      }
+      el.remove()
+    }
+  })
+
+  it('root/admin（及鉴权关闭宿主）写入口全在：New + 行内 Edit/Delete', async () => {
+    for (const role of ['root', 'admin', null] as const) {
+      const el = await mountAs(role)
+      await gotoAgents(el)
+      expect(newAgentButton(el), `${role} 必须见 New agent`).toBeTruthy()
+      const row = el
+        .shadowRoot!
+        .querySelector<HTMLElement>('[data-testid="agent-row"][data-id="claude"]')
+      expect(row, `claude 行 @ ${role}`).toBeTruthy()
+      expect(row!.querySelector('button[title="Edit"]')).toBeTruthy()
+      expect(row!.querySelector('button[title="Delete"]')).toBeTruthy()
+      el.remove()
+    }
+  })
+
+  it('空目录的引导文案随角色收窄：只读档不再指向隐藏的 New agent 入口', async () => {
+    apiMocks.agents.mockResolvedValue({ agents: [{ id: 'native', display: 'Native Kernel', reachable: true }] })
+    const el = await mountAs('viewer')
+    await gotoAgents(el)
+    const empty = el.shadowRoot!.querySelector('[data-testid="agents-empty"]')
+    expect(empty).toBeTruthy()
+    expect(empty!.textContent).not.toContain('New agent')
+    el.remove()
+  })
+})
+
 describe('unify-router-process-shape：router 停止被拒的强制出口（D4）', () => {
   /** 装好带 router 行的 Services 分区，并在 confirm 弹窗里点掉 Disable。 */
   async function confirmDisableRouter(el: SebasSettingsModal): Promise<void> {

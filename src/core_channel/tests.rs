@@ -1196,8 +1196,14 @@ fn missing_or_empty_channel_path_falls_back_to_default() {
     /// （消费点锚在映射表之上）。
     #[test]
     fn channel_socket_default_follows_sebas_home_and_env_override() {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // 共用 crate 级 env 串行锁（watchdog::services 的 PinnedEnv、config/
+        // upgrade 的 env 用例同锁）：本用例动的 SEBAS_HOME/SEBAS_CORE_SOCKET
+        // 是进程级全局，模块私有锁挡不住并行模块读 env——曾让
+        // pinned_lifecycle_never_touches_operator_home 读到本用例中途的
+        // SEBAS_CORE_SOCKET 覆盖而误报「socket 越出钉住目录」。
+        let lock = crate::home_env_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let saved = (
             std::env::var("SEBAS_HOME").ok(),
             std::env::var("SEBAS_STATE_DIR").ok(),
@@ -1224,12 +1230,23 @@ fn missing_or_empty_channel_path_falls_back_to_default() {
             StdPath::new("/elsewhere/core.sock"),
             "SEBAS_CORE_SOCKET 覆盖优先"
         );
-        // config 键仍压过 env。
+        // config 键仍压过 env。期望值按 resolve_channel_path 的契约计算：
+        // 绝对路径原样返回；相对（含 Windows 根化形态 `/x`——`Path::is_
+        // absolute` 为 false）join CWD。Unix 上 `/from-config/core.sock`
+        // 本就绝对，期望即原值；Windows 上期望 = CWD join（带盘符）。
         let cfg = crate::config::Config::parse("[service.core]\nchannel_path = \"/from-config/core.sock\"\n")
             .expect("config channel_path parses");
+        let raw = StdPath::new("/from-config/core.sock");
+        let expected = if raw.is_absolute() {
+            raw.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .expect("cwd readable")
+                .join(raw)
+        };
         assert_eq!(
             server::socket_path(&cfg),
-            StdPath::new("/from-config/core.sock"),
+            expected,
             "config channel_path > env > 派生"
         );
         unsafe {

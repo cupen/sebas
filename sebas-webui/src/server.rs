@@ -425,7 +425,8 @@ fn is_protected_path(path: &str) -> bool {
 /// | `/api/sessions*` 写、`/api/projects*` 写、`/api/permissions/*`（answer） | 非安全方法 | `sessions.write` |
 /// | `/api/providers*`、`/api/provider-presets`、`/api/provider-defaults`、`/api/model-aliases*`（provider 管理面读 + 写） | 全部 | 无——design D3 明确排除在角色执法外，仅登录门 + 自身守卫（POST-only + origin） |
 /// | `/api/skills*`（skills 管理面读 + 删/sync） | 全部 | 无——add-agent-skills 5.3：与 provider 管理面**同一权限档**（读=管理面读、删/sync=管理面写，都不按角色执法）；仅登录门 + 非安全方法同源校验 |
-/// | 其余 `/api/*`（summary / sessions 与 projects 读 / env / agents / nodes / about / archive 读 / browse-dirs）与 `/ws` | 全部 | 无（认证即可，viewer 可读） |
+/// | `/api/agents*` 写（POST / PUT / DELETE，gate-agent-directory-writes 1.1） | 非安全方法 | `settings.manage` 档（spec agents.manage 行：root/admin——同一执法函数的再标注，不新设权限位） |
+/// | 其余 `/api/*`（summary / sessions 与 projects 读 / env / agents 读 / nodes / about / archive 读 / browse-dirs）与 `/ws` | 全部 | 无（认证即可，viewer 可读） |
 /// | `/api/auth/{login,logout,setup,me}` | — | 豁免路径（[`is_auth_exempt_path`]），不进本表 |
 ///
 /// admin 控制面自身的 `SEBAS_CONTROL_SECRET` 会话保持第二层不动；RBAC 只
@@ -471,6 +472,13 @@ fn required_permission(path: &str, method: &str) -> Option<Permission> {
         || path.starts_with("/api/permissions/")
     {
         return mutating.then_some(Permission::SessionsWrite);
+    }
+    // agent 目录写（gate-agent-directory-writes 1.1，spec「RBAC 角色与权限
+    // 执法」agents.manage 行）：增/改/删挂 settings.manage **同档**（root/
+    // admin，design：不新设独立权限位，同一执法函数的再标注）；GET 保持
+    // 登录门（认证即可读——agent 列表是选 agent 建会话的前置数据）。
+    if path == "/api/agents" || path.starts_with("/api/agents/") {
+        return mutating.then_some(Permission::SettingsManage);
     }
     None
 }
@@ -1538,6 +1546,126 @@ mod auth_guard_tests {
         // 匿名：登录门照常（豁免的是角色执法，不是登录）。
         let (status, _) = req(app, "GET", "/api/skills", None, None, None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    /// gate-agent-directory-writes 1.1：agents 写执法矩阵（spec「RBAC 角色
+    /// 与权限执法」agents.manage 行）——四角色 × {create, update, delete,
+    /// list}。member/viewer 对任一写操作 403（settings.manage 档）；root/
+    /// admin 穿过角色执法到达 handler（FakeBackend 不可达 → 503，绝非
+    /// 401/403）；GET 全角色认证即可（登录门，agent 列表只读不收权）；
+    /// 匿名 401（登录门先于角色执法）。
+    #[tokio::test]
+    async fn agents_write_matrix_follows_settings_manage_tier() {
+        let (app, _dir, _auth) = rbac_app().await;
+        let alice = login_cookie(&app, "alice", "password8").await; // root
+        let ada = login_cookie(&app, "ada", "password8").await; // admin
+        let bob = login_cookie(&app, "bob", "password8").await; // member
+        let vic = login_cookie(&app, "vic", "password8").await; // viewer
+
+        // 写操作三件套：member/viewer 全部 403，root/admin 全部到达 handler
+        // （503 = core 不可达，是「穿过角色执法」的证据）。
+        for (method, uri, body) in [
+            ("POST", "/api/agents", Some(r#"{"id":"probe"}"#.to_string())),
+            ("PUT", "/api/agents/probe", Some("{}".to_string())),
+            ("DELETE", "/api/agents/probe", None),
+        ] {
+            for (who, cookie) in [("member", &bob), ("viewer", &vic)] {
+                let (status, body) = req(app.clone(), method, uri, Some(cookie), None, body.clone())
+                    .await;
+                assert_eq!(
+                    status,
+                    StatusCode::FORBIDDEN,
+                    "{who} 的 agents {method} 必须 403: {body}"
+                );
+            }
+            for (who, cookie) in [("root", &alice), ("admin", &ada)] {
+                let (status, body) = req(app.clone(), method, uri, Some(cookie), None, body.clone())
+                    .await;
+                assert_eq!(
+                    status,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "{who} 的 agents {method} 必须穿过角色执法: {status} {body}"
+                );
+            }
+        }
+
+        // 读（列表）：四角色认证即可，无一 403。
+        for (who, cookie) in [
+            ("root", &alice),
+            ("admin", &ada),
+            ("member", &bob),
+            ("viewer", &vic),
+        ] {
+            let (status, body) = req(app.clone(), "GET", "/api/agents", Some(cookie), None, None).await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "{who} 读 agent 目录必须放行（登录门）: {body}"
+            );
+        }
+
+        // 匿名仍是 401（登录门先于角色执法）。
+        let (status, _) = req(app, "POST", "/api/agents", None, None, Some("{}".into())).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    /// gate-agent-directory-writes 1.2：角色/禁用即时生效对 agents 写同样
+    /// 成立（身份按请求实时解析，无快照）。admin 降级 member 后同一会话的
+    /// 下一个 agents 写 403（无需重登）；用户被禁用后同一会话 401。
+    #[tokio::test]
+    async fn agents_write_resolves_role_and_enabled_live() {
+        let (app, _dir, auth) = rbac_app().await;
+        let ada = login_cookie(&app, "ada", "password8").await;
+
+        // 降级前：admin 穿过角色执法（503 = handler）。
+        let (status, body) = req(
+            app.clone(),
+            "POST",
+            "/api/agents",
+            Some(&ada),
+            None,
+            Some(r#"{"id":"probe"}"#.into()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+
+        // root 降级 admin → member（库层动作，用户管理端点行为另有覆盖）。
+        let uid = auth
+            .user_store()
+            .unwrap()
+            .get_by_username("ada")
+            .unwrap()
+            .unwrap()
+            .id;
+        auth.user_store()
+            .unwrap()
+            .set_role(uid, Role::Member)
+            .unwrap();
+
+        // 同一会话、无需重登：下一个 agents 写按新角色 403。
+        let (status, body) = req(
+            app.clone(),
+            "POST",
+            "/api/agents",
+            Some(&ada),
+            None,
+            Some(r#"{"id":"probe"}"#.into()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "降级后必须即时 403: {body}");
+
+        // 禁用路径：同一会话的下一个请求 401（fail-closed）。
+        auth.user_store().unwrap().set_enabled(uid, false).unwrap();
+        let (status, _) = req(
+            app,
+            "POST",
+            "/api/agents",
+            Some(&ada),
+            None,
+            Some(r#"{"id":"probe"}"#.into()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "禁用后必须即时 401");
     }
 
     /// spec「禁用用户即刻失效」：禁用后既有会话的下一个请求 401。

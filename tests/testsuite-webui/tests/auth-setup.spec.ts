@@ -112,7 +112,7 @@ test.describe('鉴权与访问旅程', () => {
       // The setup response sets the session cookie: the sidebar shows the
       // signed-in account and a reload keeps the workbench up.
       await expect(
-        page.locator('sebas-app .sidebar-footer .settings-btn', { hasText: '退出 (admin)' }),
+        page.locator('sebas-app .sidebar-footer .settings-btn', { hasText: '退出 (admin · root)' }),
       ).toBeVisible()
       await page.reload()
       await expect(page.locator('sebas-dashboard')).toBeVisible({ timeout: 15_000 })

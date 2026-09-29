@@ -85,6 +85,10 @@ import { guardedHide } from '../components/wa-hide-guard.js'
 import { renderMarkdown } from '../components/markdown.js'
 import { viewStyles } from '../styles/shared.js'
 import { getThemeMode, resolvesToLight, setThemeMode, type ThemeMode } from '../theme.js'
+// 分区可见性映射表（add-webui-multiuser-rbac 5.4 起；gate-agent-directory-
+// writes 2.1 收编为共享单表）：users/services 分区裁剪与 agents 写入口、
+// （经 app-shell 下传 rail 的）新建会话入口同一事实源。
+import { canControlServices, canManageAgents, canManageUsers } from './role-visibility.js'
 
 // Web Awesome 组件（provider 管理对话框用；与其它 view 同款按需注册）。
 import '@awesome.me/webawesome/dist/components/dialog/dialog.js'
@@ -1345,19 +1349,9 @@ export class SebasSettingsModal extends LitElement {
 
   // ---- 分区可见性（add-webui-multiuser-rbac 5.4，design D3 呈现层裁剪）----
 
-  /** 用户管理仅 root（D3：users.manage 只有 root 有）。 */
-  private get canManageUsers(): boolean {
-    return this.role === 'root'
-  }
-
-  /** 服务控制 root/admin；role 为 null（鉴权关闭的宿主）保持既有可用。 */
-  private get canControlServices(): boolean {
-    return this.role === null || this.role === 'admin' || this.role === 'root'
-  }
-
   private sectionVisible(id: SettingsSection): boolean {
-    if (id === 'users') return this.canManageUsers
-    if (id === 'services') return this.canControlServices
+    if (id === 'users') return canManageUsers(this.role)
+    if (id === 'services') return canControlServices(this.role)
     return true
   }
 
@@ -2361,17 +2355,23 @@ export class SebasSettingsModal extends LitElement {
     const rows = this.agentsCatalog
     const builtin = rows?.find((a) => a.id === 'native') ?? null
     const managed = (rows ?? []).filter((a) => a.id !== 'native')
+    // 写入口按角色裁剪（gate-agent-directory-writes 2.1）：agents.manage 归
+    // settings.manage 档（root/admin）；member/viewer 只读浏览，防线在服务
+    // 端 403 执法。role 为 null（鉴权关闭宿主）保持既有可用。
+    const canWrite = canManageAgents(this.role)
     return html`
       <div class="provider-toolbar">
         <wa-button appearance="outlined" @click=${() => this.loadAgentsCatalog()}>Refresh</wa-button>
-        <wa-button
-          variant="brand"
-          appearance="filled"
-          ?disabled=${this.agentsBusy}
-          @click=${() => this.openAgentCreate()}
-        >
-          ＋ New agent
-        </wa-button>
+        ${canWrite
+          ? html`<wa-button
+              variant="brand"
+              appearance="filled"
+              ?disabled=${this.agentsBusy}
+              @click=${() => this.openAgentCreate()}
+            >
+              ＋ New agent
+            </wa-button>`
+          : nothing}
       </div>
       ${this.agentAction
         ? html`<div
@@ -2414,8 +2414,11 @@ export class SebasSettingsModal extends LitElement {
                 : nothing}
               ${managed.length === 0 && builtin
                 ? html`<div class="provider-row-empty" data-testid="agents-empty">
-                    目录里还没有其它 agent——用「＋ New agent」添加，或在 config.toml
-                    的 [acp.agents.*] 里声明（首次启动作为种子导入）。
+                    ${canWrite
+                      ? html`目录里还没有其它 agent——用「＋ New agent」添加，或在 config.toml
+                          的 [acp.agents.*] 里声明（首次启动作为种子导入）。`
+                      : html`目录里还没有其它 agent。可在 config.toml 的 [acp.agents.*]
+                          里声明（首次启动作为种子导入）；新增需要 admin 以上角色。`}
                   </div>`
                 : managed.map((a) => this.renderAgentRow(a))}
             </div>
@@ -2423,7 +2426,8 @@ export class SebasSettingsModal extends LitElement {
     `
   }
 
-  /** 单个 agent 行：id + 展示名 + 可达性（不可达带 cause）+ 编辑/删除。 */
+  /** 单个 agent 行：id + 展示名 + 可达性（不可达带 cause）+ 编辑/删除
+   * （gate-agent-directory-writes 2.1：行内写按钮仅 agents.manage 档呈现）。 */
   private renderAgentRow(a: AgentKindInfo) {
     return html`
       <div class="provider-row" data-testid="agent-row" data-id=${a.id}>
@@ -2438,24 +2442,26 @@ export class SebasSettingsModal extends LitElement {
           >
             ${a.reachable ? 'reachable' : (a.cause ?? 'unreachable')}
           </span>
-          <span class="provider-row-actions">
-            <button
-              class="row-action"
-              title="Edit"
-              ?disabled=${this.agentsBusy}
-              @click=${() => this.openAgentEdit(a)}
-            >
-              ✎
-            </button>
-            <button
-              class="row-action danger"
-              title="Delete"
-              ?disabled=${this.agentsBusy}
-              @click=${() => (this.agentDelete = { id: a.id, error: '' })}
-            >
-              🗑
-            </button>
-          </span>
+          ${canManageAgents(this.role)
+            ? html`<span class="provider-row-actions">
+                <button
+                  class="row-action"
+                  title="Edit"
+                  ?disabled=${this.agentsBusy}
+                  @click=${() => this.openAgentEdit(a)}
+                >
+                  ✎
+                </button>
+                <button
+                  class="row-action danger"
+                  title="Delete"
+                  ?disabled=${this.agentsBusy}
+                  @click=${() => (this.agentDelete = { id: a.id, error: '' })}
+                >
+                  🗑
+                </button>
+              </span>`
+            : nothing}
         </div>
       </div>
     `

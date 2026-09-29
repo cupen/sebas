@@ -23,8 +23,10 @@ const WEBUI_PORT = 9898
 export default defineConfig({
   testDir: './tests',
   // users-admin.spec.ts 与 auth.spec.ts 共用本装配（都需要 auth-on + 预置
-  // admin）——users-admin 是 2026-09-23 验收补的 Users 管理闭环旅程。
-  testMatch: /auth\.spec\.ts|users-admin\.spec\.ts/,
+  // admin）——users-admin 是 2026-09-23 验收补的 Users 管理闭环旅程；
+  // agents-gate 是 gate-agent-directory-writes 补的 agents 写执法旅程
+  // （viewer/member 经 users API 现场自愈建户）。
+  testMatch: /auth\.spec\.ts|users-admin\.spec\.ts|agents-gate\.spec\.ts/,
   timeout: 30_000,
   retries: 1,
   workers: 1,

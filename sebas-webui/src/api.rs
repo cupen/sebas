@@ -3182,12 +3182,14 @@ mod env_endpoint_tests {
         // 清单全量钉死（single-state-dir：SEBAS_STATE_DB 退休，
         // SEBAS_STATE_DIR 上位；retire-legacy-state-json 3.6：
         // SEBAS_ROUTER_PROVIDER_OVERLAY / SEBAS_STATE_FILE 也退休并从本清单
-        // 删除）：增删条目须显式过这里。
+        // 删除；unify-sebas-home：SEBAS_HOME 单一 home 变量上位入表）：
+        // 增删条目须显式过这里。
         assert_eq!(
             names,
             [
                 "SEBAS_ROUTER_CONFIG",
                 "SEBAS_ROUTER_LISTEN",
+                "SEBAS_HOME",
                 "SEBAS_STATE_DIR",
                 "SEBAS_WEBUI_PASSWORD",
                 "SEBAS_CONTROL_SECRET",

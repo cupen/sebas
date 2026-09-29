@@ -20,6 +20,7 @@ import {
   api,
   type Project,
   type ProjectBranchInfo,
+  type Role,
   type SessionRow,
   type ArchiveEntry,
   type NodeInfo,
@@ -28,6 +29,7 @@ import { sharedWs } from '../api/shared-ws.js'
 import type { WsEvent } from '../api/ws.js'
 import { icon } from '../components/icons.js'
 import { guardedHide } from '../components/wa-hide-guard.js'
+import { canCreateSessions } from './role-visibility.js'
 import {
   ANCHOR_ADVANCED_EVENT,
   armOpeningSeam,
@@ -202,6 +204,13 @@ function relativeTime(unixSecs: number): string {
 @customElement('sebas-project-rail')
 export class SebasProjectRail extends LitElement {
   @property({ type: String }) activePath: string | null = null
+  /**
+   * 当前登录用户角色（gate-agent-directory-writes 2.1，shell 从
+   * `/api/auth/me` 探得的 `role` 下传）：「新建会话」入口（项目行「+」）
+   * 按映射表裁剪——viewer 无 sessions.write，不呈现入口（防线在服务端
+   * 403）。`null` = 宿主未启用登录鉴权，保持既有可用。
+   */
+  @property({ attribute: false }) role: Role | null = null
 
   @state() private projects: Project[] = []
   @state() private sessions: SessionRow[] = []
@@ -1251,16 +1260,21 @@ export class SebasProjectRail extends LitElement {
               >${icon('more', 12)}</button>
               <wa-dropdown-item value="remove" @click=${(e: Event) => this.openRemoveDialog(e, p)}>移除项目</wa-dropdown-item>
             </wa-dropdown>
-            <button
-              class="row-action"
-              title=${nodeOk ? `New session in ${p.name}` : `无法新建会话：${st.cause ?? `节点 ${nodeLabel} 不可用`}`}
-              aria-label="New session in ${p.name}"
-              ?disabled=${!nodeOk}
-              @click=${(e: Event) => {
-                e.stopPropagation()
-                this.openNewSessionDialog(p)
-              }}
-            >${icon('add', 12)}</button>
+            <!-- gate-agent-directory-writes 2.1：「+」新建会话入口按角色裁剪
+                 （sessions.write 不含 viewer——viewer 不呈现，只读浏览不受
+                 影响；节点不可用的禁用语义不变）。 -->
+            ${canCreateSessions(this.role)
+              ? html`<button
+                  class="row-action"
+                  title=${nodeOk ? `New session in ${p.name}` : `无法新建会话：${st.cause ?? `节点 ${nodeLabel} 不可用`}`}
+                  aria-label="New session in ${p.name}"
+                  ?disabled=${!nodeOk}
+                  @click=${(e: Event) => {
+                    e.stopPropagation()
+                    this.openNewSessionDialog(p)
+                  }}
+                >${icon('add', 12)}</button>`
+              : nothing}
           </span>
         </div>
         ${nodeOk ? nothing : html`<div class="node-cause" data-testid="project-node-cause">节点 ${nodeLabel} 不可用：${st.cause ?? st.status}</div>`}

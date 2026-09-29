@@ -30,7 +30,9 @@ pub enum Role {
 pub enum Permission {
     /// 用户管理（`/api/users*`）。
     UsersManage,
-    /// 系统设置写（卡片/显示偏好，`POST /api/settings`）。
+    /// 系统设置写（卡片/显示偏好，`POST /api/settings`）；agent 目录写
+    /// （agents.manage，`/api/agents*` 增/改/删）同档执法
+    /// （gate-agent-directory-writes 1.1）。
     SettingsManage,
     /// 服务控制（watchdog 服务启停/升级/回滚，`/api/admin/*` 类）。
     ServicesControl,
@@ -54,8 +56,14 @@ impl Role {
     /// |---|---|---|---|---|
     /// | users.manage | ✓ | | | |
     /// | settings.manage | ✓ | ✓ | | |
+    /// | agents.manage（agent 目录写，gate-agent-directory-writes） | ✓ | ✓ | | |
     /// | services.control | ✓ | ✓ | | |
     /// | sessions.write | ✓ | ✓ | ✓ | |
+    ///
+    /// agents.manage **不设独立权限位**（design：agent 目录与系统设置同属
+    /// 「影响全局行为的管理面」）——spec 矩阵新增行引用 settings.manage 同档，
+    /// 执法在 `server::required_permission` 对 `/api/agents*` 写路径再标注为
+    /// [`Permission::SettingsManage`]。
     pub fn permissions(&self) -> &'static [Permission] {
         match self {
             Role::Root => &[

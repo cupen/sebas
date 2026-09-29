@@ -700,6 +700,10 @@ export class SebasApp extends LitElement {
   }
 
   private showLogin(): void {
+    // 登出 / 会话失效：身份（含角色展示位，gate-agent-directory-writes 2.2）
+    // 一并清空——登录页不得残留上一会话的用户名或角色。
+    this.authUsername = null
+    this.authRole = null
     this.authState = 'login'
   }
 
@@ -895,6 +899,7 @@ export class SebasApp extends LitElement {
           </a>
           <sebas-project-rail
             .activePath=${this.selectedPath}
+            .role=${this.authRole}
             @rail-select=${this.onRailSelect}
             @rail-archive-view=${this.onArchiveView}
           ></sebas-project-rail>
@@ -907,7 +912,9 @@ export class SebasApp extends LitElement {
                   title="退出登录"
                   @click=${() => void this.onLogout()}
                 >
-                  ${icon('logout', 16)}<span class="settings-label">退出 (${this.authUsername})</span>
+                  ${icon('logout', 16)}<span class="settings-label"
+                    >退出 (${this.authUsername}${this.authRole ? ` · ${this.authRole}` : ''})</span
+                  >
                 </button>`
               : nothing}
             <button

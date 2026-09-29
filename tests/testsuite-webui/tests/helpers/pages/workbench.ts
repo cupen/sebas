@@ -24,10 +24,14 @@ export class AppShell {
   }
 }
 
-/** Sidebar footer logout button: `退出 (${username})`. */
+/** Sidebar footer logout button: `退出 (${username} · role)`——role 段
+ * （gate-agent-directory-writes 2.2）在 me 未带回角色的过渡期缺省，匹配
+ * 兼容两形。 */
 async function page$logout(page: Page, username: string): Promise<void> {
   await page
-    .locator('sebas-app .sidebar-footer .settings-btn', { hasText: `退出 (${username})` })
+    .locator('sebas-app .sidebar-footer .settings-btn', {
+      hasText: new RegExp(`退出 \\(${username}(?: · [a-z]+)?\\)`),
+    })
     .click()
 }
 

@@ -57,7 +57,7 @@ test.describe('鉴权闭环', () => {
 
       // Logout: back to the gate, and it sticks across another reload.
       await page
-        .locator('sebas-app .sidebar-footer .settings-btn', { hasText: '退出 (admin)' })
+        .locator('sebas-app .sidebar-footer .settings-btn', { hasText: '退出 (admin · root)' })
         .click()
       await expect(login.host).toBeVisible({ timeout: 15_000 })
       await page.reload()
@@ -85,7 +85,7 @@ test.describe('鉴权闭环', () => {
 
       // Logout: back to the unauthenticated gate.
       await page
-        .locator('sebas-app .sidebar-footer .settings-btn', { hasText: '退出 (admin)' })
+        .locator('sebas-app .sidebar-footer .settings-btn', { hasText: '退出 (admin · root)' })
         .click()
       await expect(login.host).toBeVisible({ timeout: 15_000 })
 
