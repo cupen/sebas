@@ -157,6 +157,23 @@ describe('sebas-line-chart rendering', () => {
     el.remove()
   })
 
+  it('renders svg children in the SVG namespace (svg helper, not html)', async () => {
+    const el = await mount(
+      [
+        { name: 'a', values: [1, 2] },
+        { name: 'b', values: [2, 1] },
+      ],
+      ['2026-09-28', '2026-09-29'],
+    )
+    const svg = el.shadowRoot!.querySelector('svg')!
+    // 回归钉子：<svg> 内部经 ${} 注入的子模板若走 html 助手会落在 XHTML
+    // 命名空间（HTMLUnknownElement）——属性俱在但真浏览器整块不渲染。
+    for (const child of svg.querySelectorAll('polyline, line, text')) {
+      expect(child.namespaceURI).toBe('http://www.w3.org/2000/svg')
+    }
+    el.remove()
+  })
+
   it('draws a marker circle instead of a polyline for a single point', async () => {
     const el = await mount([{ name: 'm', values: [7] }], ['2026-09-29'])
     const svg = el.shadowRoot!.querySelector('svg')!

@@ -10,7 +10,7 @@
  * 组件只负责呈现。颜色不是唯一通道：图例文字 + 悬停行文本都带模型名。
  */
 
-import { LitElement, css, html, nothing } from 'lit'
+import { LitElement, css, html, nothing, svg } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 
 /** 一条折线系列：名字 + 与 x 轴索引等长的数值序列。 */
@@ -319,7 +319,10 @@ export class SebasLineChart extends LitElement {
         @pointerleave=${this.onPointerLeave}
       >
         ${geo.yTicks.map(
-          (t) => html`
+          // svg 助手而非 html：<svg> 内部经 ${} 注入的子模板若走 html 会解析成
+          // XHTML 命名空间的 HTMLUnknownElement——属性俱在但整块不渲染（真浏览器
+          // 才暴露，happy-dom 不敏感）；svg 助手强制子模板按 SVG 命名空间解析。
+          (t) => svg`
             <line
               class=${t.value === 0 ? 'baseline' : 'gridline'}
               x1=${DEFAULT_PADDING.left}
@@ -332,13 +335,13 @@ export class SebasLineChart extends LitElement {
             </text>
           `,
         )}
-        ${geo.xLabels.map((l) => html`
+        ${geo.xLabels.map((l) => svg`
           <text class="xtick" x=${l.x} y=${this.height - 6}>
             ${this.xLabels[l.index] ?? ''}
           </text>
         `)}
         ${this.hoverIndex !== null
-          ? html`<line
+          ? svg`<line
               class="hoverline"
               x1=${geo.points[0]![this.hoverIndex]!.x}
               x2=${geo.points[0]![this.hoverIndex]!.x}
@@ -348,15 +351,15 @@ export class SebasLineChart extends LitElement {
           : nothing}
         ${this.series.map((s, si) => {
           const color = this.color(si)
-          return html`
+          return svg`
             ${geo.paths[si]
-              ? html`<polyline
+              ? svg`<polyline
                   points=${geo.points[si]!.map((p) => `${round(p.x)},${round(p.y)}`).join(' ')}
                   stroke=${color}
                 ></polyline>`
               : nothing}
             ${geo.markers[si]!.map(
-              (p) => html`<circle
+              (p) => svg`<circle
                 class="marker"
                 cx=${round(p.x)}
                 cy=${round(p.y)}
