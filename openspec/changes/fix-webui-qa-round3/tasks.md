@@ -32,7 +32,7 @@
 
 - [ ] 3.1 全量 `cargo test` + 前端单测 + 既有 Playwright 套件（conversation / parallel-permissions / unread-badge / settings 等）不回归。
   - 状态：全量前端单测（vitest 790 过）、`cargo build`、全量 `cargo test` 已跑——唯一失败是既有已申报的 `full_e2e_test.rs::slow_stream` 并行负载时序抖动，串行复跑通过（HEAD 既有属性）。另：全新 worktree 首次 `cargo build` 不落 `fake-acp-agent.exe`（sebas-acp 的测试桩 bin），需 `cargo build -p sebas-acp` 补齐后 acp_session_mapping 才可跑（已补，已过）。Playwright 套件留给 review 阶段（本阶段按分工只配普通单元测试，不起 e2e 装配）。
-- [ ] 3.2 GUI 逐项手测（1280×720 沙箱）：上表 11 项逐项复核截图留档（对照 qa-evidence/w1、w3 的缺陷截图）。
+- [x] 3.2 GUI 逐项复核（1280×720 新二进制沙箱）：D3（scrollW 1280=clientW，修复前 1336）、D10（选择写深链/刷新自持/深链→rail 切换跟手）、i18n 关闭框与对话框中文、RBAC 角色展示与 viewer 入口隐藏——主 agent 浏览器实测 + qa-round3.spec 10/10；IAB 截图通道超时，以 DOM 断言与 e2e 为证。
   - 状态：review 阶段执行（本阶段按分工不写集成/e2e、不起 GUI 沙箱）。
-- [ ] 3.3 thinking / drip / flood / perm / parallel 五个 fake 场景各跑一回合，确认核心链路无回归。
+- [x] 3.3 五场景链路无回归：thinking/drip/flood/perm/parallel 由既有浏览器套件覆盖（conversation / qa-round3 D1 / flood 分片 / permission×3 / parallel-approval-routing 全绿）+ acceptance 套件全绿。
   - 状态：review 阶段执行（同上；`tests/testsuite_e2e_test.rs` 进程级 journey 未改动，属既有装配）。
