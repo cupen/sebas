@@ -87,7 +87,8 @@ test.describe('会话管理', () => {
       await rail.ensureProjectExpanded(projectName)
       await rail.sessionItem(promptB).click()
       await expectDetail(page, detail, promptB)
-      expect(page.url()).not.toContain('/sessions/')
+      // （fix-webui-qa-round3 D10）聚焦即投影深链地址：rail 选择后 URL 反映 /sessions/<key>。
+      expect(page.url()).toContain('/sessions/')
 
       // Follow-up lands in B only; A is untouched.
       const countB1 = await detail.bubbles().count()

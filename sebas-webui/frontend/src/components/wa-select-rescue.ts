@@ -47,6 +47,16 @@
  *   - `open === false` 且浮层已收好也不碰——正常收起链已走完。
  * 清理动作全部经 0ms 定时器执行，且 `rescueStuckSelectPopup` 落地时重查判定
  * （定时器窗口里用户可能已把下拉重新打开——那是正常交互，不许干预）。
+ *
+ * ── fix-webui-qa-round3 1.2（D2）正向不变量 ─────────────────────────────
+ * 第三轮 GUI QA 在残留清理就位的情况下仍复现「选择一次后鼠标无法再展开」
+ * （箭头翻转 = open 已翻 true；列表不渲染 = 浮层侧停在收起态）。这是展开态
+ * 布尔与实际渲染的**正向**一致性被上游收起/展开竞速打破。修复面同在包装层
+ * （design D2「展开态布尔与实际渲染一致性修复」）：同一 0ms 定时器里重读
+ * open——`open === true` 而 wa-popup 未 active 或 listbox 仍 hidden 时，
+ * `forceRenderOpenSelect` 把渲染面强制拉回与 open 一致（active=true 触发
+ * wa-popup 自身的 showPopover 反应链）。见 {@link isOpenButUnrendered} /
+ * {@link forceRenderOpenSelect}。
  */
 
 /** 结构化探针：只读 WA select 上本模块用到的面（测试用假对象即可）。 */
@@ -71,6 +81,39 @@ function activePopup(select: WaSelectRescueProbe): PopupProbe | null {
 /** 「select 已收起（open === false）但浮层仍 active」= 不变量被破坏的残留态。 */
 export function hasStuckSelectPopup(select: WaSelectRescueProbe): boolean {
   return !select.open && activePopup(select) !== null
+}
+
+/**
+ * （fix-webui-qa-round3 1.2 / D2）展开态布尔与实际渲染的**正向**不变量：
+ * `open === true` 时浮层必须真的在渲染——wa-popup active 且 listbox 可见。
+ * QA 第三轮实锤的反向残留（选择一次后鼠标再点：箭头翻转、列表不渲染）正
+ * 是这条不变量被上游收起/展开竞速打破后的样子：open 翻了 true，浮层侧
+ * （popup.active / listbox.hidden）却停在收起态。修复落在包装层（design
+ * D2：不 vendor 改造）：强制把渲染面拉回与 open 一致——`listbox.hidden =
+ * false` + `popup.active = true`（wa-popup 自身的 active 反应链会走
+ * showPopover 把浮层真正挂回 top layer）。
+ */
+export function isOpenButUnrendered(select: WaSelectRescueProbe): boolean {
+  if (!select.open) return false
+  const popup = select.shadowRoot?.querySelector('wa-popup') as PopupProbe | null | undefined
+  if (!popup || !popup.active) return true
+  const listbox = select.shadowRoot?.querySelector('.listbox')
+  return listbox instanceof HTMLElement && listbox.hidden
+}
+
+/**
+ * 强制渲染展开态（D2）。与摘层同理**只在 0ms 定时器里跑**：这里的属性写
+ * 会触发 wa-popup 的反应链（showPopover），绝不允许落在指针序列内。执行
+ * 前重查判定——定时器窗口里用户可能已把下拉收起（那是正常交互，不许干预）。
+ * 返回 true = 确实修了东西。
+ */
+export function forceRenderOpenSelect(select: WaSelectRescueProbe): boolean {
+  if (!isOpenButUnrendered(select)) return false
+  const popup = select.shadowRoot?.querySelector('wa-popup') as PopupProbe | null
+  const listbox = select.shadowRoot?.querySelector('.listbox')
+  if (listbox instanceof HTMLElement) listbox.hidden = false
+  if (popup && !popup.active) popup.active = true
+  return true
 }
 
 /**
@@ -133,14 +176,27 @@ export function findStuckSelectPopupsInPath(path: readonly EventTarget[]): WaSel
  *     之前，pointerdown 兜底因此只在收起链挂死（change 之后仍残留）时才接手；
  *   - `pointerdown` 捕获兜底：只做「检测 + 记录」，清理动作同样排进 0ms
  *     定时器——绝不在指针序列内同步改 popover 状态。
+ *   - （fix-webui-qa-round3 D2）同一定时器里顺带校验**正向**不变量
+ *     （open === true 但浮层未渲染 → 强制拉齐）：展开态布尔与实际渲染的
+ *     一致性修复。pointerdown 落在 WA 翻转 open 之前（捕获阶段），所以
+ *     定时器落地时**重读** open——刚收起的不碰（那是残留清理的活），刚
+ *     展开而浮层没跟上的就地修好。
  * 返回卸载函数。
  */
 export function installWaSelectRescue(doc: Document = document): () => void {
   const schedule = (path: readonly EventTarget[]): void => {
-    const stuck = findStuckSelectPopupsInPath(path)
-    if (stuck.length === 0) return
+    const selects = path.filter(
+      (node): node is HTMLElement =>
+        node instanceof HTMLElement && node.localName === 'wa-select',
+    )
+    if (selects.length === 0) return
     setTimeout(() => {
-      for (const select of stuck) rescueStuckSelectPopup(select)
+      for (const el of selects) {
+        const select = el as unknown as WaSelectRescueProbe
+        // 定时器窗口里状态可能已变：以落地瞬间的 open 为准各走各的修复面。
+        if (hasStuckSelectPopup(select)) rescueStuckSelectPopup(select)
+        else if (isOpenButUnrendered(select)) forceRenderOpenSelect(select)
+      }
     }, 0)
   }
   const onPointerDown = (e: PointerEvent): void => schedule(e.composedPath())

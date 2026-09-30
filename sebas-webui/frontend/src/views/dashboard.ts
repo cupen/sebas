@@ -21,11 +21,13 @@ import { sharedWs } from '../api/shared-ws.js'
 import { icon } from '../components/icons.js'
 import { guardedHide } from '../components/wa-hide-guard.js'
 import { notify } from '../notify.js'
+// （fix-webui-qa-round3 2.6 / D10）会话选择写 URL：聚焦路径的地址投影。
+import { navigate } from '../router.js'
 import { modeBadgeLabel } from './mode-vocabulary.js'
 // fix-webui-qa-defects 7.3：终止通知的可读会话名与 rail 同源（回退链复用）。
 // add-agent-settings-and-session-titles 7.1：聚焦头部同走 fullSessionLabel
 // 命名链，truncateName 提供展示截断（全文进 title）。
-import { fullSessionLabel, truncateName, RAIL_FOCUS_EVENT } from './project-rail.js'
+import { archivedEntryLabel, fullSessionLabel, truncateName, RAIL_FOCUS_EVENT, SESSION_LABEL_CHANGED_EVENT } from './project-rail.js'
 // （round3 3.1）焦点处立读锚：详情到达时为本浏览器缺锚的聚焦会话立锚。
 import {
   armOpeningSeam,
@@ -483,6 +485,9 @@ export class SebasDashboard extends LitElement {
     const wasEngaged = this.turnEngagedNow()
     const cause = wasEngaged ? 'agent 进程异常退出' : '会话已关闭'
     this.terminatedFor = key
+    // （fix-webui-qa-round3 2.6 / D10）聚焦会话被移除 = 无焦点（新建态）：
+    // 地址按 spec 回落 `/`（带旧会话地址刷新会撞 404 深链降级，回落才自持）。
+    this.reflectFocusUrl(null)
     notify({
       level: 'warn',
       message: `会话「${label}」已终止（${cause}），对话记录保留在下方（只读）。`,
@@ -546,7 +551,7 @@ export class SebasDashboard extends LitElement {
       const path = res.entry?.project_path || entry.project_path
       notify({
         level: 'info',
-        message: `会话「${entry.label}」已恢复到 ${path || '（无项目）'}，可在该项目下继续使用。`,
+        message: `会话「${archivedEntryLabel(entry)}」已恢复到 ${path || '（无项目）'}，可在该项目下继续使用。`,
       })
       this.dispatchEvent(new CustomEvent('archive-view-close', { bubbles: true, composed: true }))
       // 恢复后就地激活（与点会话同一条 switch 路径）；会话映射不在场时
@@ -558,7 +563,7 @@ export class SebasDashboard extends LitElement {
       this.restoreError = cause
       notify({
         level: 'error',
-        message: `恢复会话「${entry.label}」失败：${cause}。该条目仍在 History 中。`,
+        message: `恢复会话「${archivedEntryLabel(entry)}」失败：${cause}。该条目仍在 History 中。`,
       })
     } finally {
       this.restoring = false
@@ -937,12 +942,49 @@ export class SebasDashboard extends LitElement {
     const key = (ev as CustomEvent<{ key?: string }>).detail?.key
     if (key) {
       this.focusOverride = key
+      // （fix-webui-qa-round3 2.6 / D10）选择写 URL：聚焦事件的地址投影
+      // （openSession 已 navigate 过——幂等：pathname 一致即 no-op）。
+      this.reflectFocusUrl(key)
       // （fix-webui-qa-findings review F2）rail 聚焦是显式动作：重置投影
       // 幂等闸，同会话重选可再次反投影（D4 门禁隐藏后的显式恢复路径）；
       // 重复派发仍被 followFocusedProject 的 path===selectedPath 挡住。
       this.lastFollowedFocusKey = null
     }
     this.scheduleListRefresh()
+  }
+
+  /**
+   * （fix-webui-qa-round3 2.3 / D6）改名成功的就地同步：把新名写进 summary
+   * 的 recent_sessions 行——聚焦头部的命名链（fullSessionLabel）与 rail 行
+   * 共享**同一份行数据**，这里没有第二处标题缓存；事件只让同一份源提前一拍
+   * 更新（不等 WS 相位帧/节流刷新），「侧栏已新、头部仍旧」的窗口关死。
+   * `label: null` = 清名（行回退预览/短 id，头部同链跟随）。行不在场时
+   * no-op（下一次全量刷新收敛）。
+   */
+  private onSessionLabelChanged = (ev: Event): void => {
+    const { key, label } = (ev as CustomEvent<{ key?: string; label?: string | null }>).detail ?? {}
+    if (!key || this.data?.recent_sessions === undefined) return
+    const rows = this.data.recent_sessions
+    const i = rows.findIndex((r) => r.encoded_key === key)
+    if (i < 0) return
+    const next = [...rows]
+    next[i] = { ...next[i]!, label }
+    this.data = { ...this.data, recent_sessions: next }
+  }
+
+  /**
+   * （fix-webui-qa-round3 2.6 / D10）聚焦指针 → 地址栏的单向投影：聚焦
+   * `key` 时地址更新为其 `/sessions/{key}` 形式（history pushState，不引发
+   * 页面跳转重载）；`null`（清焦/新建态）回落 `/`。pathname 已一致时
+   * no-op（深链直达、rail 已导航等路径天然幂等）。只在**显式聚焦事件**上
+   * 调用——summary 收敛不反推 URL，浏览器前进/后退与「项目行点击回 `/`」
+   * 的历史导航不被工作台抢写。rail 标记仍由焦点指针派生，URL 只是地址
+   * 投影 + 刷新自持（design D10 决策）。
+   */
+  private reflectFocusUrl(key: string | null): void {
+    const target = key === null ? '/' : `/sessions/${key}`
+    if (location.pathname === target) return
+    navigate(target)
   }
 
   /**
@@ -995,6 +1037,8 @@ export class SebasDashboard extends LitElement {
     window.addEventListener('sebas:refetch', this.refetch)
     // fix-webui-qa-defects 4.1：rail 切换会话的即时聚焦事件。
     window.addEventListener(RAIL_FOCUS_EVENT, this.onRailFocus)
+    // （fix-webui-qa-round3 2.3 / D6）改名的就地同步事件（rail 发）。
+    window.addEventListener(SESSION_LABEL_CHANGED_EVENT, this.onSessionLabelChanged)
     // workbench-rail-polish 3.2/D2：rail 创建会话成功后的对焦请求（请求
     // 一次性派发，落地走下面的短窗重试）。
     window.addEventListener(COMPOSER_FOCUS_REQUEST, this.onComposerFocusRequest)
@@ -1011,6 +1055,7 @@ export class SebasDashboard extends LitElement {
     this.unlistenNarrow?.()
     window.removeEventListener('sebas:refetch', this.refetch)
     window.removeEventListener(RAIL_FOCUS_EVENT, this.onRailFocus)
+    window.removeEventListener(SESSION_LABEL_CHANGED_EVENT, this.onSessionLabelChanged)
     window.removeEventListener(COMPOSER_FOCUS_REQUEST, this.onComposerFocusRequest)
     this.stopComposerFocusWindow()
     if (this.listRefreshTimer !== null) {
@@ -1535,7 +1580,9 @@ export class SebasDashboard extends LitElement {
           >
             <sebas-status-badge slug="dormant" label="Archived" glyph="🗂"></sebas-status-badge>
             <div class="ident">
-              <span class="chat">${arch.label}</span>
+              <!-- （fix-webui-qa-round3 2.4 / D7）归档只读视图标题同走
+                   归档时刻现用标签（与 History 行同一取数）。 -->
+              <span class="chat">${archivedEntryLabel(arch)}</span>
               <span class="meta">
                 <span
                   class="mono"

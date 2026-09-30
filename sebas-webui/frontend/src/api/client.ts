@@ -1363,6 +1363,14 @@ export interface ArchiveEntry {
   desired_mode?: string | null
   current_model?: string | null
   available_models?: string[] | null
+  /**
+   * （fix-webui-qa-round3 2.4 / D7）归档时刻的**操作者现用标签**（后端
+   * round4 3.1 迁移位随快照落档）。History 条目展示以它优先——顶层的
+   * `label` 是自动标题（首条 prompt 预览 / 短 id），改名后归档的会话若按
+   * 它显示就会回退到旧自动标题（QA W1 实锤）。null/缺省（从未改名）回退
+   * `label`。
+   */
+  operator_label?: string | null
 }
 
 /**

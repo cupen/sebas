@@ -54,6 +54,11 @@ const PATHS: Record<string, string> = {
   // add-usage-statistics 4.2：侧栏「用量」入口（lucide line-chart）。
   usage:
     '<path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="m7 13 3-3 4 4 5-5"/>',
+  // fix-webui-qa-round3 D1：thinking 过程折叠的专用标识（lucide
+  // message-square-plus 点线变体）——与工具的 zap 区分，收起行一眼可辨
+  // 「此处是 thinking」。
+  thinking:
+    '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="M8 9h.01"/><path d="M12 9h.01"/><path d="M16 9h.01"/>',
 }
 
 /** Render a decorative inline-SVG icon by name; empty string when unknown.

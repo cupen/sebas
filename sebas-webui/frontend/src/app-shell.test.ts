@@ -51,6 +51,8 @@ const wsMocks = vi.hoisted(() => {
       for (const h of handlers) h(ev)
     },
     reconnectNow: vi.fn(),
+    // （fix-webui-qa-round3 2.7 / D11）鉴权闸：登录前/会话失效后的静默姿态。
+    setAuthGated: vi.fn(),
     clearHandlers: (): void => handlers.clear(),
   }
 })
@@ -383,11 +385,14 @@ describe('routes after IA v2', () => {
 })
 
 describe('deep-link reachability (workbench-conversation-view 3.1)', () => {
-  it('the project rail switches focus IN PLACE — it no longer navigates to deep links', () => {
+  it('the project rail writes the session URL on selection (fix-webui-qa-round3 D10)', () => {
     const src = readFileSync(join(here, 'views/project-rail.ts'), 'utf8')
-    // 点会话 = POST switch + 停在工作台；深链导航已退役。
+    // 点会话 = POST switch + 停在工作台就地渲染（不重载），**且**把地址
+    // 投影成该会话的 /sessions/{key} 深链形（pushState，刷新自持焦点；
+    // rail 标记仍由焦点指针派生——fix-webui-qa-round3 D10 反转旧「不写
+    // 深链」语义）。
     expect(src).toContain('api.switchSession')
-    expect(src).not.toContain('navigate(`/sessions/')
+    expect(src).toContain("navigate(`/sessions/${row.encoded_key}`)")
   })
 
   it('the shell routes /sessions/:key to the workbench with the deep-link key', () => {
@@ -395,6 +400,38 @@ describe('deep-link reachability (workbench-conversation-view 3.1)', () => {
     expect(src).toContain('session-deep-link')
     expect(src).toContain('deepLinkKey')
     expect(src).not.toContain('sebas-session-detail')
+  })
+
+  // ─── fix-webui-qa-round3：D3 栅格收纳 / D4 控件不溢出 / D10 出口统一 ──────
+
+  it('the padded document outlet declares border-box (fix-webui-qa-round3 D3/D4)', () => {
+    // 根因：文档级通配 border-box 进不了 shadow DOM——width:100% + 左右
+    // padding 按 content-box 恰好多出 2×space-8，/sessions 卡片栅格与 usage
+    // 控件行整体溢出 1280 视口且被 overflow hidden 裁掉（QA 实测
+    // scrollWidth 1336 vs 1280、刷新按钮右缘被裁）。
+    const src = readFileSync(join(here, 'app-shell.ts'), 'utf8')
+    const rule = src.match(/\.outlet\.padded\s*\{([^}]*)\}/)?.[1] ?? ''
+    expect(rule).toMatch(/box-sizing:\s*border-box/)
+    expect(rule).toMatch(/width:\s*100%/)
+    expect(rule).toMatch(/padding:/)
+  })
+
+  it('workbench routes share ONE dashboard template so focus-driven navigations keep the instance (D10)', () => {
+    const src = readFileSync(join(here, 'app-shell.ts'), 'utf8')
+    // `/`、`/sessions/:key` 与未知路径回退都渲染同一个模板字面量（Lit 按
+    // 模板身份复用 DOM——聚焦切换不再拆毁重建 dashboard）。
+    const outlet = src.match(/private renderOutlet\(\)[\s\S]*?\n  \}/)?.[0] ?? ''
+    expect(outlet).toContain(".deepLinkKey=${this.routeId === 'session-deep-link'")
+    // 仅两个非工作台出口。
+    expect((outlet.match(/<sebas-sessions>/g) ?? []).length).toBe(1)
+    expect((outlet.match(/<sebas-usage>/g) ?? []).length).toBe(1)
+  })
+
+  it('the sessions grid wraps within its container (D3 layout contract)', () => {
+    const src = readFileSync(join(here, 'views/sessions.ts'), 'utf8')
+    const grid = src.match(/\.grid\s*\{([^}]*)\}/)?.[1] ?? ''
+    // auto-fill + minmax：容器就位（border-box）后卡片换行收纳、不裁列。
+    expect(grid).toMatch(/repeat\(auto-fill,\s*minmax\(/)
   })
 })
 
@@ -691,6 +728,49 @@ describe('multiuser auth gate (add-webui-multiuser-rbac 5.2/5.4)', () => {
     expect(el.shadowRoot!.querySelector('sebas-login')).toBeTruthy()
     expect(el.shadowRoot!.querySelector('sebas-setup')).toBeNull()
     expect(el.shadowRoot!.querySelector('.outlet')).toBeNull()
+    el.remove()
+  })
+  // （fix-webui-qa-round3 2.7 / D11）未认证 = /ws 上闸静默；认证就绪撤闸。
+  it('gates the shared ws client while unauthenticated and ungates on auth-ready (D11)', async () => {
+    apiMocks.authMe.mockResolvedValue({ enabled: true, authenticated: false })
+    const el = await mountShell()
+    expect(wsMocks.setAuthGated).toHaveBeenCalledWith(true)
+    el.remove()
+
+    // 认证就绪（登录成功路径）：撤闸（内含立即重连）。
+    wsMocks.setAuthGated.mockClear()
+    const el2 = await mountShell()
+    apiMocks.authMe.mockResolvedValue({
+      enabled: true,
+      authenticated: true,
+      username: 'admin',
+      role: 'root',
+      needs_setup: false,
+    })
+    el2.shadowRoot!.querySelector('sebas-login')!
+      .dispatchEvent(new CustomEvent('login-success', { detail: { username: 'admin' }, bubbles: true, composed: true }))
+    await new Promise((r) => setTimeout(r, 0))
+    await new Promise((r) => setTimeout(r, 0))
+    expect(wsMocks.setAuthGated).toHaveBeenCalledWith(false)
+    el2.remove()
+  })
+
+  it('gates the ws client again when a session expiry flips back to the login view (D11)', async () => {
+    apiMocks.authMe.mockResolvedValue({
+      enabled: true,
+      authenticated: true,
+      username: 'admin',
+      role: 'root',
+      needs_setup: false,
+    })
+    const el = await mountShell()
+    await new Promise((r) => setTimeout(r, 0))
+    wsMocks.setAuthGated.mockClear()
+    // 会话失效：任意 API 401 → 未授权处理器 → 登录页 + 上闸。
+    unauthorizedHandler()()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(wsMocks.setAuthGated).toHaveBeenCalledWith(true)
     el.remove()
   })
 

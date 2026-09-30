@@ -164,7 +164,15 @@ export class FocusedSession {
     )
     for (let guard = 0; guard < 10; guard++) {
       if ((await collapsed.count()) === 0) return
-      await collapsed.first().click()
+      // 竞态护栏：聚焦项目的「缺省展开」可能在 count 与 click 之间把最后一行
+      // 翻成 true（locator 随即不再匹配，click 会永远等下去）——点击用短超时，
+      // 翻面不算失败，交给循环顶部的重查；真有卡死的收起行时，由调用方的
+      // 后续断言（toHaveAttribute 等）如实报红。
+      await collapsed
+        .first()
+        .click({ timeout: 2_000 })
+        .catch(() => {})
+      await this.page.waitForTimeout(150)
     }
   }
 

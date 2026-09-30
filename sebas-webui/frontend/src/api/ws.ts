@@ -272,6 +272,13 @@ export interface WsClientOptions {
   /** Base backoff in ms; doubles per failed attempt up to `maxBackoffMs`. */
   backoffMs?: number
   maxBackoffMs?: number
+  /**
+   * （fix-webui-qa-round3 2.7 / D11）**从未成功打开过**的连接失败（典型：
+   * 登录前的 `/ws` 升级 401 拒绝）之间的重试间隔——长退避，缺省 30s。
+   * 认证成功后的 `reconnectNow()` 立即越过它。与此同时短退避梯
+   * （backoffMs→maxBackoffMs）只服务于「曾连上后掉线」的重连。
+   */
+  unopenedBackoffMs?: number
   /** Frame codec (add-ws-rpc-protocol D2/D5); defaults to the JSON codec. */
   codec?: WsFrameCodec
   /** `request()` timeout window in ms; default 10s (design D5). */
@@ -286,6 +293,17 @@ export class WsClient implements ReactiveController {
   private attempts = 0
   private backoffMs: number
   private maxBackoffMs: number
+  /** （fix-webui-qa-round3 2.7 / D11）未成功打开过的失败间长退避。 */
+  private readonly unopenedBackoffMs: number
+  /** 是否曾成功打开过（打开过 → 断线重连走既有短退避梯）。 */
+  private everOpened = false
+  /**
+   * （fix-webui-qa-round3 2.7 / D11）鉴权闸：true = 宿主声明当前未认证
+   * （登录前 / 会话失效后），不再发起任何连接尝试（重连定时器就地取消，
+   * onclose 也不再排重连）——spec「未认证客户端 SHALL NOT 发起重试风暴，
+   * 至多做一次静默尝试」。认证就绪（宿主调用 false）即恢复连接姿态。
+   */
+  private authGated = false
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private closedByUser = false
   private readonly onReconnect?: () => void
@@ -300,6 +318,7 @@ export class WsClient implements ReactiveController {
   constructor(host: ReactiveControllerHost, options: WsClientOptions = {}) {
     this.backoffMs = options.backoffMs ?? 500
     this.maxBackoffMs = options.maxBackoffMs ?? 15_000
+    this.unopenedBackoffMs = options.unopenedBackoffMs ?? 30_000
     this.onReconnect = options.onReconnect
     this.onStateChange = options.onStateChange
     this.socketFactory = options.socketFactory ?? ((url) => new WebSocket(url))
@@ -365,6 +384,25 @@ export class WsClient implements ReactiveController {
     })
   }
 
+  /**
+   * （fix-webui-qa-round3 2.7 / D11）鉴权闸。宿主（app-shell）从
+   * `/api/auth/me` 探得未认证（登录页/首启设置页/会话失效跳登录）时置
+   * true：未在途的连接不再发起、排定的重连就地取消；置 false（认证就绪）
+   * 即恢复既有连接姿态（等价 reconnectNow）。已连接的 socket 不动——服务
+   * 端会话失效自会关它，届时闸还在，不再重连。
+   */
+  setAuthGated(gated: boolean): void {
+    this.authGated = gated
+    if (gated) {
+      if (this.reconnectTimer) {
+        clearTimeout(this.reconnectTimer)
+        this.reconnectTimer = null
+      }
+      return
+    }
+    this.reconnectNow()
+  }
+
   /** Reject and drop every in-flight request (timeout entries included). */
   private failPending(code: string, message: string): void {
     for (const pending of this.pending.values()) {
@@ -381,7 +419,7 @@ export class WsClient implements ReactiveController {
    * 下一轮退避。
    */
   reconnectNow(): void {
-    if (this.closedByUser || this.connected || this.socket) return
+    if (this.closedByUser || this.authGated || this.connected || this.socket) return
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer)
       this.reconnectTimer = null
@@ -390,7 +428,9 @@ export class WsClient implements ReactiveController {
   }
 
   private connect(): void {
-    if (this.socket) return
+    // （fix-webui-qa-round3 2.7 / D11）闸下不连：未认证态不再产生新的 401
+    // 升级尝试（spec「至多做一次静默尝试」——模块装载的那次急连算一次）。
+    if (this.authGated || this.socket) return
     const proto = location.protocol === 'https:' ? 'wss://' : 'ws://'
     const socket = this.socketFactory(`${proto}${location.host}/ws`)
     this.socket = socket
@@ -398,6 +438,9 @@ export class WsClient implements ReactiveController {
     socket.onopen = () => {
       const wasRetry = this.attempts > 0
       this.attempts = 0
+      // D11：首次成功打开后，断线重连才回到既有短退避梯——登录前的 401
+      // 拒绝序列永远走不到这条线。
+      this.everOpened = true
       this.onStateChange?.(true)
       if (wasRetry) this.onReconnect?.()
     }
@@ -444,7 +487,13 @@ export class WsClient implements ReactiveController {
   }
 
   private scheduleReconnect(): void {
-    const delay = Math.min(this.backoffMs * 2 ** this.attempts, this.maxBackoffMs)
+    // （fix-webui-qa-round3 2.7 / D11）未认证闸 / 从未打开过的失败（登录前
+    // 401 拒绝的典型形状）都不得进入短退避梯：闸下静默；未打开过走长退避
+    // （缺省 30s）——console 不再每页刷 3–6 条 401 噪音（QA W3 实锤）。
+    if (this.authGated || this.closedByUser) return
+    const delay = this.everOpened
+      ? Math.min(this.backoffMs * 2 ** this.attempts, this.maxBackoffMs)
+      : this.unopenedBackoffMs
     this.attempts += 1
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null

@@ -594,6 +594,23 @@ export function processItemLabel(item: ProcessItem): { label: string; full: stri
 }
 
 /**
+ * （fix-webui-qa-round3 D1）process run 的成员构成词（纯函数）：thinking 独占
+ * = thinking、tool 独占 = tool、混合 = mixed。折叠收起行据此挑 glyph 与
+ * data-kind——thinking 回合的折叠在缺省形态即标明 thinking（spec「thinking
+ * fold is titled and distinguishable」），操作者不展开就能认出「此处是
+ * thinking」，而不是一条与正文无异的裸文本。
+ */
+export function processRunKind(run: ProcessRun): 'thinking' | 'tool' | 'mixed' {
+  const has = { thinking: false, tool: false }
+  for (const it of run.items) {
+    if (it.elementType === 'thinking') has.thinking = true
+    else has.tool = true
+  }
+  if (has.thinking && has.tool) return 'mixed'
+  return has.thinking ? 'thinking' : 'tool'
+}
+
+/**
  * 过程折叠的 summary 行标签（D3）: the run's LAST entry is the one currently
  * streaming, so its structured title (generic label fallback) IS the
  * "running tool" — as refetched entries land, the run's tail moves and the
@@ -1098,7 +1115,12 @@ export class SebasTranscriptView extends LitElement {
     /* 过程折叠（4.4，D5.4）：collapsed affordance 收敛为**单行行内 link**
        （glyph + 标签 + 进行中标题 + 计数）——无按钮块、无卡框、无大面积
        容器样式。展开体保留轻量分区（虚线顶边），open 状态由组件托管
-       （foldOpen Map），显隐即条件渲染。 */
+       （foldOpen Map），显隐即条件渲染。
+       （fix-webui-qa-round3 D1）收起行加一层 surface-2 底的**小胶囊**：
+       仍是行内轻控件（无边框、无阴影、不换行成块），但与正文段落形态可
+       区分——操作者无需展开即可从折叠行看出「此处有 thinking/工具过程」
+       （spec「过程折叠的缺省呈现 SHALL 与正文可区分」；与 4.4「不得是
+       大按钮/边框块/卡chrome」并存：胶囊无 border、无 box-shadow）。 */
     .turn-block .process-fold {
       margin: var(--sebas-space-2) 0;
       min-width: 0;
@@ -1108,9 +1130,10 @@ export class SebasTranscriptView extends LitElement {
       align-items: center;
       gap: 8px;
       max-width: 100%;
-      padding: 0;
-      background: none;
+      padding: 1px 8px;
+      background: var(--sebas-surface-2);
       border: none;
+      border-radius: var(--sebas-radius-full);
       cursor: pointer;
       font: inherit;
       font-size: 0.78rem;
@@ -2076,8 +2099,15 @@ export class SebasTranscriptView extends LitElement {
     const id = String(r.position)
     const open = this.foldOpen.get(id) === true
     const { label, full } = processRunSummary(r)
+    // （fix-webui-qa-round3 D1）data-kind 标成员构成，glyph 按 kind 挑：
+    // thinking 独占的 run 挂 thinking 专用 glyph——收起行不展开即可辨识
+    // 「此处是 thinking/工具过程」，而非一条与正文无异的裸文本（spec
+    // 「thinking fold is titled and distinguishable」）。PROCESS 标签、计数
+    // 与摘要仍只出现在折叠行上；正文段（.body）永不携带（分派层保证：
+    // text 条目永不入过程 run，scenario「text never wears a process chip」）。
+    const kind = processRunKind(r)
     return html`
-      <div class="process-fold" data-process-id=${id} data-process-count=${r.items.length}>
+      <div class="process-fold" data-process-id=${id} data-process-count=${r.items.length} data-kind=${kind}>
         <button
           type="button"
           class="fold-link"
@@ -2086,7 +2116,7 @@ export class SebasTranscriptView extends LitElement {
           title=${full ?? nothing}
           @click=${this.toggleFold(id)}
         >
-          <span class="kind-icon" aria-hidden="true">${icon('zap', 11)}</span>
+          <span class="kind-icon" aria-hidden="true">${icon(kind === 'tool' ? 'zap' : 'thinking', 11)}</span>
           <span class="label">process</span>
           <span class="running">${label}</span>
           <span class="fold-count">${r.items.length}</span>
@@ -2127,6 +2157,11 @@ export class SebasTranscriptView extends LitElement {
     const id = `item:${it.position}`
     const open = this.foldOpen.get(id) === true
     const { label, full } = processItemLabel(it)
+    // （fix-webui-qa-round3 D1）thinking 条目的二级折叠标题标明 thinking：
+    // glyph + data-element-type 已有词，收起行再加 thinking 专用 glyph——
+    // 与工具条目（title 词）在视觉上分开（spec「thinking 段的第二级折叠
+    // 标题 SHALL 标明 thinking」）。
+    const isThinking = it.elementType === 'thinking'
     return html`
       <div class="process-item" data-position=${it.position} data-element-type=${it.elementType}>
         <button
@@ -2137,6 +2172,7 @@ export class SebasTranscriptView extends LitElement {
           title=${full ?? nothing}
           @click=${this.toggleFold(id)}
         >
+          ${isThinking ? html`<span class="kind-icon item-kind-icon" aria-hidden="true">${icon('thinking', 10)}</span>` : nothing}
           <span class="item-title">${label}</span>
         </button>
         ${open ? this.renderItemBody(it) : nothing}

@@ -1882,6 +1882,24 @@ describe('revamp-settings-nav-and-models-editor：编辑器内 fetch 整单替�
     el.remove()
   })
 
+  // （fix-webui-qa-round3 2.2 / D5）长探测错误完整可读：错误文本独占一行、
+  // 任意点可断——不再被表单右缘单行裁切（QA W3 D2 实锤形态）。样式合同：
+  // 头行允许换行、错误文本 flex-basis 100% + anywhere 断行。
+  it('wraps long probe errors on their own full-width line (D5)', async () => {
+    const el = await mount()
+    const css = [...el.shadowRoot!.querySelectorAll('style')]
+      .map((s) => s.textContent ?? '')
+      .join('\n')
+    const headRule = css.match(/\.model-entries \.entries-head\s*\{([^}]*)\}/)?.[1] ?? ''
+    expect(headRule).toMatch(/flex-wrap:\s*wrap/)
+    const errRule = css.match(/\.model-entries \.fetch-error\s*\{([^}]*)\}/)?.[1] ?? ''
+    expect(errRule).toMatch(/flex:\s*1\s+1\s+100%/, '错误文本独占整行')
+    expect(errRule).toMatch(/min-width:\s*0/)
+    expect(errRule).toMatch(/overflow-wrap:\s*anywhere/)
+    expect(errRule).toMatch(/white-space:\s*normal/)
+    el.remove()
+  })
+
   // spec「no base URL means no fetch entry」：三槽位全空的 provider，编辑器
   // 不渲染 fetch 动作。
   it('renders no fetch action in the editor for a provider without a usable base URL', async () => {

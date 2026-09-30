@@ -117,7 +117,10 @@ export class SebasApp extends LitElement {
    */
   @state() private archivedEntry: ArchiveEntry | null = null
 
-  private params: Record<string, string> = {}
+  /** 路由参数（fix-webui-qa-round3 2.6）：响应式——深链→深链切换焦点时
+   * dashboard 的 deepLinkKey 依赖它触发重渲染，非响应字段会让第二次深链
+   * 不落地（URL 已换、工作台仍显示旧会话）。 */
+  @state() private params: Record<string, string> = {}
   private onNavigateBound: () => void = () => {}
   private onClick: (e: MouseEvent) => void = () => {}
   /** 窄屏媒体查询退订句柄（5.1）。 */
@@ -362,8 +365,15 @@ export class SebasApp extends LitElement {
       position: relative; /* 子视图定位上下文 */
     }
     /* 文档型路由（/sessions 表格页）维持 1080px 可读列宽并自行滚动：
-       与预览原型“全屏应用”的差异在 IA 上是刻意的（表格页是次级页）。 */
+       与预览原型“全屏应用”的差异在 IA 上是刻意的（表格页是次级页）。
+       （fix-webui-qa-round3 1.3 / D3+D4）box-sizing 必须就地声明：文档级
+       的通配 border-box 规则进不了 shadow DOM——
+       缺了它 width:100% 按 content-box 解析，再加左右 padding（space-8
+       ×2）恰好多出 64px，/sessions 卡片栅格与 usage 控件行整体溢出视口
+       （QA 实测 scrollWidth 1336 vs 1280、刷新按钮右缘被裁 24px+）且被
+       宿主 overflow hidden 裁掉不可回收。声明后栅格在容器内换行收纳。 */
     .outlet.padded {
+      box-sizing: border-box;
       width: 100%;
       max-width: 1080px;
       margin: 0 auto;
@@ -661,7 +671,10 @@ export class SebasApp extends LitElement {
    */
   private markAuthReady(): void {
     this.authState = 'ready'
-    sharedWs.reconnectNow()
+    // （fix-webui-qa-round3 2.7 / D11）认证就绪 = 撤闸：setAuthGated(false)
+    // 内含 reconnectNow——「就绪瞬间立即连上」的既有语义不变，未认证期间
+    // 的重连风暴已被闸住。
+    sharedWs.setAuthGated(false)
   }
 
   /** 窄屏项目抽屉开关（fix-webui-mobile-polish）：≤640px 时项目树收进抽屉。 */
@@ -682,6 +695,10 @@ export class SebasApp extends LitElement {
       if (info.enabled && !info.authenticated) {
         this.authUsername = null
         this.authRole = null
+        // （fix-webui-qa-round3 2.7 / D11）未认证 = 上闸：/ws 不再重试
+        // （模块装载的急连至多产生一条 401，之后静默），spec「登录前无
+        // 重试噪音」。认证就绪的 markAuthReady 撤闸并立即重连。
+        sharedWs.setAuthGated(true)
         // 零用户首启 → 设置页建 root；否则常规登录页。
         this.authState = info.needs_setup ? 'setup' : 'login'
         return
@@ -704,6 +721,9 @@ export class SebasApp extends LitElement {
     // 一并清空——登录页不得残留上一会话的用户名或角色。
     this.authUsername = null
     this.authRole = null
+    // （fix-webui-qa-round3 2.7 / D11）会话失效跳登录 = 未认证：/ws 上闸
+    // 静默（登出后已断的 socket 不再按短梯反复 401）。
+    sharedWs.setAuthGated(true)
     this.authState = 'login'
   }
 
@@ -811,32 +831,22 @@ export class SebasApp extends LitElement {
 
   private renderOutlet() {
     switch (this.routeId) {
-      case 'dashboard':
-        return html`<sebas-dashboard
-          .selectedPath=${this.selectedPath}
-          .coreReachability=${this.coreReachability}
-          .archivedEntry=${this.archivedEntry}
-          @archive-view-close=${this.onArchiveViewClose}
-        ></sebas-dashboard>`
       case 'sessions':
         return html`<sebas-sessions></sebas-sessions>`
       // （add-usage-statistics 4.2）用量看数面（文档型路由，padded 列宽）。
       case 'usage':
         return html`<sebas-usage></sebas-usage>`
-      case 'session-deep-link':
-        // 深链渲染同一个工作台并聚焦该会话（读 detail 即设置服务端焦点
-        // 指针）——没有独立详情页。
-        return html`<sebas-dashboard
-          .selectedPath=${this.selectedPath}
-          .coreReachability=${this.coreReachability}
-          .deepLinkKey=${this.params['key'] ?? null}
-          .archivedEntry=${this.archivedEntry}
-          @archive-view-close=${this.onArchiveViewClose}
-        ></sebas-dashboard>`
       default:
+        // （fix-webui-qa-round3 2.6 / D10）工作台三态（`/`、`/sessions/:key`
+        // 深链、未知路径回退）收敛到**同一个**模板字面量——Lit 按模板身份
+        // 复用 DOM，聚焦路径在 `/` ↔ `/sessions/{key}` 之间切换时 dashboard
+        // 实例不再被拆毁重建（会话选择写 URL 是高频动作，重建意味着整棵
+        // 转录重挂 + 全量重取）。焦点由 deepLinkKey 属性驱动（组件自己监听
+        // 该属性变化并 loadFocused），与既有深链语义同一条通道。
         return html`<sebas-dashboard
           .selectedPath=${this.selectedPath}
           .coreReachability=${this.coreReachability}
+          .deepLinkKey=${this.routeId === 'session-deep-link' ? (this.params['key'] ?? null) : null}
           .archivedEntry=${this.archivedEntry}
           @archive-view-close=${this.onArchiveViewClose}
         ></sebas-dashboard>`

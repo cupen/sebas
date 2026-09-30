@@ -107,7 +107,8 @@ test.describe('会话管理', () => {
       await expect(workbench.projectHeader.locator('.path:not(.muted)')).toHaveText(projectA, {
         timeout: 15_000,
       })
-      expect(page.url()).not.toContain('/sessions/')
+      // （fix-webui-qa-round3 D10）聚焦即投影深链地址：rail 选择后 URL 反映 /sessions/<key>。
+      expect(page.url()).toContain('/sessions/')
 
       expect(collector.clean()).toEqual([])
     })

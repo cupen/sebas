@@ -55,6 +55,7 @@ import {
   middleTruncate,
   processItemLabel,
   processRunDenied,
+  processRunKind,
   processRunSummary,
   registerEmptyStreamSession,
   resolveAgentDisplay,
@@ -605,6 +606,127 @@ describe('assistant author label fallback chain (3.1, D1)', () => {
 })
 
 // ---- rendered-component coverage ---------------------------------------
+
+// ─── fix-webui-qa-round3 1.1（D1）：thinking 折叠成员与可区分性 ──────────────
+
+describe('thinking fold membership and distinguishability (fix-webui-qa-round3 D1)', () => {
+  it('splitAgentRuns never routes text entries into process runs (alternating turn)', () => {
+    const runs = splitAgentRuns([
+      entry({ position: 1, element_type: 'thinking', content: 'hmm' }),
+      entry({ position: 2, element_type: 'markdown', content: 'part one. ' }),
+      entry({ position: 3, element_type: 'thinking', content: 'hmm again' }),
+      entry({ position: 4, element_type: 'markdown', content: 'part two.' }),
+    ])
+    expect(runs.map((r) => r.type)).toEqual(['process', 'text', 'process', 'text'])
+    const texts = runs.filter((r): r is Extract<typeof r, { type: 'text' }> => r.type === 'text')
+    expect(texts.map((t) => t.content)).toEqual(['part one. ', 'part two.'])
+  })
+
+  it('body segments never wear a process chip; chips live only on fold rows (DOM)', async () => {
+    // fake-claude thinking 场景的 wire 形态：两段 thinking 与两段正文交替。
+    const el = await mount({
+      entries: [
+        entry({ position: 0, kind: 'prompt', content: 'go', created_at_unix: FIXED_DATES.T1 }),
+        entry({ position: 1, kind: 'content', element_type: 'thinking', content: 'hmm', created_at_unix: FIXED_DATES.T1 }),
+        entry({ position: 2, kind: 'content', element_type: 'markdown', content: 'thought out loud', created_at_unix: FIXED_DATES.T1 }),
+        entry({ position: 3, kind: 'content', element_type: 'thinking', content: 'hmm again', created_at_unix: FIXED_DATES.T1 }),
+        entry({ position: 4, kind: 'content', element_type: 'markdown', content: 'and the answer', created_at_unix: FIXED_DATES.T1 }),
+      ],
+    })
+    const assistant = el.shadowRoot!.querySelector<HTMLElement>('.turn-block.is-assistant')!
+    // 正文段：零折叠链接、零「process」字样——不携带任何过程芯片/提示。
+    const bodies = [...assistant.querySelectorAll<HTMLElement>('.flow > .body')]
+    expect(bodies).toHaveLength(2)
+    for (const body of bodies) {
+      expect(body.querySelector('.fold-link, .process-fold, .kind-icon')).toBeNull()
+      expect(body.textContent).not.toMatch(/process/i)
+    }
+    // 过程芯片只出现在过程折叠的收起行上（两条 thinking 段各一折）。
+    const folds = [...assistant.querySelectorAll<HTMLElement>('.process-fold')]
+    expect(folds).toHaveLength(2)
+    for (const fold of folds) {
+      expect(fold.querySelector('.fold-link .label')?.textContent?.trim()).toBe('process')
+    }
+    el.remove()
+  })
+
+  it('a thinking-only fold is marked thinking (data-kind + glyph) in its collapsed default', async () => {
+    // thinking 独占与 tool 独占各渲一折：glyph 必须不同（thinking 专用
+    // 标识 vs 工具的 zap）。
+    const el = await mount({
+      entries: [
+        entry({ position: 0, kind: 'prompt', content: 'go', created_at_unix: FIXED_DATES.T1 }),
+        entry({ position: 1, kind: 'content', element_type: 'thinking', content: 'deep thought', created_at_unix: FIXED_DATES.T1 }),
+        entry({ position: 2, kind: 'prompt', content: 'again', created_at_unix: FIXED_DATES.T2 }),
+        entry({ position: 3, kind: 'content', element_type: 'tool', content: '📖 **read**', title: 'read · x', created_at_unix: FIXED_DATES.T2 }),
+      ],
+    })
+    const folds = [...el.shadowRoot!.querySelectorAll<HTMLElement>('.process-fold')]
+    expect(folds).toHaveLength(2)
+    const thinkingFold = folds[0]!
+    const toolFold = folds[1]!
+    // spec「thinking fold is titled and distinguishable」：收起行即标明
+    // thinking——data-kind + thinking 专用 glyph（非工具的 zap）。
+    expect(thinkingFold.dataset.kind).toBe('thinking')
+    expect(toolFold.dataset.kind).toBe('tool')
+    expect(thinkingFold.querySelector('.fold-link .running')?.textContent?.trim()).toBe('thinking')
+    const thinkingGlyph = thinkingFold.querySelector('.kind-icon')!.innerHTML
+    const toolGlyph = toolFold.querySelector('.kind-icon')!.innerHTML
+    expect(thinkingGlyph).not.toBe(toolGlyph)
+    expect(thinkingGlyph).toContain('svg')
+    el.remove()
+  })
+
+  it('a tool-only fold keeps the tool kind; mixed runs are marked mixed', async () => {
+    const runs: ProcessRun[] = [
+      { type: 'process', position: 1, items: [{ elementType: 'tool', content: 'x', title: null, position: 1 }] },
+      { type: 'process', position: 2, items: [
+        { elementType: 'thinking', content: 'h', title: null, position: 2 },
+        { elementType: 'tool', content: 't', title: null, position: 3 },
+      ] },
+    ]
+    expect(processRunKind(runs[0]!)).toBe('tool')
+    expect(processRunKind(runs[1]!)).toBe('mixed')
+  })
+
+  it('second-level thinking folds carry the thinking glyph next to the title', async () => {
+    const el = await mount({
+      entries: [
+        entry({ position: 0, kind: 'prompt', content: 'go', created_at_unix: FIXED_DATES.T1 }),
+        entry({ position: 1, kind: 'content', element_type: 'thinking', content: 'plan', created_at_unix: FIXED_DATES.T1 }),
+      ],
+    })
+    const assistant = el.shadowRoot!.querySelector<HTMLElement>('.turn-block.is-assistant')!
+    assistant.querySelector<HTMLButtonElement>('.process-fold button.fold-link')!.click()
+    await el.updateComplete
+    const item = assistant.querySelector<HTMLElement>('.process-item[data-element-type="thinking"]')!
+    expect(item.querySelector('.item-kind-icon')).toBeTruthy()
+    expect(item.querySelector('.item-title')?.textContent?.trim()).toBe('thinking')
+    el.remove()
+  })
+
+  it('collapsed fold rows are visually distinct from prose (chip styling, no border/card)', async () => {
+    const el = await mount({
+      entries: [
+        entry({ position: 0, kind: 'prompt', content: 'go', created_at_unix: FIXED_DATES.T1 }),
+        entry({ position: 1, kind: 'content', element_type: 'thinking', content: 'plan', created_at_unix: FIXED_DATES.T1 }),
+      ],
+    })
+    const styleText = [...el.shadowRoot!.querySelectorAll('style')]
+      .map((s) => s.textContent ?? '')
+      .join('\n')
+    // 与正文可区分：折叠行（.fold-link）带胶囊底色。
+    const linkRule = styleText.match(/\.turn-block \.fold-link\s*\{([^}]*)\}/)?.[1] ?? ''
+    expect(linkRule).toMatch(/background:\s*var\(--sebas-surface-2\)/)
+    expect(linkRule).toMatch(/border-radius:/)
+    // 仍是轻量行内控件：无边框、无卡框（4.4 合同不被胶囊破坏）。
+    expect(linkRule).toMatch(/border:\s*none/)
+    const foldRule = styleText.match(/\.turn-block \.process-fold\s*\{([^}]*)\}/)?.[1] ?? ''
+    expect(foldRule).not.toMatch(/\bborder:/)
+    expect(foldRule).not.toMatch(/\bbackground:/)
+    el.remove()
+  })
+})
 
 describe('sebas-transcript-view (conversation rendering)', () => {
   it('renders N streamed chunks as ONE natural-flow turn, not per-chunk bubbles (2.1)', async () => {

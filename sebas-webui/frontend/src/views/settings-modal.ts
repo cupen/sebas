@@ -934,6 +934,10 @@ export class SebasSettingsModal extends LitElement {
       display: flex;
       align-items: center;
       gap: 6px;
+      /* （fix-webui-qa-round3 2.2 / D5）探测/抓取失败的长错误文本独占一行：
+           允许换行后，flex-basis 100% 的错误文本落到标题行下方整行铺开，
+           不再挤在同一行里被表单右缘单行裁切（QA 实锤：长 cause 只见首段）。 */
+      flex-wrap: wrap;
     }
     .model-entries .entries-label {
       font-size: 0.78rem;
@@ -941,7 +945,13 @@ export class SebasSettingsModal extends LitElement {
       color: var(--sebas-text-dim);
     }
     .model-entries .fetch-error {
+      /* （fix-webui-qa-round3 2.2 / D5）独占整行 + 任意点可断：长错误完整
+           可读，不要求操作者开 devtools。 */
+      flex: 1 1 100%;
+      min-width: 0;
+      white-space: normal;
       font-size: 0.72rem;
+      line-height: 1.5;
       color: var(--sebas-status-failed, #f87171);
       overflow-wrap: anywhere;
     }

@@ -106,8 +106,10 @@ test.describe('审批卡片旅程', () => {
           { timeout: 10_000 },
         )
         .toBe('waiting')
+      // （review 复跑决议）窗口 10s→30s：钉的行为不变（退避重试继续拉、
+      // 扑空 ≥2 次），只是给足负载下的预算——第二次重试可能落在 10s 外。
       await expect
-        .poll(() => emptyPullsForKeyB, { timeout: 10_000 })
+        .poll(() => emptyPullsForKeyB, { timeout: 30_000 })
         .toBeGreaterThanOrEqual(2)
       // 扑空窗口内卡片必须缺席（空读模型不渲染卡——不是 UI 撒谎）。
       await expect(cards.all()).toHaveCount(0)

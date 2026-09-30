@@ -21,6 +21,7 @@ import {
   parseRailExpanded,
   railExpandedDefault,
   serializeRailExpanded,
+  archivedEntryLabel,
 } from './project-rail.js'
 
 // ---- localStorage polyfill --------------------------------------------
@@ -296,9 +297,10 @@ describe('sebas-project-rail (sidebar tree)', () => {
     first.click()
     await new Promise((r) => setTimeout(r, 0))
     await el.updateComplete
-    // switch 端点被调用；操作员不被导航走——留在工作台。
+    // switch 端点被调用；不发生页面跳转重载——工作台就地渲染。（D10）
+    // 地址同时投影为该会话的 /sessions/{key}（pushState，刷新自持焦点）。
     expect(apiMock.switchSession).toHaveBeenCalledWith('oc_1%00')
-    expect(window.location.pathname).toBe('/')
+    expect(window.location.pathname).toBe('/sessions/oc_1%00')
     el.remove()
   })
 
@@ -2334,6 +2336,133 @@ describe('add-project path input fidelity + debounced precheck (round2 1.1)', ()
     await vi.advanceTimersByTimeAsync(300)
     await (el as any).updateComplete
     expect((el as any).addPathScopeHint).toContain('不存在')
+    el.remove()
+  })
+})
+
+
+// ─── fix-webui-qa-round3：D7 History 归档时刻标签 / D9 项目重排序入口 ────────
+
+describe('fix-webui-qa-round3 (D7 archive label / D9 reorder menu)', () => {
+  it('D7: History rows show the archive-time operator label over the auto title', async () => {
+    mockOf(apiMock.archiveList).mockResolvedValue({
+      archived_sessions: [
+        {
+          session_key: 'oc_rn%00',
+          project_path: '/home/me/alpha',
+          label: '21ef0814-auto-title',
+          operator_label: 'w2-archive-test',
+          archived_at: 5000,
+          retention_deadline: 9000,
+        },
+        {
+          session_key: 'oc_never%00',
+          project_path: '/home/me/alpha',
+          label: 'never-renamed',
+          operator_label: null,
+          archived_at: 4000,
+          retention_deadline: 8000,
+        },
+      ],
+    })
+    const el = await mount()
+    const heads = [...el.shadowRoot!.querySelectorAll('.group-head')]
+    const historyHead = heads.find((h) => h.textContent?.includes('History'))
+    ;(historyHead as HTMLElement).click()
+    await el.updateComplete
+    const names = [
+      ...el.shadowRoot!.querySelectorAll('.group-section li.session-item.archived .session-name'),
+    ].map((n) => n.textContent?.trim())
+    // 改名后归档显示新名，不回退旧自动标题；未改名的回退自动标题。
+    expect(names).toContain('w2-archive-test')
+    expect(names).toContain('never-renamed')
+    expect(names).not.toContain('21ef0814-auto-title')
+    // 行 title 悬停同源。
+    const renamedRow = [...el.shadowRoot!.querySelectorAll('li.session-item.archived')].find(
+      (li) => li.getAttribute('title') === 'w2-archive-test',
+    )
+    expect(renamedRow).toBeTruthy()
+    el.remove()
+  })
+
+  it('D7: archivedEntryLabel prefers a non-blank operator_label and falls back to label', async () => {
+    expect(archivedEntryLabel({ label: 'auto', operator_label: 'renamed' })).toBe('renamed')
+    expect(archivedEntryLabel({ label: 'auto', operator_label: null })).toBe('auto')
+    expect(archivedEntryLabel({ label: 'auto', operator_label: undefined })).toBe('auto')
+    // 空白串按未设置处理（后端脏数据不放大成空行名）。
+    expect(archivedEntryLabel({ label: 'auto', operator_label: '   ' })).toBe('auto')
+  })
+
+  it('D9: the project … menu exposes 上移/下移, disabled at the edges', async () => {
+    const el = await mount()
+    const rows = () => [...el.shadowRoot!.querySelectorAll('.row')]
+    const menus = [...el.shadowRoot!.querySelectorAll('wa-dropdown')]
+    expect(menus.length).toBe(rows().length)
+    const firstItems = [...menus[0]!.querySelectorAll('wa-dropdown-item')]
+    const up = firstItems.find((i) => i.getAttribute('value') === 'move-up')
+    const down = firstItems.find((i) => i.getAttribute('value') === 'move-down')
+    expect(up).toBeTruthy()
+    expect(down).toBeTruthy()
+    expect(up!.hasAttribute('disabled')).toBe(true, '首个项目的上移禁用')
+    expect(down!.hasAttribute('disabled')).toBe(false)
+    el.remove()
+  })
+
+  it('D9: 下移 reorders through POST /api/projects/reorder and persists', async () => {
+    mockOf(apiMock.projects.reorder).mockResolvedValue({
+      projects: [projects[1], projects[0]],
+    })
+    const el = await mount()
+    const menus = [...el.shadowRoot!.querySelectorAll('wa-dropdown')]
+    const down = [...menus[0]!.querySelectorAll('wa-dropdown-item')].find(
+      (i) => i.getAttribute('value') === 'move-down',
+    ) as HTMLElement
+    down.click()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(apiMock.projects.reorder).toHaveBeenCalledWith(['proj-beta', 'proj-alpha'])
+    expect([...el.shadowRoot!.querySelectorAll('.row')][0]!.textContent).toContain('beta')
+    el.remove()
+  })
+
+  it('D9: 上移 on the last project reorders back and the item is disabled on the last row', async () => {
+    mockOf(apiMock.projects.reorder).mockResolvedValue({
+      projects: [projects[1], projects[0]],
+    })
+    const el = await mount()
+    const menus = [...el.shadowRoot!.querySelectorAll('wa-dropdown')]
+    const lastMenu = menus[menus.length - 1]!
+    const up = [...lastMenu.querySelectorAll('wa-dropdown-item')].find(
+      (i) => i.getAttribute('value') === 'move-up',
+    ) as HTMLElement
+    const down = [...lastMenu.querySelectorAll('wa-dropdown-item')].find(
+      (i) => i.getAttribute('value') === 'move-down',
+    ) as HTMLElement
+    expect(down.hasAttribute('disabled')).toBe(true, '末位项目的下移禁用')
+    up.click()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(apiMock.projects.reorder).toHaveBeenCalledWith(['proj-beta', 'proj-alpha'])
+    expect([...el.shadowRoot!.querySelectorAll('.row')][0]!.textContent).toContain('beta')
+    el.remove()
+  })
+
+  it('D10: a rail session click navigates to the session deep-link URL (focus path writes URL)', async () => {
+    window.history.replaceState({}, '', '/')
+    mockOf(apiMock.switchSession).mockResolvedValue({
+      status: 'switched',
+      redirect: '/sessions/oc_1%00',
+      active_session_key: 'oc_1%00',
+    })
+    const el = await mount()
+    ;(el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).click()
+    await el.updateComplete
+    const first = el.shadowRoot!.querySelector('li.session-item') as HTMLElement
+    first.click()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    // 既有断言（switch 就地聚焦）之外，地址已写成 /sessions/{key}。
+    expect(window.location.pathname).toBe('/sessions/oc_1%00')
     el.remove()
   })
 })

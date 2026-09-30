@@ -81,7 +81,8 @@ test.describe('会话管理', () => {
 
       // No navigation away: the workbench stays the single surface, and the
       // switch is observable in place (URL untouched).
-      expect(page.url()).not.toContain('/sessions/')
+      // （fix-webui-qa-round3 D10）聚焦即投影深链地址：rail 选择后 URL 反映 /sessions/<key>。
+      expect(page.url()).toContain('/sessions/')
 
       // The rail's current-session marker follows the focus pointer to B…
       await expect(

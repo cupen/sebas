@@ -100,4 +100,52 @@ test.describe('鉴权闭环', () => {
       expect(collector.pageErrors).toEqual([])
     })
   })
+
+  test.describe('登录前 /ws 静默（fix-webui-qa-round3 D11）', () => {
+    // 独立计数器：ErrorCollector 有意过滤 127.0.0.1 的 WebSocket 连接失败
+    // （主套件 auth-off 无此噪音），而本旅程的合同恰是「未认证 /ws 升级失败
+    // 至多一条」——这里裸数 console error，不做该过滤。
+    test('pre-login /ws upgrade noise stays at most one per load; login restores the connection', async ({
+      page,
+    }) => {
+      test.setTimeout(60_000)
+      const wsFailures: string[] = []
+      page.on('console', (msg) => {
+        if (
+          msg.type() === 'error' &&
+          /WebSocket connection to 'ws:\/\/127\.0\.0\.1:\d+\/ws'/.test(msg.text())
+        ) {
+          wsFailures.push(msg.text())
+        }
+      })
+      const login = new Login(page)
+
+      await page.goto('/')
+      await expect(login.host).toBeVisible()
+      // 撑过旧短退避梯的活跃窗口：修复前梯子按 ~0.5/1/2/4/8s 重试，9s 内
+      // 攒 5+ 条 401；修复后模块装载的急连至多 1 条，之后鉴权闸静默。
+      await page.waitForTimeout(9_000)
+      expect(
+        wsFailures.length,
+        `pre-login /ws failures: ${wsFailures.length}`,
+      ).toBeLessThanOrEqual(1)
+
+      // 再加载一次：同样至多一条（每页装载一次静默尝试）。
+      await page.reload()
+      await expect(login.host).toBeVisible()
+      await page.waitForTimeout(4_000)
+      expect(wsFailures.length).toBeLessThanOrEqual(2)
+
+      // 登录成功 = 撤闸：工作台出现（/ws 连上），且登录后不再新增失败——
+      // 恢复正常连接姿态，无重试风暴。
+      await login.login('admin', 'admin')
+      await expect(page.locator('sebas-dashboard')).toBeVisible({ timeout: 15_000 })
+      const atLogin = wsFailures.length
+      await page.waitForTimeout(4_000)
+      expect(
+        wsFailures.length,
+        `post-login /ws failures appeared: ${wsFailures.slice(atLogin).join(' | ')}`,
+      ).toBe(atLogin)
+    })
+  })
 })

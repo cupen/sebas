@@ -34,8 +34,10 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   findStuckSelectPopupsInPath,
+  forceRenderOpenSelect,
   hasStuckSelectPopup,
   installWaSelectRescue,
+  isOpenButUnrendered,
   rescueStuckSelectPopup,
   type WaSelectRescueProbe,
 } from './wa-select-rescue.js'
@@ -372,6 +374,61 @@ describe('installWaSelectRescue', () => {
 // jsdom 复现不了 popover dismiss 吞 click，修复面用源码读回契约钉死：摘层
 // 手段里绝不允许再出现 hidePopover( 调用；change 后清理路径存在；摘层入口
 // 唯一且在定时器内（指针序列内不可能同步改 popover 状态）。
+
+// ── fix-webui-qa-round3 1.2（D2）：正向不变量——open=true 必须真的渲染 ──
+
+describe('isOpenButUnrendered / forceRenderOpenSelect (round3 D2)', () => {
+  it('flags open=true with an inactive popup or hidden listbox; healthy states pass', async () => {
+    const broken = await makeSelect(true, false)
+    expect(isOpenButUnrendered(asProbe(broken))).toBe(true, 'popup 未 active')
+    broken.listbox.hidden = true
+    const healthy = await makeSelect(true, false)
+    // open=true 且浮层已在渲染 = 健康，绝不干预。
+    healthy.activatePopup()
+    healthy.listbox.hidden = false
+    await flush()
+    expect(isOpenButUnrendered(asProbe(healthy))).toBe(false)
+    // open=false 永远不进正向判定（那是残留判定的领地）。
+    const closed = await makeSelect(false, false)
+    expect(isOpenButUnrendered(asProbe(closed))).toBe(false)
+    broken.remove(); healthy.remove(); closed.remove()
+  })
+
+  it('forceRenderOpenSelect unhides the listbox and activates the popup; no-op when healthy', async () => {
+    const el = await makeSelect(true, false)
+    el.listbox.hidden = true
+    expect(forceRenderOpenSelect(asProbe(el))).toBe(true)
+    expect(el.listbox.hidden).toBe(false)
+    expect(el.popupElement()!.active).toBe(true)
+    // 已一致 = 不动（幂等零误伤）。
+    expect(forceRenderOpenSelect(asProbe(el))).toBe(false)
+    el.remove()
+  })
+
+  it('install: a pointerdown on a select whose open flipped true but popup lagged gets repaired in the 0ms timer', async () => {
+    const unlisten = installWaSelectRescue(document)
+    const el = await makeSelect(true, false)
+    el.listbox.hidden = true
+    // 真实指针落在 select 上（composedPath 才含它）。
+    el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, composed: true }))
+    await flush()
+    expect(el.listbox.hidden).toBe(false, '展开态布尔与渲染拉齐')
+    expect(el.popupElement()!.active).toBe(true)
+    unlisten()
+    el.remove()
+  })
+
+  it('install: a select that closed before the timer lands (normal toggle) is left alone', async () => {
+    const unlisten = installWaSelectRescue(document)
+    const el = await makeSelect(false, false)
+    el.listbox.hidden = true // 用户刚收起：listbox hidden 是**正常**收起态
+    el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, composed: true }))
+    await flush()
+    expect(el.listbox.hidden).toBe(true, '收起态不被正向修复误开')
+    unlisten()
+    el.remove()
+  })
+})
 
 describe('source contracts (round3 1.2, third revision)', () => {
   const here = dirname(fileURLToPath(import.meta.url))

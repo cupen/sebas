@@ -353,6 +353,58 @@ describe('WsClient', () => {
     client.hostDisconnected()
     expect(states).toEqual([true])
   })
+
+  // ─── fix-webui-qa-round3 2.7 / D11：登录前的 /ws 重试静默/长退避 ─────────
+
+  it('a socket that never opened reconnects on the LONG backoff (no 401 retry storm)', () => {
+    // 登录前的 401 升级拒绝形状：onclose 直接来，open 从未发生。短梯
+    // （100ms 起）会让 console 每页刷 3–6 条 401；现在首Retr ≥ 30s。
+    const client = makeClient()
+    client.hostConnected()
+    expect(FakeSocket.instances).toHaveLength(1)
+    FakeSocket.instances[0]!.drop() // 401 rejection: never opened
+    // 旧短梯的全部窗口内（≤15s）零新尝试。
+    vi.advanceTimersByTime(15_000)
+    expect(FakeSocket.instances).toHaveLength(1)
+    // 长退避（缺省 30s）到点才重试。
+    vi.advanceTimersByTime(15_000)
+    expect(FakeSocket.instances).toHaveLength(2)
+  })
+
+  it('a socket that opened once returns to the short ladder after a drop', () => {
+    const client = makeClient() // backoffMs: 100
+    client.hostConnected()
+    FakeSocket.instances[0]!.open()
+    FakeSocket.instances[0]!.drop()
+    vi.advanceTimersByTime(100)
+    expect(FakeSocket.instances).toHaveLength(2)
+  })
+
+  it('setAuthGated(true) silences reconnection; false restores and reconnects now', () => {
+    const client = makeClient()
+    client.hostConnected()
+    FakeSocket.instances[0]!.drop() // never opened; long timer scheduled
+    client.setAuthGated(true)
+    // 闸下：排定的重连被取消，怎么推进时钟都不再尝试。
+    vi.advanceTimersByTime(120_000)
+    expect(FakeSocket.instances).toHaveLength(1)
+    // 闸下 connect() 也被拦（宿主直呼 reconnectNow 同样）。
+    client.reconnectNow()
+    expect(FakeSocket.instances).toHaveLength(1)
+    // 撤闸 = 恢复连接姿态：立即发起一次尝试（认证就绪的 reconnectNow 语义）。
+    client.setAuthGated(false)
+    expect(FakeSocket.instances).toHaveLength(2)
+  })
+
+  it('the auth gate also blocks reconnects scheduled by later drops', () => {
+    const client = makeClient()
+    client.hostConnected()
+    FakeSocket.instances[0]!.open()
+    client.setAuthGated(true) // 会话失效跳登录
+    FakeSocket.instances[0]!.drop()
+    vi.advanceTimersByTime(120_000)
+    expect(FakeSocket.instances).toHaveLength(1, '未认证态不重连')
+  })
 })
 
 describe('jsonFrameCodec', () => {

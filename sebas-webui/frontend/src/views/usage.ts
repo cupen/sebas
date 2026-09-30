@@ -77,7 +77,7 @@ export function seriesFor(
 
 /** 窗口是否全零（「暂无用量数据」空态判别——聚合成功但什么都没发生）。 */
 export function isAllZero(data: UsageTimeseries): boolean {
-  const t = data.totals
+  const t = windowTotals(data)
   return (
     t.requests === 0 &&
     t.input_tokens === 0 &&
@@ -85,6 +85,36 @@ export function isAllZero(data: UsageTimeseries): boolean {
     t.cache_read_tokens === 0 &&
     t.cache_creation_tokens === 0
   )
+}
+
+/**
+ * （fix-webui-qa-round3 1.4 / D8）**窗口**合计（纯函数）：统计卡的数字从
+ * 与图表**同一份 buckets** 现场累加——卡片口径按构造与图表窗口一致，切换
+ * 粒度/窗口即随新响应重算（spec「summary cards follow the selected
+ * window」）。不再信任载荷顶层 `totals`：它一旦与桶窗口漂移（旧聚合器、
+ * 代理层缓存），卡片就会呈现「全量口径」与空图表同屏的矛盾（QA W3 实锤
+ * 形态：请求数 1 常驻、按小时图表窗内全空）。
+ */
+export function windowTotals(data: UsageTimeseries): UsageTimeseries['totals'] {
+  const t = data.totals
+  const acc = {
+    requests: 0,
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_read_tokens: 0,
+    cache_creation_tokens: 0,
+  }
+  for (const b of data.buckets) {
+    for (const m of b.models) {
+      acc.requests += m.requests
+      acc.input_tokens += m.input_tokens
+      acc.output_tokens += m.output_tokens
+      acc.cache_read_tokens += m.cache_read_tokens
+      acc.cache_creation_tokens += m.cache_creation_tokens
+    }
+  }
+  // totals 里 model 字段等非数值形状保持载荷原样：数值五项以桶和为准。
+  return { ...t, ...acc }
 }
 
 /** 悬停读数：该时点各模型的四类明细（task 4.1；API 一次给全，切换零请求）。 */
@@ -290,7 +320,9 @@ export class SebasUsage extends LitElement {
   }
 
   render() {
-    const t = this.data?.totals
+    // （fix-webui-qa-round3 1.4 / D8）卡片数字 = 窗口合计（与图表同一份
+    // buckets 现场累加），不再读载荷顶层 totals——口径一致性由构造保证。
+    const t = this.data ? windowTotals(this.data) : null
     return html`
       <header class="page-head">
         <div>

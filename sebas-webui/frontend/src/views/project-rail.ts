@@ -82,6 +82,14 @@ export const ADD_PATH_VALIDATE_DEBOUNCE_MS = 300
 export const RAIL_FOCUS_EVENT = 'sebas:rail-focus'
 
 /**
+ * （fix-webui-qa-round3 2.3 / D6）改名成功的就地同步事件：`detail.key` 是
+ * 编码会话键、`detail.label` 是新名（null = 清名回退预览）。dashboard 监听
+ * 后把新名写进自己手里的 summary 行——rail 与聚焦头部共享同一标题源
+ * （fullSessionLabel），头部即时跟随，不等 WS 帧/节流刷新。
+ */
+export const SESSION_LABEL_CHANGED_EVENT = 'sebas:session-label-changed'
+
+/**
  * 手填路径的禁用原因（fix-webui-qa-defects 7.2 修复，本 change 5.2 收口为
  * spec：越界**与不存在**都必须给出原因且提交控件禁用——不允许只禁用不解
  * 释）。纯函数：注册/预检错误文案映射为输入框旁可读原因；未知失败返回
@@ -199,6 +207,19 @@ function relativeTime(unixSecs: number): string {
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
   return `${Math.floor(diff / 86400)}d ago`
+}
+
+/**
+ * 归档条目的人读标签（fix-webui-qa-round3 2.4 / D7，纯函数）：优先
+ * `operator_label`——归档时刻的**操作者现用标签**（后端 round4 3.1 随
+ * 快照落档）；顶层 `label` 是自动标题（首条 prompt 预览/短 id），改名后
+ * 归档的会话若按它显示就会回退旧自动标题（QA W1 实锤）。未改名（字段
+ * null/缺省/空白）回退 `label`。History 行、归档只读视图与恢复通知共用
+ * 这一份取数，杜绝两处漂移。
+ */
+export function archivedEntryLabel(entry: Pick<ArchiveEntry, 'label' | 'operator_label'>): string {
+  const renamed = entry.operator_label?.trim()
+  return renamed ? renamed : entry.label
 }
 
 @customElement('sebas-project-rail')
@@ -718,9 +739,11 @@ export class SebasProjectRail extends LitElement {
 
   /**
    * 点会话 = switch + 就地聚焦（workbench-conversation-view 3.1，design
-   * D6）：POST switch 设置服务端焦点指针后停在 `/`，dashboard 就地渲染该
-   * 会话——不再 navigate 到深链离开工作台。switch 404（会话恰好被关闭）
-   * 时只刷新列表，不导航。
+   * D6）：POST switch 设置服务端焦点指针后就地渲染该会话——不再 navigate
+   * 离开工作台重载。switch 404（会话恰好被关闭）时只刷新列表，不导航。
+   * （fix-webui-qa-round3 2.6 / D10）选择写 URL：地址更新为该会话的
+   * `/sessions/{key}` 深链形（history pushState，不引发页面跳转）——刷新
+   * / 重开自持焦点；rail 标记仍由焦点指针派生，不因 URL 直接改写。
    */
   private async openSession(row: SessionRow) {
     let resp: { status: string; redirect: string; active_session_key: string } | undefined
@@ -743,7 +766,9 @@ export class SebasProjectRail extends LitElement {
     // 分界线——锚已到顶、分界线照画，两句合同不再互斥。
     armOpeningSeam(row.encoded_key, readAnchorCount(row.encoded_key))
     writeFocusAnchor(row.encoded_key, row.msg_count)
-    if (location.pathname !== '/') navigate('/')
+    // （fix-webui-qa-round3 2.6 / D10）写会话 URL（不再是 '/'）：任何聚焦
+    // 路径都把地址投影成 /sessions/{key}。
+    navigate(`/sessions/${row.encoded_key}`)
     // fix-webui-qa-defects 4.1（design D3）：switch 只写服务端指针、不发任何
     // 事件——dashboard 的焦点视图此前要等下一个无关会话事件刷新 summary 才
     // 「跳」过来。这里以响应里的 active_session_key 派发窗口级聚焦事件，
@@ -810,7 +835,9 @@ export class SebasProjectRail extends LitElement {
       //    「当前」标记由 refresh() 后的 active_session_key 回填（创建请求
       //    服务端已 set_focus）。
       void this.refresh()
-      if (location.pathname !== '/') navigate('/')
+      // （fix-webui-qa-round3 2.6 / D10）创建即聚焦：地址同样投影为该会话的
+      // /sessions/{key}（刷新自持焦点）。
+      navigate(`/sessions/${created.key}`)
       // ③ 一次性 composer 对焦请求（COMPOSER_FOCUS_REQUEST，dashboard 接力
       //    到 focusInput）。setTimeout(0)：在 /sessions 上创建时先让路由
       //    切换把工作台挂载出来，监听方才在场。仅创建成功这一个时机派发
@@ -941,13 +968,24 @@ export class SebasProjectRail extends LitElement {
     const label = this.renameInputValue().trim()
     try {
       // 空输入 = 清空（wire 语义单一出处：服务端把空白归一为 None）。
-      await api.setSessionLabel(row.encoded_key, label || null)
+      const applied = label || null
+      await api.setSessionLabel(row.encoded_key, applied)
+      // （fix-webui-qa-round3 2.3 / D6）改名成功回调同步标题源：window 级
+      // 事件把新名就地写进 dashboard 手里的 summary 行——聚焦头部的命名链
+      // （fullSessionLabel）即时拿到新值，与 rail 行同源同帧，不再等 WS
+      // 相位帧/节流刷新（侧栏已新、头部仍旧的窗口由此关死）。空 label 的
+      // 事件也派发（清名 = 回退预览，头部同样要跟）。
+      window.dispatchEvent(
+        new CustomEvent(SESSION_LABEL_CHANGED_EVENT, {
+          detail: { key: row.encoded_key, label: applied },
+        }),
+      )
       // （fix-webui-qa-findings M6）成功回执走 notify 层：重命名的效果落在
       // rail 行与聚焦头部两处，info toast 点名「改成什么」。
       notify({
         level: 'info',
-        message: label
-          ? `会话已重命名为「${label}」。`
+        message: applied
+          ? `会话已重命名为「${applied}」。`
           : `已清除会话名称，回退到首条消息预览。`,
       })
       this.closeRenameDialog()
@@ -994,13 +1032,34 @@ export class SebasProjectRail extends LitElement {
     this.dragIndex = null; this.dragOverIndex = null
     if (from === null || from === dropIndex) return
     const next = [...this.projects]; const [moved] = next.splice(from, 1); next.splice(dropIndex, 0, moved)
+    await this.applyProjectOrder(next)
+  }
+  private onDragEnd() { this.dragIndex = null; this.dragOverIndex = null }
+
+  /**
+   * （fix-webui-qa-round3 2.5 / D9）项目「…」菜单的上移/下移：与拖拽共用
+   * 同一条落盘链路（{@link applyProjectOrder} → POST /api/projects/reorder）。
+   * QA W1 实锤拖拽在真实指针序列里滑成了文本选择（draggable 行内拖拽的
+   * 可发现性/成功率都低），菜单项是确定性的重排序入口。边界位（首/末）
+   * 对应项禁用。
+   */
+  private async moveProject(index: number, delta: -1 | 1) {
+    const to = index + delta
+    if (to < 0 || to >= this.projects.length) return
+    const next = [...this.projects]
+    const [moved] = next.splice(index, 1)
+    next.splice(to, 0, moved!)
+    await this.applyProjectOrder(next)
+  }
+
+  /** 乐观更新 + 服务端持久化（拖拽与上移/下移共用的唯一落盘路径）。 */
+  private async applyProjectOrder(next: Project[]) {
     this.projects = next
     try {
       const { projects } = await api.projects.reorder(next.map((p) => p.id))
       this.projects = projects
     } catch (err) { this.error = err instanceof Error ? err.message : String(err); void this.refresh() }
   }
-  private onDragEnd() { this.dragIndex = null; this.dragOverIndex = null }
 
   // ─── Add project dialog ─────────────────────────────────────────
   private openAddDialog() {
@@ -1203,15 +1262,18 @@ export class SebasProjectRail extends LitElement {
   }
 
   private renderArchivedSessionRow(a: ArchiveEntry) {
+    // （fix-webui-qa-round3 2.4 / D7）History 行名取归档时刻现用标签
+    // （operator_label 优先）——改名→归档后不得回退旧自动标题。
+    const name = archivedEntryLabel(a)
     return html`
       <li
         class="session-item archived"
-        title=${a.label}
+        title=${name}
         data-testid="archived-row"
         @click=${(e: Event) => this.viewArchivedSession(e, a)}
       >
         <span class="session-dot done" aria-hidden="true"></span>
-        <span class="session-name">${a.label}</span>
+        <span class="session-name">${name}</span>
         <!-- （fix-webui-qa-defects-round4 3.2）basename 切分同时接受 \ 与 /：
              Windows 归档路径存的是反斜杠普通形，此前 split('/') 不切、整条
              路径原样进 .archive-meta，撑出横向滚动。 -->
@@ -1259,6 +1321,24 @@ export class SebasProjectRail extends LitElement {
                 aria-haspopup="menu"
               >${icon('more', 12)}</button>
               <wa-dropdown-item value="remove" @click=${(e: Event) => this.openRemoveDialog(e, p)}>移除项目</wa-dropdown-item>
+              <!-- （fix-webui-qa-round3 2.5 / D9）重排序入口：上移/下移，走既有
+                   /api/projects/reorder 持久化（拖拽之外的确定性入口；QA 实锤
+                   行内拖拽在真实指针序列里成功率低）。边界位对应项禁用。
+                   stopPropagation 防 menu 点击击穿到行级 select。 -->
+              <wa-dropdown-item
+                value="move-up"
+                data-testid="project-move-up"
+                ?disabled=${index === 0}
+                @click=${(e: Event) => { e.stopPropagation(); void this.moveProject(index, -1) }}
+                >上移</wa-dropdown-item
+              >
+              <wa-dropdown-item
+                value="move-down"
+                data-testid="project-move-down"
+                ?disabled=${index === this.projects.length - 1}
+                @click=${(e: Event) => { e.stopPropagation(); void this.moveProject(index, 1) }}
+                >下移</wa-dropdown-item
+              >
             </wa-dropdown>
             <!-- gate-agent-directory-writes 2.1：「+」新建会话入口按角色裁剪
                  （sessions.write 不含 viewer——viewer 不呈现，只读浏览不受

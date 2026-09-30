@@ -101,7 +101,7 @@ if (!customElements.get('sebas-workbench-composer')) {
 
 import './dashboard.js'
 // RAIL_FOCUS_EVENT：rail 切换成功的窗口级聚焦事件（4.1，design D3）。
-import { RAIL_FOCUS_EVENT } from './project-rail.js'
+import { RAIL_FOCUS_EVENT, SESSION_LABEL_CHANGED_EVENT } from './project-rail.js'
 // PROJECT_FOLLOW_EVENT / focusedProjectPath：聚焦反投影项目上下文（本 change 4.1）。
 // displayedProjectResolved：displayed project 调和（fix-webui-qa-findings D4）。
 import {
@@ -2279,5 +2279,133 @@ describe('last-active relative label ticks with the local clock (round2 3.3)', (
     // unix 缺席回退服务端串（旧 payload 兼容）。
     expect(relativeActiveLabel(undefined, now, 'server form')).toBe('server form')
     expect(relativeActiveLabel(0, now, 'server form')).toBe('server form')
+  })
+})
+
+
+// ─── fix-webui-qa-round3：D6 改名就地同步 / D10 会话选择写 URL ──────────────
+
+describe('fix-webui-qa-round3 (D6 rename sync / D10 focus URL)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    wsMocks.clearHandlers()
+    apiMocks.summary.mockResolvedValue(summaryBase)
+    apiMocks.session.mockResolvedValue(detailFixture())
+    apiMocks.projectsList.mockResolvedValue({
+      projects: [{ id: 'proj-sebas', path: '/home/me/sebas', name: 'sebas', added_at: 0 }],
+    })
+    apiMocks.sessions.mockResolvedValue({
+      recent_sessions: [],
+      active_session_key: null,
+    })
+    apiMocks.settings.mockResolvedValue({
+      card_config: {
+        theme_color: '#000',
+        fold_long_output: false,
+        thinking_display: 'auto',
+        max_user_text_chars: 0,
+        max_tool_output_chars: 0,
+      },
+      router: { listen: null, provider_count: 0, debug: false, has_auth: false, providers: [] },
+    })
+    apiMocks.projectsBranch.mockResolvedValue({ project_id: 'proj-sebas', branch: null, accessible: true })
+    apiMocks.nodes.mockResolvedValue({
+      nodes: [{ id: 'local', status: 'online', local: true }],
+      remote_available: true,
+    })
+    apiMocks.agents.mockResolvedValue({ agents: [] })
+  })
+
+  async function settle(el: SebasDashboard): Promise<void> {
+    for (let i = 0; i < 5; i++) {
+      await new Promise((r) => setTimeout(r, 10))
+      await el.updateComplete
+    }
+  }
+
+  it('D6: a rename event patches the shared row so the focused header follows the rail', async () => {
+    apiMocks.summary.mockResolvedValue({
+      ...focusedSummary(),
+      recent_sessions: [
+        row({ encoded_key: 'oc_live%00', chat_id: 'chat-live', label: '旧名' }),
+      ],
+    })
+    const el = await mount()
+    await settle(el)
+    const name = () =>
+      el.shadowRoot!.querySelector<HTMLElement>('[data-testid="session-head-name"]')
+    expect(name()!.textContent?.trim()).toBe('旧名')
+
+    // rail 的改名成功回调派发窗口级事件：dashboard 就地补丁同一份行数据
+    // （无第二处标题缓存），头部即时跟随——不等 WS 帧/节流刷新。
+    window.dispatchEvent(
+      new CustomEvent(SESSION_LABEL_CHANGED_EVENT, {
+        detail: { key: 'oc_live%00', label: 'hello-empty-qa' },
+      }),
+    )
+    await el.updateComplete
+    expect(name()!.textContent?.trim()).toBe('hello-empty-qa')
+
+    // 清名（label: null）= 行回退预览/短 id 链，头部同链跟随。
+    window.dispatchEvent(
+      new CustomEvent(SESSION_LABEL_CHANGED_EVENT, {
+        detail: { key: 'oc_live%00', label: null },
+      }),
+    )
+    await el.updateComplete
+    // 行的预览缺位：清名后命名链接到 session_id_short（row() 缺省 aaaa0001）。
+    expect(name()!.textContent?.trim()).toBe('aaaa0001')
+    el.remove()
+  })
+
+  it('D6: a label event for a row that is absent is a no-op', async () => {
+    apiMocks.summary.mockResolvedValue({
+      ...focusedSummary(),
+      recent_sessions: [row({ encoded_key: 'oc_live%00', chat_id: 'chat-live', label: '别的行' })],
+    })
+    const el = await mount()
+    await settle(el)
+    window.dispatchEvent(
+      new CustomEvent(SESSION_LABEL_CHANGED_EVENT, {
+        detail: { key: 'oc_missing%00', label: 'nope' },
+      }),
+    )
+    await el.updateComplete
+    // 行不在场 = 不补丁：聚焦头部的命名链不受未知 key 事件影响。
+    expect(
+      el.shadowRoot!.querySelector<HTMLElement>('[data-testid="session-head-name"]')
+        ?.textContent?.trim(),
+    ).toBe('别的行')
+    el.remove()
+  })
+
+  it('D10: a rail focus event writes the session URL (pushState, no reload)', async () => {
+    window.history.replaceState({}, '', '/')
+    const el = await mount()
+    await settle(el)
+    window.dispatchEvent(
+      new CustomEvent(RAIL_FOCUS_EVENT, { detail: { key: 'oc_live%00' } }),
+    )
+    await el.updateComplete
+    expect(window.location.pathname).toBe('/sessions/oc_live%00')
+    // 幂等：同会话重复聚焦不再推一条重复历史。
+    window.dispatchEvent(
+      new CustomEvent(RAIL_FOCUS_EVENT, { detail: { key: 'oc_live%00' } }),
+    )
+    expect(window.location.pathname).toBe('/sessions/oc_live%00')
+    el.remove()
+  })
+
+  it('D10: focus cleared by a focused-session removal falls the URL back to /', async () => {
+    window.history.replaceState({}, '', '/sessions/oc_live%00')
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    const el = await mount()
+    await settle(el)
+    expect(el.shadowRoot!.querySelector('[data-testid="session-head-name"]')).toBeTruthy()
+    // 聚焦会话被移除（close/归档）：地址回落 /（新建态）。
+    wsMocks.emit({ type: 'session.removed', session_id: 'oc_live%00' })
+    await settle(el)
+    expect(window.location.pathname).toBe('/')
+    el.remove()
   })
 })
