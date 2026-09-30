@@ -170,24 +170,20 @@ export function normalizeDisplayPath(text: string): string {
 }
 
 /**
- * 会话名 = 首条用户消息预览；零轮占位回退短 id / 键尾段（D10）。
+ * 会话名 = 操作者 label → 首条用户消息预览 → 「未命名会话」。
  *
- * workbench-interaction-polish 3.2 修复：0-turn 占位（无 prompt、无
- * session_id）在 /api/sessions 行上三者全空（`chat_id` 本就不在该 payload
- * 的词表里）——回退到键的 reference 尾段，`[...undefined]` 曾把整棵 rail
- * 渲染炸掉。模块级导出：/sessions 表格的卡片链接同源复用。
+ * （fix-webui-qa-round6 2.2）零消息占位不再显示 UUID 截断/键尾段——服务端
+ * 命名链删除 user_prompt 回退后，无 label 且无 first_prompt_preview 的行
+ * 就是「尚无任何消息」的会话，统一显示可读占位名；首条消息落地后经
+ * session.updated 帧的 prompt_preview 即时切到预览（引擎 seed_card 捕获，
+ * 无需刷新）。
  */
+export const UNNAMED_SESSION_LABEL = '未命名会话'
+
 export function fullSessionLabel(row: SessionRow): string {
   // （fix-webui-approval-restore-and-session-identity 5.1，design D6）命名
-  // 优先级：label → 首条 prompt 预览 → 短 id → 键尾段。只影响「设置了
-  // label」的会话——未设置时行为与旧版本完全一致。
-  return (
-    row.label ??
-    row.prompt_preview ??
-    row.session_id_short ??
-    row.chat_id ??
-    decodeSessionKeyTail(row.encoded_key)
-  )
+  // 优先级：label → 首条 prompt 预览 → 未命名占位。
+  return row.label ?? row.prompt_preview ?? UNNAMED_SESSION_LABEL
 }
 
 /** `web%00web-1709…-4` → `web-1709…-4`（键尾段 = 占位会话的可读短名）。 */

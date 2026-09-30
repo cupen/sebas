@@ -67,6 +67,11 @@ export class SebasNoticeLayer extends LitElement {
   private unsubscribe: (() => void) | null = null
   /** 已入栈的 toast 条目（store id → 元素），双向同步的差集基础。 */
   private toastEls = new Map<number, WaToastItem>()
+  /**
+   * （fix-webui-qa-round6 5.3）每条瞬时条的后备消失定时器句柄：WA 的
+   * rAF 倒计时在后台标签页停摆时的兜底（见 syncToasts 内注释）。
+   */
+  private toastTimers = new Map<number, number>()
   /** 锁定开始前被聚焦的元素（恢复时归还；元素已失则落 body）。 */
   private restoreFocus: HTMLElement | null = null
   /** 锁定开始 → 渲染完成后把焦点移入横幅（updated 里消费）。 */
@@ -162,6 +167,8 @@ export class SebasNoticeLayer extends LitElement {
     this.unsubscribe?.()
     this.unsubscribe = null
     this.toastEls.clear()
+    for (const t of this.toastTimers.values()) clearTimeout(t)
+    this.toastTimers.clear()
     super.disconnectedCallback()
   }
 
@@ -255,17 +262,42 @@ export class SebasNoticeLayer extends LitElement {
         () => {
           // 关闭按钮（WA 内建恒在）或自动消失后的回写；store 已移除时无害。
           this.toastEls.delete(item.id)
+          const t = this.toastTimers.get(item.id)
+          if (t !== undefined) {
+            clearTimeout(t)
+            this.toastTimers.delete(item.id)
+          }
           dismiss(item.id)
         },
         { once: true },
       )
       this.toastEls.set(item.id, el)
+      // （fix-webui-qa-round6 5.3）自动消失的后备定时器：WA toast-item 的
+      // 倒计时由 requestAnimationFrame 驱动——标签页**后台化**时 rAF 停摆，
+      // 倒计时永不到零、toast 永驻（QA 实证「已注册」toast 停留 15+ 分钟
+      // 跨导航不消，且非所有 toast 粘滞——粘滞的正是后台化期间创建/计数的
+      // 那批）。store 侧 setTimeout 不吃 rAF 节流：到点即兜底 hide（WA 自身
+      // 的 rAF 计时若先到，回写路径已清掉本定时器；hide 幂等，双到无害）。
+      if (item.duration > 0) {
+        const t = window.setTimeout(() => {
+          this.toastTimers.delete(item.id)
+          // 直接回写 store（remove 幂等）：emit → updated() → syncToasts
+          // 出栈臂负责元素侧 hide——单一路径，不与 WA 自身的 rAF 计时赛跑。
+          dismiss(item.id)
+        }, item.duration + 500)
+        this.toastTimers.set(item.id, t)
+      }
       // 直接子元素挂入官方栈：slotchange 自动 showStack/startTimer/announce。
       stack.appendChild(el)
     }
     for (const [id, el] of [...this.toastEls]) {
       if (liveIds.has(id)) continue
       this.toastEls.delete(id)
+      const t = this.toastTimers.get(id)
+      if (t !== undefined) {
+        clearTimeout(t)
+        this.toastTimers.delete(id)
+      }
       if (el.isConnected) void el.hide()
     }
   }

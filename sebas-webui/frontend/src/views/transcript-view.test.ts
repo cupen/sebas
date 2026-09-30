@@ -705,6 +705,35 @@ describe('thinking fold membership and distinguishability (fix-webui-qa-round3 D
     el.remove()
   })
 
+  // （fix-webui-qa-round6 3.1，design D4）展开的过程折叠内 thinking 条目
+  // **默认**显示实际内容——不需要对二级折叠的第二次点击；占位词只作标签。
+  it('an expanded process fold shows the thinking content inline by default (round6 3.1)', async () => {
+    const el = await mount({
+      entries: [
+        entry({ position: 0, kind: 'prompt', content: 'think please', created_at_unix: FIXED_DATES.T1 }),
+        entry({ position: 1, kind: 'content', element_type: 'thinking', content: 'hmm', created_at_unix: FIXED_DATES.T1 }),
+        entry({ position: 2, kind: 'content', element_type: 'thinking', content: 'hmm again', created_at_unix: FIXED_DATES.T1 }),
+      ],
+    })
+    const assistant = el.shadowRoot!.querySelector<HTMLElement>('.turn-block.is-assistant')!
+    // 一次点击（过程折叠）后内容即在场——无需任何二级交互。
+    assistant.querySelector<HTMLButtonElement>('.process-fold button.fold-link')!.click()
+    await el.updateComplete
+    const foldBody = assistant.querySelector<HTMLElement>('.process-fold .fold-body')!
+    expect(foldBody.textContent).toContain('hmm')
+    expect(foldBody.textContent).toContain('hmm again')
+    // 占位词仍是条目标签，但内容不再被占位词顶替。
+    const items = [...foldBody.querySelectorAll<HTMLElement>('.process-item[data-element-type="thinking"]')]
+    expect(items).toHaveLength(2)
+    for (const item of items) {
+      expect(item.querySelector('.item-title')?.textContent?.trim()).toBe('thinking')
+      expect(item.querySelector('.body.item-body')).toBeTruthy()
+    }
+    // thinking 条目不再渲染二级折叠开关（内容默认在场）。
+    expect(foldBody.querySelector('.process-item[data-element-type="thinking"] button')).toBeNull()
+    el.remove()
+  })
+
   it('collapsed fold rows are visually distinct from prose (chip styling, no border/card)', async () => {
     const el = await mount({
       entries: [
@@ -843,14 +872,19 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     await el.updateComplete
     const items = [...assistant.querySelectorAll<HTMLElement>('.process-item')]
     expect(items.length).toBe(3)
-    items.forEach((d) =>
+    // （fix-webui-qa-round6 3.1）thinking 条目不再有二级折叠——展开体外层
+    // 后内容默认在场；tool 条目保持二级折叠且默认收起。
+    expect(items[0].querySelector('.body.item-body')?.textContent).toContain('deep thought')
+    const toolItems = items.filter((d) => d.dataset.elementType === 'tool')
+    expect(toolItems.length).toBe(2)
+    toolItems.forEach((d) =>
       expect(d.querySelector<HTMLButtonElement>('button.fold-link')!.getAttribute('aria-expanded')).toBe('false'),
     )
     // 二级 link：有 title 显示 title 且 title 属性保全量；无 title 回退
-    // 通用标签（thinking / tool）且不带 title 属性。
+    // 通用标签（tool）且不带 title 属性。
     expect(items[0].dataset.position).toBe('1')
     expect(items[0].querySelector('.item-title')?.textContent?.trim()).toBe('thinking')
-    expect(items[0].querySelector('button.fold-link')!.hasAttribute('title')).toBe(false)
+    expect(items[0].querySelector('button.fold-link')).toBeNull()
     expect(items[1].querySelector('.item-title')?.textContent?.trim()).toBe(
       'read_file · src/app.ts',
     )
@@ -859,15 +893,17 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     )
     expect(items[2].querySelector('.item-title')?.textContent?.trim()).toBe('tool')
     // 展开层级：逐条点击二级 link 才展开（键盘同路径——原生 button 激活）。
+    // （fix-webui-qa-round6 3.1）link 清单只含 tool 条目——thinking 无二级
+    // 折叠，内容默认在场。
     const itemLinks = [...assistant.querySelectorAll<HTMLButtonElement>('.process-item button.fold-link')]
+    expect(itemLinks.length).toBe(2)
     itemLinks.forEach((b) => expect(b.getAttribute('aria-expanded')).toBe('false'))
-    itemLinks[1].click()
+    itemLinks[0].click()
     await el.updateComplete
-    expect(itemLinks[1].getAttribute('aria-expanded')).toBe('true')
+    expect(itemLinks[0].getAttribute('aria-expanded')).toBe('true')
     expect(items[1].textContent).toContain('read_file')
-    // 其余二级折叠不受影响。
-    expect(itemLinks[0].getAttribute('aria-expanded')).toBe('false')
-    expect(itemLinks[2].getAttribute('aria-expanded')).toBe('false')
+    // 其余二级折叠不受影响（thinking 条目无折叠可动）。
+    expect(itemLinks[1].getAttribute('aria-expanded')).toBe('false')
     // 再点一次同一 link：收起（点击切换展开/收起）；外层同理。
     link.click()
     await el.updateComplete
@@ -1945,9 +1981,19 @@ describe('truncation + view-all dialog (fix-webui-streaming-liveness 4.5)', () =
 
   it('an expanded under-threshold entry renders in full with no truncation note', async () => {
     const el = await mount({ entries: mixedTurnEntries() })
-    el.shadowRoot!.querySelector<HTMLButtonElement>('.process-fold button.fold-link')!.click()
-    await el.updateComplete
-    el.shadowRoot!.querySelector<HTMLButtonElement>('.process-item button.fold-link')!.click()
+    // 外层折叠全部展开：thinking 条目（round6 3.1）内容默认在场；tool 条目
+    // 再点自己的二级折叠。
+    for (const fold of [
+      ...el.shadowRoot!.querySelectorAll<HTMLButtonElement>('.process-fold button.fold-link'),
+    ]) {
+      fold.click()
+      await el.updateComplete
+    }
+    el.shadowRoot!
+      .querySelector<HTMLButtonElement>(
+        '.process-item[data-element-type="tool"] button.fold-link',
+      )!
+      .click()
     await el.updateComplete
     expect(el.shadowRoot!.querySelector('[data-truncated]')).toBeNull()
     expect(el.shadowRoot!.querySelector('[data-testid="truncation-note"]')).toBeNull()

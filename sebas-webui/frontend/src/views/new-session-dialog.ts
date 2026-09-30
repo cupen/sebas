@@ -82,6 +82,12 @@ export class SebasNewSessionDialog extends LitElement {
   @property({ attribute: false }) projectName: string | null = null
   /** 项目记住的 default agent（预选；`null` = 首访，兜底首个可达 agent）。 */
   @property({ attribute: false }) defaultAgent: string | null = null
+  /**
+   * （fix-webui-qa-round6 5.2）本弹窗会话的预选 agent（打开时快照）：
+   * 下拉里该选项标注「上次使用」，让操作员看得出预选的来历；操作者改选
+   * 不移动标注。
+   */
+  private preselectedAgent: string | null = null
   /** 创建失败的就地呈现（rail 写入；开盒/成功时清空）。 */
   @property({ attribute: false }) error: string | null = null
   /**
@@ -167,11 +173,15 @@ export class SebasNewSessionDialog extends LitElement {
       this.lastConfirmAt = Number.NEGATIVE_INFINITY
       this.agent = ''
       if (this.defaultAgent) this.agent = this.defaultAgent
+      // （fix-webui-qa-round6 5.2）「上次使用」标注锚定**预选**（项目记住的
+      // default_agent），不随操作者改选漂移。
+      this.preselectedAgent = this.agent || null
       this.applyCatalogPreselect()
     }
     // 项目切换（rail 对不同项目的「+」复用同一对话框实例）。
     if (changed.has('defaultAgent') && this.open && this.defaultAgent) {
       this.agent = this.defaultAgent
+      this.preselectedAgent = this.defaultAgent
     }
     // （round3 1.2 第三轮）busy 一旦翻转（rail 异步置位/解除），「确认已发
     // 出但 busy 还没跟上」的同步双发窗口就已关闭：300ms 去重窗口归零——
@@ -324,7 +334,9 @@ export class SebasNewSessionDialog extends LitElement {
               : nothing}
             ${this.agents.map((a) =>
               a.reachable
-                ? html`<wa-option value=${a.id}>${a.display}</wa-option>`
+                ? html`<wa-option value=${a.id}
+                    >${a.id === this.preselectedAgent ? `${a.display}（上次使用）` : a.display}</wa-option
+                  >`
                 : html`<wa-option value=${a.id} disabled title=${a.cause ?? '不可达'}
                     >${agentUnavailableLabel(a)}</wa-option
                   >`,

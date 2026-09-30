@@ -21,7 +21,7 @@
  * retries: 0：实现缺陷不得被 retry 掩盖。零固定 sleep。
  */
 import { expect, test } from '@playwright/test'
-import { createSession, ErrorCollector, FocusedSession } from './helpers/index'
+import { createSession, ErrorCollector, FocusedSession, getSession } from './helpers/index'
 
 test.describe('agent 对话覆盖', () => {
   test.describe.configure({ retries: 0 })
@@ -35,6 +35,7 @@ test.describe('agent 对话覆盖', () => {
   test.describe('过程折叠：thinking 呈现', () => {
     test('thinking/正文交替回合：thinking 进默认收起的过程折叠、正文独立按序，结算后顺序与内容不丢失', async ({
       page,
+      request,
     }) => {
       test.setTimeout(60_000)
       const detail = new FocusedSession(page)
@@ -88,6 +89,27 @@ test.describe('agent 对话覆盖', () => {
         'and the answer',
       ])
 
+      // 3.5)（fix-webui-qa-round6 3.1）**只点外层折叠**（不点任何二级条目）：
+      // thinking 内容即在场——占位词不再顶替内容（spec「the expanded (default)
+      // view SHALL show the thinking text」）。先收起全部折叠回到缺省态。
+      const allFoldLinks = assistantTurn.locator('div.process-fold button.fold-link')
+      for (let i = 0; i < (await allFoldLinks.count()); i += 1) {
+        const link = allFoldLinks.nth(i)
+        if ((await link.getAttribute('aria-expanded')) === 'true') {
+          const body = link.locator('xpath=following-sibling::div[contains(@class,"fold-body")]')
+          if ((await body.count()) > 0) await link.click()
+        }
+      }
+      await expect(assistantTurn.locator('div.process-fold .fold-body')).toHaveCount(0)
+      for (let i = 0; i < (await allFoldLinks.count()); i += 1) {
+        await allFoldLinks.nth(i).click()
+      }
+      const oneClickText = (
+        await assistantTurn.locator('div.process-fold .fold-body').allInnerTexts()
+      ).join(' | ')
+      expect(oneClickText).toContain('hmm')
+      expect(oneClickText).toContain('hmm again')
+
       // 4) 结算后展开折叠：thinking 内容不丢失（两段都在，且顺序保持）。
       let foldText = ''
       await expect
@@ -116,6 +138,28 @@ test.describe('agent 对话覆盖', () => {
           ),
       )
       expect(runKindsAfterExpand).toEqual(['fold', 'text', 'fold', 'text'])
+
+      // 5)（fix-webui-qa-round6 3.1 review 补口）展开体里的 thinking 文本
+      // **就是会话详情 API 里同条目的 content**（spec「matching the session
+      // detail API for the same entries」）——上面对 'hmm' 的断言若只是恰好
+      // 撞上占位词变化或 fixture 漂移，这里当场爆；「条目 content 完好、
+      // GUI 只出占位词」的原缺陷形态（API 有 'hmm'、DOM 无）也会在这里被
+      // 逐条比对钉死。
+      const { detail: apiDetail } = await getSession(request, key)
+      const apiThinking = (apiDetail?.entries ?? [])
+        .filter((e) => e.element_type === 'thinking')
+        .map((e) => (e.content ?? '').trim())
+        .filter((t) => t.length > 0)
+      expect(apiThinking.length).toBeGreaterThan(0)
+      const renderedThinking = await assistantTurn
+        .locator('.process-item[data-element-type="thinking"] .item-body')
+        .allInnerTexts()
+      for (const content of apiThinking) {
+        expect(
+          renderedThinking.some((t) => t.includes(content)),
+          `rendered thinking bodies must carry the API entry content "${content}"; got: ${JSON.stringify(renderedThinking)}`,
+        ).toBe(true)
+      }
 
       expect(collector.clean()).toEqual([])
     })

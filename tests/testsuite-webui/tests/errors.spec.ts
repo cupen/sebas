@@ -16,10 +16,12 @@
 import { expect, test } from '@playwright/test'
 import {
   createSession,
+  ensureSceneProject,
   ErrorCollector,
   getSession,
   listSessions,
   FocusedSession,
+  ProjectRail,
   Transcript,
   waitListStatus,
   waitStatus,
@@ -169,11 +171,19 @@ test.describe('agent 对话覆盖', () => {
       // 圆点读的是操作者七词 slug —— spawn 失败 = `failed`（raw status 才是
       // `spawn-failed`）。
       //
-      // 行标签：失败会话没有 chat_id/session_id_short，`fullSessionLabel` 落到
-      // 键尾段（= reference），故按 reference 定位而不是 prompt（它不是 rail
-      // 行名）。
-      const reference = decodeURIComponent(key).split('\0').pop()!
-      await detail.expectSessionStatus(reference, 'failed')
+      // （fix-webui-qa-round6 2.2 回归更新）行名链删除键尾段回退后，无消息
+      // 的 spawn-failed 行名 = 可读占位「未命名会话」——旧行为落到键尾段
+      // （= reference），旧定位器按它找行因此失明。改按「失败圆点」定位行
+      // （唯一性由本旅程独有的 failed 会话保证），并顺手钉住新命名合同：
+      // 失败行显可读占位，而非 UUID 截片/键尾段。
+      const { name: projectName } = await ensureSceneProject(request)
+      const rail = new ProjectRail(page)
+      await rail.ensureProjectExpanded(projectName)
+      const failedRow = page
+        .locator('sebas-project-rail li.session-item')
+        .filter({ has: page.locator('.session-dot[data-status="failed"]') })
+      await expect(failedRow).toHaveCount(1)
+      await expect(failedRow.locator('.session-name')).toHaveText('未命名会话')
 
       expect(collector.clean()).toEqual([])
     })

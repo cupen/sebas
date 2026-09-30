@@ -255,6 +255,25 @@ describe('composer is pure follow-up (4.1)', () => {
     editable.remove()
   })
 
+  // （fix-webui-qa-round6 5.1）等价模式的等价声明走**选项 helper text**
+  // （wa-option title）通道：composer 打开模式下拉时，allow/auto 两个选项
+  // 的悬浮解释各自点名对方等价（后端同档 bypass），操作者无需读文档即可
+  // 区分。选项标签保持裸词、发送值不变。
+  it('mode menu states allow/auto equivalence in the option helper text (round6 5.1)', async () => {
+    const el = await mount({ ...focus, modeEditable: true, currentMode: 'ask' })
+    const sel = el.shadowRoot?.querySelector('[data-testid="mode-switch"]')
+    const optionEls = Array.from(sel?.querySelectorAll('wa-option') ?? [])
+    const titleOf = (v: string) =>
+      optionEls.find((o) => o.getAttribute('value') === v)?.getAttribute('title') ?? ''
+    expect(titleOf('allow')).toContain('与 Auto 等价')
+    expect(titleOf('auto')).toContain('与 Allow 等价')
+    // 标签保持裸词（等价声明不进标签）。
+    const labelOf = (v: string) =>
+      optionEls.find((o) => o.getAttribute('value') === v)?.textContent?.trim()
+    expect(labelOf('allow')).toBe('Allow')
+    expect(labelOf('auto')).toBe('Auto')
+  })
+
   it('composer mode dropdown shares the MODE_OPTIONS vocabulary with the creation dialog (4.1)', async () => {
     // polish-workbench-walkthrough-ux 4.1：composer 权限模式下拉与创建弹窗
     // 同源渲染——选项文案来自共享 MODE_OPTIONS，且带 aria-label「权限模式」。

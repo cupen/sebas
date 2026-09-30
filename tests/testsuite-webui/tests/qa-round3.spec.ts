@@ -795,7 +795,9 @@ test.describe('fix-webui-qa-round3 review 补层', () => {
           { timeout: 20_000 },
         )
         .toBe(2)
-      await expect(thinkingItems.first().locator('button.fold-link .item-kind-icon')).toBeVisible()
+      // （fix-webui-qa-round6 3.1）thinking 条目不再是二级折叠（内容默认
+      // 在场），glyph 直接挂在条目标题行上——可区分性合同不变。
+      await expect(thinkingItems.first().locator('.item-kind-icon')).toBeVisible()
 
       expect(collector.clean()).toEqual([])
     })

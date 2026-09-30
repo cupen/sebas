@@ -128,6 +128,50 @@ test.describe('agent mode 选择', () => {
     expect(collector.clean()).toEqual([])
   })
 
+  // fix-webui-qa-round6 5.1（spec「等价模式有标注」浏览器半边）：claude 驱动
+  // 的会话上 allow 与 auto 同档（bypass）——操作员打开 composer 模式菜单时，
+  // 两个选项的 helper text（悬浮 title）必须互相点名等价；标签保持裸词、
+  // 发送值与门控语义不受标注影响（前端单测 workbench-composer.test.ts 钉词
+  // 汇，本旅程钉真实下拉里的呈现）。
+  test('composer mode menu states the allow/auto equivalence in option helper text (round6 5.1)', async ({
+    page,
+    request,
+  }) => {
+    await resetState(request)
+    const key = await createSession(request, { prompt: 'hello', mode: 'ask' })
+    await waitStatus(request, key, ['done'])
+
+    await page.goto(`/sessions/${key}`)
+    const modeSwitch = page.locator(
+      'sebas-workbench-composer wa-select[data-testid="mode-switch"]',
+    )
+    await expect(modeSwitch).toBeVisible()
+
+    // 打开真实下拉（spec 场景字面：operator opens the composer mode menu）。
+    await modeSwitch.click()
+    const options = modeSwitch.locator('wa-option')
+    await expect(options).toHaveCount(4, { timeout: 10_000 })
+
+    const meta = await options.evaluateAll((els) =>
+      els.map((el) => ({
+        value: el.getAttribute('value'),
+        title: el.getAttribute('title') ?? '',
+        label: (el.textContent ?? '').trim(),
+      })),
+    )
+    const allow = meta.find((o) => o.value === 'allow')
+    const auto = meta.find((o) => o.value === 'auto')
+    expect(allow?.title).toContain('与 Auto 等价')
+    expect(auto?.title).toContain('与 Allow 等价')
+    // 标签保持裸词（等价声明走 helper text，不进标签）。
+    expect(allow?.label).toBe('Allow')
+    expect(auto?.label).toBe('Auto')
+
+    // 收起，不做选择（change 只在真选择时派发）。
+    await page.keyboard.press('Escape')
+    expect(collector.clean()).toEqual([])
+  })
+
   test.describe('composer 模式下拉形态', () => {
     test('composer mode dropdown options stay single-line (round3 6.2)', async ({
       page,

@@ -1741,7 +1741,7 @@ describe('termination notice naming (fix-webui-qa-defects 7.3)', () => {
     el.remove()
   })
 
-  it('falls back through the rail chain (short id) when no preview exists', async () => {
+  it('falls back to the readable unnamed label when no preview exists (round6 2.2)', async () => {
     apiMocks.summary.mockResolvedValue({
       ...focusedSummary(),
       recent_sessions: [
@@ -1762,7 +1762,10 @@ describe('termination notice naming (fix-webui-qa-defects 7.3)', () => {
     wsMocks.emit({ type: 'session.removed', session_id: 'oc_live%00' })
     await settle(el)
     const toast = notices.find((n) => n.message.includes('已终止'))
-    expect(toast?.message).toContain('aaaa0009')
+    // （fix-webui-qa-round6 2.2）无预览（零消息）行命名 = 「未命名会话」，
+    // 不再落短 id 截片；原始键尾段也不上屏。
+    expect(toast?.message).toContain('未命名会话')
+    expect(toast?.message).not.toContain('aaaa0009')
     expect(toast?.message).not.toContain('web-1789abcde-1')
     unsubscribe()
     resetNotices()
@@ -2354,8 +2357,9 @@ describe('fix-webui-qa-round3 (D6 rename sync / D10 focus URL)', () => {
       }),
     )
     await el.updateComplete
-    // 行的预览缺位：清名后命名链接到 session_id_short（row() 缺省 aaaa0001）。
-    expect(name()!.textContent?.trim()).toBe('aaaa0001')
+    // 行的预览缺位：清名后命名链落到「未命名会话」（fix-webui-qa-round6
+    // 2.2——短 id 截片不再是行名）。
+    expect(name()!.textContent?.trim()).toBe('未命名会话')
     el.remove()
   })
 

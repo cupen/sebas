@@ -1255,6 +1255,80 @@ describe('add-agent-settings-and-session-titles：Agents 分区（/api/agents*�
     el.remove()
   })
 
+  // （fix-webui-qa-round6 4.1）保存读取**渲染中字段**的实况值：即使 @input
+  // 事件链在任何一环丢失（Web Awesome 转发层——QA GUI 实测宿主与内层 input
+  // 的 value 都已同步、保存仍报「agent id 必填」），保存仍以 DOM 为准。
+  it('save reads the live DOM value even when no input event fired (round6 4.1)', async () => {
+    apiMocks.agentsCreate.mockResolvedValue({ created: 'liveclaud' })
+    const el = await mount()
+    await goto(el, 4)
+    waButtons(el)
+      .find((b) => b.textContent?.includes('新建 agent'))!
+      .click()
+    await settle(el)
+    const dlg = dialogByLabel(el, '新建 agent')
+    // 直接设宿主 value，**不派发** input 事件——组件状态保持空串。
+    const host = dlg.querySelector<HTMLInputElement>('wa-input[data-testid="agent-form-id"]')!
+    expect(host).toBeTruthy()
+    host.value = 'liveclaud'
+    await el.updateComplete
+    const save = waButtonsIn(dlg).find((b) => b.textContent?.trim() === '保存')!
+    save.click()
+    await settle(el)
+    expect(apiMocks.agentsCreate).toHaveBeenCalledTimes(1)
+    expect(apiMocks.agentsCreate).toHaveBeenCalledWith('liveclaud', {
+      driver: 'claude',
+      path: 'claude',
+      display: null,
+      args: null,
+      work_dir: null,
+      sessions_dir: null,
+    })
+    el.remove()
+  })
+
+  // （fix-webui-qa-round6 4.2）关闭（取消）后同一设置会话内再点「＋新建
+  // agent」：全新空表单打开、字段可写——重开不再被 hide 动画竞态吞掉。
+  it('the create form reopens fresh after close in the same settings session (round6 4.2)', async () => {
+    const el = await mount()
+    await goto(el, 4)
+    const openForm = async () => {
+      waButtons(el)
+        .find((b) => b.textContent?.includes('新建 agent'))!
+        .click()
+      await settle(el)
+    }
+    await openForm()
+    const first = dialogByLabel(el, '新建 agent')
+    const firstId = first.querySelector<HTMLInputElement>('wa-input[data-testid="agent-form-id"]')!
+    expect(firstId).toBeTruthy()
+    firstId.value = 'something'
+    await el.updateComplete
+    // 取消关闭：agentForm=null → 对话框整棵移出 DOM（条件渲染）。
+    waButtonsIn(first)
+      .find((b) => b.textContent?.trim() === '取消')!
+      .click()
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('wa-dialog[label="新建 agent"]')).toBeNull()
+
+    // 再开：全新空表单，id 字段渲染且为空（不残留上次输入）。
+    await openForm()
+    const second = dialogByLabel(el, '新建 agent')
+    const secondId = second.querySelector<HTMLInputElement>('wa-input[data-testid="agent-form-id"]')!
+    expect(secondId).toBeTruthy()
+    expect(secondId.value).toBe('')
+    // 字段可写（设值后保存带值提交）。
+    secondId.value = 'reopened'
+    await el.updateComplete
+    apiMocks.agentsCreate.mockResolvedValue({ created: 'reopened' })
+    waButtonsIn(second)
+      .find((b) => b.textContent?.trim() === '保存')!
+      .click()
+    await settle(el)
+    expect(apiMocks.agentsCreate).toHaveBeenCalledWith('reopened', expect.anything())
+    el.remove()
+  })
+
   it('create form rejects the reserved native id without a request', async () => {
     const el = await mount()
     await goto(el, 4)
@@ -1665,9 +1739,31 @@ describe('sebas-settings-modal closing', () => {
   it('clicking the backdrop (not the panel) closes it', async () => {
     const el = await mount()
     const overlay = el.shadowRoot!.querySelector('.overlay') as HTMLElement
+    // 真实遮罩点击 = 同一指针序列的 pointerdown + click 都落在遮罩上。
+    overlay.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, composed: true }))
     overlay.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }))
     await el.updateComplete
     expect(el.open).toBe(false)
+    el.remove()
+  })
+
+  // （fix-webui-qa-round6 4.4）按下不在遮罩上的 click（面板内子元素在
+  // mousedown→click 之间被移除后的重定向）不关闭——「无操作自关」的候选
+  // 机制在这里被掐断。
+  it('a click whose pointerdown did not start on the backdrop does not close it (round6 4.4)', async () => {
+    const el = await mount()
+    const overlay = el.shadowRoot!.querySelector('.overlay') as HTMLElement
+    // 只有 click，没有遮罩上的 pointerdown（重定向序列）。
+    overlay.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }))
+    await el.updateComplete
+    expect(el.open).toBe(true)
+    // 反向序列（pointerdown 在面板内、click 冒到遮罩）同样不关：面板内
+    // pointerdown 把锚点置 false。
+    const panel = el.shadowRoot!.querySelector('.panel') as HTMLElement
+    panel.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, composed: true }))
+    overlay.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }))
+    await el.updateComplete
+    expect(el.open).toBe(true)
     el.remove()
   })
 

@@ -107,4 +107,55 @@ test.describe('审批卡片旅程', () => {
       expect(collector.clean()).toEqual([])
     })
   })
+
+  // fix-webui-qa-round6（permission-flow「每一轮工具环的审批请求都到达审批
+  // 面」浏览器半边）：已决策过一轮的同会话，第二轮 `perm` 的审批卡必须**原
+  // 地再次渲染**（WS 推送路径、无刷新），泊车期间 rail 当前行亮「等待」徽标
+  // ——回归钉：第二轮请求丢失（读模型空、不出卡、回合永久挂起）在这里当场
+  // 爆。进程级与 API 读模型半边在 tests/testsuite_e2e_test.rs 的
+  // second_turn_permission_request_still_parks_and_is_decidable。
+  test.describe('多轮审批不丢', () => {
+    test('second perm turn renders its approval card again, rail shows the waiting badge', async ({
+      page,
+    }) => {
+      const { detail, cards } = await openAndTriggerPerm(page)
+
+      // 第一轮：出卡 → allow once → 落定（既有合同）。
+      await expect(cards.all().first()).toBeVisible({ timeout: 15_000 })
+      await cards.allowOnce().click()
+      await expect(cards.all()).toHaveCount(0, { timeout: 15_000 })
+      await detail.expectFoldedText('perm done')
+      await detail.expectStatus('done')
+
+      // 第二轮（同一会话、同一页面、无刷新）：审批卡必须再次出现。
+      await detail.sendFollowUp('perm')
+      await expect(cards.all().first()).toBeVisible({ timeout: 15_000 })
+      await expect(cards.card().locator('.head .tool')).toHaveText('Bash')
+
+      // 泊车可观察面的另一半：rail 当前行亮 waiting（status_slug=waiting +
+      // 「等待」徽标）——「泊车了但 rail 看不出在等人」同为 violation。
+      const currentRow = page.locator('sebas-project-rail li.session-item.current')
+      await expect(currentRow).toHaveClass(/waiting/, { timeout: 15_000 })
+      await expect(currentRow.locator('[data-testid="session-waiting"]')).toBeVisible()
+
+      // 同一面可决策：allow once → 第二回合照常收尾，两回合的工具都落了。
+      await cards.allowOnce().click()
+      await expect(cards.all()).toHaveCount(0, { timeout: 15_000 })
+      await detail.expectStatus('done', 20_000)
+      await expect
+        .poll(
+          async () => {
+            await detail.expandAllFolds()
+            return detail.turnWith('perm done').count()
+          },
+          { timeout: 20_000 },
+        )
+        .toBe(2)
+
+      // 决策落定后 waiting 面退场。
+      await expect(currentRow).not.toHaveClass(/waiting/, { timeout: 15_000 })
+
+      expect(collector.clean()).toEqual([])
+    })
+  })
 })

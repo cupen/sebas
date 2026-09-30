@@ -334,6 +334,14 @@ export class SebasSettingsModal extends LitElement {
   @state() private agentsCatalog: AgentKindInfo[] | null = null
   @state() private agentsError = ''
   @state() private agentsBusy = false
+  /**
+   * （fix-webui-qa-round6 4.4）遮罩关闭的按下锚点：当前指针序列的
+   * pointerdown 是否落在遮罩上。click 只在与该锚点同时成立时才关闭——
+   * 面板内子元素在按下与抬起之间被移除时，click 重定向到遮罩不再误关
+   * （QA 现象 D「对话框无操作自关」的候选机制之一）。非响应式即可：
+   * 只在事件处理器间传递，不参与渲染。
+   */
+  private overlayPointerDownOnBackdrop = false
   /** 行动作的内联结果（删除/保存成功提示；错误走表单 error 或 callout）。 */
   @state() private agentAction: { ok: boolean; text: string } | null = null
   /**
@@ -2580,31 +2588,69 @@ export class SebasSettingsModal extends LitElement {
     return exists ? `目录中已存在 agent「${id}」——保存将覆盖它的启动定义（删除过的 id 会借此复活）。` : null
   }
 
+  /**
+   * （fix-webui-qa-round6 4.1）表单实况值读取：校验与保存前从**渲染中的
+   * wa-input 宿主**实时读值（shadowRoot 内层 input → 宿主 value → 组件状态
+   * 逐级回退），与 rail 重命名对话框的 renameInputValue 同一模式。此前只信
+   * @input 事件聚合的组件状态——Web Awesome 的 input 转发在任何一环丢失
+   * （QA GUI 实测：宿主与内层 input 的 value 都已同步、保存仍报「agent id
+   * 必填」），表单状态与 DOM 脱节时这里以 DOM 为准。
+   */
+  private agentFormFieldValue(testid: string, fallback: string): string {
+    const host = this.shadowRoot?.querySelector<HTMLInputElement>(
+      `wa-input[data-testid="${testid}"]`,
+    )
+    if (host) {
+      // 宿主 value 是实况值（Web Awesome 把内层 input 的输入同步到宿主
+      // 属性——QA GUI 实测两侧一致）；仅宿主缺席时才退内层 input。绝不因
+      // 内层 input 尚未同步（挂载期/测试环境属性未冲刷）让空串遮蔽宿主值。
+      if (host.value != null) return String(host.value)
+      const native = host.shadowRoot?.querySelector<HTMLInputElement>('input')
+      if (native?.value != null) return native.value
+    }
+    return fallback
+  }
+
+  /** 提交口径的表单快照：DOM 实况值覆盖组件状态（4.1）。 */
+  private agentFormLiveSnapshot(form: NonNullable<typeof this.agentForm>): NonNullable<typeof this.agentForm> {
+    return {
+      ...form,
+      id: this.agentFormFieldValue('agent-form-id', form.id),
+      display: this.agentFormFieldValue('agent-form-display', form.display),
+      path: this.agentFormFieldValue('agent-form-path', form.path),
+      commandText: this.agentFormFieldValue('agent-form-command', form.commandText),
+      sessionsDir: this.agentFormFieldValue('agent-form-sessions', form.sessionsDir),
+      workDir: this.agentFormFieldValue('agent-form-work', form.workDir),
+      argsText: this.agentFormFieldValue('agent-form-args', form.argsText),
+    }
+  }
+
   private async submitAgentForm(): Promise<void> {
     const form = this.agentForm
     if (!form || this.agentsBusy) return
-    const id = form.id.trim()
+    const live = this.agentFormLiveSnapshot(form)
+    const id = live.id.trim()
     if (form.mode === 'create') {
       if (!id) {
         this.agentForm = {
-          ...form,
+          ...live,
           error: 'agent id 必填（且不能是保留 id "native"）',
         }
         return
       }
       if (id === 'native') {
-        this.agentForm = { ...form, error: '"native" 是内置内核保留 id，不可占用' }
+        this.agentForm = { ...live, error: '"native" 是内置内核保留 id，不可占用' }
         return
       }
     }
-    if (form.shape === 'custom') {
-      const argv = form.commandText.trim().split(/\s+/).filter((s) => s.length > 0)
+    if (live.shape === 'custom') {
+      const argv = live.commandText.trim().split(/\s+/).filter((s) => s.length > 0)
       if (argv.length === 0) {
-        this.agentForm = { ...form, error: '自定义 ACP 需要至少一个命令（argv[0]）' }
+        this.agentForm = { ...live, error: '自定义 ACP 需要至少一个命令（argv[0]）' }
         return
       }
     }
-    const payload = this.agentFormPayload(form)
+    const payload = this.agentFormPayload(live)
     this.agentsBusy = true
     try {
       if (form.mode === 'create') {
@@ -2627,7 +2673,7 @@ export class SebasSettingsModal extends LitElement {
       window.dispatchEvent(new Event('sebas:refetch'))
     } catch (err) {
       const message = errorText(err)
-      this.agentForm = { ...form, error: message }
+      this.agentForm = { ...live, error: message }
     } finally {
       this.agentsBusy = false
     }
@@ -2652,19 +2698,27 @@ export class SebasSettingsModal extends LitElement {
   }
 
   /** Agents 对话框群（5.1）：新建/编辑表单 + 删除二次确认；全部带 wa-hide
-   *  来源守卫（与其余分区对话框同款）。 */
+   *  来源守卫（与其余分区对话框同款）。
+   *
+   *  （fix-webui-qa-round6 4.2）两个对话框都改为**条件渲染**（关闭即整棵
+   *  移出 DOM，与会话创建对话框 round5 5.3 同一模式）：WaDialog 的
+   *  handleOpenChange 在「open 翻 false 时强制 open=true 再 requestClose」
+   *  ——hide 动画窗口内把 open 翻回 true 会命中 no-op 分支，随后的 hide
+   *  收尾把对话框藏掉：重开点击被整体吞掉（QA 现象「表单随后无法再打开，
+   *  多次点击无效」）。条件渲染让每次打开都是全新元素 + showModal，
+   *  重开竞态与 hide 期顶层遮罩吞点击一并消除。 */
   private renderAgentDialogs() {
     const form = this.agentForm
     return html`
-      <wa-dialog
-        label=${form?.mode === 'edit' ? `编辑 agent ${form.id}` : '新建 agent'}
-        ?open=${form !== null}
-        @wa-hide=${guardedHide(() => (this.agentForm = null))}
-        class="user-create"
-      >
-        ${form === null
-          ? nothing
-          : html`
+      ${form === null
+        ? nothing
+        : html`
+            <wa-dialog
+              label=${form.mode === 'edit' ? `编辑 agent ${form.id}` : '新建 agent'}
+              open
+              @wa-hide=${guardedHide(() => (this.agentForm = null))}
+              class="user-create"
+            >
               ${form.error
                 ? html`<div class="callout callout-error" role="alert" data-testid="agent-form-error">
                     ${form.error}
@@ -2673,6 +2727,7 @@ export class SebasSettingsModal extends LitElement {
               <div class="editor-grid">
                 <wa-input
                   label="Agent id"
+                  data-testid="agent-form-id"
                   ?disabled=${form.mode === 'edit'}
                   .value=${form.id}
                   @input=${(ev: Event) =>
@@ -2683,6 +2738,7 @@ export class SebasSettingsModal extends LitElement {
                 ></wa-input>
                 <wa-input
                   label="显示名（可选）"
+                  data-testid="agent-form-display"
                   .value=${form.display}
                   @input=${(ev: Event) =>
                     (this.agentForm = {
@@ -2694,6 +2750,7 @@ export class SebasSettingsModal extends LitElement {
                   ? html`
                       <wa-select
                         label="启动定义"
+                        data-testid="agent-form-shape"
                         value=${form.shape}
                         hoist
                         @change=${(ev: Event) =>
@@ -2711,6 +2768,7 @@ export class SebasSettingsModal extends LitElement {
                   : html`
                       <wa-select
                         label="形态"
+                        data-testid="agent-form-shape"
                         value=${form.shape}
                         hoist
                         @change=${(ev: Event) =>
@@ -2728,6 +2786,7 @@ export class SebasSettingsModal extends LitElement {
                   ? html`
                       <wa-input
                         label="二进制路径"
+                        data-testid="agent-form-path"
                         placeholder="claude"
                         .value=${form.path}
                         @input=${(ev: Event) =>
@@ -2742,6 +2801,7 @@ export class SebasSettingsModal extends LitElement {
                   ? html`
                       <wa-input
                         label="命令（argv，空格分隔）"
+                        data-testid="agent-form-command"
                         placeholder="cursor-agent acp"
                         .value=${form.commandText}
                         @input=${(ev: Event) =>
@@ -2763,6 +2823,7 @@ export class SebasSettingsModal extends LitElement {
                   ? html`
                       <wa-input
                         label="会话目录（可选）"
+                        data-testid="agent-form-sessions"
                         placeholder="~/.claude/sessions"
                         .value=${form.sessionsDir}
                         @input=${(ev: Event) =>
@@ -2775,6 +2836,7 @@ export class SebasSettingsModal extends LitElement {
                   : nothing}
                 <wa-input
                   label="工作目录（可选）"
+                  data-testid="agent-form-work"
                   placeholder="agent 子进程的工作目录"
                   .value=${form.workDir}
                   @input=${(ev: Event) =>
@@ -2785,6 +2847,7 @@ export class SebasSettingsModal extends LitElement {
                 ></wa-input>
                 <wa-input
                   label="启动参数（空格分隔）"
+                  data-testid="agent-form-args"
                   placeholder="--scenario thinking"
                   .value=${form.argsText}
                   @input=${(ev: Event) =>
@@ -2803,45 +2866,50 @@ export class SebasSettingsModal extends LitElement {
                     </div>`
                   : nothing}
               </div>
-            `}
-        <wa-button slot="footer" appearance="plain" @click=${() => (this.agentForm = null)}>
-          取消
-        </wa-button>
-        <wa-button
-          slot="footer"
-          variant="brand"
-          ?disabled=${this.agentsBusy}
-          @click=${() => void this.submitAgentForm()}
-        >
-          ${this.agentsBusy ? '保存中…' : '保存'}
-        </wa-button>
-      </wa-dialog>
+              <wa-button slot="footer" appearance="plain" @click=${() => (this.agentForm = null)}>
+                取消
+              </wa-button>
+              <wa-button
+                slot="footer"
+                variant="brand"
+                data-testid="agent-form-save"
+                ?disabled=${this.agentsBusy}
+                @click=${() => void this.submitAgentForm()}
+              >
+                ${this.agentsBusy ? '保存中…' : '保存'}
+              </wa-button>
+            </wa-dialog>
+          `}
 
-      <wa-dialog
-        label="删除 agent"
-        ?open=${this.agentDelete !== null}
-        @wa-hide=${guardedHide(() => (this.agentDelete = null))}
-      >
-        <p class="dialog-text">
-          删除 agent <strong>${this.agentDelete?.id ?? ''}</strong>？已建会话不受影响
-          （继续到自然结束）；引用它的项目默认 agent 会被清除。之后在创建会话下拉
-          中立即可见。
-        </p>
-        ${this.agentDelete?.error
-          ? html`<div class="callout callout-error" role="alert">${this.agentDelete.error}</div>`
-          : nothing}
-        <wa-button slot="footer" appearance="plain" @click=${() => (this.agentDelete = null)}>
-          取消
-        </wa-button>
-        <wa-button
-          slot="footer"
-          variant="danger"
-          ?disabled=${this.agentsBusy}
-          @click=${() => void this.confirmAgentDelete()}
-        >
-          删除
-        </wa-button>
-      </wa-dialog>
+      ${this.agentDelete === null
+        ? nothing
+        : html`
+            <wa-dialog
+              label="删除 agent"
+              open
+              @wa-hide=${guardedHide(() => (this.agentDelete = null))}
+            >
+              <p class="dialog-text">
+                删除 agent <strong>${this.agentDelete.id}</strong>？已建会话不受影响
+                （继续到自然结束）；引用它的项目默认 agent 会被清除。之后在创建会话下拉
+                中立即可见。
+              </p>
+              ${this.agentDelete.error
+                ? html`<div class="callout callout-error" role="alert">${this.agentDelete.error}</div>`
+                : nothing}
+              <wa-button slot="footer" appearance="plain" @click=${() => (this.agentDelete = null)}>
+                取消
+              </wa-button>
+              <wa-button
+                slot="footer"
+                variant="danger"
+                ?disabled=${this.agentsBusy}
+                @click=${() => void this.confirmAgentDelete()}
+              >
+                删除
+              </wa-button>
+            </wa-dialog>
+          `}
     `
   }
 
@@ -3482,9 +3550,22 @@ export class SebasSettingsModal extends LitElement {
     return html`
       <div
         class="overlay"
+        @pointerdown=${(e: PointerEvent) => {
+          // （fix-webui-qa-round6 4.4）真遮罩点击的按下锚点：只认 pointerdown
+          // 也落在遮罩上的 click 序列。面板内子元素在 mousedown→click 之间被
+          // Lit 重渲移除时，click 会重定向到幸存祖先（= 遮罩）——单靠
+          // target===currentTarget 会把一次面板内交互误判成「点遮罩关闭」
+          //（QA 现象 D「对话框无操作自关」的候选机制）。
+          this.overlayPointerDownOnBackdrop = e.target === e.currentTarget
+        }}
         @click=${(e: MouseEvent) => {
-          // 点在遮罩（而非面板）上才关闭。
-          if (e.target === e.currentTarget) this.requestClose()
+          // 点在遮罩（而非面板）上才关闭；且按下锚点也在遮罩上（同一次
+          // 指针序列），重定向的 click 不再触发关闭。
+          if (
+            e.target === e.currentTarget &&
+            this.overlayPointerDownOnBackdrop
+          )
+            this.requestClose()
         }}
       >
         <div class="panel" role="dialog" aria-modal="true" aria-label="设置">

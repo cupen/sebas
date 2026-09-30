@@ -2154,14 +2154,29 @@ export class SebasTranscriptView extends LitElement {
    * {@link renderViewAllDialog}）。
    */
   private renderProcessItem(it: ProcessItem) {
-    const id = `item:${it.position}`
-    const open = this.foldOpen.get(id) === true
     const { label, full } = processItemLabel(it)
     // （fix-webui-qa-round3 D1）thinking 条目的二级折叠标题标明 thinking：
     // glyph + data-element-type 已有词，收起行再加 thinking 专用 glyph——
     // 与工具条目（title 词）在视觉上分开（spec「thinking 段的第二级折叠
     // 标题 SHALL 标明 thinking」）。
     const isThinking = it.elementType === 'thinking'
+    // （fix-webui-qa-round6 3.1，design D4）thinking 条目按 element_type 分支
+    // 补内容渲染：展开的过程折叠内**默认**显示条目携带的 thinking 文本（与
+    // markdown 同层，不再要求对二级折叠的第二次点击）——占位词「thinking」
+    // 只作为条目标签保留在标题行，绝不再顶替内容。
+    if (isThinking) {
+      return html`
+        <div class="process-item" data-position=${it.position} data-element-type=${it.elementType}>
+          <span class="item-link" data-testid="thinking-item-head">
+            <span class="kind-icon item-kind-icon" aria-hidden="true">${icon('thinking', 10)}</span>
+            <span class="item-title">${label}</span>
+          </span>
+          ${this.renderItemBody(it)}
+        </div>
+      `
+    }
+    const id = `item:${it.position}`
+    const open = this.foldOpen.get(id) === true
     return html`
       <div class="process-item" data-position=${it.position} data-element-type=${it.elementType}>
         <button
@@ -2172,7 +2187,6 @@ export class SebasTranscriptView extends LitElement {
           title=${full ?? nothing}
           @click=${this.toggleFold(id)}
         >
-          ${isThinking ? html`<span class="kind-icon item-kind-icon" aria-hidden="true">${icon('thinking', 10)}</span>` : nothing}
           <span class="item-title">${label}</span>
         </button>
         ${open ? this.renderItemBody(it) : nothing}

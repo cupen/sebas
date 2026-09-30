@@ -155,10 +155,13 @@ test.describe.serial('Settings → Agents 目录 webui 全链路', () => {
     // 4) 创建对话框即时可选（免重启生效的可观察面；reachable → 可选不禁用）。
     await rail.openNewSessionDialog(projectName)
     const agentSelect = rail.newSessionDialog().locator('[data-testid="dialog-agent-select"]')
-    const optionValues = await agentSelect
-      .locator('wa-option')
-      .evaluateAll((els) => els.map((el) => el.getAttribute('value')))
-    expect(optionValues).toContain(AGENT_ID)
+    // 目录随弹窗打开异步拉取（占位 wa-option value="" 先在场）——轮询等
+    // ui-fake 进清单，不与 loadAgents 竞速。
+    await expect
+      .poll(async () =>
+        agentSelect.locator('wa-option').evaluateAll((els) => els.map((el) => el.getAttribute('value'))),
+      )
+      .toContain(AGENT_ID)
     await expect(agentSelect.locator(`wa-option[value="${AGENT_ID}"]`)).not.toHaveAttribute(
       'disabled',
     )

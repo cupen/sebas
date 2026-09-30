@@ -32,6 +32,10 @@ export default defineConfig({
     /auth\.spec\.ts/,
     /auth-setup\.spec\.ts/,
     /users-admin\.spec\.ts/,
+    // agents-gate 只在 auth-on 形态跑（其文件头契约 + playwright.auth.config.ts
+    // testMatch 同名单）；auth=off 的主沙箱零用户，beforeAll 的 admin/admin
+    // 登录必 401——漏列曾让主配置全量跑必红（2 failed + 6 did-not-run）。
+    /agents-gate\.spec\.ts/,
     /deployment\.spec\.ts/,
     /approval-detached\.spec\.ts/,
     /singleprocess-dead-core\.spec\.ts/,

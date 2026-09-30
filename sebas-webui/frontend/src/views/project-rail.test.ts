@@ -216,7 +216,9 @@ describe('sebas-project-rail (sidebar tree)', () => {
 
     const items = [...el.shadowRoot!.querySelectorAll('li.session-item')]
     expect(items).toHaveLength(2)
-    expect(el.shadowRoot!.textContent).toContain('aaaa0001')
+    // （fix-webui-qa-round6 2.2）占位行名是可读的「未命名会话」，不再是
+    // 短 id 截片。
+    expect(el.shadowRoot!.textContent).toContain('未命名会话')
     expect(items[0]!.querySelector('.session-dot')?.getAttribute('data-status')).toBe('working')
     expect(items[1]!.querySelector('.session-dot')?.getAttribute('data-status')).toBe('done')
     el.remove()
@@ -389,7 +391,8 @@ describe('inbox removal (rail-declutter-unread 4.1)', () => {
     await el.updateComplete
     const items = [...el.shadowRoot!.querySelectorAll('li.session-item')]
     expect(items).toHaveLength(2)
-    expect(items.every((i) => i.textContent!.includes('aaaa'))).toBe(true)
+    // （fix-webui-qa-round6 2.2）零消息行显示「未命名会话」。
+    expect(items.every((i) => i.textContent!.includes('未命名会话'))).toBe(true)
     el.remove()
   })
 
@@ -783,7 +786,7 @@ describe('session naming by first prompt (rail-declutter-unread 3.4)', () => {
     el.remove()
   })
 
-  it('zero-turn placeholders fall back to the short identifier', async () => {
+  it('zero-turn placeholders show the readable unnamed label (round6 2.2)', async () => {
     const placeholder = row({
       project_id: 'proj-alpha',
       prompt_preview: null,
@@ -793,9 +796,11 @@ describe('session naming by first prompt (rail-declutter-unread 3.4)', () => {
     const el = await mount()
     ;(el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).click()
     await el.updateComplete
+    // （fix-webui-qa-round6 2.2）占位行显示「未命名会话」而非 UUID 截断；
+    // 首条消息落地后经 session.updated 的 prompt_preview 切到预览（同链）。
     expect(
       el.shadowRoot!.querySelector('li.session-item .session-name')?.textContent,
-    ).toBe('aaaa0009')
+    ).toBe('未命名会话')
     el.remove()
   })
 
@@ -1509,7 +1514,8 @@ describe('creation focus chain (workbench-rail-polish 3.1/3.2)', () => {
     const placeholder = el.shadowRoot!.querySelector('li.session-item.current')
     expect(placeholder).toBeTruthy()
     expect(placeholder!.getAttribute('aria-current')).toBe('true')
-    expect(placeholder!.textContent).toContain(placeholderRow.session_id_short!)
+    // （fix-webui-qa-round6 2.2）新占位行名是可读的「未命名会话」。
+    expect(placeholder!.textContent).toContain('未命名会话')
     // 占位行就挂在被创建项目（alpha）的组下——保持展开，新行立即可见。
     const alphaLi = (el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).closest('li')!
     expect(alphaLi.querySelector('li.session-item.current')).toBe(placeholder)
@@ -1697,6 +1703,23 @@ describe('session naming by operator label (5.1)', () => {
     // 清空（null/缺省）→ 首条 prompt 预览（旧行为完全一致）。
     expect(fullSessionLabel({ ...named, label: null })).toBe('first prompt')
     expect(fullSessionLabel({ ...named, label: undefined })).toBe('first prompt')
+  })
+
+  // （fix-webui-qa-round6 2.2）零消息占位行显示可读的「未命名会话」，不再
+  // 显示 UUID 截断/键尾段；首条消息落地（prompt_preview 到达）即切预览。
+  it('zero-message placeholder rows show the readable unnamed label (round6 2.2)', async () => {
+    const placeholder = row({ project_id: 'proj-alpha' })
+    expect(fullSessionLabel(placeholder)).toBe('未命名会话')
+    expect(
+      fullSessionLabel({
+        ...placeholder,
+        session_id_short: '5fc41539-…6805dd57',
+      }),
+    ).toBe('未命名会话')
+    // 首条消息落地 → 预览顶上（live 更新的同一链）。
+    expect(
+      fullSessionLabel({ ...placeholder, prompt_preview: 'hello' }),
+    ).toBe('hello')
   })
 
   it('the rename action sets the label via the seam and refreshes (5.1)', async () => {

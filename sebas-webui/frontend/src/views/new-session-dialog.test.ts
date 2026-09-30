@@ -178,6 +178,26 @@ describe('sebas-new-session-dialog', () => {
     expect(detail.mode).toBe('ask')
   })
 
+  // （fix-webui-qa-round6 5.2）预选 agent 标注「上次使用」：标注锚定打开时
+  // 的预选（项目 default_agent），操作者改选不移动标注；其它选项不带标注。
+  it('the preselected agent option carries the last-used tag, anchored at open (round6 5.2)', async () => {
+    const el = await mount({ open: true, defaultAgent: 'claude' })
+    const agentSel = el.shadowRoot!.querySelector('[data-testid="dialog-agent-select"]')!
+    const labelOf = (v: string) => {
+      const o = agentSel.querySelector(`wa-option[value="${v}"]`)
+      return o?.textContent?.trim() ?? null
+    }
+    // 预选 claude（项目 default_agent）→ 标注在它身上。
+    expect(agentSel.value).toBe('claude')
+    expect(labelOf('claude')).toContain('上次使用')
+    expect(labelOf('codex')).not.toContain('上次使用')
+
+    // 操作者改选 claude-empty：标注不跟选，仍在预选那个上。
+    await pick(el, 'dialog-agent-select', 'claude-empty')
+    expect(labelOf('claude')).toContain('上次使用')
+    expect(labelOf('codex')).not.toContain('上次使用')
+  })
+
   it('choosing a permission mode rides on the confirm detail', async () => {
     const el = await mount({ open: true, defaultAgent: 'claude' })
     await pick(el, 'dialog-mode-select', 'edit')

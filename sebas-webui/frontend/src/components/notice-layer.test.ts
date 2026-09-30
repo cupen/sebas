@@ -8,9 +8,9 @@
  *   焦点漫游——design Risks 约定）。
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { installWaDomPolyfills } from '../test-support/wa-polyfills.js'
-import { ERROR_TOAST_DURATION_MS, dismiss, notify, resetNotices, setFatal, setWsDown } from '../notify.js'
+import { DEFAULT_DURATIONS as DEFAULT_DURATIONS_MS, ERROR_TOAST_DURATION_MS, dismiss, notify, resetNotices, setFatal, setWsDown } from '../notify.js'
 import { CORE_FATAL_BANNER_TESTID, SebasNoticeLayer, WS_DOWN_BANNER_TESTID } from './notice-layer.js'
 import './notice-layer.js'
 import type WaToastItem from '@awesome.me/webawesome/dist/components/toast-item/toast-item.js'
@@ -154,6 +154,37 @@ describe('栈行为：挤占出栈、驻留手动关、去重', () => {
     notify({ level: 'warn', message: 'dup' })
     await layer.updateComplete
     expect(toastItems()).toHaveLength(1)
+  })
+
+  // （fix-webui-qa-round6 5.3）后备消失定时器：WA toast 的 rAF 倒计时在
+  // 后台标签页停摆（rAF 暂停）——store 侧 setTimeout 到点即 dismiss，
+  // toast 不再永驻。用假时钟推进过 duration（无需真实 5s），happy-dom 的
+  // 元素出栈随 updateComplete+flush 落定。
+  it('a transient toast auto-dismisses via the fallback timer past its duration (round6 5.3)', async () => {
+    vi.useFakeTimers()
+    try {
+      notify({ level: 'info', message: '项目「work」已注册。' })
+      await layer.updateComplete
+      expect(toastItems()).toHaveLength(1)
+      // 未到时长：仍在。
+      await vi.advanceTimersByTimeAsync(DEFAULT_DURATIONS_MS.info)
+      await layer.updateComplete
+      expect(toastItems()).toHaveLength(1)
+      // 过时长 + 兜底余量：store 回写 → 元素出栈（fake timers 下不走
+      // flush()——它的 rAF/setTimeout 等待会被假时钟挂起）。
+      await vi.advanceTimersByTimeAsync(600)
+      await layer.updateComplete
+      await vi.advanceTimersByTimeAsync(0)
+      await layer.updateComplete
+      expect(toastItems()).toHaveLength(0)
+      const { subscribeNotices } = await import('../notify.js')
+      const seen: number[] = []
+      const unsub = subscribeNotices((s) => seen.push(s.items.length))
+      unsub()
+      expect(seen[0]).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('store-side dismiss (eviction path) hides the element', async () => {
