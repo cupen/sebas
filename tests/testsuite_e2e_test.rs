@@ -1299,6 +1299,154 @@ async fn state_dir_wait_done(
 mod session_lifecycle {
     use super::*;
 
+/// fix-webui-qa-round6 2.1（project-session-actions「crash 重生后行名仍取首条
+/// prompt」）：fake-claude 会话首条 prompt=hello → 发 `crash`（子进程中途崩死、
+/// 映射退役）→ 再发 `hi`（重生续聊）——行名的 prompt_preview 必须始终是首条
+/// "hello"，绝不漂向崩溃回合或重生回合的 prompt。回归钉：首条锚定是死代码、
+/// 行名实走 user_prompt 回退（crash 后被改写为崩溃回合 prompt，QA-1 实锤）
+/// 在这里当场爆。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn row_name_stays_anchored_to_the_first_prompt_across_crash_respawn() {
+    let sb = Sandbox::new("testsuite_e2e", "row-name-crash-respawn");
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+    let project_id = scene_project_id(&cli, &sb).await;
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "project_id": project_id, "prompt": "hello", "agent": "claude" }),
+    )
+    .await
+    .expect("create session");
+    assert_eq!(status, 201, "create session: {body}");
+    let key = body["key"].as_str().expect("key").to_string();
+    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+
+    // 首轮落定：行名预览 = 首条 prompt。
+    wait_turn_done(&cli, &sb, &detail_url).await;
+    let row_of = {
+        let cli = cli.clone();
+        let url = format!("{}/api/sessions", sb.webui_url());
+        let key = key.clone();
+        move || {
+            let cli = cli.clone();
+            let url = url.clone();
+            let key = key.clone();
+            Box::pin(async move {
+                let v = cli
+                    .get(&url)
+                    .send()
+                    .await
+                    .ok()?
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()?;
+                v["recent_sessions"]
+                    .as_array()?
+                    .into_iter()
+                    .find(|r| r["encoded_key"].as_str() == Some(key.as_str()))
+                    .cloned()
+            })
+        }
+    };
+    let row = wait_for(
+        "first-prompt preview to appear on the row",
+        Duration::from_secs(15),
+        &sb.path,
+        {
+            let row_of = row_of.clone();
+            move || {
+                let row_of = row_of.clone();
+                Box::pin(async move {
+                    row_of()
+                        .await
+                        .and_then(|r| {
+                            r["prompt_preview"]
+                                .as_str()
+                                .map(str::to_string)
+                        })
+                })
+            }
+        },
+    )
+    .await;
+    assert_eq!(row, "hello", "the row is named by the first prompt");
+
+    // 中途崩死：`crash` 触发词让桩出一帧后 exit(1)——终态错误 → 映射退役。
+    let (st, b) = post_json(
+        &cli,
+        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+        serde_json::json!({ "message": "crash" }),
+    )
+    .await
+    .expect("send crash");
+    assert_eq!(st, 200, "crash accepted: {b}");
+    wait_entry_containing(&cli, &sb, &key, "boom").await;
+    // 终态错误收尾（退役）落定：行离开在飞态（failed/dormant 均为终态呈现）。
+    wait_for(
+        "crashed session to leave the engaged state",
+        Duration::from_secs(20),
+        &sb.path,
+        {
+            let row_of = row_of.clone();
+            move || {
+                let row_of = row_of.clone();
+                Box::pin(async move {
+                    row_of().await.and_then(|r| {
+                        let slug = r["status_slug"].as_str()?.to_string();
+                        matches!(slug.as_str(), "failed" | "dormant" | "done").then_some(())
+                    })
+                })
+            }
+        },
+    )
+    .await;
+
+    // 崩溃后行名仍锚定首条（绝不漂成 "crash"）。
+    let row = wait_for(
+        "row preview to stay anchored after the crash",
+        Duration::from_secs(15),
+        &sb.path,
+        {
+            let row_of = row_of.clone();
+            move || {
+                let row_of = row_of.clone();
+                Box::pin(async move {
+                    row_of().await.and_then(|r| {
+                        r["prompt_preview"].as_str().map(str::to_string)
+                    })
+                })
+            }
+        },
+    )
+    .await;
+    assert_eq!(
+        row, "hello",
+        "the crash turn's prompt must never become the row name"
+    );
+
+    // 重生续聊：下一条消息拉起子进程，回合照常完成。
+    let (st, b) = post_json(
+        &cli,
+        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+        serde_json::json!({ "message": "hi" }),
+    )
+    .await
+    .expect("send hi after respawn");
+    assert_eq!(st, 200, "respawn message accepted: {b}");
+    wait_turn_done(&cli, &sb, &detail_url).await;
+
+    // 重生后行名仍是首条 "hello"（也绝不漂成 "hi"）。
+    let row = row_of().await.expect("row after respawn");
+    assert_eq!(
+        row["prompt_preview"].as_str(),
+        Some("hello"),
+        "the row name must stay anchored to the first prompt across the respawn: {row}"
+    );
+}
 /// 9.3 进程级 e2e：**core 与 node 是两个进程**。
 ///
 /// 覆盖：一次性 bootstrap token 配对 → 节点在工作台可见 → 项目路径由**节点**判定
@@ -7660,9 +7808,12 @@ async fn escalation_kill_keeps_the_session_on_the_api_surface() {
         .find(|r| r["encoded_key"].as_str() == Some(key.as_str()))
         .unwrap_or_else(|| panic!("the killed session must stay listed: {list}"));
     assert_eq!(row["status"], "dormant", "the retired row reports dormant: {row}");
+    // （fix-webui-qa-round6 2.1 回归更新）行名恒锚**首条** prompt："hang" 是
+    // 第二条消息，绝不移动行名（旧断言钉的是 user_prompt 漂移行为——正是
+    // 本 change 删除的缺陷形态；修复后实际值就是首条 "hello"）。
     assert_eq!(
-        row["prompt_preview"], "hang",
-        "the row name must survive card-state teardown: {row}"
+        row["prompt_preview"], "hello",
+        "the row name must survive card-state teardown anchored to the first prompt: {row}"
     );
 
     // 详情 200：击杀前产物保留 + hang 的 prompt 条目 + 携带升级原因的错误
@@ -9459,6 +9610,209 @@ async fn parallel_scenario_reverse_order_answers_route_to_their_own_tool() {
             .iter()
             .any(|e| e["content"].as_str() == Some("parallel tools finished")),
         "the reversed answer order must not stop the turn close: {entries:?}"
+    );
+}
+
+/// fix-webui-qa-round6 1.1（permission-flow「每一轮工具环的审批请求都到达审批
+/// 面」/「第二轮审批不丢（进程级）」）：同一 fake-claude 会话两轮 `perm`——
+/// 首轮经读模型应答 allow_once 落定后，第二轮 `perm` 的待批**必须**再次出现
+/// 在 approvals 读模型并可用同一面应答。回归钉：审批注册在「上一轮已有决策」
+/// 后失效（第二轮 hook_callback 不再登记、读模型空表、回合永久 Waiting 仅
+/// cancel 可解困）在这里当场爆。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn second_turn_permission_request_still_parks_and_is_decidable() {
+    let sb = Sandbox::new("testsuite_e2e", "fake-perm-second-turn");
+    let journal = sb.path.join("fake-claude-journal.jsonl");
+    sb.append_acp_args(&["--journal", &support::forward_slash(&journal)]);
+    let cli = http_client();
+    let _core = sb.spawn_core_extra(&[("RUST_LOG", "debug")]);
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+    let project_id = scene_project_id(&cli, &sb).await;
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "project_id": project_id, "prompt": "perm", "agent": "claude" }),
+    )
+    .await
+    .expect("create session");
+    assert_eq!(status, 201, "create session: {body}");
+    let key = body["key"].as_str().expect("key").to_string();
+    let approvals_url = format!("{}/api/sessions/{key}/approvals", sb.webui_url());
+    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+
+    // 读模型行的取数器（review 补口）：待批行必须携带**完整语义**——
+    // request_id 之外还有 tool_name 与 args，审批卡的面就是从这行渲染的；
+    // 只断言 id 会让「行退化成裸 id」这类回归漏网。
+    let parked_row_of = {
+        let cli = cli.clone();
+        let approvals_url = approvals_url.clone();
+        move || {
+            let cli = cli.clone();
+            let approvals_url = approvals_url.clone();
+            Box::pin(async move {
+                let v = cli
+                    .get(&approvals_url)
+                    .send()
+                    .await
+                    .ok()?
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()?;
+                let approvals = v["approvals"].as_array()?;
+                // 恰一条：已决的首轮请求不得以任何形态残留读模型
+                // （墓碑留在决策侧，读模型只列**当前泊车**）。
+                (approvals.len() == 1).then(|| approvals[0].clone())
+            })
+        }
+    };
+    let assert_perm_row = |row: &serde_json::Value, turn: usize| {
+        assert_eq!(
+            row["tool_name"].as_str(),
+            Some("Bash"),
+            "turn {turn}: read-model row must name the gated tool: {row}"
+        );
+        let args = row["args"].to_string();
+        assert!(
+            args.contains("rm -rf"),
+            "turn {turn}: read-model row must carry the gated call's args: {row}"
+        );
+    };
+
+    // 首轮：待批出现 → allow_once → 回合落定（既有合同，照常工作）。
+    let first_row = wait_for(
+        "first perm approval parked",
+        Duration::from_secs(30),
+        &sb.path,
+        {
+            let parked_row_of = parked_row_of.clone();
+            move || {
+                let parked_row_of = parked_row_of.clone();
+                Box::pin(async move { parked_row_of().await })
+            }
+        },
+    )
+    .await;
+    let first_id = first_row["request_id"]
+        .as_str()
+        .expect("first request_id")
+        .to_string();
+    assert_perm_row(&first_row, 1);
+    let (st, b) = post_json(
+        &cli,
+        &format!("{}/api/permissions/{}/answer", sb.webui_url(), first_id),
+        serde_json::json!({ "decision": { "decision": "allow_once" } }),
+    )
+    .await
+    .expect("answer first approval");
+    assert_eq!(st, 200, "first answer delivered: {b}");
+    wait_turn_done(&cli, &sb, &detail_url).await;
+
+    // 第二轮：同会话再发一次 `perm`。待批必须再次出现在读模型——这是本
+    // journey 的核心断言（修复前：返回空数组，回合停在 Waiting）。
+    let (st, b) = post_json(
+        &cli,
+        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+        serde_json::json!({ "message": "perm" }),
+    )
+    .await
+    .expect("send second perm");
+    assert_eq!(st, 200, "second perm accepted: {b}");
+
+    let second_row = wait_for(
+        "second perm approval parked",
+        Duration::from_secs(30),
+        &sb.path,
+        {
+            let parked_row_of = parked_row_of.clone();
+            let first_id = first_id.clone();
+            move || {
+                let parked_row_of = parked_row_of.clone();
+                let first_id = first_id.clone();
+                Box::pin(async move {
+                    let row = parked_row_of().await?;
+                    // fix-webui-qa-round6 1.2：第二轮的 request_id 必须是**新的
+                    // 一个**（桩的 tool_use_id 每轮复用 tc-1；修复后 driver 以会
+                    // 话内序号消歧，同 key 撞已决墓碑的旧缺陷在此当场爆）。
+                    let id = row["request_id"].as_str()?;
+                    (id != first_id).then_some(row)
+                })
+            }
+        },
+    )
+    .await;
+    let second_id = second_row["request_id"]
+        .as_str()
+        .expect("second request_id")
+        .to_string();
+    assert_perm_row(&second_row, 2);
+
+    // 泊车可观察面的另一半（spec：read model + rail waiting badge）：第二轮
+    // 等待期间，会话行的状态词必须是 waiting（rail 行首圆点 + 「等待」徽标
+    // 都由它驱动）——「泊车了但看起来在跑/已完成」同为 violation。
+    let rows_url = format!("{}/api/sessions", sb.webui_url());
+    let parked_slug = wait_for(
+        "parked second turn to project the waiting slug",
+        Duration::from_secs(15),
+        &sb.path,
+        {
+            let cli = cli.clone();
+            let rows_url = rows_url.clone();
+            let key = key.clone();
+            move || {
+                let cli = cli.clone();
+                let rows_url = rows_url.clone();
+                let key = key.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&rows_url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    v["recent_sessions"]
+                        .as_array()?
+                        .into_iter()
+                        .find(|r| r["encoded_key"].as_str() == Some(key.as_str()))?
+                        ["status_slug"]
+                        .as_str()
+                        .map(str::to_string)
+                })
+            }
+        },
+    )
+    .await;
+    assert_eq!(
+        parked_slug, "waiting",
+        "a parked approval turn must be observable as waiting on the rail row"
+    );
+
+    // 同一面可决策：allow_once → 泊住的 hook 复活 → 回合落定 + 环后正文。
+    let (st, b) = post_json(
+        &cli,
+        &format!("{}/api/permissions/{}/answer", sb.webui_url(), second_id),
+        serde_json::json!({ "decision": { "decision": "allow_once" } }),
+    )
+    .await
+    .expect("answer second approval");
+    assert_eq!(st, 200, "second answer delivered: {b}");
+    wait_turn_done(&cli, &sb, &detail_url).await;
+    let (_status, detail) = get_json_status(&cli, &detail_url)
+        .await
+        .expect("session detail");
+    let entries = detail["entries"].as_array().cloned().unwrap_or_default();
+    let perm_done = entries
+        .iter()
+        .filter(|e| e["element_type"].as_str() == Some("tool"))
+        .filter_map(|e| e["content"].as_str())
+        .filter(|c| c.contains("✓ **Bash**"))
+        .count();
+    assert!(
+        perm_done >= 2,
+        "both perm turns must have executed their tool after their own allow: {entries:?}"
     );
 }
 }

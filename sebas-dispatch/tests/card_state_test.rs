@@ -756,11 +756,23 @@ async fn allow_session_click_replies_then_switches_mode_to_auto() {
         }
     }
     let turns = router.session_turns(&key, 0).await.unwrap();
+    // （fix-webui-qa-findings D2）ModeChanged 到达即写 ok=true 契约条目
+    // （「权限模式已切换」）；游离 SetMode 失败 Error 不得再追加失败条目
+    // （ok=false / 模式未变）。成功条目恰好一条、无失败条目。
+    let results: Vec<_> = turns
+        .iter()
+        .filter(|e| e.element_type == "permission_mode_result".into())
+        .collect();
+    assert_eq!(results.len(), 1, "exactly the success contract entry");
+    let payload: serde_json::Value =
+        serde_json::from_str(results[0].content.as_str()).unwrap_or_default();
+    assert_eq!(payload["ok"], serde_json::Value::Bool(true));
     assert!(
-        !turns
-            .iter()
-            .any(|e| e.element_type == "permission_mode_result".into()),
-        "成功路径不写失败契约条目"
+        !turns.iter().any(|e| {
+            e.element_type == "permission_mode_result".into()
+                && e.content.contains("模式未变")
+        }),
+        "成功消费后不写失败契约条目"
     );
 }
 

@@ -1248,6 +1248,14 @@ impl DispatchHandle {
                 // 重入把同一条 prompt 重复追加进 transcript。
                 self.transcript_push(&session_id, TurnEntry::prompt(0, user_prompt.clone()))
                     .await;
+                // （fix-webui-qa-round6 2.1）首条 prompt 预览捕获落库：命名
+                // 锚只写一次——crash 重生 / cancel / 后续消息都绝不移动它
+                // （retire 迁移的 is_none 守卫从此恒有锚可保）。
+                if let Some(key) = self.map.lookup_key_by_session(&session_id).await {
+                    self.map
+                        .set_prompt_preview_if_empty(&key, user_prompt.clone())
+                        .await;
+                }
             }
             if let Some(key) = self.map.lookup_key_by_session(&session_id).await {
                 self.publish_updated(&key).await;

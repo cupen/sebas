@@ -921,6 +921,33 @@ impl SessionMap {
         hit
     }
 
+    /// （fix-webui-qa-round6 2.1）首条 prompt 预览捕获：`prompt_preview` 缺省
+    /// 时落**首条**用户消息预览并随映射持久化（projects.db）。只写一次——
+    /// 后续消息、crash 重生、cancel 都绝不移动它（行名首条锚定的持久半边；
+    /// 投影半边在 engine `session_info` 的 fallback 链）。无映射 no-op。
+    pub async fn set_prompt_preview_if_empty(&self, key: &ChannelKey, preview: String) -> bool {
+        let hit = {
+            let mut g = self.inner.write().await;
+            match g.get_mut(key) {
+                Some(m)
+                    if m.prompt_preview
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .is_none() =>
+                {
+                    m.prompt_preview = Some(preview);
+                    true
+                }
+                _ => false,
+            }
+        };
+        if hit {
+            self.persist_upsert(key).await;
+        }
+        hit
+    }
+
     /// （session-slash-commands 2.1）物化 agent 广告的会话命令表：
     /// `AcpEvent::AvailableCommands` 到达时全量覆盖（二次通知 = 刷新旧表，
     /// 与 model/mode 同一到达线）。无映射时 no-op。空表同样写入——agent 撤
@@ -1609,6 +1636,36 @@ mod tests {
         // 无映射 no-op。
         let ghost = ChannelKey::new("web", "web-auto-title-ghost");
         assert!(!map.set_label_if_empty(&ghost, "x".into()).await);
+    }
+
+    /// （fix-webui-qa-round6 2.1）首条 prompt 预览捕获只写一次：后续消息、
+    /// 空白值、无映射都不移动已落的首条锚（crash 重生 / cancel 后行名不漂）。
+    #[tokio::test]
+    async fn prompt_preview_captures_the_first_message_only() {
+        let map = SessionMap::new();
+        let key = ChannelKey::new("web", "web-first-preview");
+        map.insert(key.clone(), Mapping::active("s-first-preview"))
+            .await
+            .expect("fresh key inserts");
+
+        // 首条消息落锚。
+        assert!(map.set_prompt_preview_if_empty(&key, "hello".into()).await);
+        assert_eq!(
+            map.get(&key).await.unwrap().prompt_preview.as_deref(),
+            Some("hello")
+        );
+
+        // 后续消息（crash 重生后的新回合 prompt）绝不移动锚。
+        assert!(!map.set_prompt_preview_if_empty(&key, "crash".into()).await);
+        assert_eq!(
+            map.get(&key).await.unwrap().prompt_preview.as_deref(),
+            Some("hello"),
+            "later prompts must never move the first-message anchor"
+        );
+
+        // 无映射 no-op。
+        let ghost = ChannelKey::new("web", "web-first-preview-ghost");
+        assert!(!map.set_prompt_preview_if_empty(&ghost, "x".into()).await);
     }
 
     /// 非持久形态（in-flight 占位 / SpawnFailed）不产出行——已提交行原样

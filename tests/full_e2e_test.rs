@@ -229,3 +229,142 @@ async fn slow_stream_exposes_full_fsm_via_debounced_pump() {
         "🚧 reaction should arrive before ✅ (FSM order)"
     );
 }
+
+/// fix-webui-qa-round6 1.2：同一会话两轮 `perm` 的**中间层**复现（引擎 +
+/// 生产 pump + 真桩，无 webui/core 子进程）。driver 层测试（sebas-acp
+/// permission_roundtrip）证明驱动与 SDK 两轮都登记；本用例叠加生产 pump
+/// 与引擎读模型，断言每一轮的待批都出现在 `pending_permission_requests`
+/// 且可经生产同款 Reply 臂（SendAcp → mgr.send）解锁收尾。
+/// （Out::SendAcp 在测试里手工转发给 mgr——与 dispatch_out 的同名臂一致。）
+#[tokio::test]
+async fn second_perm_turn_parks_in_the_engine_read_model() {
+    let fake = workspace_target().join(format!("fake-claude{}", std::env::consts::EXE_SUFFIX));
+    assert!(fake.exists(), "missing build artifact {}", fake.display());
+
+    let map = SessionMap::new();
+    let (router, mut out_rx) = DispatchHandle::new_with_config(map, CardConfig::default(), 256);
+    let mgr = Arc::new(SessionManager::claude_only(Duration::from_secs(15)));
+
+    let key = ChannelKey::feishu("oc_perm_round6", None);
+
+    // ── 第一轮：注入文本 → 读 SpawnAcp → 生产 spawn 函数 → 生产 pump。
+    router
+        .dispatch(ChannelEvent::Text {
+            key: key.clone(),
+            text: "perm".into(),
+            reply_target: None,
+        })
+        .await;
+    let spawn = tokio::time::timeout(Duration::from_millis(2000), out_rx.recv())
+        .await
+        .expect("SpawnAcp not received in time")
+        .expect("channel closed");
+    let prompt = match spawn {
+        Out::SpawnAcp { prompt, .. } => prompt,
+        other => panic!("expected SpawnAcp, got {other:?}"),
+    };
+    let work = support::TestDir::new("full_e2e", "perm-round6");
+    let (session_id, pending, rx, _model) = sebas::run::acp_spawn_and_activate(
+        &mgr,
+        &router,
+        &key,
+        &prompt,
+        "claude",
+        vec![fake.to_str().unwrap().to_string()],
+        Some(work.path().to_string_lossy().into_owned()),
+        None,
+        None,
+    )
+    .await
+    .expect("spawn fake CLI through production fn");
+    router.seed_card(session_id.clone(), prompt.clone()).await;
+    sebas::run::spawn_acp_pump(rx.clone(), router.clone(), session_id.clone());
+    let _ = sebas::run::flush_pending_prompts(&mgr, &session_id, pending).await;
+
+    // 转发器：后续回合的 SendAcp 手工落实（与 dispatch_out 的 ACP 臂一致）。
+    let fwd_mgr = mgr.clone();
+    let forwarder = tokio::spawn(async move {
+        while let Some(out) = out_rx.recv().await {
+            if let Out::SendAcp { session_id, cmd } = out {
+                let _ = fwd_mgr.send(&session_id, cmd).await;
+            }
+        }
+    });
+
+    for turn in 1..=2 {
+        if turn == 2 {
+            // 第二轮走生产的 Text → Continue 路由（Active 会话 → submit_turn
+            // → emit_turn_card → SendAcp 由转发器落实）。
+            router
+                .dispatch(ChannelEvent::Text {
+                    key: key.clone(),
+                    text: "perm".into(),
+                    reply_target: None,
+                })
+                .await;
+        }
+
+        // 引擎读模型出现待批（fix 目标：每一轮都在）。
+        let mut request_id = None;
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while request_id.is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "turn {turn}: approval never appeared in the engine read model"
+            );
+            let parked = router
+                .pending_permission_requests(&key)
+                .await
+                .unwrap_or_default();
+            if let Some(first) = parked.first() {
+                // review 补口：读模型行携带完整语义（工具名 + 参数）——审批
+                // 卡的面从这行渲染，行退化成裸 id 会让卡片失语。
+                assert_eq!(
+                    first.tool_name, "Bash",
+                    "turn {turn}: read-model row must name the gated tool"
+                );
+                assert!(
+                    first.args.to_string().contains("rm -rf"),
+                    "turn {turn}: read-model row must carry the gated call's args"
+                );
+                request_id = Some(first.request_id.clone());
+            } else {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+        let request_id = request_id.unwrap();
+
+        // 生产同款决策回灌：webui answer → router.emit(SendAcp
+        // PermissionReply)（emit 单点解除泊车）→ 转发器落实 mgr.send。
+        router
+            .emit(Out::SendAcp {
+                session_id: session_id.clone(),
+                cmd: sebas_acp::claude::session::AcpCommand::PermissionReply {
+                    session_id: session_id.clone(),
+                    request_id,
+                    decision: sebas_acp::claude::session::Decision::AllowOnce,
+                },
+            })
+            .await;
+
+        // 泊车解除 + 回合收尾（读模型清空）。
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "turn {turn}: parking never resolved"
+            );
+            let parked = router
+                .pending_permission_requests(&key)
+                .await
+                .unwrap_or_default();
+            if parked.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    mgr.kill_all().await;
+    forwarder.abort();
+}

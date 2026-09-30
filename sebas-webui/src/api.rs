@@ -2699,14 +2699,11 @@ fn session_phase_frame(info: &SessionInfo) -> crate::events::SessionPhaseFrame {
         .map_or(info.parked_approvals, |r| r.parked_approvals);
     let derived = SessionStatus::derive(&info.status, info.phase.as_ref())
         .with_parked_approvals(parked);
-    // （fix-webui-qa-findings DD2）行命名链的预览取**首条消息锚定值**——
-    // first_prompt_preview（引擎投影：迁移位/转录首条 Prompt）优先，旧快照
-    // 无该值时回退 user_prompt（旧行为，等下一次全量收敛）。
-    let prompt_preview = info
-        .first_prompt_preview
-        .clone()
-        .filter(|p| !p.is_empty())
-        .or_else(|| info.user_prompt.clone().filter(|p| !p.is_empty()));
+    // （fix-webui-qa-findings DD2，fix-webui-qa-round6 2.1）行命名链的预览只
+    // 认**首条消息锚定值**——first_prompt_preview（引擎在首条消息落转写时
+    // 捕获并持久化）。user_prompt 回退已删除（crash/cancel 后它跟随最新回合
+    // prompt，正是行名漂移的根源）；None = 尚无消息（占位会话）。
+    let prompt_preview = info.first_prompt_preview.clone().filter(|p| !p.is_empty());
     crate::events::SessionPhaseFrame {
         status_slug: derived.slug().to_string(),
         turn_engaged: info.turn_engaged,

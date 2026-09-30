@@ -408,15 +408,13 @@ impl From<&sebas_dispatch::SessionInfo> for SessionRow {
             // 8.1 会话归属项目按 `(节点, 路径)`：远端会话的 project_dir 若按
             // 本机公式算 id，会挂到「本机同路径项目」下。
             project_id: crate::projects::project_id_for_session(info),
-            // （fix-webui-qa-findings DD2）行命名预览锚定**首条**用户消息
-            // （first_prompt_preview）；旧快照无锚定值时回退 user_prompt。
-            // 后续消息绝不移动行名（user_prompt 是「当前回合」语义，只服务
-            // 飞书卡面与回执判定，不再进行名）。
-            prompt_preview: info
-                .first_prompt_preview
-                .clone()
-                .filter(|p| !p.is_empty())
-                .or_else(|| info.user_prompt.clone().filter(|p| !p.is_empty())),
+            // （fix-webui-qa-findings DD2，fix-webui-qa-round6 2.1）行命名预览
+            // 只认**首条**用户消息锚定值（first_prompt_preview——引擎在首条
+            // 消息落转写时捕获并随会话行持久化）。user_prompt 回退已删除：
+            // user_prompt 是「当前回合」语义（crash/cancel 后跟随最新回合
+            // prompt），绝不再进行名。无锚定值 = 尚无消息（占位会话），由
+            // 前端按「未命名会话」呈现。
+            prompt_preview: info.first_prompt_preview.clone().filter(|p| !p.is_empty()),
             // （5.1，design D6）label 随行下发。
             label: info.label.clone(),
             current_model: info.current_model.clone(),

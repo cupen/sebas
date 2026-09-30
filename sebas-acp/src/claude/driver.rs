@@ -821,12 +821,17 @@ fn permission_hook(
     mode: SharedPermissionMode,
 ) -> HookCallback {
     use std::sync::atomic::Ordering;
+    // fix-webui-qa-round6 1.2：会话内单调序号——request_id 的唯一性锚。闭包
+    // 每次会话连接构造一份（post-cancel respawn 换新驱动 = 新计数器，同一
+    // 泊车链路不会跨代复用）。
+    let hook_seq = Arc::new(std::sync::atomic::AtomicU64::new(0));
     Arc::new(move |input: HookInput, tool_use_id: Option<String>, _ctx| {
         let session_id = session_id.clone();
         let evt_tx = evt_tx.clone();
         let pending = pending.clone();
         let waiting = waiting_permission.clone();
         let mode = mode.clone();
+        let hook_seq = hook_seq.clone();
         async move {
             let HookInput::PreToolUse(pre) = input else {
                 return allow_output("non-PreToolUse hook passthrough");
@@ -841,8 +846,16 @@ fn permission_hook(
             // request_id 以 `claude:` 前缀命名空间化，与 agent-driver spec「request_id
             // as `<kind-slug>:<raw-id>`」一致，避免与通用 ACP 驱动的同名 raw id 在
             // 共享 perm_cards/待决映射里冲突。
+            //
+            // （fix-webui-qa-round6 1.2）raw_id 追加**会话内单调序号**：tool_use_id
+            // 只在回合内唯一（同会话下一回合的 hook 完全可能复用同一 id——桩的
+            // perm 场景每轮都是 "tc-1"）。复用的 id 会让第二回合的待批与第一回合
+            // 的已决记录同 key：审批卡被已决墓碑压制、读模型虽登记但决策面永不
+            // 渲染、回合永久 Waiting。序号让每次 hook 咨询都是独立的 request_id，
+            // 决定仍严格按 request_id 配对（并行/乱序安全不变）。
             let raw_id = tool_use_id.unwrap_or_else(|| format!("req-{}", uuid::Uuid::new_v4()));
-            let request_id = format!("claude:{raw_id}");
+            let seq = hook_seq.fetch_add(1, Ordering::SeqCst) + 1;
+            let request_id = format!("claude:{raw_id}-{seq}");
             let (tx, rx) = oneshot::channel();
             pending.lock().await.insert(request_id.clone(), tx);
             // Suspend hang detection while the user decides (openspec/specs/acp-driver/spec.md:
