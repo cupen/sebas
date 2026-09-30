@@ -118,7 +118,7 @@ test.describe('对话视图（workbench-conversation-view）', () => {
       const fold = detail.processFold().first()
       await expect(fold).toBeVisible({ timeout: 15_000 })
       const outerLink = fold.locator('[data-testid="process-fold-link"]')
-      await expect(outerLink.locator('.label')).toHaveText('process')
+      await expect(outerLink.locator('.label')).toHaveText('过程')
       // 尾条目 = 工具请求（结果已顶层化），计数 = 1。
       await expect(outerLink.locator('.running')).toHaveText('Bash · rm -rf /')
       await expect(outerLink.locator('.fold-count')).toHaveText('1')

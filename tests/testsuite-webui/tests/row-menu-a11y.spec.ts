@@ -50,12 +50,12 @@ test.describe('会话管理', () => {
       expect(closed).not.toContain('重命名')
       expect(closed).not.toContain('归档')
       expect(closed).not.toContain('移除项目')
-      expect(closed).toContain('Session actions for')
-      expect(closed).toContain('Project actions for')
+      expect(closed).toContain('会话操作：')
+      expect(closed).toContain('项目操作：')
 
       // 会话行菜单展开态：菜单项回到 a11y 树。
       await row.hover()
-      await row.locator('wa-dropdown button[title="Session actions"]').click()
+      await row.locator('wa-dropdown button[title="会话操作"]').click()
       const renameItem = row.locator('wa-dropdown-item[value="rename"]')
       await expect(renameItem).toBeVisible()
       const sessionOpen = await rail.host.ariaSnapshot()
@@ -72,7 +72,7 @@ test.describe('会话管理', () => {
       // 项目行菜单展开态：移除项目动作同理——关闭态缺席、展开态在场。
       const projectRow = rail.projectRow(projectName)
       await projectRow.hover()
-      await projectRow.locator('wa-dropdown button[title="Project actions"]').click()
+      await projectRow.locator('wa-dropdown button[title="项目操作"]').click()
       const removeItem = projectRow.locator('wa-dropdown-item[value="remove"]')
       await expect(removeItem).toBeVisible()
       const projectOpen = await rail.host.ariaSnapshot()

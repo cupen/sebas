@@ -136,12 +136,12 @@ test.describe('agents 写执法（gate-agent-directory-writes）', () => {
     // Settings → Agents：分区可浏览（读），写入口全部不呈现。
     const settings = new SettingsModal(page)
     await settings.openViaSidebar()
-    await settings.openSection('Agents')
+    await settings.openSection('Agent')
     const modal = page.locator('sebas-settings-modal')
-    await expect(modal.locator('wa-button').filter({ hasText: 'New agent' })).toHaveCount(0)
+    await expect(modal.locator('wa-button').filter({ hasText: '新建 agent' })).toHaveCount(0)
     await expect(modal.locator('[data-testid="agent-row"]').first()).toBeVisible()
-    await expect(modal.locator('[data-testid="agent-row"] button[title="Edit"]')).toHaveCount(0)
-    await expect(modal.locator('[data-testid="agent-row"] button[title="Delete"]')).toHaveCount(0)
+    await expect(modal.locator('[data-testid="agent-row"] button[title="编辑"]')).toHaveCount(0)
+    await expect(modal.locator('[data-testid="agent-row"] button[title="删除"]')).toHaveCount(0)
     await settings.closeButton.click()
     await expect(settings.panel).toBeHidden()
 
@@ -163,14 +163,14 @@ test.describe('agents 写执法（gate-agent-directory-writes）', () => {
 
     const settings = new SettingsModal(page)
     await settings.openViaSidebar()
-    await settings.openSection('Agents')
+    await settings.openSection('Agent')
     const modal = page.locator('sebas-settings-modal')
-    await expect(modal.locator('wa-button').filter({ hasText: 'New agent' })).toBeVisible()
+    await expect(modal.locator('wa-button').filter({ hasText: '新建 agent' })).toBeVisible()
     // config 种子的 claude 行带编辑/删除入口（呈现层与执法同档开放）。
     const row = modal.locator('[data-testid="agent-row"][data-id="claude"]')
     await expect(row).toBeVisible()
-    await expect(row.locator('button[title="Edit"]')).toBeVisible()
-    await expect(row.locator('button[title="Delete"]')).toBeVisible()
+    await expect(row.locator('button[title="编辑"]')).toBeVisible()
+    await expect(row.locator('button[title="删除"]')).toBeVisible()
   })
 })
 
@@ -378,7 +378,7 @@ test.describe.serial('角色/禁用即时生效（agents 写，spec「会话绑�
     await expect(page.locator('sebas-dashboard')).toBeVisible({ timeout: 15_000 })
     // 侧栏角色展示位（gate-agent-directory-writes 2.2）：与 /api/auth/me 一致。
     // 页脚有两个 .settings-btn（退出 + 设置）——用 aria-label 精确点名退出钮。
-    const logoutBtn = page.locator('sebas-app .sidebar-footer button[aria-label="Sign out"]')
+    const logoutBtn = page.locator('sebas-app .sidebar-footer button[aria-label="退出登录"]')
     await expect(logoutBtn).toHaveText(/退出 \(gate-live · admin\)/)
 
     // root 降级为 member（API 侧，浏览器不动）。
@@ -389,14 +389,14 @@ test.describe.serial('角色/禁用即时生效（agents 写，spec「会话绑�
     // 登出 → 登录页（无残留：用户名与角色不留在界面上）。
     await logoutBtn.click()
     await expect(page.locator('sebas-login')).toBeVisible({ timeout: 15_000 })
-    await expect(page.locator('sebas-app .sidebar-footer button[aria-label="Sign out"]')).toHaveCount(
+    await expect(page.locator('sebas-app .sidebar-footer button[aria-label="退出登录"]')).toHaveCount(
       0,
     )
 
     // 重登：前端重取 me，展示位随新角色翻转（display 与执法同源）。
     await login.login(LIVE.username, LIVE.password)
     await expect(page.locator('sebas-dashboard')).toBeVisible({ timeout: 15_000 })
-    await expect(page.locator('sebas-app .sidebar-footer button[aria-label="Sign out"]')).toHaveText(
+    await expect(page.locator('sebas-app .sidebar-footer button[aria-label="退出登录"]')).toHaveText(
       /退出 \(gate-live · member\)/,
     )
 

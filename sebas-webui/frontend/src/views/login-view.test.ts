@@ -14,6 +14,7 @@ const apiMocks = vi.hoisted(() => ({
 }))
 
 vi.mock('../api/client.js', () => ({
+  errorText: (err: unknown) => (err instanceof Error ? err.message : String(err)),
   // 与真 ApiError 同形（client.ts）：status + code + count，视图按 status 分支。
   ApiError: class ApiError extends Error {
     readonly status: number

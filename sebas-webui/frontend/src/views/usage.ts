@@ -14,7 +14,7 @@
 
 import { LitElement, css, html } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
-import { ApiError, api, type UsageTimeseries } from '../api/client.js'
+import { ApiError, api, type UsageTimeseries, errorText } from '../api/client.js'
 import { icon } from '../components/icons.js'
 import { viewStyles } from '../styles/shared.js'
 import '../components/line-chart.js'
@@ -260,7 +260,7 @@ export class SebasUsage extends LitElement {
       // 其它失败（网络断 / 未登录跳转等）也按不可达呈现 cause，但没有
       // 结构化 cause 时用通用文案。
       if (this.unreachableCause === null && !(e instanceof ApiError && e.status === 401)) {
-        this.unreachableCause = String(e)
+        this.unreachableCause = errorText(e)
       }
     } finally {
       if (seq === this.reloadSeq) this.loading = false

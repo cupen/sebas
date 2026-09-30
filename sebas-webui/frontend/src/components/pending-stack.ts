@@ -30,7 +30,7 @@
 
 import { LitElement, css, html, nothing } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { ApiError, NetworkError, api, type PendingSubmission } from '../api/client.js'
+import { ApiError, NetworkError, api, type PendingSubmission, errorText } from '../api/client.js'
 import { notify } from '../notify.js'
 
 @customElement('sebas-pending-stack')
@@ -461,7 +461,7 @@ function quoteText(text: string): string {
 function describeError(err: unknown): string {
   if (err instanceof ApiError) return err.message
   if (err instanceof NetworkError) return '网络失败，原因无法确认'
-  return String(err)
+  return errorText(err)
 }
 
 /** 起等时长的呈现分桶（秒 → 分钟 → 小时，不假精度）。 */

@@ -50,6 +50,6 @@ describe('accessibility baseline', () => {
     // must give it an accessible name derived from the row label（
     // workbench-interaction-polish：占位行的名字归 fullSessionLabel 的键尾
     // 段兜底，chat_id 不在 /api/sessions 行词表里）.
-    expect(src).toContain('aria-label=${`Close session ${fullSessionLabel(row)}`}')
+    expect(src).toContain('aria-label=${`关闭会话 ${fullSessionLabel(row)}`}')
   })
 })

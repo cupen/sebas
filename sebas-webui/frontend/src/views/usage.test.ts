@@ -23,6 +23,7 @@ const apiMocks = vi.hoisted(() => ({
 }))
 
 vi.mock('../api/client.js', () => ({
+  errorText: (err: unknown) => (err instanceof Error ? err.message : String(err)),
   api: {
     usageTimeseries: apiMocks.usageTimeseries,
   },

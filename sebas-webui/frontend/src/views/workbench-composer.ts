@@ -68,7 +68,7 @@
 import { LitElement, css, html, nothing, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { unsafeHTML } from 'lit/directives/unsafe-html.js'
-import { api, type AvailableCommandInfo } from '../api/client.js'
+import { api, errorText, type AvailableCommandInfo } from '../api/client.js'
 import type { CoreReachabilityState } from '../api/ws.js'
 import {
   loadModelCatalog,
@@ -196,7 +196,7 @@ export class SebasWorkbenchComposer extends LitElement {
   @property({ type: Boolean }) hasTurns = false
   /** 输入占位符（5.2）：两态切换的单一出处。 */
   private get inputPlaceholder(): string {
-    return this.hasTurns ? 'Ask for follow-up changes…' : '开始对话…'
+    return this.hasTurns ? '继续对话——描述需要的修改…' : '开始对话…'
   }
   /** mode 切换可用性：0-turn 占位（无 session_id）不可切——mode 由创建表单决定。 */
   @property({ type: Boolean }) modeEditable = false
@@ -270,7 +270,7 @@ export class SebasWorkbenchComposer extends LitElement {
   private get unreachable(): { cause: string } | null {
     const r = this.coreReachability
     if (r !== null && r.ok === false) {
-      return { cause: r.cause ?? 'core not connected' }
+      return { cause: r.cause ?? '核心未连接' }
     }
     return null
   }
@@ -433,7 +433,7 @@ export class SebasWorkbenchComposer extends LitElement {
         new CustomEvent('composer-sent', { detail: { key }, bubbles: true, composed: true }),
       )
     } catch (e) {
-      this.error = String(e)
+      this.error = errorText(e)
     } finally {
       this.sending = false
       // 后端已确认（或拒绝）：乐观指示退场——成功面由转录「已收到」角标
@@ -460,7 +460,7 @@ export class SebasWorkbenchComposer extends LitElement {
         new CustomEvent('composer-sent', { detail: { key }, bubbles: true, composed: true }),
       )
     } catch (e) {
-      this.error = String(e)
+      this.error = errorText(e)
     }
   }
 
@@ -476,7 +476,7 @@ export class SebasWorkbenchComposer extends LitElement {
         new CustomEvent('composer-sent', { detail: { key }, bubbles: true, composed: true }),
       )
     } catch (e) {
-      this.error = String(e)
+      this.error = errorText(e)
     } finally {
       this.modelSwitching = false
     }
@@ -494,7 +494,7 @@ export class SebasWorkbenchComposer extends LitElement {
         new CustomEvent('composer-sent', { detail: { key }, bubbles: true, composed: true }),
       )
     } catch (e) {
-      this.error = String(e)
+      this.error = errorText(e)
     } finally {
       this.modeSwitching = false
     }
@@ -612,7 +612,7 @@ export class SebasWorkbenchComposer extends LitElement {
       <div
         class="cmd-palette"
         role="listbox"
-        aria-label="Session commands"
+        aria-label="会话命令"
         data-testid="command-palette"
         @scroll=${() => this.syncBubbleTop()}
       >
@@ -804,7 +804,7 @@ export class SebasWorkbenchComposer extends LitElement {
               <div
                 class="model-menu"
                 role="listbox"
-                aria-label="Session model"
+                aria-label="会话模型"
                 data-testid="model-menu"
                 @keydown=${this.menuKeydown}
               >
@@ -893,8 +893,8 @@ export class SebasWorkbenchComposer extends LitElement {
       SubmitState,
       { label: string; icon: ReturnType<typeof icon>; disabled: boolean }
     > = {
-      disabled: { label: 'Send', icon: icon('forward', 14), disabled: true },
-      send: { label: 'Send', icon: icon('forward', 14), disabled: false },
+      disabled: { label: '发送', icon: icon('forward', 14), disabled: true },
+      send: { label: '发送', icon: icon('forward', 14), disabled: false },
       sending: {
         label: '发送中',
         icon: html`<span class="spinner" aria-hidden="true"></span>`,
@@ -960,7 +960,7 @@ export class SebasWorkbenchComposer extends LitElement {
           <wa-textarea
             placeholder=${this.inputPlaceholder}
             data-testid="composer-input"
-            aria-label="Message"
+            aria-label="消息"
             resize="none"
             ?disabled=${this.inputDisabled()}
             .value=${this.text}

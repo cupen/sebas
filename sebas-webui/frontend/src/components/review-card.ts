@@ -29,7 +29,7 @@
 
 import { LitElement, css, html, nothing } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { api, ApiError, type PendingApprovalInfo, type PermissionDecision } from '../api/client.js'
+import { api, ApiError, type PendingApprovalInfo, type PermissionDecision, errorText } from '../api/client.js'
 import { sharedWs } from '../api/shared-ws.js'
 import { icon } from './icons.js'
 import { viewStyles } from '../styles/shared.js'
@@ -400,7 +400,7 @@ export class SebasReviewCards extends LitElement {
         this.patch(card.request_id, { state: 'expired', error: '' })
       } else {
         // Transport/server hiccup: keep the card retryable.
-        this.patch(card.request_id, { state: 'pending', error: String(e) })
+        this.patch(card.request_id, { state: 'pending', error: errorText(e) })
       }
     }
   }
@@ -424,18 +424,18 @@ export class SebasReviewCards extends LitElement {
           ${card.reason ? html`<span class="why">${card.reason}</span>` : nothing}
         </header>
         <div class="meta">
-          <span class="session-id" title=${`session ${card.session_id}`}
-            >session ${card.session_id}</span
+          <span class="session-id" title=${`会话 ${card.session_id}`}
+            >会话 ${card.session_id}</span
           >
-          <span class="request-id" title=${`request ${card.request_id}`}
-            >request ${card.request_id}</span
+          <span class="request-id" title=${`请求 ${card.request_id}`}
+            >请求 ${card.request_id}</span
           >
         </div>
         <pre class="args">${this.formatArgs(card.args)}</pre>
         ${card.state === 'expired'
           ? html`<div class="callout callout-warning" role="status">
               ${icon('alert')}<span
-                >No longer pending — already answered, timed out or cleared.</span
+                >已不在待决状态——已被答复、超时或已清除。</span
               >
             </div>`
           : html`
@@ -447,7 +447,7 @@ export class SebasReviewCards extends LitElement {
                   appearance="accent"
                   ?disabled=${busy}
                   @click=${() => void this.answer(card, { decision: 'allow_once' })}
-                  >Allow once</wa-button
+                  >仅允许一次</wa-button
                 >
                 <wa-button
                   size="s"
@@ -456,7 +456,7 @@ export class SebasReviewCards extends LitElement {
                   appearance="outlined"
                   ?disabled=${busy}
                   @click=${() => void this.answer(card, { decision: 'allow_session' })}
-                  >Allow for session</wa-button
+                  >本会话内允许</wa-button
                 >
                 <wa-button
                   size="s"
@@ -465,15 +465,15 @@ export class SebasReviewCards extends LitElement {
                   appearance="outlined"
                   ?disabled=${busy}
                   @click=${() => void this.answer(card, { decision: 'deny' })}
-                  >Deny</wa-button
+                  >拒绝</wa-button
                 >
               </div>
               <div class="escalate">
                 <wa-input
                   class="escalate-reason"
                   size="s"
-                  placeholder="Why raise this once? (escalate)"
-                  aria-label="Escalation reason"
+                  placeholder="为什么这次要上抛？（升级给人工决定）"
+                  aria-label="升级原因"
                   .value=${card.escalateReason}
                   ?disabled=${busy}
                   @input=${(e: Event) =>
@@ -492,7 +492,7 @@ export class SebasReviewCards extends LitElement {
                       decision: 'escalate',
                       reason: escalateReason,
                     })}
-                  >Escalate</wa-button
+                  >上抛</wa-button
                 >
               </div>
               ${card.error
@@ -508,7 +508,7 @@ export class SebasReviewCards extends LitElement {
   render() {
     if (this.cards.length === 0) return nothing
     return html`
-      <div class="review-cards" role="region" aria-label="Permission review">
+      <div class="review-cards" role="region" aria-label="权限审批">
         ${this.cards.map((card) => this.renderCard(card))}
       </div>
     `

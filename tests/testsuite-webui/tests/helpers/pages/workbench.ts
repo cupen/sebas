@@ -128,10 +128,10 @@ export class FocusedSession {
     this.transcript = page.locator('sebas-dashboard .turn-stream-area')
     this.emptyConversation = page
       .locator('sebas-dashboard .turn-stream-area .empty-stream')
-      .filter({ hasText: 'Nothing yet' })
+      .filter({ hasText: '还没有对话' })
     this.unavailableNote = page
       .locator('sebas-dashboard .turn-stream-area .empty-stream')
-      .filter({ hasText: 'Session unavailable' })
+      .filter({ hasText: '会话不可得' })
     // The composer is the dashboard's own workbench composer (follow-up mode).
     this.composerTextarea = page.locator('sebas-workbench-composer wa-textarea textarea')
     this.sendButton = page.locator('sebas-workbench-composer .send-button')

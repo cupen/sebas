@@ -74,13 +74,13 @@ test.describe('displayed-project 焦点调和', () => {
     // the A2 evidence): row menu → 移除项目 → confirm.
     const row = rail.projectRow(alpha)
     await row.hover()
-    await row.locator('button[title="Project actions"]').click()
+    await row.locator('button[title="项目操作"]').click()
     await row.locator('wa-dropdown-item[value="remove"]').click()
     // wa-dialog 是 top-layer popover：host 本体读作 hidden，内容可见——
     // 可见性断言打在标题上（同 rail.openAddDialog 纪律）。
     const dialog = page.locator('wa-dialog', { hasText: '移除项目' })
     await expect(
-      dialog.locator('h2, [role="heading"]', { hasText: 'Remove project' }).first(),
+      dialog.locator('h2, [role="heading"]', { hasText: '移除项目' }).first(),
     ).toBeVisible()
     await dialog.locator('wa-button').filter({ hasText: '移除' }).click()
 
@@ -128,11 +128,11 @@ test.describe('displayed-project 焦点调和', () => {
     // Remove the ONLY project: the rail falls to 尚未注册项目…
     const row = rail.projectRow(last)
     await row.hover()
-    await row.locator('button[title="Project actions"]').click()
+    await row.locator('button[title="项目操作"]').click()
     await row.locator('wa-dropdown-item[value="remove"]').click()
     const dialog = page.locator('wa-dialog', { hasText: '移除项目' })
     await expect(
-      dialog.locator('h2, [role="heading"]', { hasText: 'Remove project' }).first(),
+      dialog.locator('h2, [role="heading"]', { hasText: '移除项目' }).first(),
     ).toBeVisible()
     await dialog.locator('wa-button').filter({ hasText: '移除' }).click()
 

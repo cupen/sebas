@@ -49,7 +49,7 @@ export class ProjectRail {
 
   /** Expand the History group (archived sessions; hidden when empty). */
   async expandHistory(): Promise<void> {
-    await this.host.locator('.group-head', { hasText: 'History' }).click()
+    await this.host.locator('.group-head', { hasText: '历史' }).click()
   }
 
   /**
@@ -70,7 +70,7 @@ export class ProjectRail {
       .locator('li.session-item:not(.archived)', { hasText: rowLabel })
       .first()
     await row.hover()
-    await row.locator('wa-dropdown button[title="Session actions"]').click()
+    await row.locator('wa-dropdown button[title="会话操作"]').click()
     const menu = row.locator('wa-dropdown-item[value="archive"]')
     await expect(menu).toBeVisible()
     return menu
@@ -126,7 +126,7 @@ export class ProjectRail {
    * path input). Web Awesome renders it in the top layer when open.
    */
   addDialog(): Locator {
-    return this.page.locator('sebas-project-rail wa-dialog[label="Add project"]')
+    return this.page.locator('sebas-project-rail wa-dialog[label="添加项目"]')
   }
 
   async openAddDialog(): Promise<void> {
@@ -135,7 +135,7 @@ export class ProjectRail {
     // but the rendered contents (heading/tree/input) are visible. Assert on
     // the visible heading instead of the host.
     await expect(
-      this.addDialog().locator('h2, [role="heading"]', { hasText: 'Add project' }).first(),
+      this.addDialog().locator('h2, [role="heading"]', { hasText: '添加项目' }).first(),
     ).toBeVisible()
   }
 
@@ -152,7 +152,7 @@ export class ProjectRail {
   async openNewSessionDialog(projectName: string): Promise<void> {
     const row = this.projectRow(projectName)
     await row.hover()
-    await row.locator('button[aria-label^="New session"]').click()
+    await row.locator('button[aria-label^="在 "]').click()
     await expect(
       this.newSessionDialog().locator('h2, [role="heading"]').first(),
     ).toBeVisible()
@@ -215,12 +215,12 @@ export class ProjectRail {
    * (`.fill` can bypass wa-input's input event in some versions).
    */
   async addProjectByPath(dir: string): Promise<void> {
-    const input = this.addDialog().locator('wa-input[label="Project path"] input')
+    const input = this.addDialog().locator('wa-input[label="项目路径"] input')
     await input.click()
     await input.pressSequentially(dir)
     await this.addDialog()
       .locator('wa-button')
-      .filter({ hasText: 'Add project' })
+      .filter({ hasText: '添加项目' })
       .click()
   }
 }
@@ -256,7 +256,7 @@ export class ReviewCards {
 
   constructor(page: Page) {
     this.page = page
-    this.region = page.locator('sebas-review-cards .review-cards[aria-label="Permission review"]')
+    this.region = page.locator('sebas-review-cards .review-cards[aria-label="权限审批"]')
   }
 
   /** Nth pending card. */
@@ -295,12 +295,12 @@ export class SessionsPage {
     this.page = page
     this.host = page.locator('sebas-sessions')
     this.pageTitle = page.locator('sebas-sessions .page-title')
-    this.promptInput = page.locator('sebas-sessions wa-input[aria-label="New session prompt"] input')
+    this.promptInput = page.locator('sebas-sessions wa-input[aria-label="新会话任务描述"] input')
     this.newSessionButton = page
       .locator('sebas-sessions form.composer wa-button')
-      .filter({ hasText: 'New session' })
+      .filter({ hasText: '新建会话' })
     this.cards = page.locator('sebas-sessions article.scard')
-    this.closeDialog = page.locator('sebas-sessions wa-dialog[label="Close session"]')
+    this.closeDialog = page.locator('sebas-sessions wa-dialog[label="关闭会话"]')
   }
 
   /** The card whose detail link targets the given encoded key. */
@@ -310,15 +310,15 @@ export class SessionsPage {
 
   async closeCard(encodedKey: string): Promise<void> {
     await this.cardFor(encodedKey)
-      .locator('wa-button[aria-label^="Close session"]')
+      .locator('wa-button[aria-label^="关闭会话"]')
       .click()
     // wa-dialog host is popover-hidden; assert the visible dialog copy.
     await expect(
-      this.closeDialog.locator('h2, [role="heading"]', { hasText: 'Close session' }).first(),
+      this.closeDialog.locator('h2, [role="heading"]', { hasText: '关闭会话' }).first(),
     ).toBeVisible()
     await this.closeDialog
       .locator('wa-button')
-      .filter({ hasText: 'Close session' })
+      .filter({ hasText: '关闭会话' })
       .click()
   }
 }
@@ -333,15 +333,15 @@ export class SettingsModal {
   constructor(page: Page) {
     this.page = page
     this.host = page.locator('sebas-settings-modal')
-    this.panel = page.locator('sebas-settings-modal .panel[role="dialog"][aria-label="Settings"]')
-    this.closeButton = page.locator('sebas-settings-modal button.close[aria-label="Close settings"]')
+    this.panel = page.locator('sebas-settings-modal .panel[role="dialog"][aria-label="设置"]')
+    this.closeButton = page.locator('sebas-settings-modal button.close[aria-label="关闭设置"]')
   }
 
   async openViaSidebar(): Promise<void> {
     // workbench-interaction-polish 4.1：composer 不再有 settings 入口——
     // Settings 归 app shell 侧栏底部（pinned footer）。
     await this.page
-      .locator('sebas-app .sidebar-footer button[aria-label="Open settings"]')
+      .locator('sebas-app .sidebar-footer button[aria-label="打开设置"]')
       .click()
     await expect(this.panel).toBeVisible()
   }
@@ -357,15 +357,15 @@ export class SettingsModal {
    */
   async openSection(
     label:
-      | 'Generic'
-      | 'Models'
-      | 'Agents'
-      | 'Skills'
-      | 'Services'
-      | 'Users'
-      | 'Appearance'
-      | 'About'
-      | 'Env Vars',
+      | '通用'
+      | '模型'
+      | 'Agent'
+      | '技能'
+      | '服务'
+      | '用户'
+      | '外观'
+      | '关于'
+      | '环境变量',
   ): Promise<void> {
     await this.panel.locator('.nav-item', { hasText: label }).click()
     await expect(

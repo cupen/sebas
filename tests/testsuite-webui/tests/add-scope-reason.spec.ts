@@ -45,12 +45,12 @@ test.describe('项目管理覆盖', () => {
 
       await page.goto('/')
       await rail.openAddDialog()
-      const input = rail.addDialog().locator('wa-input[label="Project path"] input')
+      const input = rail.addDialog().locator('wa-input[label="项目路径"] input')
       const hint = rail.addDialog().locator('[data-testid="add-project-scope-hint"]')
       const submit = rail
         .addDialog()
         .locator('wa-button')
-        .filter({ hasText: 'Add project' })
+        .filter({ hasText: '添加项目' })
 
       // An EXISTING directory outside the workspace root → the boundary
       // reason, submit stays disabled. (browse-dirs resolves the candidate

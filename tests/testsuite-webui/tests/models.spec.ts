@@ -215,7 +215,7 @@ test.describe('模型管理覆盖', () => {
 
       await page.goto('/')
       await settings.openViaSidebar()
-      await settings.openSection('Models')
+      await settings.openSection('模型')
 
       // Browsing the list stays read-only on the network: zero fetch traffic
       // (each fetch dials the provider's upstream from core).
@@ -231,7 +231,7 @@ test.describe('模型管理覆盖', () => {
       await expect(row.locator('button[data-testid="fetch-models"]')).toHaveCount(0)
 
       // Model entries are editable: add two entries, one tagged vision.
-      await row.locator('button[title="Edit"]').click()
+      await row.locator('button[title="编辑"]').click()
       const editor = page.locator('sebas-settings-modal wa-dialog.provider-editor')
       const add = editor.locator('button[data-testid="add-model-entry"]')
       await expect(add).toBeVisible()
@@ -242,7 +242,7 @@ test.describe('模型管理覆盖', () => {
       await add.click()
       const entry1 = editor.locator('[data-testid="model-entry"]').nth(1)
       await entry1.locator('wa-input input').fill('entry-b')
-      await editor.locator('wa-button').filter({ hasText: 'Save' }).click()
+      await editor.locator('wa-button').filter({ hasText: '保存' }).click()
       await expect(editor).toBeHidden({ timeout: 10_000 })
 
       // API truth: the entries persisted with their capability tags (entry
@@ -316,14 +316,14 @@ test.describe('模型管理覆盖', () => {
 
         await page.goto('/')
         await settings.openViaSidebar()
-        await settings.openSection('Models')
+        await settings.openSection('模型')
 
         const row = settings.panel.locator('.provider-row', { hasText: 'fetchable' })
         await expect(row).toBeVisible({ timeout: 10_000 })
 
         // ── Cancel-discard phase: fetch replaces the DRAFT only; cancelling
         // the editor leaves the stored catalog untouched.
-        await row.locator('button[title="Edit"]').click()
+        await row.locator('button[title="编辑"]').click()
         let editor = page.locator('sebas-settings-modal wa-dialog.provider-editor')
         await expect(
           editor.locator('button[data-testid="fetch-models"]'),
@@ -344,13 +344,13 @@ test.describe('模型管理覆盖', () => {
         // Fetch persists nothing by itself.
         expect(await storedEntries()).toEqual([{ id: 'fetch-m-2', tags: ['vision'] }])
 
-        await editor.locator('wa-button').filter({ hasText: 'Cancel' }).click()
+        await editor.locator('wa-button').filter({ hasText: '取消' }).click()
         await expect(editor).toBeHidden({ timeout: 10_000 })
         expect(await storedEntries()).toEqual([{ id: 'fetch-m-2', tags: ['vision'] }])
 
         // ── Save phase: reopen, fetch again, save through the ordinary edit
         // flow — the wholesale replacement (dedup by id) reaches the store.
-        await row.locator('button[title="Edit"]').click()
+        await row.locator('button[title="编辑"]').click()
         editor = page.locator('sebas-settings-modal wa-dialog.provider-editor')
         await expect(
           editor.locator('button[data-testid="fetch-models"]'),
@@ -362,7 +362,7 @@ test.describe('模型管理覆盖', () => {
           'fetch-m-1',
           { timeout: 10_000 },
         )
-        await editor.locator('wa-button').filter({ hasText: 'Save' }).click()
+        await editor.locator('wa-button').filter({ hasText: '保存' }).click()
         await expect(editor).toBeHidden({ timeout: 10_000 })
         await expect.poll(storedEntries, { timeout: 10_000, intervals: [250] }).toEqual([
           { id: 'fetch-m-1', tags: [] },
@@ -410,16 +410,16 @@ test.describe('模型管理覆盖', () => {
         // lands it in the core store.
         await page.goto('/')
         await settings.openViaSidebar()
-        await settings.openSection('Models')
+        await settings.openSection('模型')
         const row = settings.panel.locator('.provider-row', { hasText: 'dialog-seam' })
         await expect(row).toBeVisible({ timeout: 10_000 })
-        await row.locator('button[title="Edit"]').click()
+        await row.locator('button[title="编辑"]').click()
         const editor = page.locator('sebas-settings-modal wa-dialog.provider-editor')
         await editor.locator('button[data-testid="fetch-models"]').click()
         await expect(
           editor.locator('[data-testid="model-entry"]').nth(0).locator('wa-input input'),
         ).toHaveValue('dlg-m-1', { timeout: 10_000 })
-        await editor.locator('wa-button').filter({ hasText: 'Save' }).click()
+        await editor.locator('wa-button').filter({ hasText: '保存' }).click()
         await expect(editor).toBeHidden({ timeout: 10_000 })
 
         // API truth: the fetched ids persisted through the ordinary save.
@@ -470,15 +470,15 @@ test.describe('模型管理覆盖', () => {
 
       await page.goto('/')
       await settings.openViaSidebar()
-      await settings.openSection('Models')
+      await settings.openSection('模型')
 
       const row = settings.panel.locator('.provider-row', { hasText: 'urlless' })
       await expect(row).toBeVisible({ timeout: 10_000 })
-      await row.locator('button[title="Edit"]').click()
+      await row.locator('button[title="编辑"]').click()
       const editor = page.locator('sebas-settings-modal wa-dialog.provider-editor')
-      await expect(editor.locator('wa-button').filter({ hasText: 'Save' })).toBeVisible()
+      await expect(editor.locator('wa-button').filter({ hasText: '保存' })).toBeVisible()
       await expect(editor.locator('button[data-testid="fetch-models"]')).toHaveCount(0)
-      await editor.locator('wa-button').filter({ hasText: 'Cancel' }).click()
+      await editor.locator('wa-button').filter({ hasText: '取消' }).click()
       await expect(editor).toBeHidden({ timeout: 10_000 })
       await settings.close()
 
@@ -502,7 +502,7 @@ test.describe('模型管理覆盖', () => {
       // 会话头与跟随模式 composer 各有一枚锁提示——限定会话头那枚。
       const lock = page.locator('sebas-dashboard .session-head [data-testid="agent-lock"]')
       await expect(lock).toContainText('🔒')
-      await expect(lock).toHaveAttribute('title', /immutable — chosen when the session was created/)
+      await expect(lock).toHaveAttribute('title', /agent 创建时选定，之后不可更改/)
 
       expect(collector.clean()).toEqual([])
     })

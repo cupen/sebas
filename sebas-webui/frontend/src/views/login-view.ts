@@ -138,9 +138,24 @@ export class SebasLogin extends LitElement {
     }
   `
 
+  /**
+   * 提交前的就地校验（webui-i18n-sweep 2.1）：表单容器 novalidate 后浏览器
+   * 原生英文气泡不再出现，缺填以中文就地提示（不发请求）。
+   */
+  private validate(): string | null {
+    if (!this.username.trim()) return '请输入用户名'
+    if (!this.password) return '请输入密码'
+    return null
+  }
+
   private async submit(e: Event): Promise<void> {
     e.preventDefault()
     if (this.busy) return
+    const invalid = this.validate()
+    if (invalid) {
+      this.error = invalid
+      return
+    }
     this.busy = true
     this.error = null
     try {
@@ -173,7 +188,7 @@ export class SebasLogin extends LitElement {
           <span class="name">sebas<small>${APP_TAGLINE}</small></span>
         </div>
         <p class="title">登录以继续</p>
-        <form @submit=${this.submit}>
+        <form novalidate @submit=${this.submit}>
           <label>
             用户名
             <input

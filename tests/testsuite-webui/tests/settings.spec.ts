@@ -65,7 +65,7 @@ test.describe('设置面', () => {
       const truth = await getAdminServices(page.request)
       await page.goto('/')
       await settings.openViaSidebar()
-      await settings.openSection('Services')
+      await settings.openSection('服务')
 
       if (!truth.adapter_ok) {
         // Bare-core sandbox: honest degradation — banner, zero rows.
@@ -104,39 +104,39 @@ test.describe('设置面', () => {
       const truth = await getAbout(page.request)
       await page.goto('/')
       await settings.openViaSidebar()
-      await settings.openSection('About')
+      await settings.openSection('关于')
 
       // INSTANCE 段在上：工作区根目录 + 复制、default agent kind（读
       // /api/about 真值）。preselect-last-used-model：default provider/model
       // 行已删除——创建预选改 last-used 语义，该行只是数据源已 404 的死 UI。
       const instance = settings.panel.locator('dl.about-list.about-instance')
       await expect(instance).toBeVisible({ timeout: 10_000 })
-      await expect(instance).toContainText('Workspace root')
-      await expect(instance.locator('.kv', { hasText: 'Default agent kind' }).locator('dd'))
+      await expect(instance).toContainText('工作区根目录')
+      await expect(instance.locator('.kv', { hasText: '默认 agent 种类' }).locator('dd'))
         .toContainText(truth.default_agent_kind)
       await expect(
-        instance.locator('button[title="Copy workspace root"]'),
+        instance.locator('button[title="复制工作区根目录"]'),
       ).toBeAttached()
-      await expect(instance.locator('.kv', { hasText: 'Default provider' })).toHaveCount(0)
+      await expect(instance.locator('.kv', { hasText: '默认 provider' })).toHaveCount(0)
 
       // BUILD 段在下（/api/about 真实字段），对账 contains 断言。
       const build = settings.panel.locator('dl.about-list.about-build')
       await expect(build).toBeVisible({ timeout: 10_000 })
       const row = (label: string) => build.locator('.kv', { hasText: label }).locator('dd')
-      await expect(row('Version')).toContainText(truth.version)
-      await expect(row('Providers')).toContainText(String(truth.provider_count))
-      await expect(row('Router listen')).toContainText(truth.router_listen ?? '—')
+      await expect(row('版本')).toContainText(truth.version)
+      await expect(row('Provider 数')).toContainText(String(truth.provider_count))
+      await expect(row('Router 监听')).toContainText(truth.router_listen ?? '—')
       // Toolchain is empty in dev builds (an empty dd reads hidden) — pin
       // the row's attachment, not its visibility or value.
-      await expect(row('Rust toolchain')).toBeAttached()
-      await expect(row('Uptime')).not.toBeEmpty()
+      await expect(row('Rust 工具链')).toBeAttached()
+      await expect(row('运行时长')).not.toBeEmpty()
 
       // add-about-build-info: the build-time row (UTC labelled) and the
       // standalone git row (branch@shorthash) reconcile to API truth too —
       // the sandbox injects real values via build.rs, but the assertion is
       // literal-free so it also holds when they degrade to 'unknown'.
-      await expect(row('Build time')).toContainText(truth.build_time)
-      await expect(row('Build time')).toContainText('UTC')
+      await expect(row('构建时间')).toContainText(truth.build_time)
+      await expect(row('构建时间')).toContainText('UTC')
       await expect(row('Git')).toContainText(
         `${truth.git_branch}@${truth.git_hash}`,
       )
@@ -167,7 +167,7 @@ test.describe('设置面', () => {
       await settings.openViaSidebar()
       // split-env-vars-settings-section D4：Env 表自 Generic 迁出，住底部
       // 只读组「Env Vars」（与 About 同组，压底分隔线）。
-      await settings.openSection('Env Vars')
+      await settings.openSection('环境变量')
 
       const table = settings.panel.locator('table.env-table')
       await expect(table).toBeVisible({ timeout: 10_000 })
@@ -195,7 +195,7 @@ test.describe('设置面', () => {
       await settings.openViaSidebar()
 
       // Services: banner, zero rows, zero row actions.
-      await settings.openSection('Services')
+      await settings.openSection('服务')
       await expect(settings.panel.locator('.services-banner')).toContainText(
         '无 watchdog 控制面',
         { timeout: 10_000 },
@@ -206,7 +206,7 @@ test.describe('设置面', () => {
       // revamp-settings-nav-and-models-editor: the former Settings overview's
       // maintenance actions are retired everywhere — no restart-all, no reset,
       // in any section (per-service restart lives only in Services).
-      for (const section of ['Generic', 'Appearance', 'Models', 'About'] as const) {
+      for (const section of ['通用', '外观', '模型', '关于'] as const) {
         await settings.openSection(section)
         await expect(
           settings.panel.locator('wa-button', { hasText: '全部进程重启' }),
@@ -233,7 +233,7 @@ test.describe('设置面', () => {
 
       // revamp-settings-nav-and-models-editor：无历史记忆时缺省聚焦 Generic。
       const navItem = (label: string) => settings.panel.locator('.nav-item', { hasText: label })
-      await expect(navItem('Generic')).toHaveAttribute('aria-current', 'true', {
+      await expect(navItem('通用')).toHaveAttribute('aria-current', 'true', {
         timeout: 10_000,
       })
 
@@ -254,27 +254,27 @@ test.describe('设置面', () => {
         }),
       )
       expect(signature).toEqual([
-        'Generic',
-        'Appearance',
+        '通用',
+        '外观',
         'sep',
-        'Services',
-        'Models',
-        'Agents',
-        'Skills',
+        '服务',
+        '模型',
+        'Agent',
+        '技能',
         'sep-tail',
-        'Env Vars',
-        'About',
+        '环境变量',
+        '关于',
       ])
-      await expect(navItem('Users')).toHaveCount(0)
+      await expect(navItem('用户')).toHaveCount(0)
 
       // 历史记忆：切到 Models 后关闭再打开，缺省直接回到 Models（无点击）。
-      await settings.openSection('Models')
+      await settings.openSection('模型')
       await settings.close()
       await settings.openViaSidebar()
-      await expect(navItem('Models')).toHaveAttribute('aria-current', 'true', {
+      await expect(navItem('模型')).toHaveAttribute('aria-current', 'true', {
         timeout: 10_000,
       })
-      await expect(navItem('Generic')).toHaveAttribute('aria-current', 'false')
+      await expect(navItem('通用')).toHaveAttribute('aria-current', 'false')
       await settings.close()
 
       // 旧值回退：记忆值 `settings`（本变更前的合法分区名）按非法值处理，
@@ -282,10 +282,10 @@ test.describe('设置面', () => {
       await page.evaluate(() => localStorage.setItem('lastSettingsSection', 'settings'))
       await page.reload()
       await settings.openViaSidebar()
-      await expect(navItem('Generic')).toHaveAttribute('aria-current', 'true', {
+      await expect(navItem('通用')).toHaveAttribute('aria-current', 'true', {
         timeout: 10_000,
       })
-      await expect(navItem('Models')).toHaveAttribute('aria-current', 'false')
+      await expect(navItem('模型')).toHaveAttribute('aria-current', 'false')
       await settings.close()
 
       expect(collector.clean()).toEqual([])
@@ -311,12 +311,12 @@ test.describe('设置面', () => {
       await page.goto('/')
       await settings.openViaSidebar()
       // Default section is Generic — defaults live under Models.
-      await settings.openSection('Models')
+      await settings.openSection('模型')
 
       // Toolbar mirrors the null truth (span only — wa-button internals also
       // carry .label slots, so scope structurally).
       await expect(settings.panel.locator('.provider-toolbar span.label')).toHaveText(
-        'no default set',
+        '未设置默认',
         { timeout: 10_000 },
       )
 
@@ -326,8 +326,8 @@ test.describe('设置面', () => {
         .filter({ hasText: seededName })
       const providerName = (await firstRow.locator('.provider-row-name').textContent())?.trim()
       expect(providerName).toBeTruthy()
-      await firstRow.locator('button[title="Set as default for new sessions"]').click()
-      const dialog = page.locator('sebas-settings-modal wa-dialog[label="Set default for new sessions"]')
+      await firstRow.locator('button[title="设为新建会话的默认"]').click()
+      const dialog = page.locator('sebas-settings-modal wa-dialog[label="设置新建会话默认"]')
       await expect(
         dialog.locator('.dialog-text').filter({ hasText: seededName }),
       ).toBeVisible()
@@ -335,17 +335,17 @@ test.describe('设置面', () => {
       // say so, rows with one offer the select — either branch is legitimate.
       await expect(
         dialog
-          .locator('.dialog-text', { hasText: 'This provider has no model catalog yet.' })
-          .or(dialog.locator('wa-select[label="Default model"]')),
+          .locator('.dialog-text', { hasText: '该 provider 还没有模型目录。' })
+          .or(dialog.locator('wa-select[label="默认模型"]')),
       ).toBeVisible()
 
       // workbench-agent-wire-fix 3.3：全局默认无服务端持久化面（端点已退
       // 录）。Save 只更新本地呈现（toolbar 反映新默认），wire 上无请求——
       // 默认 agent 的持久化由项目级 default_agent 承载。
-      await dialog.locator('wa-button').filter({ hasText: 'Set default' }).click()
+      await dialog.locator('wa-button').filter({ hasText: '设为默认' }).click()
       await expect(
         settings.panel.locator('.provider-toolbar span.label'),
-      ).toHaveText(`default: ${seededName.split(' ')[0]}`, { timeout: 10_000 })
+      ).toHaveText(`默认：${seededName}`, { timeout: 10_000 })
       expect((await page.request.get('/api/agent-defaults')).status()).toBe(404)
       // 确认即收（defaultDraft 清空 = dialog 关闭）；无需再点 Cancel。
       await expect(dialog).toBeHidden({ timeout: 10_000 })
@@ -363,7 +363,7 @@ test.describe('设置面', () => {
       await page.goto('/')
       await settings.openViaSidebar()
       // Default section is Generic — provider management lives under Models.
-      await settings.openSection('Models')
+      await settings.openSection('模型')
 
       // Empty custom create is rejected client-side with zero network traffic
       // (custom minimal form requires the instance name).
@@ -372,12 +372,12 @@ test.describe('设置面', () => {
         if (route.request().method() === 'POST') postCalls += 1
         void route.continue()
       })
-      await settings.panel.locator('wa-button').filter({ hasText: 'New (custom)' }).click()
+      await settings.panel.locator('wa-button').filter({ hasText: '新建（自定义）' }).click()
       const editor = page.locator('sebas-settings-modal wa-dialog.provider-editor')
       // wa-dialog hosts read popover-hidden in the top layer — assert the
       // rendered footer action instead (same discipline as the rail dialogs).
-      await expect(editor.locator('wa-button').filter({ hasText: 'Save' })).toBeVisible()
-      await editor.locator('wa-button').filter({ hasText: 'Save' }).click()
+      await expect(editor.locator('wa-button').filter({ hasText: '保存' })).toBeVisible()
+      await editor.locator('wa-button').filter({ hasText: '保存' }).click()
       await expect(editor.locator('.callout-error[role="alert"]')).toContainText('名称不能为空')
       expect(postCalls).toBe(0)
 
@@ -385,11 +385,11 @@ test.describe('设置面', () => {
       // one base URL; the payload carries no advanced-only fields). Dialog
       // closes, list refreshes (make-core-own-provider-data 3.2).
       const probeName = `spec-create-${Date.now()}`
-      const nameInput = editor.locator('wa-input[label="Name"] input')
+      const nameInput = editor.locator('wa-input[label="名称"] input')
       await nameInput.click()
       await nameInput.pressSequentially(probeName)
-      await editor.locator('wa-input[label="Base URL (OpenAI-compatible)"] input').fill('http://127.0.0.1:9/v1')
-      await editor.locator('wa-button').filter({ hasText: 'Save' }).click()
+      await editor.locator('wa-input[label="Base URL（OpenAI 兼容）"] input').fill('http://127.0.0.1:9/v1')
+      await editor.locator('wa-button').filter({ hasText: '保存' }).click()
       await expect(editor).toBeHidden({ timeout: 10_000 })
       // API truth: the new row is there immediately (no restart).
       await expect
@@ -403,7 +403,7 @@ test.describe('设置面', () => {
       // Persistence: the store is core-owned — a fresh page load still sees it.
       await page.reload()
       await settings.openViaSidebar()
-      await settings.openSection('Models')
+      await settings.openSection('模型')
       await expect(
         settings.panel.locator('.provider-row').filter({ hasText: probeName }),
       ).toBeVisible({ timeout: 10_000 })
@@ -413,11 +413,11 @@ test.describe('设置面', () => {
       await settings.panel
         .locator('.provider-row')
         .filter({ hasText: probeName })
-        .locator('button[title="Edit"]')
+        .locator('button[title="编辑"]')
         .click()
       const editDialog = page.locator('sebas-settings-modal wa-dialog.provider-editor')
-      await expect(editDialog.locator('wa-button').filter({ hasText: 'Save' })).toBeVisible()
-      await editDialog.locator('wa-button').filter({ hasText: 'Save' }).click()
+      await expect(editDialog.locator('wa-button').filter({ hasText: '保存' })).toBeVisible()
+      await editDialog.locator('wa-button').filter({ hasText: '保存' }).click()
       await expect(editDialog).toBeHidden({ timeout: 10_000 })
       await expect(
         settings.panel.locator('.provider-row').filter({ hasText: probeName }),
@@ -427,11 +427,11 @@ test.describe('设置面', () => {
       // preset name (redesign-provider-models-settings D5) and its model
       // catalog follows the code table. The editor defaults to the first
       // code-table preset ("anthropic").
-      await settings.panel.locator('wa-button').filter({ hasText: 'New (preset)' }).click()
+      await settings.panel.locator('wa-button').filter({ hasText: '新建（预设）' }).click()
       const presetEditor = page.locator('sebas-settings-modal wa-dialog.provider-editor')
-      await expect(presetEditor.locator('wa-input[label="Name"]')).toHaveCount(0)
+      await expect(presetEditor.locator('wa-input[label="名称"]')).toHaveCount(0)
       await presetEditor.locator('wa-input[label="API key"] input').fill('sk-spec-preset')
-      await presetEditor.locator('wa-button').filter({ hasText: 'Save' }).click()
+      await presetEditor.locator('wa-button').filter({ hasText: '保存' }).click()
       await expect(presetEditor).toBeHidden({ timeout: 10_000 })
       // fix-webui-qa-round2 3.4（D-R2B 归因修复）：裸 hasText 'anthropic'
       // 是歧义定位——deepseek 预设的 base URL 恰好含 '/anthropic' 子串、
@@ -440,7 +440,7 @@ test.describe('设置面', () => {
       // 渲染是好的）。改按 store 行的 preset 徽章精确锚定新 preset 行。
       await expect(
         settings.panel.locator('.provider-row').filter({
-          has: page.locator('.provider-badge.preset', { hasText: 'anthropic · code' }),
+          has: page.locator('.provider-badge.preset', { hasText: 'anthropic · 内置' }),
         }),
       ).toBeVisible({ timeout: 10_000 })
       const presetResp = await page.request.get('/api/providers')
@@ -469,16 +469,16 @@ test.describe('设置面', () => {
       await page.goto('/')
       await settings.openViaSidebar()
       // Default section is Generic — provider management lives under Models.
-      await settings.openSection('Models')
+      await settings.openSection('模型')
       const seededRow = settings.panel.locator('.provider-row').filter({ hasText: seededName })
       await expect(seededRow).toBeVisible({ timeout: 10_000 })
 
       // Delete confirm now succeeds: dialog closes, the row disappears from
       // the UI and from the API truth.
-      await seededRow.locator('button[title="Delete"]').click()
-      const confirm = page.locator('sebas-settings-modal wa-dialog[label="Delete provider"]')
+      await seededRow.locator('button[title="删除"]').click()
+      const confirm = page.locator('sebas-settings-modal wa-dialog[label="删除 provider"]')
       await expect(confirm.locator('.dialog-text')).toBeVisible()
-      await confirm.locator('wa-button').filter({ hasText: 'Delete' }).click()
+      await confirm.locator('wa-button').filter({ hasText: '删除' }).click()
       await expect(confirm).toBeHidden({ timeout: 10_000 })
       await expect(seededRow).toHaveCount(0)
       await expect
@@ -499,16 +499,16 @@ test.describe('设置面', () => {
       // Reload so the SPA rebuilds and re-reads the provider list fresh.
       await page.reload()
       await settings.openViaSidebar()
-      await settings.openSection('Models')
+      await settings.openSection('模型')
       const urllessRow = settings.panel.locator('.provider-row').filter({ hasText: urllessName })
       await expect(urllessRow).toBeVisible({ timeout: 10_000 })
-      await urllessRow.locator('button[title="Edit"]').click()
+      await urllessRow.locator('button[title="编辑"]').click()
       const urllessEditor = page.locator('sebas-settings-modal wa-dialog.provider-editor')
-      await expect(urllessEditor.locator('wa-button').filter({ hasText: 'Save' })).toBeVisible()
+      await expect(urllessEditor.locator('wa-button').filter({ hasText: '保存' })).toBeVisible()
       await expect(
         urllessEditor.locator('button[data-testid="fetch-models"]'),
       ).toHaveCount(0)
-      await urllessEditor.locator('wa-button').filter({ hasText: 'Cancel' }).click()
+      await urllessEditor.locator('wa-button').filter({ hasText: '取消' }).click()
       await expect(urllessEditor).toBeHidden({ timeout: 10_000 })
       const probe = await page.request.post(
         `/api/providers/${encodeURIComponent(urllessName)}/probe`,

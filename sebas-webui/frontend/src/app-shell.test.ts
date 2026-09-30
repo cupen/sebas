@@ -169,7 +169,7 @@ describe('sidebar IA v2', () => {
     // 项目树挂在侧栏里，Settings 入口钉在底部。
     expect(el.shadowRoot!.querySelector('sebas-project-rail')).toBeTruthy()
     const settingsBtn = el.shadowRoot!.querySelector<HTMLButtonElement>('button.settings-btn')
-    expect(settingsBtn?.textContent ?? '').toContain('Settings')
+    expect(settingsBtn?.textContent ?? '').toContain('设置')
     // NAV_ITEMS 链接列表整体删除：无导航链接，退役路径一个都不出现。
     const hrefs = [...el.shadowRoot!.querySelectorAll('nav a')].map((a) => a.getAttribute('href'))
     // 仅剩品牌回链 + 用量入口（add-usage-statistics 4.2：`/usage` 看数面
@@ -315,9 +315,9 @@ describe('sidebar IA v2', () => {
     expect(modal.hasAttribute('open')).toBe(true)
     // 居中弹窗骨架：dialog 语义 + 占位正文 + 可命名关闭按钮。
     const panel = modal.shadowRoot!.querySelector('[role="dialog"]')
-    expect(panel?.getAttribute('aria-label')).toBe('Settings')
+    expect(panel?.getAttribute('aria-label')).toBe('设置')
     expect(modal.shadowRoot!.querySelector('.close')).toBeTruthy()
-    expect(modal.shadowRoot!.textContent).toContain('Settings')
+    expect(modal.shadowRoot!.textContent).toContain('设置')
 
     modal.dispatchEvent(new CustomEvent('close', { bubbles: true, composed: true }))
     await el.updateComplete
@@ -874,7 +874,7 @@ describe('当前角色可见（gate-agent-directory-writes 2.2）', () => {
   }
 
   function logoutLabel(el: SebasApp): string {
-    const btn = el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="Sign out"]')
+    const btn = el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="退出登录"]')
     return btn?.textContent ?? ''
   }
 
@@ -909,7 +909,7 @@ describe('当前角色可见（gate-agent-directory-writes 2.2）', () => {
     const el = await mountShell()
     expect(logoutLabel(el)).toContain('退出 (alice · admin)')
     // authLogout 的 fetch 在 jsdom 无服务可达即抛——onLogout 照样走 showLogin。
-    el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="Sign out"]')!.click()
+    el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="退出登录"]')!.click()
     await new Promise((r) => setTimeout(r, 0))
     await el.updateComplete
     expect(el.shadowRoot!.querySelector('sebas-login')).toBeTruthy()

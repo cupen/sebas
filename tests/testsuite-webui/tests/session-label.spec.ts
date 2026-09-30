@@ -45,7 +45,7 @@ test.describe('会话管理', () => {
       .locator('li.session-item:not(.archived)', { hasText: rowLabel })
       .first()
     await row.hover()
-    await row.locator('wa-dropdown button[title="Session actions"]').click()
+    await row.locator('wa-dropdown button[title="会话操作"]').click()
     const item = row.locator('wa-dropdown-item[value="rename"]')
     await expect(item).toBeVisible()
     await item.click()

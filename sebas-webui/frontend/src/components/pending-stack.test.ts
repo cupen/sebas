@@ -19,6 +19,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { PendingSubmission } from '../api/client.js'
 
 vi.mock('../api/client.js', () => ({
+  errorText: (err: unknown) => (err instanceof Error ? err.message : String(err)),
   api: {
     removePending: vi.fn(),
     movePending: vi.fn(),

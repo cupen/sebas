@@ -90,7 +90,7 @@ test.describe('工作台首屏', () => {
       // 模型凭据」。展示名走 catalog 的 display（native = "Native Kernel"）。
       await expect(nativeOption).toContainText('Native Kernel')
       await expect(nativeOption).toContainText('未配置模型凭据')
-      await expect(nativeOption).toContainText('Settings → Models')
+      await expect(nativeOption).toContainText('设置 → 模型')
 
       // 目录不可得（沙箱无 provider 目录）→ 显式说明，不渲染空下拉。
       await expect(

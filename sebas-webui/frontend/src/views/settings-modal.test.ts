@@ -164,6 +164,8 @@ vi.mock('../api/client.js', () => ({
   },
   // 角色词表（渲染层常量，Users 分区的角色下拉数据源）与真模块同值。
   ROLES: ['root', 'admin', 'member', 'viewer'] as const,
+  // 呈现用错误文本（webui-i18n-sweep 1.4）：与真实现同语义（Error → message）。
+  errorText: (err: unknown) => (err instanceof Error ? err.message : String(err)),
 }))
 
 import './settings-modal.js'
@@ -383,14 +385,14 @@ describe('sebas-settings-modal sections', () => {
     const el = await mount()
     const labels = navItems(el).map((b) => b.textContent?.trim())
     expect(labels).toEqual([
-      'Generic',
-      'Appearance',
-      'Services',
-      'Models',
-      'Agents',
-      'Skills',
-      'Env Vars',
-      'About',
+      '通用',
+      '外观',
+      '服务',
+      '模型',
+      'Agent',
+      '技能',
+      '环境变量',
+      '关于',
     ])
     el.remove()
   })
@@ -403,15 +405,15 @@ describe('sebas-settings-modal sections', () => {
     // 底部组上方的分隔线带 .tail（margin-top: auto 压底），且紧贴 Env Vars 项。
     const tail = seps.find((s) => s.classList.contains('tail'))!
     expect(tail).toBeTruthy()
-    expect(tail.previousElementSibling?.textContent?.trim()).toBe('Skills')
+    expect(tail.previousElementSibling?.textContent?.trim()).toBe('技能')
     expect(tail.nextElementSibling?.classList.contains('nav-item')).toBe(true)
-    expect(tail.nextElementSibling?.textContent?.trim()).toBe('Env Vars')
+    expect(tail.nextElementSibling?.textContent?.trim()).toBe('环境变量')
     // 底部组内 Env Vars → About 之间不再有分隔线（同组并列）。
-    expect(tail.nextElementSibling?.nextElementSibling?.textContent?.trim()).toBe('About')
+    expect(tail.nextElementSibling?.nextElementSibling?.textContent?.trim()).toBe('关于')
     // 另一条在 Services 项之前（appearance|services 组间线）。
     const plain = seps.find((s) => !s.classList.contains('tail'))!
-    expect(plain.nextElementSibling?.textContent?.trim()).toBe('Services')
-    expect(plain.previousElementSibling?.textContent?.trim()).toBe('Appearance')
+    expect(plain.nextElementSibling?.textContent?.trim()).toBe('服务')
+    expect(plain.previousElementSibling?.textContent?.trim()).toBe('外观')
     el.remove()
   })
 
@@ -425,7 +427,7 @@ describe('sebas-settings-modal sections', () => {
     // 占位文案指明偏好项（语言切换等）后续提供（textContent 含模板换行，
     // 先折叠空白再断言）。
     const text = (el.shadowRoot!.textContent ?? '').replace(/\s+/g, ' ')
-    expect(text).toContain('will be provided here later')
+    expect(text).toContain('以后会在这里提供')
     el.remove()
   })
 
@@ -490,14 +492,14 @@ describe('sebas-settings-modal sections', () => {
       s.textContent?.trim(),
     )
     expect(ids).toEqual(['im', 'router'])
-    expect(text).toContain('desired running · status running · up 1h 2m')
-    expect(text).toContain('Recent errors')
+    expect(text).toContain('期望 running · 状态 running · 已运行 1h 2m')
+    expect(text).toContain('最近错误')
     expect(text).toContain('im worker boom')
     // 动作按钮随 actual status 互斥（status-driven-service-rows）：im running
     // 只显 ■，router stopped 只显 ▶。
-    const enables = [...el.shadowRoot!.querySelectorAll('button[title="Enable service"]')]
+    const enables = [...el.shadowRoot!.querySelectorAll('button[title="启用服务"]')]
     expect(enables.length).toBe(1)
-    const disables = [...el.shadowRoot!.querySelectorAll('button[title="Disable service"]')]
+    const disables = [...el.shadowRoot!.querySelectorAll('button[title="停用服务"]')]
     expect(disables.length).toBe(1)
     el.remove()
   })
@@ -517,9 +519,9 @@ describe('sebas-settings-modal sections', () => {
     const coreCard = cards.find((c) => c.querySelector('.service-id')?.textContent === 'core')!
     expect(coreCard).toBeTruthy()
     // core 纯只读（status-driven-service-rows D3）：无 ▶ / ■ / ⟳ 任何按钮。
-    expect(coreCard.querySelector('button[title="Enable service"]')).toBeNull()
-    expect(coreCard.querySelector('button[title="Disable service"]')).toBeNull()
-    expect(coreCard.querySelector('button[title="Restart service"]')).toBeNull()
+    expect(coreCard.querySelector('button[title="启用服务"]')).toBeNull()
+    expect(coreCard.querySelector('button[title="停用服务"]')).toBeNull()
+    expect(coreCard.querySelector('button[title="重启服务"]')).toBeNull()
     expect(coreCard.querySelectorAll('button').length).toBe(0)
     // 动作区容器仍渲染（定宽占位，D4）。
     expect(coreCard.querySelector('.service-actions')).not.toBeNull()
@@ -596,7 +598,7 @@ describe('sebas-settings-modal sections', () => {
     await goto(el, 2)
     const text = el.shadowRoot!.textContent ?? ''
     expect(text).toContain('router')
-    expect(text).toContain('desired running · status running · up 1m')
+    expect(text).toContain('期望 running · 状态 running · 已运行 1m')
     el.remove()
   })
 
@@ -615,8 +617,8 @@ describe('sebas-settings-modal sections', () => {
     const rows = [...el.shadowRoot!.querySelectorAll<HTMLElement>('.provider-row')]
     expect(rows.length).toBe(2)
     expect(text).toContain('alpha')
-    expect(text).toContain('deepseek · code')
-    expect(text).toContain('custom')
+    expect(text).toContain('deepseek · 内置')
+    expect(text).toContain('自定义')
     expect(text).toContain('https://a.example/anthropic')
     expect(text).toContain('beta')
     // 列表呈现模型条目与能力标记（条目 = id + tags；text 隐含）。
@@ -635,13 +637,13 @@ describe('sebas-settings-modal sections', () => {
     expect(apiMocks.fsBrowseDirs).toHaveBeenCalled()
     const text = el.shadowRoot!.textContent ?? ''
     // INSTANCE 段：工作区根目录 + default agent kind（读 /api/about 真值）。
-    expect(text).toContain('Instance')
-    expect(text).toContain('Workspace root')
+    expect(text).toContain('实例')
+    expect(text).toContain('工作区根目录')
     expect(text).toContain('/tmp/test-work')
-    expect(text).toContain('Default agent kind')
+    expect(text).toContain('默认 agent 种类')
     expect(text).toContain('claude')
     // BUILD 段：/api/about 真实字段。
-    expect(text).toContain('Build')
+    expect(text).toContain('构建')
     expect(text).toContain('0.4.2')
     expect(text).toContain('3h 12m')
     expect(text).toContain('1.88')
@@ -652,7 +654,7 @@ describe('sebas-settings-modal sections', () => {
     expect(lists[0]!.classList.contains('about-instance')).toBe(true)
     expect(lists[1]!.classList.contains('about-build')).toBe(true)
     // 工作区根目录带复制按钮。
-    const copy = el.shadowRoot!.querySelector('button[title="Copy workspace root"]')
+    const copy = el.shadowRoot!.querySelector('button[title="复制工作区根目录"]')
     expect(copy).toBeTruthy()
     el.remove()
   })
@@ -780,7 +782,7 @@ describe('status-driven-service-rows：动作按钮随 actual status 互斥（D2
     const el = await mount()
     await goto(el, 2)
     const card = el.shadowRoot!.querySelector<HTMLElement>('.service-card')!
-    const enable = card.querySelector<HTMLButtonElement>('button[title="Enable service"]')!
+    const enable = card.querySelector<HTMLButtonElement>('button[title="启用服务"]')!
     enable.click()
     await el.updateComplete
     // 执行期间：行内按钮禁用（busy）。
@@ -935,7 +937,7 @@ describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
     expect(rows.length).toBe(3)
     // 名字 + attachment 数。
     const deploy = rows.find((r) => r.dataset.name === 'my-deploy')!
-    expect(deploy.querySelector('.skills-row-atts')?.textContent?.trim()).toBe('2 attachments')
+    expect(deploy.querySelector('.skills-row-atts')?.textContent?.trim()).toBe('2 个附件')
     // invalid 徽标 + 成因（描述位显 reason）。
     const broken = rows.find((r) => r.dataset.name === 'broken')!
     expect(broken.querySelector('[data-testid="skill-invalid"]')).toBeTruthy()
@@ -971,13 +973,13 @@ describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
     const el = await mount()
     await goto(el, 5)
     const buttons = waButtons(el).map((b) => b.textContent?.trim())
-    expect(buttons).toContain('Refresh')
-    expect(buttons).toContain('Sync')
-    expect(buttons.some((t) => t?.includes('New') || t?.includes('Edit'))).toBe(false)
+    expect(buttons).toContain('刷新')
+    expect(buttons).toContain('同步')
+    expect(buttons.some((t) => t?.includes('新建') || t?.includes('编辑'))).toBe(false)
     // 行内也没有编辑入口（只有删除 🗑）。
     const rowActions = [...el.shadowRoot!.querySelectorAll<HTMLElement>('.skills-row .row-action')]
     expect(rowActions.length).toBe(3)
-    expect(rowActions.every((b) => b.title === 'Delete')).toBe(true)
+    expect(rowActions.every((b) => b.title === '删除')).toBe(true)
     el.remove()
   })
 
@@ -987,13 +989,13 @@ describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
     const callsBefore = apiMocks.skillsList.mock.calls.length
     skillRows(el)
       .find((r) => r.dataset.name === 'broken')!
-      .querySelector<HTMLElement>('button[title="Delete"]')!
+      .querySelector<HTMLElement>('button[title="删除"]')!
       .click()
     await el.updateComplete
     // 确认文案讲明两段式语义：backend 副本在下次 Sync 清理。
     const text = el.shadowRoot!.querySelector('[data-testid="skill-delete-text"]')!.textContent!
     expect(text).toContain('broken')
-    expect(text).toContain('Sync')
+    expect(text).toContain('同步')
     // 取消不发请求。
     el.shadowRoot!
       .querySelector('wa-dialog.skill-delete')!
@@ -1004,7 +1006,7 @@ describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
     // 确认 → DELETE + 列表重取。
     skillRows(el)
       .find((r) => r.dataset.name === 'broken')!
-      .querySelector<HTMLElement>('button[title="Delete"]')!
+      .querySelector<HTMLElement>('button[title="删除"]')!
       .click()
     await el.updateComplete
     el.shadowRoot!
@@ -1023,18 +1025,18 @@ describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
     const el = await mount()
     await goto(el, 5)
     waButtons(el)
-      .find((b) => b.textContent?.trim() === 'Sync')!
+      .find((b) => b.textContent?.trim() === '同步')!
       .click()
     await settle(el)
     const panel = el.shadowRoot!.querySelector('[data-testid="skills-sync-result"]')!
     const text = panel.textContent ?? ''
     expect(text).toContain('claude')
-    expect(text).toContain('1 written')
-    expect(text).toContain('1 overwritten')
-    expect(text).toContain('1 deleted')
-    expect(text).toContain('2 private')
+    expect(text).toContain('已写入 1')
+    expect(text).toContain('覆盖 1')
+    expect(text).toContain('删除 1')
+    expect(text).toContain('私有 2')
     // 无落点 backend 如实呈现（reported, not skipped）。
-    expect(text).toContain('no placement: gemini')
+    expect(text).toContain('无落点：gemini')
     // 覆盖/删除的条目名逐一点名（「仓 wins」必须可见）。
     expect(panel.textContent).toContain('~ grill-me')
     expect(panel.textContent).toContain('- old-skill')
@@ -1072,7 +1074,7 @@ describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
       ],
     })
     waButtons(el)
-      .find((b) => b.textContent?.trim() === 'Refresh')!
+      .find((b) => b.textContent?.trim() === '刷新')!
       .click()
     await settle(el)
 
@@ -1081,7 +1083,7 @@ describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
     expect(rows.some((r) => r.dataset.name === 'git-cloned')).toBe(true)
     expect(rows.some((r) => r.dataset.name === 'broken')).toBe(false)
     expect(el.shadowRoot!.querySelector('.provider-toolbar span.label')?.textContent).toContain(
-      '2 skills in store',
+      '仓内 2 个技能',
     )
     // 预览目标仍在 → 预览保留。
     expect(el.shadowRoot!.querySelector('[data-testid="skill-preview"]')).toBeTruthy()
@@ -1091,7 +1093,7 @@ describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
       skills: [{ name: 'git-cloned', description: '来自 git clone', attachments: [], valid: true }],
     })
     waButtons(el)
-      .find((b) => b.textContent?.trim() === 'Refresh')!
+      .find((b) => b.textContent?.trim() === '刷新')!
       .click()
     await settle(el)
     expect(el.shadowRoot!.querySelector('[data-testid="skill-preview"]')).toBeNull()
@@ -1103,11 +1105,11 @@ describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
     const el = await mount()
     await goto(el, 5)
     expect(el.shadowRoot!.querySelector('.provider-toolbar span.label')?.textContent).toContain(
-      '0 skills in store',
+      '仓内 0 个技能',
     )
     const placeholder = el.shadowRoot!.querySelector('.prefs-placeholder')
     expect(placeholder).toBeTruthy()
-    expect(placeholder!.textContent).toContain('The skill store is empty')
+    expect(placeholder!.textContent).toContain('技能仓为空')
     expect(placeholder!.textContent).toContain('sebas skills add')
     expect(skillRows(el)).toHaveLength(0)
     el.remove()
@@ -1118,17 +1120,17 @@ describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
     await goto(el, 5)
     apiMocks.skillsSync.mockRejectedValue(new ApiError(500, 'reconcile exploded'))
     waButtons(el)
-      .find((b) => b.textContent?.trim() === 'Sync')!
+      .find((b) => b.textContent?.trim() === '同步')!
       .click()
     await settle(el)
 
     const err = el.shadowRoot!.querySelector('[data-testid="skills-sync-error"]')
     expect(err).toBeTruthy()
-    expect(err!.textContent).toContain('Sync failed')
+    expect(err!.textContent).toContain('同步失败')
     expect(err!.textContent).toContain('reconcile exploded')
     expect(el.shadowRoot!.querySelector('[data-testid="skills-sync-result"]')).toBeNull()
     // busy 复位：按钮恢复可点（否则一次失败就永久卡死 Sync）。
-    const syncBtn = waButtons(el).find((b) => b.textContent?.trim() === 'Sync')!
+    const syncBtn = waButtons(el).find((b) => b.textContent?.trim() === '同步')!
     expect((syncBtn as unknown as HTMLButtonElement).disabled).toBe(false)
     el.remove()
   })
@@ -1214,15 +1216,15 @@ describe('add-agent-settings-and-session-titles：Agents 分区（/api/agents*�
     const native = el.shadowRoot!.querySelector('[data-testid="agent-row-native"]')
     expect(native).toBeTruthy()
     expect(native!.querySelector('[data-testid="agent-builtin-badge"]')?.textContent).toContain(
-      'builtIn',
+      '内置',
     )
     // native 行不得有编辑/删除入口。
-    expect(native!.querySelector('button[title="Edit"]')).toBeNull()
-    expect(native!.querySelector('button[title="Delete"]')).toBeNull()
+    expect(native!.querySelector('button[title="编辑"]')).toBeNull()
+    expect(native!.querySelector('button[title="删除"]')).toBeNull()
     // store 行有编辑/删除入口。
     const row = agentRows(el).find((r) => r.dataset['id'] === 'claude')!
-    expect(row.querySelector('button[title="Edit"]')).toBeTruthy()
-    expect(row.querySelector('button[title="Delete"]')).toBeTruthy()
+    expect(row.querySelector('button[title="编辑"]')).toBeTruthy()
+    expect(row.querySelector('button[title="删除"]')).toBeTruthy()
     el.remove()
   })
 
@@ -1231,13 +1233,13 @@ describe('add-agent-settings-and-session-titles：Agents 分区（/api/agents*�
     const el = await mount()
     await goto(el, 4)
     waButtons(el)
-      .find((b) => b.textContent?.includes('New agent'))!
+      .find((b) => b.textContent?.includes('新建 agent'))!
       .click()
     await settle(el)
-    const dlg = dialogByLabel(el, 'New agent')
+    const dlg = dialogByLabel(el, '新建 agent')
     setWaInput(el, 'Agent id', 'myclaude')
     // 形态下拉缺省 claude、路径预填 claude——直接保存。
-    const save = waButtonsIn(dlg).find((b) => b.textContent?.trim() === 'Save')!
+    const save = waButtonsIn(dlg).find((b) => b.textContent?.trim() === '保存')!
     save.click()
     await settle(el)
     // （fix-webui-qa-round2 2.4）spawn 目录/参数字段随 create 全量上 wire
@@ -1257,13 +1259,13 @@ describe('add-agent-settings-and-session-titles：Agents 分区（/api/agents*�
     const el = await mount()
     await goto(el, 4)
     waButtons(el)
-      .find((b) => b.textContent?.includes('New agent'))!
+      .find((b) => b.textContent?.includes('新建 agent'))!
       .click()
     await settle(el)
     setWaInput(el, 'Agent id', 'native')
-    const dlg = dialogByLabel(el, 'New agent')
+    const dlg = dialogByLabel(el, '新建 agent')
     waButtonsIn(dlg)
-      .find((b) => b.textContent?.trim() === 'Save')!
+      .find((b) => b.textContent?.trim() === '保存')!
       .click()
     await settle(el)
     expect(apiMocks.agentsCreate).not.toHaveBeenCalled()
@@ -1279,13 +1281,13 @@ describe('add-agent-settings-and-session-titles：Agents 分区（/api/agents*�
     await goto(el, 4)
     agentRows(el)
       .find((r) => r.dataset['id'] === 'claude')!
-      .querySelector<HTMLElement>('button[title="Edit"]')!
+      .querySelector<HTMLElement>('button[title="编辑"]')!
       .click()
     await settle(el)
-    setWaInput(el, 'Display name (optional)', 'My Claude')
-    const dlg = dialogByLabel(el, 'Edit agent claude')
+    setWaInput(el, '显示名（可选）', 'My Claude')
+    const dlg = dialogByLabel(el, '编辑 agent claude')
     waButtonsIn(dlg)
-      .find((b) => b.textContent?.trim() === 'Save')!
+      .find((b) => b.textContent?.trim() === '保存')!
       .click()
     await settle(el)
     // 部分更新：display + spawn 目录/参数改动面（launch 形态保留存量——
@@ -1304,14 +1306,14 @@ describe('add-agent-settings-and-session-titles：Agents 分区（/api/agents*�
     await goto(el, 4)
     agentRows(el)
       .find((r) => r.dataset['id'] === 'claude')!
-      .querySelector<HTMLElement>('button[title="Delete"]')!
+      .querySelector<HTMLElement>('button[title="删除"]')!
       .click()
     await settle(el)
     // 确认弹窗打开、请求未发。
     expect(apiMocks.agentsDelete).not.toHaveBeenCalled()
-    const dlg = dialogByLabel(el, 'Delete agent')
+    const dlg = dialogByLabel(el, '删除 agent')
     waButtonsIn(dlg)
-      .find((b) => b.textContent?.trim() === 'Delete')!
+      .find((b) => b.textContent?.trim() === '删除')!
       .click()
     await settle(el)
     expect(apiMocks.agentsDelete).toHaveBeenCalledWith('claude')
@@ -1344,32 +1346,32 @@ describe('add-agent-settings-and-session-titles：Agents 分区（/api/agents*�
     await goto(el, 4)
     agentRows(el)
       .find((r) => r.dataset['id'] === 'myagent')!
-      .querySelector<HTMLElement>('button[title="Edit"]')!
+      .querySelector<HTMLElement>('button[title="编辑"]')!
       .click()
     await settle(el)
-    const dlg = dialogByLabel(el, 'Edit agent myagent')
+    const dlg = dialogByLabel(el, '编辑 agent myagent')
     // D-A4：display 以未兜底的 display_raw 回填（display === id 不再丢失）。
     const displayInput = [...dlg.querySelectorAll('wa-input')].find(
-      (i) => i.getAttribute('label') === 'Display name (optional)',
+      (i) => i.getAttribute('label') === '显示名（可选）',
     )
     expect(
       (displayInput as unknown as { value: string } | null)?.value,
     ).toBe('My Agent!')
     // M-A4：存量 launch 字段逐项回填。
     const sessionsInput = [...dlg.querySelectorAll('wa-input')].find(
-      (i) => i.getAttribute('label') === 'Sessions dir (optional)',
+      (i) => i.getAttribute('label') === '会话目录（可选）',
     )
     expect(
       (sessionsInput as unknown as { value: string } | null)?.value,
     ).toBe('D:/sb/sessions')
     // 改 args 后保存：claude 驱动的 put 携带三个 spawn 字段。
     const argsInput = [...dlg.querySelectorAll('wa-input')].find(
-      (i) => i.getAttribute('label') === 'Args (space separated)',
+      (i) => i.getAttribute('label') === '启动参数（空格分隔）',
     ) as unknown as HTMLInputElement
     argsInput.value = '--scenario drip'
     argsInput.dispatchEvent(new Event('input', { bubbles: true, composed: true }))
     waButtonsIn(dlg)
-      .find((b) => b.textContent?.trim() === 'Save')!
+      .find((b) => b.textContent?.trim() === '保存')!
       .click()
     await settle(el)
     expect(apiMocks.agentsUpdate).toHaveBeenCalledWith('myagent', {
@@ -1387,7 +1389,7 @@ describe('add-agent-settings-and-session-titles：Agents 分区（/api/agents*�
     const el = await mount()
     await goto(el, 4)
     waButtons(el)
-      .find((b) => b.textContent?.trim() === '＋ New agent')!
+      .find((b) => b.textContent?.trim() === '＋ 新建 agent')!
       .click()
     await settle(el)
     setWaInput(el, 'Agent id', 'claude')
@@ -1419,13 +1421,13 @@ describe('gate-agent-directory-writes 2.1：Agents 写入口随角色裁剪', ()
     const labels = [...el.shadowRoot!.querySelectorAll<HTMLElement>('.nav .nav-item')].map(
       (b) => b.textContent?.trim(),
     )
-    const index = labels.indexOf('Agents')
+    const index = labels.indexOf('Agent')
     expect(index).toBeGreaterThanOrEqual(0)
     await goto(el, index)
   }
 
   function newAgentButton(el: SebasSettingsModal): HTMLElement | null {
-    return waButtons(el).find((b) => b.textContent?.includes('New agent')) ?? null
+    return waButtons(el).find((b) => b.textContent?.includes('新建 agent')) ?? null
   }
 
   it('member/viewer 只读：New/Edit/Delete 全部不呈现（分区本身保留可浏览）', async () => {
@@ -1438,10 +1440,10 @@ describe('gate-agent-directory-writes 2.1：Agents 写入口随角色裁剪', ()
       expect(el.shadowRoot!.querySelector('[data-testid="agent-row-native"]')).toBeTruthy()
       expect(el.shadowRoot!.querySelectorAll('[data-testid="agent-row"]').length).toBeGreaterThan(0)
       // 写入口全部不呈现。
-      expect(newAgentButton(el), `${role} 不得见 New agent`).toBeNull()
+      expect(newAgentButton(el), `${role} 不得见「新建 agent」`).toBeNull()
       for (const row of el.shadowRoot!.querySelectorAll<HTMLElement>('[data-testid="agent-row"]')) {
-        expect(row.querySelector('button[title="Edit"]'), `${role} 不得见 Edit`).toBeNull()
-        expect(row.querySelector('button[title="Delete"]'), `${role} 不得见 Delete`).toBeNull()
+        expect(row.querySelector('button[title="编辑"]'), `${role} 不得见「编辑」`).toBeNull()
+        expect(row.querySelector('button[title="删除"]'), `${role} 不得见「删除」`).toBeNull()
       }
       el.remove()
     }
@@ -1451,13 +1453,13 @@ describe('gate-agent-directory-writes 2.1：Agents 写入口随角色裁剪', ()
     for (const role of ['root', 'admin', null] as const) {
       const el = await mountAs(role)
       await gotoAgents(el)
-      expect(newAgentButton(el), `${role} 必须见 New agent`).toBeTruthy()
+      expect(newAgentButton(el), `${role} 必须见「新建 agent」`).toBeTruthy()
       const row = el
         .shadowRoot!
         .querySelector<HTMLElement>('[data-testid="agent-row"][data-id="claude"]')
       expect(row, `claude 行 @ ${role}`).toBeTruthy()
-      expect(row!.querySelector('button[title="Edit"]')).toBeTruthy()
-      expect(row!.querySelector('button[title="Delete"]')).toBeTruthy()
+      expect(row!.querySelector('button[title="编辑"]')).toBeTruthy()
+      expect(row!.querySelector('button[title="删除"]')).toBeTruthy()
       el.remove()
     }
   })
@@ -1468,7 +1470,7 @@ describe('gate-agent-directory-writes 2.1：Agents 写入口随角色裁剪', ()
     await gotoAgents(el)
     const empty = el.shadowRoot!.querySelector('[data-testid="agents-empty"]')
     expect(empty).toBeTruthy()
-    expect(empty!.textContent).not.toContain('New agent')
+    expect(empty!.textContent).not.toContain('新建 agent')
     el.remove()
   })
 })
@@ -1480,7 +1482,7 @@ describe('unify-router-process-shape：router 停止被拒的强制出口（D4�
     const routerCard = [...el.shadowRoot!.querySelectorAll<HTMLElement>('.service-card')].find(
       (c) => c.querySelector('.service-id')?.textContent === 'router',
     )!
-    routerCard.querySelector<HTMLElement>('button[title="Disable service"]')!.click()
+    routerCard.querySelector<HTMLElement>('button[title="停用服务"]')!.click()
     await el.updateComplete
     const confirm = el.shadowRoot!.querySelector(
       'wa-dialog.service-action-confirm',
@@ -1536,7 +1538,7 @@ describe('unify-router-process-shape：router 停止被拒的强制出口（D4�
     // 二层对话框打开：拒绝驱动，携带目标与计数；拒绝不落内联错误。
     expect(forceStopState(el)).toEqual({ name: 'router', count: 2 })
     expect(forceDialog(el).textContent).toContain('2')
-    expect(forceDialog(el).textContent).toContain('streaming')
+    expect(forceDialog(el).textContent).toContain('流式')
     expect(el.shadowRoot!.querySelector('.callout-error')).toBeNull()
     // 「强制停止」= 同一停止请求带 force: true 重发；成功后刷新列表。
     forceDialog(el).querySelector<HTMLElement>('wa-button[variant="danger"]')!.click()
@@ -1559,7 +1561,7 @@ describe('unify-router-process-shape：router 停止被拒的强制出口（D4�
     expect(forceStopState(el)).toBeNull()
     expect(apiMocks.disableService).toHaveBeenCalledTimes(1)
     expect(apiMocks.adminServicesSafe).toHaveBeenCalledTimes(1)
-    expect(el.shadowRoot!.textContent ?? '').toContain('status running')
+    expect(el.shadowRoot!.textContent ?? '').toContain('状态 running')
     el.remove()
   })
 
@@ -1600,9 +1602,9 @@ describe('sebas-settings-modal appearance section', () => {
     await goto(el, 1)
     const options = themeOptions(el)
     expect(options.map((b) => b.querySelector('.theme-option-label')?.textContent)).toEqual([
-      'System',
-      'Dark',
-      'Light',
+      '跟随系统',
+      '深色',
+      '浅色',
     ])
     expect(options[0]!.getAttribute('aria-pressed')).toBe('true')
     expect(options[1]!.getAttribute('aria-pressed')).toBe('false')
@@ -1618,7 +1620,7 @@ describe('sebas-settings-modal appearance section', () => {
     expect(localStorage.getItem('sebas:theme')).toBe('light')
     expect(document.documentElement.classList.contains('wa-dark')).toBe(false)
     expect(themeOptions(el)[2]!.getAttribute('aria-pressed')).toBe('true')
-    expect(el.shadowRoot!.textContent).toContain('Applied immediately, saved for this browser.')
+    expect(el.shadowRoot!.textContent).toContain('立即生效，保存在当前浏览器。')
     el.remove()
   })
 
@@ -1634,7 +1636,7 @@ describe('sebas-settings-modal appearance section', () => {
     await el.updateComplete
     expect(localStorage.getItem('sebas:theme')).toBe('system')
     expect(document.documentElement.classList.contains('wa-dark')).toBe(true)
-    expect(el.shadowRoot!.textContent).toContain('Your OS currently asks for dark')
+    expect(el.shadowRoot!.textContent).toContain('系统当前为深色')
     el.remove()
   })
 })
@@ -1684,7 +1686,7 @@ it('states honestly that no global default is set (agent-defaults retired)', asy
   await goto(el, 3)
 
   const status = el.shadowRoot?.querySelector('.provider-toolbar [role="status"]')
-  expect(status?.textContent ?? '').toContain('no default set')
+  expect(status?.textContent ?? '').toContain('未设置默认')
   expect(el.shadowRoot?.querySelector('.provider-badge.default')).toBeNull()
   el.remove()
 })
@@ -1703,7 +1705,7 @@ describe('revamp-settings-nav-and-models-editor：编辑器内 fetch 整单替�
   /** 打开指定 provider 的编辑器（行内 ✎）。 */
   async function openEditorFor(el: SebasSettingsModal, name: string): Promise<HTMLElement> {
     await goto(el, 3)
-    rowFor(el, name).querySelector<HTMLButtonElement>('button[title="Edit"]')!.click()
+    rowFor(el, name).querySelector<HTMLButtonElement>('button[title="编辑"]')!.click()
     await el.updateComplete
     const dialog = el.shadowRoot!.querySelector('wa-dialog.provider-editor') as HTMLElement
     expect(dialog).toBeTruthy()
@@ -1927,7 +1929,7 @@ describe('revamp-settings-nav-and-models-editor：编辑器内 fetch 整单替�
   // 即便 presetDef 有 code-table URL 也不渲染 fetch 动作。
   it('renders no fetch action in create editors', async () => {
     const el = await mount()
-    for (const label of ['New (preset)', 'New (custom)']) {
+    for (const label of ['新建（预设）', '新建（自定义）']) {
       const dialog = await openCreateEditor(el, label)
       expect(editorFetchButton(dialog)).toBeNull()
       ;(dialog.querySelector('wa-button[appearance="plain"]') as HTMLElement).click()
@@ -1961,7 +1963,7 @@ describe('revamp-settings-nav-and-models-editor：编辑器内 fetch 整单替�
 describe('redesign-provider-models-settings 2.1：wa-hide 来源守卫', () => {
   async function openEditor(el: SebasSettingsModal): Promise<HTMLElement> {
     await goto(el, 3)
-    const newBtn = waButtons(el).find((b) => b.textContent?.includes('New (preset)'))!
+    const newBtn = waButtons(el).find((b) => b.textContent?.includes('新建（预设）'))!
     expect(newBtn).toBeTruthy()
     newBtn.click()
     await el.updateComplete
@@ -1973,7 +1975,7 @@ describe('redesign-provider-models-settings 2.1：wa-hide 来源守卫', () => {
   it('a wa-hide bubbling from the inner wa-select does NOT close the editor', async () => {
     const el = await mount()
     const dialog = await openEditor(el)
-    const select = dialog.querySelector('wa-select[label="Preset"]')
+    const select = dialog.querySelector('wa-select[label="预设"]')
     expect(select).toBeTruthy()
     // 模拟 WA <wa-select> 收起列表框：从子控件派发 composed wa-hide。
     select!.dispatchEvent(new CustomEvent('wa-hide', { bubbles: true, composed: true }))
@@ -1998,7 +2000,7 @@ describe('redesign-provider-models-settings 3.1：预制最小表单', () => {
   async function openPresetEditor(el: SebasSettingsModal): Promise<HTMLElement> {
     await goto(el, 3)
     waButtons(el)
-      .find((b) => b.textContent?.includes('New (preset)'))!
+      .find((b) => b.textContent?.includes('新建（预设）'))!
       .click()
     await el.updateComplete
     return el.shadowRoot!.querySelector('wa-dialog.provider-editor') as HTMLElement
@@ -2017,7 +2019,7 @@ describe('redesign-provider-models-settings 3.1：预制最小表单', () => {
     apiMocks.providerCreate.mockResolvedValue({ created: 'deepseek' })
 
     // 最小路径里没有实例名输入（D5：默认取 preset 名；改名在 Advanced）。
-    expect(dialog.querySelector('wa-input[label="Name"]')).toBeNull()
+    expect(dialog.querySelector('wa-input[label="名称"]')).toBeNull()
 
     // API key。
     setWaValue(dialog, 'wa-input[label="API key"]', 'sk-test')
@@ -2083,7 +2085,7 @@ describe('redesign-provider-models-settings 3.1：预制最小表单', () => {
     const el = await mount()
     const dialog = await openPresetEditor(el)
     // revamp…3.1：区块标签改「Models」、两句提示语删除。
-    expect(dialog.querySelector('.model-entries .entries-label')?.textContent?.trim()).toBe('Models')
+    expect(dialog.querySelector('.model-entries .entries-label')?.textContent?.trim()).toBe('模型')
     expect(dialog.querySelector('.entries-hint')).toBeNull()
     // 「＋ Add model」改纯 ＋ 通栏按钮。
     const add = dialog.querySelector('button[data-testid="add-model-entry"]') as HTMLButtonElement
@@ -2098,7 +2100,7 @@ describe('redesign-provider-models-settings 3.2：定制最小表单 + Advanced 
   async function openCustomEditor(el: SebasSettingsModal): Promise<HTMLElement> {
     await goto(el, 3)
     waButtons(el)
-      .find((b) => b.textContent?.includes('New (custom)'))!
+      .find((b) => b.textContent?.includes('新建（自定义）'))!
       .click()
     await el.updateComplete
     return el.shadowRoot!.querySelector('wa-dialog.provider-editor') as HTMLElement
@@ -2127,9 +2129,9 @@ describe('redesign-provider-models-settings 3.2：定制最小表单 + Advanced 
     // 默认折叠。
     expect(advanced.open).toBe(false)
 
-    setWaValue(dialog, 'wa-input[label="Name"]', 'my-api')
+    setWaValue(dialog, 'wa-input[label="名称"]', 'my-api')
     // 协议缺省 OpenAI-compatible → 单个 Base URL 落 openai_chat 槽（D4）。
-    setWaValue(dialog, 'wa-input[label="Base URL (OpenAI-compatible)"]', 'https://api.example/v1')
+    setWaValue(dialog, 'wa-input[label="Base URL（OpenAI 兼容）"]', 'https://api.example/v1')
     setWaValue(dialog, 'wa-input[label="API key"]', 'sk-custom')
 
     await save(el)
@@ -2155,18 +2157,18 @@ describe('redesign-provider-models-settings 3.2：定制最小表单 + Advanced 
     advanced.open = true
     await el.updateComplete
 
-    setWaValue(dialog, 'wa-input[label="Name"]', 'my-api')
-    setWaValue(dialog, 'wa-input[label="Base URL (OpenAI-compatible)"]', 'https://api.example/v1')
+    setWaValue(dialog, 'wa-input[label="名称"]', 'my-api')
+    setWaValue(dialog, 'wa-input[label="Base URL（OpenAI 兼容）"]', 'https://api.example/v1')
     // 展开后可编辑其余槽位（anthropic 槽 + responses 槽）与改名映射。
-    setWaValue(dialog, 'wa-input[label="Base URL (Anthropic)"]', 'https://api.example/anthropic')
+    setWaValue(dialog, 'wa-input[label="Base URL（Anthropic）"]', 'https://api.example/anthropic')
     setWaValue(
       dialog,
-      'wa-input[label="Base URL (OpenAI Responses)"]',
+      'wa-input[label="Base URL（OpenAI Responses）"]',
       'https://api.example/responses',
     )
     setWaValue(
       dialog,
-      'wa-input[label^="Model rename map"]',
+      'wa-input[label^="模型重命名映射"]',
       'old-model -> new-model',
     )
     await save(el)
@@ -2204,7 +2206,7 @@ describe('add-webui-multiuser-rbac 5.3/5.4：Users 分区与角色裁剪', () =>
   }
 
   async function gotoUsers(el: SebasSettingsModal): Promise<void> {
-    const index = navLabels(el).indexOf('Users')
+    const index = navLabels(el).indexOf('用户')
     expect(index).toBeGreaterThanOrEqual(0)
     await goto(el, index)
   }
@@ -2250,28 +2252,28 @@ describe('add-webui-multiuser-rbac 5.3/5.4：Users 分区与角色裁剪', () =>
   it('trims the nav by role: Users is root-only, Services hides for member/viewer', async () => {
     const rootEl = await mountAs('root')
     expect(navLabels(rootEl)).toEqual([
-      'Generic',
-      'Appearance',
-      'Services',
-      'Users',
-      'Models',
-      'Agents',
-      'Skills',
-      'Env Vars',
-      'About',
+      '通用',
+      '外观',
+      '服务',
+      '用户',
+      '模型',
+      'Agent',
+      '技能',
+      '环境变量',
+      '关于',
     ])
     rootEl.remove()
 
     const adminEl = await mountAs('admin')
     expect(navLabels(adminEl)).toEqual([
-      'Generic',
-      'Appearance',
-      'Services',
-      'Models',
-      'Agents',
-      'Skills',
-      'Env Vars',
-      'About',
+      '通用',
+      '外观',
+      '服务',
+      '模型',
+      'Agent',
+      '技能',
+      '环境变量',
+      '关于',
     ])
     adminEl.remove()
 
@@ -2279,8 +2281,8 @@ describe('add-webui-multiuser-rbac 5.3/5.4：Users 分区与角色裁剪', () =>
     for (const role of ['member', 'viewer'] as const) {
       const el = await mountAs(role)
       const labels = navLabels(el)
-      expect(labels).not.toContain('Users')
-      expect(labels).not.toContain('Services')
+      expect(labels).not.toContain('用户')
+      expect(labels).not.toContain('服务')
       el.remove()
     }
 
@@ -2288,14 +2290,14 @@ describe('add-webui-multiuser-rbac 5.3/5.4：Users 分区与角色裁剪', () =>
     // （users.manage 需要服务端身份）。
     const hostEl = await mountAs(null)
     expect(navLabels(hostEl)).toEqual([
-      'Generic',
-      'Appearance',
-      'Services',
-      'Models',
-      'Agents',
-      'Skills',
-      'Env Vars',
-      'About',
+      '通用',
+      '外观',
+      '服务',
+      '模型',
+      'Agent',
+      '技能',
+      '环境变量',
+      '关于',
     ])
     hostEl.remove()
   })
@@ -2319,9 +2321,9 @@ describe('add-webui-multiuser-rbac 5.3/5.4：Users 分区与角色裁剪', () =>
     const text = el.shadowRoot!.textContent ?? ''
     expect(text).toContain('alice')
     expect(text).toContain('member')
-    expect(text).toContain('disabled')
+    expect(text).toContain('已禁用')
     // created_at_unix → ISO 日期（列表不携带任何哈希字段可展示）。
-    expect(text).toContain('created 2023-11-14')
+    expect(text).toContain('创建于 2023-11-14')
     expect(userRow(el, 'alice').querySelector('wa-select.user-role')).toBeTruthy()
     el.remove()
   })
@@ -2341,13 +2343,13 @@ describe('add-webui-multiuser-rbac 5.3/5.4：Users 分区与角色裁剪', () =>
     const el = await mountAs('root')
     await gotoUsers(el)
     waButtons(el)
-      .find((b) => b.textContent?.includes('New user'))!
+      .find((b) => b.textContent?.includes('新建用户'))!
       .click()
     await el.updateComplete
     const dialog = el.shadowRoot!.querySelector('wa-dialog.user-create') as HTMLElement
-    setWaValue(dialog, 'wa-input[label="Username"]', 'bob')
-    setWaValue(dialog, 'wa-input[label^="Password"]', 'long-enough')
-    pickWaSelect(dialog, 'wa-select[label="Role"]', 'admin')
+    setWaValue(dialog, 'wa-input[label="用户名"]', 'bob')
+    setWaValue(dialog, 'wa-input[label^="密码"]', 'long-enough')
+    pickWaSelect(dialog, 'wa-select[label="角色"]', 'admin')
     ;(dialog.querySelector('wa-button[variant="brand"]') as HTMLElement).click()
     await settle(el)
     expect(apiMocks.usersCreate).toHaveBeenCalledTimes(1)
@@ -2362,12 +2364,12 @@ describe('add-webui-multiuser-rbac 5.3/5.4：Users 分区与角色裁剪', () =>
     const el = await mountAs('root')
     await gotoUsers(el)
     waButtons(el)
-      .find((b) => b.textContent?.includes('New user'))!
+      .find((b) => b.textContent?.includes('新建用户'))!
       .click()
     await el.updateComplete
     const dialog = el.shadowRoot!.querySelector('wa-dialog.user-create') as HTMLElement
-    setWaValue(dialog, 'wa-input[label="Username"]', 'bob')
-    setWaValue(dialog, 'wa-input[label^="Password"]', 'short')
+    setWaValue(dialog, 'wa-input[label="用户名"]', 'bob')
+    setWaValue(dialog, 'wa-input[label^="密码"]', 'short')
     ;(dialog.querySelector('wa-button[variant="brand"]') as HTMLElement).click()
     await settle(el)
     expect(apiMocks.usersCreate).not.toHaveBeenCalled()
@@ -2382,12 +2384,12 @@ describe('add-webui-multiuser-rbac 5.3/5.4：Users 分区与角色裁剪', () =>
     const el = await mountAs('root')
     await gotoUsers(el)
     waButtons(el)
-      .find((b) => b.textContent?.includes('New user'))!
+      .find((b) => b.textContent?.includes('新建用户'))!
       .click()
     await el.updateComplete
     const dialog = el.shadowRoot!.querySelector('wa-dialog.user-create') as HTMLElement
-    setWaValue(dialog, 'wa-input[label="Username"]', 'alice')
-    setWaValue(dialog, 'wa-input[label^="Password"]', 'long-enough')
+    setWaValue(dialog, 'wa-input[label="用户名"]', 'alice')
+    setWaValue(dialog, 'wa-input[label^="密码"]', 'long-enough')
     ;(dialog.querySelector('wa-button[variant="brand"]') as HTMLElement).click()
     await settle(el)
     expect(apiMocks.usersCreate).toHaveBeenCalledTimes(1)
@@ -2405,7 +2407,7 @@ describe('add-webui-multiuser-rbac 5.3/5.4：Users 分区与角色裁剪', () =>
     await settle(el)
     expect(apiMocks.usersSetRole).toHaveBeenCalledWith(2, 'viewer')
     // 改角色触发列表重取后 DOM 重建：重新寻行再点启停。
-    ;(userRow(el, 'root').querySelector('button[title="Disable user"]') as HTMLElement).click()
+    ;(userRow(el, 'root').querySelector('button[title="停用用户"]') as HTMLElement).click()
     await settle(el)
     expect(apiMocks.usersSetEnabled).toHaveBeenCalledWith(1, false)
     const callout = el.shadowRoot!.querySelector('[data-testid="user-action"]')
@@ -2431,7 +2433,7 @@ describe('add-webui-multiuser-rbac 5.3/5.4：Users 分区与角色裁剪', () =>
   it('reset password goes through its dialog and reports success in place', async () => {
     const el = await mountAs('root')
     await gotoUsers(el)
-    ;(userRow(el, 'alice').querySelector('button[title="Reset password"]') as HTMLElement).click()
+    ;(userRow(el, 'alice').querySelector('button[title="重置密码"]') as HTMLElement).click()
     await el.updateComplete
     const dialog = el.shadowRoot!.querySelector('wa-dialog.user-reset') as HTMLElement
     expect(dialog.textContent).toContain('alice')
@@ -2450,7 +2452,7 @@ describe('add-webui-multiuser-rbac 5.3/5.4：Users 分区与角色裁剪', () =>
     apiMocks.usersDelete.mockRejectedValue(new ApiError(409, '不能删除最后一个启用的 root'))
     const el = await mountAs('root')
     await gotoUsers(el)
-    ;(userRow(el, 'root').querySelector('button[title="Delete user"]') as HTMLElement).click()
+    ;(userRow(el, 'root').querySelector('button[title="删除用户"]') as HTMLElement).click()
     await el.updateComplete
     const dialog = el.shadowRoot!.querySelector('wa-dialog.user-delete') as HTMLElement
     ;(dialog.querySelector('wa-button[variant="danger"]') as HTMLElement).click()
@@ -2502,7 +2504,7 @@ describe('About / Services display defects (round3 4.3/4.4)', () => {
     const el = await mount()
     await goto(el, 7)
     const row = [...el.shadowRoot!.querySelectorAll('dl.about-build .kv')].find((kv) =>
-      kv.textContent?.includes('Rust toolchain'),
+      kv.textContent?.includes('Rust 工具链'),
     )
     expect(row).toBeTruthy()
     // 探测失败 = 「探测失败（成因）」，不是裸「未知」。
@@ -2515,7 +2517,7 @@ describe('About / Services display defects (round3 4.3/4.4)', () => {
     const el = await mount()
     await goto(el, 7)
     const row = [...el.shadowRoot!.querySelectorAll('dl.about-build .kv')].find((kv) =>
-      kv.textContent?.includes('Rust toolchain'),
+      kv.textContent?.includes('Rust 工具链'),
     )
     expect(row!.querySelector('[data-testid="about-toolchain"]')!.textContent).toContain('rustc 1.88.0')
     el.remove()
@@ -2537,7 +2539,7 @@ describe('About / Services display defects (round3 4.3/4.4)', () => {
     const el = await mount()
     await goto(el, 7)
     const row = [...el.shadowRoot!.querySelectorAll('dl.about-build .kv')].find((kv) =>
-      kv.textContent?.includes('Rust toolchain'),
+      kv.textContent?.includes('Rust 工具链'),
     )
     expect(row!.querySelector('[data-testid="about-toolchain"]')!.textContent).toContain('未安装')
     el.remove()
@@ -2575,13 +2577,13 @@ describe('About BUILD section shows build time and git info (add-about-build-inf
     ]
     // 行序（design D4）：Version → Build time → Git → 现状行（Uptime…）。
     const labels = buildRows.map((kv) => kv.querySelector('dt')?.textContent?.trim())
-    expect(labels[0]).toBe('Version')
-    expect(labels[1]).toBe('Build time')
+    expect(labels[0]).toBe('版本')
+    expect(labels[1]).toBe('构建时间')
     expect(labels[2]).toBe('Git')
-    expect(labels).toContain('Uptime')
-    expect(labels).toContain('Rust toolchain')
-    expect(labels).toContain('Router listen')
-    expect(labels).toContain('Providers')
+    expect(labels).toContain('运行时长')
+    expect(labels).toContain('Rust 工具链')
+    expect(labels).toContain('Router 监听')
+    expect(labels).toContain('Provider 数')
 
     // 构建时间行：值 + UTC 标注（标注放展示层）。
     const buildTime = buildRows[1]!.querySelector('[data-testid="about-build-time"]')
@@ -2626,7 +2628,7 @@ describe('About BUILD section shows build time and git info (add-about-build-inf
     const el = await mount()
     await goto(el, 7)
     const row = [...el.shadowRoot!.querySelectorAll('dl.about-build .kv')].find((kv) =>
-      kv.textContent?.includes('Rust toolchain'),
+      kv.textContent?.includes('Rust 工具链'),
     )
     const bound = row!.querySelector('.toolchain-required')
     expect(bound).toBeTruthy()
@@ -2650,7 +2652,7 @@ describe('About BUILD section shows build time and git info (add-about-build-inf
     const el = await mount()
     await goto(el, 7)
     const row = [...el.shadowRoot!.querySelectorAll('dl.about-build .kv')].find((kv) =>
-      kv.textContent?.includes('Rust toolchain'),
+      kv.textContent?.includes('Rust 工具链'),
     )
     // 探测值照常呈现，界限标签缺席。
     expect(row!.querySelector('[data-testid="about-toolchain"]')!.textContent).toContain(

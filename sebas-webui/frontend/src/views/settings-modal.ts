@@ -79,6 +79,7 @@ import {
   type SkillsSyncResponse,
   type UserRecord,
   ApiError,
+  errorText,
 } from '../api/client.js'
 import { icon } from '../components/icons.js'
 import { guardedHide } from '../components/wa-hide-guard.js'
@@ -138,17 +139,17 @@ const MANAGED_SERVICE_NAMES: ReadonlySet<string> = new Set(['core', 'webui', 'ro
  * 可见性由 visibleSections 按角色裁剪（users 仅 root、services 非
  * member/viewer），元数据本身不做裁剪。 */
 const SECTIONS: ReadonlyArray<{ id: SettingsSection; label: string; icon: string }> = [
-  { id: 'generic', label: 'Generic', icon: 'settings' },
-  { id: 'appearance', label: 'Appearance', icon: 'sun' },
-  { id: 'services', label: 'Services', icon: 'shield' },
-  { id: 'users', label: 'Users', icon: 'users' },
-  { id: 'models', label: 'Models', icon: 'zap' },
+  { id: 'generic', label: '通用', icon: 'settings' },
+  { id: 'appearance', label: '外观', icon: 'sun' },
+  { id: 'services', label: '服务', icon: 'shield' },
+  { id: 'users', label: '用户', icon: 'users' },
+  { id: 'models', label: '模型', icon: 'zap' },
   // add-agent-settings-and-session-titles 5.1：Agents 分区紧跟 Models
   // （导航顺序 …Models → Agents → Env Vars · About）。
-  { id: 'agents', label: 'Agents', icon: 'sessions' },
-  { id: 'skills', label: 'Skills', icon: 'skills' },
-  { id: 'env-vars', label: 'Env Vars', icon: 'about' },
-  { id: 'about', label: 'About', icon: 'about' },
+  { id: 'agents', label: 'Agent', icon: 'sessions' },
+  { id: 'skills', label: '技能', icon: 'skills' },
+  { id: 'env-vars', label: '环境变量', icon: 'about' },
+  { id: 'about', label: '关于', icon: 'about' },
 ]
 
 /**
@@ -167,7 +168,7 @@ const SECTION_DESC: Record<SettingsSection, string> = {
   agents:
     '管理 agent 目录。内置 sebas 内核恒在不可删；其余条目全量增删改，保存后免重启生效。config.toml 的 [acp.agents.*] 只是首次启动的种子源——之后以这里为准。',
   skills:
-    '本机存储的 agent 技能。可浏览与移除条目，然后 Sync 把技能仓投影到你的 agent。本页从不创建或编辑技能——请使用 CLI、git 或 npx，然后 Refresh。',
+    '本机存储的 agent 技能。可浏览与移除条目，然后点「同步」把技能仓投影到你的 agent。本页从不创建或编辑技能——请使用 CLI、git 或 npx，然后点「刷新」。',
   'env-vars':
     '只读参考：本 sebas 实例读取的环境变量。敏感项只显示是否已设置。',
   about: '本实例是什么——工作区、默认 agent 种类，以及所运行的构建版本。',
@@ -224,9 +225,9 @@ function activeSessionsRejection(err: unknown): { count: number | null } | null 
 
 /** Appearance 分区的主题三态（mode 语义见 theme.ts）。 */
 const THEME_OPTIONS: ReadonlyArray<{ mode: ThemeMode; label: string; sub: string }> = [
-  { mode: 'system', label: 'System', sub: 'Follow your OS preference' },
-  { mode: 'dark', label: 'Dark', sub: 'Always dark' },
-  { mode: 'light', label: 'Light', sub: 'Always light' },
+  { mode: 'system', label: '跟随系统', sub: '跟随系统偏好' },
+  { mode: 'dark', label: '深色', sub: '始终深色' },
+  { mode: 'light', label: '浅色', sub: '始终浅色' },
 ]
 
 /**
@@ -1432,7 +1433,7 @@ export class SebasSettingsModal extends LitElement {
         this.aboutError = ''
       })
       .catch((e) => {
-        this.aboutError = String(e)
+        this.aboutError = errorText(e)
       })
       .finally(() => {
         this.aboutLoading = false
@@ -1454,7 +1455,7 @@ export class SebasSettingsModal extends LitElement {
         this.services = d.services
       })
       .catch((e) => {
-        this.servicesError = e instanceof ApiError ? e.message : String(e)
+        this.servicesError = errorText(e)
         this.services = []
         this.adapterOk = false
       })
@@ -1485,7 +1486,7 @@ export class SebasSettingsModal extends LitElement {
         this.envVars = d.items
       })
       .catch((e) => {
-        this.envError = e instanceof ApiError ? e.message : String(e)
+        this.envError = errorText(e)
         this.envVars = null
       })
   }
@@ -1535,7 +1536,7 @@ export class SebasSettingsModal extends LitElement {
         this.users = d.users
       })
       .catch((e) => {
-        this.usersError = e instanceof ApiError ? e.message : String(e)
+        this.usersError = errorText(e)
         this.users = null
       })
   }
@@ -1548,13 +1549,13 @@ export class SebasSettingsModal extends LitElement {
         this.users = d.users
       })
       .catch((e) => {
-        this.usersError = e instanceof ApiError ? e.message : String(e)
+        this.usersError = errorText(e)
       })
   }
 
   /** 行内错误文案归一：400/409 的响应 error 字段原文优先。 */
   private userErrorText(err: unknown): string {
-    return err instanceof ApiError ? err.message : String(err)
+    return errorText(err)
   }
 
   // ---- Skills 分区（add-agent-skills 5.2）----
@@ -1575,7 +1576,7 @@ export class SebasSettingsModal extends LitElement {
         this.skills = d.skills
       })
       .catch((e) => {
-        this.skillsError = e instanceof ApiError ? e.message : String(e)
+        this.skillsError = errorText(e)
         this.skills = null
       })
   }
@@ -1593,7 +1594,7 @@ export class SebasSettingsModal extends LitElement {
         }
       })
       .catch((e) => {
-        this.skillsError = e instanceof ApiError ? e.message : String(e)
+        this.skillsError = errorText(e)
       })
   }
 
@@ -1614,7 +1615,7 @@ export class SebasSettingsModal extends LitElement {
           this.skillPreview = {
             name,
             detail: null,
-            error: e instanceof ApiError ? e.message : String(e),
+            error: errorText(e),
           }
         }
       })
@@ -1631,7 +1632,7 @@ export class SebasSettingsModal extends LitElement {
       this.skillSync = {
         ok: false,
         outcome: null,
-        error: err instanceof ApiError ? err.message : String(err),
+        error: errorText(err),
       }
     } finally {
       this.skillBusy = false
@@ -1652,7 +1653,7 @@ export class SebasSettingsModal extends LitElement {
     } catch (err) {
       this.skillDelete = {
         ...target,
-        error: err instanceof ApiError ? err.message : String(err),
+        error: errorText(err),
       }
     } finally {
       this.skillBusy = false
@@ -1666,7 +1667,7 @@ export class SebasSettingsModal extends LitElement {
         this.skills = d.skills
       })
       .catch((e) => {
-        this.skillsError = e instanceof ApiError ? e.message : String(e)
+        this.skillsError = errorText(e)
       })
   }
 
@@ -1824,7 +1825,7 @@ export class SebasSettingsModal extends LitElement {
       }
       this.serviceAction = {
         ok: false,
-        text: err instanceof ApiError ? err.message : String(err),
+        text: errorText(err),
       }
     } finally {
       this.serviceBusy = null
@@ -1864,7 +1865,7 @@ export class SebasSettingsModal extends LitElement {
         this.configProviders = d.config_providers ?? []
       })
       .catch((e) => {
-        this.adminError = e instanceof ApiError ? e.message : String(e)
+        this.adminError = errorText(e)
         this.adminProviders = []
         this.configProviders = []
       })
@@ -1889,7 +1890,7 @@ export class SebasSettingsModal extends LitElement {
         this.configProviders = d.config_providers ?? []
       })
       .catch((e) => {
-        this.adminError = e instanceof ApiError ? e.message : String(e)
+        this.adminError = errorText(e)
       })
   }
 
@@ -2074,7 +2075,7 @@ export class SebasSettingsModal extends LitElement {
       this.editor = null
       await this.refreshProviders()
     } catch (err) {
-      this.actionError = err instanceof ApiError ? err.message : String(err)
+      this.actionError = errorText(err)
     } finally {
       this.busy = false
     }
@@ -2089,7 +2090,7 @@ export class SebasSettingsModal extends LitElement {
       this.deleteTarget = null
       await this.refreshProviders()
     } catch (err) {
-      this.actionError = err instanceof ApiError ? err.message : String(err)
+      this.actionError = errorText(err)
     } finally {
       this.busy = false
     }
@@ -2122,7 +2123,7 @@ export class SebasSettingsModal extends LitElement {
     } catch (err) {
       this.fetchState = {
         state: 'error',
-        reason: err instanceof ApiError ? err.message : String(err),
+        reason: errorText(err),
       }
     }
   }
@@ -2166,8 +2167,7 @@ export class SebasSettingsModal extends LitElement {
           ${this.renderSectionHead(section)}
           <div class="panel panel-pad">
             <p class="prefs-placeholder">
-              No general preferences yet. Language switching and other preferences will be
-              provided here later.
+              暂无通用偏好。语言切换等其它偏好以后会在这里提供。
             </p>
           </div>
         `
@@ -2226,20 +2226,20 @@ export class SebasSettingsModal extends LitElement {
     return html`
       <div class="provider-toolbar">
         <wa-button variant="brand" appearance="filled" @click=${() => this.openCreatePreset()}>
-          ＋ New (preset)
+          ＋ 新建（预设）
         </wa-button>
         <wa-button appearance="outlined" @click=${() => this.openCreateCustom()}>
-          ＋ New (custom)
+          ＋ 新建（自定义）
         </wa-button>
         <span class="label" role="status">
           ${this.defaults?.provider
-            ? `default: ${this.defaults.provider}${this.defaults.model ? ` / ${this.defaults.model}` : ''}`
-            : 'no default set'}
+            ? `默认：${this.defaults.provider}${this.defaults.model ? ` / ${this.defaults.model}` : ''}`
+            : '未设置默认'}
         </span>
         ${this.defaults?.provider
           ? html`<button
               class="row-action"
-              title="Clear the default for new sessions"
+              title="清除新建会话的默认值"
               ?disabled=${this.busy}
               @click=${() => void this.clearDefault()}
             >
@@ -2265,7 +2265,7 @@ export class SebasSettingsModal extends LitElement {
         : html`
             <div class="provider-list">
               ${providers.length === 0
-                ? html`<div class="provider-row-empty">No providers configured.</div>`
+                ? html`<div class="provider-row-empty">尚未配置 provider。</div>`
                 : providers.map((p) => this.renderProviderRow(p))}
               ${this.configProviders.map((c) => this.renderConfigProviderRow(c))}
             </div>
@@ -2273,7 +2273,7 @@ export class SebasSettingsModal extends LitElement {
       <p class="provider-source-note" data-testid="provider-source-note">
         列表分两类：store 行（可编辑，配置存于状态库）与 config 行
         （<code>config.toml</code> 的 <code>[provider.*]</code> 种子，本页只读，
-        编辑请改配置文件后重启）。New-session 目录的模型来自会话上报的
+        编辑请改配置文件后重启）。新建会话弹窗的模型目录来自会话上报的
         configOptions 与别名表，与这里的 provider 集合同源（按会话能力呈现）。
       </p>
     `
@@ -2286,28 +2286,28 @@ export class SebasSettingsModal extends LitElement {
         <div class="provider-row-main">
           <span class="provider-row-name">${p.name}</span>
           <span class="provider-badge ${p.preset ? 'preset' : 'custom'}">
-            ${p.preset ? `${p.preset} · code` : 'custom'}
+            ${p.preset ? `${p.preset} · 内置` : '自定义'}
           </span>
           <span class="provider-key ${p.api_key_configured ? 'on' : 'off'}">
-            ${p.api_key_configured ? 'key configured' : 'no key'}
+            ${p.api_key_configured ? '已配 key' : '未配 key'}
           </span>
           ${this.defaults?.provider === p.name
-            ? html`<span class="provider-badge default" role="status">default</span>`
+            ? html`<span class="provider-badge default" role="status">默认</span>`
             : nothing}
-          <span class="provider-row-url" title=${url ?? ''}>${url ?? 'no base url'}</span>
+          <span class="provider-row-url" title=${url ?? ''}>${url ?? '无 base URL'}</span>
           <span class="provider-row-actions">
             <button
               class="row-action"
-              title="Set as default for new sessions"
+              title="设为新建会话的默认"
               ?disabled=${this.busy}
               @click=${() => this.openSetDefault(p)}
             >
               ★
             </button>
-            <button class="row-action" title="Edit" @click=${() => this.openEdit(p)}>✎</button>
+            <button class="row-action" title="编辑" @click=${() => this.openEdit(p)}>✎</button>
             <button
               class="row-action danger"
-              title="Delete"
+              title="删除"
               ?disabled=${this.busy}
               @click=${() => (this.deleteTarget = p.name)}
             >
@@ -2348,7 +2348,7 @@ export class SebasSettingsModal extends LitElement {
           ${c.also_in_store
             ? html`<span class="provider-badge preset">store 同名行生效中</span>`
             : nothing}
-          <span class="provider-row-url" title=${url ?? ''}>${url ?? 'no base url'}</span>
+          <span class="provider-row-url" title=${url ?? ''}>${url ?? '无 base URL'}</span>
         </div>
       </div>
     `
@@ -2357,7 +2357,7 @@ export class SebasSettingsModal extends LitElement {
    * Agents 分区（add-agent-settings-and-session-titles 5.1）：agent 目录
    * 管理。builtIn `native` 行只读恒在（spec「built-in `native` kernel …
    * without being stored or deletable」）；其余条目可编辑/删除（删除二次
-   * 确认，且不影响已建会话）；「＋ New agent」打开三形态新建表单（claude /
+   * 确认，且不影响已建会话）；「＋ 新建 agent」打开三形态新建表单（claude /
    * opencode 预填 / 自定义 ACP argv）。保存后免重启生效——创建会话下拉在
    * 下次打开/`sebas:refetch` 时即见新目录。
    */
@@ -2371,7 +2371,7 @@ export class SebasSettingsModal extends LitElement {
     const canWrite = canManageAgents(this.role)
     return html`
       <div class="provider-toolbar">
-        <wa-button appearance="outlined" @click=${() => this.loadAgentsCatalog()}>Refresh</wa-button>
+        <wa-button appearance="outlined" @click=${() => this.loadAgentsCatalog()}>刷新</wa-button>
         ${canWrite
           ? html`<wa-button
               variant="brand"
@@ -2379,7 +2379,7 @@ export class SebasSettingsModal extends LitElement {
               ?disabled=${this.agentsBusy}
               @click=${() => this.openAgentCreate()}
             >
-              ＋ New agent
+              ＋ 新建 agent
             </wa-button>`
           : nothing}
       </div>
@@ -2410,12 +2410,12 @@ export class SebasSettingsModal extends LitElement {
                       <div class="provider-row-main">
                         <span class="provider-row-name">${builtin.id}</span>
                         <span class="provider-badge default" data-testid="agent-builtin-badge"
-                          >builtIn · sebas</span
+                          >内置 · sebas</span
                         >
                         <span class="provider-key ${builtin.reachable ? 'on' : 'off'}">
                           ${builtin.reachable
-                            ? 'reachable'
-                            : (builtin.cause ?? 'unreachable')}
+                            ? '可达'
+                            : (builtin.cause ?? '不可达')}
                         </span>
                         <span class="provider-row-url">内置 sebas 内核（不可删除）</span>
                       </div>
@@ -2425,7 +2425,7 @@ export class SebasSettingsModal extends LitElement {
               ${managed.length === 0 && builtin
                 ? html`<div class="provider-row-empty" data-testid="agents-empty">
                     ${canWrite
-                      ? html`目录里还没有其它 agent——用「＋ New agent」添加，或在 config.toml
+                      ? html`目录里还没有其它 agent——用「＋ 新建 agent」添加，或在 config.toml
                           的 [acp.agents.*] 里声明（首次启动作为种子导入）。`
                       : html`目录里还没有其它 agent。可在 config.toml 的 [acp.agents.*]
                           里声明（首次启动作为种子导入）；新增需要 admin 以上角色。`}
@@ -2450,13 +2450,13 @@ export class SebasSettingsModal extends LitElement {
             class="provider-key ${a.reachable ? 'on' : 'off'}"
             title=${a.cause ?? ''}
           >
-            ${a.reachable ? 'reachable' : (a.cause ?? 'unreachable')}
+            ${a.reachable ? '可达' : (a.cause ?? '不可达')}
           </span>
           ${canManageAgents(this.role)
             ? html`<span class="provider-row-actions">
                 <button
                   class="row-action"
-                  title="Edit"
+                  title="编辑"
                   ?disabled=${this.agentsBusy}
                   @click=${() => this.openAgentEdit(a)}
                 >
@@ -2464,7 +2464,7 @@ export class SebasSettingsModal extends LitElement {
                 </button>
                 <button
                   class="row-action danger"
-                  title="Delete"
+                  title="删除"
                   ?disabled=${this.agentsBusy}
                   @click=${() => (this.agentDelete = { id: a.id, error: '' })}
                 >
@@ -2485,7 +2485,7 @@ export class SebasSettingsModal extends LitElement {
         this.agentsCatalog = d.agents
       })
       .catch((e) => {
-        this.agentsError = e instanceof ApiError ? e.message : String(e)
+        this.agentsError = errorText(e)
         this.agentsCatalog = []
       })
   }
@@ -2626,7 +2626,7 @@ export class SebasSettingsModal extends LitElement {
       // 创建会话下拉等消费面即时重取（免重启生效的可观察面）。
       window.dispatchEvent(new Event('sebas:refetch'))
     } catch (err) {
-      const message = err instanceof ApiError ? err.message : String(err)
+      const message = errorText(err)
       this.agentForm = { ...form, error: message }
     } finally {
       this.agentsBusy = false
@@ -2644,7 +2644,7 @@ export class SebasSettingsModal extends LitElement {
       this.loadAgentsCatalog()
       window.dispatchEvent(new Event('sebas:refetch'))
     } catch (err) {
-      const message = err instanceof ApiError ? err.message : String(err)
+      const message = errorText(err)
       this.agentDelete = { ...target, error: message }
     } finally {
       this.agentsBusy = false
@@ -2657,7 +2657,7 @@ export class SebasSettingsModal extends LitElement {
     const form = this.agentForm
     return html`
       <wa-dialog
-        label=${form?.mode === 'edit' ? `Edit agent ${form.id}` : 'New agent'}
+        label=${form?.mode === 'edit' ? `编辑 agent ${form.id}` : '新建 agent'}
         ?open=${form !== null}
         @wa-hide=${guardedHide(() => (this.agentForm = null))}
         class="user-create"
@@ -2682,7 +2682,7 @@ export class SebasSettingsModal extends LitElement {
                     })}
                 ></wa-input>
                 <wa-input
-                  label="Display name (optional)"
+                  label="显示名（可选）"
                   .value=${form.display}
                   @input=${(ev: Event) =>
                     (this.agentForm = {
@@ -2693,7 +2693,7 @@ export class SebasSettingsModal extends LitElement {
                 ${form.mode === 'edit'
                   ? html`
                       <wa-select
-                        label="Launch definition"
+                        label="启动定义"
                         value=${form.shape}
                         hoist
                         @change=${(ev: Event) =>
@@ -2710,7 +2710,7 @@ export class SebasSettingsModal extends LitElement {
                     `
                   : html`
                       <wa-select
-                        label="Shape"
+                        label="形态"
                         value=${form.shape}
                         hoist
                         @change=${(ev: Event) =>
@@ -2727,7 +2727,7 @@ export class SebasSettingsModal extends LitElement {
                 ${form.shape === 'claude'
                   ? html`
                       <wa-input
-                        label="Binary path"
+                        label="二进制路径"
                         placeholder="claude"
                         .value=${form.path}
                         @input=${(ev: Event) =>
@@ -2741,7 +2741,7 @@ export class SebasSettingsModal extends LitElement {
                 ${form.shape === 'custom'
                   ? html`
                       <wa-input
-                        label="Command (argv, space separated)"
+                        label="命令（argv，空格分隔）"
                         placeholder="cursor-agent acp"
                         .value=${form.commandText}
                         @input=${(ev: Event) =>
@@ -2762,7 +2762,7 @@ export class SebasSettingsModal extends LitElement {
                 ${(form.shape === 'claude' || (form.mode === 'edit' && form.shape === '' && (this.agentsCatalog ?? []).find((x) => x.id === form.id)?.driver_raw === 'claude'))
                   ? html`
                       <wa-input
-                        label="Sessions dir (optional)"
+                        label="会话目录（可选）"
                         placeholder="~/.claude/sessions"
                         .value=${form.sessionsDir}
                         @input=${(ev: Event) =>
@@ -2774,7 +2774,7 @@ export class SebasSettingsModal extends LitElement {
                     `
                   : nothing}
                 <wa-input
-                  label="Work dir (optional)"
+                  label="工作目录（可选）"
                   placeholder="agent 子进程的工作目录"
                   .value=${form.workDir}
                   @input=${(ev: Event) =>
@@ -2784,7 +2784,7 @@ export class SebasSettingsModal extends LitElement {
                     })}
                 ></wa-input>
                 <wa-input
-                  label="Args (space separated)"
+                  label="启动参数（空格分隔）"
                   placeholder="--scenario thinking"
                   .value=${form.argsText}
                   @input=${(ev: Event) =>
@@ -2805,7 +2805,7 @@ export class SebasSettingsModal extends LitElement {
               </div>
             `}
         <wa-button slot="footer" appearance="plain" @click=${() => (this.agentForm = null)}>
-          Cancel
+          取消
         </wa-button>
         <wa-button
           slot="footer"
@@ -2813,17 +2813,17 @@ export class SebasSettingsModal extends LitElement {
           ?disabled=${this.agentsBusy}
           @click=${() => void this.submitAgentForm()}
         >
-          ${this.agentsBusy ? 'Saving…' : 'Save'}
+          ${this.agentsBusy ? '保存中…' : '保存'}
         </wa-button>
       </wa-dialog>
 
       <wa-dialog
-        label="Delete agent"
+        label="删除 agent"
         ?open=${this.agentDelete !== null}
         @wa-hide=${guardedHide(() => (this.agentDelete = null))}
       >
         <p class="dialog-text">
-          Delete agent <strong>${this.agentDelete?.id ?? ''}</strong>? 已建会话不受影响
+          删除 agent <strong>${this.agentDelete?.id ?? ''}</strong>？已建会话不受影响
           （继续到自然结束）；引用它的项目默认 agent 会被清除。之后在创建会话下拉
           中立即可见。
         </p>
@@ -2831,7 +2831,7 @@ export class SebasSettingsModal extends LitElement {
           ? html`<div class="callout callout-error" role="alert">${this.agentDelete.error}</div>`
           : nothing}
         <wa-button slot="footer" appearance="plain" @click=${() => (this.agentDelete = null)}>
-          Cancel
+          取消
         </wa-button>
         <wa-button
           slot="footer"
@@ -2839,7 +2839,7 @@ export class SebasSettingsModal extends LitElement {
           ?disabled=${this.agentsBusy}
           @click=${() => void this.confirmAgentDelete()}
         >
-          Delete
+          删除
         </wa-button>
       </wa-dialog>
     `
@@ -2856,14 +2856,14 @@ export class SebasSettingsModal extends LitElement {
     if (this.skillsError)
       return html`
         <div class="callout callout-error" role="alert">
-          ${icon('alert')}<span>Failed to load: ${this.skillsError}</span>
+          ${icon('alert')}<span>加载失败：${this.skillsError}</span>
         </div>
       `
     const list = this.skills
     return html`
       <div class="provider-toolbar">
         <wa-button appearance="outlined" ?disabled=${this.skillBusy} @click=${() => this.refreshSkills()}>
-          Refresh
+          刷新
         </wa-button>
         <wa-button
           variant="brand"
@@ -2871,10 +2871,10 @@ export class SebasSettingsModal extends LitElement {
           ?disabled=${this.skillBusy}
           @click=${() => void this.runSkillsSync()}
         >
-          ${this.skillBusy ? 'Syncing…' : 'Sync'}
+          ${this.skillBusy ? '同步中…' : '同步'}
         </wa-button>
         <span class="label" role="status">
-          ${list === null ? '' : `${list.length} skill${list.length === 1 ? '' : 's'} in store`}
+          ${list === null ? '' : `仓内 ${list.length} 个技能`}
         </span>
       </div>
       ${this.renderSkillSyncPanel()}
@@ -2888,8 +2888,7 @@ export class SebasSettingsModal extends LitElement {
         : list.length === 0
           ? html`<div class="panel panel-pad">
               <p class="prefs-placeholder">
-                The skill store is empty. Add skills with <code>sebas skills add</code>, git or
-                npx — then Refresh.
+                技能仓为空。用 <code>sebas skills add</code>、git 或 npx 添加技能——然后点「刷新」。
               </p>
             </div>`
           : html`
@@ -2909,22 +2908,22 @@ export class SebasSettingsModal extends LitElement {
     if (!s.ok)
       return html`
         <div class="callout callout-error" role="alert" data-testid="skills-sync-error">
-          ${icon('alert')}<span>Sync failed: ${s.error}</span>
+          ${icon('alert')}<span>同步失败：${s.error}</span>
         </div>
       `
     const o = s.outcome!
     return html`
       <div class="panel panel-pad skills-sync" data-testid="skills-sync-result">
         ${o.reports.length === 0 && o.no_placement.length === 0
-          ? html`<p class="prefs-placeholder">Nothing to project — no backends with a skill placement.</p>`
+          ? html`<p class="prefs-placeholder">无可投影内容——没有任何 backend 有技能落点。</p>`
           : nothing}
         ${o.reports.map(
           (r) => html`
             <div class="skills-sync-row">
               <strong>${r.backend}</strong>
               <span class="skills-sync-counts">
-                ${r.written.length} written · ${r.overwritten.length} overwritten ·
-                ${r.deleted.length} deleted · ${r.private_ignored} private
+                已写入 ${r.written.length} · 覆盖 ${r.overwritten.length} ·
+                删除 ${r.deleted.length} · 私有 ${r.private_ignored}
               </span>
               ${r.overwritten.length || r.deleted.length
                 ? html`<div class="skills-sync-names">
@@ -2937,7 +2936,7 @@ export class SebasSettingsModal extends LitElement {
         )}
         ${o.no_placement.length
           ? html`<div class="skills-sync-noplace">
-              no placement: ${o.no_placement.join(', ')}（这些 agent 没有已知的 skills
+              无落点：${o.no_placement.join(', ')}（这些 agent 没有已知的 skills
               目录约定，sync 未写任何文件）
             </div>`
           : nothing}
@@ -2954,7 +2953,7 @@ export class SebasSettingsModal extends LitElement {
         <div class="skills-row-main">
           <button
             class="skills-row-name"
-            title=${open ? 'Collapse preview' : 'Preview SKILL.md'}
+            title=${open ? '收起预览' : '预览 SKILL.md'}
             @click=${() => this.toggleSkillPreview(s.name)}
           >
             ${open ? '▾' : '▸'} ${s.name}
@@ -2962,16 +2961,16 @@ export class SebasSettingsModal extends LitElement {
           ${s.valid
             ? nothing
             : html`<span class="provider-badge custom" title=${s.reason ?? ''} data-testid="skill-invalid">
-                invalid
+                无效
               </span>`}
           <span class="skills-row-desc">${s.valid ? (s.description ?? '') : (s.reason ?? '')}</span>
           <span class="skills-row-atts">
-            ${s.attachments.length} attachment${s.attachments.length === 1 ? '' : 's'}
+            ${s.attachments.length} 个附件
           </span>
           <span class="provider-row-actions">
             <button
               class="row-action danger"
-              title="Delete"
+              title="删除"
               ?disabled=${this.skillBusy}
               @click=${() => (this.skillDelete = { name: s.name, error: '' })}
             >
@@ -2992,7 +2991,7 @@ export class SebasSettingsModal extends LitElement {
     if (p.error)
       return html`
         <div class="callout callout-error" role="alert">
-          ${icon('alert')}<span>Failed to load: ${p.error}</span>
+          ${icon('alert')}<span>加载失败：${p.error}</span>
         </div>
       `
     if (!p.detail)
@@ -3004,7 +3003,7 @@ export class SebasSettingsModal extends LitElement {
           : html`<div class="skills-md">${unsafeHTML(renderMarkdown(p.detail.text))}</div>`}
         ${p.detail.attachments.length
           ? html`<div class="skills-atts">
-              <span class="label">attachments</span>
+              <span class="label">附件</span>
               ${p.detail.attachments.map((a) => html`<code>${a}</code>`)}
             </div>`
           : nothing}
@@ -3022,7 +3021,7 @@ export class SebasSettingsModal extends LitElement {
     if (this.envError)
       return html`
         <div class="callout callout-error" role="alert">
-          ${icon('alert')}<span>Failed to load: ${this.envError}</span>
+          ${icon('alert')}<span>加载失败：${this.envError}</span>
         </div>
       `
     if (this.envVars === null)
@@ -3043,9 +3042,9 @@ export class SebasSettingsModal extends LitElement {
         <table class="env-table">
           <thead>
             <tr>
-              <th>Variable</th>
-              <th>Used for</th>
-              <th>Value</th>
+              <th>变量</th>
+              <th>用途</th>
+              <th>值</th>
             </tr>
           </thead>
           <tbody>
@@ -3073,7 +3072,7 @@ export class SebasSettingsModal extends LitElement {
     if (this.servicesError)
       return html`
         <div class="callout callout-error" role="alert">
-          ${icon('alert')}<span>Failed to load: ${this.servicesError}</span>
+          ${icon('alert')}<span>加载失败：${this.servicesError}</span>
         </div>
       `
     if (this.services === null)
@@ -3111,7 +3110,7 @@ export class SebasSettingsModal extends LitElement {
       ${this.serviceEvents.length > 0
         ? html`
             <div class="service-errors">
-              <div class="service-errors-title">Recent errors</div>
+              <div class="service-errors-title">最近错误</div>
               ${this.serviceEvents
                 .slice(-3)
                 .reverse()
@@ -3156,7 +3155,7 @@ export class SebasSettingsModal extends LitElement {
             <span class="service-id">${s.name}</span>
           </div>
           <div class="service-desc">
-            desired ${s.desired} · status ${s.status} · up ${formatUptimeSecs(s.uptime_secs)}
+            期望 ${s.desired} · 状态 ${s.status} · 已运行 ${formatUptimeSecs(s.uptime_secs)}
           </div>
         </div>
         <div class="service-status">
@@ -3170,7 +3169,7 @@ export class SebasSettingsModal extends LitElement {
                   ? html`
                       <button
                         class="row-action"
-                        title="Enable service"
+                        title="启用服务"
                         ?disabled=${busy}
                         @click=${() => void this.runServiceAction('enable', s.name)}
                       >
@@ -3182,7 +3181,7 @@ export class SebasSettingsModal extends LitElement {
                   ? html`
                       <button
                         class="row-action"
-                        title="Disable service"
+                        title="停用服务"
                         ?disabled=${busy}
                         @click=${() => (this.confirmTarget = { kind: 'disable', name: s.name })}
                       >
@@ -3194,7 +3193,7 @@ export class SebasSettingsModal extends LitElement {
                   ? html`
                       <button
                         class="row-action"
-                        title="Restart service"
+                        title="重启服务"
                         ?disabled=${busy}
                         @click=${() => (this.confirmTarget = { kind: 'restart', name: s.name })}
                       >
@@ -3206,7 +3205,7 @@ export class SebasSettingsModal extends LitElement {
                   ? html`
                       <span
                         class="service-transition"
-                        title="Service is ${s.status}"
+                        title="服务状态：${s.status}"
                         aria-hidden="true"
                       >
                         ⋯
@@ -3230,7 +3229,7 @@ export class SebasSettingsModal extends LitElement {
     return html`
       <div class="provider-toolbar">
         <wa-button variant="brand" appearance="filled" @click=${() => this.openUserCreate()}>
-          ＋ New user
+          ＋ 新建用户
         </wa-button>
         ${this.usersError
           ? html`<span class="toolbar-error" role="alert">${this.usersError}</span>`
@@ -3261,7 +3260,7 @@ export class SebasSettingsModal extends LitElement {
         : html`
             <div class="provider-list">
               ${users.length === 0
-                ? html`<div class="provider-row-empty">No users yet.</div>`
+                ? html`<div class="provider-row-empty">还没有用户。</div>`
                 : users.map((u) => this.renderUserRow(u))}
             </div>
           `}
@@ -3282,13 +3281,13 @@ export class SebasSettingsModal extends LitElement {
           <span class="provider-row-name">${u.username}</span>
           <span class="provider-badge ${u.role === 'root' ? 'preset' : ''}">${u.role}</span>
           <span class="provider-key ${u.enabled ? 'on' : 'off'}">
-            ${u.enabled ? 'enabled' : 'disabled'}
+            ${u.enabled ? '已启用' : '已禁用'}
           </span>
-          <span class="provider-row-url" title="created">created ${formatDateUnix(u.created_at_unix)}</span>
+          <span class="provider-row-url" title="创建于">创建于 ${formatDateUnix(u.created_at_unix)}</span>
           <span class="provider-row-actions">
             <wa-select
               class="user-role"
-              aria-label="Role of ${u.username}"
+              aria-label="${u.username} 的角色"
               value=${u.role}
               ?disabled=${this.userBusy || isSelf}
               title=${isSelf ? selfGuardTitle : nothing}
@@ -3300,7 +3299,7 @@ export class SebasSettingsModal extends LitElement {
             ${u.enabled
               ? html`<button
                   class="row-action"
-                  title=${isSelf ? selfGuardTitle : "Disable user"}
+                  title=${isSelf ? selfGuardTitle : "停用用户"}
                   ?disabled=${this.userBusy || isSelf}
                   @click=${() => void this.setUserEnabled(u, false)}
                 >
@@ -3308,7 +3307,7 @@ export class SebasSettingsModal extends LitElement {
                 </button>`
               : html`<button
                   class="row-action"
-                  title=${isSelf ? selfGuardTitle : "Enable user"}
+                  title=${isSelf ? selfGuardTitle : "启用用户"}
                   ?disabled=${this.userBusy || isSelf}
                   @click=${() => void this.setUserEnabled(u, true)}
                 >
@@ -3316,7 +3315,7 @@ export class SebasSettingsModal extends LitElement {
                 </button>`}
             <button
               class="row-action"
-              title="Reset password"
+              title="重置密码"
               ?disabled=${this.userBusy}
               @click=${() => this.openUserReset(u)}
             >
@@ -3324,7 +3323,7 @@ export class SebasSettingsModal extends LitElement {
             </button>
             <button
               class="row-action danger"
-              title=${isSelf ? selfGuardTitle : "Delete user"}
+              title=${isSelf ? selfGuardTitle : "删除用户"}
               ?disabled=${this.userBusy || isSelf}
               @click=${() => this.openUserDelete(u)}
             >
@@ -3339,7 +3338,7 @@ export class SebasSettingsModal extends LitElement {
   /** Appearance：主题三态；选择立即生效（翻 <html> 的 wa-dark）并持久化。 */
   private renderAppearance() {
     return html`
-      <div class="theme-options" role="group" aria-label="Theme">
+      <div class="theme-options" role="group" aria-label="主题">
         ${THEME_OPTIONS.map(
           (o) => html`
             <button
@@ -3361,8 +3360,8 @@ export class SebasSettingsModal extends LitElement {
       </div>
       <p class="theme-hint">
         ${this.themeMode === 'system'
-          ? `Your OS currently asks for ${resolvesToLight('system') ? 'light' : 'dark'}; the console follows it.`
-          : 'Applied immediately, saved for this browser.'}
+          ? `系统当前为${resolvesToLight('system') ? '浅色' : '深色'}，控制台跟随系统。`
+          : '立即生效，保存在当前浏览器。'}
       </p>
     `
   }
@@ -3378,7 +3377,7 @@ export class SebasSettingsModal extends LitElement {
     if (this.aboutError)
       return html`
         <div class="callout callout-error" role="alert">
-          ${icon('alert')}<span>Failed to load: ${this.aboutError}</span>
+          ${icon('alert')}<span>加载失败：${this.aboutError}</span>
         </div>
       `
     if (this.aboutLoading || !this.aboutData)
@@ -3396,16 +3395,16 @@ export class SebasSettingsModal extends LitElement {
       `
     const a = this.aboutData
     return html`
-      <h3 class="about-seg-title">Instance</h3>
+      <h3 class="about-seg-title">实例</h3>
       <dl class="about-list about-instance">
         <div class="kv">
-          <dt>Workspace root</dt>
+          <dt>工作区根目录</dt>
           <dd>
             ${this.overviewRoot ?? '—'}
             ${this.overviewRoot
               ? html`<button
                   class="row-action"
-                  title="Copy workspace root"
+                  title="复制工作区根目录"
                   @click=${() => this.copyRoot()}
                 >
                   ${this.rootCopied ? '✓' : '⧉'}
@@ -3414,18 +3413,18 @@ export class SebasSettingsModal extends LitElement {
           </dd>
         </div>
         <div class="kv">
-          <dt>Default agent kind</dt>
+          <dt>默认 agent 种类</dt>
           <dd>
             ${a.default_agent_kind ?? '—'}
-            <span class="service-sub">(default kind for new sessions)</span>
+            <span class="service-sub">（新建会话的默认种类）</span>
           </dd>
         </div>
       </dl>
 
-      <h3 class="about-seg-title">Build</h3>
+      <h3 class="about-seg-title">构建</h3>
       <dl class="about-list about-build">
         <div class="kv">
-          <dt>Version</dt>
+          <dt>版本</dt>
           <dd><span class="version-chip">${a.version}</span></dd>
         </div>
         <!-- add-about-build-info：Version chip 之下依次是构建时间行（UTC
@@ -3433,7 +3432,7 @@ export class SebasSettingsModal extends LitElement {
              哪个提交」）与独立一行的 Git 信息（分支名@短hash）。构建信息
              缺失时后端如实下发 unknown——照实显示，不隐藏行。 -->
         <div class="kv">
-          <dt>Build time</dt>
+          <dt>构建时间</dt>
           <dd data-testid="about-build-time">
             ${a.build_time}<span class="service-sub">UTC</span>
           </dd>
@@ -3443,11 +3442,11 @@ export class SebasSettingsModal extends LitElement {
           <dd data-testid="about-git">${a.git_branch}@${a.git_hash}</dd>
         </div>
         <div class="kv">
-          <dt>Uptime</dt>
+          <dt>运行时长</dt>
           <dd>${a.uptime}</dd>
         </div>
         <div class="kv">
-          <dt>Rust toolchain</dt>
+          <dt>Rust 工具链</dt>
           <dd data-testid="about-toolchain">
             ${a.rustc?.state === 'ok'
               ? a.rustc.version
@@ -3461,11 +3460,11 @@ export class SebasSettingsModal extends LitElement {
           </dd>
         </div>
         <div class="kv">
-          <dt>Router listen</dt>
+          <dt>Router 监听</dt>
           <dd>${a.router_listen ?? '—'}</dd>
         </div>
         <div class="kv">
-          <dt>Providers</dt>
+          <dt>Provider 数</dt>
           <dd>
             ${a.provider_count}
             <!-- （fix-webui-qa-defects-round5 4.3）口径标注：这是 router 侧
@@ -3488,11 +3487,11 @@ export class SebasSettingsModal extends LitElement {
           if (e.target === e.currentTarget) this.requestClose()
         }}
       >
-        <div class="panel" role="dialog" aria-modal="true" aria-label="Settings">
-          <h2 class="sr-only">Settings</h2>
-          <button class="close" aria-label="Close settings" @click=${this.requestClose}>✕</button>
+        <div class="panel" role="dialog" aria-modal="true" aria-label="设置">
+          <h2 class="sr-only">设置</h2>
+          <button class="close" aria-label="关闭设置" @click=${this.requestClose}>✕</button>
           <div class="layout">
-            <nav class="nav" aria-label="Settings sections">
+            <nav class="nav" aria-label="设置分区">
               ${this.visibleSections.map(
                 (s, i) => html`
                   ${i > 0 && NAV_BREAKS.has(s.id)
@@ -3539,7 +3538,7 @@ export class SebasSettingsModal extends LitElement {
       >
         ${this.editor === null ? nothing : this.renderEditorBody()}
         <wa-button slot="footer" appearance="plain" @click=${() => (this.editor = null)}>
-          Cancel
+          取消
         </wa-button>
         <wa-button
           slot="footer"
@@ -3547,22 +3546,21 @@ export class SebasSettingsModal extends LitElement {
           ?disabled=${this.busy}
           @click=${() => void this.submitEditor()}
         >
-          ${this.busy ? 'Saving…' : 'Save'}
+          ${this.busy ? '保存中…' : '保存'}
         </wa-button>
       </wa-dialog>
 
       <wa-dialog
-        label="Delete provider"
+        label="删除 provider"
         ?open=${this.deleteTarget !== null}
         @wa-hide=${guardedHide(() => (this.deleteTarget = null))}
       >
         <p class="dialog-text">
-          Delete provider
-          <strong>${this.deleteTarget ?? ''}</strong>? This removes it from the router
-          configuration.
+          删除 provider
+          <strong>${this.deleteTarget ?? ''}</strong>？这会把它从 router 配置中移除。
         </p>
         <wa-button slot="footer" appearance="plain" @click=${() => (this.deleteTarget = null)}>
-          Cancel
+          取消
         </wa-button>
         <wa-button
           slot="footer"
@@ -3570,12 +3568,12 @@ export class SebasSettingsModal extends LitElement {
           ?disabled=${this.busy}
           @click=${() => void this.confirmDelete()}
         >
-          Delete
+          删除
         </wa-button>
       </wa-dialog>
 
       <wa-dialog
-        label="Set default for new sessions"
+        label="设置新建会话默认"
         ?open=${this.defaultDraft !== null}
         @wa-hide=${guardedHide(() => (this.defaultDraft = null))}
       >
@@ -3583,14 +3581,14 @@ export class SebasSettingsModal extends LitElement {
           ? nothing
           : html`
               <p class="dialog-text">
-                New sessions will start with provider
+                新会话将以 provider
                 <strong>${this.defaultDraft.provider}</strong>
-                ${this.defaultDraft.model ? ` and model <strong>${this.defaultDraft.model}</strong>` : ''}.
+                ${this.defaultDraft.model ? ` 与模型 <strong>${this.defaultDraft.model}</strong>` : ''} 启动。
               </p>
               ${this.modelChoicesFor(this.defaultDraft.provider).length > 0
                 ? html`
                     <wa-select
-                      label="Default model"
+                      label="默认模型"
                       value=${this.defaultDraft.model ?? ''}
                       @change=${(e: Event) =>
                         (this.defaultDraft = {
@@ -3598,16 +3596,16 @@ export class SebasSettingsModal extends LitElement {
                           model: (e.target as HTMLSelectElement).value || null,
                         })}
                     >
-                      <wa-option value="">(provider default)</wa-option>
+                      <wa-option value="">（provider 默认）</wa-option>
                       ${this.modelChoicesFor(this.defaultDraft.provider).map(
                         (m) => html`<wa-option value=${m}>${m}</wa-option>`,
                       )}
                     </wa-select>
                   `
-                : html`<p class="dialog-text">This provider has no model catalog yet.</p>`}
+                : html`<p class="dialog-text">该 provider 还没有模型目录。</p>`}
             `}
         <wa-button slot="footer" appearance="plain" @click=${() => (this.defaultDraft = null)}>
-          Cancel
+          取消
         </wa-button>
         <wa-button
           slot="footer"
@@ -3615,7 +3613,7 @@ export class SebasSettingsModal extends LitElement {
           ?disabled=${this.busy || this.defaultDraft === null}
           @click=${() => void this.confirmSetDefault()}
         >
-          ${this.busy ? 'Saving…' : 'Set default'}
+          ${this.busy ? '保存中…' : '设为默认'}
         </wa-button>
       </wa-dialog>
     `
@@ -3630,7 +3628,7 @@ export class SebasSettingsModal extends LitElement {
   private renderUserDialogs() {
     return html`
       <wa-dialog
-        label="New user"
+        label="新建用户"
         ?open=${this.userCreate !== null}
         @wa-hide=${guardedHide(() => (this.userCreate = null))}
         class="user-create"
@@ -3645,7 +3643,7 @@ export class SebasSettingsModal extends LitElement {
                 : nothing}
               <div class="editor-grid">
                 <wa-input
-                  label="Username"
+                  label="用户名"
                   required
                   .value=${this.userCreate.username}
                   @input=${(ev: Event) =>
@@ -3655,7 +3653,7 @@ export class SebasSettingsModal extends LitElement {
                     })}
                 ></wa-input>
                 <wa-input
-                  label="Password (min 8 characters)"
+                  label="密码（至少 8 个字符）"
                   type="password"
                   autocomplete="new-password"
                   .value=${this.userCreate.password}
@@ -3666,7 +3664,7 @@ export class SebasSettingsModal extends LitElement {
                     })}
                 ></wa-input>
                 <wa-select
-                  label="Role"
+                  label="角色"
                   value=${this.userCreate.role}
                   @change=${(ev: Event) =>
                     (this.userCreate = {
@@ -3679,7 +3677,7 @@ export class SebasSettingsModal extends LitElement {
               </div>
             `}
         <wa-button slot="footer" appearance="plain" @click=${() => (this.userCreate = null)}>
-          Cancel
+          取消
         </wa-button>
         <wa-button
           slot="footer"
@@ -3687,12 +3685,12 @@ export class SebasSettingsModal extends LitElement {
           ?disabled=${this.userBusy}
           @click=${() => void this.submitUserCreate()}
         >
-          ${this.userBusy ? 'Creating…' : 'Create'}
+          ${this.userBusy ? '创建中…' : '创建'}
         </wa-button>
       </wa-dialog>
 
       <wa-dialog
-        label="Reset password"
+        label="重置密码"
         ?open=${this.userReset !== null}
         @wa-hide=${guardedHide(() => (this.userReset = null))}
         class="user-reset"
@@ -3701,8 +3699,7 @@ export class SebasSettingsModal extends LitElement {
           ? nothing
           : html`
               <p class="dialog-text">
-                Set a new password for <strong>${this.userReset.username}</strong>. Their
-                existing sessions are invalidated immediately.
+                为 <strong>${this.userReset.username}</strong> 设置新密码。其现有会话将立即失效。
               </p>
               ${this.userReset.error
                 ? html`<div class="callout callout-error" role="alert" data-testid="user-reset-error">
@@ -3711,7 +3708,7 @@ export class SebasSettingsModal extends LitElement {
                 : nothing}
               <div class="editor-grid">
                 <wa-input
-                  label="New password (min 8 characters)"
+                  label="新密码（至少 8 个字符）"
                   type="password"
                   autocomplete="new-password"
                   .value=${this.userReset.password}
@@ -3724,7 +3721,7 @@ export class SebasSettingsModal extends LitElement {
               </div>
             `}
         <wa-button slot="footer" appearance="plain" @click=${() => (this.userReset = null)}>
-          Cancel
+          取消
         </wa-button>
         <wa-button
           slot="footer"
@@ -3732,12 +3729,12 @@ export class SebasSettingsModal extends LitElement {
           ?disabled=${this.userBusy}
           @click=${() => void this.submitUserReset()}
         >
-          ${this.userBusy ? 'Saving…' : 'Reset'}
+          ${this.userBusy ? '保存中…' : '重置'}
         </wa-button>
       </wa-dialog>
 
       <wa-dialog
-        label="Delete user"
+        label="删除用户"
         ?open=${this.userDelete !== null}
         @wa-hide=${guardedHide(() => (this.userDelete = null))}
         class="user-delete"
@@ -3746,8 +3743,7 @@ export class SebasSettingsModal extends LitElement {
           ? nothing
           : html`
               <p class="dialog-text">
-                Delete user <strong>${this.userDelete.username}</strong>? Their sessions are
-                removed and they can no longer sign in.
+                删除用户 <strong>${this.userDelete.username}</strong>？其会话将被移除，且无法再登录。
               </p>
               ${this.userDelete.error
                 ? html`<div class="callout callout-error" role="alert" data-testid="user-delete-error">
@@ -3756,7 +3752,7 @@ export class SebasSettingsModal extends LitElement {
                 : nothing}
             `}
         <wa-button slot="footer" appearance="plain" @click=${() => (this.userDelete = null)}>
-          Cancel
+          取消
         </wa-button>
         <wa-button
           slot="footer"
@@ -3764,7 +3760,7 @@ export class SebasSettingsModal extends LitElement {
           ?disabled=${this.userBusy}
           @click=${() => void this.confirmUserDelete()}
         >
-          Delete
+          删除
         </wa-button>
       </wa-dialog>
     `
@@ -3780,7 +3776,7 @@ export class SebasSettingsModal extends LitElement {
   private renderSkillsDialogs() {
     return html`
       <wa-dialog
-        label="Delete skill"
+        label="删除技能"
         ?open=${this.skillDelete !== null}
         @wa-hide=${guardedHide(() => (this.skillDelete = null))}
         class="skill-delete"
@@ -3790,7 +3786,7 @@ export class SebasSettingsModal extends LitElement {
           : html`
               <p class="dialog-text" data-testid="skill-delete-text">
                 从技能仓删除 <strong>${this.skillDelete.name}</strong>？各 agent
-                技能目录里的副本保持不动——它们会在下次按 <strong>Sync</strong>
+                技能目录里的副本保持不动——它们会在下次点「同步」
                 时被清理。
               </p>
               ${this.skillDelete.error
@@ -3800,7 +3796,7 @@ export class SebasSettingsModal extends LitElement {
                 : nothing}
             `}
         <wa-button slot="footer" appearance="plain" @click=${() => (this.skillDelete = null)}>
-          Cancel
+          取消
         </wa-button>
         <wa-button
           slot="footer"
@@ -3808,7 +3804,7 @@ export class SebasSettingsModal extends LitElement {
           ?disabled=${this.skillBusy}
           @click=${() => void this.confirmSkillDelete()}
         >
-          Delete
+          删除
         </wa-button>
       </wa-dialog>
     `
@@ -3823,18 +3819,17 @@ export class SebasSettingsModal extends LitElement {
       <wa-dialog
         class="service-action-confirm"
         label=${this.confirmTarget
-          ? `${this.confirmTarget.kind === 'disable' ? 'Disable' : 'Restart'} service`
-          : 'Service action'}
+          ? `${this.confirmTarget.kind === 'disable' ? '停用' : '重启'}服务`
+          : '服务操作'}
         ?open=${this.confirmTarget !== null}
         @wa-hide=${guardedHide(() => (this.confirmTarget = null))}
       >
         <p class="dialog-text">
-          ${this.confirmTarget?.kind === 'disable' ? 'Disable' : 'Restart'} managed service
-          <strong>${this.confirmTarget?.name ?? ''}</strong>? This takes effect immediately and
-          cannot be undone（不可撤销）; in-flight work on that process is interrupted.
+          ${this.confirmTarget?.kind === 'disable' ? '停用' : '重启'}受管服务
+          <strong>${this.confirmTarget?.name ?? ''}</strong>？立即生效且不可撤销；该进程上进行中的工作会被中断。
         </p>
         <wa-button slot="footer" appearance="plain" @click=${() => (this.confirmTarget = null)}>
-          Cancel
+          取消
         </wa-button>
         <wa-button
           slot="footer"
@@ -3847,7 +3842,7 @@ export class SebasSettingsModal extends LitElement {
             void this.runServiceAction(t.kind, t.name)
           }}
         >
-          ${this.confirmTarget?.kind === 'disable' ? 'Disable' : 'Restart'}
+          ${this.confirmTarget?.kind === 'disable' ? '停用' : '重启'}
         </wa-button>
       </wa-dialog>
     `
@@ -3864,18 +3859,16 @@ export class SebasSettingsModal extends LitElement {
     return html`
       <wa-dialog
         class="service-force-stop"
-        label="Force stop service"
+        label="强制停止服务"
         ?open=${this.forceStop !== null}
         @wa-hide=${guardedHide(() => (this.forceStop = null))}
       >
         <p class="dialog-text">
-          Stopping <strong>${this.forceStop?.name ?? ''}</strong> was rejected: there
-          ${this.forceStop?.count === 1 ? 'is' : 'are'}
-          <strong>${this.forceStop?.count ?? '—'}</strong> active routed session(s). Forcing the
-          stop will interrupt their streaming responses.
+          停止 <strong>${this.forceStop?.name ?? ''}</strong> 被拒绝：仍有
+          <strong>${this.forceStop?.count ?? '—'}</strong> 个活跃 routed 会话。强制停止会中断它们的流式响应。
         </p>
         <wa-button slot="footer" appearance="plain" @click=${() => (this.forceStop = null)}>
-          Cancel
+          取消
         </wa-button>
         <wa-button
           slot="footer"
@@ -3883,7 +3876,7 @@ export class SebasSettingsModal extends LitElement {
           ?disabled=${this.serviceBusy !== null}
           @click=${() => void this.confirmForceStop()}
         >
-          Force stop
+          强制停止
         </wa-button>
       </wa-dialog>
     `
@@ -3910,7 +3903,7 @@ export class SebasSettingsModal extends LitElement {
       this.defaults = null
       window.dispatchEvent(new CustomEvent('sebas:refetch', { bubbles: true, composed: true }))
     } catch (err) {
-      this.actionError = err instanceof ApiError ? err.message : String(err)
+      this.actionError = errorText(err)
     } finally {
       this.busy = false
     }
@@ -3929,7 +3922,7 @@ export class SebasSettingsModal extends LitElement {
       // composer 等消费方即时重取模型数据源（与 app-shell 的 refetch 约定一致）。
       window.dispatchEvent(new CustomEvent('sebas:refetch', { bubbles: true, composed: true }))
     } catch (err) {
-      this.actionError = err instanceof ApiError ? err.message : String(err)
+      this.actionError = errorText(err)
     } finally {
       this.busy = false
     }
@@ -3938,9 +3931,9 @@ export class SebasSettingsModal extends LitElement {
   private editorLabel(): string {
     const e = this.editor
     if (!e) return ''
-    if (e.mode === 'create-preset') return 'New provider (preset)'
-    if (e.mode === 'create-custom') return 'New provider (custom)'
-    return `Edit provider: ${e.name}`
+    if (e.mode === 'create-preset') return '新建 provider（预设）'
+    if (e.mode === 'create-custom') return '新建 provider（自定义）'
+    return `编辑 provider：${e.name}`
   }
 
   /** 定制最小输入的「单个 Base URL」读写的是 protocol 选中的槽位
@@ -3969,12 +3962,12 @@ export class SebasSettingsModal extends LitElement {
     return html`
       <div class="model-entries">
         <div class="entries-head">
-          <span class="entries-label">Models</span>
+          <span class="entries-label">模型</span>
           ${this.canFetchInEditor()
             ? html`
                 <button
                   class="row-action"
-                  title="Fetch model list from the provider's official base URL"
+                  title="从 provider 的官方 base URL 抓取模型列表"
                   data-testid="fetch-models"
                   ?disabled=${this.busy || fetching}
                   @click=${() => void this.fetchModelsIntoEditor()}
@@ -3982,13 +3975,13 @@ export class SebasSettingsModal extends LitElement {
                   🔍
                 </button>
                 ${fetching
-                  ? html`<span class="entries-label" role="status">fetching…</span>`
+                  ? html`<span class="entries-label" role="status">抓取中…</span>`
                   : nothing}
               `
             : nothing}
           ${this.fetchState?.state === 'error'
             ? html`<span class="fetch-error" role="alert">
-                fetch failed — ${this.fetchState.reason}
+                抓取失败——${this.fetchState.reason}
               </span>`
             : nothing}
         </div>
@@ -3996,7 +3989,7 @@ export class SebasSettingsModal extends LitElement {
           (m, i) => html`
             <div class="model-entry-row" data-testid="model-entry">
               <wa-input
-                placeholder="model id"
+                placeholder="模型 id"
                 .value=${m.id}
                 @input=${(ev: Event) => this.setModelId(i, (ev.target as HTMLInputElement).value)}
               ></wa-input>
@@ -4020,7 +4013,7 @@ export class SebasSettingsModal extends LitElement {
               )}
               <button
                 class="row-action danger"
-                title="Remove model entry"
+                title="移除模型条目"
                 ?disabled=${this.busy}
                 @click=${() => this.removeModelEntry(i)}
               >
@@ -4031,7 +4024,7 @@ export class SebasSettingsModal extends LitElement {
         )}
         <button
           class="add-model"
-          title="Add a model entry"
+          title="添加模型条目"
           data-testid="add-model-entry"
           ?disabled=${this.busy}
           @click=${() => this.addModelEntry()}
@@ -4063,19 +4056,19 @@ export class SebasSettingsModal extends LitElement {
         ${e.mode === 'create-custom'
           ? html`
               <wa-input
-                label="Name"
+                label="名称"
                 required
                 .value=${e.name}
                 @input=${(ev: Event) => this.setEditor({ name: (ev.target as HTMLInputElement).value })}
               ></wa-input>
             `
           : e.mode === 'edit'
-            ? html`<wa-input label="Name" .value=${e.name} disabled></wa-input>`
+            ? html`<wa-input label="名称" .value=${e.name} disabled></wa-input>`
             : nothing}
         ${e.mode === 'create-preset'
           ? html`
               <wa-select
-                label="Preset"
+                label="预设"
                 value=${e.preset}
                 @change=${(ev: Event) =>
                   this.setEditor({ preset: (ev.target as HTMLSelectElement).value })}
@@ -4089,7 +4082,7 @@ export class SebasSettingsModal extends LitElement {
         ${isPreset && presetDef
           ? html`
               <div class="readonly-urls" part="preset-details">
-                <div class="readonly-title">Preset values (owned by the code, follow updates)</div>
+                <div class="readonly-title">预设值（由代码拥有，随应用更新）</div>
                 <div class="readonly-row">
                   <span>Anthropic</span><code>${presetDef.base_url_anthropic ?? '—'}</code>
                 </div>
@@ -4106,7 +4099,7 @@ export class SebasSettingsModal extends LitElement {
         ${!isPreset
           ? html`
               <wa-input
-                label=${primaryIsAnthropic ? 'Base URL (Anthropic)' : 'Base URL (OpenAI-compatible)'}
+                label=${primaryIsAnthropic ? 'Base URL（Anthropic）' : 'Base URL（OpenAI 兼容）'}
                 placeholder=${primaryIsAnthropic
                   ? 'anthropic-messages endpoint'
                   : 'chat-completions endpoint'}
@@ -4115,15 +4108,15 @@ export class SebasSettingsModal extends LitElement {
                   this.setPrimaryBaseUrl((ev.target as HTMLInputElement).value)}
               ></wa-input>
               <wa-select
-                label="Protocol"
+                label="协议"
                 value=${e.protocol}
                 @change=${(ev: Event) =>
                   this.setEditor({ protocol: (ev.target as HTMLSelectElement).value })}
               >
-                <wa-option value="openai">OpenAI-compatible</wa-option>
+                <wa-option value="openai">OpenAI 兼容</wa-option>
                 <wa-option value="anthropic">Anthropic</wa-option>
                 ${e.mode === 'edit'
-                  ? html`<wa-option value="auto">Auto (stored preference)</wa-option>`
+                  ? html`<wa-option value="auto">自动（沿用已存偏好）</wa-option>`
                   : nothing}
               </wa-select>
             `
@@ -4131,19 +4124,19 @@ export class SebasSettingsModal extends LitElement {
         <wa-input
           label="API key"
           type="password"
-          placeholder=${e.mode === 'edit' ? 'leave empty to keep the stored key' : 'paste API key'}
+          placeholder=${e.mode === 'edit' ? '留空则保留已存 key' : '粘贴 API key'}
           .value=${e.apiKey}
           @input=${(ev: Event) => this.setEditor({ apiKey: (ev.target as HTMLInputElement).value })}
         ></wa-input>
         ${this.renderModelEntries()}
 
         <details class="advanced">
-          <summary>Advanced</summary>
+          <summary>高级</summary>
           <div class="advanced-body">
             ${e.mode === 'create-preset'
               ? html`
                   <wa-input
-                    label="Name (defaults to the preset name)"
+                    label="名称（缺省用预设名）"
                     placeholder=${e.preset}
                     .value=${e.name}
                     @input=${(ev: Event) =>
@@ -4155,9 +4148,9 @@ export class SebasSettingsModal extends LitElement {
               ? html`
                   <wa-input
                     label=${primaryIsAnthropic
-                      ? 'Base URL (OpenAI-compatible)'
-                      : 'Base URL (Anthropic)'}
-                    placeholder="empty = protocol not served"
+                      ? 'Base URL（OpenAI 兼容）'
+                      : 'Base URL（Anthropic）'}
+                    placeholder="留空 = 不提供该协议"
                     .value=${primaryIsAnthropic ? e.baseUrlOpenaiChat : e.baseUrlAnthropic}
                     @input=${(ev: Event) =>
                       primaryIsAnthropic
@@ -4165,7 +4158,7 @@ export class SebasSettingsModal extends LitElement {
                         : this.setEditor({ baseUrlAnthropic: (ev.target as HTMLInputElement).value })}
                   ></wa-input>
                   <wa-input
-                    label="Base URL (OpenAI Responses)"
+                    label="Base URL（OpenAI Responses）"
                     placeholder="Responses API endpoint"
                     .value=${e.baseUrlOpenaiResponses}
                     @input=${(ev: Event) =>
@@ -4177,13 +4170,12 @@ export class SebasSettingsModal extends LitElement {
               : nothing}
             ${advancedEnvName
               ? html`<div class="advanced-note">
-                  API key env fallback: <code>${advancedEnvName}</code> (inherited; used only when
-                  no plaintext key is stored)
+                  API key env 回退：<code>${advancedEnvName}</code>（继承而来；仅在没有存储明文 key 时使用）
                 </div>`
               : nothing}
             <wa-input
-              label="Default model"
-              placeholder="model id passed to the agent (optional)"
+              label="默认模型"
+              placeholder="传给 agent 的模型 id（可选）"
               .value=${e.defaultModel}
               @input=${(ev: Event) =>
                 this.setEditor({ defaultModel: (ev.target as HTMLInputElement).value })}
@@ -4191,7 +4183,7 @@ export class SebasSettingsModal extends LitElement {
             ${!isPreset
               ? html`
                   <wa-input
-                    label="Model rename map (one per line: old-id -> new-id)"
+                    label="模型重命名映射（每行一条：旧 id -> 新 id）"
                     placeholder="old-id -> new-id"
                     .value=${e.modelMapText}
                     @input=${(ev: Event) =>
@@ -4202,12 +4194,12 @@ export class SebasSettingsModal extends LitElement {
             ${isPreset
               ? html`
                   <wa-select
-                    label="Protocol"
+                    label="协议"
                     value=${e.protocol}
                     @change=${(ev: Event) =>
                       this.setEditor({ protocol: (ev.target as HTMLSelectElement).value })}
                   >
-                    <wa-option value="auto">Auto (Anthropic first)</wa-option>
+                    <wa-option value="auto">自动（Anthropic 优先）</wa-option>
                     <wa-option value="anthropic">Anthropic</wa-option>
                     <wa-option value="openai">OpenAI</wa-option>
                   </wa-select>

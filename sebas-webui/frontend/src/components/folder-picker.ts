@@ -11,7 +11,7 @@
 
 import { LitElement, css, html } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { api } from '../api/client.js'
+import { api, errorText } from '../api/client.js'
 import '@awesome.me/webawesome/dist/components/tree/tree.js'
 import '@awesome.me/webawesome/dist/components/tree-item/tree-item.js'
 
@@ -142,7 +142,7 @@ export class SebasFolderPicker extends LitElement {
       return true
     } catch (e) {
       item.removeAttribute('lazy')
-      const message = e instanceof Error ? e.message : String(e)
+      const message = errorText(e)
       this.expandError = `展开 ${path} 失败：${message}（再次点击可重试）`
       return false
     }

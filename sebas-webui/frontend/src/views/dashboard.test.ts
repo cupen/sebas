@@ -34,6 +34,7 @@ const apiMocks = vi.hoisted(() => ({
 }))
 
 vi.mock('../api/client.js', () => ({
+  errorText: (err: unknown) => (err instanceof Error ? err.message : String(err)),
   api: {
     summary: apiMocks.summary,
     sessions: apiMocks.sessions,
@@ -1856,14 +1857,14 @@ describe('session header agent identity (3.3)', () => {
     ).toContain('codex')
     el.remove()
 
-    // 旧归档条目（无身份字段）：header 如实回退 "default agent"，不编造。
+    // 旧归档条目（无身份字段）：header 如实回退「默认 agent」，不编造。
     apiMocks.session.mockResolvedValue({ ...detailFixture(), agent_kind: null })
     const el2 = await mount()
     await new Promise((r) => setTimeout(r, 0))
     await el2.updateComplete
     expect(
       el2.shadowRoot!.querySelector('[data-testid="agent-lock"]')?.textContent,
-    ).toContain('default agent')
+    ).toContain('默认 agent')
     el2.remove()
   })
 })
@@ -2272,10 +2273,10 @@ describe('last-active relative label ticks with the local clock (round2 3.3)', (
   it('relativeActiveLabel recomputes from unix as time advances', async () => {
     const { relativeActiveLabel } = await import('./dashboard.js')
     const now = 1_000_000
-    expect(relativeActiveLabel(now - 5, now, '5s ago')).toBe('5s ago')
-    expect(relativeActiveLabel(now - 90, now, 'fallback')).toBe('1m ago')
-    expect(relativeActiveLabel(now - 7200, now, 'fallback')).toBe('2h ago')
-    expect(relativeActiveLabel(now - 172800, now, 'fallback')).toBe('2d ago')
+    expect(relativeActiveLabel(now - 5, now, '5 秒前')).toBe('5 秒前')
+    expect(relativeActiveLabel(now - 90, now, 'fallback')).toBe('1 分钟前')
+    expect(relativeActiveLabel(now - 7200, now, 'fallback')).toBe('2 小时前')
+    expect(relativeActiveLabel(now - 172800, now, 'fallback')).toBe('2 天前')
     // unix 缺席回退服务端串（旧 payload 兼容）。
     expect(relativeActiveLabel(undefined, now, 'server form')).toBe('server form')
     expect(relativeActiveLabel(0, now, 'server form')).toBe('server form')

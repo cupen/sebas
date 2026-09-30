@@ -46,7 +46,7 @@ test.describe('会话管理', () => {
       await waitStatus(page.request, key, ['done'])
 
       await page.goto('/sessions')
-      await expect(sessions.pageTitle).toHaveText('Sessions')
+      await expect(sessions.pageTitle).toHaveText('会话')
       const card = sessions.cardFor(key)
       await expect(card).toBeVisible()
 
@@ -194,7 +194,7 @@ test.describe('会话管理', () => {
       await page.goto(`/sessions/${key}`)
       await expect(detail.host).toBeVisible()
       // 会话头的 model 选择器仍缺席（选择器语义归创建对话框/composer 芯片）。
-      await expect(page.locator('sebas-workbench-composer wa-select[aria-label="Model"]')).toHaveCount(
+      await expect(page.locator('sebas-workbench-composer wa-select[aria-label="会话模型"]')).toHaveCount(
         0,
       )
       // 芯片在场（别名表随快照可达），且不是「无可用模型」占位、不是启动

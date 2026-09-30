@@ -645,7 +645,7 @@ describe('thinking fold membership and distinguishability (fix-webui-qa-round3 D
     const folds = [...assistant.querySelectorAll<HTMLElement>('.process-fold')]
     expect(folds).toHaveLength(2)
     for (const fold of folds) {
-      expect(fold.querySelector('.fold-link .label')?.textContent?.trim()).toBe('process')
+      expect(fold.querySelector('.fold-link .label')?.textContent?.trim()).toBe('过程')
     }
     el.remove()
   })
@@ -804,7 +804,7 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     const link = assistant.querySelector<HTMLButtonElement>('button.fold-link')!
     expect(link.getAttribute('aria-expanded')).toBe('false')
     expect(link.querySelector('.kind-icon')).toBeTruthy()
-    expect(link.querySelector('.label')?.textContent?.trim()).toBe('process')
+    expect(link.querySelector('.label')?.textContent?.trim()).toBe('过程')
     expect(link.querySelector('.fold-count')?.textContent?.trim()).toBe('1')
     // 样式面：折叠容器无边框/无底色卡框（link 化的外观合同）。
     const styleText = [...el.shadowRoot!.querySelectorAll('style')]
@@ -830,7 +830,7 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     // 折叠行：固定 process 标签 + 实时摘要（进行中条目 = run 尾部，此处
     // 是无 title 的 tool → 通用标签）+ 条目计数。
     const link = fold.querySelector<HTMLButtonElement>('button.fold-link')!
-    expect(link.querySelector('.label')?.textContent?.trim()).toBe('process')
+    expect(link.querySelector('.label')?.textContent?.trim()).toBe('过程')
     expect(link.querySelector('.running')?.textContent?.trim()).toBe('tool')
     // run 尾条目无 title → 通用标签、link 不带 title 属性。
     expect(link.hasAttribute('title')).toBe(false)
@@ -1089,7 +1089,7 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     expect((el as unknown as { unseenCount: number }).unseenCount).toBe(1)
     const seam = el.shadowRoot?.querySelector<HTMLElement>('.seam')
     expect(seam?.hasAttribute('hidden')).toBe(false)
-    expect(seam?.textContent).toContain('~1 new')
+    expect(seam?.textContent).toContain('~1 条新消息')
     // 边界落在第一个「可见段累计超过锚」的回合（new 的 agent 回合）上方，
     // 不切开任何回合；seam 与徽标读同一条段锚（2.3，D3）。
     const seamNext = seam?.nextElementSibling
@@ -1983,7 +1983,7 @@ describe('truncation + view-all dialog (fix-webui-streaming-liveness 4.5)', () =
 
 describe('errorEntryLabel (fix-webui-qa-defects 5.2, design D5)', () => {
   it('labels a spawn failure as spawn failed', () => {
-    expect(errorEntryLabel({ failure_class: 'spawn' })).toBe('spawn failed')
+    expect(errorEntryLabel({ failure_class: 'spawn' })).toBe('启动失败')
   })
 
   it('labels a stall force-settle as 回合停滞, never as a spawn failure', () => {

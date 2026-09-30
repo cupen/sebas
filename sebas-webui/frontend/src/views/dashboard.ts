@@ -15,7 +15,7 @@
 
 import { LitElement, css, html, nothing, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { api, type AgentKindInfo, type ArchiveDetail, type ArchiveEntry, type ConversationEntryView, type NodeInfo, type NodesResponse, type PendingSubmission, type Project, type SessionDetail, type Summary } from '../api/client.js'
+import { api, type AgentKindInfo, type ArchiveDetail, type ArchiveEntry, type ConversationEntryView, type NodeInfo, type NodesResponse, type PendingSubmission, type Project, type SessionDetail, type Summary, errorText } from '../api/client.js'
 import type { WsEvent, CoreReachabilityState } from '../api/ws.js'
 import { sharedWs } from '../api/shared-ws.js'
 import { icon } from '../components/icons.js'
@@ -145,10 +145,10 @@ export function relativeActiveLabel(
 ): string {
   if (unixSecs === undefined || unixSecs === null || unixSecs <= 0) return fallback
   const diff = Math.max(0, nowSecs - unixSecs)
-  if (diff < 60) return `${diff}s ago`
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
-  return `${Math.floor(diff / 86400)}d ago`
+  if (diff < 60) return `${diff} 秒前`
+  if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`
+  if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`
+  return `${Math.floor(diff / 86400)} 天前`
 }
 
 /**
@@ -559,7 +559,7 @@ export class SebasDashboard extends LitElement {
       await api.switchSession(entry.session_key).catch(() => undefined)
       window.dispatchEvent(new Event('sebas:refetch'))
     } catch (err) {
-      const cause = err instanceof Error ? err.message : String(err)
+      const cause = errorText(err)
       this.restoreError = cause
       notify({
         level: 'error',
@@ -1221,7 +1221,7 @@ export class SebasDashboard extends LitElement {
         this.followFocusedProject()
       })
       .catch((e) => {
-        this.error = String(e)
+        this.error = errorText(e)
       })
   }
 
@@ -1273,7 +1273,7 @@ export class SebasDashboard extends LitElement {
         this.followFocusedProject()
       })
       .catch((e) => {
-        this.error = String(e)
+        this.error = errorText(e)
       })
   }
 
@@ -1297,7 +1297,7 @@ export class SebasDashboard extends LitElement {
     } catch (e) {
       this.nodes = [{ id: LOCAL_NODE, status: 'online', local: true }]
       this.remoteNodesAvailable = false
-      this.nodesCause = e instanceof Error ? e.message : String(e)
+      this.nodesCause = errorText(e)
     }
   }
 
@@ -1389,7 +1389,7 @@ export class SebasDashboard extends LitElement {
     if (this.error)
       return html`
         <div class="callout callout-error" role="alert">
-          ${icon('alert')}<span>Failed to load: ${this.error}</span>
+          ${icon('alert')}<span>加载失败：${this.error}</span>
           <button class="retry-btn" @click=${() => this.refetch()}>重试</button>
         </div>
       `
@@ -1462,7 +1462,7 @@ export class SebasDashboard extends LitElement {
                       <a
                         class="focused-link"
                         href=${`/sessions/${d.active_session.encoded_key}`}
-                        title="Focused session"
+                        title="聚焦的会话"
                       >
                         <span class="fkey">${d.active_session.chat_id}</span>
                         <span class="arrow">${icon('forward', 13)}</span>
@@ -1576,9 +1576,9 @@ export class SebasDashboard extends LitElement {
           <div
             class="session-head"
             data-status="dormant"
-            aria-label="Archived session (read-only)"
+            aria-label="归档会话（只读）"
           >
-            <sebas-status-badge slug="dormant" label="Archived" glyph="🗂"></sebas-status-badge>
+            <sebas-status-badge slug="dormant" label="已归档" glyph="🗂"></sebas-status-badge>
             <div class="ident">
               <!-- （fix-webui-qa-round3 2.4 / D7）归档只读视图标题同走
                    归档时刻现用标签（与 History 行同一取数）。 -->
@@ -1821,7 +1821,7 @@ export class SebasDashboard extends LitElement {
       (this.focusedDetail?.status_slug ?? this.data?.active_session?.status_slug ?? null) ===
         'working'
     return html`
-      <div class="turn-stream-area" aria-label="Focused session conversation">
+      <div class="turn-stream-area" aria-label="聚焦会话的对话">
         ${d && d.encoded_key === key
           ? html`
               ${this.renderSessionHead(d)}
@@ -1926,8 +1926,8 @@ export class SebasDashboard extends LitElement {
             <span
               class="mono"
               data-testid="agent-lock"
-              title="Agent is immutable — chosen when the session was created"
-              >🔒 ${d.agent_kind ?? 'default agent'}</span
+              title="agent 创建时选定，之后不可更改"
+              >🔒 ${d.agent_kind ?? '默认 agent'}</span
             >
             <!-- 8.5：所属执行节点；不可用时点名节点与成因。 -->
             <span
@@ -1957,7 +1957,7 @@ export class SebasDashboard extends LitElement {
                  切换迁至输入框底沿、模型切换归 composer 芯片、归档是
                  rail 行溢出菜单的唯一入口——头部只留展示。 -->
             <span data-testid="last-active"
-              >last active ${relativeActiveLabel(d.last_active_unix, this.clockSecs, d.last_active)}</span
+              >最近活跃 ${relativeActiveLabel(d.last_active_unix, this.clockSecs, d.last_active)}</span
             >
           </span>
         </div>

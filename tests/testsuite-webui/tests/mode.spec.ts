@@ -70,7 +70,7 @@ test.describe('agent mode 选择', () => {
       page.locator('sebas-workbench-composer [data-testid="mode-switch"]'),
     ).toHaveCount(0)
     await expect(
-      page.locator('sebas-workbench-composer wa-select[aria-label="Permission mode"]'),
+      page.locator('sebas-workbench-composer wa-select[aria-label="权限模式"]'),
     ).toHaveCount(0)
 
     await rail.cancelNewSessionDialog()

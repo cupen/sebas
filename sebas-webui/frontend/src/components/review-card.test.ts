@@ -65,6 +65,7 @@ vi.mock('../api/shared-ws.js', () => {
 })
 
 vi.mock('../api/client.js', () => ({
+  errorText: (err: unknown) => (err instanceof Error ? err.message : String(err)),
   api: { answerPermission: vi.fn(), sessionApprovals: vi.fn() },
   ApiError: class MockApiError extends Error {
     readonly status: number
@@ -151,8 +152,8 @@ describe('sebas-review-cards', () => {
     expect(card.dataset.requestId).toBe('toolu_1')
     expect(card.querySelector('.tool')?.textContent).toBe('bash')
     expect(card.querySelector('.why')?.textContent).toContain('may modify state')
-    expect(card.querySelector('.session-id')?.textContent).toContain('session oc_enc')
-    expect(card.querySelector('.request-id')?.textContent).toContain('request toolu_1')
+    expect(card.querySelector('.session-id')?.textContent).toContain('会话 oc_enc')
+    expect(card.querySelector('.request-id')?.textContent).toContain('请求 toolu_1')
     // Args are rendered as formatted JSON (2-space indent).
     expect(card.querySelector('.args')?.textContent).toContain('"command": "rm -rf build"')
   })
@@ -244,7 +245,7 @@ describe('sebas-review-cards', () => {
     expect(cards(el).length).toBe(1)
     const card = cards(el)[0]!
     expect(card.dataset.state).toBe('expired')
-    expect(card.querySelector('.callout-warning')?.textContent).toContain('No longer pending')
+    expect(card.querySelector('.callout-warning')?.textContent).toContain('已不在待决状态')
     expect(card.querySelector('wa-button.allow-once')).toBeNull()
 
     // A late repeat of the same frame cannot resurrect the expired card,

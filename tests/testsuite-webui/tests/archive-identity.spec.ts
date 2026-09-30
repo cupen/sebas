@@ -135,13 +135,13 @@ test.describe('会话管理', () => {
       await page.reload()
       await restoreFromHistory(page, legacyTag)
 
-      // The fallback is presented honestly: "default agent", NOT a
+      // The fallback is presented honestly: "默认 agent", NOT a
       // fabricated identity. API agrees (agent_kind null).
       await expect(
         page
           .locator('sebas-dashboard .session-head [data-testid="agent-lock"]')
           .first(),
-      ).toContainText('default agent', { timeout: 15_000 })
+      ).toContainText('默认 agent', { timeout: 15_000 })
       const legacy = (await getSession(page.request, key)).detail!
       expect(legacy.agent_kind ?? null).toBeNull()
       // The rebuilt session is listed again (row back under the rail; the

@@ -122,7 +122,7 @@ test.describe('项目管理覆盖', () => {
       // … 菜单 → 移除 → 弹窗就地说明「先归档/关闭（N 个会话）」。
       const row = rail.projectRow(projectName)
       await row.hover()
-      await row.locator('button[title="Project actions"]').click()
+      await row.locator('button[title="项目操作"]').click()
       const removeItem = row.locator('wa-dropdown-item[value="remove"]')
       await expect(removeItem).toBeVisible()
       await removeItem.click()
@@ -367,7 +367,7 @@ test.describe('项目管理覆盖', () => {
       // 根回显即反斜杠形。故断言只锚路径语义、不锚斜杠风格：两侧都归一为
       // `/` 后比较。注册经后端 canonicalize_plain 归一，rail 侧断言用
       // path.join 形，与此处互不影响。
-      const pathInput = dialog.locator('wa-input[label="Project path"] input')
+      const pathInput = dialog.locator('wa-input[label="项目路径"] input')
       const expectedSelected = `${scene}/work/pick-parent-${t}/pick-child-${t}`.replace(/\\/g, '/')
       await expect
         .poll(async () => (await pathInput.inputValue()).replace(/\\/g, '/'), {
@@ -377,7 +377,7 @@ test.describe('项目管理覆盖', () => {
         .toBe(expectedSelected)
 
       // Submit through the dialog footer; the project lands in the rail.
-      await dialog.locator('wa-button').filter({ hasText: 'Add project' }).click()
+      await dialog.locator('wa-button').filter({ hasText: '添加项目' }).click()
       await expect
         .poll(async () => (await listProjects(page.request)).some((p) => p.path === child), {
           timeout: 10_000,
@@ -406,7 +406,7 @@ test.describe('项目管理覆盖', () => {
       await rail.openAddDialog()
 
       const dialog = rail.addDialog()
-      const submit = dialog.locator('wa-button').filter({ hasText: 'Add project' })
+      const submit = dialog.locator('wa-button').filter({ hasText: '添加项目' })
       // Empty path: the footer submit is disabled. wa-button does not reflect
       // disabled to a host attribute — assert the property, not native
       // semantics (Playwright can't see WA's internal disabled state).
@@ -417,7 +417,7 @@ test.describe('项目管理覆盖', () => {
       // the register-side inline error is reserved for precheck-pass races,
       // not for this journey (不可解析即越界，add-workspace-root).
       const missing = path.join(sceneDir(), `no-such-dir-${Date.now()}`)
-      const pathInput = dialog.locator('wa-input[label="Project path"] input')
+      const pathInput = dialog.locator('wa-input[label="项目路径"] input')
       await pathInput.click()
       await pathInput.pressSequentially(missing)
       const hint = dialog.locator('[data-testid="add-project-scope-hint"]')
@@ -425,11 +425,11 @@ test.describe('项目管理覆盖', () => {
       await expect(submit).toHaveJSProperty('disabled', true)
       // The dialog is still open (heading visible) and the registry untouched.
       await expect(
-        dialog.locator('h2, [role="heading"]', { hasText: 'Add project' }).first(),
+        dialog.locator('h2, [role="heading"]', { hasText: '添加项目' }).first(),
       ).toBeVisible()
       expect((await listProjects(page.request)).length).toBe(before)
 
-      await dialog.locator('wa-button').filter({ hasText: 'Cancel' }).click()
+      await dialog.locator('wa-button').filter({ hasText: '取消' }).click()
 
       expect(collector.clean()).toEqual([])
     })

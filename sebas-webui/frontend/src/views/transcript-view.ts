@@ -570,7 +570,7 @@ export function errorEntryLabel(entry: {
 }): string {
   switch (entry.failure_class) {
     case 'spawn':
-      return 'spawn failed'
+      return '启动失败'
     case 'stall':
       return '回合停滞'
     default:
@@ -1817,15 +1817,15 @@ export class SebasTranscriptView extends LitElement {
     const seam = html`
       <div class="seam" ?hidden=${!showSeam} data-count=${this.unseenCount} role="status">
         <span class="pill"
-          ><span class="count">~${this.unseenCount} new</span> since you last viewed</span
+          ><span class="count">~${this.unseenCount} 条新消息</span>（自你上次查看）</span
         >
         <button type="button" class="link" @click=${this.markAllSeen}>
-          mark all seen
+          全部标为已读
         </button>
       </div>
     `
     return html`
-      <div class="scroll" role="log" aria-label="Session conversation">
+      <div class="scroll" role="log" aria-label="会话对话">
         ${this.seamIndex === null ? seam : nothing}
         ${this.turnUnits.map((u, i) =>
           // 4.2：map 项是**同一个**模板字面量——seam 有无是项内 child part
@@ -2117,7 +2117,7 @@ export class SebasTranscriptView extends LitElement {
           @click=${this.toggleFold(id)}
         >
           <span class="kind-icon" aria-hidden="true">${icon(kind === 'tool' ? 'zap' : 'thinking', 11)}</span>
-          <span class="label">process</span>
+          <span class="label">过程</span>
           <span class="running">${label}</span>
           <span class="fold-count">${r.items.length}</span>
           ${processRunOutcome(r) === 'ok'

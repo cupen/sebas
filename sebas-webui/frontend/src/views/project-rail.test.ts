@@ -410,14 +410,14 @@ describe('row action consolidation (rail-declutter-unread 3.1/3.2)', () => {
     // 顺序固定：… 下拉在前，+ 在后；行内不再有平铺的移除按钮。
     expect(children[0]!.tagName.toLowerCase()).toBe('wa-dropdown')
     expect(children[1]!.tagName.toLowerCase()).toBe('button')
-    expect(children[1]!.getAttribute('aria-label')).toBe('New session in alpha')
+    expect(children[1]!.getAttribute('aria-label')).toBe('在 alpha 中新建会话')
     expect(el.shadowRoot!.querySelector('.row .row-remove')).toBeNull()
 
     // … 菜单含「移除项目」；点击菜单项打开移除弹窗。
     const item = el.shadowRoot!.querySelector('wa-dropdown-item[value="remove"]') as HTMLElement
     item.click()
     await el.updateComplete
-    const dialog = el.shadowRoot!.querySelector('wa-dialog[label="Remove project"]')
+    const dialog = el.shadowRoot!.querySelector('wa-dialog[label="移除项目"]')
     expect((dialog as any).open).toBe(true)
     el.remove()
   })
@@ -873,7 +873,7 @@ describe('history group (archived sessions)', () => {
     })
     const el = await mount()
     const heads = [...el.shadowRoot!.querySelectorAll('.group-head')]
-    const historyHead = heads.find((h) => h.textContent?.includes('History'))
+    const historyHead = heads.find((h) => h.textContent?.includes('历史'))
     expect(historyHead).toBeTruthy()
     expect(historyHead!.querySelector('.group-count')?.textContent).toBe('3')
     // （5.5）组头是原生 <button>：role=button 语义来自元素本身（保留
@@ -919,7 +919,7 @@ describe('history group (archived sessions)', () => {
     })
     const el = await mount()
     const heads = [...el.shadowRoot!.querySelectorAll('.group-head')]
-    const historyHead = heads.find((h) => h.textContent?.includes('History'))
+    const historyHead = heads.find((h) => h.textContent?.includes('历史'))
     ;(historyHead as HTMLElement).click()
     await el.updateComplete
     const meta = el.shadowRoot!.querySelector(
@@ -1089,7 +1089,7 @@ describe('project node dimension (add-remote-execution-node 8.1/8.2)', () => {
     expect(cause!.textContent).toContain('离线')
 
     const plus = el.shadowRoot!.querySelector<HTMLButtonElement>(
-      'button[aria-label^="New session"]',
+      'button[aria-label^="在 "]',
     )
     expect(plus!.disabled).toBe(true)
 
@@ -1124,7 +1124,7 @@ describe('project node dimension (add-remote-execution-node 8.1/8.2)', () => {
     await el.updateComplete
     expect(el.shadowRoot!.querySelector('[data-testid="project-node-cause"]')).toBeNull()
     const plus = el.shadowRoot!.querySelector<HTMLButtonElement>(
-      'button[aria-label^="New session"]',
+      'button[aria-label^="在 "]',
     )
     expect(plus!.disabled).toBe(false)
     el.remove()
@@ -1147,7 +1147,7 @@ describe('project node dimension (add-remote-execution-node 8.1/8.2)', () => {
     const el = await mount()
 
     const heads = [...el.shadowRoot!.querySelectorAll('.group-head')]
-    const waitingHead = heads.find((h) => h.textContent?.includes('Waiting on you'))
+    const waitingHead = heads.find((h) => h.textContent?.includes('等待你处理'))
     expect(waitingHead).toBeTruthy()
     expect(waitingHead!.querySelector('.group-count')?.textContent).toBe('1')
 
@@ -1213,7 +1213,7 @@ describe('creation dialog wiring (workbench-interaction-polish 3.2)', () => {
     })
     const el = await mount()
     const plus = el.shadowRoot!.querySelector<HTMLButtonElement>(
-      'button[aria-label="New session in alpha"]',
+      'button[aria-label="在 alpha 中新建会话"]',
     )!
     plus.click()
     await el.updateComplete
@@ -1232,7 +1232,7 @@ describe('creation dialog wiring (workbench-interaction-polish 3.2)', () => {
     })
     const el = await mount()
     ;(
-      el.shadowRoot!.querySelector('button[aria-label="New session in alpha"]') as HTMLButtonElement
+      el.shadowRoot!.querySelector('button[aria-label="在 alpha 中新建会话"]') as HTMLButtonElement
     ).click()
     await el.updateComplete
     const dialog = await dialogOf(el)
@@ -1265,7 +1265,7 @@ describe('creation dialog wiring (workbench-interaction-polish 3.2)', () => {
     })
     const el = await mount()
     ;(
-      el.shadowRoot!.querySelector('button[aria-label="New session in beta"]') as HTMLButtonElement
+      el.shadowRoot!.querySelector('button[aria-label="在 beta 中新建会话"]') as HTMLButtonElement
     ).click()
     await el.updateComplete
     const dialog = await dialogOf(el)
@@ -1320,7 +1320,7 @@ describe('creation dialog wiring (workbench-interaction-polish 3.2)', () => {
     })
     const el = await mount()
     ;(
-      el.shadowRoot!.querySelector('button[aria-label="New session in alpha"]') as HTMLButtonElement
+      el.shadowRoot!.querySelector('button[aria-label="在 alpha 中新建会话"]') as HTMLButtonElement
     ).click()
     await el.updateComplete
     const dialog = await dialogOf(el)
@@ -1438,7 +1438,7 @@ describe('creation focus chain (workbench-rail-polish 3.1/3.2)', () => {
   /** 打开 alpha 的创建对话框并确认（走 confirmNewSession 的成功路径）。 */
   async function confirmCreation(el: SebasProjectRail): Promise<void> {
     const plus = el.shadowRoot!.querySelector<HTMLButtonElement>(
-      'button[aria-label="New session in alpha"]',
+      'button[aria-label="在 alpha 中新建会话"]',
     )!
     plus.click()
     await el.updateComplete
@@ -1998,7 +1998,7 @@ describe('add-project scope hint (5.2)', () => {
     ;(el as any).addPathScopeHint = '路径在 workspace root 之外——只能注册工作区内的目录'
     await (el as any).updateComplete
     const submit = [...el.shadowRoot!.querySelectorAll('wa-button')].find((b) =>
-      b.textContent!.includes('Add project'),
+      b.textContent!.includes('添加项目'),
     ) as HTMLElement & { hasAttribute: (n: string) => boolean }
     expect(submit.hasAttribute('disabled')).toBe(true)
     // 原因在输入框旁可见（data-testid 钩子）。
@@ -2063,7 +2063,7 @@ describe('creation establishes the read anchor (round3 3.1)', () => {
     })
     const el = await mount()
     ;(
-      el.shadowRoot!.querySelector('button[aria-label="New session in alpha"]') as HTMLButtonElement
+      el.shadowRoot!.querySelector('button[aria-label="在 alpha 中新建会话"]') as HTMLButtonElement
     ).click()
     await el.updateComplete
     ;(el as any).confirmNewSession(
@@ -2109,7 +2109,7 @@ describe('in-flight creation guard through the real confirm button (round3 1.2/1
     })
     const el = await mount()
     ;(
-      el.shadowRoot!.querySelector('button[aria-label="New session in alpha"]') as HTMLButtonElement
+      el.shadowRoot!.querySelector('button[aria-label="在 alpha 中新建会话"]') as HTMLButtonElement
     ).click()
     await el.updateComplete
     const dialog = el.shadowRoot!.querySelector(
@@ -2216,7 +2216,7 @@ describe('unread badge journey after creation (round3 3.1)', () => {
     })
     const el = await mount()
     ;(
-      el.shadowRoot!.querySelector('button[aria-label="New session in alpha"]') as HTMLButtonElement
+      el.shadowRoot!.querySelector('button[aria-label="在 alpha 中新建会话"]') as HTMLButtonElement
     ).click()
     await el.updateComplete
     ;(el as any).confirmNewSession(
@@ -2283,7 +2283,7 @@ describe('add-project path input fidelity + debounced precheck (round2 1.1)', ()
   }
 
   function typeInto(el: SebasProjectRail, text: string): void {
-    const input = el.shadowRoot!.querySelector('wa-input[label="Project path"]') as any
+    const input = el.shadowRoot!.querySelector('wa-input[label="项目路径"]') as any
     expect(input).toBeTruthy()
     // 逐字符键击：每次 input 事件携带累计值（真输入框语义）。
     for (let i = 1; i <= text.length; i++) {
@@ -2367,7 +2367,7 @@ describe('fix-webui-qa-round3 (D7 archive label / D9 reorder menu)', () => {
     })
     const el = await mount()
     const heads = [...el.shadowRoot!.querySelectorAll('.group-head')]
-    const historyHead = heads.find((h) => h.textContent?.includes('History'))
+    const historyHead = heads.find((h) => h.textContent?.includes('历史'))
     ;(historyHead as HTMLElement).click()
     await el.updateComplete
     const names = [

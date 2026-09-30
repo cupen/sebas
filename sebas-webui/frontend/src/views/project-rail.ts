@@ -1247,8 +1247,8 @@ export class SebasProjectRail extends LitElement {
           <button
             slot="trigger"
             class="row-action"
-            title="Session actions"
-            aria-label="Session actions for ${fullLabel}"
+            title="会话操作"
+            aria-label="会话操作：${fullLabel}"
             aria-haspopup="menu"
           >${icon('more', 12)}</button>
           <!-- （workbench-live-conversation-flow 4.2）归档是唯一生命周期
@@ -1316,8 +1316,8 @@ export class SebasProjectRail extends LitElement {
               <button
                 slot="trigger"
                 class="row-action"
-                title="Project actions"
-                aria-label="Project actions for ${p.name}"
+                title="项目操作"
+                aria-label="项目操作：${p.name}"
                 aria-haspopup="menu"
               >${icon('more', 12)}</button>
               <wa-dropdown-item value="remove" @click=${(e: Event) => this.openRemoveDialog(e, p)}>移除项目</wa-dropdown-item>
@@ -1346,8 +1346,8 @@ export class SebasProjectRail extends LitElement {
             ${canCreateSessions(this.role)
               ? html`<button
                   class="row-action"
-                  title=${nodeOk ? `New session in ${p.name}` : `无法新建会话：${st.cause ?? `节点 ${nodeLabel} 不可用`}`}
-                  aria-label="New session in ${p.name}"
+                  title=${nodeOk ? `在 ${p.name} 中新建会话` : `无法新建会话：${st.cause ?? `节点 ${nodeLabel} 不可用`}`}
+                  aria-label="在 ${p.name} 中新建会话"
                   ?disabled=${!nodeOk}
                   @click=${(e: Event) => {
                     e.stopPropagation()
@@ -1372,7 +1372,7 @@ export class SebasProjectRail extends LitElement {
     return html`
       <div class="group-section waiting-group">
         <button type="button" class="group-head" aria-expanded=${this.waitingOpen ? 'true' : 'false'} @click=${() => (this.waitingOpen = !this.waitingOpen)}>
-          <span class="chevron ${this.waitingOpen ? 'open' : ''}" aria-hidden="true">▶</span><span>Waiting on you</span><span class="group-count">${waiting.length}</span>
+          <span class="chevron ${this.waitingOpen ? 'open' : ''}" aria-hidden="true">▶</span><span>等待你处理</span><span class="group-count">${waiting.length}</span>
         </button>
         ${this.waitingOpen ? html`<ul class="sessions">${waiting.map((r) => this.renderSessionRow(r))}</ul>` : nothing}
       </div>`
@@ -1386,7 +1386,7 @@ export class SebasProjectRail extends LitElement {
     return html`
       <div class="group-section">
         <button type="button" class="group-head" data-testid="history-group-head" aria-expanded=${this.historyOpen ? 'true' : 'false'} @click=${() => (this.historyOpen = !this.historyOpen)}>
-          <span class="chevron ${this.historyOpen ? 'open' : ''}" aria-hidden="true">▶</span><span>History</span><span class="group-count">${archived.length}</span>
+          <span class="chevron ${this.historyOpen ? 'open' : ''}" aria-hidden="true">▶</span><span>历史</span><span class="group-count">${archived.length}</span>
         </button>
         ${this.historyOpen ? html`<ul class="sessions">${archived.map((a) => this.renderArchivedSessionRow(a))}</ul>` : nothing}
       </div>`
@@ -1397,8 +1397,8 @@ export class SebasProjectRail extends LitElement {
     const closePendingCount = this.closeTarget?.pending_count ?? 0
     return html`
       <div class="section-label">
-        <span>Projects</span>
-        <button class="add-btn" aria-label="Add project" title="添加项目" @click=${this.openAddDialog}>${icon('add', 14)}</button>
+        <span>项目</span>
+        <button class="add-btn" aria-label="添加项目" title="添加项目" @click=${this.openAddDialog}>${icon('add', 14)}</button>
       </div>
       ${this.error ? html`<div class="error">${this.error} <button class="retry-btn" @click=${() => void this.refresh()}>重试</button></div>` : nothing}
       ${this.degradedHint ? html`<div class="degraded-hint" role="status" data-testid="project-degraded-hint">${this.degradedHint}</div>` : nothing}
@@ -1407,14 +1407,14 @@ export class SebasProjectRail extends LitElement {
       ${this.renderHistory()}
 
       ${this.addDialogOpen ? html`
-      <wa-dialog label="Add project" style="--width: 480px;" .open=${true} @wa-hide=${guardedHide(() => this.closeAddDialog())}>
+      <wa-dialog label="添加项目" style="--width: 480px;" .open=${true} @wa-hide=${guardedHide(() => this.closeAddDialog())}>
         <div class="wa-stack" style="gap:var(--sebas-space-4);">
-          <p style="font-size:0.85rem;color:var(--sebas-text);margin:0;">Choose a directory to add as a project:</p>
+          <p style="font-size:0.85rem;color:var(--sebas-text);margin:0;">选择要添加为项目的目录：</p>
           <sebas-folder-picker class="folder-picker" @folder-selected=${this.onFolderSelected}></sebas-folder-picker>
           <!-- （fix-webui-qa-round2 3.2，D-A2）分隔符不贴边：目录列表滚到
                最后一行时 or 标签与滚动视口底边仍留一行呼吸（上下 margin
                独立于栈 gap，不与列表末行拥挤）。 -->
-          <p style="font-size:0.8rem;color:var(--sebas-text-faint);margin:var(--sebas-space-3) 0;text-align:center;">or</p>
+          <p style="font-size:0.8rem;color:var(--sebas-text-faint);margin:var(--sebas-space-3) 0;text-align:center;">或</p>
           <!-- Web Awesome 3.x 派发标准 input 事件（不派发 wa-input），手动路径才能联动启用提交按钮。
                fix-webui-qa-defects 7.2：手填路径即时预检越界（禁用不再静默）。
                fix-webui-approval-restore-and-session-identity 5.2：本行行尾曾有
@@ -1422,13 +1422,13 @@ export class SebasProjectRail extends LitElement {
                属性未加引号，该引号被并进属性值，把 @input 的 EventPart 降级成
                普通属性 part，listener 永不挂接（历轮「手填路径失灵」的根因）；
                同时把引号灌进 .value 值。引号已除，@input 绑定恢复。 -->
-          <wa-input label="Project path" placeholder="/absolute/path/to/repo" .value=${this.addPath} @input=${(e: any) => { this.addPath = e.target.value; this.scheduleAddPathScopeCheck(this.addPath) }}>
+          <wa-input label="项目路径" placeholder="/absolute/path/to/repo" .value=${this.addPath} @input=${(e: any) => { this.addPath = e.target.value; this.scheduleAddPathScopeCheck(this.addPath) }}>
             <wa-icon slot="start" name="folder" aria-hidden="true"></wa-icon>
           </wa-input>
           <!-- 8.1：节点维度。空值 = 本机隐式注册（既有行为）；选远端时路径由
                那台节点判定。远端注册表不可得时如实说明，不假装没有远端节点。 -->
           <wa-select
-            label="Execution node"
+            label="执行节点"
             data-testid="add-node-select"
             value=${this.addNodeId}
             @change=${(e: any) => (this.addNodeId = e.target.value ?? '')}
@@ -1445,12 +1445,12 @@ export class SebasProjectRail extends LitElement {
           <!-- fix-webui-qa-defects 7.2：越界禁用原因在输入框旁可见，不再静默。 -->
           ${this.addPathScopeHint ? html`<div style="color:var(--sebas-status-failed);font-size:0.78rem;" data-testid="add-project-scope-hint">${this.addPathScopeHint}</div>` : nothing}
         </div>
-        <wa-button slot="footer" variant="brand" @click=${() => void this.submitAddProject()} ?disabled=${!this.addPath.trim() || this.addPathScopeHint !== null}>Add project</wa-button>
-        <wa-button slot="footer" appearance="plain" @click=${() => this.closeAddDialog()}>Cancel</wa-button>
+        <wa-button slot="footer" variant="brand" @click=${() => void this.submitAddProject()} ?disabled=${!this.addPath.trim() || this.addPathScopeHint !== null}>添加项目</wa-button>
+        <wa-button slot="footer" appearance="plain" @click=${() => this.closeAddDialog()}>取消</wa-button>
       </wa-dialog>` : nothing}
 
       ${this.removeTarget !== null ? html`
-      <wa-dialog label="Remove project" style="--width: 440px;" .open=${true} @wa-hide=${guardedHide(() => this.closeRemoveDialog())}>
+      <wa-dialog label="移除项目" style="--width: 440px;" .open=${true} @wa-hide=${guardedHide(() => this.closeRemoveDialog())}>
         <div class="wa-stack" style="gap:var(--sebas-space-3);">
           <p style="font-size:0.88rem;color:var(--sebas-text);margin:0;">
             移除项目 <b>${this.removeTarget?.name ?? ''}</b>？

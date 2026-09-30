@@ -5,7 +5,7 @@
 
 import { LitElement, css, html } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
-import { api, ApiError, type AgentKindInfo, type SessionList } from '../api/client.js'
+import { api, ApiError, errorText, type AgentKindInfo, type SessionList } from '../api/client.js'
 import { sharedWs } from '../api/shared-ws.js'
 import { navigate } from '../router.js'
 import { icon } from '../components/icons.js'
@@ -242,7 +242,7 @@ export class SebasSessions extends LitElement {
         this.error = ''
       })
       .catch((e) => {
-        this.error = String(e)
+        this.error = errorText(e)
       })
   }
 
@@ -265,7 +265,7 @@ export class SebasSessions extends LitElement {
       this.prompt = ''
       navigate(`/sessions/${key}`)
     } catch (err) {
-      this.error = String(err)
+      this.error = errorText(err)
     } finally {
       this.creating = false
     }
@@ -276,7 +276,7 @@ export class SebasSessions extends LitElement {
       const { redirect } = await api.switchSession(encodedKey)
       navigate(redirect)
     } catch (err) {
-      this.error = String(err)
+      this.error = errorText(err)
     }
   }
 
@@ -289,7 +289,7 @@ export class SebasSessions extends LitElement {
       this.refetch()
     } catch (err) {
       if (err instanceof ApiError && err.status === 404) this.refetch()
-      else this.error = String(err)
+      else this.error = errorText(err)
     }
   }
 
@@ -313,7 +313,7 @@ export class SebasSessions extends LitElement {
     if (this.error)
       return html`
         <div class="callout callout-error" role="alert">
-          ${icon('alert')}<span>Failed to load: ${this.error}</span>
+          ${icon('alert')}<span>加载失败：${this.error}</span>
           <button class="retry-btn" @click=${() => this.refetch()}>重试</button>
         </div>
       `
@@ -322,30 +322,30 @@ export class SebasSessions extends LitElement {
     return html`
       <header class="page-head">
         <div>
-          <h1 class="page-title">Sessions</h1>
-          <p class="page-sub">Create, focus and close agent sessions.</p>
+          <h1 class="page-title">会话</h1>
+          <p class="page-sub">创建、聚焦与关闭 agent 会话。</p>
         </div>
       </header>
 
       <div class="chips">
-        <span class="chip"><span class="dot" style="background: var(--sebas-status-working)"></span><b>${d.active_count}</b> active</span>
-        <span class="chip"><span class="dot" style="background: var(--sebas-status-dormant)"></span><b>${d.dormant_count}</b> dormant</span>
-        <span class="chip"><span class="dot" style="background: var(--sebas-status-starting)"></span><b>${d.spawning_count}</b> spawning</span>
-        <span class="chip"><b>${d.total_sessions}</b> total</span>
+        <span class="chip"><span class="dot" style="background: var(--sebas-status-working)"></span><b>${d.active_count}</b> 活跃</span>
+        <span class="chip"><span class="dot" style="background: var(--sebas-status-dormant)"></span><b>${d.dormant_count}</b> 休眠</span>
+        <span class="chip"><span class="dot" style="background: var(--sebas-status-starting)"></span><b>${d.spawning_count}</b> 启动中</span>
+        <span class="chip"><b>${d.total_sessions}</b> 总计</span>
       </div>
 
       <form class="panel composer" @submit=${this.create}>
-        <span class="composer-label">Start a new session</span>
+        <span class="composer-label">新建会话</span>
         <div class="row">
           <wa-input
-            placeholder="Describe the task for a new agent session…"
-            aria-label="New session prompt"
+            placeholder="描述新会话要执行的任务…"
+            aria-label="新会话任务描述"
             value=${this.prompt}
             @input=${(e: Event) => (this.prompt = (e.target as HTMLInputElement).value)}
           ></wa-input>
           <wa-select
             class="project-select"
-            aria-label="Project"
+            aria-label="项目"
             data-testid="new-session-project"
             value=${this.projectId}
             ?disabled=${this.projects.length === 0}
@@ -370,7 +370,7 @@ export class SebasSessions extends LitElement {
               (k) =>
                 k.reachable
                   ? html`<wa-option value=${k.id}>${k.display}</wa-option>`
-                  : html`<wa-option value=${k.id} disabled title=${k.cause ?? 'unreachable'}
+                  : html`<wa-option value=${k.id} disabled title=${k.cause ?? '不可达'}
                       >${agentUnavailableLabel(k)}</wa-option
                     >`,
             )}
@@ -381,7 +381,7 @@ export class SebasSessions extends LitElement {
             ?loading=${this.creating}
             ?disabled=${!this.projectId || this.projects.length === 0}
             type="submit"
-            >New session</wa-button
+            >新建会话</wa-button
           >
         </div>
       </form>
@@ -391,9 +391,9 @@ export class SebasSessions extends LitElement {
             <section class="panel" style="margin-top: var(--sebas-space-4)">
               <div class="empty">
                 <span class="glyph">${icon('sessions', 20)}</span>
-                <span class="title">Nothing running yet</span>
+                <span class="title">还没有运行中的会话</span>
                 <p class="hint">
-                  Start your first session above — describe the task and the agent picks it up.
+                  在上方启动第一个会话——描述任务，agent 会接手执行。
                 </p>
               </div>
             </section>
@@ -420,21 +420,21 @@ export class SebasSessions extends LitElement {
                     </div>
                     <div class="foot">
                       ${row.is_active
-                        ? html`<span class="focused-chip">focused</span>`
+                        ? html`<span class="focused-chip">聚焦中</span>`
                         : html`<wa-button
                             size="s"
                             appearance="plain"
                             @click=${() => this.switchTo(row.encoded_key)}
-                            >Focus</wa-button
+                            >聚焦</wa-button
                           >`}
                       <span class="spacer"></span>
                       <wa-button
                         size="s"
                         appearance="plain"
                         variant="danger"
-                        aria-label=${`Close session ${fullSessionLabel(row)}`}
+                        aria-label=${`关闭会话 ${fullSessionLabel(row)}`}
                         @click=${() => (this.closeTarget = row.encoded_key)}
-                        >Close</wa-button
+                        >关闭</wa-button
                       >
                     </div>
                   </article>
@@ -443,15 +443,14 @@ export class SebasSessions extends LitElement {
             </div>
           `}
 
-      <wa-dialog label="Close session" ?open=${this.closeTarget !== null} @wa-hide=${guardedHide(() => (this.closeTarget = null))}>
+      <wa-dialog label="关闭会话" ?open=${this.closeTarget !== null} @wa-hide=${guardedHide(() => (this.closeTarget = null))}>
         <p class="dialog-body">
-          Closing will terminate the agent child process and drop the session
-          mapping. This cannot be undone.
+          关闭将终止 agent 子进程并解除会话映射，此操作不可撤销。
         </p>
         <wa-button slot="footer" appearance="plain" @click=${() => (this.closeTarget = null)}
-          >Cancel</wa-button
+          >取消</wa-button
         >
-        <wa-button slot="footer" variant="danger" @click=${this.confirmClose}>Close session</wa-button>
+        <wa-button slot="footer" variant="danger" @click=${this.confirmClose}>关闭会话</wa-button>
       </wa-dialog>
     `
   }

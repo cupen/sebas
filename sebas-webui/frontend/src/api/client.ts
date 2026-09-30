@@ -785,6 +785,16 @@ export class ApiError extends Error {
 }
 
 /**
+ * 呈现用错误文本（webui-i18n-sweep 1.4）：取 `Error.message`，非 Error 值
+ * 原样字符串化。替代裸 `String(err)`——后者走 `Error.prototype.toString`，
+ * 会在中文消息前拼出英文 "Error: " 前缀，破坏界面语言一致性（后端消息
+ * 正文保持透传，不翻译）。
+ */
+export function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+/**
  * 网络级失败（add-webui-allowed-roots D6）：请求根本没拿到 HTTP 响应——
  * 服务进程死了、连接被拒、DNS 失败——fetch 抛 TypeError。统一包装成
  * `NetworkError`，让视图能区分「后端拒绝（ApiError）」与「进程没了」。

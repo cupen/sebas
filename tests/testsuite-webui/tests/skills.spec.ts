@@ -76,10 +76,10 @@ test.describe('Skills 仓', () => {
       await resetState(page.request)
       await page.goto('/')
       await settings.openViaSidebar()
-      await settings.openSection('Skills')
+      await settings.openSection('技能')
 
       const toolbar = settings.panel.locator('.provider-toolbar span.label')
-      await expect(toolbar).toHaveText('2 skills in store', { timeout: 10_000 })
+      await expect(toolbar).toHaveText('仓内 2 个技能', { timeout: 10_000 })
 
       const rows = settings.panel.locator('[data-testid="skill-row"]')
       await expect(rows).toHaveCount(2)
@@ -87,7 +87,7 @@ test.describe('Skills 仓', () => {
       // valid 条目：描述 + attachment 计数（嵌套文件也计入）。
       const beads = settings.panel.locator('[data-testid="skill-row"][data-name="beads"]')
       await expect(beads.locator('.skills-row-desc')).toHaveText('beads 工作流技能')
-      await expect(beads.locator('.skills-row-atts')).toHaveText('1 attachment')
+      await expect(beads.locator('.skills-row-atts')).toHaveText('1 个附件')
       await expect(beads.locator('[data-testid="skill-invalid"]')).toHaveCount(0)
 
       // invalid 条目：徽标 + 悬停原因（title）+ 描述位呈现成因。
@@ -110,7 +110,7 @@ test.describe('Skills 仓', () => {
       await resetState(page.request)
       await page.goto('/')
       await settings.openViaSidebar()
-      await settings.openSection('Skills')
+      await settings.openSection('技能')
 
       // 展开 beads：markdown 渲染（marked 管线）+ attachment 文件名清单。
       const beads = settings.panel.locator('[data-testid="skill-row"][data-name="beads"]')
@@ -149,36 +149,36 @@ test.describe('Skills 仓', () => {
       await resetState(page.request)
       await page.goto('/')
       await settings.openViaSidebar()
-      await settings.openSection('Skills')
+      await settings.openSection('技能')
 
       const broken = settings.panel.locator('[data-testid="skill-row"][data-name="broken"]')
       await expect(broken).toBeVisible({ timeout: 10_000 })
-      await broken.locator('button[title="Delete"]').click()
+      await broken.locator('button[title="删除"]').click()
 
       // 确认弹窗点名条目，并讲明「只删仓，backend 副本留待下次 sync 清理」。
-      const confirm = page.locator('sebas-settings-modal wa-dialog[label="Delete skill"]')
+      const confirm = page.locator('sebas-settings-modal wa-dialog[label="删除技能"]')
       const text = confirm.locator('[data-testid="skill-delete-text"]')
       await expect(text).toBeVisible()
       // polish-workbench-walkthrough-ux 把正文换成操作者中文措辞：「从技能仓
       // 删除 X？各 agent 技能目录里的副本保持不动——它们会在下次按 Sync 时被
-      // 清理。」（弹窗 label 与确认按钮仍是 Delete skill / Delete）
+      // 清理。」（弹窗 label 与确认按钮已是「删除技能 / 删除」）
       await expect(text).toContainText('从技能仓删除')
       await expect(text).toContainText('broken')
       await expect(text).toContainText('保持不动')
-      await expect(text).toContainText('Sync')
+      await expect(text).toContainText('同步')
 
-      await confirm.locator('wa-button').filter({ hasText: 'Delete' }).click()
+      await confirm.locator('wa-button').filter({ hasText: '删除' }).click()
       await expect(confirm).toBeHidden({ timeout: 10_000 })
       await expect(broken).toHaveCount(0)
       await expect(settings.panel.locator('.provider-toolbar span.label')).toHaveText(
-        '1 skill in store',
+        '仓内 1 个技能',
       )
       // API truth：删除只动了仓（fs 事实先行，UI 已随 reloadSkills 对齐）。
       expect(fs.existsSync(path.join(storeDir(), 'broken'))).toBe(false)
       expect(fs.existsSync(path.join(storeDir(), 'beads'))).toBe(true)
 
       // 刷新后仍与盘上一致（「refresh reflects on-disk community changes」）。
-      await settings.panel.locator('wa-button').filter({ hasText: 'Refresh' }).click()
+      await settings.panel.locator('wa-button').filter({ hasText: '刷新' }).click()
       await expect(settings.panel.locator('[data-testid="skill-row"]')).toHaveCount(1)
       await expect(
         settings.panel.locator('[data-testid="skill-row"][data-name="beads"]'),
@@ -207,16 +207,16 @@ test.describe('Skills 仓', () => {
       await resetState(page.request)
       await page.goto('/')
       await settings.openViaSidebar()
-      await settings.openSection('Skills')
+      await settings.openSection('技能')
 
-      await settings.panel.locator('wa-button').filter({ hasText: 'Sync' }).click()
+      await settings.panel.locator('wa-button').filter({ hasText: '同步' }).click()
       const panel = settings.panel.locator('[data-testid="skills-sync-result"]')
       await expect(panel).toBeVisible({ timeout: 10_000 })
 
       // claude：1 写入 · 私产只计数（不动）。
       const claudeRow = panel.locator('.skills-sync-row', { hasText: 'claude' })
       await expect(claudeRow.locator('.skills-sync-counts')).toHaveText(
-        '1 written · 0 overwritten · 0 deleted · 1 private',
+        '已写入 1 · 覆盖 0 · 删除 0 · 私有 1',
       )
 
       // fakeacp / claude-empty / claude-stream / claude-thinking 无落点：如实
@@ -230,7 +230,7 @@ test.describe('Skills 仓', () => {
       // 它逼人确认新 agent 确实无落点，而不是被静默忽略。历史上已因此更新过
       // 三次（claude-empty / claude-stream / claude-thinking）。
       await expect(panel.locator('.skills-sync-noplace')).toContainText(
-        'no placement: claude-empty, claude-stream, claude-thinking, fakeacp',
+        '无落点：claude-empty, claude-stream, claude-thinking, fakeacp',
       )
 
       // 投影真的落进了沙箱内的落点目录；私产字节不动。

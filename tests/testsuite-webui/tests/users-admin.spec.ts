@@ -29,7 +29,7 @@ async function loginAsAdmin(page: import('@playwright/test').Page): Promise<Sett
   await expect(page.locator('sebas-login')).toBeHidden()
   const settings = new SettingsModal(page)
   await settings.openViaSidebar()
-  await settings.openSection('Users')
+  await settings.openSection('用户')
   return settings
 }
 
@@ -62,21 +62,21 @@ test.describe.serial('Users 管理闭环', () => {
 
     await page
       .locator('sebas-settings-modal wa-button')
-      .filter({ hasText: 'New user' })
+      .filter({ hasText: '新建用户' })
       .click()
-    const dialog = page.locator('sebas-settings-modal wa-dialog[label="New user"]')
+    const dialog = page.locator('sebas-settings-modal wa-dialog[label="新建用户"]')
     // wa-dialog 宿主在 top layer 读作 hidden——可见性断言落在渲染出的内部
     // 元素上（settings.spec 同款纪律）。
-    await expect(dialog.locator('wa-button').filter({ hasText: 'Create' })).toBeVisible()
+    await expect(dialog.locator('wa-button').filter({ hasText: '创建' })).toBeVisible()
 
-    const nameInput = dialog.locator('wa-input[label="Username"] input')
+    const nameInput = dialog.locator('wa-input[label="用户名"] input')
     await nameInput.click()
     await nameInput.pressSequentially(USERNAME)
-    const passInput = dialog.locator('wa-input[label="Password (min 8 characters)"] input')
+    const passInput = dialog.locator('wa-input[label="密码（至少 8 个字符）"] input')
     await passInput.click()
     await passInput.pressSequentially(PASSWORD)
     // 角色留默认 member（对话框打开即 member，无需再选）。
-    await dialog.locator('wa-button').filter({ hasText: 'Create' }).click()
+    await dialog.locator('wa-button').filter({ hasText: '创建' }).click()
 
     await expect(dialog).toBeHidden()
     await expect(
@@ -85,7 +85,7 @@ test.describe.serial('Users 管理闭环', () => {
     const row = page.locator(`sebas-settings-modal [data-testid="user-row"][data-username="${USERNAME}"]`)
     await expect(row).toBeVisible()
     await expect(row.locator('.provider-badge')).toHaveText('member')
-    await expect(row.locator('.provider-key')).toHaveText('enabled')
+    await expect(row.locator('.provider-key')).toHaveText('已启用')
   })
 
   test('重名创建被 409 拒绝并就地展示（大小写不敏感）', async ({ page }) => {
@@ -93,26 +93,26 @@ test.describe.serial('Users 管理闭环', () => {
 
     await page
       .locator('sebas-settings-modal wa-button')
-      .filter({ hasText: 'New user' })
+      .filter({ hasText: '新建用户' })
       .click()
-    const dialog = page.locator('sebas-settings-modal wa-dialog[label="New user"]')
-    await expect(dialog.locator('wa-button').filter({ hasText: 'Create' })).toBeVisible()
+    const dialog = page.locator('sebas-settings-modal wa-dialog[label="新建用户"]')
+    await expect(dialog.locator('wa-button').filter({ hasText: '创建' })).toBeVisible()
 
-    const nameInput = dialog.locator('wa-input[label="Username"] input')
+    const nameInput = dialog.locator('wa-input[label="用户名"] input')
     await nameInput.click()
     // 大写变体：唯一性按 NOCASE 判定（user_store 的 COLLATE NOCASE 契约）。
     await nameInput.pressSequentially(USERNAME.toUpperCase())
-    const passInput = dialog.locator('wa-input[label="Password (min 8 characters)"] input')
+    const passInput = dialog.locator('wa-input[label="密码（至少 8 个字符）"] input')
     await passInput.click()
     await passInput.pressSequentially(PASSWORD)
-    await dialog.locator('wa-button').filter({ hasText: 'Create' }).click()
+    await dialog.locator('wa-button').filter({ hasText: '创建' }).click()
 
     await expect(dialog.locator('[data-testid="user-create-error"]')).toHaveText(
       '用户名已存在（大小写不敏感）',
     )
     // 对话框保持打开、失败不发通知条。
     await expect(dialog.locator('[data-testid="user-create-error"]')).toBeVisible()
-    await dialog.locator('wa-button').filter({ hasText: 'Cancel' }).click()
+    await dialog.locator('wa-button').filter({ hasText: '取消' }).click()
     await expect(dialog).toBeHidden()
   })
 
@@ -121,24 +121,24 @@ test.describe.serial('Users 管理闭环', () => {
 
     await page
       .locator('sebas-settings-modal wa-button')
-      .filter({ hasText: 'New user' })
+      .filter({ hasText: '新建用户' })
       .click()
-    const dialog = page.locator('sebas-settings-modal wa-dialog[label="New user"]')
-    await expect(dialog.locator('wa-button').filter({ hasText: 'Create' })).toBeVisible()
+    const dialog = page.locator('sebas-settings-modal wa-dialog[label="新建用户"]')
+    await expect(dialog.locator('wa-button').filter({ hasText: '创建' })).toBeVisible()
 
-    const nameInput = dialog.locator('wa-input[label="Username"] input')
+    const nameInput = dialog.locator('wa-input[label="用户名"] input')
     await nameInput.click()
     await nameInput.pressSequentially('shortlived')
-    const passInput = dialog.locator('wa-input[label="Password (min 8 characters)"] input')
+    const passInput = dialog.locator('wa-input[label="密码（至少 8 个字符）"] input')
     await passInput.click()
     await passInput.pressSequentially(WEAK_PASSWORD)
-    await dialog.locator('wa-button').filter({ hasText: 'Create' }).click()
+    await dialog.locator('wa-button').filter({ hasText: '创建' }).click()
 
     await expect(dialog.locator('[data-testid="user-create-error"]')).toHaveText(
       '密码至少需要 8 个字符',
     )
     await expect(dialog.locator('[data-testid="user-create-error"]')).toBeVisible()
-    await dialog.locator('wa-button').filter({ hasText: 'Cancel' }).click()
+    await dialog.locator('wa-button').filter({ hasText: '取消' }).click()
     await expect(
       page.locator('sebas-settings-modal [data-testid="user-row"][data-username="shortlived"]'),
     ).toHaveCount(0)
@@ -161,7 +161,7 @@ test.describe.serial('Users 管理闭环', () => {
     // 关掉重开：角色来自 auth.db 读回，不是前端残留状态。
     await settings.close()
     await settings.openViaSidebar()
-    await settings.openSection('Users')
+    await settings.openSection('用户')
     await expect(
       page
         .locator(`sebas-settings-modal [data-testid="user-row"][data-username="${USERNAME}"]`)
@@ -182,7 +182,7 @@ test.describe.serial('Users 管理闭环', () => {
     const settings = new SettingsModal(page)
     await settings.openViaSidebar()
     // 角色驱动入口裁剪（5.4）：非 root 不渲染 Users 分区。
-    await expect(settings.panel.locator('.nav-item', { hasText: 'Users' })).toHaveCount(0)
+    await expect(settings.panel.locator('.nav-item', { hasText: '用户' })).toHaveCount(0)
     // API 侧同一把尺：同一成员会话直呼 /api/users 被点名拒绝。
     expect((await ctx.request.get('/api/users')).status()).toBe(403)
     await ctx.close()
@@ -192,37 +192,37 @@ test.describe.serial('Users 管理闭环', () => {
     const settings = await loginAsAdmin(page)
 
     const row = page.locator(`sebas-settings-modal [data-testid="user-row"][data-username="${USERNAME}"]`)
-    await row.locator('button[title="Disable user"]').click()
+    await row.locator('button[title="停用用户"]').click()
     await expect(
       page.locator('sebas-settings-modal [data-testid="user-action"]'),
     ).toHaveText(`用户 ${USERNAME} 已禁用`)
-    await expect(row.locator('.provider-key')).toHaveText('disabled')
+    await expect(row.locator('.provider-key')).toHaveText('已禁用')
 
-    await row.locator('button[title="Enable user"]').click()
-    await expect(row.locator('.provider-key')).toHaveText('enabled')
+    await row.locator('button[title="启用用户"]').click()
+    await expect(row.locator('.provider-key')).toHaveText('已启用')
   })
 
   test('最后一个启用的 root 受保护：禁用与删除都被拒', async ({ page }) => {
     const settings = await loginAsAdmin(page)
 
     const adminRow = page.locator('sebas-settings-modal [data-testid="user-row"][data-username="admin"]')
-    await adminRow.locator('button[title="Disable user"]').click()
+    await adminRow.locator('button[title="停用用户"]').click()
     await expect(page.locator('sebas-settings-modal [data-testid="user-action"]')).toHaveText(
       '不能删除、禁用或降级最后一个启用的 root',
     )
-    await expect(adminRow.locator('.provider-key')).toHaveText('enabled')
+    await expect(adminRow.locator('.provider-key')).toHaveText('已启用')
 
-    await adminRow.locator('button[title="Delete user"]').click()
-    const dialog = page.locator('sebas-settings-modal wa-dialog[label="Delete user"]')
+    await adminRow.locator('button[title="删除用户"]').click()
+    const dialog = page.locator('sebas-settings-modal wa-dialog[label="删除用户"]')
     await expect(dialog.locator('.dialog-text')).toBeVisible()
-    await dialog.locator('wa-button').filter({ hasText: 'Delete' }).click()
+    await dialog.locator('wa-button').filter({ hasText: '删除' }).click()
     // 删除先撞上自删守卫（当前登录的正是 admin）；LastRoot 守卫由上面的
     // 禁用尝试断言。
     await expect(dialog.locator('[data-testid="user-delete-error"]')).toHaveText(
       '不能删除当前登录的用户自己',
     )
     await expect(dialog.locator('[data-testid="user-delete-error"]')).toBeVisible()
-    await dialog.locator('wa-button').filter({ hasText: 'Cancel' }).click()
+    await dialog.locator('wa-button').filter({ hasText: '取消' }).click()
     await expect(adminRow).toBeVisible()
   })
 
@@ -230,11 +230,11 @@ test.describe.serial('Users 管理闭环', () => {
     const settings = await loginAsAdmin(page)
 
     const row = page.locator(`sebas-settings-modal [data-testid="user-row"][data-username="${USERNAME}"]`)
-    await row.locator('button[title="Delete user"]').click()
-    const dialog = page.locator('sebas-settings-modal wa-dialog[label="Delete user"]')
+    await row.locator('button[title="删除用户"]').click()
+    const dialog = page.locator('sebas-settings-modal wa-dialog[label="删除用户"]')
     await expect(dialog.locator('.dialog-text')).toBeVisible()
     await expect(dialog.locator('.dialog-text')).toContainText(USERNAME)
-    await dialog.locator('wa-button').filter({ hasText: 'Delete' }).click()
+    await dialog.locator('wa-button').filter({ hasText: '删除' }).click()
 
     await expect(
       page.locator('sebas-settings-modal [data-testid="user-action"]'),

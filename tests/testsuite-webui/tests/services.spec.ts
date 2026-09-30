@@ -86,7 +86,7 @@ function interceptServices(page: Page, initial: ServiceRow[]) {
 async function openServices(settings: SettingsModal): Promise<void> {
   await settings.page.goto('/')
   await settings.openViaSidebar()
-  await settings.openSection('Services')
+  await settings.openSection('服务')
 }
 
 /** 精确按内部名锚定一行（避免子串误配，如 uptime 里的 "im"）。 */
@@ -155,11 +155,11 @@ test.describe('设置面 Services 分区', () => {
 
       // running：只 ■。
       expect(await buttonLabels(webui)).toEqual(['■'])
-      await expect(webui.locator('button[title="Disable service"]')).toHaveCount(1)
-      await expect(webui.locator('button[title="Enable service"]')).toHaveCount(0)
+      await expect(webui.locator('button[title="停用服务"]')).toHaveCount(1)
+      await expect(webui.locator('button[title="启用服务"]')).toHaveCount(0)
       // stopped：只 ▶。
       expect(await buttonLabels(router)).toEqual(['▶'])
-      await expect(router.locator('button[title="Enable service"]')).toHaveCount(1)
+      await expect(router.locator('button[title="启用服务"]')).toHaveCount(1)
       // starting：过渡占位（span，非按钮）——点击不发任何请求。
       await expect(im.locator('button')).toHaveCount(0)
       const placeholder = im.locator('.service-actions .service-transition')
@@ -189,7 +189,7 @@ test.describe('设置面 Services 分区', () => {
 
       for (const row of [webui, router]) {
         expect(await buttonLabels(row)).toEqual(['■', '⟳'])
-        await expect(row.locator('button[title="Restart service"]')).toHaveCount(1)
+        await expect(row.locator('button[title="重启服务"]')).toHaveCount(1)
       }
       expect(await buttonLabels(im)).toEqual(['▶'])
       await settings.close()
@@ -283,7 +283,7 @@ test.describe('设置面 Services 分区', () => {
       await expect(router).toBeVisible({ timeout: 10_000 })
 
       // running 行只 ■：点它 → confirm 弹窗（不预查会话数，拒绝驱动）。
-      await router.locator('button[title="Disable service"]').click()
+      await router.locator('button[title="停用服务"]').click()
       const confirm = page.locator('sebas-settings-modal wa-dialog.service-action-confirm')
       await expect(confirm.locator('.dialog-text')).toBeVisible()
       await confirm.locator('wa-button[variant="danger"]').click()
@@ -300,7 +300,7 @@ test.describe('设置面 Services 分区', () => {
       expect(state.disableCalls).toEqual([null, { force: true }])
       await expect(
         router.locator('.service-desc'),
-      ).toContainText('status stopped', { timeout: 10_000 })
+      ).toContainText('状态 stopped', { timeout: 10_000 })
       await settings.close()
 
       expect(collector.clean()).toEqual([])

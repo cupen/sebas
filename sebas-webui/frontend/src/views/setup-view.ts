@@ -202,7 +202,7 @@ export class SebasSetup extends LitElement {
         </div>
         <p class="title">创建管理员账户</p>
         <p class="hint">这是此实例的第一个账户（root），之后可在 Settings 内管理其他用户。</p>
-        <form @submit=${this.submit}>
+        <form novalidate @submit=${this.submit}>
           <label>
             用户名
             <input

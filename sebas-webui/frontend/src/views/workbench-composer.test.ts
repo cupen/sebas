@@ -47,6 +47,7 @@ if (typeof (globalThis as { ResizeObserver?: unknown }).ResizeObserver === 'unde
 // ---- api client mock ----------------------------------------------------
 
 vi.mock('../api/client.js', () => ({
+  errorText: (err: unknown) => (err instanceof Error ? err.message : String(err)),
   api: {
     summary: vi.fn(),
     agents: vi.fn(),
@@ -197,7 +198,7 @@ describe('composer is pure follow-up (4.1)', () => {
     // 不存在——创建唯一入口是 rail 的创建对话框。
     expect(el.shadowRoot?.querySelector('wa-select[aria-label="Agent"]')).toBeNull()
     expect(el.shadowRoot?.querySelector('wa-select[aria-label="Provider"]')).toBeNull()
-    expect(el.shadowRoot?.querySelector('wa-select[aria-label="Permission mode"]')).toBeNull()
+    expect(el.shadowRoot?.querySelector('wa-select[aria-label="权限模式"]')).toBeNull()
     expect(el.shadowRoot?.querySelector('.mode-chip')).toBeNull()
     expect(el.shadowRoot?.querySelector('[data-testid="mode-select"]')).toBeNull()
     // 设置入口归 app shell（侧栏底部）。
@@ -380,7 +381,7 @@ describe('contextual input placeholder (polish-workbench-walkthrough-ux 5.2)', (
     const ta2 = afterFirstTurn.shadowRoot?.querySelector('wa-textarea') as unknown as HTMLElement & {
       placeholder?: string
     }
-    expect(ta2?.getAttribute('placeholder')).toBe('Ask for follow-up changes…')
+    expect(ta2?.getAttribute('placeholder')).toBe('继续对话——描述需要的修改…')
     afterFirstTurn.remove()
   })
 })

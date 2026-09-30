@@ -50,6 +50,7 @@ if (typeof (globalThis as { ResizeObserver?: unknown }).ResizeObserver === 'unde
 }
 
 vi.mock('../api/client.js', () => ({
+  errorText: (err: unknown) => (err instanceof Error ? err.message : String(err)),
   api: {
     agents: vi.fn(),
     providers: vi.fn(),
@@ -373,7 +374,7 @@ describe('sebas-new-session-dialog', () => {
     const hint = el.shadowRoot?.querySelector('[data-testid="dialog-catalog-unavailable"]')
     // 显式引导 + （4.4）不暗示创建被禁：说明仍可用 agent 默认模型创建。
     expect(hint?.textContent).toContain('尚未配置 provider 模型')
-    expect(hint?.textContent).toContain('Settings → Models')
+    expect(hint?.textContent).toContain('设置 → 模型')
     expect(hint?.textContent).toContain('默认模型')
     // 创建按钮不因目录为空而禁用（仅 agent 必选门禁）。
     const confirm = el.shadowRoot?.querySelector(
@@ -405,7 +406,7 @@ describe('sebas-new-session-dialog', () => {
     expect(codex!.hasAttribute('disabled')).toBe(true)
     // （polish-workbench-walkthrough-ux 4.3）默认可见文案 = 操作者语言 +
     // 补救入口；实现性成因（cause）只进 tooltip。
-    expect(codex?.textContent ?? '').toContain('不可用 — 到 Settings → Models 检查配置')
+    expect(codex?.textContent ?? '').toContain('不可用——到「设置 → 模型」检查配置')
     expect((codex as unknown as { title: string }).title).toContain('command not found')
   })
 

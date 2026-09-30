@@ -14,6 +14,7 @@ const apiMocks = vi.hoisted(() => ({
 }))
 
 vi.mock('../api/client.js', () => ({
+  errorText: (err: unknown) => (err instanceof Error ? err.message : String(err)),
   ApiError: class ApiError extends Error {
     readonly status: number
     readonly code: string | null

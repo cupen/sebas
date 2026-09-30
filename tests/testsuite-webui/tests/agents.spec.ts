@@ -100,30 +100,30 @@ test.describe.serial('Settings → Agents 目录 webui 全链路', () => {
     // 1) Settings → Agents：新建表单（Shape 缺省即 claude，无需再选）
     const settings = new SettingsModal(page)
     await settings.openViaSidebar()
-    await settings.openSection('Agents')
+    await settings.openSection('Agent')
     await expect(settings.panel.locator('[data-testid="agent-row-native"]')).toBeVisible()
 
-    await settings.panel.locator('wa-button').filter({ hasText: 'New agent' }).click()
-    const dialog = page.locator('sebas-settings-modal wa-dialog[label="New agent"]')
+    await settings.panel.locator('wa-button').filter({ hasText: '新建 agent' }).click()
+    const dialog = page.locator('sebas-settings-modal wa-dialog[label="新建 agent"]')
     // wa-dialog 宿主在 top layer 读作 hidden——可见性断言落在渲染出的内部
     // 元素上（users-admin.spec 同款纪律）。
-    await expect(dialog.locator('wa-button').filter({ hasText: 'Save' })).toBeVisible()
+    await expect(dialog.locator('wa-button').filter({ hasText: '保存' })).toBeVisible()
 
     // wa-input 内层 input 逐字键入——`.fill` 会绕过 wa-input 的 input 事件
     // （addProjectByPath / users-admin 同款约束）。
     const idInput = dialog.locator('wa-input[label="Agent id"] input')
     await idInput.click()
     await idInput.pressSequentially(AGENT_ID)
-    const displayInput = dialog.locator('wa-input[label="Display name (optional)"] input')
+    const displayInput = dialog.locator('wa-input[label="显示名（可选）"] input')
     await displayInput.click()
     await displayInput.pressSequentially(DISPLAY)
     // Binary path 有预填 'claude'——全选后覆盖输入，换成 fake-claude 绝对路径。
-    const pathInput = dialog.locator('wa-input[label="Binary path"] input')
+    const pathInput = dialog.locator('wa-input[label="二进制路径"] input')
     await pathInput.click()
     await pathInput.press('ControlOrMeta+a')
     await pathInput.pressSequentially(fakeClaudeBin())
 
-    await dialog.locator('wa-button').filter({ hasText: 'Save' }).click()
+    await dialog.locator('wa-button').filter({ hasText: '保存' }).click()
     await expect(
       page.locator('sebas-settings-modal [data-testid="agent-action"]'),
     ).toHaveText(`已创建 ${AGENT_ID}（免重启，创建会话下拉立即可选）`)
@@ -132,7 +132,7 @@ test.describe.serial('Settings → Agents 目录 webui 全链路', () => {
     )
     await expect(row).toBeVisible()
     await expect(row.locator('.provider-badge')).toHaveText(DISPLAY)
-    await expect(row.locator('.provider-key')).toHaveText('reachable')
+    await expect(row.locator('.provider-key')).toHaveText('可达')
 
     // 2) API 同框：catalog 已含条目（同一 state snapshot 的读面）。
     const catalog = (await (await request.get('/api/agents')).json()) as {
@@ -146,7 +146,7 @@ test.describe.serial('Settings → Agents 目录 webui 全链路', () => {
     // 3) 刷新后仍在——目录落库，不是前端内存态。
     await page.reload()
     await settings.openViaSidebar()
-    await settings.openSection('Agents')
+    await settings.openSection('Agent')
     await expect(
       page.locator(`sebas-settings-modal [data-testid="agent-row"][data-id="${AGENT_ID}"]`),
     ).toBeVisible()
@@ -185,11 +185,11 @@ test.describe.serial('Settings → Agents 目录 webui 全链路', () => {
     await page.goto('/')
     const settings = new SettingsModal(page)
     await settings.openViaSidebar()
-    await settings.openSection('Agents')
+    await settings.openSection('Agent')
 
-    await settings.panel.locator('wa-button').filter({ hasText: 'New agent' }).click()
-    const dialog = page.locator('sebas-settings-modal wa-dialog[label="New agent"]')
-    const save = dialog.locator('wa-button').filter({ hasText: 'Save' })
+    await settings.panel.locator('wa-button').filter({ hasText: '新建 agent' }).click()
+    const dialog = page.locator('sebas-settings-modal wa-dialog[label="新建 agent"]')
+    const save = dialog.locator('wa-button').filter({ hasText: '保存' })
     await expect(save).toBeVisible()
 
     // 保留 id：前端内联拒绝（不发请求——spec「内置 native kernel 不落表、
@@ -207,7 +207,7 @@ test.describe.serial('Settings → Agents 目录 webui 全链路', () => {
     await idInput.pressSequentially(AGENT_ID)
     await save.click()
     await expect(dialog.locator('[data-testid="agent-form-error"]')).toContainText('已存在')
-    await dialog.locator('wa-button').filter({ hasText: 'Cancel' }).click()
+    await dialog.locator('wa-button').filter({ hasText: '取消' }).click()
     await expect(dialog).toBeHidden()
   })
 
@@ -219,14 +219,14 @@ test.describe.serial('Settings → Agents 目录 webui 全链路', () => {
 
     const settings = new SettingsModal(page)
     await settings.openViaSidebar()
-    await settings.openSection('Agents')
+    await settings.openSection('Agent')
     const row = page.locator(
       `sebas-settings-modal [data-testid="agent-row"][data-id="${AGENT_ID}"]`,
     )
-    await row.locator('button[title="Delete"]').click()
-    const confirm = page.locator('sebas-settings-modal wa-dialog[label="Delete agent"]')
-    await expect(confirm.locator('wa-button').filter({ hasText: 'Delete' })).toBeVisible()
-    await confirm.locator('wa-button').filter({ hasText: 'Delete' }).click()
+    await row.locator('button[title="删除"]').click()
+    const confirm = page.locator('sebas-settings-modal wa-dialog[label="删除 agent"]')
+    await expect(confirm.locator('wa-button').filter({ hasText: '删除' })).toBeVisible()
+    await confirm.locator('wa-button').filter({ hasText: '删除' }).click()
     await expect(
       page.locator('sebas-settings-modal [data-testid="agent-action"]'),
     ).toHaveText(`已删除 ${AGENT_ID}（已建会话继续到自然结束）`)

@@ -215,7 +215,7 @@ test.describe('fix-webui-qa-round3 review 补层', () => {
       expect(geo!.mainScrollWidth).toBeLessThanOrEqual(geo!.mainClientWidth + 1)
 
       // 任一卡片的操作入口（Close）完整落在视口内（不被右缘裁剪）。
-      const closeButtons = cards.locator('wa-button[aria-label^="Close session"]')
+      const closeButtons = cards.locator('wa-button[aria-label^="关闭会话"]')
       await expect(closeButtons.first()).toBeVisible()
       for (let i = 0; i < (await closeButtons.count()); i += 1) {
         const box = await closeButtons.nth(i).boundingBox()
@@ -357,7 +357,7 @@ test.describe('fix-webui-qa-round3 review 补层', () => {
         .locator('li.session-item:not(.archived)', { hasText: tag })
         .first()
       await row.hover()
-      await row.locator('wa-dropdown button[title="Session actions"]').click()
+      await row.locator('wa-dropdown button[title="会话操作"]').click()
       await row.locator('wa-dropdown-item[value="rename"]').click()
       const dialog = page.locator('sebas-project-rail wa-dialog[label="重命名会话"]')
       await expect(
@@ -483,7 +483,7 @@ test.describe('fix-webui-qa-round3 review 补层', () => {
       const openProjectMenu = async (name: string) => {
         const row = rail.projectRow(name)
         await row.hover()
-        await row.locator('button[aria-label^="Project actions"]').click()
+        await row.locator('button[aria-label^="项目操作"]').click()
         await expect(row.locator('wa-dropdown-item[data-testid="project-move-down"]')).toBeVisible()
         return row
       }
@@ -687,10 +687,10 @@ test.describe('fix-webui-qa-round3 review 补层', () => {
 
       await page.goto('/')
       await settings.openViaSidebar()
-      await settings.openSection('Models')
+      await settings.openSection('模型')
       const row = settings.panel.locator('.provider-row', { hasText: providerName })
       await expect(row).toBeVisible({ timeout: 10_000 })
-      await row.locator('button[title="Edit"]').click()
+      await row.locator('button[title="编辑"]').click()
       const editor = page.locator('sebas-settings-modal wa-dialog.provider-editor')
       await expect(editor.locator('button[data-testid="fetch-models"]')).toBeVisible({
         timeout: 10_000,
@@ -723,7 +723,7 @@ test.describe('fix-webui-qa-round3 review 补层', () => {
       expect(geo.right).toBeLessThanOrEqual(geo.headRight + 1)
 
       // 收尾：先关 provider 编辑器（开着会盖住设置面板的关闭钮）。
-      await editor.locator('wa-button').filter({ hasText: 'Cancel' }).click()
+      await editor.locator('wa-button').filter({ hasText: '取消' }).click()
       await expect(editor).toBeHidden({ timeout: 10_000 })
       await settings.close()
       expect(collector.clean()).toEqual([])

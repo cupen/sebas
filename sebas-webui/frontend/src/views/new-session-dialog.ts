@@ -55,8 +55,8 @@ import '@awesome.me/webawesome/dist/components/option/option.js'
  */
 export function agentUnavailableLabel(a: { id: string; display: string }): string {
   return a.id === 'native'
-    ? `${a.display}（未配置模型凭据 — 到 Settings → Models 配置）`
-    : `${a.display}（不可用 — 到 Settings → Models 检查配置）`
+    ? `${a.display}（未配置模型凭据——到「设置 → 模型」配置）`
+    : `${a.display}（不可用——到「设置 → 模型」检查配置）`
 }
 
 /** 创建对话框确认事件 detail：与 POST /api/sessions 的创建面同词汇。 */
@@ -299,7 +299,7 @@ export class SebasNewSessionDialog extends LitElement {
     if (!this.open) return nothing
     return html`
       <wa-dialog
-        label=${this.projectName ? `New session in ${this.projectName}` : 'New session'}
+        label=${this.projectName ? `在 ${this.projectName} 中新建会话` : '新建会话'}
         style="--width: 460px;"
         .open=${true}
         @wa-hide=${guardedHide(() => this.cancel())}
@@ -320,12 +320,12 @@ export class SebasNewSessionDialog extends LitElement {
             }}
           >
             ${this.agents.length === 0
-              ? html`<wa-option value="" disabled>agent catalog 不可用</wa-option>`
+              ? html`<wa-option value="" disabled>agent 目录不可用</wa-option>`
               : nothing}
             ${this.agents.map((a) =>
               a.reachable
                 ? html`<wa-option value=${a.id}>${a.display}</wa-option>`
-                : html`<wa-option value=${a.id} disabled title=${a.cause ?? 'unreachable'}
+                : html`<wa-option value=${a.id} disabled title=${a.cause ?? '不可达'}
                     >${agentUnavailableLabel(a)}</wa-option
                   >`,
             )}
@@ -336,7 +336,7 @@ export class SebasNewSessionDialog extends LitElement {
           ${this.catalogUnavailable
             ? html`<p class="hint" data-testid="dialog-catalog-unavailable" role="status">
                 尚未配置 provider 模型——仍可创建会话，将使用 agent
-                内置的默认模型；需要指定模型时到 Settings → Models 添加
+                内置的默认模型；需要指定模型时到「设置 → 模型」添加
                 provider。
               </p>`
             : html`
@@ -356,8 +356,8 @@ export class SebasNewSessionDialog extends LitElement {
                   ${providers.map((p) => html`<wa-option value=${p}>${p}</wa-option>`)}
                 </wa-select>
                 <wa-select
-                  label="Model"
-                  aria-label="Model"
+                  label="模型"
+                  aria-label="模型"
                   data-testid="dialog-model-select"
                   value=${this.model ?? ''}
                   ?disabled=${providerModels.length === 0}
@@ -377,8 +377,8 @@ export class SebasNewSessionDialog extends LitElement {
                对弹窗的同源落实），解释走非内联通道：选项悬浮 title + 下拉
                hint 行随当前选中模式动态显示。 -->
           <wa-select
-            label="Permission mode"
-            aria-label="Permission mode"
+            label="权限模式"
+            aria-label="权限模式"
             data-testid="dialog-mode-select"
             value=${this.mode}
             hint=${this.modeDescription}

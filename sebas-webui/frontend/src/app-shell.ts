@@ -892,7 +892,7 @@ export class SebasApp extends LitElement {
         ?inert=${this.coreReachability?.ok === false}
         @wa-reposition=${this.onRailReposition}
       >
-        <nav slot="start" class="rail-drawer ${this.railDrawerOpen && this.narrow ? 'open' : ''}" aria-label="Primary">
+        <nav slot="start" class="rail-drawer ${this.railDrawerOpen && this.narrow ? 'open' : ''}" aria-label="主导航">
           <button
             class="rail-close"
             aria-label="关闭项目树"
@@ -900,7 +900,7 @@ export class SebasApp extends LitElement {
           >
             ${icon('x', 16)}
           </button>
-          <a class="brand" href="/" aria-label="sebas console home">
+          <a class="brand" href="/" aria-label="sebas 控制台首页">
             <span class="mark" aria-hidden="true">❯</span>
             <span class="name">sebas<small>${APP_TAGLINE}</small></span>
           </a>
@@ -918,7 +918,7 @@ export class SebasApp extends LitElement {
             ${this.authUsername
               ? html`<button
                   class="settings-btn"
-                  aria-label="Sign out"
+                  aria-label="退出登录"
                   title="退出登录"
                   @click=${() => void this.onLogout()}
                 >
@@ -930,10 +930,10 @@ export class SebasApp extends LitElement {
             <button
               class="settings-btn"
               aria-haspopup="dialog"
-              aria-label="Open settings"
+              aria-label="打开设置"
               @click=${() => (this.settingsOpen = true)}
             >
-              ${icon('settings', 16)}<span class="settings-label">Settings</span>
+              ${icon('settings', 16)}<span class="settings-label">设置</span>
             </button>
           </div>
         </nav>
