@@ -102,6 +102,11 @@ export class ErrorCollector {
       // with 400 + active_routed_sessions; the journey asserts the force
       // dialog and the force: true resend, not network silence.
       if (text.includes('400') && /\/api\/admin\/services\/.+\/disable/.test(url)) return
+      // Intentional typed-rejection probes (add-webui-round7-gaps 3.2 mkdir
+      // journey): illegal/duplicate names through the picker answer 400 BY
+      // DESIGN — the journey asserts the inline Chinese reason (mkdir-error),
+      // not network silence.
+      if (text.includes('400') && /\/api\/fs\/mkdir/.test(url)) return
       if (url && !/^https?:\/\/127\.0\.0\.1:/i.test(url)) return
       this.consoleErrors.push(url ? `${text} (${url})` : text)
     })

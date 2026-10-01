@@ -41,6 +41,9 @@ export default defineConfig({
     /qa-round7-ws-auth\.spec\.ts/,
     /deployment\.spec\.ts/,
     /approval-detached\.spec\.ts/,
+    // core-link-badge 的停核/恢复半边只在 detached 双进程拓扑成立（翻转
+    // 推送需 webui 存活才能收到）——与 deployment 同名单，归 detached config。
+    /core-link-badge\.spec\.ts/,
     /singleprocess-dead-core\.spec\.ts/,
     /test-model-scenarios\.spec\.ts/,
   ],

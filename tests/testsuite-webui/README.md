@@ -100,6 +100,11 @@ pnpm --dir tests/testsuite-webui exec playwright test
 | 转录布局 ⁹ | 表格/代码块/CJK | 宽 GFM 表格块级横滚、pre 滚动语义不回退、CJK 长句折行不撑破 | `qa-round7-transcript-layout.spec.ts` | agent-workbench「转录任意内容不破坏布局」（fix-webui-qa-round7 delta，尚未归档）⁹ |
 | 未认证 WS 重连闸 ⁹ | 登录页静默 | 登录页停留期 console 无周期性 /ws 升级失败（首连 1 条后静默） | `qa-round7-ws-auth.spec.ts` | webui-ws-rpc「未认证客户端不反复撞升级端点」（fix-webui-qa-round7 delta，尚未归档）⁹ |
 | 未认证 WS 重连闸 ⁹ | 登录后实时链路 | admin/admin 登录后 WS 建立，agent 回复实时上屏（无刷新） | `qa-round7-ws-auth.spec.ts` | webui-ws-rpc「未认证客户端不反复撞升级端点」（fix-webui-qa-round7 delta，尚未归档）⁹ |
+| 会话用量呈现 ¹⁰ | claude 会话累计随回合增长 | one turn shows non-zero totals, a second turn grows them | `session-usage.spec.ts` | usage-statistics「会话级 token 用量可见」（add-webui-round7-gaps delta，尚未归档）¹⁰ |
+| 会话用量呈现 ¹⁰ | 未上报 token 的 agent 如实呈现 | fakeacp session shows the unreported chip, never a fabricated 0 | `session-usage.spec.ts` | usage-statistics「会话级 token 用量可见」（test.fail 钉住已知缺陷：引擎把未上报会话投影为 `{0,0}` 而非 null）¹⁰ |
+| 目录选择器建目录 ¹⁰ | 边界内成功 / 非法名拒绝 / 越界拒绝 | 边界内建目录成功：树内即时可见、可进入、可用于项目注册 等 3 例 | `folder-picker-mkdir.spec.ts` | webui/projects「目录选择器可新建子目录」（add-webui-round7-gaps delta；越界父目录 UI 构造不出，由 API oracle 直证）¹⁰ |
+| 连接徽标三态 ¹⁰ | 断连联动与恢复翻回 | 停核翻红且横幅一致（cause 悬停）；恢复自动翻回 | `core-link-badge.spec.ts` | agent-workbench「core 连接状态常驻指示」（add-webui-round7-gaps delta；detached 拓扑，死亡装配承载不了推送翻转）¹⁰ |
+| 连接徽标三态 ¹⁰ | 健康时低调呈现（fresh load） | 健康时低调呈现：fresh load 即 ok | `core-link-badge.spec.ts` | agent-workbench「core 连接状态常驻指示」（test.fail 钉住已知缺陷：初始 `core.reachability.get` 被 authState 竞态吞掉，fresh load 停在 unknown）¹⁰ |
 
 > ¹ 设置面（S1–S4, S6）的锚点指向尚未归档的 change `expand-webui-e2e-settings` 的 delta
 > scenario（尚未同步进主 spec）；S5a/S5b 锚到主 spec `模型管理覆盖`「settings provider
@@ -169,6 +174,18 @@ pnpm --dir tests/testsuite-webui exec playwright test
 > （playwright.auth.config.ts 同名单）；登录页静默断言取 35s 观察窗——旧实
 > 现未认证重连是固定 30s 慢梯，一个完整周期是分辨「首连 1 条」与「周期重试」
 > 的最小窗，test 级 timeout 相应放宽到 75s、`retries: 0`。
+
+> ¹⁰ add-webui-round7-gaps（2026-10-01）三条旅程的备注：
+> `session-usage.spec.ts` 的用量断言一律**相对**（fake-claude 的 SUCCESS_TURNS
+> 是进程全局回合计数，同 harness 先行旅程会消耗它——只锚非零基线 + 第二回合
+> 严格增长）。两条 **test.fail** 用例（fakeacp 未上报、徽标 fresh-load 健康
+> 态）是有意为之的缺陷钉子：断言写 spec 要求的形状、按预期失败即绿，实现
+> 修复后会「unexpectedly passed」逼删注记——缺陷详情与最小修复建议见各自
+> 文件头注释。`core-link-badge.spec.ts` 跑 **detached** 拓扑
+> （playwright.detached.config.ts 同名单）：tasks.md 2.2 原文提的死亡装配
+> （dead-core）是单进程形态，SIGKILL 的正是 webui 本身，没有任何
+> `core.reachability` 推送可言，翻转场景承载不了；死亡形态（SPA 自感、
+> ws-down 横幅）与徽标的关系是另一已知观察，未在本旅程断言。
 
 能力矩阵账本见 `tests/acceptance/COVERAGE.md` 的 `testsuite-webui-browser` 一节。
 

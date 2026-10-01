@@ -172,6 +172,60 @@ pub fn safe_path(
     Ok((target, echo))
 }
 
+/// POST /api/fs/mkdir 的响应（add-webui-round7-gaps 3.1）：父目录回显（与
+/// browse-dirs 的 echo 同形）+ 创建成功的目录名。
+#[derive(Debug, Clone, Serialize)]
+pub struct MkdirResponse {
+    pub path: String,
+    pub name: String,
+}
+
+/// 目录名单段校验（add-webui-round7-gaps 3.1，mkdir 的名称单点）：拒绝空
+/// （含纯空白）/`.`/`..`/路径分隔符（`/` 与 `\` 两种 flavor）/NUL。分隔符
+/// 拒绝先于 join，绝不给「借名字越界」留路径。返回 `Err` = 中文拒绝文案；
+/// `Ok` = trim 后的实际创建名。
+pub fn validate_dir_name(name: &str) -> Result<String, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("目录名不能为空".to_string());
+    }
+    if trimmed == "." || trimmed == ".." {
+        return Err(format!("目录名不能是「{trimmed}」"));
+    }
+    if trimmed.contains('/') || trimmed.contains('\\') {
+        return Err("目录名不能包含路径分隔符 / 或 \\".to_string());
+    }
+    if trimmed.contains('\0') {
+        return Err("目录名包含非法字符".to_string());
+    }
+    Ok(trimmed.to_string())
+}
+
+/// 单层建目录（add-webui-round7-gaps 3.1）：在 `path`（父目录）下创建名为
+/// `name` 的子目录。webui-local 写面，无 core 参与。
+///
+/// 语义边界（webui/projects spec「目录选择器可新建子目录」）：
+/// - 父目录经 [`safe_path`] 同一单点校验——workspace root 边界 fail-closed
+///   不得旁路；父不存在/不是目录即被拒绝（单层语义：拒绝 mkdir -p 式批量
+///   创建，防误操作面扩大）；
+/// - 名称段经 [`validate_dir_name`] 校验，空/`.`/`..`/分隔符全部类型化拒绝；
+/// - `create_dir` 的原子语义：目标已存在（同名目录或文件）即失败，无覆盖。
+/// 所有拒绝路径都先于任何文件系统写发生，无副作用。
+pub fn mkdir_in(path: &str, name: &str, workspace_root: &Path) -> Result<MkdirResponse, String> {
+    let name = validate_dir_name(name)?;
+    let (parent, echo) = safe_path(path, None, workspace_root)?;
+    let target = parent.join(&name);
+    if let Err(e) = std::fs::create_dir(&target) {
+        return Err(match e.kind() {
+            std::io::ErrorKind::AlreadyExists => format!("同名目录已存在: {name}"),
+            _ => format!("创建目录失败: {e}"),
+        });
+    }
+    // 完整路径只进日志（与 safe_path 同一防泄露姿态——错误体不回显解析形）。
+    tracing::info!(dir = %target.display(), "fs: mkdir");
+    Ok(MkdirResponse { path: echo, name })
+}
+
 /// List only the directory children of `path`, scoped to a root. 无参起点 =
 /// workspace root（add-workspace-root：浏览起点收敛到 workspace root）。
 pub fn browse_dirs(
@@ -879,5 +933,95 @@ mod tests {
             "explicit root must filter too: {names:?}"
         );
         assert!(names.contains(&"sub") && names.contains(&"zeta"));
+    }
+
+    // ---- 单层建目录（add-webui-round7-gaps 3.1）----
+
+    /// mkdir 成功路径：目录被创建、browse 立即可见、回显与 browse-dirs 同形。
+    #[test]
+    fn mkdir_creates_single_level_and_browse_sees_it() {
+        let (dir, _sub) = dir_with_sub();
+        let resp = mkdir_in("", "新建项目", dir.path()).unwrap();
+        assert_eq!(resp.name, "新建项目");
+        assert_eq!(resp.path, dunce::simplified(dir.path()).to_string_lossy());
+        let listing = browse_dirs("", None, dir.path()).unwrap();
+        assert!(listing.entries.iter().any(|e| e.name == "新建项目"));
+    }
+
+    #[test]
+    fn mkdir_in_nested_existing_parent_round_trips() {
+        let (dir, sub) = dir_with_sub();
+        let created = mkdir_in(sub.to_str().unwrap(), "deep2", dir.path()).unwrap();
+        assert_eq!(created.name, "deep2");
+        assert!(sub.join("deep2").is_dir());
+        // 回显 path + 子名再建一层（单层 × N 次，不是一次 -p）——正是
+        // folder-picker「新建文件夹」连续两层的使用形态。
+        let nested_parent = format!("{}/deep2", created.path);
+        mkdir_in(&nested_parent, "inner", dir.path()).unwrap();
+        assert!(sub.join("deep2").join("inner").is_dir());
+    }
+
+    #[test]
+    fn mkdir_rejects_out_of_bounds_parent_without_side_effects() {
+        // 绝对路径指到 workspace root 之外：拒绝且树外无任何写入。
+        let (dir, _sub) = dir_with_sub();
+        let (sibling, s_sub) = dir_with_sub();
+        let err =
+            mkdir_in(sibling.path().to_str().unwrap(), "evil", dir.path()).unwrap_err();
+        assert_eq!(err, "路径超出根目录范围");
+        assert!(!s_sub.join("evil").exists(), "越界请求不得产生副作用");
+        // `..` 穿越同样拒绝（canonicalize 解析后越界）。
+        let err = mkdir_in("..", "evil", dir.path()).unwrap_err();
+        assert_eq!(err, "路径超出根目录范围");
+        let outside_parent = dir.path().parent().unwrap().to_path_buf();
+        assert!(!outside_parent.join("evil").exists());
+    }
+
+    #[test]
+    fn mkdir_rejects_missing_or_non_dir_parent_without_side_effects() {
+        let (dir, _sub) = dir_with_sub();
+        // 父不存在（单层语义：不代建中间目录）。
+        let err = mkdir_in("no_such_parent", "x", dir.path()).unwrap_err();
+        assert!(err.contains("no_such_parent"), "{err}");
+        assert!(!dir.path().join("no_such_parent").exists());
+        // 父是文件。
+        let err = mkdir_in("file.txt", "x", dir.path()).unwrap_err();
+        assert_eq!(err, "不是目录");
+        assert!(!dir.path().join("file.txt").join("x").exists());
+    }
+
+    #[test]
+    fn mkdir_rejects_illegal_names_without_side_effects() {
+        let (dir, _sub) = dir_with_sub();
+        let illegal = ["", "   ", ".", "..", "a/b", r"a\b", "a\0b"];
+        for name in illegal {
+            let err = mkdir_in("", name, dir.path()).unwrap_err();
+            assert!(!err.is_empty(), "name {name:?} must be rejected");
+            // 拒绝路径在文件系统上零副作用：根下除既有条目外无新增。
+            let listing = browse_dirs("", None, dir.path()).unwrap();
+            assert_eq!(
+                listing.entries.len(),
+                2,
+                "name {name:?} must not create anything"
+            );
+        }
+    }
+
+    #[test]
+    fn mkdir_rejects_duplicate_target_atomically() {
+        let (dir, _sub) = dir_with_sub();
+        mkdir_in("", "dup", dir.path()).unwrap();
+        let err = mkdir_in("", "dup", dir.path()).unwrap_err();
+        assert_eq!(err, "同名目录已存在: dup");
+    }
+
+    #[test]
+    fn dir_name_validation_trims_and_reports_reasons() {
+        assert_eq!(validate_dir_name("  ok  ").unwrap(), "ok");
+        assert_eq!(validate_dir_name("").unwrap_err(), "目录名不能为空");
+        assert_eq!(validate_dir_name(" . ").unwrap_err(), "目录名不能是「.」");
+        assert_eq!(validate_dir_name("..").unwrap_err(), "目录名不能是「..」");
+        assert!(validate_dir_name("a/b").unwrap_err().contains("分隔符"));
+        assert!(validate_dir_name(r"a\b").unwrap_err().contains("分隔符"));
     }
 }

@@ -2414,3 +2414,84 @@ describe('fix-webui-qa-round3 (D6 rename sync / D10 focus URL)', () => {
     el.remove()
   })
 })
+
+/**
+ * add-webui-round7-gaps 1.1（usage-statistics spec「会话级 token 用量可见」）：
+ * 会话头用量芯片——引擎 usage 快照在场即实数呈现；通用 ACP 不上报 token
+ * （usage null/缺省）如实呈现「未上报」，不以 0 冒充；相位帧携带 usage 时
+ * 就地补丁（随回合完成即时增长，不欠 HTTP）。
+ */
+describe('session usage chip (add-webui-round7-gaps 1.1)', () => {
+  async function settle(el: SebasDashboard): Promise<void> {
+    await new Promise((r) => setTimeout(r, 0))
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+  }
+
+  function usageChipOf(el: SebasDashboard): HTMLElement {
+    const chip = el.shadowRoot!.querySelector<HTMLElement>('[data-testid="session-usage"]')
+    expect(chip).toBeTruthy()
+    return chip!
+  }
+
+  it('usage 在场：芯片展示 input/output 实数（title 带模型与累计口径）', async () => {
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    apiMocks.session.mockResolvedValue({
+      ...detailFixture(),
+      usage: { model: 'claude-sonnet-4-20250514', total_input: 5200, total_output: 310 },
+    })
+    const el = await mount()
+    await settle(el)
+    const chip = usageChipOf(el)
+    expect(chip.dataset.usage).toBe('reported')
+    expect(chip.textContent).toContain('5200')
+    expect(chip.textContent).toContain('310')
+    expect(chip.getAttribute('title')).toContain('claude-sonnet-4-20250514')
+    el.remove()
+  })
+
+  it('usage 缺省（通用 ACP 不上报）：「未上报 token」，不以 0 冒充', async () => {
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    apiMocks.session.mockResolvedValue({ ...detailFixture(), usage: null })
+    const el = await mount()
+    await settle(el)
+    const chip = usageChipOf(el)
+    expect(chip.dataset.usage).toBe('unreported')
+    expect(chip.textContent).toContain('未上报 token')
+    expect(chip.textContent).not.toMatch(/\b0\b/)
+    el.remove()
+  })
+
+  it('session.updated 帧带 usage：聚焦详情就地补丁，芯片数值即时增长', async () => {
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    apiMocks.session.mockResolvedValue({
+      ...detailFixture(),
+      usage: { total_input: 100, total_output: 10 },
+    })
+    const el = await mount()
+    await settle(el)
+    expect(usageChipOf(el).textContent).toContain('Token in 100 · out 10')
+
+    // 随后的节流刷新（loadFocused）按服务端真源收敛到同一数值。
+    apiMocks.session.mockResolvedValue({
+      ...detailFixture(),
+      usage: { total_input: 300, total_output: 30 },
+    })
+    wsMocks.emit({
+      type: 'session.updated',
+      session_id: 'oc_live%00',
+      status_slug: 'working',
+      turn_engaged: true,
+      msg_count: 3,
+      pending: [],
+      label: null,
+      usage: { total_input: 300, total_output: 30 },
+    })
+    // 帧处理是同步的：HTTP 往返之前 focusedDetail 已就地补丁。
+    const detail = (el as unknown as { focusedDetail: SessionDetail | null }).focusedDetail
+    expect(detail?.usage).toEqual({ total_input: 300, total_output: 30 })
+    await settle(el)
+    expect(usageChipOf(el).textContent).toContain('Token in 300 · out 30')
+    el.remove()
+  })
+})

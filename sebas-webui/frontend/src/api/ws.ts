@@ -26,7 +26,7 @@
  */
 
 import type { ReactiveController, ReactiveControllerHost } from 'lit'
-import type { PendingSubmission } from './client.js'
+import type { PendingSubmission, SessionUsage } from './client.js'
 
 /**
  * （session-parallel-liveness-and-unread-polish 2.1/2.2，design D2）会话相位
@@ -56,6 +56,12 @@ export interface SessionPhaseFrame {
   label: string | null
   /** 首条用户消息预览（DD1/DD2）；缺省 = 旧 core 不带（行名等全量收敛）。 */
   prompt_preview?: string | null
+  /**
+   * （add-webui-round7-gaps 1.1）累计 token 用量随帧下发：引擎对 UsageUpdate
+   * 即发 Updated，会话头用量芯片随回合完成即时增长。缺省 = 旧 core 不带
+   * （芯片等全量收敛）；null = 引擎尚无 usage 事件（未上报，不冒充 0）。
+   */
+  usage?: SessionUsage | null
 }
 
 export interface WsEvents {

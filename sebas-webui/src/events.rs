@@ -41,6 +41,11 @@ pub struct SessionPhaseFrame {
     /// 扩展——旧对端不发能读，本侧 None 不上 wire（协议演进规则 1）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_preview: Option<String>,
+    /// （add-webui-round7-gaps 1.1）累计 token 用量随帧下发：引擎对
+    /// UsageUpdate 即发 Updated，会话呈现面的用量芯片随回合完成即时增长，
+    /// 不欠一次 HTTP 详情。同上，载荷扩展——None 不上 wire。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<sebas_channels::AppUsage>,
 }
 
 /// Events that the WebUI can push to connected clients.
@@ -173,6 +178,11 @@ mod tests {
             }],
             label: Some("renamed-by-operator".into()),
             prompt_preview: Some("first hello".into()),
+            usage: Some(sebas_channels::AppUsage {
+                model: Some("claude-sonnet-4-20250514".into()),
+                total_input: 5200,
+                total_output: 310,
+            }),
         };
         let cases: Vec<(WebUiEvent, serde_json::Value)> = vec![
             (
@@ -185,6 +195,7 @@ mod tests {
                         pending: Vec::new(),
                         label: None,
                         prompt_preview: None,
+                        usage: None,
                     },
                 },
                 json!({
@@ -215,7 +226,10 @@ mod tests {
                     "label": "renamed-by-operator",
                     // fix-webui-qa-findings DD1：Some 上 wire；None 帧（上/
                     // 下两案）按 skip_serializing_if 缺省不出现。
-                    "prompt_preview": "first hello"
+                    "prompt_preview": "first hello",
+                    // add-webui-round7-gaps 1.1：用量随帧下发（同载荷扩展
+                    // 规则——Some 上 wire，None 不出现）。
+                    "usage": {"model": "claude-sonnet-4-20250514", "total_input": 5200, "total_output": 310}
                 }),
             ),
             // 非占用相位同样键齐全：turn_engaged=false 显式上 wire（D2：
@@ -230,6 +244,7 @@ mod tests {
                         pending: Vec::new(),
                         label: None,
                         prompt_preview: None,
+                        usage: None,
                     },
                 },
                 json!({

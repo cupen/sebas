@@ -1301,11 +1301,30 @@ fn tool_result_frame(sid: &str, tool_id: &str, content: &str, is_error: bool) ->
     })
 }
 
+/// add-webui-round7-gaps 1.2：成功回合的 result 帧携带非零 usage。真实 CLI
+/// 的 result.usage 语义是本回合的 token 计数——driver 映射为 UsageUpdate、
+/// 引擎在 Finished 清零后落为本回合终值。按**成功回合序号**递增（第 1 回合
+/// in 100/out 10、第 2 回合 in 200/out 20……），「第二回合后累计增长」的
+/// 浏览器旅程断言数据源。error result 不计数也不带 usage（driver 对
+/// is_error 的 result 不发 UsageUpdate）。
+static SUCCESS_TURNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn result_frame(sid: &str, subtype: &str, is_error: bool) -> Value {
+    let turn = if is_error {
+        0
+    } else {
+        SUCCESS_TURNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+    };
     json!({
         "type": "result", "subtype": subtype, "is_error": is_error,
         "stop_reason": if is_error { serde_json::Value::Null } else { json!("end_turn") },
-        "duration_ms": 1, "duration_api_ms": 1, "num_turns": 1, "result": "", "session_id": sid
+        "duration_ms": 1, "duration_api_ms": 1, "num_turns": 1, "result": "", "session_id": sid,
+        "usage": if is_error { serde_json::Value::Null } else { json!({
+            "input_tokens": 100 * turn,
+            "output_tokens": 10 * turn,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0
+        }) }
     })
 }
 

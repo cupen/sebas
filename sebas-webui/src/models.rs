@@ -233,6 +233,11 @@ pub struct SessionRow {
     /// 判定（design D3 / Migration Plan）。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub turn_engaged: bool,
+    /// （add-webui-round7-gaps 1.1）会话累计 token 用量（引擎快照透传）。
+    /// `None` = 引擎尚无 usage 事件（通用 ACP 无 token 上报——前端如实标
+    /// 「未上报」，不以 0 冒充）；None 不上 wire。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<sebas_channels::AppUsage>,
 }
 
 /// Dashboard overview data.
@@ -435,6 +440,8 @@ impl From<&sebas_dispatch::SessionInfo> for SessionRow {
             spawn_failure_reason: info.spawn_failure_reason.clone(),
             available_commands: info.available_commands.clone(),
             turn_engaged: info.turn_engaged,
+            // （add-webui-round7-gaps 1.1）用量随行透传（None 不上 wire）。
+            usage: info.usage.clone(),
         }
     }
 }

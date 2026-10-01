@@ -92,6 +92,10 @@ pub(crate) fn session_summary(info: &SessionInfo) -> serde_json::Value {
         // rail-declutter-unread：聚焦会话的段计数（transcript 标记已读时
         // 推进浏览器读锚用，保证 seam 与徽标一致）。
         "msg_count": info.msg_count,
+        // （add-webui-round7-gaps 1.1）会话累计 token 用量（引擎快照透传）；
+        // null = 引擎尚无 usage 事件（通用 ACP 无 token 上报——前端如实标
+        // 「未上报」，不以 0 冒充）。
+        "usage": info.usage,
     });
     // （session-slash-commands 2.2）聚焦会话的命令表（composer 面板数据源）。
     // 空表不插键——旧前端看到的 summary 形状不变（新 core + 旧前端兼容）。
@@ -1011,4 +1015,82 @@ pub async fn agent_delete(State(state): State<WebUiState>, Path(id): Path<String
 /// Health probe: `GET /health`.
 pub async fn health() -> &'static str {
     "ok\n"
+}
+
+#[cfg(test)]
+mod usage_projection_tests {
+    //! （add-webui-round7-gaps 1.1）会话级 token 用量的投影形状：summary 行
+    //! 与 rail 行都透传引擎快照的 usage——`None` = 引擎尚无 usage 事件
+    //! （通用 ACP 无 token 上报），键语义是「null/缺省 = 未上报」，绝不以 0 冒充。
+
+    use super::*;
+    use sebas_channels::AppUsage;
+    use sebas_dispatch::SessionInfo;
+    use sebas_domain::session::{SessionMode, SessionPhase};
+
+    fn session_info(usage: Option<AppUsage>) -> SessionInfo {
+        SessionInfo {
+            channel: "web".into(),
+            key: "k".into(),
+            session_id: Some("s1".into()),
+            status: SessionPhase::Active,
+            phase: None,
+            user_prompt: None,
+            last_active_unix: 7,
+            project_dir: None,
+            current_model: None,
+            available_models: None,
+            agent_kind: None,
+            usage,
+            backend: None,
+            pending: Vec::new(),
+            remote: None,
+            desired_mode: SessionMode::Ask,
+            effective_mode: None,
+            msg_count: 0,
+            available_commands: Vec::new(),
+            turn_engaged: false,
+            spawn_failure_reason: None,
+            parked_approvals: 0,
+            label: None,
+            first_prompt_preview: None,
+        }
+    }
+
+    #[test]
+    fn summary_carries_usage_totals_when_reported() {
+        let info = session_info(Some(AppUsage {
+            model: Some("claude-sonnet-4-20250514".into()),
+            total_input: 5200,
+            total_output: 310,
+        }));
+        let v = session_summary(&info);
+        assert_eq!(v["usage"]["total_input"], 5200);
+        assert_eq!(v["usage"]["total_output"], 310);
+        assert_eq!(v["usage"]["model"], "claude-sonnet-4-20250514");
+    }
+
+    #[test]
+    fn summary_usage_is_null_when_never_reported() {
+        // 未上报 token（通用 ACP）→ null：消费端据此呈现「未上报」而非 0。
+        let v = session_summary(&session_info(None));
+        assert!(v["usage"].is_null());
+    }
+
+    #[test]
+    fn rail_row_omits_usage_key_when_unreported() {
+        let none = crate::models::SessionRow::from(&session_info(None));
+        let v = serde_json::to_value(&none).unwrap();
+        assert!(v.get("usage").is_none(), "None 不上 wire（skip_serializing_if）");
+
+        let some = crate::models::SessionRow::from(&session_info(Some(AppUsage {
+            model: None,
+            total_input: 42,
+            total_output: 7,
+        })));
+        let v = serde_json::to_value(&some).unwrap();
+        assert_eq!(v["usage"]["total_input"], 42);
+        assert_eq!(v["usage"]["total_output"], 7);
+        assert!(v["usage"].get("model").is_none());
+    }
 }

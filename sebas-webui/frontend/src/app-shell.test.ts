@@ -285,13 +285,17 @@ describe('sidebar IA v2', () => {
       position: number
       positionInPixels: number
     }
-    // 正常的有限百分比：不动。
+    // 正常的有限百分比：不动。（railWidth 与 DOM 手设值对齐：就绪即补的
+    // reachability get 会引发重渲染，`position-in-pixels` 绑定按状态重放
+    // ——对齐后重放写回同值，断言钉的是「自愈不动合法位置」。）
+    el.railWidth = 321
     Object.defineProperty(frame, 'position', { value: 19.44, writable: true, configurable: true })
     frame.positionInPixels = 321
     ;(el as unknown as { updated: () => void }).updated()
     await new Promise((r) => requestAnimationFrame(() => r(null)))
     expect(frame.positionInPixels).toBe(321)
     // 组件未升级（position 未定义）：同样不动。
+    el.railWidth = 321
     Object.defineProperty(frame, 'position', { value: undefined, writable: true, configurable: true })
     ;(el as unknown as { updated: () => void }).updated()
     await new Promise((r) => requestAnimationFrame(() => r(null)))
@@ -587,14 +591,15 @@ describe('global core fatal notice (add-webui-tiered-notices)', () => {
     return el.shadowRoot!.querySelector('wa-split-panel.frame')!
   }
 
-  it('initializes from core.reachability.get when /ws connects; unknown state shows nothing', async () => {
-    wsMocks.request.mockResolvedValue({ ok: false, kind: 'startup_failed', cause: 'socket absent' })
+  it('initializes from core.reachability.get (就绪即补发); unknown state shows nothing', async () => {
+    let resolveGet!: (v: unknown) => void
+    wsMocks.request.mockImplementationOnce(() => new Promise((r) => { resolveGet = r }))
     const el = await mountShell()
     // 未知态（get 未应答）：不渲染横幅也不锁定。
     expect(bannerOf(el)).toBeNull()
     expect(frameOf(el).hasAttribute('inert')).toBe(false)
 
-    connectWs()
+    resolveGet({ ok: false, kind: 'startup_failed', cause: 'socket absent' })
     await flush(el)
     // 初始态 = get 响应：fatal 横幅按 kind 分档 + cause 原文，role=alert。
     expect(wsMocks.request).toHaveBeenCalledWith('core.reachability.get')
@@ -693,6 +698,107 @@ describe('global core fatal notice (add-webui-tiered-notices)', () => {
     expect(src).not.toContain('ws-banner')
     expect(src).not.toContain('core-banner')
     expect(src).not.toContain('stacked')
+  })
+})
+
+/**
+ * add-webui-round7-gaps 2.1（agent-workbench spec「core 连接状态常驻指示」）：
+ * 主区常驻徽标与 fatal 横幅同源（同一 coreReachability 状态）——可达低调、
+ * 不可达醒目（kind 分文案 + cause 悬停）、恢复自动翻回；断线时横幅与徽标
+ * 同时在场（同一事实两种强度），不互相矛盾。
+ */
+describe('core 连接常驻徽标（add-webui-round7-gaps 2.1）', () => {
+  function connectWs(): void {
+    window.dispatchEvent(new CustomEvent('sebas:ws-state', { detail: { connected: true } }))
+  }
+
+  async function flush(el: SebasApp): Promise<void> {
+    await new Promise((r) => setTimeout(r, 0))
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+  }
+
+  function badgeOf(el: SebasApp): HTMLElement {
+    const badge = el.shadowRoot!.querySelector('[data-testid="core-link"]') as HTMLElement | null
+    expect(badge).toBeTruthy()
+    return badge!
+  }
+
+  afterEach(() => {
+    wsMocks.request.mockReset()
+    wsMocks.clearHandlers()
+  })
+
+  it('get 未应答 = unknown 中性态；get ok = 低调正常态（就绪即补发）', async () => {
+    // 3c 修复后：markAuthReady 就绪即补发 get（不再等 WS connect 事件）。
+    // 挂起未应答 → unknown 中性；应答 ok → 低调正常。
+    let resolveGet!: (v: unknown) => void
+    wsMocks.request.mockImplementationOnce(() => new Promise((r) => { resolveGet = r }))
+    const el = await mountShell()
+    expect(wsMocks.request).toHaveBeenCalledWith('core.reachability.get')
+    expect(badgeOf(el).dataset.state).toBe('unknown')
+    expect(badgeOf(el).textContent).toContain('核心状态未知')
+
+    resolveGet({ ok: true })
+    await flush(el)
+    expect(badgeOf(el).dataset.state).toBe('ok')
+    expect(badgeOf(el).textContent).toContain('核心已连接')
+    el.remove()
+  })
+
+  it('断连翻红醒目 + kind/cause 进 title；fatal 横幅同时在场（同源联动）', async () => {
+    wsMocks.request.mockResolvedValue({ ok: true })
+    const el = await mountShell()
+    connectWs()
+    await flush(el)
+    expect(badgeOf(el).dataset.state).toBe('ok')
+
+    wsMocks.emit({
+      type: 'core.reachability',
+      ok: false,
+      kind: 'disconnected',
+      cause: 'connection dropped',
+    })
+    await flush(el)
+    const badge = badgeOf(el)
+    expect(badge.dataset.state).toBe('down')
+    expect(badge.textContent).toContain('核心不可达')
+    expect(badge.getAttribute('title')).toContain('与核心的连接已断开')
+    expect(badge.getAttribute('title')).toContain('connection dropped')
+    // 同一事实两种强度：fatal 横幅与徽标同帧在场。
+    const layer = el.shadowRoot!.querySelector('sebas-notice-layer') as unknown as {
+      shadowRoot: ShadowRoot
+    }
+    expect(layer.shadowRoot.querySelector('[data-testid="core-fatal-banner"]')).toBeTruthy()
+    el.remove()
+  })
+
+  it('恢复自动翻回正常态（横幅消失，无需刷新）', async () => {
+    wsMocks.request.mockResolvedValue({ ok: true })
+    const el = await mountShell()
+    connectWs()
+    await flush(el)
+    wsMocks.emit({ type: 'core.reachability', ok: false, kind: 'startup_failed', cause: 'x' })
+    await flush(el)
+    expect(badgeOf(el).dataset.state).toBe('down')
+
+    wsMocks.emit({ type: 'core.reachability', ok: true })
+    await flush(el)
+    expect(badgeOf(el).dataset.state).toBe('ok')
+    expect(badgeOf(el).textContent).toContain('核心已连接')
+    el.remove()
+  })
+
+  it('kind-less 断连 payload 退化为通用「核心不可达」文案', async () => {
+    wsMocks.request.mockResolvedValue({ ok: false, cause: 'mystery' })
+    const el = await mountShell()
+    connectWs()
+    await flush(el)
+    const badge = badgeOf(el)
+    expect(badge.dataset.state).toBe('down')
+    expect(badge.getAttribute('title')).toContain('核心不可达')
+    expect(badge.getAttribute('title')).toContain('mystery')
+    el.remove()
   })
 })
 

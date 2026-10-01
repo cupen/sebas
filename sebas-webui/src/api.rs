@@ -286,6 +286,10 @@ pub async fn session_detail(
         "effective_mode": info.effective_mode,
         // （add-composer-agent-binding）创建时绑定的 agent kind；null = 默认。
         "agent_kind": info.agent_kind,
+        // （add-webui-round7-gaps 1.1）会话累计 token 用量（引擎快照透传）。
+        // null = 引擎尚无 usage 事件（通用 ACP 无 token 上报——前端如实标
+        // 「未上报」，不以 0 冒充）。
+        "usage": info.usage,
         // 绑定的项目，按稳定 id（workbench-agent-wire-fix 2.5）；null = inbox。
         // 8.1：id 由 `(节点, 路径)` 派生（远端会话不属于本机同路径项目）。
         "project_id": crate::projects::project_id_for_session(info),
@@ -1749,6 +1753,35 @@ pub async fn browse_dirs(
     }
 }
 
+/// POST /api/fs/mkdir 的请求体（add-webui-round7-gaps 3.1）：`path` 是父目录
+/// （browse-dirs 的回显形态；空 = workspace root），`name` 是新子目录名
+/// （单段，非路径）。
+#[derive(Deserialize)]
+pub struct MkdirRequest {
+    #[serde(default)]
+    pub path: String,
+    pub name: String,
+}
+
+/// POST /api/fs/mkdir — 在 workspace root 边界内单层新建子目录
+/// （add-webui-round7-gaps 3.1，webui/projects spec）。webui-local 写面，
+/// 无 core 参与。边界校验与 browse-dirs 同一单点（`fs::safe_path`，不得
+/// 旁路）；名称段拒绝空/`.`/`..`/路径分隔符；父必须已存在（拒绝 mkdir -p
+/// 式批量创建）。所有拒绝均为类型化 400（中文原因），文件系统零副作用。
+pub async fn mkdir(
+    State(state): State<WebUiState>,
+    Json(req): Json<MkdirRequest>,
+) -> Response {
+    match crate::fs::mkdir_in(&req.path, &req.name, &state.workspace_root) {
+        Ok(resp) => (
+            StatusCode::CREATED,
+            Json(json!({ "path": resp.path, "name": resp.name, "created": true })),
+        )
+            .into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
 // ---- Project API endpoints ----
 
 /// add-workspace-root 2.3：会话面/携项目 create 的越界统一文案。不回显服务端
@@ -2711,6 +2744,9 @@ fn session_phase_frame(info: &SessionInfo) -> crate::events::SessionPhaseFrame {
         pending: info.pending.clone(),
         label: info.label.clone(),
         prompt_preview,
+        // （add-webui-round7-gaps 1.1）用量随帧下发：UsageUpdate 引擎即发
+        // Updated，会话头的用量芯片不欠一次 HTTP 详情。None 不上 wire。
+        usage: info.usage.clone(),
     }
 }
 

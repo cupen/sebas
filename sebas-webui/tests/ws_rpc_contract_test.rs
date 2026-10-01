@@ -10,6 +10,7 @@
 //!    field names preserved verbatim. The frontend reconstitutes the event
 //!    object from `params`, so a renamed field would silently break views.
 
+use sebas_channels::AppUsage;
 use sebas_dispatch::TurnEntry;
 use sebas_webui::events::{PendingSubmissionView, WebUiEvent, notification_frame};
 use sebas_webui::ws_rpc::{
@@ -135,6 +136,11 @@ fn all_seven_events_travel_as_notifications_with_params_verbatim() {
         pending: Vec::new(),
         label: Some("renamed".into()),
         prompt_preview: None,
+        usage: Some(sebas_channels::AppUsage {
+            model: None,
+            total_input: 100,
+            total_output: 10,
+        }),
     };
     let events: Vec<WebUiEvent> = vec![
         WebUiEvent::SessionCreated {
@@ -146,6 +152,7 @@ fn all_seven_events_travel_as_notifications_with_params_verbatim() {
                 pending: Vec::new(),
                 label: None,
                 prompt_preview: None,
+                usage: None,
             },
         },
         WebUiEvent::SessionUpdated {

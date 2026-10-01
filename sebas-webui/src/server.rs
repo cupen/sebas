@@ -334,6 +334,9 @@ fn build_router_full(
             get(api::projects_list).post(api::projects_add),
         )
         .route("/api/fs/browse-dirs", get(api::browse_dirs))
+        // add-webui-round7-gaps 3.1：目录选择器新建子目录（写面，RBAC 挂
+        // sessions.write 档——见 required_permission 的 /api/fs/mkdir 行）。
+        .route("/api/fs/mkdir", post(api::mkdir))
         .route("/api/archive", get(api::archive_list))
         .route("/api/archive/{key}", get(api::archive_detail))
         .route("/api/sessions/{key}/archive", post(api::archive_session))
@@ -426,6 +429,7 @@ fn is_protected_path(path: &str) -> bool {
 /// | `/api/providers*`、`/api/provider-presets`、`/api/provider-defaults`、`/api/model-aliases*`（provider 管理面读 + 写） | 全部 | 无——design D3 明确排除在角色执法外，仅登录门 + 自身守卫（POST-only + origin） |
 /// | `/api/skills*`（skills 管理面读 + 删/sync） | 全部 | 无——add-agent-skills 5.3：与 provider 管理面**同一权限档**（读=管理面读、删/sync=管理面写，都不按角色执法）；仅登录门 + 非安全方法同源校验 |
 /// | `/api/agents*` 写（POST / PUT / DELETE，gate-agent-directory-writes 1.1） | 非安全方法 | `settings.manage` 档（spec agents.manage 行：root/admin——同一执法函数的再标注，不新设权限位） |
+/// | `/api/fs/mkdir`（目录选择器新建子目录，add-webui-round7-gaps 3.1） | 非安全方法 | `sessions.write`（为注册项目服务的写面；viewer 只读） |
 /// | 其余 `/api/*`（summary / sessions 与 projects 读 / env / agents 读 / nodes / about / archive 读 / browse-dirs）与 `/ws` | 全部 | 无（认证即可，viewer 可读） |
 /// | `/api/auth/{login,logout,setup,me}` | — | 豁免路径（[`is_auth_exempt_path`]），不进本表 |
 ///
@@ -479,6 +483,12 @@ fn required_permission(path: &str, method: &str) -> Option<Permission> {
     // 登录门（认证即可读——agent 列表是选 agent 建会话的前置数据）。
     if path == "/api/agents" || path.starts_with("/api/agents/") {
         return mutating.then_some(Permission::SettingsManage);
+    }
+    // 目录选择器新建子目录（add-webui-round7-gaps 3.1）：fs 上的**写**面，
+    // 为注册项目/建会话服务——挂 sessions.write 档（root/admin/member；
+    // viewer 只读不放行，与项目写同一执法；browse-dirs 读面维持「认证即可」）。
+    if path == "/api/fs/mkdir" {
+        return mutating.then_some(Permission::SessionsWrite);
     }
     None
 }
@@ -2244,6 +2254,97 @@ mod workspace_root_tests {
         // 最小 percent-encode：只编码查询串里非法的字符（测试路径均为
         // tempdir 生成的安全 ASCII）。
         s.replace(' ', "%20")
+    }
+
+    // ── add-webui-round7-gaps 3.1：POST /api/fs/mkdir（webui/projects spec）──
+
+    /// 边界内建目录成功：201 + 回显（browse-dirs 同形），树中立即可见。
+    #[tokio::test]
+    async fn mkdir_creates_inside_workspace_root_and_browse_sees_it() {
+        let t = two_trees();
+        let app = app_with_workspace_root(t.allowed.path().to_path_buf());
+        let body = serde_json::json!({ "path": "", "name": "新项目" });
+        let (status, resp) = req(app, "POST", "/api/fs/mkdir", Some(body.to_string())).await;
+        assert_eq!(status, StatusCode::CREATED, "resp: {resp}");
+        assert_eq!(resp["name"].as_str(), Some("新项目"));
+        assert_eq!(
+            resp["path"].as_str(),
+            Some(
+                dunce::simplified(t.allowed.path())
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+        assert!(t.allowed.path().join("新项目").is_dir());
+
+        // 创建后的目录立即经 browse-dirs 可见（「无需手工刷新」的服务端半边）。
+        let app = app_with_workspace_root(t.allowed.path().to_path_buf());
+        let (status, body) = req(app, "GET", "/api/fs/browse-dirs", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let names: Vec<&str> = body["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|e| e["name"].as_str())
+            .collect();
+        assert!(names.contains(&"新项目"), "entries: {body}");
+    }
+
+    /// 负路径（路由面）：越界父 / 父缺失 / 非法名 / 同名 → 类型化 400 +
+    /// 中文原因，文件系统零副作用。
+    #[tokio::test]
+    async fn mkdir_route_rejections_are_typed_and_side_effect_free() {
+        let t = two_trees();
+        let outside_dir = t.outside.path().join("evil-target");
+
+        let cases: Vec<(serde_json::Value, String)> = vec![
+            (
+                serde_json::json!({ "path": t.outside.path().to_str().unwrap(), "name": "x" }),
+                "路径超出根目录范围".into(),
+            ),
+            (
+                serde_json::json!({ "path": "no_such_parent", "name": "x" }),
+                "路径不存在或无法访问".into(),
+            ),
+            (
+                serde_json::json!({ "path": "", "name": "../escape" }),
+                "路径分隔符".into(),
+            ),
+            (
+                serde_json::json!({ "path": "", "name": ".." }),
+                "目录名".into(),
+            ),
+            (
+                serde_json::json!({ "path": "", "name": "" }),
+                "目录名不能为空".into(),
+            ),
+        ];
+        for (body, expected) in cases {
+            let app = app_with_workspace_root(t.allowed.path().to_path_buf());
+            let (status, resp) = req(app, "POST", "/api/fs/mkdir", Some(body.to_string())).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "resp: {resp}");
+            let msg = resp["error"].as_str().expect("typed error body").to_string();
+            assert!(msg.contains(&expected), "got: {msg}");
+        }
+        assert!(
+            !outside_dir.exists(),
+            "越界请求不得在树外产生任何副作用"
+        );
+        // 根下除既有 sub 外无新增条目。
+        assert_eq!(std::fs::read_dir(t.allowed.path()).unwrap().count(), 1);
+    }
+
+    /// RBAC 中央表：mkdir 是 fs 上的**写**面 → 挂 sessions.write 档
+    /// （viewer 只读不放行）；GET 不存在该面（405 由路由方法承担，不进表）。
+    #[test]
+    fn mkdir_route_is_a_sessions_write_surface() {
+        assert_eq!(
+            required_permission("/api/fs/mkdir", "POST"),
+            Some(crate::rbac::Permission::SessionsWrite)
+        );
+        assert_eq!(required_permission("/api/fs/mkdir", "GET"), None);
+        // 读面不受影响：browse-dirs 维持「认证即可」。
+        assert_eq!(required_permission("/api/fs/browse-dirs", "GET"), None);
     }
 
     /// 就绪日志的引导 URL：通配 bind 呈现为 127.0.0.1（浏览器不可点

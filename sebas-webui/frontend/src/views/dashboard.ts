@@ -24,6 +24,9 @@ import { notify } from '../notify.js'
 // （fix-webui-qa-round3 2.6 / D10）会话选择写 URL：聚焦路径的地址投影。
 import { navigate } from '../router.js'
 import { modeBadgeLabel } from './mode-vocabulary.js'
+// （add-webui-round7-gaps 1.1）会话头用量芯片的呈现投影（usage-statistics
+// spec「会话级 token 用量可见」的唯一投影点）。
+import { sessionUsageView } from './session-usage.js'
 // fix-webui-qa-defects 7.3：终止通知的可读会话名与 rail 同源（回退链复用）。
 // add-agent-settings-and-session-titles 7.1：聚焦头部同走 fullSessionLabel
 // 命名链，truncateName 提供展示截断（全文进 title）。
@@ -388,6 +391,10 @@ export class SebasDashboard extends LitElement {
             turn_engaged: ev.turn_engaged,
             msg_count: ev.msg_count,
             pending: ev.pending,
+            // （add-webui-round7-gaps 1.1）用量随帧就地补丁：UsageUpdate 引擎
+            // 即发 Updated，会话头的用量芯片随回合完成即时增长，不欠 HTTP。
+            // 缺省（旧 core）保留现有值，等全量收敛。
+            ...(ev.usage !== undefined ? { usage: ev.usage } : {}),
           }
         }
         this.scheduleListRefresh()
@@ -807,6 +814,15 @@ export class SebasDashboard extends LitElement {
       }
       .session-head .meta .mono {
         font-family: var(--sebas-font-mono);
+      }
+      /* （add-webui-round7-gaps 1.1）会话头用量芯片：已上报 = 常态弱显示
+         （tabular-nums 对齐），未上报（通用 ACP 不报 token）= 再弱一档——
+         「未上报」是信息不是异常，不用失败红。 */
+      .session-head .meta .usage-tag {
+        white-space: nowrap;
+      }
+      .session-head .meta .usage-tag[data-usage='unreported'] {
+        color: var(--sebas-text-faint);
       }
       /* 中程模型选择器：meta 行内的紧凑下拉（add-acp-model-selection）。 */
       .session-head .model-pick {
@@ -1908,6 +1924,10 @@ export class SebasDashboard extends LitElement {
     // （4.2）模式章合一：auto 即「自动执行」（原 UNGATED 语义不再另挂英文
     // 红章）；desired/effective 过渡态显示中性灰「模式切换中…」；未知值
     // 如实显示原词，不造红色 UNKNOWN。
+    // （add-webui-round7-gaps 1.1）会话累计 token 用量：引擎快照的 usage
+    // 累计（usage-statistics spec）。未上报 token 的 agent（通用 ACP）如实
+    // 呈现「未上报」，不以 0 冒充。
+    const usage = sessionUsageView(d.usage)
     // （3.6，design D6b）session-head 卡片只承载身份与操作信息（chat /
     // node-tag / model / mode / actions）：状态徽标与状态边框撤出——会话
     // 状态只挂 rail 行首圆点一处；「排队」只属于 pending-stack（消息维度）。
@@ -1953,6 +1973,15 @@ export class SebasDashboard extends LitElement {
                   ${modeDiffers ? '模式切换中…' : modeBadgeLabel(effective ?? desired ?? '')}
                 </span>`
               : nothing}
+            <!-- （add-webui-round7-gaps 1.1）会话累计 token 用量：随回合完成
+                 即时增长（相位帧就地补丁）；未上报 = 「未上报 token」弱化态。 -->
+            <span
+              class="mono usage-tag"
+              data-testid="session-usage"
+              data-usage=${usage.tone}
+              title=${usage.title}
+              >${usage.text}</span
+            >
             <!-- （workbench-live-conversation-flow 4.2）头部去交互化：mode
                  切换迁至输入框底沿、模型切换归 composer 芯片、归档是
                  rail 行溢出菜单的唯一入口——头部只留展示。 -->

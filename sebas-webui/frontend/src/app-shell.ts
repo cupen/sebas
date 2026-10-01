@@ -354,6 +354,59 @@ export class SebasApp extends LitElement {
       flex-direction: column;
       position: relative; /* 子视图定位上下文 */
     }
+    /* ── core 连接状态常驻徽标（add-webui-round7-gaps 2.1）──────────────
+       常驻主区右上角：ok 低调（点 + 弱字），down 醒目（失败色实底），unknown
+       中性。与 fatal 横幅同源（同一 coreReachability 状态），同亮同灭。 */
+    .core-link {
+      position: absolute;
+      top: 10px;
+      right: 14px;
+      z-index: 30;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      max-width: min(60%, 420px);
+      padding: 3px 10px;
+      border-radius: var(--sebas-radius-full);
+      font-size: 0.72rem;
+      font-weight: 600;
+      white-space: nowrap;
+      color: var(--sebas-text-faint);
+      background: color-mix(in srgb, var(--sebas-surface) 85%, transparent);
+      border: 1px solid var(--sebas-border);
+      transition:
+        color var(--sebas-dur) var(--sebas-ease),
+        background var(--sebas-dur) var(--sebas-ease),
+        border-color var(--sebas-dur) var(--sebas-ease);
+    }
+    .core-link-dot {
+      flex: 0 0 auto;
+      width: 8px;
+      height: 8px;
+      border-radius: var(--sebas-radius-full);
+      background: var(--sebas-text-faint);
+    }
+    .core-link[data-state='ok'] .core-link-dot {
+      background: var(--sebas-status-done);
+    }
+    .core-link[data-state='ok'] {
+      color: var(--sebas-text-faint);
+      border-color: var(--sebas-border);
+    }
+    .core-link[data-state='down'] {
+      color: var(--sebas-status-failed);
+      background: var(--sebas-status-failed-bg);
+      border-color: var(--sebas-status-failed-border);
+      font-weight: 700;
+      box-shadow: 0 0 0 3px var(--sebas-status-failed-bg);
+    }
+    .core-link[data-state='down'] .core-link-dot {
+      background: var(--sebas-status-failed);
+    }
+    .core-link-label {
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
     .outlet {
       /* 满幅工作台：workbench 类路由（/ 与 /sessions/:key）直接铺满
          出口区（去掉居中窄栏），滚动交给视图内部（turn-stream）。 */
@@ -654,6 +707,55 @@ export class SebasApp extends LitElement {
     }
   }
 
+  /**
+   * （add-webui-round7-gaps 2.1，agent-workbench spec「core 连接状态常驻
+   * 指示」）常驻徽标的呈现投影。数据源与 fatal 横幅同源（applyCoreReachability
+   * 是唯一入账点，setFatal 由它驱动）——同一事实两种强度，绝不互相矛盾；
+   * 无新增轮询（订阅 + 既有 get 即全部）。三态：
+   * - `ok`：低调绿点（常态不抢注意力）；
+   * - `down`：醒目红徽标，kind 分文案 + cause 进悬停 title；
+   * - `null`（未知，get 未应答/连接未立）：中性弱显示。
+   */
+  private coreLinkBadge() {
+    const st = this.coreReachability
+    let state: 'ok' | 'down' | 'unknown'
+    let label: string
+    let title: string
+    if (st === null) {
+      state = 'unknown'
+      label = '核心状态未知'
+      title = '核心状态未知——连接建立后自动获取'
+    } else if (st.ok) {
+      state = 'ok'
+      label = '核心已连接'
+      title = '核心连接正常'
+    } else {
+      state = 'down'
+      label = '核心不可达'
+      const kindText =
+        st.kind === 'startup_failed'
+          ? '（核心启动失败）'
+          : st.kind === 'auth_rejected'
+            ? '（核心拒绝接入）'
+            : st.kind === 'disconnected'
+              ? '（与核心的连接已断开）'
+              : ''
+      title = `核心不可达${kindText}${st.cause ? `：${st.cause}` : ''}`
+    }
+    return html`
+      <div
+        class="core-link"
+        data-testid="core-link"
+        data-state=${state}
+        role="status"
+        title=${title}
+      >
+        <span class="core-link-dot" aria-hidden="true"></span>
+        <span class="core-link-label">${label}</span>
+      </div>
+    `
+  }
+
   private onWsState = (e: Event): void => {
     const connected = (e as CustomEvent<{ connected: boolean }>).detail?.connected !== false
     // fix-webui-mobile-polish：登录/首启设置态下的 /ws 认证拒绝循环（连接即
@@ -661,6 +763,10 @@ export class SebasApp extends LitElement {
     // 器断开」——横幅只在进入工作台后才有意义；就绪瞬间 reconnectNow 兜住
     // 退避尾巴，横幅不再在工作台上驻留。
     if (this.authState !== 'ready') return
+    // （add-webui-round7-gaps 3c）WS 断连 = 承载 reachability 推送的通道没了，
+    // 此刻对核心状态的真实认知是「未知」——徽标回中性，不再沿述最后已知
+    // 的「已连接」与断线横幅自相矛盾；重连后的 get 自动收敛回真实态。
+    if (!connected) this.coreReachability = null
     setWsDown(!connected)
     if (connected) void this.refreshCoreReachability()
   }
@@ -675,6 +781,11 @@ export class SebasApp extends LitElement {
     // 内含 reconnectNow——「就绪瞬间立即连上」的既有语义不变，未认证期间
     // 的重连风暴已被闸住。
     sharedWs.setAuthGated(false)
+    // （add-webui-round7-gaps 3c）就绪即补一次可达性 get：WS 打开几乎总是
+    // 先于 checkAuth 完成，onWsState 的 connected 分支在就绪前被吞——不补
+    // 这一发，fresh load 的徽标会一直停在「未知」直到某次翻转推送。get
+    // 幂等且失败不推翻既有状态，健康/断连两态都由它如实收敛。
+    void this.refreshCoreReachability()
   }
 
   /** 窄屏项目抽屉开关（fix-webui-mobile-polish）：≤640px 时项目树收进抽屉。 */
@@ -938,6 +1049,7 @@ export class SebasApp extends LitElement {
           </div>
         </nav>
         <main slot="end" @open-settings=${() => (this.settingsOpen = true)}>
+          ${this.coreLinkBadge()}
           <div class="outlet${this.isWideRoute() ? '' : ' padded'}">${this.renderOutlet()}</div>
         </main>
       </wa-split-panel>

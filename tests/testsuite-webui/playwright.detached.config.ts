@@ -19,10 +19,14 @@ export const WEBUI_PORT = 9897
 export default defineConfig({
   testDir: './tests',
   // Detached-topology journeys: the deployment resilience journey (harden
-  // 5.4), the detached approval loop (cover-core-channel-test-gaps B1.2) and
-  // the tiered-notice fatal lock (add-webui-tiered-notices 5.2). Their core
+  // 5.4), the detached approval loop (cover-core-channel-test-gaps B1.2), the
+  // tiered-notice fatal lock (add-webui-tiered-notices 5.2) and the core-link
+  // badge tri-state journey (add-webui-round7-gaps 2.2 — the badge flip needs
+  // a LIVE webui receiving the ok=false push; the single-process dead-core
+  // assembly kills the webui itself, so no push can exist there). Their core
   // stop/start would be lethal to the shared single-process suite.
-  testMatch: /deployment\.spec\.ts|approval-detached\.spec\.ts|tiered-notices\.spec\.ts/,
+  testMatch:
+    /deployment\.spec\.ts|approval-detached\.spec\.ts|tiered-notices\.spec\.ts|core-link-badge\.spec\.ts/,
   timeout: 60_000,
   retries: 1,
   workers: 1,

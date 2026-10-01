@@ -27,7 +27,7 @@ pub use maps::{
 use crate::card_events::{
     apply_event_to_card, card_needs_rotation, count_folded_items, update_parent_title,
 };
-use crate::card_state::CardState;
+use crate::card_state::{CardState, CardUsage};
 use crate::cards::CardConfig;
 use crate::commands::{Command, RouterAction};
 use crate::crud::ProviderForms;
@@ -542,7 +542,18 @@ impl DispatchHandle {
                     } else {
                         Some(st.user_prompt)
                     };
-                    (Some(st.status_emoji), prompt, Some(st.usage), receipt)
+                    // （add-webui-round7-gaps 3c）快照吃会话累计量，且只在
+                    // 上报过 token 的会话上投影——通用 ACP（context/cost 非
+                    // token）保持 None，webui 显「未上报」而非 0 冒充。
+                    let usage = if st.usage_reported {
+                        Some(CardUsage {
+                            model: st.usage.model.clone(),
+                            ..st.usage_total.clone()
+                        })
+                    } else {
+                        None
+                    };
+                    (Some(st.status_emoji), prompt, usage, receipt)
                 }
                 // 无卡态：命名来源只剩迁移位（dormant 退役行 / 恢复行）。
                 None => (None, m.prompt_preview.clone().filter(|p| !p.is_empty()), None, false),
@@ -1459,6 +1470,23 @@ impl DispatchHandle {
                     }
                     if let Some(output) = usage.output_tokens {
                         st.usage.total_output += output;
+                    }
+                    // （add-webui-round7-gaps 3c）会话累计量同步落账：不随
+                    // Finished 清零（usage 才是回合缓冲）；reported 只在真带
+                    // token 计数的帧上置位一次即永久——全 None 的帧（lazy
+                    // seed）与从未上报的会话（通用 ACP）投影 None（webui
+                    // 「未上报」），不以全零冒充。
+                    if usage.input_tokens.is_some() || usage.output_tokens.is_some() {
+                        st.usage_reported = true;
+                    }
+                    if let Some(input) = usage.input_tokens {
+                        st.usage_total.total_input += input;
+                    }
+                    if let Some(output) = usage.output_tokens {
+                        st.usage_total.total_output += output;
+                    }
+                    if usage.model.is_some() {
+                        st.usage_total.model = st.usage.model.clone();
                     }
                     return None;
                 }

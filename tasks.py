@@ -522,7 +522,7 @@ def testsuite_webui(c, case=None):
                 cmd = f"pnpm --dir {suite_dir} exec playwright test --config playwright.dead-core.config.ts"
             elif case == "native":
                 cmd = f"pnpm --dir {suite_dir} exec playwright test --config playwright.native.config.ts"
-            elif case in ("deployment", "approval-detached"):
+            elif case in ("deployment", "approval-detached", "core-link-badge"):
                 cmd = (
                     f"pnpm --dir {suite_dir} exec playwright test --config playwright.detached.config.ts"
                     f" {case}"

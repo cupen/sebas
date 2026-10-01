@@ -77,6 +77,19 @@ export interface NodesResponse {
   cause?: string | null
 }
 
+/**
+ * （add-webui-round7-gaps 1.1）会话累计 token 用量，逐字对应引擎随会话快照
+ * 输出的 `AppUsage`。通用 ACP 无 token 上报（其 usage 语义是 context/cost，
+ * 不折算）——此时服务端 usage 为 null/缺省，界面如实呈现「未上报」，不以 0
+ * 冒充。router 逐请求 timeseries（/usage 页）口径不受此影响。
+ */
+export interface SessionUsage {
+  /** 报告用量的模型全名；null/缺省 = 引擎未报模型名。 */
+  model?: string | null
+  total_input: number
+  total_output: number
+}
+
 export interface SessionRow {
   encoded_key: string
   /**
@@ -145,6 +158,12 @@ export interface SessionRow {
    * `'ask'`——wire/内存/UI 四层同一份字符串，无 null 路径。
    */
   desired_mode: string
+  /**
+   * （add-webui-round7-gaps 1.1）会话累计 token 用量（引擎快照透传）；
+   * null/缺省 = 引擎尚无 usage 事件（通用 ACP 不上报 token——如实呈现
+   * 「未上报」，不冒充 0）。
+   */
+  usage?: SessionUsage | null
 }
 
 export interface SessionSummary {
@@ -194,6 +213,11 @@ export interface SessionSummary {
    * 一律带 `?? 'ask'` 回退。
    */
   desired_mode?: string
+  /**
+   * （add-webui-round7-gaps 1.1）聚焦会话累计 token 用量；null/缺省 =
+   * 引擎尚无 usage 事件（如实呈现「未上报」，不冒充 0）。
+   */
+  usage?: SessionUsage | null
 }
 
 export interface CardConfig {
@@ -425,6 +449,12 @@ export interface SessionDetail {
    * 原因与重试入口。
    */
   spawn_failure_reason?: string | null
+  /**
+   * （add-webui-round7-gaps 1.1）会话累计 token 用量（引擎快照透传）；
+   * null/缺省 = 引擎尚无 usage 事件（通用 ACP 不上报 token——如实呈现
+   * 「未上报」，不冒充 0）。会话头芯片的数据源。
+   */
+  usage?: SessionUsage | null
 }
 
 /**
@@ -1325,6 +1355,14 @@ export const api = {
   // root 省略（null/undefined/空串）→ 服务端默认 work root（拾取器即用此）。
   fsBrowseDirs: (path: string, root?: string | null) =>
     get<FsBrowseResponse>(withQuery('/api/fs/browse-dirs', { path, root: root ?? undefined })),
+  /**
+   * （add-webui-round7-gaps 3.1）在 `path`（父目录，browse-dirs 回显形态；
+   * 空 = workspace root）下单层新建名为 `name` 的子目录。父须已存在（拒绝
+   * mkdir -p 式批量）；越界/父缺失/非法名（空/`.`/`..`/分隔符）/同名均为
+   * 类型化 400，`ApiError.message` 是中文原因，文件系统零副作用。
+   */
+  fsMkdir: (path: string, name: string) =>
+    post<{ path: string; name: string; created: boolean }>('/api/fs/mkdir', { path, name }),
 }
 
 // ---- Project API ----

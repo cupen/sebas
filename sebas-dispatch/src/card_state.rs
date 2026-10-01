@@ -43,6 +43,14 @@ pub struct CardState {
     pub body: Vec<ChannelElement>,
     /// Model name and token usage tracking (neutral).
     pub usage: CardUsage,
+    /// （add-webui-round7-gaps 3c 修订）会话累计 token：UsageUpdate 落账时
+    /// 同步累加，不随回合 Finished 清零——`usage` 是「本回合」缓冲（feishu
+    /// footer 语义保留），webui 会话级用量芯片吃这里。
+    pub usage_total: CardUsage,
+    /// 该会话是否上报过任何 token 计数。门控快照投影：从未上报的 agent
+    /// （通用 ACP 报的是 context/cost 非 token）投影 None（webui 显「未上报
+    /// token」），不以全零冒充「已上报 0」。
+    pub usage_reported: bool,
 }
 
 impl CardState {
@@ -54,6 +62,8 @@ impl CardState {
             started_at: Instant::now(),
             body: Vec::new(),
             usage: CardUsage::default(),
+            usage_total: CardUsage::default(),
+            usage_reported: false,
         }
     }
 
@@ -65,6 +75,8 @@ impl CardState {
             started_at: Instant::now(),
             body: Vec::new(),
             usage: CardUsage::default(),
+            usage_total: CardUsage::default(),
+            usage_reported: false,
         }
     }
 }
