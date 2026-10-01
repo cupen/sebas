@@ -5513,6 +5513,254 @@ async fn claude_model_surface_reaches_snapshot_and_switch_round_trips() {
             "both scenario models were requested: {models:?}"
         );
     }
+
+    /// fix-webui-qa-round7 2.1（acp-model-selection「拒绝后回合不留挂起」+
+    /// 「无虚假操作者中断条目」）的进程级 journey：fakeacp 会话先成功切到
+    /// ok-model，再切被类型化拒绝的 bad-model。钉住的合同：
+    /// 1) 拒绝以类型化错误条目如实上屏（带「模型未变」稳定标记）；
+    /// 2) 拒绝落地后会话**远短于 600s** 回到终态（status=done）——拒绝即
+    ///    终态边，不等停滞 watchdog；core 日志无「turn stalled」强收记录、
+    ///    转录无「回合停滞被强制收尾」合成条目；
+    /// 3) 被拒切换不改 current_model（仍 ok-model）；
+    /// 4) 后续一条新消息正常开轮并完成（composer 恢复可提交的进程级等价）；
+    /// 5) 全程转录无「回合被停止（操作者中断了本次回复）」条目——拒绝收尾
+    ///    不是操作者中断，陈旧取消标记不得注入无关回合。
+    ///
+    /// 断言为何抓得住旧缺陷（DEF-02）：旧 pump 把带标记的非终态 Error 当流
+    /// 式事件攒 debounce——任何在拒收窗口开放的回合相位会被 next_emoji 推进
+    /// WORKING 且再无人收尾，只能等 600s watchdog 强收（合成「回合停滞」条
+    /// 目 + TurnStalled 日志）。本用例的「拒绝后 ≤15s 终态 + 无强收痕迹 +
+    /// 后续回合可开」三面在旧分类下必然红：回合要么滞留 working 到超时、
+    /// 要么吃 watchdog 合成条目，两条断言各打一面。引擎级红绿由
+    /// sebas-dispatch/tests/model_rejection_and_cancel_anchor_test.rs 与
+    /// tests/pump_unit_test.rs 的注入半边承载（进程级时序无法确定性命中
+    /// SEED 窗口——ACP 驱动命令通道串行化，拒绝总在在飞回合 Finished 之后
+    /// 到达），此处钉端到端链路不回退。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn fakeacp_model_rejection_settles_the_session_and_leaves_no_false_interrupt() {
+        let sb = Sandbox::new("testsuite_e2e", "fakeacp-model-reject");
+        let cli = http_client();
+
+        // 沙箱 config 追加 fakeacp agent（同 tasks.py 的 testsuite-webui 装配：
+        // 广告 bad-model/ok-model、初始=第一个，对 bad-model 的
+        // session/set_config_option 回类型化拒绝）。二进制与 sebas 同 target
+        // 目录（CARGO_BIN_EXE 只对同包 bin 有效，同 sebas_node_bin 的推法）。
+        let fake_acp_name = if cfg!(windows) {
+            "fake-acp-agent.exe"
+        } else {
+            "fake-acp-agent"
+        };
+        let fake_acp = std::path::PathBuf::from(env!("CARGO_BIN_EXE_sebas"))
+            .with_file_name(fake_acp_name);
+        assert!(
+            fake_acp.exists(),
+            "找不到 {}：先构建它——cargo build -p sebas-acp --bin fake-acp-agent",
+            fake_acp.display()
+        );
+        let fakeacp_journal = sb.path.join("fakeacp-journal.jsonl");
+        let fakeacp_section = format!(
+            "\n[acp.agents.fakeacp]\ndriver = \"acp\"\ncommand = [\"{}\", \"--journal\", \"{}\", \"--model-options\", \"bad-model,ok-model\", \"--reject-model\", \"bad-model\"]\n",
+            support::forward_slash(&fake_acp),
+            support::forward_slash(&fakeacp_journal),
+        );
+        let config = std::fs::read_to_string(&sb.config_path)
+            .unwrap_or_else(|e| panic!("read config {}: {e}", sb.config_path.display()));
+        assert!(
+            !config.contains("[acp.agents.fakeacp]"),
+            "fakeacp section appended twice"
+        );
+        std::fs::write(&sb.config_path, format!("{config}{fakeacp_section}"))
+            .unwrap_or_else(|e| panic!("write config {}: {e}", sb.config_path.display()));
+
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
+
+        // 首回合开轮并完成（echo:<routing-id>），模型面随快照可达（初始 =
+        // configOptions 第一项 bad-model）。
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions", sb.webui_url()),
+            serde_json::json!({
+                "project_id": project_id,
+                "prompt": "hello",
+                "agent": "fakeacp"
+            }),
+        )
+        .await
+        .expect("create fakeacp session");
+        assert_eq!(status, 201, "create session: {body}");
+        let key = body["key"].as_str().expect("key").to_string();
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+        wait_turn_done(&cli, &sb, &detail_url).await;
+
+        // 1) 成功切换：ok-model 送达 wire（journal）且快照跟随。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/model", sb.webui_url()),
+            serde_json::json!({ "model_id": "ok-model" }),
+        )
+        .await
+        .expect("switch to ok-model");
+        assert_eq!(status, 200, "ok-model switch must be delivered: {body}");
+        wait_for(
+            "ok-model switch to reach the wire and the snapshot",
+            Duration::from_secs(15),
+            &sb.path.clone(),
+            {
+                let cli = cli.clone();
+                let url = detail_url.clone();
+                let journal = fakeacp_journal.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    let journal = journal.clone();
+                    Box::pin(async move {
+                        let wire_ok = std::fs::read_to_string(&journal)
+                            .map(|c| {
+                                c.lines().any(|l| {
+                                    l.contains("session/set_config_option")
+                                        && l.contains("\"value\":\"ok-model\"")
+                                })
+                            })
+                            .unwrap_or(false);
+                        if !wire_ok {
+                            return None;
+                        }
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        (v["current_model"].as_str() == Some("ok-model")).then_some(v)
+                    })
+                }
+            },
+        )
+        .await;
+
+        // 2) 被拒切换：请求送达（journal 有 bad-model），类型化拒绝条目上屏，
+        //    会话即时回终态、模型不变。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/model", sb.webui_url()),
+            serde_json::json!({ "model_id": "bad-model" }),
+        )
+        .await
+        .expect("switch to bad-model");
+        assert_eq!(status, 200, "bad-model switch must be delivered: {body}");
+        wait_for(
+            "the bad-model switch to reach the wire",
+            Duration::from_secs(15),
+            &sb.path.clone(),
+            {
+                let journal = fakeacp_journal.clone();
+                move || {
+                    let journal = journal.clone();
+                    Box::pin(async move {
+                        std::fs::read_to_string(&journal)
+                            .map(|c| {
+                                c.lines().any(|l| {
+                                    l.contains("session/set_config_option")
+                                        && l.contains("\"value\":\"bad-model\"")
+                                })
+                            })
+                            .unwrap_or(false)
+                            .then_some(())
+                    })
+                }
+            },
+        )
+        .await;
+        let entries = wait_entry_containing(&cli, &sb, &key, "bad-model").await;
+        let rejection = entries
+            .iter()
+            .find(|(kind, content)| {
+                kind == "error" && content.contains("bad-model") && content.contains("模型未变")
+            })
+            .expect("typed rejection entry (error, names the model, carries the marker) must land")
+            .1
+            .clone();
+
+        // 拒绝即终态：远短于 600s watchdog（15s 上限）回到 done，且模型未被
+        // 被拒切换改动。
+        let detail = wait_for(
+            "the session to settle to done well under the 600s watchdog",
+            Duration::from_secs(15),
+            &sb.path.clone(),
+            {
+                let cli = cli.clone();
+                let url = detail_url.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        (v["status_slug"].as_str() == Some("done")).then_some(v)
+                    })
+                }
+            },
+        )
+        .await;
+        assert_eq!(
+            detail["current_model"].as_str(),
+            Some("ok-model"),
+            "a rejected switch must not change the session's current model: {detail}"
+        );
+
+        // 3) 后续一条新消息正常开轮并完成（echo 第二次落账）——composer 恢复
+        //    可提交的进程级等价。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+            serde_json::json!({ "message": "follow-up" }),
+        )
+        .await
+        .expect("follow-up after rejection");
+        assert_eq!(status, 200, "session must stay writable after rejection: {body}");
+        wait_turn_done(&cli, &sb, &detail_url).await;
+        let entries = fetch_session_entries(&cli, &detail_url)
+            .await
+            .expect("entries after the follow-up turn");
+        let echoes = entries
+            .iter()
+            .filter(|(_, c)| c.contains("echo:"))
+            .count();
+        assert!(
+            echoes >= 2,
+            "the follow-up turn must complete with its own echo (rejection entry: {rejection}); entries: {entries:?}"
+        );
+
+        // 4) 无虚假操作者中断、无 watchdog 强收痕迹：转录两个条目都不存在，
+        //    core 日志无 turn stalled 记录。
+        assert!(
+            !entries
+                .iter()
+                .any(|(_, c)| c.contains("回合被停止") || c.contains("操作者中断")),
+            "a model rejection must never surface as an operator interrupt: {entries:?}"
+        );
+        assert!(
+            !entries.iter().any(|(_, c)| c.contains("回合停滞被强制收尾")),
+            "the stall watchdog must not be the closer here: {entries:?}"
+        );
+        let core_log = std::fs::read_to_string(&sb.core_log).unwrap_or_default();
+        assert!(
+            !core_log.contains("turn stalled"),
+            "core log must not record a stall force-settle for this journey"
+        );
+    }
 }
 
 mod sandbox_and_state_dir {

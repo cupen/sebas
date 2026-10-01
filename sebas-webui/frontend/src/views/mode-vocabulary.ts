@@ -35,12 +35,16 @@ export interface ModeOption {
  * 上是**同一档**（同映射 bypass tier，permission-flow spec 明文）——两段
  * 描述都写「全部放行 + 留审计」并**互相点名等价**，不暗示任何不存在的
  * 行为差异（QA：两模式在 GUI 上观测无差异，旧文案却措辞各异像有两档）。
+ *
+ * （fix-webui-qa-round7 4.1）label 双语化：英文模式词 + 中文副标注（与
+ * modeBadgeLabel 的会话头部徽章同一措辞，两处下拉与徽章口径一致）。发送
+ * 值（value）与门控不变——label 只是人读面。
  */
 export const MODE_OPTIONS: readonly ModeOption[] = [
-  { value: 'ask', label: 'Ask', description: '逐次询问：每个工具先问你' },
-  { value: 'edit', label: 'Edit', description: '自动接受编辑，其余工具先问你' },
-  { value: 'allow', label: 'Allow', description: '全部放行、留审计（与 Auto 等价）' },
-  { value: 'auto', label: 'Auto', description: '全部放行、留审计（与 Allow 等价）' },
+  { value: 'ask', label: 'Ask · 逐次询问', description: '逐次询问：每个工具先问你' },
+  { value: 'edit', label: 'Edit · 自动接受编辑', description: '自动接受编辑，其余工具先问你' },
+  { value: 'allow', label: 'Allow · 放行', description: '全部放行、留审计（与 Auto 等价）' },
+  { value: 'auto', label: 'Auto · 自动执行', description: '全部放行、留审计（与 Allow 等价）' },
 ]
 
 /**

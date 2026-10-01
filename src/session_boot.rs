@@ -388,12 +388,29 @@ pub fn spawn_acp_pump_with_idle(
                     // 任意事件重置 idle 计时。
                     last_activity = tokio::time::Instant::now();
                     let is_terminal = matches!(evt, AcpEvent::Error { terminal: true, .. });
+                    // （fix-webui-qa-round7 2.2，acp-model-selection D2）模型切换
+                    // 拒绝（非终态 Error + sebas_acp::MODEL_UNCHANGED_MARKER）也
+                    // 走即时路径：它不是回合内容——pump 若按流式臂处理，只会把
+                    // SEED 占位推成 WORKING（next_emoji 的非终态 Error 边）再无
+                    // 人收尾，回合滞留到 600s watchdog 强收（QA DEF-02）。即时
+                    // 路径经 apply_event_to_out 的非终态 Error 臂：SEED/WORKING
+                    // 锚定收尾 DONE + 队列 drain + 可见错误条目——拒绝即终态，
+                    // 远早于 watchdog。claude 拒绝帧（refusal）的 Error+Finished
+                    // 配对不带标记，仍走原配对语义，不受影响。
+                    let is_model_rejection = matches!(
+                        &evt,
+                        AcpEvent::Error {
+                            terminal: false,
+                            message,
+                            ..
+                        } if message.contains(sebas_acp::MODEL_UNCHANGED_MARKER)
+                    );
                     let is_immediate = matches!(
                         evt,
                         AcpEvent::Finished { .. }
                             | AcpEvent::Error { terminal: true, .. }
                             | AcpEvent::PermissionRequest { .. }
-                    );
+                    ) || is_model_rejection;
                     if is_immediate {
                         // 即时路径：取消待发 debounce，同步出最终态。
                         dirty = false;

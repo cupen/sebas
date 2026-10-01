@@ -25,8 +25,10 @@ export default defineConfig({
   // users-admin.spec.ts 与 auth.spec.ts 共用本装配（都需要 auth-on + 预置
   // admin）——users-admin 是 2026-09-23 验收补的 Users 管理闭环旅程；
   // agents-gate 是 gate-agent-directory-writes 补的 agents 写执法旅程
-  // （viewer/member 经 users API 现场自愈建户）。
-  testMatch: /auth\.spec\.ts|users-admin\.spec\.ts|agents-gate\.spec\.ts/,
+  // （viewer/member 经 users API 现场自愈建户）；qa-round7-ws-auth 是
+  // fix-webui-qa-round7 3.2 的未认证 WS 静默 + 登录后实时链路旅程。
+  testMatch:
+    /auth\.spec\.ts|users-admin\.spec\.ts|agents-gate\.spec\.ts|qa-round7-ws-auth\.spec\.ts/,
   timeout: 30_000,
   retries: 1,
   workers: 1,

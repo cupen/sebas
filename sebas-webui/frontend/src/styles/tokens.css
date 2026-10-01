@@ -152,7 +152,12 @@
   --sebas-accent-soft: rgba(71, 80, 216, 0.08);
   --sebas-accent-border: rgba(71, 80, 216, 0.3);
 
-  --sebas-signal: #c2410c;
+  /* fix-webui-qa-round7 4.2：浅色 signal 从 #c2410c（红棕，hue≈18°）改
+     #b45309（深琥珀橙，hue≈26°）。旧值与错误语义色 --sebas-status-failed
+     #d13438 几乎同族——composer 聚焦环 / 审批「你的回合」标注在浅色下
+     呈现错误语义观感（QA round7 实锤：composer 常态被聚焦环刷成红棕）。
+     对白底对比 5.0:1（审批标签文本 ≥ AA），与 working 琥珀保持可辨。 */
+  --sebas-signal: #b45309;
 
   --sebas-status-starting: #2f6fdd;
   --sebas-status-starting-bg: rgba(47, 111, 221, 0.08);

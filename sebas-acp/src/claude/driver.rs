@@ -642,7 +642,8 @@ impl CcDriver {
                                 .send(AcpEvent::Error {
                                     session_id: self.session_id.clone(),
                                     message: format!(
-                                        "set model {model_id:?} 未送达（{e}），模型未变"
+                                        "set model {model_id:?} 未送达（{e}），{}",
+                                        crate::MODEL_UNCHANGED_MARKER
                                     ),
                                     terminal: false,
                                 })

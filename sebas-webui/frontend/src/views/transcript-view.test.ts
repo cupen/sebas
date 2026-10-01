@@ -2369,3 +2369,80 @@ describe('flood ingest drains in chunks (round2 2.5, D-B13)', () => {
     el.remove()
   })
 })
+
+// ── fix-webui-qa-round7 1.2（agent-workbench D1）：转录任意内容不破坏布局 ────
+// happy-dom 无布局引擎，scrollWidth 断言不可得（浏览器旅程由 3c 承接）；
+// 这里把**样式合同**钉死：约束链的三处内容层缺口逐条锁定在组件样式表上。
+
+describe('transcript layout contract for arbitrary content (round7 1.2, D1)', () => {
+  async function styleText(el: SebasTranscriptView): Promise<string> {
+    return [...el.shadowRoot!.querySelectorAll('style')]
+      .map((s) => s.textContent ?? '')
+      .join('\n')
+  }
+
+  it('the body carries a wrapping strategy that participates in min-content shrinking', async () => {
+    // 2100+ 字符无空格 token 不撑破面板的机制面：.body 本体挂
+    // overflow-wrap: anywhere（可继承，覆盖 markdown 管线的全部产出）。
+    // 不参与 min-content 计算的 break-word 不得回归（旧缺陷根因）。
+    const el = await mount({ entries: streamedTurn('x'.repeat(2100), ['ok'], FIXED_DATES.T1) })
+    const css = await styleText(el)
+    expect(css).toMatch(/\.turn-block \.body\s*\{[^}]*overflow-wrap:\s*anywhere/)
+    // 流式纯文本尾巴同一策略（pre-wrap 可换行，长 token 同样要断）。
+    expect(css).toMatch(
+      /\.turn-block \.body\.text-live\s*\{[^}]*overflow-wrap:\s*anywhere/,
+    )
+    el.remove()
+  })
+
+  it('retires the old break-word-per-tag rule that caused the blowout', async () => {
+    // 回归守卫：子标签级的 break-word 规则整体退役——anywhere 已在 .body
+    // 继承生效，任何把 break-word 加回内容标签的写法都是缺陷回炉。
+    const el = await mount({ entries: streamedTurn('hi', ['a'], FIXED_DATES.T1) })
+    const css = await styleText(el)
+    expect(css).not.toMatch(/overflow-wrap:\s*break-word/)
+    el.remove()
+  })
+
+  it('GFM tables render as block-level horizontal scrollers, never blow out the parent', async () => {
+    const el = await mount({ entries: streamedTurn('table', ['wide'], FIXED_DATES.T1) })
+    const css = await styleText(el)
+    expect(css).toMatch(
+      /\.turn-block \.body table\s*\{[^}]*display:\s*block/,
+    )
+    expect(css).toMatch(
+      /\.turn-block \.body table\s*\{[^}]*max-width:\s*100%[^}]*overflow-x:\s*auto/,
+    )
+    // 「查看全部」弹层同约束（不成为布局破坏旁路）。
+    expect(css).toMatch(/\.view-all-body table\s*\{[^}]*overflow-x:\s*auto/)
+    // 3c：table 内恢复 overflow-wrap:normal——anywhere 继承会把文字表格
+    // 压到一字符宽，横滚永不触发；normal 让 min-content 超宽时走上横滚。
+    expect(css).toMatch(/\.turn-block \.body table\s*\{[^}]*overflow-wrap:\s*normal/)
+    expect(css).toMatch(/\.view-all-body table\s*\{[^}]*overflow-wrap:\s*normal/)
+    // pre 代码块滚动语义不回退（round7 1.3：nowrap/滚动保持既有形态）。
+    expect(css).toMatch(/\.turn-block \.body pre\s*\{[^}]*overflow-x:\s*auto/)
+    el.remove()
+  })
+
+  it('meta author names carry the shrink guard so timestamps/receipt chips stay put', async () => {
+    const el = await mount({ entries: streamedTurn('hi', ['a'], FIXED_DATES.T1) })
+    const css = await styleText(el)
+    expect(css).toMatch(
+      /\.turn-block \.meta \.author\s*\{[^}]*min-width:\s*0[^}]*text-overflow:\s*ellipsis/,
+    )
+    el.remove()
+  })
+
+  it('timestamps sit inline after the author on both sides (round7 4.3)', async () => {
+    // 单一约定：时间戳紧随作者名（用户气泡与 agent 行一致）。旧的
+    // margin-left:auto 把 agent 时间戳推到整行右缘悬空——不得回归。
+    const el = await mount({ entries: streamedTurn('hi', ['a'], FIXED_DATES.T1) })
+    const css = await styleText(el)
+    expect(css).toMatch(/\.turn-block \.meta \.time\s*\{[^}]*\}/)
+    expect(css).not.toMatch(/\.turn-block \.meta \.time\s*\{[^}]*margin-left:\s*auto/)
+    // 两侧 meta 行都渲染 time 节点（用户 + agent）。
+    const times = el.shadowRoot!.querySelectorAll('.turn-block .meta time.time')
+    expect(times.length).toBe(2)
+    el.remove()
+  })
+})

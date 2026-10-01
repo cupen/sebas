@@ -171,6 +171,12 @@ impl DispatchHandle {
                 // result 帧映射为 Error + Finished 配对，Finished 走本函数
                 // 的 Finished 臂收尾）；本臂服务 dispatch_acp_event 直达路
                 // 径，与该配对语义一致。
+                //
+                // （fix-webui-qa-round7 2.2，acp-model-selection D2）模型切换
+                // 拒绝（非终态 Error 带 MODEL_UNCHANGED_MARKER）现在也到达本
+                // 臂：core pump 把带标记的该类 Error 归类为即时事件（不是回
+                // 合内容）——拒绝即终态收尾（SEED/WORKING → DONE + drain），
+                // 占位/SEED 窗口不再被推成 WORKING 滞留到 watchdog。
                 use crate::card_state::phase::{DONE, SEED, WORKING};
                 self.card_states
                     .apply(session_id.as_str(), |st| {

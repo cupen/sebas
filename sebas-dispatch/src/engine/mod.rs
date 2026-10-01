@@ -331,11 +331,20 @@ pub struct DispatchHandle {
     /// [`DispatchHandle::force_settle_stalled_turns`]。
     stall: stall::StallRegistry,
     /// （fix-webui-approval-restore-and-session-identity 2.2，design D2）被
-    /// 操作者取消（stop / interrupt）的回合打标：cancel 命令发出时记入
-    /// session_id，`apply_event` 的 `Finished` 分支消费——为被打标的回合
-    /// append 一条「回合被停止」错误类条目，不再让被停回合无声消失。
-    /// 纯内存、随事件消费，`Finished` 之后标志即清（正常完成不含该条目）。
-    cancelled_turns: Arc<RwLock<std::collections::HashSet<String>>>,
+    /// 操作者取消（stop / interrupt）的回合打标：cancel 命令发出时记入，
+    /// `apply_event` 的 `Finished` 分支消费——为被打标的回合 append 一条
+    /// 「回合被停止」错误类条目，不再让被停回合无声消失。
+    /// 纯内存、随事件消费。
+    ///
+    /// （fix-webui-qa-round7 2.2，acp-model-selection D2）**按回合身份关联**：
+    /// 值 = 打标时刻该会话最后一条 prompt 条目的 position（回合锚，开轮时由
+    /// `seed_card` 落下）。旧实现是 per-session 无回合身份的集合——被打标回
+    /// 合若始终没等到 Finished（子进程死亡 / watchdog 强收），陈旧标记会被
+    /// 任意后续回合的 Finished 消费，伪造「操作者中断」条目（QA DEF-02 实
+    /// 锤）。锚定后标记只能被**同一回合**的终结事件消费：后续回合的 prompt
+    /// position 必然更大，陈旧标记在下次 Finished 时自然识别为过期并丢弃；
+    /// 无 prompt（空闲会话的 /cancel）不打标——没有可标注的回合。
+    cancelled_turns: Arc<RwLock<HashMap<String, u64>>>,
 }
 
 impl Clone for DispatchHandle {
@@ -438,7 +447,7 @@ impl DispatchHandle {
                 perm_events,
                 turn_events,
                 stall: stall::StallRegistry::default(),
-                cancelled_turns: Arc::new(RwLock::new(std::collections::HashSet::new())),
+                cancelled_turns: Arc::new(RwLock::new(HashMap::new())),
             },
             rx,
         )
@@ -1409,7 +1418,20 @@ impl DispatchHandle {
                 // 打标在 Finished 到达时消费——append 一条错误类「回合被停止」
                 // 条目（复用既有错误条目渲染，不新增 entry kind），transcript
                 // 不再让被停回合无声消失。正常完成回合无标、无条目。
-                if self.cancelled_turns.write().await.remove(session_id) {
+                //
+                // （fix-webui-qa-round7 2.2，acp-model-selection D2）按回合身份
+                // 消费：标记只在「打标时的回合 = 正在收尾的回合」时生效——
+                // 当前回合锚（最后一条 prompt 的 position）与标记相等才注入停
+                // 止条目。不等（陈旧标记来自更早的回合）则静默丢弃，后续无关
+                // 回合绝不出现「操作者中断」。drain（开下一轮、写新 prompt）
+                // 发生在 apply_event 之后，消费窗口内最后一条 prompt 就是本
+                // 回合的。
+                let stop_entry = {
+                    let anchor = self.current_turn_anchor(session_id).await;
+                    let taken = self.cancelled_turns.write().await.remove(session_id);
+                    matches!((taken, anchor), (Some(marked), Some(a)) if marked == a)
+                };
+                if stop_entry {
                     let entry = TurnEntry::error(0, "回合被停止（操作者中断了本次回复）")
                         .with_failure_class(failure_class::GENERIC);
                     self.transcript_push(session_id, entry).await;
@@ -2087,11 +2109,30 @@ impl DispatchHandle {
 
     /// （2.2）回合取消打标：cancel 派发前调用，`apply_event` 的 `Finished`
     /// 分支消费后补「回合被停止」条目。正常完成回合无标、无条目。
+    ///
+    /// （fix-webui-qa-round7 2.2）打标值 = 当前回合锚（最后一条 prompt 条目
+    /// 的 position，回合身份）。无 prompt = 没有正在跑/可标注的回合（空闲
+    /// 会话的 `/cancel`）——不打标，杜绝陈旧标记污染后续无关回合。
     async fn mark_cancelled_turn(&self, session_id: &str) {
-        self.cancelled_turns
-            .write()
-            .await
-            .insert(session_id.to_string());
+        if let Some(anchor) = self.current_turn_anchor(session_id).await {
+            self.cancelled_turns
+                .write()
+                .await
+                .insert(session_id.to_string(), anchor);
+        }
+    }
+
+    /// 当前回合锚：最后一条 prompt 条目的 position（`seed_card`/开轮写入）。
+    /// `None` = 该会话从未开轮（无 prompt 条目）。与
+    /// `append_zero_output_notice_if_empty` 的回合切片判定同源。
+    async fn current_turn_anchor(&self, session_id: &str) -> Option<u64> {
+        let g = self.turn_log.read().await;
+        g.get(session_id)
+            .and_then(|log| {
+                log.iter()
+                    .rposition(|e| e.kind == TurnKind::Prompt)
+                    .map(|i| log[i].position)
+            })
     }
 
     /// Send a message to an existing session from the WebUI. Returns

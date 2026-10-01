@@ -7,9 +7,20 @@ import { describe, expect, it } from 'vitest'
 import { MODE_OPTIONS, modeBadgeLabel } from './mode-vocabulary.js'
 
 describe('mode descriptions state behavioral equivalence honestly (round2 2.3)', () => {
-  it('exactly four entries with stable wire values and labels', () => {
+  it('exactly four entries with stable wire values and bilingual labels (round7 4.1)', () => {
     expect(MODE_OPTIONS.map((m) => m.value)).toEqual(['ask', 'edit', 'allow', 'auto'])
-    expect(MODE_OPTIONS.map((m) => m.label)).toEqual(['Ask', 'Edit', 'Allow', 'Auto'])
+    // label 双语：英文模式词 + 中文副标注（与 modeBadgeLabel 同措辞）。
+    // 发送值不变——label 只是人读面。
+    expect(MODE_OPTIONS.map((m) => m.label)).toEqual([
+      'Ask · 逐次询问',
+      'Edit · 自动接受编辑',
+      'Allow · 放行',
+      'Auto · 自动执行',
+    ])
+    for (const m of MODE_OPTIONS) {
+      const [, gloss] = m.label.split(' · ')
+      expect(gloss).toBe(modeBadgeLabel(m.value))
+    }
   })
 
   it('allow and auto declare each other equivalent and promise no difference', () => {

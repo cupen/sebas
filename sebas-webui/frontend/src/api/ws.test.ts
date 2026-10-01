@@ -354,21 +354,43 @@ describe('WsClient', () => {
     expect(states).toEqual([true])
   })
 
-  // ─── fix-webui-qa-round3 2.7 / D11：登录前的 /ws 重试静默/长退避 ─────────
+  // ─── fix-webui-qa-round7 3.1（webui-ws-rpc D3）：升级失败进静默等待 ─────
 
-  it('a socket that never opened reconnects on the LONG backoff (no 401 retry storm)', () => {
-    // 登录前的 401 升级拒绝形状：onclose 直接来，open 从未发生。短梯
-    // （100ms 起）会让 console 每页刷 3–6 条 401；现在首Retr ≥ 30s。
+  it('a socket that never opened enters the silent wait — no periodic upgrade attempts', () => {
+    // 登录页形状：模块装载急连一次（允许存在），升级被拒（onclose 且从未
+    // open）。静默等待态：推进任意长时钟都不产生新的升级尝试——console
+    // 不再出现周期性 /ws 失败（spec「登录页无重连噪音」）。
     const client = makeClient()
     client.hostConnected()
     expect(FakeSocket.instances).toHaveLength(1)
     FakeSocket.instances[0]!.drop() // 401 rejection: never opened
-    // 旧短梯的全部窗口内（≤15s）零新尝试。
-    vi.advanceTimersByTime(15_000)
+    // 旧 30s 长退避窗口与更多轮次内零新尝试。
+    vi.advanceTimersByTime(120_000)
     expect(FakeSocket.instances).toHaveLength(1)
-    // 长退避（缺省 30s）到点才重试。
-    vi.advanceTimersByTime(15_000)
+  })
+
+  it('the silent wait is released by the auth gate path (setAuthGated(false)) and explicit reconnectNow', () => {
+    // 等待态的解除条件 = 鉴权闸解除（登录成功/会话恢复）或操作者显式触发。
+    const client = makeClient()
+    client.hostConnected()
+    FakeSocket.instances[0]!.drop() // never opened → silent wait
+    // 显式 reconnectNow 即放行（一次尝试）。
+    client.reconnectNow()
     expect(FakeSocket.instances).toHaveLength(2)
+    // 静默等待不粘连曾打开语义：释放后的连接若再掉线，回到短退避梯。
+    FakeSocket.instances[1]!.open()
+    FakeSocket.instances[1]!.drop()
+    vi.advanceTimersByTime(100)
+    expect(FakeSocket.instances).toHaveLength(3)
+
+    // 另一条解除路径：鉴权闸 false（内含 reconnectNow）。
+    const client2 = makeClient()
+    client2.hostConnected()
+    FakeSocket.instances[3]!.drop() // never opened → silent wait
+    vi.advanceTimersByTime(60_000)
+    expect(FakeSocket.instances).toHaveLength(4)
+    client2.setAuthGated(false)
+    expect(FakeSocket.instances).toHaveLength(5)
   })
 
   it('a socket that opened once returns to the short ladder after a drop', () => {
@@ -380,10 +402,45 @@ describe('WsClient', () => {
     expect(FakeSocket.instances).toHaveLength(2)
   })
 
+  it('an established client whose reconnect upgrades keep failing converges to the silent wait', () => {
+    // （fix-webui-qa-round7 3c）「会话失效不死循环重连」：曾打开过的连接
+    // 断线后先走短退避梯；未打开过的重连尝试至多 MAX_UNOPENED_RECONNECTS
+    // 次（瞬时故障自愈容忍窗），超过即视作疑似凭据失效（升级持续被拒）
+    // 收敛到静默等待——不无限急连；容忍窗内重连成功打开则照常自愈。
+    const client = makeClient() // backoffMs: 100
+    client.hostConnected()
+    FakeSocket.instances[0]!.open()
+    FakeSocket.instances[0]!.drop()
+    vi.advanceTimersByTime(100)
+    expect(FakeSocket.instances).toHaveLength(2)
+    // 容忍窗内：连续 3 次未打开的重连仍按短退避梯推进（瞬时抖动可自愈）。
+    FakeSocket.instances[1]!.drop()
+    vi.advanceTimersByTime(200)
+    expect(FakeSocket.instances).toHaveLength(3)
+    FakeSocket.instances[2]!.drop()
+    vi.advanceTimersByTime(400)
+    expect(FakeSocket.instances).toHaveLength(4)
+    FakeSocket.instances[3]!.drop()
+    vi.advanceTimersByTime(800)
+    expect(FakeSocket.instances).toHaveLength(5)
+    // 第 4 次未打开 → 疑似凭据失效：收敛到静默等待，怎么推时钟都不再尝试。
+    FakeSocket.instances[4]!.drop()
+    vi.advanceTimersByTime(120_000)
+    expect(FakeSocket.instances).toHaveLength(5, '升级持续被拒后不再急连')
+    // 静默等待仍可被鉴权闸解除路径救活。
+    client.setAuthGated(false)
+    expect(FakeSocket.instances).toHaveLength(6)
+    // 救活后成功打开再掉线 → 容忍窗复位，回到短退避自愈梯。
+    FakeSocket.instances[5]!.open()
+    FakeSocket.instances[5]!.drop()
+    vi.advanceTimersByTime(100)
+    expect(FakeSocket.instances).toHaveLength(7)
+  })
+
   it('setAuthGated(true) silences reconnection; false restores and reconnects now', () => {
     const client = makeClient()
     client.hostConnected()
-    FakeSocket.instances[0]!.drop() // never opened; long timer scheduled
+    FakeSocket.instances[0]!.drop() // never opened; silent wait (no timer at all)
     client.setAuthGated(true)
     // 闸下：排定的重连被取消，怎么推进时钟都不再尝试。
     vi.advanceTimersByTime(120_000)

@@ -36,6 +36,9 @@ export default defineConfig({
     // testMatch 同名单）；auth=off 的主沙箱零用户，beforeAll 的 admin/admin
     // 登录必 401——漏列曾让主配置全量跑必红（2 failed + 6 did-not-run）。
     /agents-gate\.spec\.ts/,
+    // qa-round7-ws-auth 的被测前提是「未认证登录页」（webui-ws-rpc 升级 401
+    // 静默闸）——只在 auth-on 形态成立，与 auth.spec.ts 同名单跑 9898。
+    /qa-round7-ws-auth\.spec\.ts/,
     /deployment\.spec\.ts/,
     /approval-detached\.spec\.ts/,
     /singleprocess-dead-core\.spec\.ts/,

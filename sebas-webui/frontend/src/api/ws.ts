@@ -18,7 +18,10 @@
  *   10s timeout, immediate `not_connected` rejection when the socket is
  *   down (no queueing — reconnect convergence rides the existing refetch
  *   path), and every in-flight request is rejected on close;
- * - reconnect with exponential backoff after a drop, and refetch the
+ * - reconnect with exponential backoff after a drop (only for connections
+ *   that had opened at least once; an upgrade that never opened — typical
+ *   unauthenticated 401 — parks the client in a silent wait released by the
+ *   auth gate or an explicit `reconnectNow`), and refetch the
  *   visible view's data afterwards (the `onReconnect` hook).
  */
 
@@ -273,13 +276,8 @@ export interface WsClientOptions {
   backoffMs?: number
   maxBackoffMs?: number
   /**
-   * （fix-webui-qa-round3 2.7 / D11）**从未成功打开过**的连接失败（典型：
-   * 登录前的 `/ws` 升级 401 拒绝）之间的重试间隔——长退避，缺省 30s。
-   * 认证成功后的 `reconnectNow()` 立即越过它。与此同时短退避梯
-   * （backoffMs→maxBackoffMs）只服务于「曾连上后掉线」的重连。
+   * Frame codec (add-ws-rpc-protocol D2/D5); defaults to the JSON codec.
    */
-  unopenedBackoffMs?: number
-  /** Frame codec (add-ws-rpc-protocol D2/D5); defaults to the JSON codec. */
   codec?: WsFrameCodec
   /** `request()` timeout window in ms; default 10s (design D5). */
   requestTimeoutMs?: number
@@ -293,10 +291,16 @@ export class WsClient implements ReactiveController {
   private attempts = 0
   private backoffMs: number
   private maxBackoffMs: number
-  /** （fix-webui-qa-round3 2.7 / D11）未成功打开过的失败间长退避。 */
-  private readonly unopenedBackoffMs: number
   /** 是否曾成功打开过（打开过 → 断线重连走既有短退避梯）。 */
   private everOpened = false
+  /**
+   * （fix-webui-qa-round7 3c）连续「从未打开就关闭」的次数。已建立过的
+   * 连接断线后允许这么多次未打开的重连尝试（瞬时故障自愈的容忍窗），
+   * 超过即视作疑似凭据失效（升级持续被拒），复位 everOpened 收敛到
+   * 静默等待——不无限急连。
+   */
+  private static readonly MAX_UNOPENED_RECONNECTS = 3
+  private unopenedCloses = 0
   /**
    * （fix-webui-qa-round3 2.7 / D11）鉴权闸：true = 宿主声明当前未认证
    * （登录前 / 会话失效后），不再发起任何连接尝试（重连定时器就地取消，
@@ -318,7 +322,6 @@ export class WsClient implements ReactiveController {
   constructor(host: ReactiveControllerHost, options: WsClientOptions = {}) {
     this.backoffMs = options.backoffMs ?? 500
     this.maxBackoffMs = options.maxBackoffMs ?? 15_000
-    this.unopenedBackoffMs = options.unopenedBackoffMs ?? 30_000
     this.onReconnect = options.onReconnect
     this.onStateChange = options.onStateChange
     this.socketFactory = options.socketFactory ?? ((url) => new WebSocket(url))
@@ -434,8 +437,11 @@ export class WsClient implements ReactiveController {
     const proto = location.protocol === 'https:' ? 'wss://' : 'ws://'
     const socket = this.socketFactory(`${proto}${location.host}/ws`)
     this.socket = socket
+    let openedThisSocket = false
 
     socket.onopen = () => {
+      openedThisSocket = true
+      this.unopenedCloses = 0
       const wasRetry = this.attempts > 0
       this.attempts = 0
       // D11：首次成功打开后，断线重连才回到既有短退避梯——登录前的 401
@@ -476,6 +482,14 @@ export class WsClient implements ReactiveController {
       this.socket = null
       // D5：断线批量拒付在途请求——诚实优于悬挂。
       this.failPending('disconnected', 'connection lost with requests in flight')
+      // （fix-webui-qa-round7 3c）会话失效收敛：曾打开过的连接断线后，未
+      // 打开过的重连尝试允许至多 MAX_UNOPENED_RECONNECTS 次（瞬时故障的
+      // 自愈容忍窗），超过即视作疑似凭据失效（升级持续被拒），复位
+      // everOpened 收敛到静默等待——不无限急连。真掉线自愈（重连成功
+      // 打开）在容忍窗内不受影响。
+      if (!openedThisSocket) this.unopenedCloses += 1
+      else this.unopenedCloses = 0
+      if (this.unopenedCloses > WsClient.MAX_UNOPENED_RECONNECTS) this.everOpened = false
       if (this.closedByUser) return
       this.onStateChange?.(false)
       this.scheduleReconnect()
@@ -487,13 +501,17 @@ export class WsClient implements ReactiveController {
   }
 
   private scheduleReconnect(): void {
-    // （fix-webui-qa-round3 2.7 / D11）未认证闸 / 从未打开过的失败（登录前
-    // 401 拒绝的典型形状）都不得进入短退避梯：闸下静默；未打开过走长退避
-    // （缺省 30s）——console 不再每页刷 3–6 条 401 噪音（QA W3 实锤）。
+    // （fix-webui-qa-round3 2.7 / D11）未认证闸下静默。
+    // （fix-webui-qa-round7 3.1，webui-ws-rpc D3）升级失败（close 且
+    // everOpened=false，典型为未认证 401）视作疑似未认证：**不排任何重连
+    // 定时器**，进入静默等待态——WS API 拿不到升级拒绝的 HTTP 状态码，只有
+    // close 事件可观测，故以「从未打开过」为疑似判据。等待的解除复用既有
+    // 鉴权闸路径：登录成功 / 会话恢复时宿主 setAuthGated(false)（内含
+    // reconnectNow）立即发起一次尝试；操作者显式 reconnectNow() 同样放行。
+    // 「曾打开过 → 指数退避」的断线自愈语义不动。
     if (this.authGated || this.closedByUser) return
-    const delay = this.everOpened
-      ? Math.min(this.backoffMs * 2 ** this.attempts, this.maxBackoffMs)
-      : this.unopenedBackoffMs
+    if (!this.everOpened) return
+    const delay = Math.min(this.backoffMs * 2 ** this.attempts, this.maxBackoffMs)
     this.attempts += 1
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null

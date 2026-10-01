@@ -151,3 +151,103 @@ async fn terminal_error_flushes_removes_and_exits() {
     let m = map.get(&key).await.expect("记录（Dormant）必须保留");
     assert!(m.session_id().is_none(), "活跃绑定必须清掉: {m:?}");
 }
+
+// ── fix-webui-qa-round7 2.2（acp-model-selection D2）：模型拒绝即时收尾 ──────
+
+/// 带稳定标记的非终态 Error（模型切换拒绝）必须走即时路径：SEED 占位不被
+/// 推成 WORKING 滞留，而是经 apply_event_to_out 锚定收尾 DONE——拒绝即终态，
+/// 远早于 600s watchdog（QA DEF-02 的 pump 半边）。
+#[tokio::test]
+async fn model_rejection_error_is_immediate_in_the_pump() {
+    let map = SessionMap::new();
+    let key = sebas_channels::ChannelKey::feishu("oc_round7", None);
+    map.insert(key.clone(), Mapping::active("s-model"))
+        .await
+        .unwrap();
+    let (router, mut out_rx) = DispatchHandle::new(map);
+    // 接收回执相位（SEED + prompt）——拒绝到达时的典型窗口。
+    router.seed_card("s-model".into(), "p".into()).await;
+    let (tx, rx) = mpsc::channel::<AcpEvent>(64);
+    let rx = Arc::new(tokio::sync::Mutex::new(rx));
+    spawn_acp_pump(rx, router.clone(), "s-model".into());
+
+    tx.send(AcpEvent::Error {
+        session_id: "s-model".into(),
+        message: format!(
+            "set model \"bad-model\" 被拒绝（Invalid params），{}",
+            sebas_acp::MODEL_UNCHANGED_MARKER
+        ),
+        terminal: false,
+    })
+    .await
+    .unwrap();
+
+    // 即时性：不推进 150ms 节流窗，收尾产物（flush 的 UpdateCard）即刻到达。
+    let out = tokio::time::timeout(Duration::from_millis(100), out_rx.recv())
+        .await
+        .expect("model rejection settles immediately (no debounce)")
+        .expect("channel open");
+    assert!(matches!(out, Out::UpdateCard { .. }), "got {out:?}");
+
+    // 相位终态：DONE（非 WORKING 滞留）；拒绝条目可见。
+    let phase = router
+        .card_state_snapshot()
+        .await
+        .remove("s-model")
+        .map(|st| st.status_emoji);
+    assert_eq!(
+        phase.as_deref(),
+        Some(sebas_dispatch::card_state::phase::DONE),
+        "拒绝即终态收尾"
+    );
+    let turns = router.session_turns(&key, 0).await.unwrap();
+    assert!(
+        turns
+            .iter()
+            .any(|e| e.content.contains("bad-model") && e.content.contains("模型未变")),
+        "拒绝回执如实落转录"
+    );
+}
+
+/// 对照组：不带标记的普通非终态 Error（claude refusal 配对的前半）仍走流式
+/// 臂——FSM 照旧 SEED→WORKING，**不**触发即时收尾；终态语义留给配对的
+/// Finished，配对语义不受影响。（不设时序断言：pump 的 interval 首 tick 与
+/// 事件到达存在良性竞态，flush 时刻不定；相位结果是确定的。）
+#[tokio::test]
+async fn unmarked_nonterminal_error_keeps_the_streaming_arm() {
+    let map = SessionMap::new();
+    let (router, mut out_rx) = DispatchHandle::new(map);
+    router.seed_card("s-pair".into(), "p".into()).await;
+    let (tx, rx) = mpsc::channel::<AcpEvent>(64);
+    let rx = Arc::new(tokio::sync::Mutex::new(rx));
+    spawn_acp_pump(rx, router.clone(), "s-pair".into());
+
+    tx.send(AcpEvent::Error {
+        session_id: "s-pair".into(),
+        message: "agent declined the request".into(),
+        terminal: false,
+    })
+    .await
+    .unwrap();
+
+    // 等流式臂的 debounce flush 落地（≤150ms 窗 + 余量）。
+    let deadline = std::time::Instant::now() + Duration::from_millis(600);
+    while std::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(200), out_rx.recv()).await {
+            Ok(Some(_)) => break,
+            Ok(None) => panic!("channel closed"),
+            Err(_) => {}
+        }
+    }
+    let phase = router
+        .card_state_snapshot()
+        .await
+        .remove("s-pair")
+        .map(|st| st.status_emoji);
+    assert_eq!(
+        phase.as_deref(),
+        Some(sebas_dispatch::card_state::phase::WORKING),
+        "无标记的非终态 Error 走流式臂（SEED→WORKING），收尾留给配对 Finished——\
+         与带标记的模型拒绝（即时 DONE）语义分野"
+    );
+}

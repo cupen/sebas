@@ -353,8 +353,12 @@ impl AgentDriver for AcpDriver {
                                         }
                                         Err(e) => {
                                             // 失败路径：会话仍可用、本地 current
-                                            // 不变。显式发 Error（非 terminal），
-                                            // 调用方/UI 呈现"模型不可用/无效"。
+                                            // 不变。显式发 Error（非 terminal）
+                                            // + 稳定标记（MODEL_UNCHANGED_MARKER，
+                                            // fix-webui-qa-round7 2.2）：调用方/UI
+                                            // 呈现"模型不可用/无效"，引擎把该
+                                            // 类 Error 归类为模型切换失败——终态
+                                            // 边收尾回合，不滞留 WORKING。
                                             tracing::warn!(
                                                 kind = %kind_slug,
                                                 session_id = %routing_id,
@@ -366,7 +370,8 @@ impl AgentDriver for AcpDriver {
                                                 .send(AcpEvent::Error {
                                                     session_id: final_routing.clone(),
                                                     message: format!(
-                                                        "set model {model_id:?} failed: {e}"
+                                                        "set model {model_id:?} 被拒绝（{e}），{}",
+                                                        crate::MODEL_UNCHANGED_MARKER
                                                     ),
                                                     terminal: false,
                                                 })

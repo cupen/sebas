@@ -267,11 +267,12 @@ describe('composer is pure follow-up (4.1)', () => {
       optionEls.find((o) => o.getAttribute('value') === v)?.getAttribute('title') ?? ''
     expect(titleOf('allow')).toContain('与 Auto 等价')
     expect(titleOf('auto')).toContain('与 Allow 等价')
-    // 标签保持裸词（等价声明不进标签）。
+    // （fix-webui-qa-round7 4.1）标签双语化：英文模式词 + 中文副标注；
+    // 等价声明仍只走 description（title），不进标签语义。
     const labelOf = (v: string) =>
       optionEls.find((o) => o.getAttribute('value') === v)?.textContent?.trim()
-    expect(labelOf('allow')).toBe('Allow')
-    expect(labelOf('auto')).toBe('Auto')
+    expect(labelOf('allow')).toBe('Allow · 放行')
+    expect(labelOf('auto')).toBe('Auto · 自动执行')
   })
 
   it('composer mode dropdown shares the MODE_OPTIONS vocabulary with the creation dialog (4.1)', async () => {
@@ -288,7 +289,8 @@ describe('composer is pure follow-up (4.1)', () => {
     // 恰为四个共享模式（顺序一致），无空值默认项。
     expect(options).toEqual(MODE_OPTIONS.map((m) => m.value))
     const labels = optionEls.map((o) => o.textContent ?? '')
-    expect(labels[0]).toBe('Ask')
+    // （fix-webui-qa-round7 4.1）双语 label：首项 Ask · 逐次询问。
+    expect(labels[0]).toBe('Ask · 逐次询问')
     expect(labels).toEqual(MODE_OPTIONS.map((m) => m.label))
     // 每个选项携带 title 悬浮解释（与共享词汇的 description 一一对应）；
     // 下拉不渲染 hint 行——hint 属性未设（空串）。

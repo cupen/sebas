@@ -82,6 +82,11 @@
 //!   tool_result follows its own decision (allow → success text, deny →
 //!   is_error), then a post-loop text and result close the turn normally. This
 //!   is the driver-side data source for the parallel-approval-card journeys.
+//! - user text == "table" (fix-webui-qa-round7 1.3) → ONE text frame with a
+//!   deterministic rich-markdown reply (12-column GFM table + a 220-char
+//!   no-space code line + a no-space CJK run) — the agent-side data source for
+//!   the transcript layout journey (block-level table scroll, pre scroll
+//!   semantics, CJK wrapping).
 
 use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
@@ -564,6 +569,14 @@ fn main() {
                     hanging = true;
                 } else if text == "perm" {
                     perm_turn(&flags, &mut io, &stdin_rx, &mut hook_counter);
+                } else if text == "table" {
+                    // fix-webui-qa-round7 1.3：富 markdown 回复触发词——GFM
+                    // 宽表格 + 长行代码块 + 无空格 CJK 长句，一个回合全带齐
+                    // （布局旅程断言表格块级横向滚动、pre 滚动语义不回退、
+                    // CJK 折行不撑破面板的数据源；与 perm/drip 同机制）。
+                    emit_assistant_text(&mut io, &flags.session_id, &rich_markdown_reply(), reported_model(&flags));
+                    settle_pause(&mut flags);
+                    io.emit(&result_frame(&flags.session_id, "success", false));
                 } else if text == "stream" {
                     stream_turn(&mut flags, &mut io, &stdin_rx);
                 } else if text == "drip" {
@@ -896,6 +909,36 @@ fn flood_turn(flags: &mut Flags, io: &mut Io, stdin_rx: &std::sync::mpsc::Receiv
         }
     }
     io.emit(&result_frame(&sid, "success", false));
+}
+
+/// "table" 触发词的富 markdown 回复（fix-webui-qa-round7 1.3）：一段确定性
+/// 内容同时覆盖布局旅程的三个 agent 侧断言面——
+/// 1. **宽 GFM 表格**：12 列长表头，宽度必然超出转录正文列（min(680px, …)），
+///    断言表格块级横向滚动（display:block + overflow-x:auto）而转录容器不
+///    横向溢出；
+/// 2. **长行代码块**：单行 200+ 字符无空格 token，断言 `pre` 保持
+///    white-space:pre + 自身横向滚动（overflow-wrap:anywhere 不回退其语义）；
+/// 3. **无空格 CJK 长句**：断言 CJK 文本折行不撑破面板（anywhere 兜底）。
+/// 内容逐字面（无随机、无时间戳），多次触发形状一致，截图可对照。
+fn rich_markdown_reply() -> String {
+    // 表格取 **160 列短 token**：块级横滚断言需要一个「min-content 仍宽于容
+    // 器」的表格——单元格内容可折行时（overflow-wrap:anywhere 自 .body 继承
+    // 进表格），列会压到一字符宽、整表塞进正文列，横向滚动永不触发（该压缩
+    // 行为已作为观感发现上报）；列数多到压不进容器时，display:block +
+    // overflow-x:auto 的横滚路径才真实可达。
+    let header: Vec<String> = (1..=160).map(|i| format!("c{i:03}")).collect();
+    let rule: Vec<&str> = std::iter::repeat("----").take(160).collect();
+    let row: Vec<String> = (1..=160).map(|i| format!("v{i:03}")).collect();
+    let long_code_line = "x".repeat(220);
+    let cjk_run = "中文连续长句".repeat(160);
+    format!(
+        "| {} |\n| {} |\n| {} |\n\n```text\n{}\n```\n\n{}\n",
+        header.join(" | "),
+        rule.join(" | "),
+        row.join(" | "),
+        long_code_line,
+        cjk_run
+    )
 }
 
 fn run_scenario(

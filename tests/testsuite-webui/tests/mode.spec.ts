@@ -55,14 +55,15 @@ test.describe('agent mode 选择', () => {
     expect(optionValues).toEqual(['ask', 'edit', 'allow', 'auto'])
 
     // hint 行随当前选中模式：初始预选 ask →「逐次询问」；改选 edit →
-    // 跟随切换为「自动接受编辑」（Playwright 定位穿透 shadow DOM）。
-    await expect(modeSelect).toContainText('逐次询问')
+    // 跟随切换为「自动接受编辑」。option 常驻 DOM（round7 4.1 起 label
+    // 双语化，option 文本恒含全部措辞），hint 断言钉 select 的 hint 属性。
+    const hintOf = (el: Element) => (el as unknown as { hint: string }).hint
+    expect(await modeSelect.evaluate(hintOf)).toBe('逐次询问')
     await modeSelect.evaluate((el) => {
       ;(el as unknown as { value: string }).value = 'edit'
       el.dispatchEvent(new Event('change', { bubbles: true }))
     })
-    await expect(modeSelect).toContainText('自动接受编辑')
-    await expect(modeSelect).not.toContainText('逐次询问')
+    expect(await modeSelect.evaluate(hintOf)).toBe('自动接受编辑')
 
     // 无聚焦会话时 composer 只渲染 rail 创建指引——不承载任何 mode 控件
     // （创建选择归对话框；会话中切换归 composer 底沿，见下方用例）。
@@ -163,9 +164,9 @@ test.describe('agent mode 选择', () => {
     const auto = meta.find((o) => o.value === 'auto')
     expect(allow?.title).toContain('与 Auto 等价')
     expect(auto?.title).toContain('与 Allow 等价')
-    // 标签保持裸词（等价声明走 helper text，不进标签）。
-    expect(allow?.label).toBe('Allow')
-    expect(auto?.label).toBe('Auto')
+    // 标签双语化（fix-webui-qa-round7 4.1；等价声明仍走 title helper）。
+    expect(allow?.label).toBe('Allow · 放行')
+    expect(auto?.label).toBe('Auto · 自动执行')
 
     // 收起，不做选择（change 只在真选择时派发）。
     await page.keyboard.press('Escape')

@@ -234,7 +234,6 @@ describe('sebas-new-session-dialog', () => {
     // mode 下拉的 hint 行（初始预选 ask 即显示其解释，随选择切换）；
     // wire 值仍是小写 ask/edit/allow/auto。
     const { MODE_OPTIONS } = await import('./mode-vocabulary.js')
-    expect(MODE_OPTIONS.map((m) => m.label)).toEqual(['Ask', 'Edit', 'Allow', 'Auto'])
     expect(MODE_OPTIONS.map((m) => m.value)).toEqual(['ask', 'edit', 'allow', 'auto'])
     const el = await mount({ open: true, defaultAgent: 'claude' })
     const modeSel = el.shadowRoot!.querySelector('[data-testid="dialog-mode-select"]') as
@@ -244,8 +243,10 @@ describe('sebas-new-session-dialog', () => {
       label: o.textContent ?? '',
       title: (o as unknown as { title: string }).title,
     }))
-    expect(options[0]!.label).toBe('Ask')
-    expect(options.map((o) => o.label)).toEqual(['Ask', 'Edit', 'Allow', 'Auto'])
+    // （fix-webui-qa-round7 4.1）双语 label 同源下发。
+    expect(options[0]!.label).toBe(MODE_OPTIONS[0]!.label)
+    expect(options[0]!.label).toBe('Ask · 逐次询问')
+    expect(options.map((o) => o.label)).toEqual(MODE_OPTIONS.map((m) => m.label))
     expect(options.some((o) => o.value === '')).toBe(false)
     // 每个选项携带 title 悬浮解释（与共享词汇的 description 一一对应）。
     expect(options.map((o) => o.title)).toEqual(MODE_OPTIONS.map((m) => m.description))

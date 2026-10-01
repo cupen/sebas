@@ -903,8 +903,9 @@ export class SebasTranscriptView extends LitElement {
        内容侧去卡片（D4）：agent 回合不再有气泡壳——.flow 裸排（作者标签
        小字行 + 正文段/过程折叠按 run 序直接铺）；用户侧 .msg-block 收敛为
        轻底色块（tinted 背景、无边框阴影）。最宽 min(680px, 100% - 60px)；
-       时间戳在 meta 行（作者名 weight 600 淡色 + 时间右对齐
-       tabular-nums）。错误气泡保留计数卡片形态（D5）。 */
+       时间戳在 meta 行（作者名 weight 600 淡色 + 时间紧随其后、
+       tabular-nums；round7 4.3 起两侧统一为「紧随作者名」约定，不再右对齐）。
+       错误气泡保留计数卡片形态（D5）。 */
     .turn-block {
       display: flex;
       gap: 10px;
@@ -1018,15 +1019,25 @@ export class SebasTranscriptView extends LitElement {
       color: var(--sebas-text-faint);
       margin-bottom: 4px;
     }
+    /* （fix-webui-qa-round7 1.2，D1）作者名收缩守卫：meta 行是 flex 弹性行，
+       兄弟 .time/.receipt 均 nowrap；无 min-width:0 时长作者名把时间戳/回执
+       芯片推出视口。守卫后作者名省略号收干，时间戳保持原位。 */
     .turn-block .meta .author {
       font-weight: 600;
       color: var(--sebas-text-dim);
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
     .turn-block .meta .author.you {
       color: var(--sebas-accent);
     }
     .turn-block .meta .time {
-      margin-left: auto;
+      /* （fix-webui-qa-round7 4.3）时间戳统一约定：紧随作者名（与回执芯片
+         同行内联），两侧（用户气泡 / agent 行）一致。旧的「推到整行右缘」
+         对齐把 agent 时间戳悬在半空、远离作者名，与用户气泡内位置不一致
+         （QA round7 实锤）；该对齐写法不得回归。 */
       font-variant-numeric: tabular-nums;
       white-space: nowrap;
     }
@@ -1058,6 +1069,12 @@ export class SebasTranscriptView extends LitElement {
       font-size: 0.875rem;
       line-height: 1.65;
       color: var(--sebas-text);
+      /* （fix-webui-qa-round7 1.2，D1）真折行：anywhere 参与 min-content
+         收缩——无空格超长 token 不再撑破主面板。旧选择器只盖七种标签且用
+         不参与固有宽度计算的 break-word，2100+ 字符连续 token 把滚动容器
+         撑到万级 px。overflow-wrap 可继承，子元素（含 markdown 管线产出）
+         一并生效；pre 保持 white-space:pre + overflow-x 滚动，语义不回退。 */
+      overflow-wrap: anywhere;
     }
     /* 回合内多段文本（工具组切开的两段论述）：段间留一行呼吸，视觉上
        明确「中间发生过事」（design Risks：分段规则可读）。 */
@@ -1067,9 +1084,8 @@ export class SebasTranscriptView extends LitElement {
     .turn-block .process-fold + .process-fold {
       margin-top: var(--sebas-space-2);
     }
-    .turn-block .body :is(p, pre, ul, ol, h1, h2, h3, h4) {
-      overflow-wrap: break-word;
-    }
+    /* （fix-webui-qa-round7 1.2）折行已上提至 .body（anywhere 可继承）——
+       本规则退役；留位注释防回归者把 break-word 加回子标签。 */
     .turn-block .body :first-child {
       margin-top: 0;
     }
@@ -1096,6 +1112,16 @@ export class SebasTranscriptView extends LitElement {
       font-family: var(--sebas-font-mono);
       font-size: 0.82rem;
       line-height: 1.55;
+    }
+    /* （fix-webui-qa-round7 1.2，D1）GFM 表格块级横向滚动：宽于容器的表格
+       以自身滚动条呈现，转录容器本体不产生横向溢出（不撑破父容器）。 */
+    .turn-block .body table {
+      display: block;
+      max-width: 100%;
+      overflow-x: auto;
+      /* 3c：.body 的 anywhere 会继承进单元格，把文字表格压到一字符宽，
+         横滚永不触发——表格内恢复 normal，min-content 超宽时走上横滚。 */
+      overflow-wrap: normal;
     }
     .turn-block .body code {
       font-family: var(--sebas-font-mono);
@@ -1276,10 +1302,11 @@ export class SebasTranscriptView extends LitElement {
       outline-offset: 2px;
     }
     /* （4.3）流式中的当前条目：纯文本呈现保住换行语义（未经 markdown
-       解析），定稿后换 markdown 渲染。 */
+       解析），定稿后换 markdown 渲染。（fix-webui-qa-round7 1.2）折行
+       与 .body 同级 anywhere——流式里的无空格长 token 同样不撑破面板。 */
     .turn-block .body.text-live {
       white-space: pre-wrap;
-      overflow-wrap: break-word;
+      overflow-wrap: anywhere;
     }
     /* （4.5）「查看全部」弹层：会话滚动容器之外的独立 wa-dialog。 */
     .view-all-dialog {
@@ -1291,6 +1318,15 @@ export class SebasTranscriptView extends LitElement {
       line-height: 1.6;
       max-height: min(70vh, 640px);
       overflow-y: auto;
+      /* （fix-webui-qa-round7 1.2）弹层与转录同一排版约束：长 token 折行、
+         表格块级横向滚动——「查看全部」不得成为布局破坏的旁路。 */
+      overflow-wrap: anywhere;
+    }
+    .view-all-body table {
+      display: block;
+      max-width: 100%;
+      overflow-x: auto;
+      overflow-wrap: normal;
     }
   `
 

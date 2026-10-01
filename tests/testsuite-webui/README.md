@@ -96,6 +96,10 @@ pnpm --dir tests/testsuite-webui exec playwright test
 | 设置面 ¹ | 写降级 | S5b delete/probe mutations fail honestly, list unchanged | `settings.spec.ts` | 模型管理覆盖「settings provider 只读」 |
 | 提交反馈时限 ⁶ | core 挂起窗口（SIGSTOP） | 挂起期间提交：等待回执即时可见；解冻后免刷新落账 | `core-freeze-pending-ack.spec.ts` | live-turn-stream「Submission acknowledgment is bounded」挂起形态延伸（HTTP+WS 同停，route 注入复现不了）⁶ |
 | 部署韧性 ⁶ | 单进程 core 死亡 | core 死亡：ws-down 横幅 + rail 不可达 + 提交 NetworkError 内显且草稿保留 | `singleprocess-dead-core.spec.ts` | deployment/tiered-notices fatal 旅程的单进程半边（webui 本身即死进程，断连靠 SPA 自感）⁶ |
+| 转录布局 ⁹ | 长文本不撑破 | 2100+ 字符无空格消息不撑破面板；主题切换与重进入复断言 | `qa-round7-transcript-layout.spec.ts` | agent-workbench「转录任意内容不破坏布局」（fix-webui-qa-round7 delta，尚未归档）⁹ |
+| 转录布局 ⁹ | 表格/代码块/CJK | 宽 GFM 表格块级横滚、pre 滚动语义不回退、CJK 长句折行不撑破 | `qa-round7-transcript-layout.spec.ts` | agent-workbench「转录任意内容不破坏布局」（fix-webui-qa-round7 delta，尚未归档）⁹ |
+| 未认证 WS 重连闸 ⁹ | 登录页静默 | 登录页停留期 console 无周期性 /ws 升级失败（首连 1 条后静默） | `qa-round7-ws-auth.spec.ts` | webui-ws-rpc「未认证客户端不反复撞升级端点」（fix-webui-qa-round7 delta，尚未归档）⁹ |
+| 未认证 WS 重连闸 ⁹ | 登录后实时链路 | admin/admin 登录后 WS 建立，agent 回复实时上屏（无刷新） | `qa-round7-ws-auth.spec.ts` | webui-ws-rpc「未认证客户端不反复撞升级端点」（fix-webui-qa-round7 delta，尚未归档）⁹ |
 
 > ¹ 设置面（S1–S4, S6）的锚点指向尚未归档的 change `expand-webui-e2e-settings` 的 delta
 > scenario（尚未同步进主 spec）；S5a/S5b 锚到主 spec `模型管理覆盖`「settings provider
@@ -156,6 +160,15 @@ pnpm --dir tests/testsuite-webui exec playwright test
 > `claude_delta_gap_spreads_ws_frame_arrivals_over_time` /
 > `claude_delta_gap_spaces_the_default_scenario_deltas` 互补承载（见
 > `tests/acceptance/COVERAGE.md` ⁸）。
+
+> ⁹ fix-webui-qa-round7（2026-10-01）两条布局/WS 旅程的备注：
+> `qa-round7-transcript-layout.spec.ts` 固定 1280×720 视口（「scrollWidth 不
+> 超视口」需要确定性宽度）；agent 侧富 markdown（宽表格 + 长行代码块 + CJK
+> 长句）由 fake-claude 触发词 `table` 提供（此前无表格触发词，用户侧消息是
+> 纯 `<p>` 不走 markdown 管线）。`qa-round7-ws-auth.spec.ts` 跑 auth-on 形态
+> （playwright.auth.config.ts 同名单）；登录页静默断言取 35s 观察窗——旧实
+> 现未认证重连是固定 30s 慢梯，一个完整周期是分辨「首连 1 条」与「周期重试」
+> 的最小窗，test 级 timeout 相应放宽到 75s、`retries: 0`。
 
 能力矩阵账本见 `tests/acceptance/COVERAGE.md` 的 `testsuite-webui-browser` 一节。
 
