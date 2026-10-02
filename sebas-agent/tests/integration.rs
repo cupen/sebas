@@ -380,6 +380,10 @@ async fn event_vocabulary_over_full_turn() {
         .await
         .unwrap();
 
+    // （fix-webui-qa-round8 5.3）终态先行、summary 随后：wait_terminal 收到
+    // Finished 即返回，summary 在其后一拍到达——随后补收一帧。
+    let summary = tokio::time::timeout(timeout(), rx.recv()).await.unwrap();
+    assert!(matches!(summary, Ok(AgentEvent::SessionSummary { .. })));
     let kinds: Vec<String> = evs
         .iter()
         .map(|e| {
@@ -396,7 +400,6 @@ async fn event_vocabulary_over_full_turn() {
             "tool_end",
             "tool_finish",
             "text_delta",
-            "session_summary",
             "finished",
         ]
     );

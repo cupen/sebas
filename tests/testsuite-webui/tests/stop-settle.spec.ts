@@ -2,7 +2,7 @@
  * Journey — interrupt 全程收尾（fix-webui-approval-restore-and-session-identity
  * 2.1/2.2/2.4，tasks.md 7.1）。
  *
- * 功能：停止收尾 / 子功能：回合被停止条目、停止释放泊车审批
+ * 功能：停止收尾 / 子功能：回合取消条目、停止释放泊车审批
  *
  * Spec anchors: agent-workbench（ADDED）「Stop reply fully settles the turn」
  * 的「停止后 transcript 有停止条目」「停止控件随回合结算消失」「刷新后不复活
@@ -13,7 +13,8 @@
  * approvals survived as orphans (turn_engaged stayed true forever), and the
  * stopped turn vanished silently (no transcript entry). The contract now:
  * stop releases every parked request (read model drains, a late decision is
- * rejected), appends an error-class「回合被停止」entry, and resets the
+ * rejected), appends a neutral「回合已取消」notice entry（fix-webui-qa-round8
+ * 7.3：主动停止不再是错误语义）, and resets the
  * engaged state so the stop control disappears — stably across reloads.
  *
  * 场景基座：沙箱 fake-claude 带 `--slow-ms 800`，"stream" 触发 5 帧 × 250ms
@@ -41,7 +42,7 @@ test.describe('停止收尾', () => {
     collector = new ErrorCollector(page)
   })
 
-  test.describe('回合被停止条目', () => {
+  test.describe('回合取消条目', () => {
     test('stopping a streaming turn appends the stop entry, resets the control, and stays settled across reloads', async ({
       page,
     }) => {
@@ -65,10 +66,11 @@ test.describe('停止收尾', () => {
       })
       await workbench.submitControl.click()
 
-      // The stopped turn is VISIBLE: an error-class entry states the turn was
-      // stopped, instead of the user's message silently hanging.
+      // The stopped turn is VISIBLE: a neutral notice states the turn was
+      // cancelled（7.3：不再用错误色/错误文案呈现主动取消）, instead of the
+      // user's message silently hanging.
       await expect(
-        page.locator('sebas-dashboard sebas-transcript-view').getByText('回合被停止'),
+        page.locator('sebas-dashboard sebas-transcript-view').getByText('回合已取消'),
       ).toBeVisible({ timeout: 15_000 })
 
       // The composer no longer offers stop once the turn settled.
@@ -80,14 +82,14 @@ test.describe('停止收尾', () => {
       const settled = (await getSession(page.request, key)).detail!
       expect(settled.turn_engaged).toBeUndefined()
       expect(
-        settled.entries.some((e) => e.element_type === 'error' && e.content.includes('回合被停止')),
+        settled.entries.some((e) => e.element_type === 'notice' && e.content.includes('回合已取消')),
       ).toBe(true)
 
       // A reloaded page must NOT present the stopped turn as still in flight:
       // entry persists, no stop control, session idle.
       await page.reload()
       await expect(
-        page.locator('sebas-dashboard sebas-transcript-view').getByText('回合被停止'),
+        page.locator('sebas-dashboard sebas-transcript-view').getByText('回合已取消'),
       ).toBeVisible({ timeout: 15_000 })
       await expect(workbench.submitControl).not.toHaveAttribute('data-state', 'stop', {
         timeout: 10_000,
@@ -145,9 +147,9 @@ test.describe('停止收尾', () => {
       await expect(row.locator('[data-testid="session-waiting"]')).toHaveCount(0, {
         timeout: 10_000,
       })
-      // …and the turn settles with the visible stop entry.
+      // …and the turn settles with the visible cancel notice.
       await expect(
-        page.locator('sebas-dashboard sebas-transcript-view').getByText('回合被停止'),
+        page.locator('sebas-dashboard sebas-transcript-view').getByText('回合已取消'),
       ).toBeVisible({ timeout: 15_000 })
 
       // 释放的请求不可再批复 — API face: a late decision for the released id
@@ -172,12 +174,12 @@ test.describe('停止收尾', () => {
         timeout: 10_000,
       })
       await expect(
-        page.locator('sebas-dashboard sebas-transcript-view').getByText('回合被停止'),
+        page.locator('sebas-dashboard sebas-transcript-view').getByText('回合已取消'),
       ).toBeVisible({ timeout: 15_000 })
       const settled = (await getSession(page.request, key)).detail!
       expect(settled.turn_engaged).toBeUndefined()
       expect(
-        settled.entries.some((e) => e.element_type === 'error' && e.content.includes('回合被停止')),
+        settled.entries.some((e) => e.element_type === 'notice' && e.content.includes('回合已取消')),
       ).toBe(true)
       expect(collector.clean()).toEqual([])
     })

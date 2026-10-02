@@ -202,28 +202,32 @@ test.describe.serial('Users 管理闭环', () => {
     await expect(row.locator('.provider-key')).toHaveText('已启用')
   })
 
-  test('最后一个启用的 root 受保护：禁用与删除都被拒', async ({ page }) => {
+  test('最后一个启用的 root 受保护：自己那一行的停用/删除被客户端自锁', async ({ page }) => {
+    // 契约更新（观察于 fix-webui-qa-round8 验收期）：用户行动作按钮落地了
+    // 客户端自锁（isSelf → disabled + 自锁 title）——此前本旅程点「停用」
+    // 打服务端 LastRoot 守卫、点「删除」打自删守卫的路径在 UI 上已不可达
+    // （按钮禁用，点击等可 interactive 直至超时）。自锁的当前契约：自己
+    // 那一行的停用/删除禁用且 title 点名原因，角色下拉同锁；重置密码不受
+    // 自锁约束。服务端 LastRoot/自删守卫由后端测试钉住，浏览器面不再可
+    // 构造。
     const settings = await loginAsAdmin(page)
 
-    const adminRow = page.locator('sebas-settings-modal [data-testid="user-row"][data-username="admin"]')
-    await adminRow.locator('button[title="停用用户"]').click()
-    await expect(page.locator('sebas-settings-modal [data-testid="user-action"]')).toHaveText(
-      '不能删除、禁用或降级最后一个启用的 root',
+    const adminRow = page.locator(
+      'sebas-settings-modal [data-testid="user-row"][data-username="admin"]',
     )
-    await expect(adminRow.locator('.provider-key')).toHaveText('已启用')
+    const selfGuardTitle = '不能对自己行执行该操作（自锁防护）'
+    // 行内动作序（enabled 用户）：■ 停用 / 🔑 重置密码 / 🗑 删除。
+    const actions = adminRow.locator('button.row-action')
+    await expect(actions).toHaveCount(3, { timeout: 10_000 })
+    await expect(actions.nth(0)).toBeDisabled()
+    await expect(actions.nth(0)).toHaveAttribute('title', selfGuardTitle)
+    await expect(actions.nth(1)).toBeEnabled()
+    await expect(actions.nth(2)).toBeDisabled()
+    await expect(actions.nth(2)).toHaveAttribute('title', selfGuardTitle)
+    // wa-select 宿主的 disabled 不映射原生语义——断言 disabled 属性在场。
+    await expect(adminRow.locator('wa-select.user-role')).toHaveAttribute('disabled', '')
 
-    await adminRow.locator('button[title="删除用户"]').click()
-    const dialog = page.locator('sebas-settings-modal wa-dialog[label="删除用户"]')
-    await expect(dialog.locator('.dialog-text')).toBeVisible()
-    await dialog.locator('wa-button').filter({ hasText: '删除' }).click()
-    // 删除先撞上自删守卫（当前登录的正是 admin）；LastRoot 守卫由上面的
-    // 禁用尝试断言。
-    await expect(dialog.locator('[data-testid="user-delete-error"]')).toHaveText(
-      '不能删除当前登录的用户自己',
-    )
-    await expect(dialog.locator('[data-testid="user-delete-error"]')).toBeVisible()
-    await dialog.locator('wa-button').filter({ hasText: '取消' }).click()
-    await expect(adminRow).toBeVisible()
+    await expect(adminRow.locator('.provider-key')).toHaveText('已启用')
   })
 
   test('删除用户后从名册消失且无法再登录', async ({ page, playwright }) => {

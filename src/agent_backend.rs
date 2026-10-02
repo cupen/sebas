@@ -72,6 +72,14 @@ struct NativeSession {
     /// 排队连跑（busy 时再提交）沿用在飞近似的同一取舍：标志只在空闲开轮
     /// 时复位，排队轮次的零输出不单独补提示。
     turn_visible_output: bool,
+    /// （fix-webui-qa-round8 2.2；2.2 review 补修）宿主**持有的**排队提交栈：
+    /// busy 时的提交只入本队列、不直送内核（直送会让 remove/move 撤不掉已
+    /// 进内核串行队列的提交）。队列由 pump 驱动推进：回合终态（Finished /
+    /// Error，含取消）+ 该回合的 summary 落账（零输出判定完结）后，弹出
+    /// 队头置 in_flight 并投递内核——与 ACP 面的队列推进语义对齐。空闲
+    /// 提交立即开轮不入队（它在飞，不在栈上）；`close` / 终态拆除随会话
+    /// 清空。remove/move 因此对队列内容有完整否决权。
+    pending_queue: Vec<PendingSubmission>,
 }
 
 impl NativeSession {
@@ -91,6 +99,53 @@ impl NativeSession {
         };
         self.transcript.push(entry.clone());
         entry
+    }
+
+    /// （fix-webui-qa-round8 2.1）操作者提交的 prompt 条目（与 ACP `seed_card`
+    /// 等价）：内核事件里没有「用户说了什么」——宿主在投递内核前把它落进
+    /// 转录（`kind = "prompt"`），native 转录不再「只见回复不见提问」。
+    fn push_prompt_entry(&mut self, content: String) -> TurnEntry {
+        let entry = TurnEntry {
+            position: self.transcript.len() as u64,
+            kind: sebas_domain::session::TurnKind::Prompt,
+            element_type: sebas_domain::session::TurnElementType::Markdown,
+            content,
+            created_at_unix: chrono::Utc::now().timestamp().max(0) as u64,
+            title: None,
+            failure_class: None,
+        };
+        self.transcript.push(entry.clone());
+        entry
+    }
+
+    /// 单条转录条目的 turn 流广播（pump `land` 与宿主侧投递共用：日志是
+    /// 唯一事实，广播只是增量补充——Lagged 由消费端按快照收敛）。
+    fn broadcast_entry(
+        turn_events: &broadcast::Sender<TurnStreamEvent>,
+        key: &ChannelKey,
+        entry: TurnEntry,
+    ) {
+        let _ = turn_events.send(TurnStreamEvent {
+            channel: key.channel_str().to_string(),
+            key: key.reference.clone(),
+            entries: vec![entry],
+        });
+    }
+
+    /// （fix-webui-qa-round8 2.2）影子队列视图：position 重算为投递序下标
+    /// （与 ACP 面同语义——视图即投影，不持久内部序号）。
+    fn pending_view(&self) -> Vec<PendingSubmission> {
+        self.pending_queue
+            .iter()
+            .enumerate()
+            .map(|(i, p)| PendingSubmission {
+                id: p.id,
+                text: p.text.clone(),
+                position: i,
+                disposition: p.disposition.clone(),
+                priority: p.priority,
+            })
+            .collect()
     }
 
     /// 可见回复段数（派生口径，与 ACP 面一致）：连续 markdown 合并一段、
@@ -125,7 +180,10 @@ impl NativeSession {
             usage: None,
             // wire-webui-sebas-agent-e2e D4：native 会话在快照/事件中自带执行体标。
             backend: Some("native".into()),
-            pending: Vec::new(), // native 会话无 core 侧待执行栈
+            // （fix-webui-qa-round8 2.2）native 会话的待执行栈 = 宿主影子队列
+            // （提交即记、终态帧对账推进）。pending-stack 据此在 native 会话
+            // 上与 ACP 同样可渲染；空队列不上 wire 语义不变。
+            pending: self.pending_view(),
             // 原生内核会话跑在主控本机，没有节点维度。
             remote: None,
             // （add-agent-mode-selection）native 内核不承载 mode：不声称生效。
@@ -183,6 +241,9 @@ pub struct NativeAgentBackend {
     /// （wire-webui-sebas-agent-e2e）默认模型 id（`SEBAS_AGENT_MODEL`），
     /// 在 native 会话尚未设置任何覆盖前对所有 turn 生效。
     default_model: String,
+    /// （fix-webui-qa-round8 2.2）影子队列条目的稳定 id 源（后端级单调，跨
+    /// 会话唯一——remove/move 按 `(key, id)` 寻址）。
+    next_pending_id: std::sync::atomic::AtomicU64,
 }
 
 /// 无凭据时的占位 LLM 客户端：任何调用都以 terminal 错误失败。
@@ -345,6 +406,7 @@ impl NativeAgentBackend {
             unavailable_cause,
             available_models,
             default_model,
+            next_pending_id: std::sync::atomic::AtomicU64::new(1),
         })
     }
 
@@ -413,6 +475,15 @@ impl NativeAgentBackend {
                 entries: vec![entry],
             });
         }
+        // （fix-webui-qa-round8 2.2 review 补修）回合终态后由 pump 出队队头
+        // 并投递内核：宿主持有队列（busy 提交不直送内核，remove/move 才有
+        // 完整否决权）。终态（Finished/Error）与 summary 是**两个事件**——
+        // 推进标记与待投递文本必须跨迭代存活：终态置位，下一帧（summary，
+        // 零输出判定随之完结）出队队头。出队时点在 summary 落账之后，先复
+        // 位判据会把上一轮的可见输出记账清掉。`dispatch` 在锁外投递（prompt
+        // 发送在内核 cmd 通道上等待，绝不持锁跨 await）。
+        let mut advance_queue = false;
+        let mut dispatch: Option<String> = None;
         loop {
             let ev = match rx.recv().await {
                 Ok(ev) => ev,
@@ -555,6 +626,20 @@ impl NativeAgentBackend {
                                 "🗒 turn summary — {model_calls} model calls, {tool_calls} tools, {turn_ms}ms"
                             ),
                         );
+                        // （2.2 review 补修）summary 落账 = 上一轮的零输出判定
+                        // 完结：此刻出队队头、置 in_flight 并交由锁外投递内核。
+                        // 队列空（最后一轮）则 in_flight 保持 false。
+                        if advance_queue
+                            && let Some(head) = if session.pending_queue.is_empty() {
+                                None
+                            } else {
+                                Some(session.pending_queue.remove(0))
+                            }
+                        {
+                            session.in_flight = true;
+                            session.turn_visible_output = false;
+                            dispatch = Some(head.text);
+                        }
                         Some(SessionEvent::Updated {
                             session: session.info(&key),
                         })
@@ -564,12 +649,38 @@ impl NativeAgentBackend {
                     } => {
                         // ⚠ 错误行是操作员可见的 agent 产出——进 transcript 并
                         // 走 turn 流；terminal 错误随后拆除映射。
-                        land(session, &turn_events, &key, "markdown", format!("⚠ {message}"));
+                        // （fix-webui-qa-round8 7.3）操作者主动取消（内核的
+                        // 非 terminal "turn cancelled"）是**中性取消**不是失败：
+                        // 落域层统一文案的中性 notice（与 ACP 引擎面同一份
+                        // 常量），不再以 ⚠ 错误形态呈现。
+                        if message == "turn cancelled" {
+                            land(
+                                session,
+                                &turn_events,
+                                &key,
+                                "notice",
+                                sebas_domain::session::TURN_CANCELLED_NOTICE.to_string(),
+                            );
+                        } else {
+                            land(
+                                session,
+                                &turn_events,
+                                &key,
+                                "markdown",
+                                format!("⚠ {message}"),
+                            );
+                        }
                         // workbench-interaction-polish 1.1：turn 终态（含取消
                         // 的非 terminal "turn cancelled"）复位在飞标志。
                         session.in_flight = false;
                         // 回合已终：内核对悬空审批 fail-closed，泊车登记随之清除。
                         pending_approvals.write().await.remove(&encoded);
+                        // （2.2 review 补修）回合已终：排队队头等 summary 落账
+                        // 后由本 pump 出队投递（advance_queue）；terminal 错误
+                        // 随会话拆除，队列整体清空、不出队。
+                        if !terminal {
+                            advance_queue = true;
+                        }
                         removed = terminal;
                         None
                     }
@@ -579,6 +690,9 @@ impl NativeAgentBackend {
                         session.in_flight = false;
                         // 回合已终：悬空审批不再待决（fail-closed），清登记。
                         pending_approvals.write().await.remove(&encoded);
+                        // （2.2 review 补修）回合已终：排队队头等 summary 落账
+                        // 后由本 pump 出队投递（advance_queue）。
+                        advance_queue = true;
                         Some(SessionEvent::Updated {
                             session: session.info(&key),
                         })
@@ -592,6 +706,15 @@ impl NativeAgentBackend {
                     }
                 }
                 _ => {}
+            }
+            if dispatch.is_some() {
+                // 锁外投递下一轮（队列推进；prompt 发送在内核 cmd 通道上等待）。
+                // take() 复位标记——下一轮终态重新置位。
+                let text = dispatch.take().expect("checked above");
+                let g = sessions.read().await;
+                if let Some(session) = g.get(&encoded) {
+                    session.handle.prompt(text).await;
+                }
             }
             if removed {
                 sessions.write().await.remove(&encoded);
@@ -676,13 +799,25 @@ impl SessionBackend for NativeAgentBackend {
                     current_model_override: None,
                     available_models: self.available_models.clone(),
                     default_model: self.default_model.clone(),
-                    // 首条 prompt 即开轮（串行队列空）。
-                    in_flight: true,
+                    // 首条 prompt 即开轮（串行队列空）；占位创建（prompt 空）
+                    // 不开轮——首条真实消息经 message() 再开（review 修正：
+                    // 空种子回合会在转录顶部留一条空 prompt 条目与空回显）。
+                    in_flight: !prompt.trim().is_empty(),
                     // 开轮：可见输出计数从头开始（extend-test-model-scenarios
                     // 3.4，零输出回合补 notice 的判据）。
                     turn_visible_output: false,
+                    // （2.2）首条提交立即开轮，不入影子队列。
+                    pending_queue: Vec::new(),
                 },
             );
+            // （fix-webui-qa-round8 2.1）首条 prompt 与 ACP `seed_card` 等价：
+            // 投递内核前落 prompt 条目（操作者的第一条消息在转录里可见）。
+            // 占位创建（空 prompt）不落条目、不开轮。
+            if !prompt.trim().is_empty() {
+                let session = g.get_mut(&encoded).expect("just inserted");
+                let entry = session.push_prompt_entry(prompt.clone());
+                NativeSession::broadcast_entry(&self.turn_events, &key, entry);
+            }
         }
         let info = self.session_info(&encoded).await;
         if let Some(info) = info {
@@ -708,8 +843,8 @@ impl SessionBackend for NativeAgentBackend {
             .await;
         });
 
-        // First prompt drives the first turn.
-        {
+        // First prompt drives the first turn（占位创建无 prompt：不开轮）。
+        if !prompt.trim().is_empty() {
             let g = self.sessions.read().await;
             let h = &g.get(&encoded).expect("just inserted").handle;
             h.prompt(prompt).await;
@@ -721,38 +856,96 @@ impl SessionBackend for NativeAgentBackend {
     /// 当前模型字段，再下发内核 `set_model` 命令作用于后续 turn。`model_id`
     /// 不在 `available_models` 内仍接受（与 ACP 行为一致 —— 模型 ID 合法性
     /// 由内核 LLM 客户端实时校验）。
+    ///
+    /// （fix-webui-qa-round8 5.2）切换落一条 `model_change` 系统条目（含新旧
+    /// 模型名）——与 ACP 引擎面 `apply_model_changed` 的留痕对齐，两条执行体
+    /// 行为一致。
     async fn set_session_model(
         &self,
         key: ChannelKey,
         model_id: String,
     ) -> Result<(), SessionRejection> {
         let encoded = Self::encode_key(&key);
-        let mut g = self.sessions.write().await;
-        let Some(session) = g.get_mut(&encoded) else {
-            return Err(SessionRejection::UnknownSession { key: encoded });
+        let entry = {
+            let mut g = self.sessions.write().await;
+            let Some(session) = g.get_mut(&encoded) else {
+                return Err(SessionRejection::UnknownSession { key: encoded });
+            };
+            let from = session
+                .current_model_override
+                .clone()
+                .or_else(|| Some(session.default_model.clone()));
+            session.current_model_override = Some(model_id.clone());
+            let entry = TurnEntry::model_change(
+                session.transcript.len() as u64,
+                serde_json::json!({ "from": from, "to": model_id }),
+            );
+            session.transcript.push(entry.clone());
+            entry
         };
-        session.current_model_override = Some(model_id.clone());
-        session.handle.set_model(model_id).await;
+        NativeSession::broadcast_entry(&self.turn_events, &key, entry);
+        let g = self.sessions.read().await;
+        if let Some(session) = g.get(&encoded) {
+            session.handle.set_model(model_id).await;
+        }
         Ok(())
     }
 
+    /// （fix-webui-qa-round8 2.1/2.2；2.2 review 补修）操作者消息投递：
+    /// - 提交先落 prompt 条目（与 ACP seed_card 等价，转录不再只见回复）；
+    /// - 空闲提交立即开轮（直投内核）；busy 提交**只入宿主影子队列、绝不
+    ///   直送内核**——直送会让 remove/move 撤不掉已进内核串行队列的提交
+    ///   （「已移除」的提交仍执行，spec 违约）。队头的实际投递归 pump 的
+    ///   终态帧（回合结束 → 出队队头 → prompt），与 ACP 面的队列推进语义
+    ///   对齐。
     async fn message(&self, key: ChannelKey, message: String) -> Result<(), SessionRejection> {
         let encoded = Self::encode_key(&key);
-        // 写锁：in_flight 置位与会话查找同临界区（prompt 只借用 handle）。
-        let mut g = self.sessions.write().await;
-        let Some(session) = g.get_mut(&encoded) else {
-            return Err(SessionRejection::UnknownSession { key: encoded });
+        let (entry, info_frame, dispatch) = {
+            // 写锁：in_flight 置位与会话查找同临界区（prompt 只借用 handle）。
+            let mut g = self.sessions.write().await;
+            let Some(session) = g.get_mut(&encoded) else {
+                return Err(SessionRejection::UnknownSession { key: encoded });
+            };
+            // workbench-interaction-polish 1.1：空闲时这条 prompt 立即开轮。
+            let mut dispatch: Option<String> = None;
+            if !session.in_flight {
+                // 空闲开轮 → 新一轮的零输出判据复位（extend-test-model-scenarios
+                // 3.4）。
+                session.turn_visible_output = false;
+                dispatch = Some(message.clone());
+            } else {
+                // （fix-webui-qa-round8 2.2）busy 提交 = 宿主暂存（id 由后端
+                // 单调源分发；disposition=Turn 与 ACP 面同词汇）。此刻不碰
+                // 内核——remove/move 因此对队列内容有完整否决权。
+                let id = self
+                    .next_pending_id
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                session.pending_queue.push(PendingSubmission {
+                    id,
+                    text: message.clone(),
+                    position: session.pending_queue.len(),
+                    disposition: sebas_dispatch::PendingDisposition::Turn,
+                    priority: false,
+                });
+            }
+            session.in_flight = true;
+            let entry = session.push_prompt_entry(message.clone());
+            let info_frame = dispatch.is_none().then(|| SessionEvent::Updated {
+                session: session.info(&key),
+            });
+            (entry, info_frame, dispatch)
         };
-        // workbench-interaction-polish 1.1：空闲时这条 prompt 立即开轮；busy
-        // 时内核排队，在飞标志保持 true 不变。
-        if !session.in_flight {
-            // 空闲开轮 → 新一轮的零输出判据复位（extend-test-model-scenarios
-            // 3.4）。排队轮次不复位：在飞近似下无法分辨轮界，宁可少报不误报
-            // （误报会让正常回合被追加零输出提示）。
-            session.turn_visible_output = false;
+        NativeSession::broadcast_entry(&self.turn_events, &key, entry);
+        if let Some(frame) = info_frame {
+            let _ = self.events.send(frame);
         }
-        session.in_flight = true;
-        session.handle.prompt(message).await;
+        if let Some(text) = dispatch {
+            // 空闲直投（锁外：prompt 发送在内核 cmd 通道上等待）。
+            let g = self.sessions.read().await;
+            if let Some(session) = g.get(&encoded) {
+                session.handle.prompt(text).await;
+            }
+        }
         Ok(())
     }
 
@@ -781,8 +974,83 @@ impl SessionBackend for NativeAgentBackend {
         session.handle.cancel().await;
         // 会话拆除：泊车审批随会话消失（内核 fail-closed，不再待决）。
         self.pending_approvals.write().await.remove(&encoded);
-        // native 内核没有 core 侧待执行栈（提交即投递）。
+        // （fix-webui-qa-round8 2.2）影子队列随会话终结清空（映射整体移除，
+        // 这里语义自洽；计数不可得——close 的丢弃语义由 ACP 面承载，native
+        // 影子队列如实返回 0）。
         Ok(CloseReport::default())
+    }
+
+    /// （fix-webui-qa-round8 2.2）native 待执行栈的读面 = 影子队列。未知会话
+    /// typed 拒绝，与 ACP 面同契约。
+    async fn pending(&self, key: ChannelKey) -> Result<Vec<PendingSubmission>, SessionRejection> {
+        let encoded = Self::encode_key(&key);
+        let g = self.sessions.read().await;
+        let Some(session) = g.get(&encoded) else {
+            return Err(SessionRejection::UnknownSession { key: encoded });
+        };
+        Ok(session.pending_view())
+    }
+
+    /// （fix-webui-qa-round8 2.2）按 id 移除一个未开始的排队提交，成功返回
+    /// 操作后的全量影子队列。已知会话 + 未知 id = 类型化 Unknown（与 ACP
+    /// 面同词表）；影子队列里的条目都未开始执行（执行中的不在栈上）。
+    async fn remove_pending(
+        &self,
+        key: ChannelKey,
+        pending_id: u64,
+    ) -> Result<Vec<PendingSubmission>, SessionRejection> {
+        let encoded = Self::encode_key(&key);
+        let frame = {
+            let mut g = self.sessions.write().await;
+            let Some(session) = g.get_mut(&encoded) else {
+                return Err(SessionRejection::UnknownSession { key: encoded });
+            };
+            let Some(pos) = session.pending_queue.iter().position(|p| p.id == pending_id) else {
+                return Err(SessionRejection::PendingRejected {
+                    reason: sebas_domain::session::PendingReason::Unknown,
+                });
+            };
+            session.pending_queue.remove(pos);
+            let _ = self.events.send(SessionEvent::Updated {
+                session: session.info(&key),
+            });
+            session.pending_view()
+        };
+        Ok(frame)
+    }
+
+    /// （fix-webui-qa-round8 2.2）把一个未开始的提交重排到影子队列的
+    /// `to_index` 位置，成功返回操作后的全量影子队列（与 ACP 面同契约）。
+    async fn move_pending(
+        &self,
+        key: ChannelKey,
+        pending_id: u64,
+        to_index: usize,
+    ) -> Result<Vec<PendingSubmission>, SessionRejection> {
+        let encoded = Self::encode_key(&key);
+        let frame = {
+            let mut g = self.sessions.write().await;
+            let Some(session) = g.get_mut(&encoded) else {
+                return Err(SessionRejection::UnknownSession { key: encoded });
+            };
+            let Some(from) = session.pending_queue.iter().position(|p| p.id == pending_id) else {
+                return Err(SessionRejection::PendingRejected {
+                    reason: sebas_domain::session::PendingReason::Unknown,
+                });
+            };
+            if to_index >= session.pending_queue.len() {
+                return Err(SessionRejection::PendingRejected {
+                    reason: sebas_domain::session::PendingReason::OutOfRange,
+                });
+            }
+            let moved = session.pending_queue.remove(from);
+            session.pending_queue.insert(to_index, moved);
+            let _ = self.events.send(SessionEvent::Updated {
+                session: session.info(&key),
+            });
+            session.pending_view()
+        };
+        Ok(frame)
     }
 
     async fn turns(&self, key: ChannelKey, from: u64) -> Result<Vec<TurnEntry>, SessionRejection> {
@@ -1735,10 +2003,14 @@ mod tests {
             "acp-side pending read must come from the bridge, not a composite default"
         );
 
-        // native 侧：pending 空表（native 无待执行栈）；remove/move 落
-        // trait 默认的诚实不可用（此后端不承载待执行队列）。
+        // native 侧（fix-webui-qa-round8 2.2）：pending 管理面 = 宿主影子
+        // 队列——未知会话一律类型化 UnknownSession（不再落 trait 默认的
+        // Unavailable）；已存在会话无排队提交 = 空表。
         let native_key = ChannelKey::new("feishu", "agent-round5native");
-        assert!(dual.pending(native_key.clone()).await.unwrap().is_empty());
+        match dual.pending(native_key.clone()).await {
+            Err(SessionRejection::UnknownSession { .. }) => {}
+            other => panic!("unknown native session must reject, got {other:?}"),
+        }
         for op in [
             dual.remove_pending(native_key.clone(), 7)
                 .await
@@ -1750,10 +2022,8 @@ mod tests {
                 .unwrap(),
         ] {
             match &op {
-                SessionRejection::Unavailable { cause } => {
-                    assert_eq!(cause, "此后端不承载待执行队列");
-                }
-                other => panic!("native queue ops must fail honestly, got {other:?}"),
+                SessionRejection::UnknownSession { .. } => {}
+                other => panic!("unknown native session must reject queue ops, got {other:?}"),
             }
         }
     }
@@ -1971,20 +2241,22 @@ mod tests {
 
         // 两段文本 = 两条独立 turn 事件，先于收尾标记到达。汇总行只钉前缀：
         // 耗时字段随机器负载波动（0/1ms），精确匹配会间歇性翻红。
+        // （fix-webui-qa-round8 2.1）spawn 的 prompt 条目先行（position 0），
+        // 两段正文增量与其后各后移一位。
         let contents: Vec<&str> = streamed.iter().map(|e| e.content.as_str()).collect();
         assert_eq!(
-            &contents[..2],
-            &["chunk one ", "chunk two"],
-            "deltas must stream as separate live entries before the turn-end marker: {streamed:?}"
+            &contents[..3],
+            &["go", "chunk one ", "chunk two"],
+            "prompt first, then deltas as separate live entries: {streamed:?}"
         );
         assert!(
-            contents[2].starts_with("🗒 turn summary — 1 model calls, 0 tools, ")
-                && contents[2].ends_with("ms"),
+            contents[3].starts_with("🗒 turn summary — 1 model calls, 0 tools, ")
+                && contents[3].ends_with("ms"),
             "turn-end marker content unexpected: {streamed:?}"
         );
         assert_eq!(
             streamed.iter().map(|e| e.position).collect::<Vec<_>>(),
-            vec![0, 1, 2],
+            vec![0, 1, 2, 3],
             "positions assigned monotonically"
         );
 
@@ -2062,18 +2334,21 @@ mod tests {
             .iter()
             .map(|e| (e.element_type.as_str(), e.content.as_str()))
             .collect();
+        // （fix-webui-qa-round8 2.1）spawn 的 prompt 条目先行，其后 thinking
+        // 仍以独立条目先于正文落账。
         assert_eq!(
-            &kinds[..2],
+            &kinds[..3],
             &[
+                ("markdown", "go"),
                 ("thinking", "weighing the options"),
                 ("markdown", "final answer")
             ],
             "thinking must land as its own entry before the text: {streamed:?}"
         );
         // 汇总行的耗时字段随机器负载波动（0/1ms），只钉前缀不钉 ms 值。
-        let summary = kinds[2].1;
+        let summary = kinds[3].1;
         assert!(
-            kinds[2].0 == "markdown"
+            kinds[3].0 == "markdown"
                 && summary.starts_with("🗒 turn summary — 1 model calls, 0 tools, ")
                 && summary.ends_with("ms"),
             "turn summary entry unexpected: {streamed:?}"
@@ -2101,16 +2376,18 @@ mod tests {
             .expect("spawn");
 
         let streamed = collect_turn(&mut turns).await;
-        assert_eq!(streamed.len(), 2, "notice then summary: {streamed:?}");
-        assert_eq!(streamed[0].element_type, sebas_domain::vocabulary::TurnElementType::Notice);
-        assert_eq!(streamed[0].position, 0);
+        // （fix-webui-qa-round8 2.1）spawn 的 prompt 条目先行：通知与摘要各后移一位。
+        assert_eq!(streamed.len(), 3, "prompt, notice then summary: {streamed:?}");
+        assert_eq!(streamed[0].kind, sebas_domain::session::TurnKind::Prompt);
+        assert_eq!(streamed[1].element_type, sebas_domain::vocabulary::TurnElementType::Notice);
+        assert_eq!(streamed[1].position, 1);
         assert!(
-            streamed[0].content.contains("回合已结束且无输出"),
+            streamed[1].content.contains("回合已结束且无输出"),
             "notice text comes from the shared domain constant: {}",
-            streamed[0].content
+            streamed[1].content
         );
         assert!(
-            streamed[1].content.contains("turn summary"),
+            streamed[2].content.contains("turn summary"),
             "turn-end marker still lands after the notice: {streamed:?}"
         );
         // notice 不是可见回复段：本轮唯一计入的 markdown 是收尾摘要，notice
@@ -2235,32 +2512,332 @@ mod tests {
         // ── 对账：两侧的流式内容条目（position/kind/element_type/content）
         // 全等；webui 面允许在此之外多出它独有的回合摘要呈现（🗒 SessionSummary，
         // IM 桥的 pump 本就不渲染该事件——既有呈现差异，不属流式粒度）。
-        // created_at_unix 不进对账：两面先后驱动，跨秒界即差 1s，非语义差异。
-        let semantic = |e: &TurnEntry| {
+        assert!(!webui_turns.is_empty(), "webui face must have transcript");
+        // （fix-webui-qa-round8 2.1）webui 面独有操作者 prompt 条目（seed 等
+        // 价，IM 桥的 pump 不渲染提交本身）——对账只比内容条目（kind=content）。
+        let webui_content: Vec<&TurnEntry> = webui_turns
+            .iter()
+            .filter(|e| e.kind == sebas_domain::session::TurnKind::Content)
+            .collect();
+        // position 不进内容对账：webui 面的 prompt 条目让内容条目整体后移
+        // 一位（两侧各自单调），其余（kind/element_type/content）逐条全等。
+        let semantic_content = |e: &TurnEntry| {
             (
-                e.position,
                 e.kind.clone(),
                 e.element_type.clone(),
                 e.content.clone(),
             )
         };
-        assert!(!webui_turns.is_empty(), "webui face must have transcript");
         assert_eq!(
-            webui_turns[..bridge_turns.len()]
+            webui_content[..bridge_turns.len()]
                 .iter()
-                .map(semantic)
+                .map(|e| semantic_content(e))
                 .collect::<Vec<_>>(),
-            bridge_turns.iter().map(semantic).collect::<Vec<_>>(),
+            bridge_turns
+                .iter()
+                .map(|e| semantic_content(e))
+                .collect::<Vec<_>>(),
             "webui face and IM bridge face must render identical streamed transcripts"
         );
         assert!(
-            webui_turns[bridge_turns.len()..]
+            webui_content[bridge_turns.len()..]
                 .iter()
                 .all(|e| e.content.contains("turn summary")),
             "webui-only extras must be presentation traces only: {:?}",
             &webui_turns[bridge_turns.len()..]
         );
 
+        backend.close(key).await.unwrap();
+    }
+
+    // ── fix-webui-qa-round8：native 转录补全 / 影子队列 / 模型留痕 / 取消中性 ──
+
+    struct SlowTool;
+
+    #[async_trait::async_trait]
+    impl sebas_agent::tools::Tool for SlowTool {
+        fn name(&self) -> &'static str {
+            "slow"
+        }
+        fn description(&self) -> String {
+            "slow stub for queue-window testing".into()
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        async fn execute(
+            &self,
+            _input: serde_json::Value,
+            _ctx: &sebas_agent::tools::ToolCtx,
+        ) -> sebas_agent::message::ToolOutput {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            sebas_agent::message::ToolOutput::ok("slow-ok")
+        }
+    }
+
+    /// 无策略引擎（工具不门控）+ 慢工具：turn 1 卡在工具执行窗口，为影子
+    /// 队列的「提交即记 → 终态推进」提供确定性在飞窗。
+    fn slow_manager() -> SessionManager {
+        let llm = FakeLlmClient::scripted(vec![
+            FakeLlmClient::call_tools(vec![("t1", "slow", serde_json::json!({}))]),
+            FakeLlmClient::say("turn1 done"),
+            FakeLlmClient::say("turn2 done"),
+            FakeLlmClient::say("turn3 done"),
+        ]);
+        SessionManager::new(
+            Arc::new(llm),
+            ToolRegistry::from_tools(vec![Arc::new(SlowTool)]),
+            SessionConfig::default(),
+        )
+    }
+
+    async fn wait_until_content(backend: &NativeAgentBackend, key: &ChannelKey, needle: &str) {
+        let _ = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let turns = backend.turns(key.clone(), 0).await.unwrap();
+                if turns.iter().any(|t| t.content.contains(needle)) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+        })
+        .await
+        .expect("content deadline");
+    }
+
+    /// （2.1）native 会话转录为操作者提交渲染 prompt 条目：spawn 首条与
+    /// message 追加都在回复之前（`kind = "prompt"`，内容 = 提交原文）。
+    #[tokio::test]
+    async fn native_transcript_renders_operator_prompts() {
+        let backend = NativeAgentBackend::with_manager(slow_manager());
+        let ws = tempfile::tempdir().unwrap();
+        let key = backend
+            .spawn(
+                "first message".into(),
+                Some(ws.path().to_string_lossy().into()),
+            )
+            .await
+            .expect("spawn");
+        // spawn 同步落账：返回即可断言首条 prompt 条目。
+        let turns = backend.turns(key.clone(), 0).await.unwrap();
+        assert_eq!(turns[0].kind, sebas_domain::session::TurnKind::Prompt);
+        assert_eq!(turns[0].content, "first message");
+
+        // 追加消息同样先落 prompt 条目（在飞窗口内提交）。
+        backend
+            .message(key.clone(), "second message".into())
+            .await
+            .unwrap();
+        let turns = backend.turns(key.clone(), 0).await.unwrap();
+        assert!(
+            turns.iter().any(|t| t.kind == sebas_domain::session::TurnKind::Prompt
+                && t.content == "second message"),
+            "the appended submission lands a prompt entry: {turns:?}"
+        );
+        backend.close(key).await.unwrap();
+    }
+
+    /// （2.2）影子队列三相：busy 提交即记入（pending 可见）→ 终态帧对账
+    /// 推进（队头弹出）→ 会话终结清空（未知会话拒绝）。remove/move 的可用
+    /// 子集一并在在飞窗内断言。
+    #[tokio::test]
+    async fn native_shadow_queue_records_advances_and_clears() {
+        let backend = NativeAgentBackend::with_manager(slow_manager());
+        let ws = tempfile::tempdir().unwrap();
+        let key = backend
+            .spawn("go".into(), Some(ws.path().to_string_lossy().into()))
+            .await
+            .expect("spawn");
+        // 等 turn 1 进入慢工具窗口（transcript 出现工具痕迹即已开轮）。
+        wait_until_content(&backend, &key, "slow").await;
+
+        // 相位 1（记入）：在飞提交进入影子队列，快照 pending 非空、投递序。
+        backend
+            .message(key.clone(), "q-first".into())
+            .await
+            .unwrap();
+        backend
+            .message(key.clone(), "q-second".into())
+            .await
+            .unwrap();
+        let view = backend.pending(key.clone()).await.expect("pending read");
+        let texts: Vec<&str> = view.iter().map(|p| p.text.as_str()).collect();
+        assert_eq!(texts, vec!["q-first", "q-second"], "投递序");
+        let info = backend
+            .snapshot()
+            .await
+            .into_iter()
+            .find(|s| s.channel_key() == key)
+            .expect("native session in snapshot");
+        assert_eq!(
+            info.pending.len(), 2,
+            "SessionInfo.pending exposes the shadow queue"
+        );
+
+        // 可用子集：重排 + 移除。q-second 上移到队头，再移除它。
+        let view = backend
+            .move_pending(key.clone(), view[1].id, 0)
+            .await
+            .expect("move");
+        assert_eq!(view[0].text, "q-second");
+        let view = backend
+            .remove_pending(key.clone(), view[0].id)
+            .await
+            .expect("remove");
+        assert_eq!(view.len(), 1);
+        assert_eq!(view[0].text, "q-first");
+        // 未知 id → 类型化 Unknown。
+        let err = backend
+            .remove_pending(key.clone(), u64::MAX)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            SessionRejection::PendingRejected {
+                reason: sebas_domain::session::PendingReason::Unknown
+            }
+        ));
+
+        // 相位 2（推进）：turn 1 终态 + summary 落账后，pump 出队队头并投递
+        // 内核（宿主驱动）——q-first 开轮执行，队列随之清空；被移除的
+        // q-second 不再执行（其应答文本永不出现）。
+        wait_until_content(&backend, &key, "turn1 done").await;
+        wait_until_content(&backend, &key, "turn2 done").await;
+        let view = backend.pending(key.clone()).await.expect("pending read");
+        assert!(view.is_empty(), "terminal frames drain the shadow queue");
+        // 被移除条目的执行否决：给足轮转时间后其应答仍不在转录里。
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        let joined: String = backend
+            .turns(key.clone(), 0)
+            .await
+            .unwrap()
+            .iter()
+            .map(|t| t.content.clone())
+            .collect();
+        assert!(
+            !joined.contains("turn3 done"),
+            "the removed submission must never execute: {joined}"
+        );
+
+        // 相位 3（清空）：close 后未知会话拒绝。
+        backend.close(key.clone()).await.unwrap();
+        let err = backend.pending(key).await.unwrap_err();
+        assert!(matches!(err, SessionRejection::UnknownSession { .. }));
+    }
+
+    /// （2.2 review 补修）忙时入队两条 → 按序执行：remove 撤不掉的队头在
+    /// pump 终态推进下先开轮，次条随后——宿主持有队列的顺序语义与 ACP 面
+    /// 一致，且每条排队提交的应答都真实到达。
+    #[tokio::test]
+    async fn native_shadow_queue_executes_in_order_after_the_turn() {
+        let backend = NativeAgentBackend::with_manager(slow_manager());
+        let ws = tempfile::tempdir().unwrap();
+        let key = backend
+            .spawn("go".into(), Some(ws.path().to_string_lossy().into()))
+            .await
+            .expect("spawn");
+        wait_until_content(&backend, &key, "slow").await;
+        backend
+            .message(key.clone(), "s-first".into())
+            .await
+            .unwrap();
+        backend
+            .message(key.clone(), "s-second".into())
+            .await
+            .unwrap();
+
+        // 两条排队提交按队序各开一轮：turn1（慢工具）→ s-first → s-second。
+        wait_until_content(&backend, &key, "turn1 done").await;
+        wait_until_content(&backend, &key, "turn2 done").await;
+        wait_until_content(&backend, &key, "turn3 done").await;
+
+        // 执行顺序钉死：turn1 的应答先于 s-first 的应答，s-first 先于
+        // s-second（队列推进逐条出队，绝不插队/并发开轮）。
+        let turns = backend.turns(key.clone(), 0).await.unwrap();
+        let position_of = |needle: &str| {
+            turns
+                .iter()
+                .find(|t| t.content.contains(needle))
+                .map(|t| t.position)
+                .unwrap_or_else(|| panic!("{needle} missing"))
+        };
+        let (p1, p2, p3) = (
+            position_of("turn1 done"),
+            position_of("turn2 done"),
+            position_of("turn3 done"),
+        );
+        assert!(p1 < p2 && p2 < p3, "queue order must be respected: {p1} {p2} {p3}");
+        let view = backend.pending(key.clone()).await.expect("pending read");
+        assert!(view.is_empty(), "the queue drains after both turns");
+        backend.close(key).await.unwrap();
+    }
+
+    /// （5.2）native override 路径的模型切换留痕：条目含新旧模型名，from 取
+    /// 当前生效模型（override 或内核默认）。
+    #[tokio::test]
+    async fn native_model_override_lands_model_change_entry() {
+        let backend = NativeAgentBackend::with_manager(slow_manager());
+        let ws = tempfile::tempdir().unwrap();
+        let key = backend
+            .spawn("go".into(), Some(ws.path().to_string_lossy().into()))
+            .await
+            .expect("spawn");
+        wait_until_content(&backend, &key, "slow").await;
+
+        backend
+            .set_session_model(key.clone(), "test/long".into())
+            .await
+            .expect("set model");
+        let turns = backend.turns(key.clone(), 0).await.unwrap();
+        let entry = turns
+            .iter()
+            .find(|e| e.element_type.as_str() == "model_change")
+            .expect("model_change entry");
+        let payload: serde_json::Value =
+            serde_json::from_str(&entry.content).expect("payload is JSON");
+        assert_eq!(payload["from"], "claude-sonnet-4-5", "from = 内核默认模型");
+        assert_eq!(payload["to"], "test/long");
+
+        // 二次切换：from = 上一次的 override 值。
+        backend
+            .set_session_model(key.clone(), "test/text".into())
+            .await
+            .expect("set model again");
+        let turns = backend.turns(key.clone(), 0).await.unwrap();
+        let entries: Vec<&TurnEntry> = turns
+            .iter()
+            .filter(|e| e.element_type.as_str() == "model_change")
+            .collect();
+        assert_eq!(entries.len(), 2);
+        let payload: serde_json::Value =
+            serde_json::from_str(&entries[1].content).expect("payload is JSON");
+        assert_eq!(payload["from"], "test/long");
+        assert_eq!(payload["to"], "test/text");
+        backend.close(key).await.unwrap();
+    }
+
+    /// （7.3）操作者取消 = 中性「已取消」条目（notice），不再是 ⚠ 错误形态。
+    #[tokio::test]
+    async fn native_cancel_lands_a_neutral_notice() {
+        let backend = NativeAgentBackend::with_manager(slow_manager());
+        let ws = tempfile::tempdir().unwrap();
+        let key = backend
+            .spawn("go".into(), Some(ws.path().to_string_lossy().into()))
+            .await
+            .expect("spawn");
+        wait_until_content(&backend, &key, "slow").await;
+        backend.cancel(key.clone()).await.expect("cancel in flight");
+        wait_until_content(&backend, &key, "回合已取消").await;
+        let turns = backend.turns(key.clone(), 0).await.unwrap();
+        let entry = turns
+            .iter()
+            .find(|e| e.content.contains("回合已取消"))
+            .expect("cancel notice");
+        assert_eq!(
+            entry.element_type.as_str(),
+            "notice",
+            "中性 notice，不是错误"
+        );
         backend.close(key).await.unwrap();
     }
 }

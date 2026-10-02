@@ -78,6 +78,20 @@ import {
 } from '../api/model-catalog.js'
 import { renderMarkdown } from '../components/markdown.js'
 import { MODE_OPTIONS } from './mode-vocabulary.js'
+import type { TemplateResult } from 'lit'
+
+/**
+ * （fix-webui-qa-round8 7.6）权限模式下拉的选项模板**唯一实例**：模块级
+ * 常量的模板身份在组件的每次重渲染间保持不变，Lit 按身份复用同一批
+ * wa-option 元素——权限模式切换（modeSwitching 翻转）触发的重渲染不再
+ * 重建选项。QA round8 D-P3-11 实锤：连续选择后再次点开，弹层偶发
+ * 「expanded 但无 option」（wa-select 内部的选项集在选项元素被模板重建
+ * 后失联）。重建不再发生，选项恒可达；词汇仍唯一出自 MODE_OPTIONS。
+ */
+const MODE_OPTIONS_TEMPLATE: TemplateResult = html`${MODE_OPTIONS.map(
+  (m) => html`<wa-option value=${m.value} title=${m.description}>${m.label}</wa-option>`,
+)}`
+
 import { icon } from '../components/icons.js'
 import { notify } from '../notify.js'
 import { viewStyles } from '../styles/shared.js'
@@ -996,10 +1010,7 @@ export class SebasWorkbenchComposer extends LitElement {
                        state」）；解释走悬浮 title（工具栏紧凑约束，不加
                        hint 行——会话当前模式的可读措辞由 dashboard 徽章
                        modeBadgeLabel 承担）。 -->
-                  ${MODE_OPTIONS.map(
-                    (m) =>
-                      html`<wa-option value=${m.value} title=${m.description}>${m.label}</wa-option>`,
-                  )}
+                  ${MODE_OPTIONS_TEMPLATE}
                 </wa-select>`
               : nothing}
           </div>

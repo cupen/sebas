@@ -355,13 +355,19 @@ export class SebasApp extends LitElement {
       position: relative; /* 子视图定位上下文 */
     }
     /* ── core 连接状态常驻徽标（add-webui-round7-gaps 2.1）──────────────
-       常驻主区右上角：ok 低调（点 + 弱字），down 醒目（失败色实底），unknown
-       中性。与 fatal 横幅同源（同一 coreReachability 状态），同亮同灭。 */
+       常驻主区右上角。ok 低调（点 + 弱字），down 醒目（失败色实底），unknown
+       中性。与 fatal 横幅同源（同一 coreReachability 状态），同亮同灭。
+       （fix-webui-qa-round8 4.1，design D7）徽标不再绝对定位悬浮——悬浮层
+       曾拦截工作台头部右端（聚焦链接）与归档只读视图「恢复」按钮的点击；
+       改为文档流内的右对齐徽标行（自带行高），工作台整体下移一行，布局
+       占位让位，零重叠、零拦截。 */
+    .core-row {
+      flex: 0 0 auto;
+      display: flex;
+      justify-content: flex-end;
+      padding: 8px 14px 0;
+    }
     .core-link {
-      position: absolute;
-      top: 10px;
-      right: 14px;
-      z-index: 30;
       display: inline-flex;
       align-items: center;
       gap: 6px;
@@ -1049,7 +1055,7 @@ export class SebasApp extends LitElement {
           </div>
         </nav>
         <main slot="end" @open-settings=${() => (this.settingsOpen = true)}>
-          ${this.coreLinkBadge()}
+          <div class="core-row">${this.coreLinkBadge()}</div>
           <div class="outlet${this.isWideRoute() ? '' : ' padded'}">${this.renderOutlet()}</div>
         </main>
       </wa-split-panel>

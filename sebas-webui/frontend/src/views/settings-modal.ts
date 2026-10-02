@@ -90,6 +90,10 @@ import { getThemeMode, resolvesToLight, setThemeMode, type ThemeMode } from '../
 // writes 2.1 收编为共享单表）：users/services 分区裁剪与 agents 写入口、
 // （经 app-shell 下传 rail 的）新建会话入口同一事实源。
 import { canControlServices, canManageAgents, canManageUsers } from './role-visibility.js'
+// （fix-webui-qa-round8 7.5）技能预览只渲染正文：frontmatter 剥离。
+import { stripFrontmatter } from './skill-frontmatter.js'
+// （fix-webui-qa-round8 6.1）模型别名管理分区（独立模块挂入）。
+import './settings-aliases.js'
 
 // Web Awesome 组件（provider 管理对话框用；与其它 view 同款按需注册）。
 import '@awesome.me/webawesome/dist/components/dialog/dialog.js'
@@ -112,6 +116,7 @@ export type SettingsSection =
   | 'services'
   | 'users'
   | 'models'
+  | 'aliases'
   | 'agents'
   | 'skills'
   | 'env-vars'
@@ -144,8 +149,11 @@ const SECTIONS: ReadonlyArray<{ id: SettingsSection; label: string; icon: string
   { id: 'services', label: '服务', icon: 'shield' },
   { id: 'users', label: '用户', icon: 'users' },
   { id: 'models', label: '模型', icon: 'zap' },
+  // （fix-webui-qa-round8 6.1）模型别名分区紧跟 Models（router-model-aliases
+  // 「别名管理必须有 WebUI 入口」——独立模块 sebas-model-aliases 挂入）。
+  { id: 'aliases', label: '别名', icon: 'forward' },
   // add-agent-settings-and-session-titles 5.1：Agents 分区紧跟 Models
-  // （导航顺序 …Models → Agents → Env Vars · About）。
+  // （导航顺序 …Models → 别名 → Agents → Env Vars · About）。
   { id: 'agents', label: 'Agent', icon: 'sessions' },
   { id: 'skills', label: '技能', icon: 'skills' },
   { id: 'env-vars', label: '环境变量', icon: 'about' },
@@ -165,6 +173,7 @@ const SECTION_DESC: Record<SettingsSection, string> = {
   services: '与 sebas 并行运行的后台服务。',
   users: '本实例的操作员账户。仅 root 可管理——改动即时生效。',
   models: '管理模型 provider。预设派生值跟随应用代码；API key 由你自己保管。',
+  aliases: '管理模型别名：把一个短名映射到某个 provider（可选带上游模型），模型选择处可用短名。',
   agents:
     '管理 agent 目录。内置 sebas 内核恒在不可删；其余条目全量增删改，保存后免重启生效。config.toml 的 [acp.agents.*] 只是首次启动的种子源——之后以这里为准。',
   skills:
@@ -379,7 +388,8 @@ export class SebasSettingsModal extends LitElement {
   @state() private forceStop: { name: string; count: number | null } | null = null
   /** About INSTANCE 段：工作区根目录（/api/fs/browse-dirs 的服务端解析根）。 */
   @state() private overviewRoot: string | null = null
-  @state() private rootCopied = false
+  /** （fix-webui-qa-round8 7.4）复制反馈三态：idle / ok（✓）/ fail（✗）。 */
+  @state() private rootCopyState: 'idle' | 'ok' | 'fail' = 'idle'
   /** provider 管理面（/api/providers + /api/provider-presets）。 */
   @state() private adminProviders: ProviderAdmin[] | null = null
   /** （fix-webui-qa-findings M7）config.toml 种子 provider 行（本页只读）。 */
@@ -1851,16 +1861,39 @@ export class SebasSettingsModal extends LitElement {
     await this.runServiceAction('disable', t.name, true)
   }
 
-  private copyRoot(): void {
+  /**
+   * （fix-webui-qa-round8 7.4）复制必须有**可见反馈**：成功 ✓、失败 ✗（异步
+   * 剪贴板被拒/不可用在无痕环境与旧内核很常见——QA round8 实锤「点击后无
+   * 任何反馈」）。失败路径回退 execCommand 兜底一次，两级结果都落地为按钮
+   * 文案变化（1.5s 自复位）。
+   */
+  private async copyRoot(): Promise<void> {
     if (!this.overviewRoot) return
-    // jsdom/旧浏览器可能没有 clipboard——复制失败不阻塞总览渲染。
-    void navigator.clipboard?.writeText(this.overviewRoot).then(
-      () => {
-        this.rootCopied = true
-        window.setTimeout(() => (this.rootCopied = false), 1500)
-      },
-      () => {},
-    )
+    const done = (ok: boolean): void => {
+      this.rootCopyState = ok ? 'ok' : 'fail'
+      window.setTimeout(() => (this.rootCopyState = 'idle'), 1500)
+    }
+    try {
+      await navigator.clipboard?.writeText(this.overviewRoot)
+      done(true)
+      return
+    } catch {
+      // fall through to the legacy path
+    }
+    // 兜底：临时 textarea + execCommand（无剪贴板权限时的最后一条通路）。
+    try {
+      const ta = document.createElement('textarea')
+      ta.value = this.overviewRoot
+      ta.style.position = 'fixed'
+      ta.style.opacity = '0'
+      document.body.appendChild(ta)
+      ta.select()
+      const ok = document.execCommand('copy')
+      ta.remove()
+      done(ok)
+    } catch {
+      done(false)
+    }
   }
 
   /** provider 管理面数据：admin 列表 + 内置 preset 表（跟随代码的只读值）。 */
@@ -2198,6 +2231,12 @@ export class SebasSettingsModal extends LitElement {
         return html`
           ${this.renderSectionHead(section)}
           ${this.renderModels()}
+        `
+      // （fix-webui-qa-round8 6.1）模型别名分区 = 独立模块（不膨胀单文件）。
+      case 'aliases':
+        return html`
+          ${this.renderSectionHead(section)}
+          <sebas-model-aliases></sebas-model-aliases>
         `
       case 'agents':
         return html`
@@ -3051,9 +3090,9 @@ export class SebasSettingsModal extends LitElement {
     `
   }
 
-  /** 预览区：SKILL.md 经 renderMarkdown（marked → DOMPurify → hljs，与
-   * 会话转写同一净化管线）渲染 + attachment 文件名清单。正文缺失（invalid
-   * 条目没有 SKILL.md）如实呈现，不冒充空正文。 */
+  /** 预览区：SKILL.md 剥离 frontmatter 后经 renderMarkdown（marked →
+   * DOMPurify → hljs，与会话转写同一净化管线）渲染 + attachment 文件名清单。
+   * 正文缺失（invalid 条目没有 SKILL.md）如实呈现，不冒充空正文。 */
   private renderSkillPreview() {
     const p = this.skillPreview!
     if (p.error)
@@ -3068,7 +3107,9 @@ export class SebasSettingsModal extends LitElement {
       <div class="skills-preview" data-testid="skill-preview">
         ${p.detail.text === null
           ? html`<div class="callout" role="status">SKILL.md 缺失（invalid 条目），无正文可预览。</div>`
-          : html`<div class="skills-md">${unsafeHTML(renderMarkdown(p.detail.text))}</div>`}
+          : html`<div class="skills-md">
+              ${unsafeHTML(renderMarkdown(stripFrontmatter(p.detail.text)))}
+            </div>`}
         ${p.detail.attachments.length
           ? html`<div class="skills-atts">
               <span class="label">附件</span>
@@ -3475,7 +3516,7 @@ export class SebasSettingsModal extends LitElement {
                   title="复制工作区根目录"
                   @click=${() => this.copyRoot()}
                 >
-                  ${this.rootCopied ? '✓' : '⧉'}
+                  ${this.rootCopyState === 'ok' ? '✓' : this.rootCopyState === 'fail' ? '✗' : '⧉'}
                 </button>`
               : nothing}
           </dd>

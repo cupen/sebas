@@ -20,8 +20,14 @@
  *
  * 第二条用例（fix-webui-qa-defects-round3 delta「Focused session arrivals
  * never badge」）：聚焦会话的流式到达经 transcript 贴底推进共享读锚——行不
- * 点灯不是因为「聚焦抑制」遮住旧账，而是锚真的推进了（localStorage 佐证）；
- * 重复点击同会话行（no-op switch）把锚再推进到当前 msg_count，徽章保持清零。
+ * 点灯不是因为「聚焦抑制」遮住旧账，而是锚真的推进了（localStorage 佐证）。
+ *
+ * ── fix-webui-qa-round8 5.1 合同修订（锚只反映已见）────────────────────
+ * 「聚焦清零」退役：打开/聚焦不再把锚推到服务端计数——锚只在内容被真正
+ * 看到时推进（短对话开卷即全部可视 → 可视高度内结算自动清账；溢出时点
+ * 缝上「全部标为已读」显式清账；贴底跟读/跳到最新同理）。两条用例的清零
+ * 断言因此都改为「驱动一次已见动作 → 徽标清零 + 锚到服务端当前计数」；
+ * 重复聚焦（no-op switch）不推进锚、徽标保持已清状态。
  */
 import { expect, test } from '@playwright/test'
 import {
@@ -100,9 +106,20 @@ test.describe('未读徽标', () => {
     await expect(badge).toHaveText('1')
     await expect(badge).toHaveAttribute('title', '1 条未读回复')
 
-    // 聚焦 A（点徽标所在行）：徽标消失，读锚推进到服务端当前 msg_count
-    // （=2，seam 与徽标共用）。
+    // （fix-webui-qa-round8 5.1）聚焦不再清徽标——打开 A 画出未读缝，内容
+    // 被真正看到才清账：短对话开卷即全部可视（可视高度内结算自动清账）；
+    // 溢出时点缝上「全部标为已读」。两种 seen 路径都收敛到徽标清零 + 锚
+    // 推进到服务端当前 msg_count（=2，seam 与徽标共用）。
     await badgeRow.click()
+    await expect(rail.sessionItem(tagA)).toHaveAttribute('aria-current', 'true', {
+      timeout: 10_000,
+    })
+    const markSeenA = page.locator('sebas-transcript-view .seam .link')
+    try {
+      await markSeenA.click({ timeout: 2_500 })
+    } catch {
+      // 短对话开卷即全部可视（可视高度内结算）：缝已被自动清账。
+    }
     await expect(badgeRow).toHaveCount(0, { timeout: 10_000 })
     const anchor = await page.evaluate((k) => {
       const raw = localStorage.getItem(`sebas:seen:${k}`)
@@ -168,13 +185,20 @@ test.describe('未读徽标', () => {
     await expect(badgeRow).toHaveCount(1, { timeout: 15_000 })
     await expect(badgeRow).toContainText(tagB)
 
-    // 点击聚焦 B：徽标随锚推进清零；重复点击同一行（no-op switch）不再有
-    // 锚可推——徽章必须保持清零（delta「Repeated focus keeps the badge
-    // cleared」，此前同会话 no-op 不触发清零逻辑的回归钉）。
+    // （fix-webui-qa-round8 5.1）点击聚焦 B 不再清徽标——驱动一次已见动作
+    // （短对话可视高度内结算自动清账；溢出点「全部标为已读」）后徽标清零、
+    // 锚到服务端当前计数。重复点击同一行（no-op switch）不推进锚，徽章
+    // 保持清零（delta「Repeated focus keeps the badge cleared」回归钉）。
     await badgeRow.click()
     await expect(rail.sessionItem(tagB)).toHaveAttribute('aria-current', 'true', {
       timeout: 10_000,
     })
+    const markSeenB = page.locator('sebas-transcript-view .seam .link')
+    try {
+      await markSeenB.click({ timeout: 2_500 })
+    } catch {
+      // 短对话开卷即全部可视（可视高度内结算）：缝已被自动清账。
+    }
     await expect(rail.host.locator('[data-testid="session-unread"]')).toHaveCount(0, {
       timeout: 10_000,
     })

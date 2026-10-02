@@ -29,6 +29,13 @@ test.describe('未读分界线', () => {
     const keyA = await createSession(page.request, { prompt: tagA })
     await createSession(page.request, { prompt: tagB })
     await waitStatus(page.request, keyA, ['done'])
+    // 垫高会话 A（fix-webui-qa-round8 5.1 的开卷结算：未读边界若全部落在
+    // 可视高度内——滚动余量 0——开卷即「全部已见」，缝不开也不该开）。缝的
+    // 呈现前提是未读尾段溢出视口，与 transcript-scroll 旅程同一几何前提。
+    for (const extra of ['round-2', 'round-3', 'round-4']) {
+      await sendMessage(page.request, keyA, extra)
+      await waitStatus(page.request, keyA, ['done'])
+    }
 
     await page.goto('/')
     await expect(rail.host).toBeVisible()

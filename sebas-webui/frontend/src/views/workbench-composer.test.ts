@@ -275,6 +275,28 @@ describe('composer is pure follow-up (4.1)', () => {
     expect(labelOf('auto')).toBe('Auto · 自动执行')
   })
 
+
+  // （fix-webui-qa-round8 7.6）权限模式下拉重开失效的根修：选项模板唯一
+  // 实例——重渲染（模式切换在途翻转、状态刷新）复用同一批 wa-option 元素，
+  // 不再重建（QA D-P3-11：连续选择后弹层偶发「expanded 但无 option」，
+  // wa-select 内部选项集在选项元素被模板重建后失联）。
+  it('mode options survive re-renders as the same elements — no rebuild after a switch (7.6)', async () => {
+    const el = await mount({ ...focus, modeEditable: true, currentMode: 'ask' })
+    const sel = () => el.shadowRoot?.querySelector('[data-testid="mode-switch"]')
+    const before = Array.from(sel()?.querySelectorAll('wa-option') ?? [])
+    expect(before.length).toBe(4)
+    // 连续两轮模式切换：每轮 modeSwitching 翻转触发两次重渲染。
+    await el.switchMode('allow')
+    await el.switchMode('ask')
+    await el.updateComplete
+    const after = Array.from(sel()?.querySelectorAll('wa-option') ?? [])
+    expect(after.length).toBe(4)
+    // 元素身份保持：不是重建出来的新节点（重建正是选项失联的根因）。
+    expect(after[0]).toBe(before[0])
+    expect(after[3]).toBe(before[3])
+    el.remove()
+  })
+
   it('composer mode dropdown shares the MODE_OPTIONS vocabulary with the creation dialog (4.1)', async () => {
     // polish-workbench-walkthrough-ux 4.1：composer 权限模式下拉与创建弹窗
     // 同源渲染——选项文案来自共享 MODE_OPTIONS，且带 aria-label「权限模式」。

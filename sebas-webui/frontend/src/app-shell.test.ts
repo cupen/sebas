@@ -1025,3 +1025,32 @@ describe('当前角色可见（gate-agent-directory-writes 2.2）', () => {
     el.remove()
   })
 })
+
+/**
+ * fix-webui-qa-round8 4.1（agent-workbench「全局连接徽标不遮挡工作台功能」）：
+ * 徽标从绝对定位悬浮改为文档流内的右对齐徽标行——工作台头部右端（聚焦
+ * 链接）与归档只读视图的「恢复」按钮不再被悬浮层拦截。jsdom 不算 shadow
+ * 布局，几何契约按仓库既有形态断言样式表与 DOM 结构（实机点击由浏览器
+ * 验收覆盖）。
+ */
+describe('core badge yields the header corner (fix-webui-qa-round8 4.1)', () => {
+  it('the badge lives in a flow row before the outlet; absolute overlay is retired', async () => {
+    const el = await mountShell()
+    const root = el.shadowRoot!
+    // 徽标在 .core-row 内，且该行先于 .outlet（文档流让位，非悬浮）。
+    const row = root.querySelector('.core-row')!
+    expect(row.querySelector('[data-testid="core-link"]')).toBeTruthy()
+    const outlet = root.querySelector('.outlet')!
+    expect(row.compareDocumentPosition(outlet) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    const src = readFileSync(join(here, 'app-shell.ts'), 'utf8')
+    // 绝对定位/z-index 悬浮层退役：不再拦截下方元素的点击。
+    const linkRule = src.match(/\.core-link\s*\{([^}]*)\}/)?.[1] ?? ''
+    expect(linkRule).not.toMatch(/position:\s*absolute/)
+    expect(linkRule).not.toMatch(/z-index/)
+    // 徽标行自带右对齐与上留白（占位宽度由此行提供）。
+    const rowRule = src.match(/\.core-row\s*\{([^}]*)\}/)?.[1] ?? ''
+    expect(rowRule).toMatch(/justify-content:\s*flex-end/)
+    expect(rowRule).toMatch(/flex:\s*0 0 auto/)
+    el.remove()
+  })
+})

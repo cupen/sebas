@@ -84,7 +84,7 @@ test.describe('停止收尾', () => {
 
       // 行为契约：plain click（无 force——actionability 含命中目标校验，
       // 遮挡回归在此即红）落在控件上：审批读模型排空、控件离开 stop 态、
-      // 转录落地「回合被停止」条目。释放语义的深断言（迟到批复 404、过期
+      // 转录落地「回合已取消」中性条目（fix-webui-qa-round8 7.3）。释放语义的深断言（迟到批复 404、过期
       // 卡片、reload 不复活）归 stop-settle.spec 泊车旅程，这里不重复。
       await workbench.submitControl.click()
       const released = await getSessionApprovals(page.request, key)
@@ -93,7 +93,7 @@ test.describe('停止收尾', () => {
         timeout: 10_000,
       })
       await expect(
-        page.locator('sebas-dashboard sebas-transcript-view').getByText('回合被停止'),
+        page.locator('sebas-dashboard sebas-transcript-view').getByText('回合已取消'),
       ).toBeVisible({ timeout: 15_000 })
 
       expect(collector.clean()).toEqual([])

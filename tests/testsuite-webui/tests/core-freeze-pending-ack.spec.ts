@@ -27,6 +27,10 @@ import {
 } from './helpers/index'
 
 test.describe('core 挂起窗口（SIGSTOP）', () => {
+  // SIGSTOP/SIGCONT 是 POSIX 信号：Windows 上 journey 前提不成立。此前在
+  // 用例体内抛错被计为失败（linux-first 套件在 Windows 上的常驻红点）——
+  // 改为描述级条件跳过，与套件「1 POSIX skip」的既有口径一致。
+  test.skip(process.platform === 'win32', 'SIGSTOP/SIGCONT need POSIX signals (linux-first suite)')
   let collector: ErrorCollector
 
   test.beforeEach(({ page }) => {

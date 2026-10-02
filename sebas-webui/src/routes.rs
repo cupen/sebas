@@ -330,9 +330,18 @@ pub async fn providers_list(State(state): State<WebUiState>) -> axum::response::
             })
         })
         .collect();
+    // （fix-webui-qa-round8 6.1，router-model-aliases「模型别名管理有 WebUI
+    // 入口」）别名清单随 providers 读面一并下发（快照的 `model_aliases` 段
+    // 原样透传；空/缺省 = 空表）——别名分区不另造读 API，写面走既有
+    // POST/PUT/DELETE /api/model-aliases。
+    let model_aliases = snapshot
+        .get("model_aliases")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
     axum::Json(serde_json::json!({
         "providers": out,
         "config_providers": config_providers,
+        "model_aliases": model_aliases,
     }))
     .into_response()
 }

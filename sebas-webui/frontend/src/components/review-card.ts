@@ -32,6 +32,9 @@ import { customElement, property, state } from 'lit/decorators.js'
 import { api, ApiError, type PendingApprovalInfo, type PermissionDecision, errorText } from '../api/client.js'
 import { sharedWs } from '../api/shared-ws.js'
 import { icon } from './icons.js'
+// （fix-webui-qa-round8 4.4）审批面板的会话标识展示友好化（渠道 · 本地段），
+// 不再直接呈现含 %00 的 URL 编码串。wire 与路由不变。
+import { friendlySessionKey } from '../views/session-key-label.js'
 import { viewStyles } from '../styles/shared.js'
 import '@awesome.me/webawesome/dist/components/button/button.js'
 import '@awesome.me/webawesome/dist/components/input/input.js'
@@ -424,8 +427,10 @@ export class SebasReviewCards extends LitElement {
           ${card.reason ? html`<span class="why">${card.reason}</span>` : nothing}
         </header>
         <div class="meta">
+          <!-- （fix-webui-qa-round8 4.4）会话标识展示友好化（渠道 · 本地段）；
+               title 仍挂原始编码形（可复制、可与日志对账）。 -->
           <span class="session-id" title=${`会话 ${card.session_id}`}
-            >会话 ${card.session_id}</span
+            >会话 ${friendlySessionKey(card.session_id)}</span
           >
           <span class="request-id" title=${`请求 ${card.request_id}`}
             >请求 ${card.request_id}</span

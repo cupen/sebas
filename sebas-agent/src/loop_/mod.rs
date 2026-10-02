@@ -124,16 +124,6 @@ impl<'a> TurnEmit<'a> {
         });
     }
 
-    /// turn 汇总（引擎收尾发射，design N6）。
-    pub(crate) fn session_summary(&self, model_calls: u32, tool_calls: u32, turn_ms: u64) {
-        self.send(AgentEvent::SessionSummary {
-            session_id: self.session_id.into(),
-            model_calls,
-            tool_calls,
-            turn_ms,
-        });
-    }
-
     /// 策略流结果（allowed_once / allowed_session / escalated / denied / unavailable）。
     pub(crate) fn tool_policy(&self, request_id: &str, tool_name: &str, outcome: &str) {
         self.send(AgentEvent::ToolPolicy {
@@ -152,6 +142,17 @@ struct TurnCounters {
     tool_calls: u32,
 }
 
+/// 一轮 turn 的汇总数据（fix-webui-qa-round8 5.3）：`run_turn` 不再自己发射
+/// `SessionSummary`——终态（Finished / Error）必须先于 summary 落地（错误
+/// 回合的零输出判定在收尾时点求值，summary 先发会把「错误条目尚未落地」
+/// 误判成零输出）。会话层拿到这份值，在终态事件之后发射 summary。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TurnSummary {
+    pub model_calls: u32,
+    pub tool_calls: u32,
+    pub turn_ms: u64,
+}
+
 /// turn 引擎：持有预算与并发配置；会话历史由调用方持有并传入（每会话一份）。
 pub struct TurnEngine {
     pub budget: BudgetConfig,
@@ -166,7 +167,8 @@ impl TurnEngine {
         }
     }
 
-    /// 执行一轮 turn（公开入口）：计时并在收尾发射 `SessionSummary`。
+    /// 执行一轮 turn（公开入口）：返回结局与汇总数据。**不发** `SessionSummary`
+    /// ——发射顺序归会话层（终态先行，fix-webui-qa-round8 5.3）。
     #[allow(clippy::too_many_arguments)]
     pub async fn run_turn(
         &self,
@@ -179,18 +181,18 @@ impl TurnEngine {
         model: &str,
         cancel: CancellationToken,
         emit: &TurnEmit<'_>,
-    ) -> TurnOutcome {
+    ) -> (TurnOutcome, TurnSummary) {
         let started = std::time::Instant::now();
         let mut counters = TurnCounters::default();
         let outcome = self
             .run_turn_inner(llm, registry, tool_ctx_base, history, user_text, system, model, cancel, emit, &mut counters)
             .await;
-        emit.session_summary(
-            counters.model_calls,
-            counters.tool_calls,
-            started.elapsed().as_millis() as u64,
-        );
-        outcome
+        let summary = TurnSummary {
+            model_calls: counters.model_calls,
+            tool_calls: counters.tool_calls,
+            turn_ms: started.elapsed().as_millis() as u64,
+        };
+        (outcome, summary)
     }
 
     /// 执行一轮 turn：把 `user_text` 追加进 `history`，循环「模型 ⇄ 工具」
@@ -655,7 +657,7 @@ mod tests {
 
         let mut history = Vec::new();
         let emit = TurnEmit::new("s1", &tx);
-        let outcome = TurnEngine::new(BudgetConfig::default())
+        let (outcome, _summary) = TurnEngine::new(BudgetConfig::default())
             .run_turn(
                 &llm,
                 &registry,
@@ -740,7 +742,7 @@ mod tests {
 
         let mut history = Vec::new();
         let emit = TurnEmit::new("s1", &tx);
-        let outcome = TurnEngine::new(budget)
+        let (outcome, _summary) = TurnEngine::new(budget)
             .run_turn(
                 &llm, &registry, &ctx, &mut history, "go", "sys", "m",
                 CancellationToken::new(), &emit,
@@ -790,7 +792,7 @@ mod tests {
 
         let mut history = Vec::new();
         let emit = TurnEmit::new("s1", &tx);
-        let outcome = TurnEngine::new(budget)
+        let (outcome, _summary) = TurnEngine::new(budget)
             .run_turn(
                 &llm, &registry, &ctx, &mut history, "go", "sys", "m",
                 CancellationToken::new(), &emit,
@@ -830,7 +832,7 @@ mod tests {
 
         let mut history = Vec::new();
         let emit = TurnEmit::new("s1", &tx);
-        let outcome = TurnEngine::new(budget)
+        let (outcome, _summary) = TurnEngine::new(budget)
             .run_turn(
                 &llm, &registry, &ctx, &mut history, "go", "sys", "m",
                 CancellationToken::new(), &emit,
@@ -863,7 +865,7 @@ mod tests {
         let emit = TurnEmit::new("s1", &tx);
         let engine = TurnEngine::new(BudgetConfig::default());
         let started = std::time::Instant::now();
-        let outcome = {
+        let (outcome, _summary) = {
             // fut 的借用全部收在块作用域内，出块后 history 才能再被读/借。
             let fut = engine.run_turn(
                 &llm,
@@ -904,7 +906,7 @@ mod tests {
 
         // 同一 engine / history / ctx 再跑一轮 → 正常完成（C7 会话可复用）
         let llm2 = FakeLlmClient::scripted(vec![FakeLlmClient::say("fresh turn")]);
-        let outcome2 = engine
+        let (outcome2, _summary) = engine
             .run_turn(
                 &llm2, &registry, &ctx, &mut history, "again", "sys", "m",
                 CancellationToken::new(), &emit,
@@ -975,16 +977,18 @@ mod tests {
         ]);
         let mut history = Vec::new();
         let emit = TurnEmit::new("s1", &tx);
-        let outcome = TurnEngine::new(BudgetConfig::default())
+        let (outcome, _summary) = TurnEngine::new(BudgetConfig::default())
             .run_turn(&llm, &registry_stub(), &ctx, &mut history, "go", "sys", "m", tokio_util::sync::CancellationToken::new(), &emit)
             .await;
         assert_eq!(outcome, TurnOutcome::Finished { reason: FinishReason::EndTurn });
         let evs = collect(&mut rx);
         assert_eq!(
             kinds(&evs),
+            // （fix-webui-qa-round8 5.3）引擎不再发 summary——它随会话层在
+            // 终态之后发射；引擎面只到 text_delta 为止。
             vec!["tool_start", "permission_request", "tool_policy", "tool_end", "tool_finish",
                  "tool_start", "permission_request", "tool_policy", "tool_end", "tool_finish",
-                 "text_delta", "session_summary"]
+                 "text_delta"]
         );
         let outcomes: Vec<&str> = evs.iter().filter_map(|e| match e {
             AgentEvent::ToolPolicy { outcome, .. } => Some(outcome.as_str()),
@@ -1022,7 +1026,7 @@ mod tests {
         assert_eq!(
             kinds(&evs),
             vec!["tool_start", "permission_request", "tool_policy", "tool_end", "tool_finish",
-                 "tool_start", "tool_end", "tool_finish", "text_delta", "session_summary"]
+                 "tool_start", "tool_end", "tool_finish", "text_delta"]
         );
     }
 
@@ -1038,15 +1042,14 @@ mod tests {
         ]);
         let mut history = Vec::new();
         let emit = TurnEmit::new("s1", &tx);
-        let outcome = TurnEngine::new(BudgetConfig::default())
+        let (outcome, _summary) = TurnEngine::new(BudgetConfig::default())
             .run_turn(&llm, &registry_stub(), &ctx, &mut history, "go", "sys", "m", tokio_util::sync::CancellationToken::new(), &emit)
             .await;
         assert_eq!(outcome, TurnOutcome::Finished { reason: FinishReason::EndTurn });
         let evs = collect(&mut rx);
         assert_eq!(
             kinds(&evs),
-            vec!["tool_start", "tool_policy", "tool_end", "tool_finish", "text_delta",
-                 "session_summary"]
+            vec!["tool_start", "tool_policy", "tool_end", "tool_finish", "text_delta"]
         );
         assert!(matches!(&evs[1], AgentEvent::ToolPolicy { outcome, .. } if outcome == "unavailable"));
         assert!(matches!(
@@ -1080,7 +1083,7 @@ mod tests {
         assert_eq!(
             kinds(&evs),
             vec!["tool_start", "permission_request", "tool_policy", "tool_end", "tool_finish",
-                 "text_delta", "session_summary"]
+                 "text_delta"]
         );
         assert!(matches!(&evs[2], AgentEvent::ToolPolicy { outcome, .. } if outcome == "escalated"));
         // 升级确实执行了（输出可见），且只此一次
@@ -1197,7 +1200,7 @@ mod tests {
         let budget = BudgetConfig { max_messages: 3, ..Default::default() };
         let mut history = Vec::new();
         let emit = TurnEmit::new("s1", &tx);
-        let outcome = TurnEngine::new(budget)
+        let (outcome, _summary) = TurnEngine::new(budget)
             .run_turn(&llm, &registry, &ctx, &mut history, "go", "sys", "m", CancellationToken::new(), &emit)
             .await;
         assert_eq!(
@@ -1222,7 +1225,7 @@ mod tests {
         let budget = BudgetConfig { est_token_budget: 100, ..Default::default() };
         let mut history = Vec::new();
         let emit = TurnEmit::new("s1", &tx);
-        let outcome = TurnEngine::new(budget)
+        let (outcome, _summary) = TurnEngine::new(budget)
             .run_turn(&llm, &registry, &ctx, &mut history, "go", "sys", "m", CancellationToken::new(), &emit)
             .await;
         assert_eq!(
@@ -1324,7 +1327,7 @@ mod tests {
 
         let mut history = Vec::new();
         let emit = TurnEmit::new("s1", &tx);
-        let outcome = TurnEngine::new(BudgetConfig::default())
+        let (outcome, _summary) = TurnEngine::new(BudgetConfig::default())
             .run_turn(
                 &llm, &registry, &ctx, &mut history, "go", "sys", "m",
                 CancellationToken::new(), &emit,
@@ -1408,7 +1411,7 @@ mod tests {
         };
         let mut history = Vec::new();
         let emit = TurnEmit::new("s1", &_tx);
-        let outcome = TurnEngine::new(BudgetConfig::default())
+        let (outcome, _summary) = TurnEngine::new(BudgetConfig::default())
             .run_turn(
                 &llm, &registry, &ctx, &mut history, "go", "sys", "m",
                 CancellationToken::new(), &emit,

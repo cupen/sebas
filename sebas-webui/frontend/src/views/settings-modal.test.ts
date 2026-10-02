@@ -197,9 +197,25 @@ function navItems(el: SebasSettingsModal): HTMLElement[] {
   return [...el.shadowRoot!.querySelectorAll<HTMLElement>('.nav .nav-item')]
 }
 
-/** Click a nav entry by index and wait for its lazy loads to settle. */
-async function goto(el: SebasSettingsModal, index: number): Promise<void> {
-  navItems(el)[index]!.click()
+/** Click a nav entry by section id and wait for its lazy loads to settle.
+ * （fix-webui-qa-round8 6.1）新增「别名」分区后 nav 顺序位移——按 id 寻址，
+ * 不再按易碎的数字下标。 */
+async function goto(el: SebasSettingsModal, section: string): Promise<void> {
+  const labels: Record<string, string> = {
+    generic: '通用',
+    appearance: '外观',
+    services: '服务',
+    users: '用户',
+    models: '模型',
+    aliases: '别名',
+    agents: 'Agent',
+    skills: '技能',
+    'env-vars': '环境变量',
+    about: '关于',
+  }
+  const item = navItems(el).find((b) => b.textContent?.trim() === labels[section])
+  if (!item) throw new Error(`nav item not found: ${section}`)
+  item.click()
   await el.updateComplete
   await settle(el)
 }
@@ -389,6 +405,8 @@ describe('sebas-settings-modal sections', () => {
       '外观',
       '服务',
       '模型',
+      // （fix-webui-qa-round8 6.1）别名分区紧跟模型。
+      '别名',
       'Agent',
       '技能',
       '环境变量',
@@ -433,8 +451,8 @@ describe('sebas-settings-modal sections', () => {
 
   it('renders no maintenance actions anywhere (restart-all and reset retired)', async () => {
     const el = await mount()
-    for (const index of [0, 1, 2, 3, 4, 5, 6, 7]) {
-      await goto(el, index)
+    for (const section of ['generic', 'appearance', 'services', 'models', 'aliases', 'agents', 'skills', 'env-vars', 'about']) {
+      await goto(el, section)
       const buttons = waButtons(el).map((b) => b.textContent?.trim())
       expect(buttons).not.toContain('全部进程重启')
       expect(buttons).not.toContain('重置 Settings')
@@ -449,7 +467,7 @@ describe('sebas-settings-modal sections', () => {
     await settle(el)
     expect(el.section).toBe('services')
     // 打开期间切换分区会写回记忆。
-    await goto(el, 3)
+    await goto(el, "models")
     expect(localStorage.getItem('lastSettingsSection')).toBe('models')
     el.remove()
 
@@ -477,7 +495,7 @@ describe('sebas-settings-modal sections', () => {
       events: [{ seq: 1, operation_id: 'op-1', kind: 'service_error', message: 'im worker boom' }],
     })
     const el = await mount()
-    await goto(el, 2)
+    await goto(el, "services")
     expect(el.section).toBe('services')
     // 真源是 adminServicesSafe；renderServices 不得再读 /api/router。
     expect(apiMocks.adminServicesSafe).toHaveBeenCalled()
@@ -514,7 +532,7 @@ describe('sebas-settings-modal sections', () => {
     })
     apiMocks.adminEventsSafe.mockResolvedValue({ adapter_ok: true, events: [] })
     const el = await mount()
-    await goto(el, 2)
+    await goto(el, "services")
     const cards = [...el.shadowRoot!.querySelectorAll<HTMLElement>('.service-card')]
     const coreCard = cards.find((c) => c.querySelector('.service-id')?.textContent === 'core')!
     expect(coreCard).toBeTruthy()
@@ -540,7 +558,7 @@ describe('sebas-settings-modal sections', () => {
     })
     apiMocks.adminEventsSafe.mockResolvedValue({ adapter_ok: true, events: [] })
     const el = await mount()
-    await goto(el, 2)
+    await goto(el, "services")
     const ids = [...el.shadowRoot!.querySelectorAll<HTMLElement>('.service-id')].map((s) =>
       s.textContent?.trim(),
     )
@@ -567,7 +585,7 @@ describe('sebas-settings-modal sections', () => {
     })
     apiMocks.adminEventsSafe.mockResolvedValue({ adapter_ok: true, events: [] })
     const el = await mount()
-    await goto(el, 2)
+    await goto(el, "services")
     const ids = [...el.shadowRoot!.querySelectorAll<HTMLElement>('.service-id')].map((s) =>
       s.textContent?.trim(),
     )
@@ -578,7 +596,7 @@ describe('sebas-settings-modal sections', () => {
   it('Services section shows the no-adapter banner without rows or actions', async () => {
     apiMocks.adminServicesSafe.mockResolvedValue({ adapter_ok: false, services: [] })
     const el = await mount()
-    await goto(el, 2)
+    await goto(el, "services")
     const text = el.shadowRoot!.textContent ?? ''
     expect(text).toContain('无 watchdog 控制面')
     expect(el.shadowRoot!.querySelectorAll('.service-card').length).toBe(0)
@@ -595,7 +613,7 @@ describe('sebas-settings-modal sections', () => {
       services: [{ name: 'router', status: 'running', desired: 'running', uptime_secs: 95 }],
     })
     const el = await mount()
-    await goto(el, 2)
+    await goto(el, "services")
     const text = el.shadowRoot!.textContent ?? ''
     expect(text).toContain('router')
     expect(text).toContain('期望 running · 状态 running · 已运行 1m')
@@ -605,7 +623,7 @@ describe('sebas-settings-modal sections', () => {
   it('Models section renders the provider list only — no gateway card, no /api/router, no row-level fetch', async () => {
     const el = await mount()
     apiMocks.router.mockClear()
-    await goto(el, 3)
+    await goto(el, "models")
     expect(el.section).toBe('models')
     // 3.4：Models 渲染不再发起 /api/router 请求，也不出现网关卡。
     expect(apiMocks.router).not.toHaveBeenCalled()
@@ -631,7 +649,7 @@ describe('sebas-settings-modal sections', () => {
 
   it('About section shows INSTANCE (overview items) above BUILD (/api/about)', async () => {
     const el = await mount()
-    await goto(el, 7)
+    await goto(el, "about")
     expect(el.section).toBe('about')
     expect(apiMocks.about).toHaveBeenCalled()
     expect(apiMocks.fsBrowseDirs).toHaveBeenCalled()
@@ -661,7 +679,7 @@ describe('sebas-settings-modal sections', () => {
 
   it('About INSTANCE no longer renders the default provider/model row or a Models jump link', async () => {
     const el = await mount()
-    await goto(el, 7)
+    await goto(el, "about")
     const text = el.shadowRoot!.textContent ?? ''
     // preselect-last-used-model 3.1：行已删除——无论配置与否都不渲染，
     // 跳转 Models 的链接随之消失（创建预选改 last-used 语义，该行只是
@@ -676,7 +694,7 @@ describe('sebas-settings-modal sections', () => {
 
   it('About carries the router-side provider count annotation, distinct from the Models registry (round5 4.3)', async () => {
     const el = await mount()
-    await goto(el, 7)
+    await goto(el, "about")
     const text = el.shadowRoot!.textContent ?? ''
     // 口径标注：About 的 Providers 是 router 侧计数（含 debug provider），
     // 与 Models 分区的注册表口径区分，两个数字不一一对应。
@@ -706,7 +724,7 @@ describe('status-driven-service-rows：动作按钮随 actual status 互斥（D2
     })
     apiMocks.adminEventsSafe.mockResolvedValue({ adapter_ok: true, events: [] })
     const el = await mount()
-    await goto(el, 2)
+    await goto(el, "services")
     const card = el.shadowRoot!.querySelector<HTMLElement>('.service-card')!
     expect(card).toBeTruthy()
     return { el, card }
@@ -780,7 +798,7 @@ describe('status-driven-service-rows：动作按钮随 actual status 互斥（D2
       new Promise((resolve) => (resolveEnable = resolve)),
     )
     const el = await mount()
-    await goto(el, 2)
+    await goto(el, "services")
     const card = el.shadowRoot!.querySelector<HTMLElement>('.service-card')!
     const enable = card.querySelector<HTMLButtonElement>('button[title="启用服务"]')!
     enable.click()
@@ -806,7 +824,7 @@ describe('status-driven-service-rows：动作按钮随 actual status 互斥（D2
     })
     apiMocks.adminEventsSafe.mockResolvedValue({ adapter_ok: true, events: [] })
     const el = await mount()
-    await goto(el, 2)
+    await goto(el, "services")
     // 每行（core 只读、running 两钮、过渡占位）都渲染恰一个 .service-actions
     // 定宽容器——jsdom 无布局，真实 x 对齐由 Playwright 冒烟断言。
     const actions = [
@@ -845,7 +863,7 @@ describe('split-env-vars-settings-section：Env Vars 分区（/api/env）', () =
     await settle(el)
     // 懒加载：未访问该分区前不拉取。
     expect(apiMocks.env).not.toHaveBeenCalled()
-    await goto(el, 6)
+    await goto(el, "env-vars")
     expect(el.section).toBe('env-vars')
     expect(apiMocks.env).toHaveBeenCalledTimes(1)
     const rows = envRows(el)
@@ -875,7 +893,7 @@ describe('split-env-vars-settings-section：Env Vars 分区（/api/env）', () =
       ],
     })
     const el = await mount()
-    await goto(el, 6)
+    await goto(el, "env-vars")
     const text = el.shadowRoot!.textContent ?? ''
     expect(text).not.toContain('super-secret-leak')
     expect(text).toContain('已设置')
@@ -896,7 +914,7 @@ describe('split-env-vars-settings-section：Env Vars 分区（/api/env）', () =
       ],
     })
     const el = await mount()
-    await goto(el, 6)
+    await goto(el, "env-vars")
     const rows = envRows(el)
     expect(rows.length).toBe(1)
     expect(rows[0]!.querySelector('.value')?.textContent?.trim()).toBe('无法确定')
@@ -906,7 +924,7 @@ describe('split-env-vars-settings-section：Env Vars 分区（/api/env）', () =
   it('renders an inline error instead of an empty table when /api/env fails', async () => {
     apiMocks.env.mockRejectedValue(new ApiError(500, 'env listing exploded'))
     const el = await mount()
-    await goto(el, 6)
+    await goto(el, "env-vars")
     const err = el.shadowRoot!.querySelector('.callout-error[role="alert"]')
     expect(err).toBeTruthy()
     expect(err!.textContent).toContain('env listing exploded')
@@ -930,7 +948,7 @@ describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
     await settle(el)
     // 懒加载：未访问该分区前不拉取。
     expect(apiMocks.skillsList).not.toHaveBeenCalled()
-    await goto(el, 5)
+    await goto(el, "skills")
     expect(el.section).toBe('skills')
     expect(apiMocks.skillsList).toHaveBeenCalledTimes(1)
     const rows = skillRows(el)
@@ -947,7 +965,7 @@ describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
 
   it('clicking a row lazily loads the detail and renders sanitized markdown plus attachment list', async () => {
     const el = await mount()
-    await goto(el, 5)
+    await goto(el, "skills")
     // 点开前不发详情请求。
     expect(apiMocks.skillDetail).not.toHaveBeenCalled()
     const beads = skillRows(el).find((r) => r.dataset.name === 'beads')!
@@ -971,7 +989,7 @@ describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
 
   it('never offers create or edit: toolbar carries only Refresh and Sync', async () => {
     const el = await mount()
-    await goto(el, 5)
+    await goto(el, "skills")
     const buttons = waButtons(el).map((b) => b.textContent?.trim())
     expect(buttons).toContain('刷新')
     expect(buttons).toContain('同步')
@@ -985,7 +1003,7 @@ describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
 
   it('delete confirm dialog states backend copies are cleaned at next Sync; confirming deletes and refreshes', async () => {
     const el = await mount()
-    await goto(el, 5)
+    await goto(el, "skills")
     const callsBefore = apiMocks.skillsList.mock.calls.length
     skillRows(el)
       .find((r) => r.dataset.name === 'broken')!
@@ -1023,7 +1041,7 @@ describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
 
   it('Sync renders a result panel with per-backend counts and the no-placement list', async () => {
     const el = await mount()
-    await goto(el, 5)
+    await goto(el, "skills")
     waButtons(el)
       .find((b) => b.textContent?.trim() === '同步')!
       .click()
@@ -1046,8 +1064,8 @@ describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
   it('renders an inline error instead of an empty list when /api/skills fails', async () => {
     apiMocks.skillsList.mockRejectedValue(new ApiError(500, 'skills listing exploded'))
     const el = await mount()
-    await goto(el, 6)
-    await goto(el, 5)
+    await goto(el, "env-vars")
+    await goto(el, "skills")
     const err = el.shadowRoot!.querySelector('.callout-error[role="alert"]')
     expect(err).toBeTruthy()
     expect(err!.textContent).toContain('skills listing exploded')
@@ -1057,7 +1075,7 @@ describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
 
   it('Refresh re-reads the store: on-disk additions appear, kept previews survive, vanished previews collapse', async () => {
     const el = await mount()
-    await goto(el, 5)
+    await goto(el, "skills")
     // 打开 beads 预览（spec：refresh 后预览属于当前视图状态）。
     skillRows(el)
       .find((r) => r.dataset.name === 'beads')!
@@ -1103,7 +1121,7 @@ describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
   it('renders the empty-store placeholder instead of a list when the store has no entries', async () => {
     apiMocks.skillsList.mockResolvedValue({ skills: [] })
     const el = await mount()
-    await goto(el, 5)
+    await goto(el, "skills")
     expect(el.shadowRoot!.querySelector('.provider-toolbar span.label')?.textContent).toContain(
       '仓内 0 个技能',
     )
@@ -1117,7 +1135,7 @@ describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
 
   it('sync failure renders the inline error callout instead of a result panel and unsets busy', async () => {
     const el = await mount()
-    await goto(el, 5)
+    await goto(el, "skills")
     apiMocks.skillsSync.mockRejectedValue(new ApiError(500, 'reconcile exploded'))
     waButtons(el)
       .find((b) => b.textContent?.trim() === '同步')!
@@ -1137,7 +1155,7 @@ describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
 
   it('preview surfaces a detail fetch failure inline instead of a skeleton', async () => {
     const el = await mount()
-    await goto(el, 5)
+    await goto(el, "skills")
     apiMocks.skillDetail.mockRejectedValue(new ApiError(404, '仓里没有条目 "beads"'))
     skillRows(el)
       .find((r) => r.dataset.name === 'beads')!
@@ -1156,7 +1174,7 @@ describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
 
   it('invalid entry preview states the missing SKILL.md honestly (text null on the wire)', async () => {
     const el = await mount()
-    await goto(el, 5)
+    await goto(el, "skills")
     apiMocks.skillDetail.mockResolvedValue({ name: 'broken', text: null, attachments: [] })
     skillRows(el)
       .find((r) => r.dataset.name === 'broken')!
@@ -1210,7 +1228,7 @@ describe('add-agent-settings-and-session-titles：Agents 分区（/api/agents*�
     const el = await mount()
     await settle(el)
     expect(apiMocks.agents).not.toHaveBeenCalled()
-    await goto(el, 4)
+    await goto(el, "agents")
     expect(el.section).toBe('agents')
     expect(apiMocks.agents).toHaveBeenCalledTimes(1)
     const native = el.shadowRoot!.querySelector('[data-testid="agent-row-native"]')
@@ -1231,7 +1249,7 @@ describe('add-agent-settings-and-session-titles：Agents 分区（/api/agents*�
   it('create form submits the claude-shape payload with the typed id', async () => {
     apiMocks.agentsCreate.mockResolvedValue({ created: 'myclaude' })
     const el = await mount()
-    await goto(el, 4)
+    await goto(el, "agents")
     waButtons(el)
       .find((b) => b.textContent?.includes('新建 agent'))!
       .click()
@@ -1261,7 +1279,7 @@ describe('add-agent-settings-and-session-titles：Agents 分区（/api/agents*�
   it('save reads the live DOM value even when no input event fired (round6 4.1)', async () => {
     apiMocks.agentsCreate.mockResolvedValue({ created: 'liveclaud' })
     const el = await mount()
-    await goto(el, 4)
+    await goto(el, "agents")
     waButtons(el)
       .find((b) => b.textContent?.includes('新建 agent'))!
       .click()
@@ -1291,7 +1309,7 @@ describe('add-agent-settings-and-session-titles：Agents 分区（/api/agents*�
   // agent」：全新空表单打开、字段可写——重开不再被 hide 动画竞态吞掉。
   it('the create form reopens fresh after close in the same settings session (round6 4.2)', async () => {
     const el = await mount()
-    await goto(el, 4)
+    await goto(el, "agents")
     const openForm = async () => {
       waButtons(el)
         .find((b) => b.textContent?.includes('新建 agent'))!
@@ -1331,7 +1349,7 @@ describe('add-agent-settings-and-session-titles：Agents 分区（/api/agents*�
 
   it('create form rejects the reserved native id without a request', async () => {
     const el = await mount()
-    await goto(el, 4)
+    await goto(el, "agents")
     waButtons(el)
       .find((b) => b.textContent?.includes('新建 agent'))!
       .click()
@@ -1352,7 +1370,7 @@ describe('add-agent-settings-and-session-titles：Agents 分区（/api/agents*�
   it('edit defaults to keeping the launch definition and submits only the display change', async () => {
     apiMocks.agentsUpdate.mockResolvedValue({ updated: 'claude' })
     const el = await mount()
-    await goto(el, 4)
+    await goto(el, "agents")
     agentRows(el)
       .find((r) => r.dataset['id'] === 'claude')!
       .querySelector<HTMLElement>('button[title="编辑"]')!
@@ -1377,7 +1395,7 @@ describe('add-agent-settings-and-session-titles：Agents 分区（/api/agents*�
   it('delete is a confirmed action and calls the DELETE endpoint on confirm', async () => {
     apiMocks.agentsDelete.mockResolvedValue({ deleted: 'claude' })
     const el = await mount()
-    await goto(el, 4)
+    await goto(el, "agents")
     agentRows(el)
       .find((r) => r.dataset['id'] === 'claude')!
       .querySelector<HTMLElement>('button[title="删除"]')!
@@ -1417,7 +1435,7 @@ describe('add-agent-settings-and-session-titles：Agents 分区（/api/agents*�
     })
     apiMocks.agentsUpdate.mockResolvedValue({ updated: 'myagent' })
     const el = await mount()
-    await goto(el, 4)
+    await goto(el, "agents")
     agentRows(el)
       .find((r) => r.dataset['id'] === 'myagent')!
       .querySelector<HTMLElement>('button[title="编辑"]')!
@@ -1461,7 +1479,7 @@ describe('add-agent-settings-and-session-titles：Agents 分区（/api/agents*�
 
   it('duplicate agent id at create time shows a visible warning (round2 3.3)', async () => {
     const el = await mount()
-    await goto(el, 4)
+    await goto(el, "agents")
     waButtons(el)
       .find((b) => b.textContent?.trim() === '＋ 新建 agent')!
       .click()
@@ -1492,12 +1510,7 @@ describe('gate-agent-directory-writes 2.1：Agents 写入口随角色裁剪', ()
 
   /** 切到 Agents 分区（导航按角色裁剪，序号不能写死）。 */
   async function gotoAgents(el: SebasSettingsModal): Promise<void> {
-    const labels = [...el.shadowRoot!.querySelectorAll<HTMLElement>('.nav .nav-item')].map(
-      (b) => b.textContent?.trim(),
-    )
-    const index = labels.indexOf('Agent')
-    expect(index).toBeGreaterThanOrEqual(0)
-    await goto(el, index)
+    await goto(el, 'agents')
   }
 
   function newAgentButton(el: SebasSettingsModal): HTMLElement | null {
@@ -1552,7 +1565,7 @@ describe('gate-agent-directory-writes 2.1：Agents 写入口随角色裁剪', ()
 describe('unify-router-process-shape：router 停止被拒的强制出口（D4）', () => {
   /** 装好带 router 行的 Services 分区，并在 confirm 弹窗里点掉 Disable。 */
   async function confirmDisableRouter(el: SebasSettingsModal): Promise<void> {
-    await goto(el, 2)
+    await goto(el, "services")
     const routerCard = [...el.shadowRoot!.querySelectorAll<HTMLElement>('.service-card')].find(
       (c) => c.querySelector('.service-id')?.textContent === 'router',
     )!
@@ -1673,7 +1686,7 @@ describe('sebas-settings-modal appearance section', () => {
     // 页面启动时由 main.ts 应用一次主题 class；测试环境里手动补上。
     applyThemeMode()
     const el = await mount()
-    await goto(el, 1)
+    await goto(el, "appearance")
     const options = themeOptions(el)
     expect(options.map((b) => b.querySelector('.theme-option-label')?.textContent)).toEqual([
       '跟随系统',
@@ -1688,7 +1701,7 @@ describe('sebas-settings-modal appearance section', () => {
 
   it('choosing Light unsets wa-dark and persists sebas:theme=light', async () => {
     const el = await mount()
-    await goto(el, 1)
+    await goto(el, "appearance")
     themeOptions(el)[2]!.click()
     await el.updateComplete
     expect(localStorage.getItem('sebas:theme')).toBe('light')
@@ -1700,7 +1713,7 @@ describe('sebas-settings-modal appearance section', () => {
 
   it('choosing Dark sets wa-dark and persists; System returns to following the OS', async () => {
     const el = await mount()
-    await goto(el, 1)
+    await goto(el, "appearance")
     themeOptions(el)[1]!.click()
     await el.updateComplete
     expect(localStorage.getItem('sebas:theme')).toBe('dark')
@@ -1779,7 +1792,7 @@ it('states honestly that no global default is set (agent-defaults retired)', asy
   // 列表不再渲染全局 default 徽章（默认 agent 改为项目级记忆）。
 
   const el = await mount()
-  await goto(el, 3)
+  await goto(el, "models")
 
   const status = el.shadowRoot?.querySelector('.provider-toolbar [role="status"]')
   expect(status?.textContent ?? '').toContain('未设置默认')
@@ -1800,7 +1813,7 @@ describe('revamp-settings-nav-and-models-editor：编辑器内 fetch 整单替�
 
   /** 打开指定 provider 的编辑器（行内 ✎）。 */
   async function openEditorFor(el: SebasSettingsModal, name: string): Promise<HTMLElement> {
-    await goto(el, 3)
+    await goto(el, "models")
     rowFor(el, name).querySelector<HTMLButtonElement>('button[title="编辑"]')!.click()
     await el.updateComplete
     const dialog = el.shadowRoot!.querySelector('wa-dialog.provider-editor') as HTMLElement
@@ -1810,7 +1823,7 @@ describe('revamp-settings-nav-and-models-editor：编辑器内 fetch 整单替�
 
   /** 新建（preset/custom）编辑器。 */
   async function openCreateEditor(el: SebasSettingsModal, label: string): Promise<HTMLElement> {
-    await goto(el, 3)
+    await goto(el, "models")
     waButtons(el)
       .find((b) => b.textContent?.includes(label))!
       .click()
@@ -1848,7 +1861,7 @@ describe('revamp-settings-nav-and-models-editor：编辑器内 fetch 整单替�
   // 派生与 custom 皆然）有，且点击即调 core 的抓取 op。
   it('moves the fetch entry into the editor for preset and custom providers alike', async () => {
     const el = await mount()
-    await goto(el, 3)
+    await goto(el, "models")
     expect(apiMocks.fetchProviderModels).not.toHaveBeenCalled()
     // 行内没有任何 fetch 按钮（含有可用 base URL 的 alpha/beta）。
     expect(el.shadowRoot!.querySelector('button[data-testid="fetch-models"]')).toBeNull()
@@ -2058,7 +2071,7 @@ describe('revamp-settings-nav-and-models-editor：编辑器内 fetch 整单替�
 
 describe('redesign-provider-models-settings 2.1：wa-hide 来源守卫', () => {
   async function openEditor(el: SebasSettingsModal): Promise<HTMLElement> {
-    await goto(el, 3)
+    await goto(el, "models")
     const newBtn = waButtons(el).find((b) => b.textContent?.includes('新建（预设）'))!
     expect(newBtn).toBeTruthy()
     newBtn.click()
@@ -2094,7 +2107,7 @@ describe('redesign-provider-models-settings 2.1：wa-hide 来源守卫', () => {
 describe('redesign-provider-models-settings 3.1：预制最小表单', () => {
   /** 打开预制编辑器并等它渲染。 */
   async function openPresetEditor(el: SebasSettingsModal): Promise<HTMLElement> {
-    await goto(el, 3)
+    await goto(el, "models")
     waButtons(el)
       .find((b) => b.textContent?.includes('新建（预设）'))!
       .click()
@@ -2194,7 +2207,7 @@ describe('redesign-provider-models-settings 3.1：预制最小表单', () => {
 
 describe('redesign-provider-models-settings 3.2：定制最小表单 + Advanced 折叠', () => {
   async function openCustomEditor(el: SebasSettingsModal): Promise<HTMLElement> {
-    await goto(el, 3)
+    await goto(el, "models")
     waButtons(el)
       .find((b) => b.textContent?.includes('新建（自定义）'))!
       .click()
@@ -2302,9 +2315,7 @@ describe('add-webui-multiuser-rbac 5.3/5.4：Users 分区与角色裁剪', () =>
   }
 
   async function gotoUsers(el: SebasSettingsModal): Promise<void> {
-    const index = navLabels(el).indexOf('用户')
-    expect(index).toBeGreaterThanOrEqual(0)
-    await goto(el, index)
+    await goto(el, 'users')
   }
 
   function userRow(el: SebasSettingsModal, username: string): HTMLElement {
@@ -2353,6 +2364,8 @@ describe('add-webui-multiuser-rbac 5.3/5.4：Users 分区与角色裁剪', () =>
       '服务',
       '用户',
       '模型',
+      // （fix-webui-qa-round8 6.1）别名分区紧跟模型。
+      '别名',
       'Agent',
       '技能',
       '环境变量',
@@ -2366,6 +2379,7 @@ describe('add-webui-multiuser-rbac 5.3/5.4：Users 分区与角色裁剪', () =>
       '外观',
       '服务',
       '模型',
+      '别名',
       'Agent',
       '技能',
       '环境变量',
@@ -2390,6 +2404,7 @@ describe('add-webui-multiuser-rbac 5.3/5.4：Users 分区与角色裁剪', () =>
       '外观',
       '服务',
       '模型',
+      '别名',
       'Agent',
       '技能',
       '环境变量',
@@ -2598,7 +2613,7 @@ describe('About / Services display defects (round3 4.3/4.4)', () => {
       default_agent_kind: 'claude',
     })
     const el = await mount()
-    await goto(el, 7)
+    await goto(el, "about")
     const row = [...el.shadowRoot!.querySelectorAll('dl.about-build .kv')].find((kv) =>
       kv.textContent?.includes('Rust 工具链'),
     )
@@ -2611,7 +2626,7 @@ describe('About / Services display defects (round3 4.3/4.4)', () => {
 
   it('About toolchain：探测成功显示版本（fix-webui-qa-findings M9）', async () => {
     const el = await mount()
-    await goto(el, 7)
+    await goto(el, "about")
     const row = [...el.shadowRoot!.querySelectorAll('dl.about-build .kv')].find((kv) =>
       kv.textContent?.includes('Rust 工具链'),
     )
@@ -2633,7 +2648,7 @@ describe('About / Services display defects (round3 4.3/4.4)', () => {
       default_agent_kind: 'claude',
     })
     const el = await mount()
-    await goto(el, 7)
+    await goto(el, "about")
     const row = [...el.shadowRoot!.querySelectorAll('dl.about-build .kv')].find((kv) =>
       kv.textContent?.includes('Rust 工具链'),
     )
@@ -2644,7 +2659,7 @@ describe('About / Services display defects (round3 4.3/4.4)', () => {
   it('the Services no-adapter banner keeps the sebas run command unbreakable (4.4)', async () => {
     apiMocks.adminServicesSafe.mockResolvedValue({ adapter_ok: false, services: [] })
     const el = await mount()
-    await goto(el, 2)
+    await goto(el, "services")
     const cmd = el.shadowRoot!.querySelector('code.run-cmd')
     expect(cmd, 'inline command carries the no-wrap class').toBeTruthy()
     expect(cmd!.textContent).toBe('sebas run')
@@ -2667,7 +2682,7 @@ describe('About / Services display defects (round3 4.3/4.4)', () => {
 describe('About BUILD section shows build time and git info (add-about-build-info)', () => {
   it('renders a build-time row (UTC labelled) and a standalone git row under the version chip', async () => {
     const el = await mount()
-    await goto(el, 7)
+    await goto(el, "about")
     const buildRows = [
       ...el.shadowRoot!.querySelectorAll('dl.about-build .kv'),
     ]
@@ -2706,7 +2721,7 @@ describe('About BUILD section shows build time and git info (add-about-build-inf
       default_agent_kind: 'claude',
     })
     const el = await mount()
-    await goto(el, 7)
+    await goto(el, "about")
     // spec「构建信息缺失时如实呈现 unknown」：行不隐藏、照实显示。
     expect(
       el.shadowRoot!.querySelector('[data-testid="about-build-time"]')!.textContent,
@@ -2722,7 +2737,7 @@ describe('About BUILD section shows build time and git info (add-about-build-inf
 
   it('About toolchain：配置了最低版本时同 show「要求 ≥」界限 (round2 3.1)', async () => {
     const el = await mount()
-    await goto(el, 7)
+    await goto(el, "about")
     const row = [...el.shadowRoot!.querySelectorAll('dl.about-build .kv')].find((kv) =>
       kv.textContent?.includes('Rust 工具链'),
     )
@@ -2746,7 +2761,7 @@ describe('About BUILD section shows build time and git info (add-about-build-inf
       default_agent_kind: 'claude',
     })
     const el = await mount()
-    await goto(el, 7)
+    await goto(el, "about")
     const row = [...el.shadowRoot!.querySelectorAll('dl.about-build .kv')].find((kv) =>
       kv.textContent?.includes('Rust 工具链'),
     )
@@ -2758,4 +2773,76 @@ describe('About BUILD section shows build time and git info (add-about-build-inf
     el.remove()
   })
 
+})
+
+// （fix-webui-qa-round8 7.4）复制按钮的两级可见反馈：成功 ✓、失败 ✗——
+// 此前失败路径静默（QA round8 实锤「点击后无任何反馈」）。
+describe('about copy button feedback (fix-webui-qa-round8 7.4)', () => {
+  async function aboutView(): Promise<{ el: ReturnType<typeof mount> extends Promise<infer T> ? T : never; btn: HTMLButtonElement }> {
+    const el = await mount()
+    await goto(el, "about")
+    const btn = el.shadowRoot!.querySelector<HTMLButtonElement>(
+      'button[title="复制工作区根目录"]',
+    )!
+    expect(btn).toBeTruthy()
+    return { el, btn }
+  }
+
+  it('clipboard success flips the button to ✓ (visible feedback)', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    })
+    const { el, btn } = await aboutView()
+    expect(btn.textContent?.trim()).toBe('⧉')
+    await btn.click()
+    await el.updateComplete
+    // 1.5s 自复位由 window.setTimeout 承接（真实计时器），这里只钉两级反馈
+    // 的「成功 ✓」半边。
+    expect(btn.textContent?.trim()).toBe('✓')
+    el.remove()
+  })
+
+  it('clipboard rejection falls back to execCommand and shows ✗ when that also fails', async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error('denied'))
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    })
+    // jsdom 没有 execCommand：先定义再钉返回值。
+    let execResult = false
+    const exec = vi.fn((cmd: string) => (cmd === 'copy' ? execResult : false))
+    Object.defineProperty(document, 'execCommand', { value: exec, configurable: true })
+    const { el, btn } = await aboutView()
+    await btn.click()
+    await el.updateComplete
+    expect(btn.textContent?.trim()).toBe('✗')
+    // 兜底通路确实试过一次。
+    expect(exec).toHaveBeenCalledWith('copy')
+    el.remove()
+  })
+})
+
+// （fix-webui-qa-round8 7.5）技能预览只渲染正文：SKILL.md 的 frontmatter
+// 头块剥离后才进渲染管线，元数据键不得出现在预览里。
+describe('skill preview strips frontmatter (fix-webui-qa-round8 7.5)', () => {
+  it('the preview body starts at the prose, without the --- metadata block', async () => {
+    const el = await mount()
+    await goto(el, "skills")
+    // skillRows 是分区 describe 内的局部助手：这里直接按 data-name 定位行。
+    const beads = [...el.shadowRoot!.querySelectorAll<HTMLElement>('.skills-row')].find(
+      (r) => r.dataset.name === 'beads',
+    )!
+    beads.querySelector<HTMLElement>('.skills-row-name')!.click()
+    await settle(el)
+    const preview = el.shadowRoot!.querySelector('[data-testid="skill-preview"]')!
+    const md = preview.querySelector('.skills-md')!
+    // 正文在场。
+    expect(md.querySelector('h1')?.textContent).toBe('beads')
+    // frontmatter 键值不进预览（既是 7.5 的合同也是展示噪音的清除）。
+    expect(md.textContent).not.toContain('description: beads')
+    expect(md.textContent).not.toContain('name: beads')
+    el.remove()
+  })
 })

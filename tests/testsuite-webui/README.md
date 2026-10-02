@@ -67,7 +67,7 @@ pnpm --dir tests/testsuite-webui exec playwright test
 | 会话管理 | 归档恢复重建 | archive → restore: rail row back, transcript intact, History cleared, writable again | `archive-restore.spec.ts` | project-session-actions「restore archived session」+「restore preserves the transcript」² |
 | 会话管理 | rail 切换即时聚焦 | 4.2 focusing A and clicking B in the rail renders B within the throttle window, with no other events | `rail-focus.spec.ts` | agent-workbench「rail selection renders the conversation immediately」² |
 | 审批卡片旅程 | 审批读模型恢复 | reload rebuilds the review card from the read model under the same request_id, and deciding clears it for good | `approval-restore.spec.ts` | permission-flow「刷新或重连后仍可取得」+ agent-workbench「刷新后审批面从读模型重建」³ |
-| 停止收尾 | 回合被停止条目 | stopping a streaming turn appends the stop entry, resets the control, and stays settled across reloads | `stop-settle.spec.ts` | agent-workbench「停止后 transcript 有停止条目」+「刷新后不复活在飞状态」³ |
+| 停止收尾 | 回合取消条目 | stopping a streaming turn appends the neutral cancel notice（round8 7.3 前为 error 类「回合被停止」条目）, resets the control, and stays settled across reloads | `stop-settle.spec.ts` | agent-workbench「停止后 transcript 有停止条目」+「刷新后不复活在飞状态」³ |
 | 停止收尾 | 停止释放泊车审批 | stopping a parked turn releases the approval fail-closed: read model drains, late decision is rejected, stop entry lands | `stop-settle.spec.ts` | permission-flow「停止回复清空未决审批」+「释放的请求不可再批复」³ |
 | 停止收尾 | 泊车审批态下停止控件可点 | parked: stop control is unobstructed by the composer input and a plain click lands | `stop-reachability.spec.ts` | agent-workbench「停止控件随回合结算消失」+ permission-flow「停止回复清空未决审批」（round6 固化：textarea 盒体不得遮挡停止控件） |
 | 会话管理 | 聚焦联动与展开持久 | rail switch and creation landing drive the project title; project-row clicks stay independent | `rail-expand.spec.ts` | agent-workbench「rail 切换会话后项目标题跟随」+「项目行点击仍独立生效」³ |
@@ -105,6 +105,14 @@ pnpm --dir tests/testsuite-webui exec playwright test
 | 目录选择器建目录 ¹⁰ | 边界内成功 / 非法名拒绝 / 越界拒绝 | 边界内建目录成功：树内即时可见、可进入、可用于项目注册 等 3 例 | `folder-picker-mkdir.spec.ts` | webui/projects「目录选择器可新建子目录」（add-webui-round7-gaps delta；越界父目录 UI 构造不出，由 API oracle 直证）¹⁰ |
 | 连接徽标三态 ¹⁰ | 断连联动与恢复翻回 | 停核翻红且横幅一致（cause 悬停）；恢复自动翻回 | `core-link-badge.spec.ts` | agent-workbench「core 连接状态常驻指示」（add-webui-round7-gaps delta；detached 拓扑，死亡装配承载不了推送翻转）¹⁰ |
 | 连接徽标三态 ¹⁰ | 健康时低调呈现（fresh load） | 健康时低调呈现：fresh load 即 ok | `core-link-badge.spec.ts` | agent-workbench「core 连接状态常驻指示」（test.fail 钉住已知缺陷：初始 `core.reachability.get` 被 authState 竞态吞掉，fresh load 停在 unknown）¹⁰ |
+| native 转录补全 ¹¹ | 用户气泡与切换留痕 | native 会话 composer 提交见 is-user 气泡（先于回复）；中程切模型落 model_change 条目含新旧模型名 | `qa-round8-native.spec.ts` | agent-workbench「转录为操作者提交渲染用户气泡（不分执行体）」native 半边 +「会话内模型切换留痕」native 半边（fix-webui-qa-round8 delta，尚未归档）¹¹ |
+| native 转录补全 ¹¹ | 排队提交影子队列 | 回合中追加提交进待执行栈、移除同步 API 真源、留下的条目回合结束后执行 | `qa-round8-native.spec.ts` | agent-workbench「排队提交在 native 会话可见」（fix-webui-qa-round8 delta，尚未归档）¹¹ |
+| 滚动跟随与浮标 ¹¹ | 未读缝开卷与浮标回底 | 未读缝开卷（保持脱离）后新条目到达浮标出现；点浮标回底并恢复自动跟随 | `qa-round8-transcript-scroll.spec.ts` | agent-workbench「转录滚动跟随与跳到最新」（fix-webui-qa-round8 delta，尚未归档）¹¹ |
+| 滚动跟随与浮标 ¹¹ | 全读开卷自动跟随 | 打开已全读的会话开卷即贴底，新条目不触发浮标（开卷定位不再把 sticky 翻 false） | `qa-round8-transcript-scroll.spec.ts` | agent-workbench「转录滚动跟随与跳到最新」（fix-webui-qa-round8 delta，尚未归档）¹¹ |
+| 升级降级留痕 ¹¹ | ACP 上抛可见降级 | ACP 审批卡「上抛」：转录落降级条目（降级语义 + 工具名 + 原因原文），工具照常执行；顺带钉审批面板会话 chip 的友好形（无 `%00`） | `qa-round8.spec.ts` | permission-flow「升级决策的可见降级」+ agent-workbench「编码会话标识展示友好化」审批面板展示位（fix-webui-qa-round8 delta，尚未归档）¹¹ |
+| 模型切换留痕 ¹¹ | ACP 中程切模型 | 切模型成功后转录落 model_change 条目（含新旧模型名；native 半边在 qa-round8-native） | `qa-round8.spec.ts` | agent-workbench「会话内模型切换留痕」ACP 半边（fix-webui-qa-round8 delta，尚未归档）¹¹ |
+| /sessions 固定入口 ¹¹ | 历史组头链接 | 「历史」组头链接区点击导航到总览页（归档为空也在场——常驻入口） | `qa-round8.spec.ts` | agent-workbench「全部会话页有固定入口」（fix-webui-qa-round8 delta，尚未归档）¹¹ |
+| 别名管理分区 ¹¹ | CRUD 一轮 | 设置 →「别名」：新建（名称 + provider + 可选上游）、刷新后仍在、编辑、删除（确认步骤点名目标），列表与后端一致 | `qa-round8.spec.ts` | router-model-aliases「模型别名管理有 WebUI 入口」（fix-webui-qa-round8 delta，尚未归档）¹¹ |
 
 > ¹ 设置面（S1–S4, S6）的锚点指向尚未归档的 change `expand-webui-e2e-settings` 的 delta
 > scenario（尚未同步进主 spec）；S5a/S5b 锚到主 spec `模型管理覆盖`「settings provider
@@ -186,6 +194,17 @@ pnpm --dir tests/testsuite-webui exec playwright test
 > （dead-core）是单进程形态，SIGKILL 的正是 webui 本身，没有任何
 > `core.reachability` 推送可言，翻转场景承载不了；死亡形态（SPA 自感、
 > ws-down 横幅）与徽标的关系是另一已知观察，未在本旅程断言。
+
+> ¹¹ fix-webui-qa-round8（2026-10-02）七条旅程的备注：`qa-round8-native.spec.ts`
+> 跑 **native** 装配（playwright.native.config.ts 同名单，端口 9894）；影子队列
+> 用例的「回合进行中」窗口按时间构造（`test/long` 的 SSE 滴流 ≈1.9s + 内核首启
+> 开销）——native 回复经内核聚合落地，落地时点 ≈ 回合结束，不能拿回复内容当
+> 窗口锚。`qa-round8-transcript-scroll.spec.ts` 固定 1180×560 矮视口放大「内容
+> 溢出」的确定性，未读尾段用 `table` 触发词（高表格）避开「末回合太矮、缝居中
+> 落点距底 ≤ 80px 阈值」的几何坑；聚焦敏感段遵守 ⁵ 纪律走 `waitListStatus`、
+> 局部 `retries: 0`。`qa-round8.spec.ts` 的别名 CRUD 结束时经 API 清场（重跑幂等）；
+> ACP 切模型条目按 `hasText: 'opus'` 精确锁定（fake-claude 的 init 模型观察若也
+> 落一条 from=null 的条目，它不含目标模型名，不构成干扰）。
 
 能力矩阵账本见 `tests/acceptance/COVERAGE.md` 的 `testsuite-webui-browser` 一节。
 

@@ -251,6 +251,15 @@ export interface ProviderModelEntry {
   tags: ModelCapability[]
 }
 
+/**
+ * （fix-webui-qa-round8 6.1）模型别名条目（providers 快照 `model_aliases`
+ * 段的读形）：别名 → provider（可选上游模型覆写）。
+ */
+export interface ModelAliasEntry {
+  provider: string
+  upstream_model?: string
+}
+
 /** /api/providers 的 admin 列表条目（BFF 透传 core 状态库投影）。 */
 export interface ProviderAdmin {
   name: string
@@ -354,6 +363,10 @@ export type ConversationElementType =
   | 'error'
   | 'permission_mode_result'
   | 'notice'
+  // （fix-webui-qa-round8）一等系统契约条目：升级降级留痕（1.1）与模型
+  // 切换留痕（5.2）——wire 词表见 sebas-domain TurnElementType。
+  | 'escalate_downgrade'
+  | 'model_change'
 
 export interface ConversationEntryView {
   /** 0-based monotonic transcript position. */
@@ -1062,7 +1075,9 @@ export const api = {
         entries_after: entriesAfter === undefined ? undefined : String(entriesAfter),
       }),
     ),
-  settings: () => get<{ card_config: CardConfig; router: RouterInfo }>('/api/settings'),
+  // （fix-webui-qa-round8 8.2）`settings()`（GET /api/settings）已删除：全仓
+  // 无调用方（卡片配置面在 redesign-provider-models-settings 中随分区拆除，
+  // router 状态归 Services 分区的 admin 端点）。
   about: () => get<About>('/api/about'),
   /**
    * 环境变量只读清单（split-env-vars-settings-section 1.1/2.1）：webui
@@ -1249,8 +1264,15 @@ export const api = {
     ),
 
   // Provider 管理（BFF → core 状态库；preset 表跟随代码）。
+  // （fix-webui-qa-round8 6.1）`model_aliases` 随本读面下发（别名分区的
+  // 数据源；写入走 aliasCreate/aliasUpdate/aliasDelete，wire 见
+  // `/api/model-aliases`）。
   providers: () =>
-    get<{ providers: ProviderAdmin[]; config_providers?: ConfigSeededProvider[] }>('/api/providers'),
+    get<{
+      providers: ProviderAdmin[]
+      config_providers?: ConfigSeededProvider[]
+      model_aliases?: Record<string, ModelAliasEntry>
+    }>('/api/providers'),
   /**
    * （workbench-conversation-view 4.1）默认 provider/model 预选数据。数据
    * 真源是 core 状态库（BFF 经状态 seam 读）；未设置 → 双 null；core 不可达
@@ -1277,6 +1299,24 @@ export const api = {
     post<{ provider: string; models: string[] }>(
       `/api/providers/${encodeURIComponent(name)}/probe`,
     ),
+
+  // ── 模型别名管理（fix-webui-qa-round8 6.1，router-model-aliases）──────
+  // 写面 = 既有 /api/model-aliases CRUD（服务端做校验：alias 禁 / 与 *，
+  // provider 必须已注册；重复创建 409 / 更新未知 404）。
+  aliasCreate: (alias: string, provider: string, upstreamModel?: string) =>
+    post<{ created: string }>('/api/model-aliases', {
+      alias,
+      provider,
+      ...(upstreamModel ? { upstream_model: upstreamModel } : {}),
+    }),
+  aliasUpdate: (alias: string, provider: string, upstreamModel?: string) =>
+    put<{ updated: string }>(`/api/model-aliases/${encodeURIComponent(alias)}`, {
+      alias,
+      provider,
+      ...(upstreamModel ? { upstream_model: upstreamModel } : {}),
+    }),
+  aliasDelete: (alias: string) =>
+    del<{ deleted: string }>(`/api/model-aliases/${encodeURIComponent(alias)}`),
 
   // Admin reads
   adminStatus: () => get<AdminStatus>('/api/admin/status'),
