@@ -7,6 +7,7 @@
 //! - 会话生命周期事件（SessionEvent 广播 + 快照）: [`events`]
 
 mod acp_events;
+mod checkpoint;
 mod events;
 mod inbound;
 mod maps;
@@ -354,6 +355,10 @@ pub struct DispatchHandle {
     /// 的 turn-block 计数全体 +1 的根因）。首条之后的 ModelChanged 才是
     /// 操作者切换，落 `model_change` 留痕条目。
     model_seen: Arc<RwLock<HashSet<String>>>,
+    /// 会话面 checkpoint 指纹登记（fix-webui-qa-round9 1.2，
+    /// session-transcript-durability）：session_id → 上次成功写入的快照
+    /// 内容指纹。逻辑在 [`checkpoint`]（子模块可访问私有字段）。
+    checkpoints: checkpoint::CheckpointRegistry,
 }
 
 impl Clone for DispatchHandle {
@@ -380,6 +385,7 @@ impl Clone for DispatchHandle {
             stall: self.stall.clone(),
             cancelled_turns: self.cancelled_turns.clone(),
             model_seen: self.model_seen.clone(),
+            checkpoints: self.checkpoints.clone(),
         }
     }
 }
@@ -459,6 +465,7 @@ impl DispatchHandle {
                 stall: stall::StallRegistry::default(),
                 cancelled_turns: Arc::new(RwLock::new(HashMap::new())),
                 model_seen: Arc::new(RwLock::new(HashSet::new())),
+                checkpoints: checkpoint::CheckpointRegistry::default(),
             },
             rx,
         )
@@ -917,7 +924,18 @@ impl DispatchHandle {
             Some(sid) => sid.to_string(),
             // Spawning 占位没有 session_id，也不可能有泊车（泊车发生在回合
             // 内）——如实返回空表而非 None（会话是存在的）。
-            None => return Some(Vec::new()),
+            None => {
+                // （fix-webui-qa-round9 1.3，session-transcript-durability）
+                // 重启恢复的会话是 Dormant（session_id() 为 None），但它的
+                // 泊车审批已随 checkpoint 回放进泊车表（按 transcript 寻址
+                // id 登记）——按 transcript_id 解析，审查卡才能跨重启恢复
+                // 呈现（spec「待批审批跨重启恢复」）。Spawning 占位没有
+                // transcript id，落到空表（与既有注释同一语义）。
+                match m.transcript_id() {
+                    Some(tid) => tid.to_string(),
+                    None => return Some(Vec::new()),
+                }
+            }
         };
         Some(
             self.stall
@@ -993,6 +1011,9 @@ impl DispatchHandle {
             self.stall
                 .note_permission_parked(sid, &request_id, &tool_name, args.clone())
                 .await;
+            // fix-webui-qa-round9 1.2：泊车进入的即时 checkpoint（与 acp 路径
+            // 同一触发点语义，见 acp_events 的 PermissionRequest 臂）。
+            self.checkpoint_spawn(sid.to_string());
         }
         let _ = self.perm_events.send(AcpEvent::PermissionRequest {
             session_id,
@@ -1007,10 +1028,13 @@ impl DispatchHandle {
     /// 本就未泊车）。解除即广播 Updated——waiting 投影即时翻转。
     pub async fn resolve_permission_request(&self, request_id: &str) -> Option<String> {
         let sid = self.stall.note_permission_resolved(request_id).await;
-        if let Some(ref sid) = sid
-            && let Some(key) = self.map.lookup_key_by_session(sid).await
-        {
-            self.publish_updated(&key).await;
+        if let Some(ref sid) = sid {
+            if let Some(key) = self.map.lookup_key_by_session(sid).await {
+                self.publish_updated(&key).await;
+            }
+            // fix-webui-qa-round9 1.2：泊车解除的即时 checkpoint（原生桥批复
+            // 路径，与 emit 的 PermissionReply 钩子对称）。
+            self.checkpoint_spawn(sid.clone());
         }
         sid
     }
@@ -1164,10 +1188,13 @@ impl DispatchHandle {
             // （review 3c 补口，session-unread-badge delta「parked-approval
             // exit emits a frame」）批复离开引擎即解除泊车——解除的会话从
             // waiting 翻回原相位，是生命周期 flip，即刻广播。
-            if let Some(session_id) = self.stall.note_permission_resolved(request_id).await
-                && let Some(key) = self.map.lookup_key_by_session(&session_id).await
-            {
-                self.publish_updated(&key).await;
+            if let Some(session_id) = self.stall.note_permission_resolved(request_id).await {
+                if let Some(key) = self.map.lookup_key_by_session(&session_id).await {
+                    self.publish_updated(&key).await;
+                }
+                // fix-webui-qa-round9 1.2：泊车解除同样是即时 checkpoint 触发
+                // 点（快照里的泊车集合随批复清空）。
+                self.checkpoint_spawn(session_id);
             }
         }
         if let Err(e) = self.tx.send(out).await {
@@ -1466,6 +1493,11 @@ impl DispatchHandle {
                 if !stop_entry {
                     self.append_zero_output_notice_if_empty(session_id).await;
                 }
+                // fix-webui-qa-round9 1.2（review 缺口 B）：回合终态是转录与
+                // usage 的稳定点——事件驱动即时 checkpoint。没有它，闲置会话
+                // 要等 30s 周期拍，窗口内强杀丢上一回合的账（开轮 reseed 又
+                // 会先动卡态）。
+                self.checkpoint_spawn(session_id.to_string());
             }
             _ => {}
         }
@@ -2170,12 +2202,15 @@ impl DispatchHandle {
     /// 泊车时 no-op。返回被释放的 request_id 列表（日志/测试断言用）。
     pub async fn release_parked_approvals(&self, session_id: &str) -> Vec<String> {
         let released = self.stall.release_session(session_id).await;
-        if !released.is_empty()
-            && let Some(key) = self.map.lookup_key_by_session(session_id).await
-        {
-            // 泊车集合清空 = (phase, parked) 投影翻转（waiting 消失、
-            // turn_engaged 回落）——即刻广播，rail/提交控件不等轮询。
-            self.publish_updated(&key).await;
+        if !released.is_empty() {
+            if let Some(key) = self.map.lookup_key_by_session(session_id).await {
+                // 泊车集合清空 = (phase, parked) 投影翻转（waiting 消失、
+                // turn_engaged 回落）——即刻广播，rail/提交控件不等轮询。
+                self.publish_updated(&key).await;
+            }
+            // fix-webui-qa-round9 1.2：泊车集合被清空（cancel/终结路径）也是
+            // 快照变更——即时 checkpoint，与批复解除同一语义。
+            self.checkpoint_spawn(session_id.to_string());
         }
         released
     }
@@ -2452,6 +2487,14 @@ impl DispatchHandle {
         };
         let session_id_opt = mapping.session_id().map(|s| s.to_string());
 
+        // fix-webui-qa-round9 1.3（session-transcript-durability）：close 删除
+        // 对应 checkpoint 行——归档会话重启后不复活、不与归档条目重复计数
+        // （spec「归档语义不受影响」）。用 transcript 寻址 id：Dormant 映射
+        // （session_id() 为 None）的转录同样有 checkpoint。
+        if let Some(tid) = mapping.transcript_id() {
+            self.checkpoint_drop(tid).await;
+        }
+
         // design D5：在移除映射之前盘点未执行的待生效提交并发出 PendingDropped
         // ——关闭带队列的会话绝不静默丢队，观察者收到逐条标注。
         let pending = self.map.pending_submissions(&key).await;
@@ -2517,8 +2560,25 @@ impl DispatchHandle {
         prompt: String,
         root_id: Option<String>,
     ) {
+        // （fix-webui-qa-round9 review 缺口 B）会话累计 usage 跨轮保留：
+        // drop+reseed 是「本回合」缓冲的复位点，但 `usage_total`/
+        // `usage_reported` 是会话累计（checkpoint 的持久面），开轮清零会让
+        // 已上报历史从持久面消失（强杀即丢）。随新卡态带回。
+        let prior_usage = self
+            .card_states
+            .snapshot(session_id)
+            .await
+            .map(|st| (st.usage_total, st.usage_reported));
         self.card_states.drop(session_id).await;
         self.seed_card(session_id.to_string(), prompt.clone()).await;
+        if let Some((total, reported)) = prior_usage {
+            self.card_states
+                .apply(session_id, |st| {
+                    st.usage_total = total;
+                    st.usage_reported = reported;
+                })
+                .await;
+        }
         let theme_color = self.card_cfg.read().await.theme_color.clone();
         let turn_prompt = prompt.clone();
         let card = ChannelCard {
@@ -2756,16 +2816,20 @@ impl DispatchHandle {
             // 收尾时刻的搁浅条目数——drain 会让队头开轮，其余随之解除卡死。
             // （fix-webui-qa-defects 5.1，design D5）错误条目带 stall 分类，
             // 前端气泡标签渲染「回合停滞」而非通用 spawn failed。
+            // （fix-webui-qa-round9 4.2，agent-workbench）文案如实描述时序：
+            // 阈值是**判定**时刻，收尾还叠加扫描迟滞（run.rs 的扫描间隔 =
+            // clamp(阈值, 1, 15)）——最迟约 N + 间隔 秒内强制收尾，不把阈值
+            // 宣称成收尾时刻（spec「通知文案与机制一致」）。
+            let timeout = self.stall.timeout_secs();
+            let settle_deadline = timeout + timeout.clamp(1, 15);
             let released = self.map.queue_len(&key).await;
             self.transcript_push(
                 &sid,
                 TurnEntry::error(
                     0,
                     format!(
-                        "**回合停滞被强制收尾**：超过 {} 秒无任何事件（最后事件 {} 秒前），队列中 {} 条待执行提交已解除卡死。",
-                        self.stall.timeout_secs(),
+                        "**回合停滞被强制收尾**：静默超过 {timeout} 秒即判定停滞，最迟约 {settle_deadline} 秒内强制收尾（最后事件 {} 秒前），队列中 {released} 条待执行提交已解除卡死。",
                         facts.silent_for_secs,
-                        released
                     ),
                 )
                 .with_failure_class(failure_class::STALL),

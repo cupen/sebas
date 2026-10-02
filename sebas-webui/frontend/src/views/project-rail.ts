@@ -904,6 +904,57 @@ export class SebasProjectRail extends LitElement {
   @state() private closeTarget: SessionRow | null = null
   @state() private closeError: string | null = null
 
+  // ─── Rename project（fix-webui-qa-round9 3.2，project-session-actions）──
+  // 弹窗形态对齐会话重命名（5.1）：预填现名、Enter 提交、空名内联报错、
+  // 成功后行内即时更新 + notify 回执。
+  @state() private projectRenameTarget: Project | null = null
+  @state() private projectRenameValue = ''
+  @state() private projectRenameError: string | null = null
+  private projectRenaming = false
+
+  private openProjectRenameDialog(_e: Event, p: Project) {
+    this.projectRenameTarget = p
+    this.projectRenameValue = p.name
+    this.projectRenameError = null
+  }
+  private closeProjectRenameDialog() {
+    this.projectRenameTarget = null
+    this.projectRenameValue = ''
+    this.projectRenameError = null
+  }
+  /** 与会话重命名同款的 wa-input 取值锚（内部原生 input 优先）。 */
+  private projectRenameInputValue(): string {
+    const host = this.shadowRoot?.querySelector<HTMLInputElement>(
+      'wa-input[data-testid="project-rename-input"]',
+    )
+    const native = host?.shadowRoot?.querySelector<HTMLInputElement>('input')
+    return String(native?.value ?? host?.value ?? this.projectRenameValue ?? '')
+  }
+  private async confirmProjectRename() {
+    const p = this.projectRenameTarget
+    if (!p || this.projectRenaming) return
+    const name = this.projectRenameInputValue().trim()
+    if (!name) {
+      // 空名/纯空白：内联报错、对话框不关（spec「empty name rejected」）。
+      this.projectRenameError = '项目名称不能为空'
+      return
+    }
+    this.projectRenaming = true
+    this.projectRenameError = null
+    try {
+      await api.projects.rename(p.id, name)
+      notify({ level: 'info', message: `项目已重命名为「${name}」。` })
+      this.closeProjectRenameDialog()
+      // 行内即时更新：注册表变化广播（dashboard 等消费面同帧收敛）。
+      window.dispatchEvent(new Event('sebas:refetch'))
+      await this.refresh()
+    } catch (err) {
+      this.projectRenameError = err instanceof Error ? err.message : String(err)
+    } finally {
+      this.projectRenaming = false
+    }
+  }
+
   // ─── Rename（fix-webui-approval-restore-and-session-identity 5.1）────
   /** 重命名目标（`null` = 对话框关闭）。零轮占位同样可命名。 */
   @state() private renameTarget: SessionRow | null = null
@@ -1351,6 +1402,9 @@ export class SebasProjectRail extends LitElement {
                 aria-label="项目操作：${p.name}"
                 aria-haspopup="menu"
               >${icon('more', 12)}</button>
+              <!-- fix-webui-qa-round9 3.2：项目重命名入口（弹窗对齐会话
+                   重命名；只改 name——路径/排序/会话从属不动）。 -->
+              <wa-dropdown-item value="rename" @click=${(e: Event) => this.openProjectRenameDialog(e, p)}>重命名</wa-dropdown-item>
               <wa-dropdown-item value="remove" @click=${(e: Event) => this.openRemoveDialog(e, p)}>移除项目</wa-dropdown-item>
               <!-- （fix-webui-qa-round3 2.5 / D9）重排序入口：上移/下移，走既有
                    /api/projects/reorder 持久化（拖拽之外的确定性入口；QA 实锤
@@ -1539,7 +1593,9 @@ export class SebasProjectRail extends LitElement {
       </wa-dialog>` : nothing}
 
       <!-- （5.1）重命名对话框：label 是操作者自由输入，零轮占位同样可命名；
-           空输入 = 清空。关闭即整棵移出 ARIA 树。 -->
+           空输入 = 清空。关闭即整棵移出 ARIA 树。
+           （fix-webui-qa-round9 4.5）输入框聚焦时 Enter 提交（与确认按钮
+           等效）；空名提交按既有校验拒绝（服务端语义不变）。 -->
       ${this.renameTarget !== null ? html`
       <wa-dialog label="重命名会话" style="--width: 440px;" .open=${true} @wa-hide=${guardedHide(() => this.closeRenameDialog())}>
         <div class="wa-stack" style="gap:var(--sebas-space-3);">
@@ -1549,11 +1605,41 @@ export class SebasProjectRail extends LitElement {
             placeholder="留空则回退到首条消息预览"
             .value=${this.renameValue}
             @input=${(e: Event) => (this.renameValue = (e.target as HTMLInputElement).value)}
+            @keydown=${(e: KeyboardEvent) => {
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                void this.confirmRename()
+              }
+            }}
           ></wa-input>
           ${this.renameError ? html`<div style="color:var(--sebas-status-failed);font-size:0.78rem;" data-testid="rename-error">${this.renameError}</div>` : nothing}
         </div>
         <wa-button slot="footer" variant="brand" ?loading=${this.renaming} @click=${() => void this.confirmRename()}>保存</wa-button>
         <wa-button slot="footer" appearance="plain" @click=${() => this.closeRenameDialog()}>取消</wa-button>
+      </wa-dialog>` : nothing}
+
+      <!-- fix-webui-qa-round9 3.2：项目重命名对话框（形态对齐会话重命名：
+           Enter 提交、空名内联报错不关框、成功后行内即时更新）。 -->
+      ${this.projectRenameTarget !== null ? html`
+      <wa-dialog label="重命名项目" style="--width: 440px;" .open=${true} @wa-hide=${guardedHide(() => this.closeProjectRenameDialog())}>
+        <div class="wa-stack" style="gap:var(--sebas-space-3);">
+          <wa-input
+            data-testid="project-rename-input"
+            label="项目名称"
+            placeholder="项目显示名"
+            .value=${this.projectRenameValue}
+            @input=${(e: Event) => (this.projectRenameValue = (e.target as HTMLInputElement).value)}
+            @keydown=${(e: KeyboardEvent) => {
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                void this.confirmProjectRename()
+              }
+            }}
+          ></wa-input>
+          ${this.projectRenameError ? html`<div style="color:var(--sebas-status-failed);font-size:0.78rem;" data-testid="project-rename-error">${this.projectRenameError}</div>` : nothing}
+        </div>
+        <wa-button slot="footer" variant="brand" ?loading=${this.projectRenaming} @click=${() => void this.confirmProjectRename()}>保存</wa-button>
+        <wa-button slot="footer" appearance="plain" @click=${() => this.closeProjectRenameDialog()}>取消</wa-button>
       </wa-dialog>` : nothing}
 
       <!-- 创建会话对话框（workbench-interaction-polish D2）：唯一可选 agent

@@ -195,9 +195,12 @@ both live in tasks.py — the old `scripts/*sandbox*.sh` harnesses were removed
    `http://127.0.0.1:<sandbox-port>/` — `cargo build` bakes the current
    `frontend/dist` into the binary, so the sandbox serves the real UI.
 
-4. Clean up: SIGTERM the core (graceful exit removes the channel socket and
-   dumps state — itself worth asserting), stop the webui and the standalone
-   router process, delete the sandbox dir, and confirm the ports are free.
+4. Clean up: SIGTERM the core (graceful exit removes the channel socket —
+   itself worth asserting; session_map 已逐变更落库、无关停 dump，转录/审批/
+   usage 由 session-transcript-durability 的 checkpoint 承载), stop the webui
+   and the standalone router process, delete the sandbox dir, and confirm the
+   ports are free. 沙箱内驱动看门狗探针语义：每活会话每秒一条
+   `set_permission_mode` 控制帧——属存活探测，fake-claude journal 会放大显示。
 
 ### services.json：越界点已修，仍是文件（single-state-dir D6 例外说明）
 

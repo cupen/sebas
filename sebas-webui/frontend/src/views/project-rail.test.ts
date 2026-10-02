@@ -1800,6 +1800,119 @@ describe('session naming by operator label (5.1)', () => {
     expect(err?.textContent).toContain('会话不存在')
     el.remove()
   })
+
+  // （fix-webui-qa-round9 4.5）会话重命名弹窗 Enter 提交：输入框聚焦时按
+  // Enter 与确认按钮等效（提交生效、弹窗关闭、行内即时更新走既有链）。
+  it('the session rename dialog submits on Enter (round9 4.5)', async () => {
+    mockOf(apiMock.setSessionLabel).mockClear()
+    mockOf(apiMock.setSessionLabel).mockResolvedValue({ status: 'ok' })
+    const el = await mount()
+    const target = (el as any).sessions[0] as SessionRow
+    ;(el as any).openRenameDialog(new Event('click'), target)
+    await (el as any).updateComplete
+    const input = el.shadowRoot!.querySelector('wa-input[data-testid="rename-input"]')!
+    input.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, composed: true }),
+    )
+    await (el as any).updateComplete
+    // 空输入 = 清空语义（wire 形状 null，回退首条消息预览）——Enter 与
+    // 确认按钮走同一条 confirmRename 链。
+    expect(mockOf(apiMock.setSessionLabel)).toHaveBeenCalledWith(target.encoded_key, null)
+    expect((el as any).renameTarget).toBeNull()
+    el.remove()
+  })
+
+  // （fix-webui-qa-round9 4.5 反例）非 Enter 键不触发提交。
+  it('plain character keys do not submit the rename dialog (round9 4.5)', async () => {
+    mockOf(apiMock.setSessionLabel).mockClear()
+    const el = await mount()
+    const target = (el as any).sessions[0] as SessionRow
+    ;(el as any).openRenameDialog(new Event('click'), target)
+    await (el as any).updateComplete
+    const input = el.shadowRoot!.querySelector('wa-input[data-testid="rename-input"]')!
+    input.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'a', bubbles: true, composed: true }),
+    )
+    await (el as any).updateComplete
+    expect(mockOf(apiMock.setSessionLabel)).not.toHaveBeenCalled()
+    expect((el as any).renameTarget).toBe(target)
+    el.remove()
+  })
+})
+
+// ── fix-webui-qa-round9 3.2：项目重命名（rail 菜单入口 + 弹窗）────────────
+describe('project rename via rail menu (round9 3.2)', () => {
+  it('renames through the seam with the trimmed name and refreshes', async () => {
+    mockOf(apiMock.projects.rename).mockResolvedValue({
+      status: 'renamed',
+      id: 'proj-1',
+      name: '新项目名',
+    })
+    const el = await mount()
+    const p = (el as any).projects[0] as Project
+    ;(el as any).openProjectRenameDialog(new Event('click'), p)
+    await (el as any).updateComplete
+    const dialog = el.shadowRoot!.querySelector('wa-dialog[label="重命名项目"]')
+    expect(dialog).toBeTruthy()
+    expect((el as any).projectRenameValue).toBe(p.name)
+
+    ;(el as any).projectRenameValue = '  新项目名  '
+    await (el as any).updateComplete
+    await (el as any).confirmProjectRename()
+    expect(mockOf(apiMock.projects.rename)).toHaveBeenCalledWith(p.id, '新项目名')
+    expect((el as any).projectRenameTarget).toBeNull()
+    el.remove()
+  })
+
+  it('an empty or whitespace-only name shows the inline error without closing', async () => {
+    mockOf(apiMock.projects.rename).mockClear()
+    const el = await mount()
+    const p = (el as any).projects[0] as Project
+    ;(el as any).openProjectRenameDialog(new Event('click'), p)
+    ;(el as any).projectRenameValue = '   '
+    await (el as any).confirmProjectRename()
+    expect(mockOf(apiMock.projects.rename)).not.toHaveBeenCalled()
+    expect((el as any).projectRenameTarget).toBe(p)
+    const err = el.shadowRoot!.querySelector('[data-testid="project-rename-error"]')
+    expect(err?.textContent).toContain('项目名称不能为空')
+    el.remove()
+  })
+
+  it('a server rejection keeps the dialog open with the inline error', async () => {
+    mockOf(apiMock.projects.rename).mockRejectedValue(new Error('状态库不可用'))
+    const el = await mount()
+    const p = (el as any).projects[0] as Project
+    ;(el as any).openProjectRenameDialog(new Event('click'), p)
+    ;(el as any).projectRenameValue = 'x'
+    await (el as any).confirmProjectRename()
+    expect((el as any).projectRenameTarget).toBe(p)
+    const err = el.shadowRoot!.querySelector('[data-testid="project-rename-error"]')
+    expect(err?.textContent).toContain('状态库不可用')
+    el.remove()
+  })
+
+  it('the project rename dialog submits on Enter (round9 3.2)', async () => {
+    mockOf(apiMock.projects.rename).mockResolvedValue({
+      status: 'renamed',
+      id: 'proj-1',
+      name: '回车名',
+    })
+    const el = await mount()
+    const p = (el as any).projects[0] as Project
+    ;(el as any).openProjectRenameDialog(new Event('click'), p)
+    ;(el as any).projectRenameValue = '回车名'
+    await (el as any).updateComplete
+    const input = el.shadowRoot!.querySelector(
+      'wa-input[data-testid="project-rename-input"]',
+    )!
+    input.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, composed: true }),
+    )
+    await (el as any).updateComplete
+    expect(mockOf(apiMock.projects.rename)).toHaveBeenCalledWith(p.id, '回车名')
+    expect((el as any).projectRenameTarget).toBeNull()
+    el.remove()
+  })
 })
 
 // ── fix-webui-qa-defects-round5 3.2/6.3：label 变更实时刷新（label 比对收窄）┘

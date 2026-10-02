@@ -42,6 +42,10 @@ impl DispatchHandle {
                 self.stall
                     .note_permission_parked(session_id, request_id, tool_name, args.clone())
                     .await;
+                // fix-webui-qa-round9 1.2（session-transcript-durability）：泊车
+                // 进入是事件驱动的即时 checkpoint 触发点——待批审批丢失代价高、
+                // 频度低，不等周期兜底。写经后台任务，绝不阻塞事件流。
+                self.checkpoint_spawn(session_id.clone());
                 // 独立权限广播（design D6）：与飞书卡片路径并行，任何订阅者
                 // （如 webui InProcessBackend）都能拿到这条 PermissionRequest。
                 // 即使通道侧因无 ChannelKey 而丢弃卡片，广播也照发不误。

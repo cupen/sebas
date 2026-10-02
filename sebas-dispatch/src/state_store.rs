@@ -61,6 +61,10 @@ pub trait StateStoreEngine: Send + Sync {
     async fn remove_project(&self, path: &str) -> Result<bool, String>;
     /// 记录项目级默认 agent（workbench-agent-wire-fix 2.6）。按稳定 id 定位。
     async fn set_project_default_agent(&self, id: &str, agent: &str) -> Result<(), String>;
+    /// 项目重命名（fix-webui-qa-round9 3.1）：按稳定 id 更新 name 列，返回
+    /// 是否确有行被更新（未知 id = false → 调用方转 404）。只碰 name——
+    /// 路径/排序/节点归属/会话从属不变。
+    async fn rename_project(&self, id: &str, name: &str) -> Result<bool, String>;
 
     // ---- agents 域（add-agent-settings-and-session-titles 1.3）----
     //
@@ -120,6 +124,39 @@ pub trait StateStoreEngine: Send + Sync {
     async fn delete_session_entry(&self, chat_id: String, thread_id: Option<String>) -> Result<(), String> {
         tracing::debug!(chat_id = %chat_id, "session entry delete hit the no-op engine default");
         let _ = (chat_id, thread_id);
+        Ok(())
+    }
+
+    // ---- 会话面 checkpoint（fix-webui-qa-round9 1.1/1.2，
+    // session-transcript-durability）----
+    //
+    // 默认实现只服务未覆盖它们的既有测试替身（它们的被测面不含会话面）；
+    // 生产实现必须如实落库（`DbStateEngine`，projects.db 的 session_checkpoints
+    // 表），绝不拿默认 no-op 冒充成功。
+
+    /// 单会话 checkpoint 快照 upsert（单事务原子替换——完整旧快照或完整新
+    /// 快照）。响应返回前即已提交。
+    async fn save_session_checkpoint(
+        &self,
+        row: sebas_models::checkpoint::SessionCheckpointRow,
+    ) -> Result<(), String> {
+        tracing::debug!(session_id = %row.session_id, "session checkpoint save hit the no-op engine default");
+        let _ = row;
+        Ok(())
+    }
+
+    /// 全部 checkpoint 行（core 启动回放源；空库 → 空表）。
+    async fn load_session_checkpoints(
+        &self,
+    ) -> Result<Vec<sebas_models::checkpoint::SessionCheckpointRow>, String> {
+        let _ = self;
+        Ok(Vec::new())
+    }
+
+    /// 删除一个会话的 checkpoint 行（close 归档路径；幂等——无行 = Ok）。
+    async fn delete_session_checkpoint(&self, session_id: &str) -> Result<(), String> {
+        tracing::debug!(session_id = %session_id, "session checkpoint delete hit the no-op engine default");
+        let _ = session_id;
         Ok(())
     }
 }
@@ -862,6 +899,26 @@ pub async fn project_mutation(
                 .and_then(Value::as_str)
                 .ok_or_else(|| "set_default_agent: 缺少 agent 字段".to_string())?;
             engine.set_project_default_agent(id, agent).await
+        }
+        // fix-webui-qa-round9 3.1（project-session-actions）：项目重命名。
+        // 非空校验在这里再守一遍（端点已 trim），未知 id 如实报「不存在」
+        // （调用方转 404）。
+        "rename" => {
+            let id = payload
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "rename: 缺少 id 字段".to_string())?;
+            let name = payload
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| "rename: name 不能为空".to_string())?;
+            match engine.rename_project(id, name).await {
+                Ok(true) => Ok(()),
+                Ok(false) => Err(format!("rename: project '{id}' 不存在")),
+                Err(e) => Err(e),
+            }
         }
         other => Err(format!("projects: 未知 op '{other}'")),
     }

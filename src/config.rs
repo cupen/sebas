@@ -384,6 +384,13 @@ pub struct DispatchConfig {
     /// interrupt ×3 → SIGTERM）先于它触发，看门狗只兜驱动判不了的场景。
     #[serde(default = "default_turn_stall_timeout")]
     pub turn_stall_timeout: u64,
+    /// （fix-webui-qa-round9 1.2，session-transcript-durability）会话面
+    /// checkpoint 周期（秒）：转录/泊车审批/会话级 usage 的周期兜底落盘
+    /// 间隔。审批事件另有即时 checkpoint，不受本值影响。`0` = 关闭周期
+    /// 兜底（事件驱动即时 checkpoint 仍生效）。默认 30（spec：不超过
+    /// 30 秒一次）。
+    #[serde(default = "default_checkpoint_interval_secs")]
+    pub checkpoint_interval_secs: u64,
 }
 
 impl Default for DispatchConfig {
@@ -392,6 +399,7 @@ impl Default for DispatchConfig {
             channel_buffer: default_channel_buffer(),
             max_concurrent_sessions: default_max_concurrent(),
             turn_stall_timeout: default_turn_stall_timeout(),
+            checkpoint_interval_secs: default_checkpoint_interval_secs(),
         }
     }
 }
@@ -404,6 +412,9 @@ fn default_max_concurrent() -> usize {
 }
 fn default_turn_stall_timeout() -> u64 {
     600
+}
+fn default_checkpoint_interval_secs() -> u64 {
+    30
 }
 
 fn default_node_link_listen() -> String {

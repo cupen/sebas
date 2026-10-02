@@ -213,6 +213,10 @@ impl sebas_dispatch::state_store::StateStoreEngine for FakeStateEngineImpl {
             Err(format!("set_default_agent: project '{id}' 不存在"))
         }
     }
+    // fix-webui-qa-round9 3.1：测试替身不承载项目域——诚实拒绝。
+    async fn rename_project(&self, _id: &str, _name: &str) -> Result<bool, String> {
+        Err("rename: 测试替身不承载项目域".into())
+    }
 }
 
 /// StateSnapshot 返回 engine 持有的当前快照（spec scenario:

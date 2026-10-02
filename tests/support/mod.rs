@@ -236,14 +236,14 @@ impl SandboxDir {
 /// reports failure, which is success for teardown (zero new deps, zero
 /// unsafe; the Job-Object upgrade path stays recorded in the change design).
 #[cfg(unix)]
-fn kill_tree(pid: u32) {
+pub fn kill_tree(pid: u32) {
     unsafe {
         libc::killpg(pid as libc::pid_t, libc::SIGKILL);
     }
 }
 
 #[cfg(windows)]
-fn kill_tree(pid: u32) {
+pub fn kill_tree(pid: u32) {
     let _ = std::process::Command::new("taskkill")
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .stdout(std::process::Stdio::null())

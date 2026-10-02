@@ -343,6 +343,20 @@ pub fn set_project_default_agent(
     Ok(())
 }
 
+/// 项目重命名（fix-webui-qa-round9 3.1，project-session-actions）：按稳定 id
+/// 更新 name 列（注册时 name=basename 的同列；路径/排序/节点归属/会话从属
+/// 一概不动——SQL 只碰 name）。按非键列条件的非标准 UPDATE，返回是否确有
+/// 行被更新（未知 id = false → 调用方转 404，绝不假装成功）。
+pub fn rename_project(conn: &mut Connection, id: &str, name: &str) -> Result<bool, String> {
+    let updated = conn
+        .execute(
+            "UPDATE projects SET name = ?2 WHERE id = ?1",
+            sebas_db::rusqlite::params![id, name],
+        )
+        .map_err(|e| format!("重命名项目 {id} 失败: {e}"))?;
+    Ok(updated > 0)
+}
+
 /// 清除引用某 agent 的项目默认（add-agent-settings-and-session-titles：
 /// 删除 agent 时不得留下悬空引用）。按值定位（非键列条件的非标准查询），
 /// 返回被清除的项目数。

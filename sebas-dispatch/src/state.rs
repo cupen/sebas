@@ -1030,6 +1030,21 @@ impl SessionMap {
             .map(|(k, _)| k.clone())
     }
 
+    /// 按 **transcript 寻址 id** 反查映射键（fix-webui-qa-round9 1.3，
+    /// session-transcript-durability）：checkpoint 行的 session_id 是映射的
+    /// `transcript_id`（Active 路由 id / Dormant 持久 id / SpawnFailed 合成
+    /// id）——启动回放用它判断「注册表里有没有该会话」，Dormant 恢复行同样
+    /// 命中（`lookup_key_by_session` 只认 Active 的路由 id，会话恢复后全是
+    /// Dormant，用它会把全部 checkpoint 误判成孤儿）。
+    pub async fn lookup_key_by_transcript(&self, session_id: &str) -> Option<ChannelKey> {
+        self.inner
+            .read()
+            .await
+            .iter()
+            .find(|(_, m)| m.transcript_id() == Some(session_id))
+            .map(|(k, _)| k.clone())
+    }
+
     pub async fn remove_by_session(&self, session_id: &str) {
         let removed = {
             let mut g = self.inner.write().await;

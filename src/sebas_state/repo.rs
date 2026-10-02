@@ -98,8 +98,9 @@ pub static SETTINGS_TABLES: &[TableSchema] = &[
     },
 ];
 
-/// projects.db 注册清单（增长的用户数据）：projects / session_map。表形状
-/// 不变（`migrate-project-registry` 负责目标形状重建；本 change 只换库）。
+/// projects.db 注册清单（增长的用户数据）：projects / session_map /
+/// session_checkpoints（fix-webui-qa-round9 1.1，session-transcript-durability）。
+/// 表形状不变（`migrate-project-registry` 负责目标形状重建；本 change 只换库）。
 pub static PROJECTS_TABLES: &[TableSchema] = &[
     TableSchema {
         // migrate-project-registry 1.1：按目标形状重建。节点维度是正式列
@@ -153,6 +154,26 @@ pub static PROJECTS_TABLES: &[TableSchema] = &[
         );",
         index_ddls: &[],
         columns: sebas_models::session_map::SessionMapRow::schema_columns(),
+    },
+    TableSchema {
+        // fix-webui-qa-round9 1.1（session-transcript-durability）：会话面
+        // checkpoint 表——一会话一行快照 blob（change design D1）：行 =
+        // (session_id 主键, updated_at, transcript_json, parked_json, usage
+        // 标量)。单行 upsert（生成的 save()）即单事务原子替换；启动回放 =
+        // 全表扫；close 归档删除对应行。JSON blob 的序列化/反序列化在
+        // sebas-dispatch 引擎（关联域类型不进 sebas-models）。
+        name: "session_checkpoints",
+        create_table_ddl: "CREATE TABLE session_checkpoints (
+            session_id      TEXT PRIMARY KEY,
+            updated_at      INTEGER NOT NULL,
+            transcript_json TEXT NOT NULL,
+            parked_json     TEXT NOT NULL,
+            usage_in        INTEGER NOT NULL,
+            usage_out       INTEGER NOT NULL,
+            usage_reported  INTEGER NOT NULL
+        );",
+        index_ddls: &[],
+        columns: sebas_models::checkpoint::SessionCheckpointRow::schema_columns(),
     },
 ];
 

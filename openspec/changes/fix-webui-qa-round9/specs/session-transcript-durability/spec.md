@@ -30,7 +30,7 @@ core 启动时 SHALL 把最近 checkpoint 的转录、usage 回放进对应会�
 #### Scenario: 待批审批跨重启恢复
 
 - **WHEN** 一个审批卡处于待批状态时 core 被强杀并重启
-- **THEN** 重新打开该会话后审查卡恢复呈现，操作者可 Allow/Deny，决定送达执行体并照常落 tool_result
+- **THEN** 重新打开该会话后审查卡恢复呈现，操作者可 Allow/Deny，决定被接受并可追溯（core 留痕、泊车登记解除）；执行体子进程已随中断死亡的，原回合 tool_result 按 checkpoint 截断语义诚实处理（不伪造），该会话可继续发起新回合
 
 #### Scenario: checkpoint 截断诚实呈现
 

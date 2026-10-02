@@ -29,6 +29,7 @@
 //! 标量，不再有 `Map<String, Value>` 式的无类型载体。
 
 pub mod agent;
+pub mod checkpoint;
 pub mod project;
 pub mod provider;
 pub mod runtime_state;

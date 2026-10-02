@@ -69,6 +69,21 @@ interface ApprovalRow {
   reason: string
 }
 
+/**
+ * （fix-webui-qa-round9 2.2）应答 POST 悬挂的超时哨兵：与传输错误（同样回
+ * pending）区分开只为了呈现专属文案——「应答超时，请重试」点名超时，而非
+ * 泛化的网络失败。导出给测试对账。
+ */
+export class AnswerTimeoutError extends Error {
+  constructor() {
+    super(ANSWER_TIMEOUT_TEXT)
+    this.name = 'AnswerTimeoutError'
+  }
+}
+
+/** 超时后的可见错误文案（卡片回 pending、按钮恢复可点）。 */
+export const ANSWER_TIMEOUT_TEXT = '应答超时，请重试'
+
 @customElement('sebas-review-cards')
 export class SebasReviewCards extends LitElement {
   /** Encoded session key to filter on; null renders every request. */
@@ -386,18 +401,38 @@ export class SebasReviewCards extends LitElement {
     this.cards = this.cards.map((c) => (c.request_id === requestId ? { ...c, ...patch } : c))
   }
 
+  /**
+   * （fix-webui-qa-round9 2.2，permission-flow）应答 POST 的悬挂上限：POST
+   * 既不成功也不失败超过 10 秒，卡片回到**可重试的 pending** 态并呈现可见
+   * 超时文案——不再无限 disabled。语义 fail-closed 不变（回合仍泊车；后端
+   * 是否已送达由 core 日志对账，重试撞 404 走既有 expired 呈现）。
+   */
+  static readonly ANSWER_TIMEOUT_MS = 10_000
+
   private async answer(card: ReviewCard, decision: PermissionDecision): Promise<void> {
     if (card.state !== 'pending') return
     this.patch(card.request_id, { state: 'answering', error: '' })
+    let timedOut = false
     try {
-      await api.answerPermission(card.request_id, decision)
+      await Promise.race([
+        api.answerPermission(card.request_id, decision),
+        new Promise<never>((_, reject) => {
+          window.setTimeout(() => {
+            timedOut = true
+            reject(new AnswerTimeoutError())
+          }, SebasReviewCards.ANSWER_TIMEOUT_MS)
+        }),
+      ])
       // Delivered: the card has done its job. Tombstone the id so a late
       // push or a stale read-model row cannot resurrect it
       // （fix-webui-approval-restore-and-session-identity 1.3）.
       this.decided.add(card.request_id)
       this.cards = this.cards.filter((c) => c.request_id !== card.request_id)
     } catch (e) {
-      if (e instanceof ApiError && e.status === 404) {
+      if (timedOut) {
+        // 悬挂：卡片回到 pending（按钮恢复可点）+ 可见超时文案。
+        this.patch(card.request_id, { state: 'pending', error: ANSWER_TIMEOUT_TEXT })
+      } else if (e instanceof ApiError && e.status === 404) {
         // No pending request with that id — answered elsewhere, timed out
         // or unknown. Mark the card expired; it stays visible but inert.
         this.patch(card.request_id, { state: 'expired', error: '' })

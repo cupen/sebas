@@ -384,6 +384,56 @@ pub async fn run(
         });
     }
 
+    // ── 会话面 checkpoint 启动回放（fix-webui-qa-round9 1.3，
+    // session-transcript-durability）──session_map 载入、引擎句柄就绪后把
+    // checkpoint 行回填进引擎三面状态（转录/泊车审批/会话级 usage）。
+    // 放在出站泵装配之后、与 spawning 收敛同位：回放是纯内存回填，无出站
+    // 依赖，但要求 router 已建。孤儿行（映射已不在注册表）在此一并清除。
+    {
+        let router_for_ckpt = router.clone();
+        tokio::spawn(async move {
+            let Some(engine) = sebas_dispatch::state_store::engine() else {
+                return;
+            };
+            match engine.load_session_checkpoints().await {
+                Ok(rows) if rows.is_empty() => {}
+                Ok(rows) => {
+                    let (restored, pruned) =
+                        router_for_ckpt.restore_session_checkpoints(rows).await;
+                    info!(
+                        restored,
+                        pruned,
+                        "session checkpoint 回放完成（转录/泊车审批/usage 已恢复至最近快照）"
+                    );
+                }
+                Err(e) => {
+                    warn!(error = %e, "session checkpoint 读取失败：会话面按空转录启动（现状行为）");
+                }
+            }
+        });
+    }
+
+    // ── 会话面 checkpoint 周期兜底（fix-webui-qa-round9 1.2）──
+    // `[dispatch] checkpoint_interval_secs`（默认 30，0 = 关）。审批泊车进入/
+    // 解除另有事件驱动即时 checkpoint，不受本值影响；周期任务只兜「无事件也
+    // 在变脏」的普通转录增长。内容未变的会话在引擎内跳过（不重写）。
+    if cfg.dispatch.checkpoint_interval_secs > 0 {
+        let ckpt_router = router.clone();
+        let interval = cfg.dispatch.checkpoint_interval_secs.max(1);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(interval));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            ticker.tick().await; // interval 首拍即发：跳过，等一个完整周期。
+            loop {
+                ticker.tick().await;
+                let written = ckpt_router.checkpoint_dirty_sessions().await;
+                if written > 0 {
+                    tracing::debug!(written, "session checkpoint 周期兜底完成");
+                }
+            }
+        });
+    }
+
     // ── 回合停滞看门狗（fix-pending-queue-liveness 2.2，design D1/D6）──
     // `[dispatch] turn_stall_timeout`（默认 600s，0 = 关闭）配置进引擎；
     // 周期扫描复用出站泵的装配点。扫描间隔钳在 1–15s（≈阈值）：默认 600s

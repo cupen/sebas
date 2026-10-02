@@ -148,6 +148,7 @@ async function mount(opts: {
   sessionKey?: string
   msgCount?: number
   agentDisplay?: string | null
+  currentModel?: string | null
   turnLive?: boolean
 }): Promise<SebasTranscriptView> {
   const el = document.createElement('sebas-transcript-view') as SebasTranscriptView
@@ -155,6 +156,7 @@ async function mount(opts: {
   el.sessionKey = opts.sessionKey ?? 'oc_test'
   if (opts.msgCount !== undefined) el.msgCount = opts.msgCount
   if (opts.agentDisplay !== undefined) el.agentDisplay = opts.agentDisplay
+  if (opts.currentModel !== undefined) el.currentModel = opts.currentModel
   if (opts.turnLive !== undefined) el.turnLive = opts.turnLive
   document.body.appendChild(el)
   // Lit schedules its first update asynchronously; then the
@@ -773,6 +775,31 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     expect(bodies?.length).toBe(1)
     expect(bodies?.[0]?.textContent).toContain('chunk one')
     expect(bodies?.[0]?.textContent).toContain('chunk three')
+  })
+
+  // （fix-webui-qa-round9 4.3）回合块呈现生效模型名——与会话头同源；
+  // 模型不可知时如实缺省（芯片整枚不渲染，不伪造）。
+  it('agent turn frames carry the effective model chip (round9 4.3)', async () => {
+    const el = await mount({
+      entries: streamedTurn('do it', ['chunk one'], FIXED_DATES.T1),
+      currentModel: 'claude-sonnet-4',
+    })
+    const assistant = el.shadowRoot!.querySelector<HTMLElement>('.turn-block.is-assistant')!
+    const chip = assistant.querySelector<HTMLElement>('[data-testid="turn-model"]')
+    expect(chip).toBeTruthy()
+    expect(chip?.textContent).toBe('claude-sonnet-4')
+  })
+
+  it('unknown model renders no model chip — never a fabricated placeholder (round9 4.3)', async () => {
+    for (const model of [null, '', '   ']) {
+      const el = await mount({
+        entries: streamedTurn('do it', ['chunk one'], FIXED_DATES.T1),
+        currentModel: model,
+      })
+      const assistant = el.shadowRoot!.querySelector<HTMLElement>('.turn-block.is-assistant')!
+      expect(assistant.querySelector('[data-testid="turn-model"]')).toBeNull()
+      el.remove()
+    }
   })
 
   it('renders both conversation sides alternating with submission text (2.3)', async () => {

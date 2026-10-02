@@ -16,6 +16,9 @@
 import { LitElement, css, html, nothing, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { api, type AgentKindInfo, type ArchiveDetail, type ArchiveEntry, type ConversationEntryView, type NodeInfo, type NodesResponse, type PendingSubmission, type Project, type SessionDetail, type Summary, errorText } from '../api/client.js'
+// （fix-webui-qa-round9 4.6）工作台形态持久化：聚焦会话 key 存 localStorage，
+// core 重启（服务端指针清零）后重新打开工作台时恢复。
+import { loadPersistedWorkbenchFocus, savePersistedWorkbenchFocus } from './workbench-persist.js'
 import type { WsEvent, CoreReachabilityState } from '../api/ws.js'
 import { sharedWs } from '../api/shared-ws.js'
 import { icon } from '../components/icons.js'
@@ -1255,8 +1258,54 @@ export class SebasDashboard extends LitElement {
    * （见 onRailFocus：桥接节流窗口，杜绝 stale focus 写锚）；无深链时由
    * summary 的焦点指针驱动（rail switch / 创建会话就地生效）。
    */
+  /**
+   * 生效的聚焦 key：深链优先（URL 决定视图——读 detail 即设置服务端焦点
+   * 指针，summary 随后收敛到同一会话）；其次 rail 切换的即时 override
+   * （见 onRailFocus：桥接节流窗口，杜绝 stale focus 写锚）；再次 summary
+   * 的焦点指针（rail switch / 创建会话就地生效）；最后（fix-webui-qa-round9
+   * 4.6）localStorage 的持久化形态回退——core 重启后指针清零，重新打开
+   * 工作台按上次聚焦恢复（会话仍在场时），见 [`restorableFocusKey`]。
+   */
   private effectiveFocusKey(): string | null {
-    return this.deepLinkKey ?? this.focusOverride ?? this.data?.active_session_key ?? null
+    return (
+      this.deepLinkKey ??
+      this.focusOverride ??
+      this.data?.active_session_key ??
+      this.restorableFocusKey()
+    )
+  }
+
+  /**
+   * （fix-webui-qa-round9 4.6）重启后工作台形态恢复——作为 effectiveFocusKey
+   * 的**末位回退**参与每次求值，没有「恢复窗」与竞态：无深链、无 override、
+   * 无服务端指针（重启即清零）时，上次聚焦的 key 若仍在当前快照的会话行里
+   * 即生效；会话已不在场（关闭/归档/清库）→ 抹掉陈旧形态并判 null（按现行
+   * 默认，无聚焦）。服务端指针一旦接管（操作者切走/激活别的会话），回退
+   * 资格作废——此后指针再清零（焦点会话被关）绝不跳回旧形态。
+   */
+  private restoredFocus: string | null | undefined = undefined
+  private restorableFocusKey(): string | null {
+    if (this.data?.active_session_key) {
+      // 服务端指针在场 = 本次页面生命周期的焦点已由真实指针承载；
+      // 重启恢复的回退资格就地作废（一次性语义由此成立）。
+      this.restoredFocus = null
+      return null
+    }
+    if (this.restoredFocus !== undefined) return this.restoredFocus
+    // 首个 summary 未落地（data 仍 null）不判定：在场判定的数据源是
+    // recent_sessions——render 期的求值（数据未到）绝不能把闸翻成「无形态」。
+    if (this.data === null) return null
+    this.restoredFocus = null
+    if (this.deepLinkKey !== null) return null
+    const key = loadPersistedWorkbenchFocus()
+    if (key === null) return null
+    if (this.data?.recent_sessions.some((r) => r.encoded_key === key)) {
+      this.restoredFocus = key
+    } else {
+      // 陈旧形态（会话已不在场）：抹掉，下次打开按现行默认。
+      savePersistedWorkbenchFocus(null)
+    }
+    return this.restoredFocus
   }
 
   /**
@@ -1631,6 +1680,7 @@ export class SebasDashboard extends LitElement {
                     sessionKey=${detail.entry.session_key}
                     .msgCount=${null}
                     .agentDisplay=${null}
+                    .currentModel=${null}
                     .turnLive=${false}
                   ></sebas-transcript-view>`
                 : html`
@@ -1745,6 +1795,11 @@ export class SebasDashboard extends LitElement {
     // 7.3：焦点清空（会话移除）时保留提示；切到别的会话才清除。
     if (key !== null && key !== this.droppedPendingFor) this.droppedPending = null
     if (!key) {
+      // （fix-webui-qa-round9 4.6）焦点清空 = 工作台形态同步抹掉（下次打开
+      // 按现行默认，不复活已消失的聚焦）。**只认已落地的 summary**：启动期
+      // 首个 summary 未到（data 仍 null）的求值只是「焦点尚不可知」，不是
+      // 「焦点被清」——此时抹掉会把上次形态在恢复判定之前就毁掉。
+      if (this.data !== null) savePersistedWorkbenchFocus(null)
       // 代际一并作废：清空后在途的旧响应不得再落状态。
       this.fetchSeq += 1
       this.focusedDetail = null
@@ -1770,6 +1825,10 @@ export class SebasDashboard extends LitElement {
         this.sessionEntries.set(d.encoded_key, merged)
         this.focusedDetail = { ...d, entries: merged }
         this.focusedUnavailable = false
+        // （fix-webui-qa-round9 4.6）聚焦 detail 装载成功 = 形态落盘的唯一
+        // 漏斗——rail 切换 / 深链 / 创建会话（summary 收敛）三条到达线在此
+        // 汇合，重启后的恢复以这份记录为准。
+        savePersistedWorkbenchFocus(d.encoded_key)
         // （round3 6.1）空流登记：聚焦会话为 0 回合时主区渲染的是本视图的
         // 空态占位而非 transcript 组件，组件内的空流登记永远不跑——占位
         // 会话的首交换（经快照到达）因此推不出「看着到达」，徽标 + 缝驻留
@@ -1859,6 +1918,7 @@ export class SebasDashboard extends LitElement {
                     sessionKey=${d.encoded_key}
                     .msgCount=${d.msg_count ?? null}
                     .agentDisplay=${this.focusedAgentDisplay()}
+                    .currentModel=${this.focusedDetail?.current_model ?? d.active_session?.current_model ?? null}
                     .turnLive=${turnLive}
                   ></sebas-transcript-view>`}
             `

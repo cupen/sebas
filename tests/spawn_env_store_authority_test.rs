@@ -78,6 +78,10 @@ impl sebas_dispatch::state_store::StateStoreEngine for FakeEngine {
     async fn set_project_default_agent(&self, _id: &str, _agent: &str) -> Result<(), String> {
         Ok(())
     }
+    // fix-webui-qa-round9 3.1：测试替身不承载项目域——诚实拒绝。
+    async fn rename_project(&self, _id: &str, _name: &str) -> Result<bool, String> {
+        Err("rename: 测试替身不承载项目域".into())
+    }
 }
 
 /// seed 库里的 provider（带 default_model）。

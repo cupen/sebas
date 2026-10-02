@@ -1248,7 +1248,10 @@ pub async fn users_delete(
 pub struct CreateSessionRequest {
     /// Optional prompt for the new session. When omitted, the session is
     /// created as a 0-turn placeholder (no ACP child is spawned until the
-    /// first message is sent).
+    /// first message is sent). 端点级 0-turn 语义不变——但 GUI 创建后会自动
+    /// 聚焦新会话，「聚焦即拉起」（workbench-live-conversation-flow 3.1）
+    /// 会触发激活路径拉起子进程：经 GUI 走到 0-turn 会话上的操作者看到的是
+    /// 「创建即有子进程（空转、无首轮）」，那是聚焦语义，不是本端点的。
     #[serde(default)]
     pub prompt: Option<String>,
     /// 必填：目标项目，按稳定 id（`proj-<12hex>`，workbench-agent-wire-fix
@@ -2312,6 +2315,59 @@ pub struct ReorderRequest {
     /// entries not listed are appended at the end (preserving their
     /// relative add-time order).
     pub ids: Vec<String>,
+}
+
+/// fix-webui-qa-round9 3.1（project-session-actions）：`POST
+/// /api/projects/{id}/rename` 的载荷。名字在 handler 与 mutation 两处都做
+/// trim 非空校验（本处以 400 呈现给弹窗内联报错）。
+#[derive(Deserialize)]
+pub struct ProjectRenameRequest {
+    pub name: String,
+}
+
+/// POST /api/projects/{id}/rename — 项目重命名（rail 行菜单入口）。
+///
+/// 只更新注册表的 name 列（per-mutation 落库、重启保留）；路径/排序/节点
+/// 归属/会话从属一概不动（spec「rename leaves sessions attributed」）。空名
+/// /纯空白 → 400（弹窗内联报错、不关闭）；未知 id → 404；状态库不可达 →
+/// 503 typed rejection（不拿「读不到」冒充「不存在」）。
+pub async fn projects_rename(
+    State(state): State<WebUiState>,
+    Path(id): Path<String>,
+    Json(req): Json<ProjectRenameRequest>,
+) -> Response {
+    let id = match urlencoding::decode(&id) {
+        Ok(d) => d.into_owned(),
+        Err(_) => return api_error(StatusCode::BAD_REQUEST, "invalid id encoding"),
+    };
+    let name = req.name.trim();
+    if name.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({
+                "error": "项目名称不能为空",
+                "code": "empty_name",
+            })),
+        )
+            .into_response();
+    }
+    match state
+        .backend
+        .state_mutate(
+            "projects",
+            json!({ "op": "rename", "id": id, "name": name }),
+        )
+        .await
+    {
+        Ok(()) => Json(json!({ "status": "renamed", "id": id, "name": name })).into_response(),
+        Err(e) => {
+            if e.contains("不存在") {
+                api_error(StatusCode::NOT_FOUND, "project not found")
+            } else {
+                projects_unavailable(&e)
+            }
+        }
+    }
 }
 
 /// POST /api/projects/reorder — persist the user's rail ordering（状态库优先）。
