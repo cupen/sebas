@@ -343,6 +343,9 @@ fn build_router_full(
         .route("/api/sessions/{key}/restore", post(api::restore_session))
         .route("/api/projects/reorder", post(api::projects_reorder))
         .route("/api/projects/{id}/remove", post(api::projects_remove))
+        // fix-webui-qa-round9 3.1：项目重命名（rail 行菜单入口；per-mutation
+        // 落库，重启保留）。
+        .route("/api/projects/{id}/rename", post(api::projects_rename))
         .route("/api/projects/{id}/branch", get(api::projects_branch))
         // add-agent-skills 5.1：skills 管理面（列表 / 详情 / 只删仓 / 投影）。
         // static `sync` 与 `{name}` 不同方法不冲突，静态段优先匹配。
@@ -1792,6 +1795,98 @@ mod workspace_root_tests {
         let (status, resp) = req(app, "POST", "/api/projects", Some(body.to_string())).await;
         assert_eq!(status, StatusCode::CREATED, "resp: {resp}");
         assert_eq!(resp["path"].as_str(), Some(canonical.as_str()));
+    }
+
+    // ── 3.1 项目重命名（fix-webui-qa-round9，project-session-actions）──
+
+    /// 成功路径：改名落注册表（列表读回新名），路径/排序等其余字段不动。
+    #[tokio::test]
+    async fn project_rename_updates_registry_name_in_place() {
+        let t = two_trees();
+        let (app, backend) = app_and_backend_with_workspace_root(t.allowed.path().to_path_buf());
+        backend.enable_projects_store();
+        let id = backend.seed_project(
+            crate::projects::LOCAL_NODE_ID,
+            t.allowed.path().to_str().unwrap(),
+        );
+
+        let (status, resp) = req(
+            app.clone(),
+            "POST",
+            &format!("/api/projects/{id}/rename"),
+            Some(serde_json::json!({ "name": "  新名字  " }).to_string()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{resp}");
+        assert_eq!(resp["name"], "新名字", "服务端 trim 后落库");
+
+        // 列表读回：新名在场，path 原样（spec「rename 只碰 name」）。
+        let (_, list) = req(app, "GET", "/api/projects", None).await;
+        let entry = list["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == id.as_str())
+            .expect("renamed project still listed");
+        assert_eq!(entry["name"], "新名字");
+        assert_eq!(
+            entry["path"],
+            t.allowed.path().to_str().unwrap(),
+            "path must not move"
+        );
+    }
+
+    /// 空名 / 纯空白 → 400（弹窗内联报错的契约面），注册表不受影响。
+    #[tokio::test]
+    async fn project_rename_rejects_empty_and_whitespace_names() {
+        let t = two_trees();
+        let (app, backend) = app_and_backend_with_workspace_root(t.allowed.path().to_path_buf());
+        backend.enable_projects_store();
+        let id = backend.seed_project(
+            crate::projects::LOCAL_NODE_ID,
+            t.allowed.path().to_str().unwrap(),
+        );
+
+        for name in ["", "   "] {
+            let (status, resp) = req(
+                app.clone(),
+                "POST",
+                &format!("/api/projects/{id}/rename"),
+                Some(serde_json::json!({ "name": name }).to_string()),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "name={name:?}: {resp}");
+            assert_eq!(resp["code"], "empty_name", "{resp}");
+        }
+
+        // 反例守门：两次 400 没有碰注册表（名字仍是注册时的 basename）。
+        let (_, list) = req(app, "GET", "/api/projects", None).await;
+        let entry = list["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == id.as_str())
+            .expect("project still listed");
+        assert_eq!(
+            entry["name"],
+            serde_json::json!(t.allowed.path().file_name().unwrap().to_string_lossy())
+        );
+    }
+
+    /// 未知 id → 404（typed rejection；不假装成功）。
+    #[tokio::test]
+    async fn project_rename_unknown_id_is_not_found() {
+        let t = two_trees();
+        let (app, backend) = app_and_backend_with_workspace_root(t.allowed.path().to_path_buf());
+        backend.enable_projects_store();
+        let (status, resp) = req(
+            app,
+            "POST",
+            "/api/projects/proj-doesnotexist/rename",
+            Some(serde_json::json!({ "name": "x" }).to_string()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{resp}");
     }
 
     // ── 2.1 注册执法：越界与「不存在且越界」同文案（不借 400 探测存在性）──

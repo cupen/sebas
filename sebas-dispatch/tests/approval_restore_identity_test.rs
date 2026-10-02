@@ -617,3 +617,60 @@ async fn session_label_sets_clears_and_rejects_unknown_keys() {
         "a rejected label write must not publish"
     );
 }
+
+// ── fix-webui-qa-round9 1.3（session-transcript-durability）：重启恢复的
+// 会话是 Dormant（session_id() 为 None），checkpoint 回放把泊车审批按
+// transcript 寻址 id 登记回泊车表——读模型必须仍能按 key 枚举到它
+// （审查卡跨重启恢复呈现的数据源），批复出站照常解除。──────────────────
+#[tokio::test]
+async fn restored_dormant_session_still_lists_its_replayed_parked_approval() {
+    let (router, _out_rx) = DispatchHandle::new(SessionMap::new());
+    let key = web_key("dormant-parked");
+    // 重启恢复形态：Dormant 映射 + 回放进泊车表的审批（restore_session_
+    // checkpoints 的登记路径等价物）。
+    router
+        .map
+        .insert(key.clone(), Mapping::dormant("s-dormant", 42))
+        .await
+        .unwrap();
+    router
+        .stall_registry()
+        .note_permission_parked(
+            "s-dormant",
+            "claude:tc-9",
+            "Bash",
+            serde_json::json!({"command": "rm -rf /"}),
+        )
+        .await;
+
+    let listed = router
+        .pending_permission_requests(&key)
+        .await
+        .expect("known session");
+    assert_eq!(listed.len(), 1, "dormant session's replayed approval must be listed");
+    assert_eq!(listed[0].request_id, "claude:tc-9");
+    assert_eq!(listed[0].tool_name, "Bash");
+
+    // fail-closed 校验不受影响：parked_owner 按登记解析，可批复。
+    assert_eq!(
+        router.stall_registry().parked_owner("claude:tc-9").await.as_deref(),
+        Some("s-dormant")
+    );
+
+    // 批复出站解除（emit 钩子按 sid 解除）——读模型随之清空。
+    router
+        .emit(Out::SendAcp {
+            session_id: "s-dormant".into(),
+            cmd: AcpCommand::PermissionReply {
+                session_id: "s-dormant".into(),
+                request_id: "claude:tc-9".into(),
+                decision: Decision::AllowOnce,
+            },
+        })
+        .await;
+    let listed = router
+        .pending_permission_requests(&key)
+        .await
+        .expect("known session");
+    assert!(listed.is_empty(), "replayed approval clears after the reply");
+}

@@ -879,6 +879,13 @@ export class SebasTranscriptView extends LitElement {
    */
   @property({ attribute: false }) agentDisplay: string | null = null
   /**
+   * （fix-webui-qa-round9 4.3，agent-workbench）回合帧的生效模型名：与会话
+   * 头部的模型标识**同源**（dashboard 从 detail/summary 的 `current_model`
+   * 读出后下传，帧 model 观察值或会话当前模型）。空/null = 模型不可知，
+   * 如实缺省不显示（不伪造）。
+   */
+  @property({ attribute: false }) currentModel: string | null = null
+  /**
    * （4.3，D5.3）回合在飞：engine 的 `turn_engaged` 事实（dashboard 从
    * detail/summary 读出后下传）。true 时对话末尾的流式文本条目以纯文本
    * 呈现（跳过 markdown 解析——渲染成本不随帧线性增长）；回合定稿（属性
@@ -1207,6 +1214,23 @@ export class SebasTranscriptView extends LitElement {
     }
     .turn-block .meta .author.you {
       color: var(--sebas-accent);
+    }
+    /* （fix-webui-qa-round9 4.3）回合块的生效模型芯片：低调 pill（faint 底
+       + 淡字），与会话头模型标识同源同帧；模型不可知时整枚不渲染。 */
+    .turn-block .meta .model-chip {
+      flex: none;
+      display: inline-flex;
+      align-items: center;
+      max-width: 16rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      padding: 0 var(--sebas-space-2);
+      border-radius: 999px;
+      background: var(--sebas-surface-raised, rgba(127, 127, 127, 0.14));
+      color: var(--sebas-text-faint);
+      font-size: 0.66rem;
+      line-height: 1.5;
     }
     .turn-block .meta .time {
       /* （fix-webui-qa-round7 4.3）时间戳统一约定：紧随作者名（与回执芯片
@@ -2329,12 +2353,18 @@ export class SebasTranscriptView extends LitElement {
     const ts = formatTime(u.startedAt)
     const label = resolveAgentDisplay(this.agentDisplay)
     const avatar = label === 'assistant' ? 'AI' : graphemes(label)[0]?.toUpperCase() ?? 'AI'
+    // （fix-webui-qa-round9 4.3）回合块呈现生效模型名——与会话头同源；
+    // 模型不可知（空/纯空白）时如实缺省，不伪造占位。
+    const model = this.currentModel?.trim() ?? ''
     return html`
       <div class="turn-block is-assistant" data-turn-position=${u.position}>
         <div class="avatar assistant">${avatar}</div>
         <div class="flow">
           <div class="meta">
             <span class="author">${label}</span>
+            ${model
+              ? html`<span class="model-chip" data-testid="turn-model" title="本回合生效模型">${model}</span>`
+              : nothing}
             <time class="time" datetime=${iso || nothing}>${ts}</time>
           </div>
           ${u.runs.map((r, i) => this.renderAgentRun(r, this.isLiveTextTail(u, i)))}

@@ -15,6 +15,7 @@
 
 use crate::state_store::{PersistedState, StateStoreEngine};
 use sebas_models::agent::AgentRow;
+use sebas_models::checkpoint::SessionCheckpointRow;
 use sebas_models::project::{ProjectRow, project_id_for_on};
 use sebas_models::session_map::SessionMapRow;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -28,6 +29,9 @@ struct MemoryInner {
     session_map: Mutex<Vec<SessionMapRow>>,
     /// agent 目录行（add-agent-settings-and-session-titles 1.3）。
     agents: Mutex<Vec<AgentRow>>,
+    /// 会话面 checkpoint 行（fix-webui-qa-round9 1.2，
+    /// session-transcript-durability）。
+    checkpoints: Mutex<Vec<SessionCheckpointRow>>,
 }
 
 /// 纯内存状态引擎。
@@ -39,6 +43,13 @@ pub struct MemoryEngine {
 impl MemoryEngine {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 测试观察口：当前 checkpoint 行（按 session_id 排序，稳定断言）。
+    pub fn checkpoints(&self) -> Vec<SessionCheckpointRow> {
+        let mut rows = self.inner.checkpoints.lock().unwrap().clone();
+        rows.sort_by(|a, b| a.session_id.cmp(&b.session_id));
+        rows
     }
 }
 
@@ -115,6 +126,18 @@ impl StateStoreEngine for MemoryEngine {
         Ok(())
     }
 
+    async fn rename_project(&self, id: &str, name: &str) -> Result<bool, String> {
+        let mut projects = self.inner.projects.lock().unwrap();
+        let mut updated = false;
+        for p in projects.iter_mut() {
+            if p.id.as_deref() == Some(id) {
+                p.name = name.to_string();
+                updated = true;
+            }
+        }
+        Ok(updated)
+    }
+
     async fn load_agents(&self) -> Result<Vec<AgentRow>, String> {
         let mut agents = self.inner.agents.lock().unwrap().clone();
         agents.sort_by(|a, b| a.id.cmp(&b.id));
@@ -171,6 +194,32 @@ impl StateStoreEngine for MemoryEngine {
     ) -> Result<(), String> {
         let mut rows = self.inner.session_map.lock().unwrap();
         rows.retain(|r| !(r.chat_id == chat_id && r.thread_id == thread_id));
+        Ok(())
+    }
+
+    // ---- 会话面 checkpoint（fix-webui-qa-round9 1.2）：内存版的同一合同
+    // —— upsert 单行、delete 幂等、load 全量。----
+
+    async fn save_session_checkpoint(
+        &self,
+        row: SessionCheckpointRow,
+    ) -> Result<(), String> {
+        let mut rows = self.inner.checkpoints.lock().unwrap();
+        rows.retain(|r| r.session_id != row.session_id);
+        rows.push(row);
+        Ok(())
+    }
+
+    async fn load_session_checkpoints(&self) -> Result<Vec<SessionCheckpointRow>, String> {
+        Ok(self.inner.checkpoints.lock().unwrap().clone())
+    }
+
+    async fn delete_session_checkpoint(&self, session_id: &str) -> Result<(), String> {
+        self.inner
+            .checkpoints
+            .lock()
+            .unwrap()
+            .retain(|r| r.session_id != session_id);
         Ok(())
     }
 }

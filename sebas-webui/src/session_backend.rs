@@ -953,7 +953,15 @@ impl SessionBackend for InProcessBackend {
     }
 
     async fn answer_permission(&self, request_id: &str, decision: PermissionDecision) -> bool {
-        let session_id = self.request_sessions.read().await.get(request_id).cloned();
+        // （fix-webui-qa-round9 1.3）core 重启后 request_sessions（随
+        // PermissionRequest 广播填充）是空的——但 checkpoint 回放把泊车审批
+        // 恢复进了引擎泊车表（按 transcript 寻址 id 登记）。按泊车登记回填
+        // 寻址，恢复的审查卡才可决定；未泊车的 id 两处都查不到，依旧 404
+        // （fail-closed 语义不变，下方 parked 校验照常把关）。
+        let session_id = match self.request_sessions.read().await.get(request_id).cloned() {
+            Some(sid) => Some(sid),
+            None => self.router.permission_parked_session(request_id).await,
+        };
         let Some(session_id) = session_id else {
             return false;
         };
@@ -969,6 +977,15 @@ impl SessionBackend for InProcessBackend {
             .answer_native_permission(request_id, native)
             .await
         {
+            // fix-webui-qa-round9 2.1（permission-flow）：应答留痕——成功投递
+            // 处 info! 一条（request_id + 决定 + 会话）。浏览器网络日志与
+            // core 日志据此对账：点击无痕 = 请求未发出，core 无行 = 未送达。
+            tracing::info!(
+                request_id = %request_id,
+                decision = ?decision,
+                session_id = %session_id,
+                "approval answer accepted (native)"
+            );
             self.router.resolve_permission_request(request_id).await;
             return true;
         }
@@ -1003,6 +1020,15 @@ impl SessionBackend for InProcessBackend {
                 .push_transcript_entry(&session_id, escalate_downgrade_entry(request_id, &tool, reason))
                 .await;
         }
+        // fix-webui-qa-round9 2.1（permission-flow）：应答留痕——泊车校验已过
+        // （fail-closed 接受点）、批复即将出站，此处 request_id / 决定 /
+        // 会话三者齐备，info! 一条供与浏览器网络日志对账（原生路径同款）。
+        tracing::info!(
+            request_id = %request_id,
+            decision = ?decision,
+            session_id = %session_id,
+            "approval answer accepted (acp)"
+        );
         let decision = map_permission_decision(decision);
         self.router
             .emit(sebas_dispatch::Out::SendAcp {
@@ -1133,6 +1159,32 @@ fn apply_project_mutation(
                 .cloned()
                 .unwrap_or_default();
             Ok(())
+        }
+        // fix-webui-qa-round9 3.1：rename 只碰 name 列（同 id 定位）；未知 id
+        // 与 mutation 分发同文案（「不存在」→ 路由层 404）。
+        "rename" => {
+            let id = payload
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "rename: 缺少 id 字段".to_string())?;
+            let name = payload
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| "rename: name 不能为空".to_string())?;
+            let entry = list
+                .iter_mut()
+                .find(|p| p.get("id").and_then(|v| v.as_str()) == Some(id));
+            match entry {
+                Some(entry) => {
+                    if let Some(obj) = entry.as_object_mut() {
+                        obj.insert("name".into(), serde_json::json!(name));
+                    }
+                    Ok(())
+                }
+                None => Err(format!("rename: project '{id}' 不存在")),
+            }
         }
         other => Err(format!("未知的 projects 子操作: {other}")),
     }

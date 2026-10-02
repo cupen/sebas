@@ -113,6 +113,12 @@ import {
 } from './dashboard.js'
 // writeFocusAnchor：焦点处立读锚的既有锚点写入（round3 3.1）。
 import { clearOpeningSeam, peekOpeningSeam, writeFocusAnchor } from './unread-cursor.js'
+// （fix-webui-qa-round9 4.6）工作台形态持久化：聚焦 key 的存取。
+import {
+  loadPersistedWorkbenchFocus,
+  savePersistedWorkbenchFocus,
+  WORKBENCH_FOCUS_STORAGE_KEY,
+} from './workbench-persist.js'
 import type { SebasDashboard } from './dashboard.js'
 import { SebasDashboard as DashboardImpl } from './dashboard.js'
 
@@ -268,6 +274,8 @@ beforeEach(() => {
 
 afterEach(() => {
   document.body.innerHTML = ''
+  // （fix-webui-qa-round9 4.6）聚焦形态键用例间清空，防串扰。
+  localStorage.removeItem(WORKBENCH_FOCUS_STORAGE_KEY)
 })
 
 
@@ -285,6 +293,94 @@ describe('receipt phase gating (fix-webui-qa-defects-round4 review)', () => {
     expect(receiptPhaseActive([{ kind: 'prompt' }, { kind: 'content' }], 'working')).toBe(false)
     expect(receiptPhaseActive([], 'working')).toBe(false)
     expect(receiptPhaseActive(undefined, 'working')).toBe(false)
+  })
+})
+
+// ── fix-webui-qa-round9 4.6：重启后工作台形态恢复（聚焦 key 持久化）──────
+describe('workbench shape persistence (round9 4.6)', () => {
+  beforeEach(() => {
+    savePersistedWorkbenchFocus(null)
+  })
+
+  it('restores the persisted focus after a core restart (no server pointer, session still present)', async () => {
+    savePersistedWorkbenchFocus('oc_x%00')
+    // 重启后的世界：服务端指针清零、会话行仍在场。
+    apiMocks.summary.mockResolvedValue({
+      ...summaryBase,
+      recent_sessions: [row({})],
+      active_session_key: null,
+      active_session: null,
+    })
+    apiMocks.session.mockResolvedValue({ ...detailFixture(), encoded_key: 'oc_x%00' })
+    const el = await mount()
+    // 恢复走 detail 漏斗：以持久化 key 装载聚焦详情（effectiveFocusKey 的
+    // 末位回退——无关 summary 刷新不打断恢复）。
+    expect(apiMocks.session).toHaveBeenCalledWith('oc_x%00')
+    // 装载成功把形态续写（滚动/再重启仍可恢复）。
+    expect(loadPersistedWorkbenchFocus()).toBe('oc_x%00')
+    el.remove()
+  })
+
+  it('does not fight the server pointer when one exists (no restart happened)', async () => {
+    savePersistedWorkbenchFocus('oc_y%00')
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    const el = await mount()
+    // 服务端指针在场：以指针装载，恢复闸不介入。
+    expect(apiMocks.session).toHaveBeenCalledWith('oc_live%00')
+    expect((el as any).focusOverride).toBeNull()
+    el.remove()
+  })
+
+  it('drops a stale persisted focus whose session no longer exists (round9 4.6)', async () => {
+    savePersistedWorkbenchFocus('oc_gone%00')
+    apiMocks.summary.mockResolvedValue({
+      ...summaryBase,
+      recent_sessions: [row({})], // oc_x%00 在场，oc_gone%00 不在
+      active_session_key: null,
+      active_session: null,
+    })
+    const el = await mount()
+    expect(apiMocks.session).not.toHaveBeenCalledWith('oc_gone%00')
+    // 陈旧形态被抹掉（下次打开按现行默认）。
+    expect(loadPersistedWorkbenchFocus()).toBeNull()
+    el.remove()
+  })
+
+  it('a deep link decides the view — the persisted focus is not restored (round9 4.6)', async () => {
+    savePersistedWorkbenchFocus('oc_x%00')
+    apiMocks.summary.mockResolvedValue({
+      ...summaryBase,
+      recent_sessions: [row({})],
+      active_session_key: null,
+      active_session: null,
+    })
+    const el = await mount()
+    ;(el as any).deepLinkKey = 'oc_deep%00'
+    await (el as any).updateComplete
+    // 深链优先：装载的是深链 key（恢复闸不覆盖 URL 决定的视图）。
+    expect(apiMocks.session).toHaveBeenCalledWith('oc_deep%00')
+    el.remove()
+  })
+
+  it('clearing the focus wipes the persisted shape (round9 4.6)', async () => {
+    savePersistedWorkbenchFocus('oc_x%00')
+    const el = await mount()
+    ;(el as any).loadFocused(null)
+    expect(loadPersistedWorkbenchFocus()).toBeNull()
+    el.remove()
+  })
+
+  it('first use (no persisted shape) boots with the current default — no focus restore', async () => {
+    apiMocks.summary.mockResolvedValue({
+      ...summaryBase,
+      recent_sessions: [row({})],
+      active_session_key: null,
+      active_session: null,
+    })
+    const el = await mount()
+    expect((el as any).focusOverride).toBeNull()
+    expect(localStorage.getItem(WORKBENCH_FOCUS_STORAGE_KEY)).toBeNull()
+    el.remove()
   })
 })
 

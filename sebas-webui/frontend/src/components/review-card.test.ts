@@ -19,7 +19,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { SebasReviewCards } from './review-card.js'
+import { SebasReviewCards } from './review-card.js'
 import { installWaDomPolyfills } from '../test-support/wa-polyfills.js'
 
 // ---- ElementInternals polyfill（共享垫片）--------------------------------
@@ -274,6 +274,60 @@ describe('sebas-review-cards', () => {
     await flush(el)
     expect(answerMock).toHaveBeenCalledTimes(2)
     expect(cards(el).length).toBe(0)
+  })
+
+  // ---- fix-webui-qa-round9 2.2（permission-flow）：answering 态限时 ----
+
+  it('a hanging answer returns to retryable pending with a visible timeout error within 10s (round9 2.2)', async () => {
+    vi.useFakeTimers()
+    try {
+      // 悬挂的 POST：既不成功也不失败。
+      answerMock.mockImplementation(() => new Promise(() => {}))
+      const el = await mount()
+      ws.emit(permFrame())
+      await flushFake(el)
+
+      ;(cards(el)[0]!.querySelector('wa-button.allow-once') as HTMLElement).click()
+      await flushFake(el)
+      // 在途：answering、按钮 disabled（busy）。
+      expect(cards(el)[0]!.dataset.state).toBe('answering')
+
+      // 10s 内超时可见：回 pending（可重试）+ 点名超时的错误文案。
+      await vi.advanceTimersByTimeAsync(SebasReviewCards.ANSWER_TIMEOUT_MS)
+      await flushFake(el)
+      const card = cards(el)[0]!
+      expect(card.dataset.state).toBe('pending')
+      expect(card.textContent).toContain('应答超时，请重试')
+      // 回合仍泊车（fail-closed）：没有把决定发出去的假象——按钮恢复可点，
+      // 重试走正常链（这里给成功回执，卡片移除）。
+      const allow = card.querySelector('wa-button.allow-once') as HTMLElement
+      expect(allow?.hasAttribute('disabled')).toBe(false)
+      answerMock.mockResolvedValueOnce({ status: 'delivered' })
+      allow.click()
+      await flushFake(el)
+      expect(answerMock).toHaveBeenCalledTimes(2)
+      expect(cards(el).length).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('the timeout does not fire before 10s (round9 2.2)', async () => {
+    vi.useFakeTimers()
+    try {
+      answerMock.mockImplementation(() => new Promise(() => {}))
+      const el = await mount()
+      ws.emit(permFrame())
+      await flushFake(el)
+      ;(cards(el)[0]!.querySelector('wa-button.allow-once') as HTMLElement).click()
+      await flushFake(el)
+
+      await vi.advanceTimersByTimeAsync(SebasReviewCards.ANSWER_TIMEOUT_MS - 1)
+      await flushFake(el)
+      expect(cards(el)[0]!.dataset.state).toBe('answering')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   // ---- fix-webui-approval-restore-and-session-identity 1.3：读模型重建 ----

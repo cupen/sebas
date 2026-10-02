@@ -358,3 +358,227 @@ fn legacy_defaults_json_imports_exactly_once() {
         );
     });
 }
+
+// ---- session_checkpoints 表（fix-webui-qa-round9 1.1，
+// session-transcript-durability）----
+
+/// checkpoint 行经 projects 库引擎的写入/回放/删除全链路：save 即提交
+/// （响应返回前库中可见）、同键 upsert 原子替换（一会话一行）、delete 幂等；
+/// 写者重启（模拟强杀）后快照保留——「提交即持久」的 DB 契约。表由注册表
+/// 启动同步原地在旧库上补建（新表无破坏步骤）。
+#[test]
+fn session_checkpoint_rows_round_trip_through_the_projects_engine() {
+    use sebas_models::checkpoint::SessionCheckpointRow;
+
+    let dir = tempfile::tempdir().unwrap();
+    let settings_path = dir.path().join("settings.db");
+    let projects_path = dir.path().join("projects.db");
+
+    fn row(sid: &str, usage_in: i64) -> SessionCheckpointRow {
+        SessionCheckpointRow {
+            session_id: sid.into(),
+            updated_at: 1_700_000_000,
+            transcript_json: format!(r#"[{{"position":0,"session_id":"{sid}"}}]"#),
+            parked_json: r#"[{"request_id":"claude:tc-1","tool_name":"Bash","args":{}}]"#.into(),
+            usage_in,
+            usage_out: 25,
+            usage_reported: true,
+        }
+    }
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    // 第一次生命周期：写两行 + 覆盖其中一行。
+    {
+        let settings = StateWriter::start_settings(settings_path.clone()).unwrap();
+        let projects = StateWriter::start_projects(projects_path.clone()).unwrap();
+        let engine = sebas::sebas_state::engine::DbStateEngine::with_projects(
+            settings.handle().clone(),
+            projects.handle().clone(),
+        );
+        rt.block_on(async {
+            engine
+                .save_session_checkpoint(row("sess-1", 10))
+                .await
+                .expect("save checkpoint 1");
+            engine
+                .save_session_checkpoint(row("sess-2", 0))
+                .await
+                .expect("save checkpoint 2");
+            // 同键覆盖：不产生第二行（单会话单行快照）。
+            engine
+                .save_session_checkpoint(row("sess-1", 99))
+                .await
+                .expect("overwrite checkpoint 1");
+
+            let mut rows = engine.load_session_checkpoints().await.expect("load");
+            rows.sort_by(|a, b| a.session_id.cmp(&b.session_id));
+            assert_eq!(rows.len(), 2, "upsert must replace, not duplicate");
+            assert_eq!(rows[0].session_id, "sess-1");
+            assert_eq!(rows[0].usage_in, 99, "latest snapshot wins");
+            assert_eq!(rows[0].usage_reported, true);
+            assert_eq!(rows[1].session_id, "sess-2");
+        });
+
+        // 删除一行：close 归档路径的存储半边。
+        rt.block_on(async {
+            engine
+                .delete_session_checkpoint("sess-2")
+                .await
+                .expect("delete checkpoint");
+            let rows = engine.load_session_checkpoints().await.expect("load");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].session_id, "sess-1");
+            // 幂等：再删同键不报错。
+            engine
+                .delete_session_checkpoint("sess-2")
+                .await
+                .expect("idempotent delete");
+        });
+        // 写者 drop = 进程结束（mutation 已同步提交）。
+        drop(settings);
+        drop(projects);
+    }
+
+    // 第二次生命周期：重新打开同一库——未删的快照在（强杀后回放的数据源）。
+    {
+        let settings = StateWriter::start_settings(settings_path.clone()).unwrap();
+        let projects = StateWriter::start_projects(projects_path.clone()).unwrap();
+        let engine = sebas::sebas_state::engine::DbStateEngine::with_projects(
+            settings.handle().clone(),
+            projects.handle().clone(),
+        );
+        rt.block_on(async {
+            let rows = engine.load_session_checkpoints().await.expect("load");
+            assert_eq!(rows.len(), 1, "checkpoint must survive writer restart");
+            assert_eq!(rows[0].session_id, "sess-1");
+            assert_eq!(rows[0].usage_in, 99);
+            assert!(rows[0].transcript_json.contains("sess-1"));
+        });
+    }
+}
+
+/// 不可用的 projects 库：checkpoint 域方法如实拒绝（不拿默认 no-op 冒充
+/// 成功）。
+#[test]
+fn unavailable_projects_db_rejects_checkpoint_writes_honestly() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = StateWriter::start_settings(dir.path().join("settings.db")).unwrap();
+    let blocked = dir.path().join("projects.db");
+    std::fs::create_dir_all(&blocked).unwrap();
+    let cause = StateWriter::start_projects(blocked.clone())
+        .err()
+        .expect("目录路径上 open 必失败")
+        .trim()
+        .to_string();
+    let engine = sebas::sebas_state::engine::DbStateEngine::with_unavailable_projects(
+        settings.handle().clone(),
+        cause,
+    );
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let err = engine
+            .save_session_checkpoint(sebas_models::checkpoint::SessionCheckpointRow {
+                session_id: "s".into(),
+                updated_at: 0,
+                transcript_json: "[]".into(),
+                parked_json: "[]".into(),
+                usage_in: 0,
+                usage_out: 0,
+                usage_reported: false,
+            })
+            .await
+            .unwrap_err();
+        assert!(err.contains("不可用"), "{err}");
+        assert!(engine.load_session_checkpoints().await.is_err());
+        assert!(engine.delete_session_checkpoint("s").await.is_err());
+    });
+}
+
+/// fix-webui-qa-round9 3.3（project-session-actions「rename via rail menu」的
+/// 持久半边，review 阶段补写）：rename 走端点同一条 mutation 路径落库后，
+/// 写者重启（模拟 core 重启）名字保留；且 UPDATE 只碰 name 列——path、
+/// 注册时刻、排序、节点归属、项目级默认 agent 一概原样（spec「Renaming
+/// SHALL NOT change the project's path, sort order, node attribution」；
+/// 会话从属由 path 派生，path 不动即从属不动）。未知 id 如实报「不存在」，
+/// 不假装成功。
+#[test]
+fn project_rename_survives_writer_restart_and_moves_only_the_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings_path = dir.path().join("settings.db");
+    let projects_path = dir.path().join("projects.db");
+
+    let id = {
+        let settings = StateWriter::start_settings(settings_path.clone()).unwrap();
+        let projects = StateWriter::start_projects(projects_path.clone()).unwrap();
+        let engine = sebas::sebas_state::engine::DbStateEngine::with_projects(
+            settings.handle().clone(),
+            projects.handle().clone(),
+        );
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            engine
+                .add_project("local", "/tmp/rename-proj", "rename-proj", 1_700_000_000)
+                .await
+                .expect("add project");
+            engine
+                .set_project_default_agent(
+                    &sebas_models::project::project_id_for_on("local", "/tmp/rename-proj"),
+                    "claude",
+                )
+                .await
+                .expect("set default agent");
+            let before = engine
+                .load_projects()
+                .await
+                .expect("load before rename")
+                .into_iter()
+                .next()
+                .expect("one project row");
+            let id = before.id.clone().expect("registered row carries its id");
+
+            // 端点同一条 mutation 路径（api.rs projects_rename → projects
+            // op rename）：trim 在 handler/mutation 层完成，落库的是 trim 后
+            // 的名字（engine 层如实存储，不重复 trim）。
+            engine
+                .rename_project(&id, "新名字")
+                .await
+                .expect("rename committed");
+            id
+        })
+        // 写者 drop = core 进程结束。
+    };
+
+    // 第二次生命周期：重启后名字保留、其余列原样。
+    let settings = StateWriter::start_settings(settings_path.clone()).unwrap();
+    let projects = StateWriter::start_projects(projects_path.clone()).unwrap();
+    let engine = sebas::sebas_state::engine::DbStateEngine::with_projects(
+        settings.handle().clone(),
+        projects.handle().clone(),
+    );
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async move {
+        let list = engine.load_projects().await.expect("load after restart");
+        assert_eq!(list.len(), 1);
+        let row = &list[0];
+        assert_eq!(row.id.as_deref(), Some(id.as_str()), "stable id unchanged");
+        assert_eq!(row.name, "新名字", "renamed name survives the restart");
+        assert_eq!(row.path, "/tmp/rename-proj", "path must not move");
+        assert_eq!(row.node_id, "local", "node attribution must not move");
+        assert_eq!(row.added_at, 1_700_000_000, "added_at must not move");
+        assert_eq!(row.sort_order, 0, "sort order must not move");
+        assert_eq!(
+            row.default_agent.as_deref(),
+            Some("claude"),
+            "project default agent must not move"
+        );
+
+        // 未知 id → Err「不存在」（DbStateEngine 返回 false，mutation 层转
+        // 404）——绝不假装成功。
+        let missing = engine.rename_project("proj-doesnotexist", "x").await;
+        assert!(
+            matches!(&missing, Ok(false)),
+            "unknown id must report no-row-updated: {missing:?}"
+        );
+    });
+}

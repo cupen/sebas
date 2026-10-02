@@ -397,6 +397,24 @@ afterEach(() => {
 })
 
 describe('sebas-settings-modal sections', () => {
+  // （fix-webui-qa-round9 4.4，agent-workbench）设置弹窗的可访问对话框语义：
+  // 容器以 dialog 呈现（role + aria-modal + 可访问名），分区内容在可访问性
+  // 树中可及（nav 有自己的 aria-label）。
+  it('the panel carries dialog semantics with an accessible name (round9 4.4)', async () => {
+    const el = await mount()
+    const panel = el.shadowRoot!.querySelector<HTMLElement>('.panel')!
+    expect(panel).toBeTruthy()
+    expect(panel.getAttribute('role')).toBe('dialog')
+    expect(panel.getAttribute('aria-modal')).toBe('true')
+    const name = panel.getAttribute('aria-label') ?? ''
+    expect(name.trim().length).toBeGreaterThan(0)
+    expect(name).toContain('设置')
+    // 分区进入可访问性树：导航有可访问名、内容区在 dialog 内。
+    expect(panel.querySelector('.nav')?.getAttribute('aria-label')).toBeTruthy()
+    expect(panel.querySelector('.content')).toBeTruthy()
+    el.remove()
+  })
+
   it('renders the left nav with exactly Generic/Appearance/Services/Models/Skills/Env Vars/About', async () => {
     const el = await mount()
     const labels = navItems(el).map((b) => b.textContent?.trim())

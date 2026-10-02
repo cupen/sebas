@@ -56,6 +56,10 @@ export const RETIRED_REDIRECTS: Readonly<Record<string, string>> = {
   '/settings': '/',
   '/gateway': '/',
   '/about': '/',
+  // fix-webui-qa-round9 4.1（agent-workbench）：/router 已并入工作台，
+  // 旧地址栏链接归一回 canonical `/`（testsuite-webui-browser 规格本就
+  // 要求退役路径重定向，此为合规修复）。
+  '/router': '/',
 }
 
 /** Redirect target for a retired path; `null` when the path stands as-is. */

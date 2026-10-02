@@ -139,6 +139,26 @@ async fn stalled_turn_force_settles_drains_and_notifies() {
             .any(|t| t.element_type == "error".into() && t.content.contains("回合停滞被强制收尾")),
         "the transcript must explain the forced settle: {turns:?}"
     );
+    // fix-webui-qa-round9 4.2（agent-workbench）：通知文案与机制一致——阈值
+    // 是**判定**口径，收尾叠加扫描迟滞（间隔 = clamp(600,1,15)=15s → 最迟约
+    // 615 秒），不出现「阈值即收尾时刻」式误述。
+    let notice = turns
+        .iter()
+        .find(|t| t.element_type == "error".into() && t.content.contains("回合停滞被强制收尾"))
+        .expect("stall notice entry");
+    let text = &notice.content;
+    assert!(
+        text.contains("静默超过 600 秒即判定停滞"),
+        "notice must name the decision threshold: {text}"
+    );
+    assert!(
+        text.contains("最迟约 615 秒内强制收尾"),
+        "notice must name the settle deadline (threshold + scan interval): {text}"
+    );
+    assert!(
+        !text.contains("600 秒已强制收尾"),
+        "must not present the threshold as the settle moment: {text}"
+    );
 
     // 队列只弹出队头，剩余条目等新回合结束后继续 drain。
     assert_eq!(router.map.queue_len(&key).await, 1);

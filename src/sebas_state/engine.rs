@@ -128,6 +128,21 @@ impl StateStoreEngine for DbStateEngine {
         Ok(())
     }
 
+    async fn rename_project(&self, id: &str, name: &str) -> Result<bool, String> {
+        let id = id.to_string();
+        let name = name.to_string();
+        let updated = self
+            .projects()?
+            .exec(move |conn| sebas_models::project::rename_project(conn, &id, &name))
+            .await?;
+        if updated {
+            // fix-webui-qa-round9 3.1：重命名也是 projects 域 mutation——
+            // per-mutation 落库之外照发变更通知（rail 不等轮询）。
+            sebas_dispatch::state_store::notify_change("projects");
+        }
+        Ok(updated)
+    }
+
     // ---- agents 域（add-agent-settings-and-session-titles 1.3/1.4）----
     //
     // 行归 settings.db（agents 表）；删除守卫的「清项目默认」半边落
@@ -231,6 +246,38 @@ impl StateStoreEngine for DbStateEngine {
             .await?;
         sebas_dispatch::state_store::notify_change("sessions");
         Ok(())
+    }
+
+    // ---- 会话面 checkpoint（fix-webui-qa-round9 1.1/1.2/1.3，
+    // session-transcript-durability）：写入/回放/删除全经 projects 库的
+    // 单写 actor 串行提交；库不可用时如实拒绝（不冒充成功）。----
+
+    async fn save_session_checkpoint(
+        &self,
+        row: sebas_models::checkpoint::SessionCheckpointRow,
+    ) -> Result<(), String> {
+        self.projects()?
+            .exec(move |conn| row.save(conn).map_err(|e| e.to_string()))
+            .await
+    }
+
+    async fn load_session_checkpoints(
+        &self,
+    ) -> Result<Vec<sebas_models::checkpoint::SessionCheckpointRow>, String> {
+        self.projects()?
+            .exec(sebas_models::checkpoint::load_session_checkpoints)
+            .await
+    }
+
+    async fn delete_session_checkpoint(&self, session_id: &str) -> Result<(), String> {
+        let sid = session_id.to_string();
+        self.projects()?
+            .exec(move |conn| {
+                sebas_models::checkpoint::SessionCheckpointRow::delete(conn, &sid)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            })
+            .await
     }
 }
 

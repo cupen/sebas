@@ -145,4 +145,19 @@ impl StateStoreEngine for MemoryEngine {
         }
         Ok(())
     }
+
+    /// fix-webui-qa-round9 3.1: rename by stored/wire id; only `name` moves.
+    async fn rename_project(&self, id: &str, name: &str) -> Result<bool, String> {
+        let mut projects = self.inner.projects.lock().unwrap();
+        let mut updated = false;
+        for p in projects.iter_mut() {
+            let matches = p.id.as_deref() == Some(id)
+                || sebas_webui::projects::project_id_for_on(&p.node_id, &p.path) == id;
+            if matches {
+                p.name = name.to_string();
+                updated = true;
+            }
+        }
+        Ok(updated)
+    }
 }

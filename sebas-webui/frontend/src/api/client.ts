@@ -1055,6 +1055,15 @@ const projects = {
     ),
   reorder: (ids: string[]) =>
     post<{ projects: Project[] }>('/api/projects/reorder', { ids }),
+  /**
+   * 按稳定 id 重命名项目（fix-webui-qa-round9 3.1，project-session-actions）。
+   * 服务端 trim；空名 / 纯空白 → 400（弹窗内联报错），未知 id → 404。
+   */
+  rename: (id: string, name: string) =>
+    post<{ status: string; id: string; name: string }>(
+      `/api/projects/${encodeURIComponent(id)}/rename`,
+      { name },
+    ),
   branch: (id: string) =>
     get<ProjectBranchInfo>(`/api/projects/${encodeURIComponent(id)}/branch`),
 }

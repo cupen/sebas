@@ -36,3 +36,21 @@ describe('matchRoute', () => {
     expect(matchRoute(ROUTES, '/admin/status')).toBeNull()
   })
 })
+
+// fix-webui-qa-round9 4.1（agent-workbench）：/router 并入工作台后，旧地址
+// 必须归一回 canonical `/`，而不是 404 或留在原地。
+describe('redirectFor', () => {
+  it('redirects the retired /router path to the workbench root', async () => {
+    const { redirectFor, RETIRED_REDIRECTS } = await import('./router.js')
+    expect(redirectFor('/router')).toBe('/')
+    expect(RETIRED_REDIRECTS['/router']).toBe('/')
+  })
+
+  it('keeps the other retired redirects intact', async () => {
+    const { redirectFor } = await import('./router.js')
+    expect(redirectFor('/settings')).toBe('/')
+    expect(redirectFor('/gateway')).toBe('/')
+    expect(redirectFor('/about')).toBe('/')
+    expect(redirectFor('/nope')).toBeNull()
+  })
+})
