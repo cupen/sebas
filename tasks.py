@@ -1083,20 +1083,39 @@ def _run_webui_sandbox(port, auth_on, keep, reuse, human, detached=False, provis
 
 @task(
     help={
-        "port": "webui port (default: 9879)",
+        "port": "webui port (default: 9879, or 9894 with --native)",
         "auth": "enable auth with test account admin/admin",
         "keep": "keep the sandbox dir on exit",
+        "native": "inject the native scenario-model posture (SEBAS_AGENT_ROUTER_URL "
+        "→ this sandbox's debug router + test/* models); also honored via "
+        "TESTSUITE_NATIVE=1. Port derivation follows testsuite_webui_server "
+        "(explicit --port wins; default 9894 keeps the native posture isolated)",
     }
 )
-def testsuite_webui_sandbox(c, port=None, auth=False, keep=False):
-    """Run a throwaway webui backend for GUI testing (foreground, Ctrl-C to stop)."""
+def testsuite_webui_sandbox(c, port=None, auth=False, keep=False, native=False):
+    """Run a throwaway webui backend for GUI testing (foreground, Ctrl-C to stop).
+
+    fix-webui-qa-round8 8.1：`--native`（或 TESTSUITE_NATIVE=1）透传 native
+    场景模型姿态——core 进程带上 SEBAS_AGENT_ROUTER_URL（指向本沙箱装配的
+    debug router）与 test/* 场景模型清单，GUI 会话可直接发消息跑 native 内核。
+    端口沿用 testsuite_webui_server 的派生规则：显式 --port 优先；native 姿态
+    缺省 9894（与默认沙箱隔离，first-paint 的 native 禁用断言不受影响）。"""
+    # `--native` 旗标与 TESTSUITE_NATIVE 环境变量等价（旗标 OR env）。
+    native = bool(native) or os.environ.get("TESTSUITE_NATIVE", "0") == "1"
+    if port:
+        derived_port = int(port)
+    elif native:
+        derived_port = _TESTSUITE_NATIVE_PORT
+    else:
+        derived_port = _TESTSUITE_HUMAN_PORT
     try:
         _run_webui_sandbox(
-            port=int(port) if port else _TESTSUITE_HUMAN_PORT,
+            port=derived_port,
             auth_on=bool(auth),
             keep=bool(keep),
             reuse=bool(os.environ.get("TESTSUITE_REUSE")),
             human=True,
+            native=native,
         )
     finally:
         _cleanup_stale_sandboxes()

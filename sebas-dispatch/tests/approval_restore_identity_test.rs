@@ -6,8 +6,10 @@
 //!   据此拒绝）；
 //! - 2.1 cancel 释放泊车：审批挂起时可取消、pending 清空、`turn_engaged`
 //!   回落、重复 cancel 无害；
-//! - 2.2 停止条目：被打标回合的 `Finished` append「回合被停止」错误类条目，
-//!   正常完成回合不含；
+//! - 2.2 停止条目：被打标回合的 `Finished` append 中性取消 notice 条目
+//!   （fix-webui-qa-round8 7.3：操作者取消不再是错误类条目），正常完成回合不含；
+//! - 5.2 模型切换留痕：`apply_model_changed` 落 `model_change` 条目
+//!   （fix-webui-qa-round8）；
 //! - 3.2 归档恢复身份：restore 带身份四项落映射、旧档（全空）维持现默认；
 //! - 5.1 会话 label：设置/清空随快照可见、未知会话拒绝。
 
@@ -393,22 +395,23 @@ async fn cancelled_turn_appends_a_stop_entry_and_normal_finish_does_not() {
         )
         .await;
     let turns = router.session_turns(&key_a, 0).await.unwrap();
+    // （fix-webui-qa-round8 7.3）操作者取消是**中性取消**不是失败：收尾条目
+    // 是域层统一文案的 notice（无错误语义色/失败分类），不再是 error 红泡。
     let stop_entries: Vec<&TurnEntry> = turns
         .iter()
-        .filter(|e| e.element_type == "error".into() && e.content.contains("回合被停止"))
+        .filter(|e| e.element_type == "notice".into() && e.content.contains("回合已取消"))
         .collect();
     assert_eq!(
         stop_entries.len(),
         1,
-        "exactly one stop entry after a cancelled turn"
+        "exactly one neutral cancel entry after a cancelled turn"
     );
-    assert_eq!(
-        stop_entries[0].failure_class.as_deref(),
-        Some(sebas_dispatch::failure_class::GENERIC),
-        "the stop entry is an error-class entry"
+    assert!(
+        !turns.iter().any(|e| e.element_type == "error".into()),
+        "an operator-initiated cancel must not surface as an error entry"
     );
 
-    // 回合 B：正常完成（无 cancel 打标）→ 无停止条目。
+    // 回合 B：正常完成（无 cancel 打标）→ 无取消条目。
     let key_b = web_key("stop-b");
     router
         .map
@@ -434,9 +437,57 @@ async fn cancelled_turn_appends_a_stop_entry_and_normal_finish_does_not() {
     assert!(
         !turns
             .iter()
-            .any(|e| e.content.contains("回合被停止")),
-        "a normally finished turn must not carry a stop entry"
+            .any(|e| e.content.contains("回合已取消")),
+        "a normally finished turn must not carry a cancel entry"
     );
+}
+
+/// （fix-webui-qa-round8 5.2 + review 补修）会话内模型切换留痕：spawn 窗口
+/// 的**初始观察**（driver 首帧把种子模型纠偏成 agent 真实模型）只更新映射、
+/// 不落条目——它是快照记账，不是操作者动作；其后的 ModelChanged 才是操作
+/// 者切换，落 `model_change` 系统条目（含新旧模型名）。观察值与当前一致时
+/// 整体 no-op（纠偏帧重复到达不重写）。
+#[tokio::test]
+async fn model_change_lands_a_transcript_entry_with_old_and_new_model() {
+    let (router, _rx) = DispatchHandle::new(SessionMap::new());
+    let key = web_key("model");
+    router
+        .map
+        .insert(key.clone(), Mapping::active("s-model"))
+        .await
+        .unwrap();
+
+    // 初始观察（spawn 窗口纠偏）：映射更新、转录**无**条目。
+    router.apply_model_changed("s-model", "model-b").await;
+    let turns = router.session_turns(&key, 0).await.unwrap();
+    assert!(
+        !turns.iter().any(|e| e.element_type == "model_change".into()),
+        "the spawn-window observation must not land a transcript entry: {turns:?}"
+    );
+    let info = router.session_info_for(&key).await.expect("session");
+    assert_eq!(info.current_model.as_deref(), Some("model-b"));
+
+    // 中程操作者切换：from = 初始观察后的生效模型，条目落账。
+    router.apply_model_changed("s-model", "model-c").await;
+    let turns = router.session_turns(&key, 0).await.unwrap();
+    let entries: Vec<&TurnEntry> = turns
+        .iter()
+        .filter(|e| e.element_type == "model_change".into())
+        .collect();
+    assert_eq!(entries.len(), 1, "exactly one operator-switch entry");
+    let payload: serde_json::Value =
+        serde_json::from_str(&entries[0].content).expect("model_change payload is JSON");
+    assert_eq!(payload["from"], "model-b");
+    assert_eq!(payload["to"], "model-c");
+
+    // 纠偏帧重复到达（观察值 == 当前值）：整体 no-op，不重写、不落条目。
+    router.apply_model_changed("s-model", "model-c").await;
+    let turns = router.session_turns(&key, 0).await.unwrap();
+    let entries: Vec<&TurnEntry> = turns
+        .iter()
+        .filter(|e| e.element_type == "model_change".into())
+        .collect();
+    assert_eq!(entries.len(), 1, "a same-model observation is a no-op");
 }
 
 /// 3.2 主契约：restore 携带身份四项——恢复后 `agent_kind` / desired mode /

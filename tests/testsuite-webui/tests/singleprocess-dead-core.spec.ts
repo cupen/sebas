@@ -29,6 +29,10 @@ import {
 } from './helpers/index'
 
 test.describe('单进程 core 死亡（SPA 诚实降级）', () => {
+  // killCoreHard 的 SIGKILL 等待语义读 /proc（helpers/coreproc.ts
+  // requirePosix）——linux-first 套件，Windows 上此前在用例体内抛错被计为
+  // 失败；改描述级条件跳过，与 core-freeze 的 POSIX skip 同口径。
+  test.skip(process.platform === 'win32', 'SIGKILL wait semantics need POSIX (linux-first suite)')
   let collector: ErrorCollector
 
   test.beforeEach(({ page }) => {

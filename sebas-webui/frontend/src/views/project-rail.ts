@@ -542,6 +542,23 @@ export class SebasProjectRail extends LitElement {
     .group-head .chevron.open { transform: rotate(90deg); }
     .group-head .group-count { margin-left: auto; font-variant-numeric: tabular-nums; background: var(--sebas-surface-3); border-radius: var(--sebas-radius-full); padding: 0 7px; font-size: 0.62rem; }
     .group-head:focus-visible { outline: var(--sebas-focus-ring); outline-offset: 1px; }
+    /* （fix-webui-qa-round8 4.3）组头链接区：/sessions 总览入口——继承组头
+       字色（hover 提亮），无下划线，点击导航不折叠。 */
+    .group-head .group-link {
+      color: inherit;
+      text-decoration: none;
+      font-weight: inherit;
+      text-transform: inherit;
+      letter-spacing: inherit;
+    }
+    .group-head .group-link:hover,
+    .group-head .group-link:focus-visible {
+      color: var(--sebas-accent);
+    }
+    .group-head .group-link:focus-visible {
+      outline: var(--sebas-focus-ring);
+      outline-offset: 2px;
+    }
     .error { padding: 8px 12px; color: var(--sebas-status-failed); font-size: 0.78rem; }
     .error .retry-btn {
       margin-left: 4px;
@@ -751,17 +768,15 @@ export class SebasProjectRail extends LitElement {
       return
     }
     this.focusedKey = row.encoded_key
-    // rail-declutter-unread D3：switch 成功 = 聚焦写锚——读锚推进到当前
-    // msg_count，徽标清零（无锚点会话自此刻起开始累计未读）。
-    // （fix-webui-qa-round2 2.6，D-R2A 修订）聚焦写锚以服务端当前计数为准：
-    // 已有锚也随 switch 推进到当前 msg_count（单调 max，不回退）——聚焦动作
-    // 与回合定稿竞速时锚不得停在回合前的旧值（unread-badge 靶子场景：
-    // 第二回合完成后立即聚焦，锚必须停在 2 而非 1）。M3 的「分界线必须
-    // 仍可呈现」由 seam 开卷捕获承担：推进**之前**先在 unread-cursor 登记
-    // 本次的未读边界（armOpeningSeam），transcript 挂载时消费并按它补绘
-    // 分界线——锚已到顶、分界线照画，两句合同不再互斥。
+    // rail-declutter-unread D3：switch 成功 = 开卷——**先**登记本次的未读
+    // 边界（推进前的读锚），transcript 挂载时据此补绘分界线。
+    // （fix-webui-qa-round8 5.1，design D5）切会话路径不再无条件把锚推进到
+    // 服务端 msg_count——「打开」不等于「看完」，锚只反映已见内容：切走
+    // 会话绝不把未见内容计为已见（后台回合完成的徽标不被切换竞速清零）。
+    // 锚的推进统一交给 transcript 的已见驱动路径（贴底跟读 / 可视高度内
+    // 开卷结算 / mark all seen / 跳到最新）；徽标数字以 /api/sessions 的
+    // msg_count 为真值对账，localStorage 锚仅作本地缓存。
     armOpeningSeam(row.encoded_key, readAnchorCount(row.encoded_key))
-    writeFocusAnchor(row.encoded_key, row.msg_count)
     // （fix-webui-qa-round3 2.6 / D10）写会话 URL（不再是 '/'）：任何聚焦
     // 路径都把地址投影成 /sessions/{key}。
     navigate(`/sessions/${row.encoded_key}`)
@@ -1033,12 +1048,32 @@ export class SebasProjectRail extends LitElement {
   private onDragEnd() { this.dragIndex = null; this.dragOverIndex = null }
 
   /**
+   * （fix-webui-qa-round8 4.2）行菜单动作后收起菜单：动作项的 click 此前
+   * stopPropagation 挡掉了 dropdown 自身的关闭路径，排序后菜单不关闭还
+   * 重锚到移动后的另一行（QA D1-P2-01 / D-P3-13：紧邻的「移除项目」极易
+   * 被误点删错项目）。显式 hide 当前菜单；未升级的组件（测试环境）无
+   * hide 即 no-op。
+   */
+  private closeMenuFrom(e: Event): void {
+    const dropdown = (e.currentTarget as HTMLElement | null)?.closest?.('wa-dropdown') as
+      | (HTMLElement & { hide?: () => void })
+      | null
+    dropdown?.hide?.()
+  }
+
+  /**
    * （fix-webui-qa-round3 2.5 / D9）项目「…」菜单的上移/下移：与拖拽共用
    * 同一条落盘链路（{@link applyProjectOrder} → POST /api/projects/reorder）。
    * QA W1 实锤拖拽在真实指针序列里滑成了文本选择（draggable 行内拖拽的
    * 可发现性/成功率都低），菜单项是确定性的重排序入口。边界位（首/末）
-   * 对应项禁用。
+   * 对应项禁用。动作后菜单立即关闭、不重锚（4.2）。
    */
+  private async moveProjectFrom(e: Event, index: number, delta: -1 | 1) {
+    e.stopPropagation()
+    this.closeMenuFrom(e)
+    await this.moveProject(index, delta)
+  }
+
   private async moveProject(index: number, delta: -1 | 1) {
     const to = index + delta
     if (to < 0 || to >= this.projects.length) return
@@ -1325,14 +1360,14 @@ export class SebasProjectRail extends LitElement {
                 value="move-up"
                 data-testid="project-move-up"
                 ?disabled=${index === 0}
-                @click=${(e: Event) => { e.stopPropagation(); void this.moveProject(index, -1) }}
+                @click=${(e: Event) => void this.moveProjectFrom(e, index, -1)}
                 >上移</wa-dropdown-item
               >
               <wa-dropdown-item
                 value="move-down"
                 data-testid="project-move-down"
                 ?disabled=${index === this.projects.length - 1}
-                @click=${(e: Event) => { e.stopPropagation(); void this.moveProject(index, 1) }}
+                @click=${(e: Event) => void this.moveProjectFrom(e, index, 1)}
                 >下移</wa-dropdown-item
               >
             </wa-dropdown>
@@ -1377,14 +1412,25 @@ export class SebasProjectRail extends LitElement {
   private renderHistory() {
     // rail-declutter-unread D7：History 按归档时间倒序（新的在前）。前端
     // 排序，/api/archive 保持插入序返回（wire 契约不变）。
+    // （fix-webui-qa-round8 4.3）/sessions 总览页的常驻入口：组头链接区
+    // （「历史」标签 + 计数）直达 /sessions，归档为空也渲染组头——总览页
+    // 不再只能手输 URL。折叠/展开收窄到 chevron（组头的导航语义与开合
+    // 语义分离，点击标签绝不误折叠）。
     const archived = [...this.archivedSessions].sort((a, b) => b.archived_at - a.archived_at)
-    if (archived.length === 0) return nothing
     return html`
-      <div class="group-section">
+      <div class="group-section" data-testid="history-group">
         <button type="button" class="group-head" data-testid="history-group-head" aria-expanded=${this.historyOpen ? 'true' : 'false'} @click=${() => (this.historyOpen = !this.historyOpen)}>
-          <span class="chevron ${this.historyOpen ? 'open' : ''}" aria-hidden="true">▶</span><span>历史</span><span class="group-count">${archived.length}</span>
+          <span class="chevron ${this.historyOpen ? 'open' : ''}" aria-hidden="true">▶</span
+          ><a
+            class="group-link"
+            href="/sessions"
+            data-testid="history-sessions-link"
+            title="打开全部会话总览"
+            @click=${(e: Event) => e.stopPropagation()}
+            >历史</a
+          ><span class="group-count">${archived.length}</span>
         </button>
-        ${this.historyOpen ? html`<ul class="sessions">${archived.map((a) => this.renderArchivedSessionRow(a))}</ul>` : nothing}
+        ${this.historyOpen && archived.length > 0 ? html`<ul class="sessions">${archived.map((a) => this.renderArchivedSessionRow(a))}</ul>` : nothing}
       </div>`
   }
 

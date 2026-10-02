@@ -762,3 +762,18 @@ describe('sebas-review-cards', () => {
     }
   })
 })
+
+// （fix-webui-qa-round8 4.4）审批面板的会话标识展示友好化：编码串呈现为
+// 「渠道 · 本地段」，原始编码形只留在 title（可复制、可与日志对账）。
+describe('session id display friendly form (fix-webui-qa-round8 4.4)', () => {
+  it('renders the encoded key as 渠道 · 本地段 instead of the raw %00 string', async () => {
+    const el = await mount()
+    ws.emit(permFrame({ session_id: 'web%00web-1709-0' }))
+    await el.updateComplete
+    const card = cards(el)[0]!
+    expect(card.querySelector('.session-id')?.textContent).toContain('Web · web-1709-0')
+    expect(card.querySelector('.session-id')?.textContent).not.toContain('%00')
+    expect(card.querySelector('.session-id')?.getAttribute('title')).toBe('会话 web%00web-1709-0')
+    el.remove()
+  })
+})

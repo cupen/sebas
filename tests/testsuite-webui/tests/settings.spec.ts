@@ -222,7 +222,7 @@ test.describe('设置面', () => {
   })
 
   test.describe('分区导航 IA', () => {
-    test('nav order Generic→Appearance→Services→Models→Agents→Env Vars→About(pinned), default focus, memory, stale-value fallback', async ({
+    test('nav order Generic→Appearance→Services→Models→Aliases→Agents→Env Vars→About(pinned), default focus, memory, stale-value fallback', async ({
       page,
     }) => {
       const settings = new SettingsModal(page)
@@ -238,13 +238,14 @@ test.describe('设置面', () => {
       })
 
       // 分区顺序即规约（settings-modal SECTIONS）：Generic → Appearance →
-      // 〔分隔线〕Services → Models → Agents → Skills →〔压底分隔线〕Env Vars
-      // → About。免登录沙箱（服务端未启用鉴权，role = null）下 Users 分区按
-      // 角色裁剪隐藏（仅 root 可见——登录形态的呈现由 auth.spec.ts + 前端
-      // 单测承担）。一次结构断言钉住顺序 + 两条组间分隔线 + About 的 tail
-      // 分隔线（弹性留白压底的载体）。Skills 为 add-agent-skills 5.2 新增；
-      // Agents 为 add-agent-settings-and-session-titles 5.1 新增（紧跟
-      // Models 之后，spec 增量「…Models → Agents → Env Vars · About」）。
+      // 〔分隔线〕Services → Models → Aliases → Agents → Skills →〔压底分隔
+      // 线〕Env Vars → About。免登录沙箱（服务端未启用鉴权，role = null）下
+      // Users 分区按角色裁剪隐藏（仅 root 可见——登录形态的呈现由
+      // auth.spec.ts + 前端单测承担）。一次结构断言钉住顺序 + 两条组间分隔
+      // 线 + About 的 tail 分隔线（弹性留白压底的载体）。Skills 为
+      // add-agent-skills 5.2 新增；Agents 为 add-agent-settings-and-session-
+      // titles 5.1 新增；Aliases 为 fix-webui-qa-round8 6.1 新增（紧跟
+      // Models 之后，router-model-aliases「别名管理必须有 WebUI 入口」）。
       const signature = await settings.panel.locator('.nav').evaluate((nav) =>
         Array.from(nav.children).map((el) => {
           if (el.classList.contains('nav-sep')) {
@@ -259,6 +260,7 @@ test.describe('设置面', () => {
         'sep',
         '服务',
         '模型',
+        '别名',
         'Agent',
         '技能',
         'sep-tail',

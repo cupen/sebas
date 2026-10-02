@@ -266,6 +266,24 @@ async fn provider_create_is_immediately_visible_without_restart() {
     );
     assert_eq!(rows[0]["api_key_configured"], true, "明文 key → configured");
     assert!(!body.contains("sk-a"), "列表不得携带 key 材料: {body}");
+
+    // （fix-webui-qa-round8 6.1，router-model-aliases「别名管理必须有 WebUI
+    // 入口」）别名清单随 providers 读面下发：写一条别名后 GET 的
+    // `model_aliases` 段立即可见（别名分区不另造读 API）。
+    let (status, body) = json_request(
+        &app,
+        "POST",
+        "/api/model-aliases",
+        Some(r#"{"alias":"ds","provider":"alpha","upstream_model":"deepseek-chat"}"#.into()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, body) = json_request(&app, "GET", "/api/providers", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let alias = &v["model_aliases"]["ds"];
+    assert_eq!(alias["provider"], "alpha", "{body}");
+    assert_eq!(alias["upstream_model"], "deepseek-chat", "{body}");
 }
 
 /// 3.2：重名 409；更新空 api_key 保留旧值；删除后消失；删除未知 404。

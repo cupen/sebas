@@ -294,7 +294,7 @@ impl SessionTask {
                 let emit = TurnEmit::new(&self.key, &self.evt_tx);
                 // future（及其对 text/history 的借用）收在块作用域内，
                 // 出块即释放，随后才能把队列中的下一条 prompt 赋给 text。
-                let outcome = {
+                let (outcome, summary) = {
                     let fut = engine.run_turn(
                         self.llm.as_ref(),
                         &self.registry,
@@ -330,6 +330,9 @@ impl SessionTask {
                     }
                 };
                 // 终态事件：取消不是 Finished（spec：cancellation outcome）。
+                // （fix-webui-qa-round8 5.3）终态**先行**于 summary：宿主的零
+                // 输出判定在收尾时点求值，Error 先落地才不会被误判成空回合；
+                // summary 随后携带同一 turn 的计数发射。
                 match outcome {
                     TurnOutcome::Finished { .. } => {
                         let _ = self.evt_tx.send(AgentEvent::Finished {
@@ -351,6 +354,12 @@ impl SessionTask {
                         });
                     }
                 }
+                let _ = self.evt_tx.send(AgentEvent::SessionSummary {
+                    session_id: self.key.clone(),
+                    model_calls: summary.model_calls,
+                    tool_calls: summary.tool_calls,
+                    turn_ms: summary.turn_ms,
+                });
                 // turn 结束：应用 turn 期间收到的 SetModel（下一次 turn 起用）。
                 if let Some(m) = pending_model.take() {
                     self.config.model = m;
@@ -409,6 +418,20 @@ mod tests {
                 Err(e) => panic!("event channel closed: {e}"),
             }
         }
+    }
+
+    /// 终态 + 随后的 summary（fix-webui-qa-round8 5.3）：终态与 summary 由
+    /// 会话任务同一收尾序列同步发出（中间无 await），终态后的下一帧必是
+    /// summary——顺序断言的收集器据此多收一帧。
+    async fn wait_terminal_and_summary(
+        rx: &mut broadcast::Receiver<AgentEvent>,
+    ) -> Vec<AgentEvent> {
+        let mut evs = wait_terminal(rx).await;
+        match rx.recv().await {
+            Ok(ev) => evs.push(ev),
+            Err(e) => panic!("summary event expected after the terminal event: {e}"),
+        }
+        evs
     }
 
     #[test]
@@ -769,7 +792,7 @@ mod tests {
         let handle = manager.create_session(dir.path().to_path_buf());
         let mut rx = handle.subscribe();
         handle.prompt("go").await;
-        let evs = tokio::time::timeout(Duration::from_secs(30), wait_terminal(&mut rx))
+        let evs = tokio::time::timeout(Duration::from_secs(30), wait_terminal_and_summary(&mut rx))
             .await
             .unwrap();
 
@@ -777,14 +800,64 @@ mod tests {
             .iter()
             .map(|e| serde_json::to_value(e).unwrap()["type"].as_str().unwrap().into())
             .collect();
+        // （fix-webui-qa-round8 5.3）终态先行、summary 随后：宿主侧零输出判据
+        // 在 summary 时点求值，错误条目必须已经落地。
         assert_eq!(
             kinds,
-            vec!["tool_start", "tool_end", "tool_finish", "text_delta", "session_summary",
-                 "finished"]
+            vec!["tool_start", "tool_end", "tool_finish", "text_delta", "finished",
+                 "session_summary"]
         );
         assert!(evs
             .iter()
             .all(|e| serde_json::to_value(e).unwrap()["session_id"] == handle.key));
+    }
+
+    /// （fix-webui-qa-round8 5.3）以错误收尾的回合：**先** error、**后**
+    /// summary——零输出判定（随 summary 到达）看到错误条目已落地，不再把
+    /// 错误回合误报成空回合。
+    #[tokio::test]
+    async fn failed_turn_emits_error_before_summary() {
+        use crate::llm::LlmError;
+        struct AlwaysFails;
+        #[async_trait::async_trait]
+        impl LlmClient for AlwaysFails {
+            async fn stream_turn(
+                &self,
+                _req: &crate::llm::LlmRequest,
+                _sink: &(dyn Fn(crate::llm::StreamEvent) + Send + Sync),
+            ) -> Result<crate::llm::LlmTurn, LlmError> {
+                Err(LlmError::terminal("upstream 5xx"))
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let manager = SessionManager::new(
+            Arc::new(AlwaysFails),
+            ToolRegistry::new(Duration::from_secs(10)),
+            SessionConfig::default(),
+        );
+        let handle = manager.create_session(dir.path().to_path_buf());
+        let mut rx = handle.subscribe();
+        handle.prompt("go").await;
+        let evs = tokio::time::timeout(Duration::from_secs(30), wait_terminal_and_summary(&mut rx))
+            .await
+            .unwrap();
+        let kinds: Vec<String> = evs
+            .iter()
+            .map(|e| serde_json::to_value(e).unwrap()["type"].as_str().unwrap().into())
+            .collect();
+        let err_pos = kinds.iter().position(|k| k == "error").expect("error event");
+        let sum_pos = kinds
+            .iter()
+            .position(|k| k == "session_summary")
+            .expect("summary event");
+        assert!(
+            err_pos < sum_pos,
+            "error must land before the summary (zero-output judged at summary time): {kinds:?}"
+        );
+        assert!(
+            matches!(&evs[err_pos], AgentEvent::Error { terminal: true, .. }),
+            "the failing client is terminal: {kinds:?}"
+        );
     }
 
     #[tokio::test]

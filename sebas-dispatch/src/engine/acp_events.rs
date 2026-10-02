@@ -83,12 +83,13 @@ impl DispatchHandle {
                 })
                 .await;
             }
-            AcpEvent::ModelChanged { model_id, .. } => {
-                // 模型切换成功：更新映射 current model + 发布 Updated 让快照
-                // 立即反映（webui 中程模型选择器的数据源）；并把可见行累积进
-                // transcript（apply_event 会在 card body 留 "⚙ model → …"）。
-                self.apply_model_changed(session_id.as_str(), model_id)
-                    .await;
+            AcpEvent::ModelChanged { model_id: _, .. } => {
+                // 模型切换成功：映射 current model + `model_change` 条目 +
+                // Updated 发布——单点在 apply_event 的 ModelChanged 分支
+                // （fix-webui-qa-round8 5.2 收敛后它内部即调
+                // apply_model_changed）。此处不再显式调用：收敛前的「先
+                // apply_model_changed 再 apply_event」在即时线上会把同一
+                // 次切换的条目落两遍（泵线只过 apply_event，单条）。
                 let react = self.apply_event(session_id.as_str(), event).await;
                 self.flush_card(session_id.as_str()).await;
                 if let Some(emoji) = react {

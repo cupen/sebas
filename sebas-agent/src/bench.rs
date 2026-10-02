@@ -248,6 +248,18 @@ async fn run_task(task: &BenchTask, env: &BenchEnv, debug: bool, ws: &TempDirGua
                 let is_finished = matches!(ev, AgentEvent::Finished { .. });
                 evs.push(ev);
                 if is_finished || terminal {
+                    // （fix-webui-qa-round8 5.3）summary 现在在终态**之后**发射
+                    // （终态先行，零输出判定随之）——收尾时多收一帧，让 trace
+                    // 序列与 budget 判定仍然看到 summary。终态与 summary 由会
+                    // 话任务同步连发，这里的 recv 不会悬挂。
+                    if let Ok(ev) = rx.recv().await {
+                        if let AgentEvent::SessionSummary { .. } = ev {
+                            budget_flag = evs.iter().any(|e| {
+                                matches!(e, AgentEvent::Error { message, terminal: false, .. } if message.contains("budget"))
+                            });
+                        }
+                        evs.push(ev);
+                    }
                     break;
                 }
             }

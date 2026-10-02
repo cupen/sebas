@@ -31,13 +31,11 @@ import { sessionUsageView } from './session-usage.js'
 // add-agent-settings-and-session-titles 7.1：聚焦头部同走 fullSessionLabel
 // 命名链，truncateName 提供展示截断（全文进 title）。
 import { archivedEntryLabel, fullSessionLabel, truncateName, RAIL_FOCUS_EVENT, SESSION_LABEL_CHANGED_EVENT } from './project-rail.js'
-// （round3 3.1）焦点处立读锚：详情到达时为本浏览器缺锚的聚焦会话立锚。
-import {
-  armOpeningSeam,
-  peekOpeningSeam,
-  readAnchorCount,
-  writeFocusAnchor,
-} from './unread-cursor.js'
+// （round3 3.1 → fix-webui-qa-round8 5.1）焦点转换只登记开卷边界，锚的
+// 推进统一走 transcript 的已见驱动单一路径。
+import { armOpeningSeam, peekOpeningSeam, readAnchorCount } from './unread-cursor.js'
+// （fix-webui-qa-round8 4.4）聚焦链接等展示位的会话标识友好化（渠道 · 本地段）。
+import { friendlySessionKey } from './session-key-label.js'
 
 /**
  * 聚焦会话反投影项目上下文的窗口级事件（fix-webui-approval-restore-and-
@@ -1480,7 +1478,12 @@ export class SebasDashboard extends LitElement {
                         href=${`/sessions/${d.active_session.encoded_key}`}
                         title="聚焦的会话"
                       >
-                        <span class="fkey">${d.active_session.chat_id}</span>
+                        <!-- （fix-webui-qa-round8 4.4）聚焦链接的展示文本走
+                             「渠道 · 本地段」友好形，不再呈现 %00 编码串；
+                             href 仍是编码形（wire 与路由不变）。 -->
+                        <span class="fkey"
+                          >${friendlySessionKey(d.active_session.encoded_key)}</span
+                        >
                         <span class="arrow">${icon('forward', 13)}</span>
                       </a>
                     `
@@ -1773,22 +1776,13 @@ export class SebasDashboard extends LitElement {
         // （QA round5 复现）。这里以渲染空态这一事实登记，首回合到达仍按
         // 聚焦 + 可见 + 贴底 guard 消费。幂等。
         if (merged.length === 0) registerEmptyStreamSession(d.encoded_key)
-        // （round3 3.1）焦点处立读锚（一次性、按锚推导的另一半）：rail 点击
-        // 之外走进焦点的会话（创建 set_focus、深链、恢复聚焦）此前永远没有
-        // 本地锚，而无锚会话按 spec 读作 fully-read——它之后的非聚焦新回复
-        // 推不出未读徽章。详情到达且文档可见才以真实段数立锚（后台 tab 里
-        // 的装载不算「看着」——锚留空，回到页面的下一次详情装载再立）；
-        // 锚已存在绝不回写（流式/隐藏 tab 的推进语义归 transcript，单调由
-        // 游标模块保证）。
-        // （fix-webui-qa-round2 2.6，D-R2A）立锚改推进：聚焦路径以服务端
-        // 当前计数为准（已有锚也推进，单调 max），深链/恢复聚焦不再停在
-        // 回合前的旧值；「已有锚不覆写」的旧门让 unread-badge 的靶子场景
-        // （第二回合完成后立即聚焦）把锚停在下界。后台 tab 装载仍不写。
-        // 推进只发生在**焦点转换**后的首次详情装载（establishedFocusKey
-        // 门）——驻留期间的刷新不推进：上滚未跟读时到达的内容须由
-        // transcript 的 sticky 语义裁决，仪表盘不得代盖已读章。推进**前**
-        // 先登记开卷边界（与 rail switch 同序），transcript 挂载据此补绘
-        // 分界线——锚到顶与 seam 可见互不牵制。
+        // （round3 3.1 → fix-webui-qa-round8 5.1，design D5）焦点转换后的
+        // 首次详情装载只**登记开卷边界**，不再把锚推进到服务端 msg_count
+        // ——「打开」不等于「看完」，锚 SHALL 只反映已见内容：切走会话或
+        // 回合定稿不得把未见内容计为已见。锚的推进统一走 transcript 的
+        // 已见驱动单一路径（开卷可视高度内结算 / 贴底跟读 / mark all
+        // seen / 跳到最新）；rail 徽标以服务端 msg_count 为真值对账。
+        // 后台 tab 的装载不登记（hidden 的装载不算看着）。
         if (
           document.visibilityState === 'visible' &&
           d.encoded_key !== this.establishedFocusKey
@@ -1800,7 +1794,6 @@ export class SebasDashboard extends LitElement {
           if (peekOpeningSeam(d.encoded_key) === undefined) {
             armOpeningSeam(d.encoded_key, readAnchorCount(d.encoded_key))
           }
-          writeFocusAnchor(d.encoded_key, d.msg_count ?? 0)
         }
         // （round3 4.2）深链窗口的归属核对：detail 到达时 summary 的焦点
         // 指针往往还没落位，这里补一拍投影（幂等）。

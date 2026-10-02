@@ -399,7 +399,10 @@ describe('inbox removal (rail-declutter-unread 4.1)', () => {
   it('unbound sessions are invisible even when they are the only sessions', async () => {
     mockOf(apiMock.sessions).mockResolvedValue(sessionList([sessionRows[2]]))
     const el = await mount()
-    expect(el.shadowRoot!.querySelector('.group-head')).toBeNull()
+    // （fix-webui-qa-round8 4.3）唯一的组头是 History（/sessions 常驻入口，
+    // 零归档也渲染）；无项目会话仍无任何展示位。
+    const heads = [...el.shadowRoot!.querySelectorAll('.group-head')].map((h) => h.textContent)
+    expect(heads.some((t) => t?.includes('历史'))).toBe(true)
     expect(el.shadowRoot!.querySelector('li.session-item')).toBeNull()
     el.remove()
   })
@@ -641,17 +644,17 @@ describe('unread badge focused-session boundaries (fix-webui-qa-defects-round3 6
     await new Promise((r) => setTimeout(r, 0))
     await el.updateComplete
     expect(el.shadowRoot!.querySelector('[data-testid="session-unread"]')).toBeNull()
-    // （fix-webui-qa-round2 2.6，D-R2A）聚焦写锚推进到服务端当前计数：
-    // switch 不再只「缺锚立基」——锚从 2 推进到 5，徽标由聚焦 gate 与
-    // count−anchor 双门保持清零。
-    expect(readAnchorCount(target.encoded_key)).toBe(5)
+    // （fix-webui-qa-round8 5.1）切会话不再推进锚——「打开」不等于「看完」，
+    // 锚只反映已见内容（原地保持 2）；徽标由聚焦可见 gate 保持清零，锚的
+    // 推进归 transcript 的已见驱动路径（贴底跟读 / mark all seen）。
+    expect(readAnchorCount(target.encoded_key)).toBe(2)
 
-    // 同会话重复点击（no-op switch）：锚单调保持、徽标不复活（聚焦 gate）。
+    // 同会话重复点击（no-op switch）：锚保持、徽标不复活（聚焦 gate）。
     ;(items()[0] as HTMLElement).click()
     await new Promise((r) => setTimeout(r, 0))
     await el.updateComplete
     expect(el.shadowRoot!.querySelector('[data-testid="session-unread"]')).toBeNull()
-    expect(readAnchorCount(target.encoded_key)).toBe(5)
+    expect(readAnchorCount(target.encoded_key)).toBe(2)
     expect(mockOf(apiMock.switchSession).mock.calls.length - switchCallsBefore).toBe(2)
     el.remove()
   })
@@ -744,10 +747,11 @@ describe('unread badge focused-session boundaries (fix-webui-qa-defects-round3 6
       await new Promise((r) => setTimeout(r, 0))
       await el.updateComplete
       expect(items()[0]!.querySelector('[data-testid="session-unread"]')).toBeNull()
-      // （fix-webui-qa-round2 2.6，D-R2A）点回聚焦即推进锚到服务端当前
-      // 计数（3）——徽标不再复燃；未读分界线由开卷冻结边界（推进前的 1）
-      // 在 transcript 呈现，锚推进与 seam 可见解耦。
-      expect(readAnchorCount(a.encoded_key)).toBe(3)
+      // （fix-webui-qa-round8 5.1）点回聚焦不再推进锚——锚只反映已见内容
+      // （原地保持 1）；徽标由聚焦可见 gate 清掉，未读分界线由开卷冻结
+      // 边界（推进前的 1）在 transcript 呈现，锚推进交给「读到分界线」的
+      // transcript 已见路径（贴底跟读 / mark all seen / 跳到最新）。
+      expect(readAnchorCount(a.encoded_key)).toBe(1)
       el.remove()
     } finally {
       restore()
@@ -2486,6 +2490,107 @@ describe('fix-webui-qa-round3 (D7 archive label / D9 reorder menu)', () => {
     await el.updateComplete
     // 既有断言（switch 就地聚焦）之外，地址已写成 /sessions/{key}。
     expect(window.location.pathname).toBe('/sessions/oc_1%00')
+    el.remove()
+  })
+})
+
+// ─── fix-webui-qa-round8：菜单动作后关闭 / History 组头总览入口 / 未读锚不竞速 ──
+
+describe('fix-webui-qa-round8: menu close, /sessions entry, anchor race', () => {
+  function frame(sessionId: string, msgCount: number) {
+    return {
+      type: 'session.updated',
+      session_id: sessionId,
+      status_slug: 'working',
+      turn_engaged: true,
+      msg_count: msgCount,
+      pending: [],
+      label: null,
+    }
+  }
+
+  it('the row menu closes after a move action and does not re-anchor (4.2)', async () => {
+    mockOf(apiMock.projects.reorder).mockResolvedValue({
+      projects: [projects[1], projects[0]],
+    })
+    const el = await mount()
+    const menu = el.shadowRoot!.querySelector('wa-dropdown') as unknown as {
+      hide: () => void
+      hiddenByTest: boolean
+    }
+    // jsdom 里的未升级 wa-dropdown：钉一个 hide 探针（生产实现由组件提供）。
+    menu.hide = () => {
+      menu.hiddenByTest = true
+    }
+    const moveUp = el.shadowRoot!.querySelector('[data-testid="project-move-up"]') as HTMLElement
+    moveUp.click()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    // 动作执行（reorder 出站）且菜单被显式收起——不再依赖 dropdown 自身的
+    // 点击路径（stopPropagation 曾把它挡掉，菜单不关闭且重锚）。
+    expect(mockOf(apiMock.projects).reorder).toHaveBeenCalled()
+    expect(menu.hiddenByTest).toBe(true)
+    el.remove()
+  })
+
+  it('the History group head links to /sessions without toggling collapse (4.3)', async () => {
+    const el = await mount()
+    const head = el.shadowRoot!.querySelector('[data-testid="history-group-head"]') as HTMLElement
+    // 常驻入口：零归档也渲染组头。
+    expect(head).toBeTruthy()
+    const link = el.shadowRoot!.querySelector<HTMLAnchorElement>(
+      '[data-testid="history-sessions-link"]',
+    )!
+    expect(link.getAttribute('href')).toBe('/sessions')
+    // 点击链接区导航（SPA 拦截由 shell 文档级监听承接），绝不折叠组。
+    const before = head.getAttribute('aria-expanded')
+    link.click()
+    await el.updateComplete
+    expect(head.getAttribute('aria-expanded')).toBe(before)
+    // chevron 仍是折叠开关。
+    ;(head as HTMLElement).click()
+    await el.updateComplete
+    expect(head.getAttribute('aria-expanded')).not.toBe(before)
+    el.remove()
+  })
+
+  it('后台完成→切换→打开：锚不被切换竞速清零，徽标如实计数（5.1）', async () => {
+    // 同项目（聚焦所在项目缺省展开，两行都可见）。
+    const a = row({ project_id: 'proj-alpha', msg_count: 1 })
+    const b = row({ project_id: 'proj-alpha', msg_count: 1 })
+    writeFocusAnchor(b.encoded_key, 1)
+    writeFocusAnchor(a.encoded_key, 1)
+    mockOf(apiMock.sessions).mockResolvedValue({
+      ...sessionList([a, b]),
+      active_session_key: a.encoded_key,
+    })
+    mockOf(apiMock.switchSession).mockResolvedValue({
+      status: 'switched',
+      redirect: '/sessions/x',
+      active_session_key: 'x',
+    })
+    const el = await mount()
+    const items = () => [...el.shadowRoot!.querySelectorAll('li.session-item')]
+    // 后台完成：B 的回合在非聚焦状态产生新内容（msg_count 1 → 3）。
+    wsMocks.emit(frame(b.encoded_key, 3))
+    await el.updateComplete
+    // 徽标如实亮起：3 − 1 = 2。
+    expect(items()[1]!.querySelector('[data-testid="session-unread"]')?.textContent?.trim()).toBe(
+      '2',
+    )
+    // 切换到别处（点 A 行）：B 的锚不动——切换绝不把未见内容计为已见。
+    ;(items()[0] as HTMLElement).click()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(readAnchorCount(b.encoded_key)).toBe(1)
+    expect(items()[1]!.querySelector('[data-testid="session-unread"]')?.textContent?.trim()).toBe(
+      '2',
+    )
+    // 打开 B：锚仍不推进（已见驱动，推进归 transcript 的贴底/全读路径）。
+    ;(items()[1] as HTMLElement).click()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(readAnchorCount(b.encoded_key)).toBe(1)
     el.remove()
   })
 })

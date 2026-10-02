@@ -46,6 +46,10 @@ export default defineConfig({
     /core-link-badge\.spec\.ts/,
     /singleprocess-dead-core\.spec\.ts/,
     /test-model-scenarios\.spec\.ts/,
+    // qa-round8-native 与 test-model-scenarios 同名单（fix-webui-qa-round8
+    // 2.3：native 转录/影子队列旅程只在 TESTSUITE_NATIVE=1 姿态成立，主
+    // 沙箱 native 不可用，createSession(agent:'native') 409）。
+    /qa-round8-native\.spec\.ts/,
   ],
   timeout: 30_000,
   retries: 1,

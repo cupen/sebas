@@ -280,13 +280,12 @@ describe('unified notice interception (add-webui-tiered-notices 4.1)', () => {
     expect(seen[seen.length - 1].items[0].message).toContain('backend down')
   })
 
-  it('does not notify for exempt call points (dashboard/list loads, settings forms)', async () => {
+  it('does not notify for exempt call points (dashboard/list loads)', async () => {
     vi.stubGlobal('fetch', fetchMock)
     fetchMock.mockResolvedValue(errorResponse(503, { error: 'backend down' }))
 
     // 列表加载（内联重试态）与 settings 表单（就地呈现）都在豁免名单。
     await api.sessions().catch(() => undefined)
-    await api.settings().catch(() => undefined)
     await api.summary().catch(() => undefined)
     expect(seen[seen.length - 1].items).toHaveLength(0)
   })

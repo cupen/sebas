@@ -81,7 +81,7 @@ const SWEEP: ReadonlyArray<[string, ReadonlyArray<[string, string]>]> = [
     'views/project-rail.ts',
     [
       ['<span>Projects</span>', '<span>项目</span>'],
-      ['<span>History</span>', '<span>历史</span>'],
+      ['<span>History</span>', '>历史</a'],
       ['<span>Waiting on you</span>', '<span>等待你处理</span>'],
       ['title="Session actions"', 'title="会话操作"'],
       ['title="Project actions"', 'title="项目操作"'],

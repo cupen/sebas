@@ -33,6 +33,7 @@ use crate::commands::{Command, RouterAction};
 use crate::crud::ProviderForms;
 use crate::state::{Mapping, SessionMap};
 use sebas_domain::session::{CardPhase, SessionMode, TurnElementType, TurnKind};
+use std::collections::HashSet;
 use sebas_acp::claude::manager::SessionManager;
 use sebas_acp::claude::session::{AcpCommand, AcpEvent};
 use sebas_channels::card::{AppUsage, ChannelCard, TurnChrome};
@@ -345,6 +346,14 @@ pub struct DispatchHandle {
     /// position 必然更大，陈旧标记在下次 Finished 时自然识别为过期并丢弃；
     /// 无 prompt（空闲会话的 /cancel）不打标——没有可标注的回合。
     cancelled_turns: Arc<RwLock<HashMap<String, u64>>>,
+    /// （fix-webui-qa-round8 5.2 review 补修）已做过**初始模型观察**的会话
+    /// （routing session_id）。spawn 窗口里 driver 的第一帧观察（system
+    /// init / 首个 assistant 帧）会把 spawn 种子模型纠偏成 agent 真实模型
+    /// （D5 自愈）——那是快照记账，不是操作者动作；它落转录条目会让每个
+    /// 会话开局多一条「模型已切换」噪音（main 链 dialog/empty-turn 三旅程
+    /// 的 turn-block 计数全体 +1 的根因）。首条之后的 ModelChanged 才是
+    /// 操作者切换，落 `model_change` 留痕条目。
+    model_seen: Arc<RwLock<HashSet<String>>>,
 }
 
 impl Clone for DispatchHandle {
@@ -370,6 +379,7 @@ impl Clone for DispatchHandle {
             turn_log: self.turn_log.clone(),
             stall: self.stall.clone(),
             cancelled_turns: self.cancelled_turns.clone(),
+            model_seen: self.model_seen.clone(),
         }
     }
 }
@@ -448,6 +458,7 @@ impl DispatchHandle {
                 turn_events,
                 stall: stall::StallRegistry::default(),
                 cancelled_turns: Arc::new(RwLock::new(HashMap::new())),
+                model_seen: Arc::new(RwLock::new(HashSet::new())),
             },
             rx,
         )
@@ -1295,14 +1306,13 @@ impl DispatchHandle {
         let cfg = self.card_cfg.read().await;
         // transcript 条目在 apply 闭包外追加（锁序：card_states → turn_log，
         // 与其他路径不交叉）。TextDelta/Thinking/Tool 事件是内容流，逐条入账。
-        // ModelChanged（add-acp-model-selection）：更新映射 current model 并
-        // 发布 Updated，让快照立即反映中程切换 —— 覆盖流式 pump（apply_event）
-        // 与即时路径（apply_event_to_out）两条到达线。
-        if let AcpEvent::ModelChanged { model_id, .. } = event
-            && let Some(key) = self.map.lookup_key_by_session(session_id).await
-        {
-            self.map.set_current_model(&key, model_id.clone()).await;
-            self.publish_updated(&key).await;
+        // ModelChanged（add-acp-model-selection）：映射、`model_change` 条目
+        // 与 Updated 发布单点收敛在 apply_model_changed——流式 pump（apply_event）
+        // 与即时路径（apply_event_to_out）两条到达线都经它，绝不重复入账。
+        // （fix-webui-qa-round8 5.2 review 修正：泵线此前只翻映射不落条目，
+        // 活会话中程切模型无痕。）
+        if let AcpEvent::ModelChanged { model_id, .. } = event {
+            self.apply_model_changed(session_id, model_id).await;
         }
         // ModeChanged（add-agent-mode-selection）：运行时权限模式切换被
         // agent 接受——更新映射的 effective mode 并发布 Updated，快照立即
@@ -1426,8 +1436,7 @@ impl DispatchHandle {
             }
             AcpEvent::Finished { session_id } => {
                 // （2.2，design D2）被取消的回合在此收尾：cancel 命令发出的
-                // 打标在 Finished 到达时消费——append 一条错误类「回合被停止」
-                // 条目（复用既有错误条目渲染，不新增 entry kind），transcript
+                // 打标在 Finished 到达时消费——append 一条收尾条目，transcript
                 // 不再让被停回合无声消失。正常完成回合无标、无条目。
                 //
                 // （fix-webui-qa-round7 2.2，acp-model-selection D2）按回合身份
@@ -1437,21 +1446,26 @@ impl DispatchHandle {
                 // 回合绝不出现「操作者中断」。drain（开下一轮、写新 prompt）
                 // 发生在 apply_event 之后，消费窗口内最后一条 prompt 就是本
                 // 回合的。
+                //
+                // （fix-webui-qa-round8 7.3）操作者主动停止是**中性取消**不是
+                // 失败：不再落 error 条目（红泡 + 失败语义），改落域层统一
+                // 文案的中性 notice。零输出判定随后跳过被取消回合（取消条目
+                // 不算可见输出，但回合也不该再背「零输出」提示）。
                 let stop_entry = {
                     let anchor = self.current_turn_anchor(session_id).await;
                     let taken = self.cancelled_turns.write().await.remove(session_id);
                     matches!((taken, anchor), (Some(marked), Some(a)) if marked == a)
                 };
                 if stop_entry {
-                    let entry = TurnEntry::error(0, "回合被停止（操作者中断了本次回复）")
-                        .with_failure_class(failure_class::GENERIC);
+                    let entry = TurnEntry::notice(0, TURN_CANCELLED_NOTICE.to_string());
                     self.transcript_push(session_id, entry).await;
                 }
                 // close-acceptance-blind-spots 4.1：零可见输出回合的合成提示
                 // 落点（spec「Turn completing without visible output appends
-                // a notice」）。取消条目已在上面的分支落账，本检测天然跳过
-                // 被停回合（error 条目即可见输出）。
-                self.append_zero_output_notice_if_empty(session_id).await;
+                // a notice」）。被取消回合由取消条目收尾，零输出提示不再追加。
+                if !stop_entry {
+                    self.append_zero_output_notice_if_empty(session_id).await;
+                }
             }
             _ => {}
         }
@@ -1835,9 +1849,40 @@ impl DispatchHandle {
 
     /// 会话模型切换成功（AcpEvent::ModelChanged）后更新映射的 current model，
     /// 并发布 Updated 让快照/订阅者立即反映新模型。
+    ///
+    /// （fix-webui-qa-round8 5.2）切换同时落一条 `model_change` 系统条目
+    /// （含新旧模型名，`from` = 切换前映射里的当前模型，未知为 null）——
+    /// 中程切换不再无痕，转录与 rail 快照同一事实。条目只在本函数落账
+    /// （apply_event 的 ModelChanged 分支经这里； pump 与即时两条到达线
+    /// 都收敛到这一处，绝不重复入账）。
     pub async fn apply_model_changed(&self, session_id: &str, model_id: &str) {
         if let Some(key) = self.map.lookup_key_by_session(session_id).await {
+            let previous = self.map.get(&key).await.and_then(|m| m.current_model);
+            // （5.2 review 补修）spawn 窗口的**初始观察**（driver 首帧把种子
+            // 模型纠偏成 agent 真实模型，D5 自愈）只记账不落条目——它是快照
+            // 校正，不是操作者动作；此后（首条之后）的 ModelChanged 才是操
+            // 作者切换，落 `model_change` 留痕。观察值与当前一致时整体 no-op
+            // （纠偏帧重复到达不重写）。
+            let first_observation = !self
+                .model_seen
+                .read()
+                .await
+                .contains(session_id);
+            self.model_seen
+                .write()
+                .await
+                .insert(session_id.to_string());
             self.map.set_current_model(&key, model_id.to_string()).await;
+            if !first_observation && previous.as_deref() != Some(model_id) {
+                self.transcript_push(
+                    session_id,
+                    TurnEntry::model_change(
+                        0,
+                        serde_json::json!({ "from": previous, "to": model_id }),
+                    ),
+                )
+                .await;
+            }
             self.publish_updated(&key).await;
         }
     }
@@ -2755,7 +2800,7 @@ impl DispatchHandle {
 /// 零输出回合合成提示的固定文案（close-acceptance-blind-spots 4.1）：定义
 /// 已上移域层（extend-test-model-scenarios 3.4）——原生内核转录面要与引擎面
 /// 用同一句话，此处仅按原路径再导出。
-pub(crate) use sebas_domain::session::ZERO_OUTPUT_NOTICE;
+pub(crate) use sebas_domain::session::{TURN_CANCELLED_NOTICE, ZERO_OUTPUT_NOTICE};
 
 /// 一段 transcript 片段是否包含**可见输出**条目（close-acceptance-blind-spots
 /// 4.1，纯函数）：`kind = "content"` 且 `element_type ∈ {markdown, thinking,

@@ -7,7 +7,7 @@
  * 依赖 jsdom 缺失的 ElementInternals，且不属于本测试面）。
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ConversationEntryView, SessionDetail, SessionRow, Summary } from '../api/client.js'
 import { installWaDomPolyfills } from '../test-support/wa-polyfills.js'
 
@@ -112,7 +112,7 @@ import {
   receiptPhaseActive,
 } from './dashboard.js'
 // writeFocusAnchor：焦点处立读锚的既有锚点写入（round3 3.1）。
-import { writeFocusAnchor } from './unread-cursor.js'
+import { clearOpeningSeam, peekOpeningSeam, writeFocusAnchor } from './unread-cursor.js'
 import type { SebasDashboard } from './dashboard.js'
 import { SebasDashboard as DashboardImpl } from './dashboard.js'
 
@@ -352,8 +352,12 @@ describe('sebas-dashboard (workbench main area)', () => {
     expect(el.shadowRoot!.querySelector('a.spotlight')).toBeNull()
     const link = el.shadowRoot!.querySelector<HTMLAnchorElement>('a.focused-link')
     expect(link?.getAttribute('href')).toBe('/sessions/oc_live%00')
-    expect(link?.textContent).toContain('chat-live')
-    // （3.6，D6b）focused-link 保留 chat_id 锚点，不再复述状态 slug。
+    // （fix-webui-qa-round8 4.4）展示文本是「渠道 · 本地段」友好形，不再是
+    // 裸 chat_id/编码串；href 仍是编码形（wire 与路由不变）。
+    // （夹具键 'oc_live%00' 的本地段为空 → 友好化原样透出；真实键形
+    // 'web%00web-…' / 'feishu%00agent-…' 的映射由 session-key-label 单测钉。）
+    expect(link?.textContent).toContain('oc_live')
+    // （3.6，D6b）focused-link 不复述状态 slug。
     expect(link?.querySelector('sebas-status-badge')).toBeNull()
     expect(el.shadowRoot!.querySelector('.empty-stream')).toBeNull()
     el.remove()
@@ -1877,6 +1881,18 @@ describe('session header agent identity (3.3)', () => {
 describe('focus establishes the read anchor (round3 3.1)', () => {
   const KEY = 'oc_live%00'
   const anchorKey = `sebas:seen:${KEY}`
+  beforeEach(async () => {
+    // 前序用例被拆除的 transcript 仍有挂起的 rAF（开卷结算在布局落定后
+    // 执行，detached 元素的 shadow DOM 依旧可查）——先冲一帧让它落地，
+    // 再清场，否则它的迟到写入会盖住本用例的锚断言。
+    await new Promise((r) =>
+      requestAnimationFrame(() => requestAnimationFrame(() => r(null))),
+    )
+    localStorage.removeItem(anchorKey)
+    // openingSeams 是 unread-cursor 的模块级表：跨用例清场（否则前序用例
+    // 的开卷登记会盖住本用例的断言）。
+    clearOpeningSeam(KEY)
+  })
 
   beforeEach(() => {
     localStorage.removeItem(anchorKey)
@@ -1885,30 +1901,45 @@ describe('focus establishes the read anchor (round3 3.1)', () => {
     localStorage.removeItem(anchorKey)
   })
 
-  it('a session focused without a rail click gets its anchor at detail arrival', async () => {
-    // 创建 set_focus / 深链 / 恢复聚焦走进焦点的会话此前永远没有本地锚——
-    // 无锚 = fully read，之后的非聚焦新回复推不出未读徽章（QA 缺陷 3）。
-    // 详情到达时按真实段数立锚。
+  it('a focus transition arms the opening seam and does NOT advance the anchor (round8 5.1)', async () => {
+    // （fix-webui-qa-round8 5.1）锚只反映已见内容：焦点转换（创建 set_focus /
+    // 深链 / 恢复聚焦）只**登记开卷边界**，不再把锚推到服务端计数——打开
+    // 不等于看完，切走会话绝不把未见内容计为已见。锚的推进统一走
+    // transcript 的已见驱动路径。
     apiMocks.summary.mockResolvedValue(focusedSummary())
     apiMocks.session.mockResolvedValue(detailFixture()) // msg_count: 2
     const el = await mount()
     await new Promise((r) => setTimeout(r, 0))
     await el.updateComplete
-    expect(JSON.parse(localStorage.getItem(anchorKey)!)).toEqual({ anchor_count: 2 })
+    // 开卷边界已登记（无锚 = 边界 null）；锚原地不动。
+    expect(peekOpeningSeam(KEY)).toBe(null)
+    expect(localStorage.getItem(anchorKey)).toBeNull()
     el.remove()
   })
 
-  it('the focus-establishment pass advances an existing anchor to the server count (round2 2.6)', async () => {
-    // （fix-webui-qa-round2 2.6，D-R2A）锚已存在也随聚焦推进到服务端当前
-    // 计数（单调 max）——聚焦写锚以服务端当前计数为准，不得停在回合前的
-    // 旧值；分界线呈现由开卷冻结边界承担，锚到顶不再吞线。
+  it('the focus pass keeps the existing anchor and freezes the pre-advance boundary (round8 5.1)', async () => {
+    // （fix-webui-qa-round8 5.1）焦点转换不再推进锚：既有锚原地保持（1），
+    // 开卷边界以推进前锚冻结（peekOpeningSeam = 1）——transcript 据此补绘
+    // 分界线；锚推进只由已见驱动路径执行（贴底跟读 / mark all seen）。
+    // 夹具带一个真正的未读回合（离场期间攒下的第二回合）：开卷定位停在
+    // seam、sticky 脱离，随后的快照收敛不把未读内容计为已见。
     writeFocusAnchor(KEY, 1)
     apiMocks.summary.mockResolvedValue(focusedSummary())
-    apiMocks.session.mockResolvedValue(detailFixture())
+    apiMocks.session.mockResolvedValue({
+      ...detailFixture(),
+      msg_count: 4,
+      entries: [
+        { position: 0, kind: 'prompt', element_type: 'markdown', content: 'q1', created_at_unix: 1_700_000_000 },
+        { position: 1, kind: 'content', element_type: 'markdown', content: 'a1', created_at_unix: 1_700_000_100 },
+        { position: 2, kind: 'prompt', element_type: 'markdown', content: 'q2', created_at_unix: 1_700_000_200 },
+        { position: 3, kind: 'content', element_type: 'markdown', content: 'a2', created_at_unix: 1_700_000_300 },
+      ],
+    })
     const el = await mount()
     await new Promise((r) => setTimeout(r, 0))
     await el.updateComplete
-    expect(JSON.parse(localStorage.getItem(anchorKey)!)).toEqual({ anchor_count: 2 })
+    expect(JSON.parse(localStorage.getItem(anchorKey)!)).toEqual({ anchor_count: 1 })
+    expect(peekOpeningSeam(KEY)).toBe(1)
     el.remove()
   })
 
@@ -1963,10 +1994,13 @@ describe('fresh placeholder first exchange never badges (round3 6.1)', () => {
     const el = await mount()
     await new Promise((r) => setTimeout(r, 0))
     await el.updateComplete
-    // 空态占位在场：transcript 未挂载；立锚一拍写入 0（创建基线）。
+    // 空态占位在场：transcript 未挂载。（fix-webui-qa-round8 5.1）焦点
+    // 转换只登记边界、不写锚——空流登记仍照常发生，锚的建立归 transcript
+    // 首交换的「看着到达」结算。
     expect(el.shadowRoot!.querySelector('.empty-stream')).toBeTruthy()
     expect(el.shadowRoot!.querySelector('sebas-transcript-view')).toBeNull()
-    expect(JSON.parse(localStorage.getItem(anchorKey)!)).toEqual({ anchor_count: 0 })
+    expect(peekOpeningSeam(KEY)).toBe(null)
+    expect(localStorage.getItem(anchorKey)).toBeNull()
 
     // 首交换经快照到达（prompt + 回复，msg_count 0→2），sebas:refetch 驱动
     // 详情重取——transcript 随内容挂载并消费空流登记。

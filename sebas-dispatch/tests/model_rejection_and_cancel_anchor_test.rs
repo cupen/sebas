@@ -273,9 +273,10 @@ async fn a_marked_turn_still_annotates_its_own_finish() {
         .await;
 
     let turns = router.session_turns(&key, 0).await.unwrap();
+    // （fix-webui-qa-round8 7.3）操作者取消 = 中性 notice 条目（不再是错误红泡）。
     let stops: Vec<&TurnEntry> = turns
         .iter()
-        .filter(|e| e.element_type == "error".into() && e.content.contains("回合被停止"))
+        .filter(|e| e.element_type == "notice".into() && e.content.contains("回合已取消"))
         .collect();
-    assert_eq!(stops.len(), 1, "真实中断仍如实标注一条停止条目");
+    assert_eq!(stops.len(), 1, "真实中断仍如实标注一条中性取消条目");
 }

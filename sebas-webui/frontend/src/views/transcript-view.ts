@@ -317,7 +317,34 @@ export interface ModeResultUnit {
   entry: ConversationEntryView
 }
 
-export type TurnUnit = OperatorUnit | AgentUnit | ErrorUnit | NoticeUnit | ModeResultUnit
+/**
+ * （fix-webui-qa-round8 1.2）升级降级契约条目单元：`escalate_downgrade`
+ * 是一等条目类型，content 是 JSON 载荷 `{request_id, tool, reason, detail}`。
+ * 渲染为中性系统条目（含原因文本）——ACP 边界的升级降级不再无痕。
+ */
+export interface EscalateDowngradeUnit {
+  kind: 'escalate_downgrade'
+  entry: ConversationEntryView
+}
+
+/**
+ * （fix-webui-qa-round8 5.2）模型切换留痕条目单元：`model_change` 是一等
+ * 条目类型，content 是 JSON 载荷 `{from, to}`。渲染为中性系统条目（含新旧
+ * 模型名）。
+ */
+export interface ModelChangeUnit {
+  kind: 'model_change'
+  entry: ConversationEntryView
+}
+
+export type TurnUnit =
+  | OperatorUnit
+  | AgentUnit
+  | ErrorUnit
+  | NoticeUnit
+  | ModeResultUnit
+  | EscalateDowngradeUnit
+  | ModelChangeUnit
 
 /** 过程条目（D1）：进入过程 run 的 element_type 词表。 */
 function isProcessEntry(e: ConversationEntryView): boolean {
@@ -384,13 +411,34 @@ export function splitAgentRuns(entries: ConversationEntryView[]): AgentRun[] {
       runs.push({ type: 'process', items: [item], position: e.position })
       continue
     }
+    // （fix-webui-qa-round8 7.2）拼接前逐条收口未闭合围栏：一个条目的坏
+    // 围栏只影响它自己渲染成代码块，不再吞掉 run 里它之后的全部条目。
     if (last?.type === 'text') {
-      last.content += e.content
+      last.content += closeUnclosedFence(e.content)
       continue
     }
-    runs.push({ type: 'text', content: e.content, position: e.position })
+    runs.push({ type: 'text', content: closeUnclosedFence(e.content), position: e.position })
   }
   return runs
+}
+
+/**
+ * （fix-webui-qa-round8 7.1）相邻思考增量的聚合（纯函数）：过程折叠内的
+ * **相邻** thinking 条目合并为一个连续段落（内容顺序拼接、position 取首条
+ * ——折叠体的 DOM 身份不变）。逐帧落账的 thinking 增量展开后呈现为少量
+ * 连续段落，不再是一屏碎片行；与工具条目相邻的 thinking 照旧分段。
+ */
+export function mergeAdjacentThinking(items: ProcessItem[]): ProcessItem[] {
+  const out: ProcessItem[] = []
+  for (const it of items) {
+    const last = out[out.length - 1]
+    if (it.elementType === 'thinking' && last?.elementType === 'thinking') {
+      last.content += it.content
+      continue
+    }
+    out.push({ ...it })
+  }
+  return out
 }
 
 /**
@@ -438,6 +486,18 @@ export function groupConversation(entries: ErrorCountedView[]): TurnUnit[] {
       units.push({ kind: 'mode_result', entry: e })
       continue
     }
+    // （fix-webui-qa-round8 1.2 / 5.2）升级降级与模型切换的一等契约条目：
+    // 各自独立成单元，绝不卷进相邻正文的文本 run（围栏/正文互不污染）。
+    if (e.element_type === 'escalate_downgrade') {
+      flush()
+      units.push({ kind: 'escalate_downgrade', entry: e })
+      continue
+    }
+    if (e.element_type === 'model_change') {
+      flush()
+      units.push({ kind: 'model_change', entry: e })
+      continue
+    }
     if (e.kind === 'prompt') {
       flush()
       units.push({ kind: 'operator', entry: e })
@@ -451,7 +511,14 @@ export function groupConversation(entries: ErrorCountedView[]): TurnUnit[] {
 
 /** The newest entry timestamp of a turn — the turn's seam edge (D5). */
 export function unitMaxTs(unit: TurnUnit): number {
-  if (unit.kind === 'operator' || unit.kind === 'error' || unit.kind === 'notice' || unit.kind === 'mode_result') {
+  if (
+    unit.kind === 'operator' ||
+    unit.kind === 'error' ||
+    unit.kind === 'notice' ||
+    unit.kind === 'mode_result' ||
+    unit.kind === 'escalate_downgrade' ||
+    unit.kind === 'model_change'
+  ) {
     return unit.entry.created_at_unix || 0
   }
   return unit.maxTs
@@ -466,9 +533,30 @@ export function unitMaxTs(unit: TurnUnit): number {
  * seam 与徽标共用同一份段锚。
  */
 export function unitSegmentCount(unit: TurnUnit): number {
-  if (unit.kind === 'operator' || unit.kind === 'notice' || unit.kind === 'mode_result') return 0
+  if (
+    unit.kind === 'operator' ||
+    unit.kind === 'notice' ||
+    unit.kind === 'mode_result' ||
+    unit.kind === 'escalate_downgrade' ||
+    unit.kind === 'model_change'
+  )
+    return 0
   if (unit.kind === 'error') return unit.entry.count ?? 1
   return unit.runs.filter((r) => r.type === 'text').length
+}
+
+/**
+ * （fix-webui-qa-round8 7.2）未闭合代码围栏的条目级收口（纯函数）：条目内容
+ * 里的 ``` 围栏标记逐行翻转开合，落账时仍处开态（计数为奇）就在内容末尾补
+ * 一个闭合围栏——markdown 渲染的围栏作用域被限制在**单条目内**，相邻条目
+ * 的正文不再被卷进上一条的未闭合代码块。已配平的内容原样返回。
+ */
+export function closeUnclosedFence(content: string): string {
+  let open = false
+  for (const line of content.split('\n')) {
+    if (/^\s*```/.test(line)) open = !open
+  }
+  return open ? content + '\n```' : content
 }
 
 /**
@@ -490,6 +578,50 @@ export function parseModeResultPayload(content: string): {
     }
   } catch {
     return { ok: false, mode: 'unknown', detail: content }
+  }
+}
+
+/**
+ * （fix-webui-qa-round8 1.2）升级降级条目的载荷解析（纯函数）：content 是
+ * `{request_id, tool, reason, detail}` JSON；解析失败按空载荷处理（detail
+ * 回退原文本），绝不因坏载荷抛错炸掉整棵转录。
+ */
+export function parseEscalateDowngradePayload(content: string): {
+  request_id: string
+  tool: string
+  reason: string
+  detail: string
+} {
+  try {
+    const v = JSON.parse(content) as Record<string, unknown>
+    return {
+      request_id: typeof v['request_id'] === 'string' ? v['request_id'] : '',
+      tool: typeof v['tool'] === 'string' ? v['tool'] : '',
+      reason: typeof v['reason'] === 'string' ? v['reason'] : '',
+      detail: typeof v['detail'] === 'string' ? v['detail'] : '',
+    }
+  } catch {
+    return { request_id: '', tool: '', reason: '', detail: content }
+  }
+}
+
+/**
+ * （fix-webui-qa-round8 5.2）模型切换条目的载荷解析（纯函数）：content 是
+ * `{from, to}` JSON（from 可为 null = 切换前无已知模型）；解析失败按未知
+ * 处理，绝不因坏载荷抛错。
+ */
+export function parseModelChangePayload(content: string): {
+  from: string | null
+  to: string
+} {
+  try {
+    const v = JSON.parse(content) as Record<string, unknown>
+    return {
+      from: typeof v['from'] === 'string' ? v['from'] : null,
+      to: typeof v['to'] === 'string' ? v['to'] : 'unknown',
+    }
+  } catch {
+    return { from: null, to: content }
   }
 }
 
@@ -772,8 +904,7 @@ export class SebasTranscriptView extends LitElement {
   /** Number of turns strictly below the seam. */
   @state() private unseenCount = 0
   /** Index of the first unseen turn; null when everything is seen. */
-  @state() private seamIndex: number | null = 0
-  /**
+  @state() private seamIndex: number | null = 0  /**
    * （fix-webui-qa-round2 2.1/2.6，D5+D-R2A）开卷未读边界：聚焦进入会话时
    * 捕获的「推进前读锚」（null = 无未读边界，不画线）。聚焦写锚此后推进到
    * 服务端当前计数（spec「Focus anchors at the server's current count」），
@@ -787,6 +918,13 @@ export class SebasTranscriptView extends LitElement {
    * 分组后索引与回合一一对应）。
    */
   @state() private turnUnits: TurnUnit[] = []
+
+  /**
+   * （fix-webui-qa-round8 3.1）「跳到最新」浮标的可见态（纯派生）：未处于
+   * 贴底跟随（sticky=false）且视口下方还有内容（新条目/未读尾段）时出现；
+   * 点击回底并恢复跟随。几何判定见 {@link refreshJumpPill}。
+   */
+  @state() private jumpVisible = false
 
   /**
    * （D2）过程折叠的展开状态：以 run id（run 首条目 position）为键记在本
@@ -826,6 +964,8 @@ export class SebasTranscriptView extends LitElement {
   static styles = css`
     :host {
       display: block;
+      /* （fix-webui-qa-round8 3.1）浮标的定位上下文。 */
+      position: relative;
     }
     /* fill 模式：宿主随工作台面板拉伸，滚动容器交棒给面板框架
        （去掉 58vh 封顶，改 flex:1 吃满余高）。 */
@@ -897,6 +1037,41 @@ export class SebasTranscriptView extends LitElement {
     .seam .link:hover,
     .seam .link:focus-visible {
       color: var(--sebas-accent);
+    }
+    /* （fix-webui-qa-round8 3.1）「跳到最新」浮标：sticky=false 且视口下方
+       有新内容时出现在滚动容器底部居中；点击回底并恢复跟随。 */
+    .jump-latest {
+      position: absolute;
+      bottom: 14px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 5;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 12px;
+      border: 1px solid var(--sebas-border);
+      border-radius: var(--sebas-radius-full);
+      background: var(--sebas-surface);
+      color: var(--sebas-text-dim);
+      font: inherit;
+      font-size: 0.74rem;
+      cursor: pointer;
+      box-shadow: var(--sebas-shadow-1, 0 2px 8px rgba(0, 0, 0, 0.18));
+      transition:
+        color var(--sebas-dur) var(--sebas-ease),
+        border-color var(--sebas-dur) var(--sebas-ease);
+    }
+    .jump-latest:hover {
+      color: var(--sebas-accent);
+      border-color: var(--sebas-accent-border, var(--sebas-accent));
+    }
+    .jump-latest:focus-visible {
+      outline: var(--sebas-focus-ring);
+      outline-offset: 2px;
+    }
+    .jump-latest[hidden] {
+      display: none;
     }
     /* ── 自然对话流 ──
        26px 头像圆保留（assistant = accent 渐变底，user = accent-soft 底）。
@@ -1393,6 +1568,10 @@ export class SebasTranscriptView extends LitElement {
       // 「看着到达」，锚原地不动、seam 照旧呈现（3.1 契约）。组件首次
       // 挂载同理（hasUpdated=false：首更 changed 不带未显式设置的属性，
       // 是装载不是到达）。
+      //
+      // （fix-webui-qa-round8 5.1）开卷推进不再在这里无条件写锚——已见
+      // 驱动的开卷结算统一在 {@link settleOpeningAnchor}（渲染几何落定后，
+      // 以「全部已读 / 内容全部在可视高度内」为前提）执行。
       if (
         this.hasUpdated &&
         !changed.has('sessionKey') &&
@@ -1400,28 +1579,6 @@ export class SebasTranscriptView extends LitElement {
         this.docVisible()
       ) {
         this.scheduleMarkSeen()
-      }
-      // （2.6，D-R2A）开卷即按服务端当前计数写锚：聚焦推进 SHALL 以服务端
-      // 当前段计数为准（锚不得停在回合前的旧值），分界线呈现已由
-      // seamBoundary 冻结边界承担，锚到顶不再吞线。挂载帧（含深链首开）
-      // 与换会话帧都执行；candidate 取 max(服务端 msgCount, 本地已渲染)，
-      // 单调不回退。**严格推进**：无可推进水位（占位空会话 candidate=0、
-      // 已读重开 candidate≤锚）不写——空会话写 0 会污染下一次开卷的边界
-      // 登记（登记=null 表示「无线可画」，写成 0 会凭空造出一条）。
-      if (
-        this.sessionKey &&
-        (changed.has('sessionKey') || !this.hasUpdated) &&
-        // 后台 tab 的装载不算「看着」——锚留空/不动（dashboard 立锚同一
-        // 边界），回可见后的下一次装载/到达再推进。
-        this.docVisible() &&
-        // 空流在册的占位会话不在此写锚：首交换的「看着到达」结算（含登记
-        // 消费与边界清账）归 settleEmptyStreamAnchor 专管——开卷写会抢走
-        // 水位、让登记失去结算机会。
-        !emptyStreamSessions.has(this.sessionKey)
-      ) {
-        const prev = this.readSeen()
-        const candidate = this.anchorCandidate()
-        if (prev === null ? candidate > 0 : candidate > prev) this.writeSeen()
       }
       // （3.1）空流建立锚点：占位会话从 0 回合转出首回合、且操作员聚焦、
       // 文档可见、贴底时，这是「亲眼看着到达」的首交换——锚从空流状态建立，
@@ -1768,6 +1925,40 @@ export class SebasTranscriptView extends LitElement {
     } else if (this.sticky) {
       this.sticky = false
     }
+    // （fix-webui-qa-round8 3.1）浮标随几何刷新（脱离贴底且有内容在下方）。
+    this.refreshJumpPill()
+  }
+
+  /**
+   * （fix-webui-qa-round8 3.1）浮标可见性的几何刷新（纯派生）：脱离贴底
+   * （sticky=false）且视口下方还有内容（scroll 余量超阈值 = 新条目/未读
+   * 尾段在场）→ 出现；贴底跟随或已到底 → 消失。
+   */
+  private refreshJumpPill(): void {
+    const el = this.scrollEl
+    if (!el) {
+      this.jumpVisible = false
+      return
+    }
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight
+    this.jumpVisible = !this.sticky && distance > NEAR_BOTTOM_PX
+  }
+
+  /**
+   * （fix-webui-qa-round8 3.1）点击浮标：回底 + 恢复自动跟随 + 按贴底语义
+   * 推进已读（seam 随 commitMarkSeen 清账）。此后新条目自动跟随。
+   */
+  private jumpToLatest = (): void => {
+    const el = this.scrollEl
+    this.sticky = true
+    this.jumpVisible = false
+    if (el) {
+      const previous = el.style.scrollBehavior
+      el.style.scrollBehavior = 'auto'
+      el.scrollTop = el.scrollHeight
+      el.style.scrollBehavior = previous
+    }
+    if (this.docVisible()) this.scheduleMarkSeen()
   }
 
   private scheduleMarkSeen(): void {
@@ -1817,11 +2008,22 @@ export class SebasTranscriptView extends LitElement {
   private applyAutoScroll(): void {
     const el = this.scrollEl
     if (!el) return
+    // （fix-webui-qa-round8 3.1）浮标随每次布局落定刷新（内容增长不触发
+    // scroll 事件，几何刷新在这里兜住）。
+    this.refreshJumpPill()
     // （fix-webui-qa-findings M3）开卷定位：打开一个带未读缝的会话时，
-    // 首帧把 seam 滚进视野（而不是贴底）并解除 sticky——操作员第一眼看到
-    // 「上次读到哪里」；贴底 pin 的滚动事件不会触发 mark-seen（人不在
-    // 底部），seam 稳定呈现，读到边界（滚动贴底）时锚才推进。全部已读
-    // （seam 不在场）或后续到达帧保持既有贴底跟随。
+    // 首帧把 seam 滚进视野（而不是贴底）——操作员第一眼看到「上次读到哪里」。
+    //
+    // （fix-webui-qa-round8 3.1/5.1，design D4 的两半）跟随语义分两种开卷：
+    // - **全读开卷**（seam 不在场）：贴底跟随照常——开卷的程序化定位不再
+    //   无条件把 sticky 翻 false（round8 的误伤面：定位本身不是操作者上滚，
+    //   定位后自动滚动整体停摆的根因已除）；
+    // - **未读缝开卷**：定位停在中部、sticky 保持脱离——后续新条目不把
+    //   操作者拽离 seam，「跳到最新」浮标承接一键回底 + 恢复跟随（spec
+    //   scenario「浮标出现 → 点击 → 底部 + 此后自动跟随」）。跟随只在
+    //   操作者真正到达底部（滚到底 / 点浮标）时重新咬合，且此后仅操作者
+    //   主动上滚才脱离——「定位完成即恢复」的形态在浮标回底这一步兑现。
+    // （5.1）已见驱动的开卷结算随后执行。
     if (this.lastScrollKey !== this.sessionKey) {
       this.lastScrollKey = this.sessionKey
       const seam = el.querySelector<HTMLElement>('.seam:not([hidden])')
@@ -1829,14 +2031,46 @@ export class SebasTranscriptView extends LitElement {
         this.sticky = false
         this.openingScrollUntil = Date.now() + 150
         seam.scrollIntoView({ block: 'center', behavior: 'auto' })
-        return
       }
+      this.settleOpeningAnchor(el)
+      if (seam) return
     }
     if (!this.sticky) return
     const previous = el.style.scrollBehavior
     el.style.scrollBehavior = 'auto'
     el.scrollTop = el.scrollHeight
     el.style.scrollBehavior = previous
+  }
+
+  /**
+   * （fix-webui-qa-round8 5.1）已见驱动的开卷锚结算（渲染几何落定后执行，
+   * 唯一前提是「打开时内容已真正可见」）：
+   * - 全读开卷（无未读边界）：锚顶到服务端当前计数——没有未读内容的开卷
+   *   是「全部已读」，基线就此确立（后续后台到达照常计未读）；
+   * - 有未读边界且**全部内容都在可视高度内**（滚动余量为 0，无需滚动即已
+   *   看完）：视为已见，写锚并清账（spec「打开会话并看到新内容 THEN 清
+   *   除」在零滚动会话上的形态）；
+   * - 有未读边界且内容溢出可视高度：**不写锚**——打开不等于看完，徽标与
+   *   未读缝保持，直到滚动贴底 / mark all seen / 「跳到最新」/ 看着到达。
+   * 后台 tab 的装载不算「看着」；空流在册的占位会话仍归
+   * settleEmptyStreamAnchor 专管。
+   */
+  private settleOpeningAnchor(el: HTMLElement): void {
+    if (!this.sessionKey || !this.docVisible()) return
+    if (emptyStreamSessions.has(this.sessionKey)) return
+    if (this.seamBoundary === null) {
+      const prev = this.readSeen()
+      const candidate = this.anchorCandidate()
+      if (prev === null ? candidate > 0 : candidate > prev) this.writeSeen()
+      return
+    }
+    if (
+      el.scrollHeight > 0 &&
+      el.scrollHeight <= el.clientHeight + 1
+    ) {
+      this.writeSeen()
+      this.dismissSeam()
+    }
   }
 
   // ---- render -----------------------------------------------------------
@@ -1873,6 +2107,15 @@ export class SebasTranscriptView extends LitElement {
           )}`,
         )}
       </div>
+      <button
+        type="button"
+        class="jump-latest"
+        data-testid="jump-latest"
+        ?hidden=${!this.jumpVisible}
+        @click=${this.jumpToLatest}
+      >
+        ↓ 跳到最新
+      </button>
       ${this.renderViewAllDialog()}
     `
   }
@@ -1906,8 +2149,74 @@ export class SebasTranscriptView extends LitElement {
     if (u.kind === 'error') return this.renderErrorUnit(u)
     if (u.kind === 'notice') return this.renderNoticeUnit(u)
     if (u.kind === 'mode_result') return this.renderModeResultUnit(u)
+    if (u.kind === 'escalate_downgrade') return this.renderEscalateDowngradeUnit(u)
+    if (u.kind === 'model_change') return this.renderModelChangeUnit(u)
     if (u.kind === 'operator') return this.renderOperatorUnit(u, receipt)
     return this.renderAgentUnit(u)
+  }
+
+  /**
+   * （fix-webui-qa-round8 1.2）升级降级契约条目的渲染：中性系统条目（i 头像
+   * + 「审批降级」标签），正文说明「已按仅放行一次降级」并原文呈现操作者
+   * 填写的升级原因——降级不再静默，原因去向可读。
+   */
+  private renderEscalateDowngradeUnit(u: EscalateDowngradeUnit) {
+    const e = u.entry
+    const iso = isoTime(e.created_at_unix)
+    const ts = formatTime(e.created_at_unix)
+    const p = parseEscalateDowngradePayload(e.content)
+    return html`
+      <div class="turn-block is-notice" data-testid="escalate-downgrade-entry">
+        <div class="avatar notice">i</div>
+        <div class="bubble notice">
+          <div class="meta">
+            <span class="author notice">审批降级</span>
+            <time class="time" datetime=${iso || nothing}>${ts}</time>
+          </div>
+          <div class="body">
+            <p>
+              ${p.detail || '该决策已按「仅放行一次」降级执行'}${p.tool
+                ? html`（工具：<span class="mode-mode">${p.tool}</span>）`
+                : nothing}
+            </p>
+            ${p.reason
+              ? html`<p>
+                  升级原因：<span data-testid="escalate-downgrade-reason">${p.reason}</span>
+                </p>`
+              : nothing}
+          </div>
+        </div>
+      </div>
+    `
+  }
+
+  /**
+   * （fix-webui-qa-round8 5.2）模型切换留痕条目的渲染：中性系统条目（i 头像
+   * + 「模型」标签），正文「模型已切换：A → B」——两条执行体同一形态。
+   */
+  private renderModelChangeUnit(u: ModelChangeUnit) {
+    const e = u.entry
+    const iso = isoTime(e.created_at_unix)
+    const ts = formatTime(e.created_at_unix)
+    const p = parseModelChangePayload(e.content)
+    return html`
+      <div class="turn-block is-notice" data-testid="model-change-entry">
+        <div class="avatar notice">i</div>
+        <div class="bubble notice">
+          <div class="meta">
+            <span class="author notice">模型</span>
+            <time class="time" datetime=${iso || nothing}>${ts}</time>
+          </div>
+          <div class="body">
+            <p>
+              模型已切换：<span class="mode-mode">${p.from ?? '（默认）'}</span>
+              <span aria-hidden="true">→</span>
+              <span class="mode-mode">${p.to}</span>
+            </p>
+          </div>
+        </div>
+      </div>
+    `
   }
 
   /**
@@ -2165,7 +2474,11 @@ export class SebasTranscriptView extends LitElement {
         </button>
         ${open
           ? html`<div class="body fold-body">
-              ${repeat(r.items, (it) => it.position, (it) => this.renderProcessItem(it))}
+              ${repeat(
+                mergeAdjacentThinking(r.items),
+                (it) => it.position,
+                (it) => this.renderProcessItem(it),
+              )}
             </div>`
           : nothing}
       </div>

@@ -568,6 +568,22 @@ fn map_permission_decision(d: PermissionDecision) -> sebas_acp::Decision {
     downgraded
 }
 
+/// （fix-webui-qa-round8 1.1，permission-flow「升级决策的可见降级」）ACP
+/// 边界上的 escalate 降级留痕条目：对齐 `permission_mode_result` 先例——
+/// 一等契约条目（`element_type = "escalate_downgrade"`，JSON 载荷），携带
+/// 操作者填写的升级理由与「理由去向」说明。降级绝不允许静默放行。
+fn escalate_downgrade_entry(request_id: &str, tool: &str, reason: &str) -> TurnEntry {
+    TurnEntry::escalate_downgrade(
+        0,
+        serde_json::json!({
+            "request_id": request_id,
+            "tool": tool,
+            "reason": reason,
+            "detail": "此会话的执行体不支持升级（escalate）；该决策已按「仅放行一次」降级执行，升级理由已记录在执行体日志中。",
+        }),
+    )
+}
+
 #[async_trait]
 impl SessionBackend for InProcessBackend {
     async fn snapshot(&self) -> Vec<SessionInfo> {
@@ -967,6 +983,25 @@ impl SessionBackend for InProcessBackend {
             .is_none()
         {
             return false;
+        }
+        // （fix-webui-qa-round8 1.1）escalate 在 ACP 边界降级为 allow_once 时
+        // **必须可见**：降级事实 + 操作者原因落转录系统条目（对齐
+        // permission_mode_result 先例），此后工具的执行不再无任何痕迹。
+        if let PermissionDecision::Escalate { reason } = &decision
+            && let Some(key) = self.router.map.lookup_key_by_session(&session_id).await
+        {
+            let tool = self
+                .router
+                .pending_permission_requests(&key)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .find(|p| p.request_id == request_id)
+                .map(|p| p.tool_name)
+                .unwrap_or_default();
+            self.router
+                .push_transcript_entry(&session_id, escalate_downgrade_entry(request_id, &tool, reason))
+                .await;
         }
         let decision = map_permission_decision(decision);
         self.router
@@ -1806,6 +1841,87 @@ impl SessionBackend for FakeBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// （fix-webui-qa-round8 1.1，permission-flow「升级决策的可见降级」）ACP
+    /// 会话提交 escalate：决策按「仅放行一次」降级出站（工具照常执行），
+    /// **且**转录追加一条可见的降级留痕条目（含工具名与操作者原因）——
+    /// 降级绝不再静默。
+    #[tokio::test]
+    async fn escalate_downgrade_lands_a_visible_transcript_entry() {
+        let (router, mut out_rx) =
+            sebas_dispatch::DispatchHandle::new(sebas_dispatch::SessionMap::new());
+        let key = ChannelKey::new("web", "esc-1");
+        router.insert_mapping(key.clone(), "sid-esc-1".into()).await;
+        let backend = InProcessBackend::new(router.clone());
+
+        // 泊车一条权限请求（引擎直达路径：泊车登记 + 权限广播）。
+        router
+            .dispatch_acp_event(sebas_acp::AcpEvent::PermissionRequest {
+                session_id: "sid-esc-1".into(),
+                request_id: "req-esc-1".into(),
+                tool_name: "Bash".into(),
+                args: serde_json::json!({"command": "sudo rm -rf build"}),
+            })
+            .await;
+        // 让中继任务把 request_id → session_id 登记进 request_sessions。
+        for _ in 0..40 {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            if router.permission_parked_session("req-esc-1").await.is_some() {
+                break;
+            }
+        }
+
+        // escalate 批复被接受（true），决策降级为 allow_once 出站。
+        assert!(
+            backend
+                .answer_permission(
+                    "req-esc-1",
+                    PermissionDecision::Escalate {
+                        reason: "need sudo once".into(),
+                    },
+                )
+                .await,
+            "the parked request must accept the escalate decision"
+        );
+
+        // 转录里的可见降级条目：工具名 + 操作者原因 + 降级语义。
+        let turns = router.session_turns(&key, 0).await.unwrap();
+        let entry = turns
+            .iter()
+            .find(|e| e.element_type.as_str() == "escalate_downgrade")
+            .expect("the downgrade must leave a visible transcript entry");
+        let payload: serde_json::Value =
+            serde_json::from_str(&entry.content).expect("payload is JSON");
+        assert_eq!(payload["tool"], "Bash");
+        assert_eq!(payload["reason"], "need sudo once");
+        assert_eq!(
+            payload["request_id"], "req-esc-1",
+            "the entry names the decided request"
+        );
+
+        // 工具执行有痕：降级后的 allow_once 决策确实出站（PermissionReply）。
+        let mut saw_reply = false;
+        for _ in 0..8 {
+            match out_rx.recv().await {
+                Some(sebas_dispatch::Out::SendAcp {
+                    cmd:
+                        sebas_acp::AcpCommand::PermissionReply { decision, .. },
+                    ..
+                }) => {
+                    assert_eq!(
+                        decision,
+                        sebas_acp::Decision::AllowOnce,
+                        "escalate must downgrade to allow_once on the ACP boundary"
+                    );
+                    saw_reply = true;
+                    break;
+                }
+                Some(_) => continue,
+                None => break,
+            }
+        }
+        assert!(saw_reply, "the downgraded decision still reaches the driver");
+    }
 
     /// （type-session-vocabularies 3.3，design D5）**core channel → ACP** 边界的
     /// 发送集必须与合一前一致：ACP 侧只收三值，`escalate` 降级为 `allow_once`。

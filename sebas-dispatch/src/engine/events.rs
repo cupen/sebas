@@ -54,12 +54,15 @@ pub fn count_chat_messages(entries: &[TurnEntry]) -> u64 {
                 in_markdown_run = false;
             }
             // 其余元素类型都不构成「可见回复段」并打断当前段（既有 `_` 兜底
-            // 的逐字展开）：thinking / tool 是正文附属，notice 与
-            // permission_mode_result 是中性提示，未知取值照同样口径处理。
+            // 的逐字展开）：thinking / tool 是正文附属，notice、
+            // permission_mode_result、escalate_downgrade 与 model_change 是
+            // 中性系统条目，未知取值照同样口径处理。
             TurnElementType::Thinking
             | TurnElementType::Tool
             | TurnElementType::Notice
             | TurnElementType::PermissionModeResult
+            | TurnElementType::EscalateDowngrade
+            | TurnElementType::ModelChange
             | TurnElementType::Unknown(_) => in_markdown_run = false,
         }
     }

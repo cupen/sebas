@@ -359,6 +359,7 @@ export class SettingsModal {
     label:
       | '通用'
       | '模型'
+      | '别名'
       | 'Agent'
       | '技能'
       | '服务'

@@ -296,6 +296,13 @@ wire_string_enum! {
         /// 权限卡自动模式切换的结果条目（wire 形状见 `TurnEntry::permission_mode_result`）。
         /// 下划线是契约的一部分。
         PermissionModeResult => "permission_mode_result",
+        /// （fix-webui-qa-round8 1.1）审批「升级」在无 escalate 等价物的执行体
+        /// （ACP 边界）上被降级为「仅放行一次」的可见留痕条目（wire 形状见
+        /// `TurnEntry::escalate_downgrade`）。下划线是契约的一部分。
+        EscalateDowngrade => "escalate_downgrade",
+        /// （fix-webui-qa-round8 5.2）会话内模型切换成功的系统留痕条目（wire
+        /// 形状见 `TurnEntry::model_change`）。下划线是契约的一部分。
+        ModelChange => "model_change",
     }
 }
 
@@ -576,7 +583,7 @@ mod tests {
         assert!(!SessionMode::default().is_ungated());
     }
 
-    /// 回合词汇六值 + kind 两值的拼写。
+    /// 回合词汇八值 + kind 两值的拼写。
     #[test]
     fn turn_vocabulary_spellings_are_pinned() {
         let cases = [
@@ -586,6 +593,8 @@ mod tests {
             (TurnElementType::Error, "error"),
             (TurnElementType::Notice, "notice"),
             (TurnElementType::PermissionModeResult, "permission_mode_result"),
+            (TurnElementType::EscalateDowngrade, "escalate_downgrade"),
+            (TurnElementType::ModelChange, "model_change"),
         ];
         for (t, spelling) in cases {
             assert_eq!(t.as_str(), spelling);

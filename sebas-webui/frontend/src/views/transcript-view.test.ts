@@ -723,12 +723,15 @@ describe('thinking fold membership and distinguishability (fix-webui-qa-round3 D
     expect(foldBody.textContent).toContain('hmm')
     expect(foldBody.textContent).toContain('hmm again')
     // 占位词仍是条目标签，但内容不再被占位词顶替。
+    // （fix-webui-qa-round8 7.1）相邻思考增量聚合为一个连续段落：逐帧落账
+    // 的两条 thinking 在展开体里合并为**一条**条目（内容顺序拼接），不再是
+    // 一屏碎片行。
     const items = [...foldBody.querySelectorAll<HTMLElement>('.process-item[data-element-type="thinking"]')]
-    expect(items).toHaveLength(2)
-    for (const item of items) {
-      expect(item.querySelector('.item-title')?.textContent?.trim()).toBe('thinking')
-      expect(item.querySelector('.body.item-body')).toBeTruthy()
-    }
+    expect(items).toHaveLength(1)
+    expect(items[0]!.querySelector('.item-title')?.textContent?.trim()).toBe('thinking')
+    expect(items[0]!.querySelector('.body.item-body')).toBeTruthy()
+    expect(items[0]!.querySelector('.body.item-body')!.textContent).toContain('hmm')
+    expect(items[0]!.querySelector('.body.item-body')!.textContent).toContain('hmm again')
     // thinking 条目不再渲染二级折叠开关（内容默认在场）。
     expect(foldBody.querySelector('.process-item[data-element-type="thinking"] button')).toBeNull()
     el.remove()
@@ -1698,8 +1701,12 @@ describe('unread boundary advances while focused+visible (polish-workbench-walkt
     el.remove()
   })
 
-  it('打开既有未读会话的首帧快照不推进锚——seam 必须保留（3.1）', async () => {
+  it('打开既有未读会话不推进锚——锚只反映已见内容，seam 与徽标水位保留（round8 5.1）', async () => {
     // 浏览器里的段锚停在首回合（1 段），会话在离场期间攒了第二个回合。
+    // （fix-webui-qa-round8 5.1）开卷不再无条件把锚推到服务端当前计数——
+    // 打开不等于看完：溢出可视高度的未读内容保持未读水位（jsdom 无布局
+    // 几何，fit-viewport 结算不触发），锚停在 1、分界线照画；滚动贴底 /
+    // mark all seen / 跳到最新才推进。
     store.set('sebas:seen:oc_test', JSON.stringify({ anchor_count: 1 }))
     const el = await mount({
       entries: [
@@ -1713,10 +1720,7 @@ describe('unread boundary advances while focused+visible (polish-workbench-walkt
     })
     await debounceWait()
     await el.updateComplete
-    // （fix-webui-qa-round2 2.6，D-R2A）开卷推进读锚：以服务端当前计数为准
-    // （锚=4，不再停在回合前的 1）；分界线呈现由开卷冻结边界承担——锚到顶
-    // 与 seam 可见从此互不牵制，第二回合之上的分界线照画。
-    expect(storedAnchor()).toBe(4)
+    expect(storedAnchor()).toBe(1)
     expect(el.shadowRoot!.querySelector('.seam')?.hasAttribute('hidden')).toBe(false)
     el.remove()
   })
@@ -2443,6 +2447,212 @@ describe('transcript layout contract for arbitrary content (round7 1.2, D1)', ()
     // 两侧 meta 行都渲染 time 节点（用户 + agent）。
     const times = el.shadowRoot!.querySelectorAll('.turn-block .meta time.time')
     expect(times.length).toBe(2)
+    el.remove()
+  })
+})
+
+// ─── fix-webui-qa-round8：滚动浮标 / 升级降级 / 模型留痕 / 围栏容错 / 思考聚合 ──
+
+describe('fix-webui-qa-round8: scroll pill, contract entries, fence, thinking merge', () => {
+  it('closeUnclosedFence closes an unbalanced fence and leaves balanced content alone (7.2)', async () => {
+    const { closeUnclosedFence } = await import('./transcript-view.js')
+    const unclosed = 'code:\n```js\nlet x = 1'
+    expect(closeUnclosedFence(unclosed)).toBe(unclosed + '\n```')
+    expect(closeUnclosedFence('```js\nok\n```')).toBe('```js\nok\n```')
+    expect(closeUnclosedFence('plain text')).toBe('plain text')
+    // 成对围栏夹单行文本：仍配平。
+    expect(closeUnclosedFence('```a\n```\nmid\n```b\n```')).toBe('```a\n```\nmid\n```b\n```')
+  })
+
+  it('an unclosed fence in one entry never swallows later entries of the same run (7.2)', async () => {
+    const el = await mount({
+      entries: [
+        entry({ position: 0, kind: 'prompt', content: 'go', created_at_unix: FIXED_DATES.T1 }),
+        entry({
+          position: 1,
+          kind: 'content',
+          content: 'code:\n```js\nlet x',
+          created_at_unix: FIXED_DATES.T1,
+        }),
+        entry({ position: 2, kind: 'content', content: 'plain prose after', created_at_unix: FIXED_DATES.T1 }),
+      ],
+    })
+    // 渲染管线里，第二条目的围栏已收口：run 拼接体以闭合围栏结尾，
+    // 后续条目按正常形态渲染（不被卷进代码块）。
+    const run = el.shadowRoot!.querySelector('.turn-block.is-assistant .body')!
+    expect(run.textContent).toContain('plain prose after')
+    const source = (renderMarkdown as ReturnType<typeof vi.fn>).mock.calls
+      .map((c) => c[0] as string)
+      .find((src) => src.includes('plain prose after'))!
+    // 收口围栏落在该条目自己的末尾（后续正文之前）。
+    const closingIdx = source.indexOf('let x')
+    expect(source.slice(closingIdx, closingIdx + 12).startsWith('let x\n```')).toBe(true)
+    el.remove()
+  })
+
+  it('mergeAdjacentThinking merges adjacent thinking items and keeps tool boundaries (7.1)', async () => {
+    const { mergeAdjacentThinking } = await import('./transcript-view.js')
+    const items: ProcessItem[] = [
+      { elementType: 'thinking', content: 'a', title: null, position: 1 },
+      { elementType: 'thinking', content: 'b', title: null, position: 2 },
+      { elementType: 'tool', content: 'x', title: null, position: 3 },
+      { elementType: 'thinking', content: 'c', title: null, position: 4 },
+    ]
+    const merged = mergeAdjacentThinking(items)
+    expect(merged).toHaveLength(3)
+    expect(merged[0]).toMatchObject({ elementType: 'thinking', content: 'ab', position: 1 })
+    expect(merged[1]?.elementType).toBe('tool')
+    expect(merged[2]).toMatchObject({ elementType: 'thinking', content: 'c', position: 4 })
+  })
+
+  it('escalate_downgrade entries render as a neutral system entry with the reason (1.2)', async () => {
+    const el = await mount({
+      entries: [
+        entry({ position: 0, kind: 'prompt', content: 'go', created_at_unix: FIXED_DATES.T1 }),
+        entry({
+          position: 1,
+          kind: 'content',
+          element_type: 'escalate_downgrade',
+          content: JSON.stringify({
+            request_id: 'req-1',
+            tool: 'Bash',
+            reason: '需要 sudo 装依赖',
+            detail: '该决策已按「仅放行一次」降级执行。',
+          }),
+          created_at_unix: FIXED_DATES.T2,
+        }),
+      ],
+    })
+    const unit = el.shadowRoot!.querySelector<HTMLElement>(
+      '[data-testid="escalate-downgrade-entry"]',
+    )!
+    expect(unit).toBeTruthy()
+    expect(unit.textContent).toContain('仅放行一次')
+    expect(unit.textContent).toContain('Bash')
+    expect(
+      unit.querySelector('[data-testid="escalate-downgrade-reason"]')?.textContent,
+    ).toContain('需要 sudo 装依赖')
+    // 中性系统条目，不是错误红泡。
+    expect(unit.querySelector('.bubble.error')).toBeNull()
+    el.remove()
+  })
+
+  it('model_change entries render as a neutral system entry with both models (5.2)', async () => {
+    const el = await mount({
+      entries: [
+        entry({
+          position: 0,
+          kind: 'content',
+          element_type: 'model_change',
+          content: JSON.stringify({ from: 'test/text', to: 'test/long' }),
+          created_at_unix: FIXED_DATES.T1,
+        }),
+      ],
+    })
+    const unit = el.shadowRoot!.querySelector<HTMLElement>('[data-testid="model-change-entry"]')!
+    expect(unit).toBeTruthy()
+    expect(unit.textContent).toContain('test/text')
+    expect(unit.textContent).toContain('test/long')
+    expect(unit.textContent).toContain('模型已切换')
+    // 新条目独立成单元、不卷进正文 run（seam 段数口径不受影响）。
+    expect(
+      groupConversation([
+        entry({ position: 0, kind: 'content', element_type: 'model_change', content: '{}' }),
+      ]).map((u) => u.kind),
+    ).toEqual(['model_change'])
+    el.remove()
+  })
+
+  it('the jump-latest pill appears when detached with content below and restores follow on click (3.1)', async () => {
+    store.set('sebas:seen:oc_test', JSON.stringify({ anchor_count: 0 }))
+    const el = await mount({
+      entries: streamedTurn('q', ['a'], FIXED_DATES.T1),
+    })
+    const scrollEl = el.shadowRoot!.querySelector<HTMLElement>('.scroll')!
+    // 伪造几何：内容高于视口（有滚动余量）。
+    Object.defineProperty(scrollEl, 'scrollHeight', { value: 2000, configurable: true })
+    Object.defineProperty(scrollEl, 'clientHeight', { value: 400, configurable: true })
+    scrollEl.scrollTop = 0
+
+    // 操作者主动上滚（距底超阈值）→ 脱离跟随 → 浮标出现。
+    scrollEl.dispatchEvent(new Event('scroll'))
+    await el.updateComplete
+    expect((el as unknown as { sticky: boolean }).sticky).toBe(false)
+    const pill = el.shadowRoot!.querySelector<HTMLButtonElement>('[data-testid="jump-latest"]')!
+    expect(pill.hasAttribute('hidden')).toBe(false)
+
+    // 点击浮标 → 回底 + 恢复跟随 + 浮标消失 + 按贴底语义推进已读。
+    pill.click()
+    await el.updateComplete
+    await new Promise((r) => setTimeout(r, 300)) // 盖过 MARK_SEEN_DEBOUNCE_MS=250
+    expect((el as unknown as { sticky: boolean }).sticky).toBe(true)
+    expect(
+      el.shadowRoot!.querySelector('[data-testid="jump-latest"]')!.hasAttribute('hidden'),
+    ).toBe(true)
+    expect(store.get('sebas:seen:oc_test')).not.toBeNull()
+    el.remove()
+  })
+
+  it('未读缝开卷保持脱离：浮标承接回底，回底后恢复跟随（3.1）', async () => {
+    // 开卷带未读缝：边界冻结在锚 0、msgCount=4（seam 在场，jsdom 无滚动
+    // 几何 → fit-viewport 结算不触发，边界保留）。定位停在中部——sticky
+    // 保持脱离（后续到达不把操作者拽离 seam、不把未见内容计为已见），
+    // 「跳到最新」浮标是回底 + 恢复跟随的桥。
+    // jsdom 没有 scrollIntoView：垫一个空实现让开卷定位分支真实走到。
+    Element.prototype.scrollIntoView = () => {}
+    store.set('sebas:seen:oc_test', JSON.stringify({ anchor_count: 0 }))
+    const el = await mount({
+      entries: [
+        ...streamedTurn('q', ['a'], FIXED_DATES.T1),
+        ...streamedTurn('q2', ['b'], FIXED_DATES.T3).map((e) => ({
+          ...e,
+          position: e.position + 10,
+        })),
+      ],
+      msgCount: 4,
+    })
+    expect((el as unknown as { sticky: boolean }).sticky).toBe(false)
+    const scrollEl = el.shadowRoot!.querySelector<HTMLElement>('.scroll')!
+    Object.defineProperty(scrollEl, 'scrollHeight', { value: 2000, configurable: true })
+    Object.defineProperty(scrollEl, 'clientHeight', { value: 400, configurable: true })
+    // 新条目到达：浮标出现（未贴底 + 内容在下方），锚不推进（非「看着到达」）。
+    emitTurnAppend('oc_test', [
+      entry({
+        position: 99,
+        kind: 'content',
+        content: 'fresh arrival',
+        created_at_unix: FIXED_DATES.T5,
+      }),
+    ])
+    await el.updateComplete
+    await new Promise((r) => requestAnimationFrame(() => r(null)))
+    await el.updateComplete
+    expect((el as unknown as { sticky: boolean }).sticky).toBe(false)
+    const pill = el.shadowRoot!.querySelector('[data-testid="jump-latest"]')!
+    expect(pill.hasAttribute('hidden')).toBe(false)
+    expect(store.get('sebas:seen:oc_test')).toBe(JSON.stringify({ anchor_count: 0 }))
+    // 点击浮标：回底 + 跟随重新咬合 + 按贴底语义推进已读（seam 清账）。
+    ;(pill as HTMLButtonElement).click()
+    await el.updateComplete
+    await new Promise((r) => setTimeout(r, 300)) // 盖过 MARK_SEEN_DEBOUNCE_MS=250
+    expect((el as unknown as { sticky: boolean }).sticky).toBe(true)
+    expect(
+      el.shadowRoot!.querySelector('[data-testid="jump-latest"]')!.hasAttribute('hidden'),
+    ).toBe(true)
+    expect(store.get('sebas:seen:oc_test')).not.toBe(JSON.stringify({ anchor_count: 0 }))
+    el.remove()
+  })
+
+  it('全读开卷保持贴底跟随：定位不把 sticky 翻 false（3.1 的另一半）', async () => {
+    // 无未读（锚=段数）：seam 不在场 → 开卷不进入 seam 定位分支，sticky
+    // 保持 true——round8 的误伤面（开卷程序化定位把跟随停摆）不再存在。
+    store.set('sebas:seen:oc_test', JSON.stringify({ anchor_count: 2 }))
+    const el = await mount({
+      entries: streamedTurn('q', ['a', 'b'], FIXED_DATES.T1),
+      msgCount: 2,
+    })
+    expect((el as unknown as { sticky: boolean }).sticky).toBe(true)
+    expect(el.shadowRoot!.querySelector('.seam')?.hasAttribute('hidden')).toBe(true)
     el.remove()
   })
 })

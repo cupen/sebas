@@ -356,6 +356,13 @@ impl ConversationEntryView {
                 // 类型渲染（权限 spec「first-class entry, not folded into
                 // generic markdown」）。
                 | sebas_domain::session::TurnElementType::PermissionModeResult
+                // （fix-webui-qa-round8 1.1/5.2 review 补修）升级降级与模型
+                // 切换留痕同为一等契约词——不在此列会被归一成 markdown，
+                // 前端的中性系统条目渲染（含 testid）在快照路径整体丢失
+                // （turn.append 直推保留原词、快照路径被洗掉，正是「推送在
+                // 场即绿、开卷重挂即红」的劈叉形态）。
+                | sebas_domain::session::TurnElementType::EscalateDowngrade
+                | sebas_domain::session::TurnElementType::ModelChange
         ) {
             self.element_type = "markdown".to_string();
         }
@@ -503,6 +510,32 @@ mod tests {
         }
         // 比对输出（`--nocapture` 可见）。
         eprintln!("重构前转录渲染比对：\n{}", compared.join("\n"));
+    }
+
+    /// （fix-webui-qa-round8 1.1/5.2 review 补修）一等契约条目穿过 detail
+    /// 投影时**不得**被归一成 markdown：升级降级（`escalate_downgrade`）与
+    /// 模型切换留痕（`model_change`）的独立渲染（含 testid）依赖原词上
+    /// wire。turn.append 直推保留原词、快照路径曾把两者洗掉——「推送在场
+    /// 即绿、开卷重挂即红」的劈叉形态由此产生。
+    #[test]
+    fn contract_entry_types_survive_detail_normalization() {
+        for raw in ["escalate_downgrade", "model_change"] {
+            let entry = sebas_dispatch::TurnEntry {
+                position: 0,
+                kind: sebas_domain::session::TurnKind::Content,
+                element_type: sebas_domain::session::TurnElementType::from_wire(raw),
+                content: r#"{"from":"a","to":"b"}"#.to_string(),
+                created_at_unix: 0,
+                title: None,
+                failure_class: None,
+            };
+            let view = crate::models::ConversationEntryView::from(&entry)
+                .with_normalized_element_type();
+            assert_eq!(
+                view.element_type, raw,
+                "contract type {raw} must not be normalized to generic markdown"
+            );
+        }
     }
 
     /// Every input the router can produce, including the two that used to

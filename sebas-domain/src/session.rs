@@ -372,6 +372,13 @@ pub struct TurnStreamEvent {
 pub const ZERO_OUTPUT_NOTICE: &str =
     "**回合已结束且无输出**：本轮回合未产生任何可见输出（正文、thinking、工具、错误皆无）。";
 
+/// （fix-webui-qa-round8 7.3）操作者主动取消回合的中性收尾文案（唯一定义在
+/// 域层，ACP 引擎面与原生内核转录面共用）：**中性「已取消」形态**——主动
+/// 停止不是失败，绝不复用错误语义色/错误文案。`sebas-dispatch` 的零输出
+/// 判定据此跳过被取消的回合（取消条目不是可见输出，但回合也不该再背一条
+/// 「零输出」提示）。
+pub const TURN_CANCELLED_NOTICE: &str = "回合已取消（操作者停止了本次回复）。";
+
 impl TurnEntry {
     pub fn prompt(position: u64, content: impl Into<String>) -> Self {
         Self::new(
@@ -455,6 +462,45 @@ impl TurnEntry {
             position,
             TurnKind::Content,
             TurnElementType::PermissionModeResult,
+            payload.to_string(),
+        )
+    }
+
+    /// （fix-webui-qa-round8 1.1，permission-flow「升级决策的可见降级」）审批
+    /// 「升级」在无 escalate 等价物的执行体（ACP 边界）上被降级为「仅放行
+    /// 一次」的可见留痕条目——**对齐 [`Self::permission_mode_result`] 先例**：
+    /// 一等契约条目，不是混进正文的约定文案。
+    ///
+    /// wire 形状：
+    /// - `kind = "content"`、`element_type = "escalate_downgrade"`；
+    /// - `content` = JSON 载荷 `{ "request_id": String, "tool": String,
+    ///   "reason": String, "detail": String }`；
+    /// - 语义：升级决策已按「仅放行一次」降级执行，操作者填写的升级理由随
+    ///   `reason` 留痕（该路径下工具的执行不再无任何痕迹）；`detail` 面向
+    ///   操作者说明理由的去向（执行体侧日志）。
+    pub fn escalate_downgrade(position: u64, payload: serde_json::Value) -> Self {
+        Self::new(
+            position,
+            TurnKind::Content,
+            TurnElementType::EscalateDowngrade,
+            payload.to_string(),
+        )
+    }
+
+    /// （fix-webui-qa-round8 5.2，agent-workbench「会话内模型切换留痕」）会话
+    /// 模型切换成功的系统留痕条目（ACP `ModelChanged` 引擎面与 native override
+    /// 路径共用一个 wire 形状）。
+    ///
+    /// wire 形状：
+    /// - `kind = "content"`、`element_type = "model_change"`；
+    /// - `content` = JSON 载荷 `{ "from": String|null, "to": String }`；
+    /// - 语义：切换成功后的后续回合走 `to`；`from` = 切换前的模型（未知为
+    ///   null，如执行体从未声称过当前模型）。
+    pub fn model_change(position: u64, payload: serde_json::Value) -> Self {
+        Self::new(
+            position,
+            TurnKind::Content,
+            TurnElementType::ModelChange,
             payload.to_string(),
         )
     }
