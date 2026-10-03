@@ -35,6 +35,24 @@ const apiMocks = vi.hoisted(() => ({
 
 vi.mock('../api/client.js', () => ({
   errorText: (err: unknown) => (err instanceof Error ? err.message : String(err)),
+  // 与真 ApiError 同形（client.ts）：status + 机器可读拒绝码（4.2 的 404
+  // 判定经 instanceof + status 走到这里，必须与组件 import 同一构造器）。
+  ApiError: class ApiError extends Error {
+    readonly status: number
+    readonly code: string | null
+    readonly count: number | null
+    constructor(
+      status: number,
+      message: string,
+      code: string | null = null,
+      count: number | null = null,
+    ) {
+      super(message)
+      this.status = status
+      this.code = code
+      this.count = count
+    }
+  },
   api: {
     summary: apiMocks.summary,
     sessions: apiMocks.sessions,
@@ -101,6 +119,9 @@ if (!customElements.get('sebas-workbench-composer')) {
 }
 
 import './dashboard.js'
+// ApiError：mocked 模块里的同一个类——组件 import 与用例构造共用同一构造器
+// （instanceof 判定才成立）。
+import { ApiError } from '../api/client.js'
 // RAIL_FOCUS_EVENT：rail 切换成功的窗口级聚焦事件（4.1，design D3）。
 import { RAIL_FOCUS_EVENT, SESSION_LABEL_CHANGED_EVENT } from './project-rail.js'
 // PROJECT_FOLLOW_EVENT / focusedProjectPath：聚焦反投影项目上下文（本 change 4.1）。
@@ -2622,6 +2643,97 @@ describe('session usage chip (add-webui-round7-gaps 1.1)', () => {
     expect(detail?.usage).toEqual({ total_input: 300, total_output: 30 })
     await settle(el)
     expect(usageChipOf(el).textContent).toContain('Token in 300 · out 30')
+    el.remove()
+  })
+})
+
+// ── fix-webui-qa-round11 4.2（B-5/D5）：不可得会话深链止停轮询 ─────────────
+// spec「Closed-session deep link settles without polling」：一次失手后呈现
+// 「会话不可得」，后续周期同步（refetch / 列表刷新）跳过该会话——console
+// 至多一条 404，不再持续刷屏；呈现形态不变。
+describe('closed-session deep link settles without polling (round11 4.2)', () => {
+  /** 无人区 summary：无聚焦指针、唯一会话行不是深链目标。 */
+  function deadSummary(): Summary {
+    return {
+      ...summaryBase,
+      recent_sessions: [row({})],
+      active_session_key: null,
+      active_session: null,
+    }
+  }
+
+  function callsFor(key: string): number {
+    return apiMocks.session.mock.calls.filter((c) => c[0] === key).length
+  }
+
+  async function settleDeepLink(el: SebasDashboard): Promise<void> {
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+  }
+
+  it('deep link to a closed session stops after one miss; background refresh skips it', async () => {
+    apiMocks.summary.mockResolvedValue(deadSummary())
+    apiMocks.session.mockRejectedValue(new ApiError(404, '会话不存在: oc_dead%00'))
+    const el = await mount()
+    ;(el as unknown as { deepLinkKey: string | null }).deepLinkKey = 'oc_dead%00'
+    await el.updateComplete
+    await settleDeepLink(el)
+
+    // 单次失手：装载只打了一次，呈现保持既有「会话不可得」居中态。
+    expect(callsFor('oc_dead%00'), '导航至多一次失手').toBe(1)
+    expect(el.shadowRoot!.textContent).toContain('会话不可得')
+
+    // 周期同步（refreshLists 经 summary 到达触发）与显式 refetch 都跳过：
+    // 不再产生第二个 404。
+    apiMocks.summary.mockResolvedValue(deadSummary())
+    window.dispatchEvent(new Event('sebas:refetch'))
+    await settleDeepLink(el)
+    expect(callsFor('oc_dead%00'), '后台刷新必须跳过不可得会话').toBe(1)
+    ;(el as unknown as { refetch: () => void }).refetch()
+    await settleDeepLink(el)
+    expect(callsFor('oc_dead%00'), 'refetch 同样跳过').toBe(1)
+    // 呈现不回退：仍是「会话不可得」。
+    expect(el.shadowRoot!.textContent).toContain('会话不可得')
+    el.remove()
+  })
+
+  it('reload of an unavailable deep link behaves the same (single miss per element)', async () => {
+    // F5 = 元素重建：不可得集合清空，回到「至多一次失手」——本用例即一次
+    // 新装载的完整形状（单 miss 后止停）。
+    apiMocks.summary.mockResolvedValue(deadSummary())
+    apiMocks.session.mockRejectedValue(new ApiError(404, '会话不存在: oc_dead%00'))
+    const el = await mount()
+    ;(el as unknown as { deepLinkKey: string | null }).deepLinkKey = 'oc_dead%00'
+    await el.updateComplete
+    await settleDeepLink(el)
+    expect(callsFor('oc_dead%00')).toBe(1)
+    // 切走再切回该不可得会话：重入即跳过（0 次新请求），呈现恢复。
+    ;(el as unknown as { deepLinkKey: string | null }).deepLinkKey = null
+    await el.updateComplete
+    await settleDeepLink(el)
+    ;(el as unknown as { deepLinkKey: string | null }).deepLinkKey = 'oc_dead%00'
+    await el.updateComplete
+    await settleDeepLink(el)
+    expect(callsFor('oc_dead%00'), '重入不可得会话零新请求').toBe(1)
+    expect(el.shadowRoot!.textContent).toContain('会话不可得')
+    el.remove()
+  })
+
+  it('non-404 first-pull failures keep the self-heal path (no permanent skip)', async () => {
+    // 网络抖动不是「不可得」：不进集合，后续 refetch 照旧重试。
+    apiMocks.summary.mockResolvedValue(deadSummary())
+    apiMocks.session.mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    const el = await mount()
+    ;(el as unknown as { deepLinkKey: string | null }).deepLinkKey = 'oc_flaky%00'
+    await el.updateComplete
+    await settleDeepLink(el)
+    expect(callsFor('oc_flaky%00')).toBe(1)
+    apiMocks.session.mockResolvedValue({ ...detailFixture(), encoded_key: 'oc_flaky%00' })
+    window.dispatchEvent(new Event('sebas:refetch'))
+    await settleDeepLink(el)
+    expect(callsFor('oc_flaky%00'), '非 404 失败不自封不可得').toBe(2)
     el.remove()
   })
 })

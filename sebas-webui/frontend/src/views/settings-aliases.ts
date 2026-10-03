@@ -251,19 +251,42 @@ export class SebasModelAliases extends LitElement {
                     this.editor = { ...(this.editor as NonNullable<typeof this.editor>), alias: v }
                   }}
                 ></wa-input>
-                <wa-select
-                  data-testid="alias-provider-select"
-                  label="目标 provider"
-                  value=${this.editor.provider}
-                  @change=${(e: Event) => {
-                    const v = (e.target as HTMLSelectElement).value
-                    this.editor = { ...(this.editor as NonNullable<typeof this.editor>), provider: v }
-                  }}
-                >
-                  ${this.providerNames.map(
-                    (n) => html`<wa-option value=${n}>${n}</wa-option>`,
-                  )}
-                </wa-select>
+                ${this.providerNames.length === 0
+                  ? html`
+                      <!-- （fix-webui-qa-round11 4.3，A-2）零可选 provider 的空态：
+                           下拉禁用 + 指引文案（指向「模型」分区），不再静默
+                           空下拉；保存键同禁——表单不允许提交无目标的别名。 -->
+                      <wa-select
+                        data-testid="alias-provider-select"
+                        label="目标 provider"
+                        value=""
+                        ?disabled=${true}
+                      >
+                        <wa-option value="">暂无可选 provider</wa-option>
+                      </wa-select>
+                      <p class="hint" data-testid="alias-provider-empty-hint">
+                        暂无可选 provider——请先在本弹窗的「模型」分区新建一个
+                        provider，再回来创建别名。
+                      </p>
+                    `
+                  : html`
+                      <wa-select
+                        data-testid="alias-provider-select"
+                        label="目标 provider"
+                        value=${this.editor.provider}
+                        @change=${(e: Event) => {
+                          const v = (e.target as HTMLSelectElement).value
+                          this.editor = {
+                            ...(this.editor as NonNullable<typeof this.editor>),
+                            provider: v,
+                          }
+                        }}
+                      >
+                        ${this.providerNames.map(
+                          (n) => html`<wa-option value=${n}>${n}</wa-option>`,
+                        )}
+                      </wa-select>
+                    `}
                 <wa-input
                   data-testid="alias-upstream-input"
                   label="上游模型（可选）"
@@ -285,6 +308,7 @@ export class SebasModelAliases extends LitElement {
                 variant="brand"
                 data-testid="alias-save"
                 ?loading=${this.busy}
+                ?disabled=${this.providerNames.length === 0}
                 @click=${() => void this.submitEditor()}
                 >保存</wa-button
               >

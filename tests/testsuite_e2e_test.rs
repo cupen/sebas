@@ -3301,7 +3301,10 @@ async fn env_posture_stays_silent_without_inherited_vars() {
         );
 
         // 工具**真的执行了**：受控探针命令在会话工作目录下留下目录（不是
-        // 只在转录里假装）。
+        // 只在转录里假装）。bash 工具在 Windows 是平台限制性 unix-only
+        // （sebas-agent/src/tools/bash.rs，round11 proposal Non-goal）——
+        // 回合的呈现/审批/计数断言在上面对全平台生效，落盘探针仅 unix 可证。
+        #[cfg(unix)]
         assert!(
             find_under(&sb.path, ".sebas-probe").is_some(),
             "the approved bash call must have created the probe dir under the sandbox"
@@ -8948,6 +8951,379 @@ async fn archive_restore_preserves_the_row_naming_sources() {
                 .is_some_and(|e| !e.is_empty()),
             "the recorded failure carries its cause"
         );
+    }
+
+    // ── fix-webui-qa-round11 1.3 + 3.1：native 生命周期真值与回合终点通知
+    //    数据面的进程级回归（断言只吃用户面：HTTP 行投影 + WS 相位帧）──
+
+    /// 读 WS 帧直到目标会话的**相位帧**（`session.created` / `session.updated`
+    /// 同形五键），返回该帧；turn.append / permission.* / resync 等无关帧跳过。
+    async fn next_phase_frame(ws: &mut WsStream, key: &str) -> serde_json::Value {
+        loop {
+            let ev = next_ws_frame(ws).await;
+            let method = ev["method"].as_str().unwrap_or_default();
+            if (method == "session.created" || method == "session.updated")
+                && frame_targets_session(&ev, key)
+            {
+                return ev;
+            }
+        }
+    }
+
+    /// GET /api/sessions 里目标会话的行投影（无则 None，配 wait_for 用）。
+    async fn session_row(
+        cli: &reqwest::Client,
+        url: &str,
+        key: &str,
+    ) -> Option<serde_json::Value> {
+        let v = cli.get(url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+        v["recent_sessions"]
+            .as_array()?
+            .iter()
+            .find(|r| r["encoded_key"].as_str() == Some(key))
+            .cloned()
+    }
+
+    /// 1.3（验收合同 specs/session-lifecycle「Native-backed sessions report
+    /// lifecycle truth」）：native 会话生命周期在用户面推进——流式期间行呈
+    /// working 且 turn_engaged 真（rail 点与 composer 停止钮的数据源）、结束
+    /// 呈 done、活跃/休眠计数与同页行状态机械一致、标题取首条消息；失败回合
+    /// 呈 failed 不回 queued。同趟覆盖「中途打开页面」的观察面（3.1 的数据
+    /// 侧前提）：流式中新订阅的 WS 读者在该会话上看到的第一条相位帧就是诚实
+    /// 的收尾帧——turn-notify 的「首见不判」只在前端，它依赖服务端从不在
+    /// 流式中发放假 done 帧。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn native_session_lifecycle_advances_working_done_and_failed_on_the_operator_surface() {
+        let (sb, _core, _webui, _router) =
+            spawn_test_model_stack("test-model-native-lifecycle", "long").await;
+        let cli = http_client();
+        let mut ws = ws_subscribe(&sb).await;
+        let project_id = scene_project_id(&cli, &sb).await;
+        let prompt = "lifecycle probe: first message names the session";
+
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions", sb.webui_url()),
+            serde_json::json!({ "project_id": project_id, "prompt": prompt, "agent": "native" }),
+        )
+        .await
+        .expect("create native session");
+        assert_eq!(status, 201, "native spawn must not be rejected: {body}");
+        let key = body["key"].as_str().expect("session key").to_string();
+        let sessions_url = format!("{}/api/sessions", sb.webui_url());
+
+        // 开轮相位帧：带 prompt 的 spawn 即 OnIt → 首条相位帧 working +
+        // turn_engaged 真 + 标题预览随帧（rail/composer/行名三面的实时源，
+        // 不再恒 Queued / 恒未命名）。
+        let created = next_phase_frame(&mut ws, &key).await;
+        assert_eq!(
+            created["method"].as_str(),
+            Some("session.created"),
+            "the spawn announces the session: {created}"
+        );
+        assert_eq!(
+            created["params"]["status_slug"].as_str(),
+            Some("working"),
+            "spawn-with-prompt reports working, never queued: {created}"
+        );
+        assert_eq!(
+            created["params"]["turn_engaged"].as_bool(),
+            Some(true),
+            "the in-flight truth rides the same frame: {created}"
+        );
+        assert_eq!(
+            created["params"]["prompt_preview"].as_str(),
+            Some(prompt),
+            "the first message names the session on the wire: {created}"
+        );
+
+        // 流式期间（test/long 以 32 字符窗滴流，秒级窗口）：HTTP 行投影同真
+        // ——working、turn_engaged 真、标题=首条消息。
+        let working_row = {
+            let cli = cli.clone();
+            let key = key.clone();
+            let url = sessions_url.clone();
+            wait_for(
+                "native row to read working while streaming",
+                Duration::from_secs(15),
+                &sb.path.clone(),
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    let key = key.clone();
+                    Box::pin(async move {
+                        session_row(&cli, &url, &key)
+                            .await
+                            .filter(|r| r["status_slug"].as_str() == Some("working"))
+                            .filter(|r| r["turn_engaged"].as_bool() == Some(true))
+                    })
+                },
+            )
+            .await
+        };
+        assert_eq!(
+            working_row["prompt_preview"].as_str(),
+            Some(prompt),
+            "the HTTP row carries the naming anchor during the turn: {working_row}"
+        );
+
+        // 中途打开页面：流式中新订阅的读者（broadcast 只转发订阅后的帧，
+        // 不重放历史——与浏览器中途建连同姿态）。
+        let mut joiner = ws_connect(&sb.webui_url()).await;
+
+        // 回合收尾：主读者读到 done 帧；收尾前该会话不得出现假 done 帧。
+        let settle = loop {
+            let ev = next_phase_frame(&mut ws, &key).await;
+            if ev["params"]["turn_engaged"].as_bool() == Some(false) {
+                break ev;
+            }
+            assert_eq!(
+                ev["params"]["status_slug"].as_str(),
+                Some("working"),
+                "no premature settle frame while the turn is streaming: {ev}"
+            );
+        };
+        assert_eq!(
+            settle["params"]["status_slug"].as_str(),
+            Some("done"),
+            "the turn settles to done on the wire: {settle}"
+        );
+
+        // 中途加入的读者：第一条该会话相位帧 = 诚实的收尾帧（done 只在真
+        // 收尾后存在；首见即收尾由前端「首见不判」消化，不误报）。
+        let joiner_first = tokio::time::timeout(
+            Duration::from_secs(30),
+            next_phase_frame(&mut joiner, &key),
+        )
+        .await
+        .expect("the mid-turn joiner must see the settle frame");
+        assert_eq!(
+            joiner_first["params"]["status_slug"].as_str(),
+            Some("done"),
+            "the joiner's first phase frame is the honest settle: {joiner_first}"
+        );
+        assert_eq!(
+            joiner_first["params"]["turn_engaged"].as_bool(),
+            Some(false),
+            "{joiner_first}"
+        );
+
+        // 收尾后的行投影与计数：done + 在飞复位；活跃/休眠/启动中计数与
+        // 同页行状态机械一致。native done 会话仍 alive → 计活跃（done 是
+        // 回合终态不是会话休眠，与 ACP 同语义）。
+        let listed = cli
+            .get(&sessions_url)
+            .send()
+            .await
+            .expect("sessions list")
+            .json::<serde_json::Value>()
+            .await
+            .expect("list json");
+        let rows = listed["recent_sessions"].as_array().expect("rows");
+        let count_of = |slug: &str| {
+            rows.iter()
+                .filter(|r| r["status"].as_str() == Some(slug))
+                .count() as u64
+        };
+        assert_eq!(
+            listed["active_count"].as_u64(),
+            Some(count_of("active")),
+            "the active counter agrees with the per-session rows: {listed}"
+        );
+        assert_eq!(
+            listed["dormant_count"].as_u64(),
+            Some(count_of("dormant")),
+            "the dormant counter agrees with the per-session rows: {listed}"
+        );
+        assert_eq!(
+            listed["spawning_count"].as_u64(),
+            Some(count_of("spawning")),
+            "{listed}"
+        );
+        assert_eq!(
+            listed["active_count"].as_u64(),
+            Some(1),
+            "the sandbox holds exactly this one alive native session: {listed}"
+        );
+        assert_eq!(listed["dormant_count"].as_u64(), Some(0), "{listed}");
+        let row = session_row(&cli, &sessions_url, &key)
+            .await
+            .expect("row present");
+        assert_eq!(row["status_slug"].as_str(), Some("done"), "{row}");
+        // 行上的 turn_engaged 只在 true 时上 wire（旧 core 兼容缺省）——
+        // 键缺席 = false，即终态在飞复位。
+        assert_ne!(
+            row["turn_engaged"].as_bool(),
+            Some(true),
+            "the settled row must not carry the in-flight truth: {row}"
+        );
+        assert_eq!(
+            row["prompt_preview"].as_str(),
+            Some(prompt),
+            "the title anchor survives the turn: {row}"
+        );
+
+        // 失败回合：切 test/error 后下一条消息失败收尾 → 相位帧与行投影呈
+        // failed（CrossMark 经 derive 单点），不回 queued；标题锚不动。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/model", sb.webui_url()),
+            serde_json::json!({ "model_id": "test/error" }),
+        )
+        .await
+        .expect("switch model");
+        assert_eq!(status, 200, "{body}");
+        let (status, _) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+            serde_json::json!({ "message": "fail now" }),
+        )
+        .await
+        .expect("send message");
+        assert_eq!(status, 200, "the session stays addressable");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+        let failed = loop {
+            let ev = tokio::time::timeout(deadline - tokio::time::Instant::now(), next_phase_frame(&mut ws, &key))
+                .await
+                .expect("timed out waiting for the failed settle frame");
+            if ev["params"]["status_slug"].as_str() == Some("failed") {
+                break ev;
+            }
+        };
+        assert_eq!(
+            failed["params"]["turn_engaged"].as_bool(),
+            Some(false),
+            "the failed settle resets the in-flight truth: {failed}"
+        );
+        let failed_row = {
+            let cli = cli.clone();
+            let key = key.clone();
+            wait_for(
+                "native row to read failed",
+                Duration::from_secs(15),
+                &sb.path.clone(),
+                move || {
+                    let cli = cli.clone();
+                    let url = sessions_url.clone();
+                    let key = key.clone();
+                    Box::pin(async move {
+                        session_row(&cli, &url, &key)
+                            .await
+                            .filter(|r| r["status_slug"].as_str() == Some("failed"))
+                    })
+                },
+            )
+            .await
+        };
+        assert_eq!(
+            failed_row["turn_engaged"].as_bool(),
+            None,
+            "the failed row resets the in-flight truth (key only on wire when true): {failed_row}"
+        );
+        assert_eq!(
+            failed_row["prompt_preview"].as_str(),
+            Some(prompt),
+            "a failed turn does not move the naming anchor: {failed_row}"
+        );
+    }
+
+    /// 3.1 数据面合同：**后续回合**开轮必须把 turn_engaged=true 重新广播
+    /// （ACP 面 `emit_turn_card` 开轮即 publish_updated 的同款契约）。回合
+    /// 终点通知依赖 true→false 迁移——首回合由 session.created 帧武装，第
+    /// 2+ 回合（空闲直投路径）若缺武装帧，客户端记录的占用停在 false，收尾
+    /// 帧不再构成迁移 → 非聚焦会话的完成通知漏发（spec「非聚焦会话回合完成
+    /// 通知」对后台回合的每一轮都必须成立）。
+    ///
+    /// REVIEW 发现（fix-webui-qa-round11 review）：`src/agent_backend.rs`
+    /// `message()` 的 `info_frame = dispatch.is_none().then(..)` 恰好在「空闲
+    /// 直投开轮」分支不发帧（只发 busy 入队分支）——本用例钉住正确契约，
+    /// 当前实现红；最小修复 = message() 无条件发一条 Updated（相位已置
+    /// OnIt、in_flight 已置位，帧即 working 真值）。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn native_turn_start_reannounces_turn_engaged_for_subsequent_turns() {
+        let (sb, _core, _webui, _router) =
+            spawn_test_model_stack("test-model-native-rearm", "text").await;
+        let cli = http_client();
+        let mut ws = ws_subscribe(&sb).await;
+        let project_id = scene_project_id(&cli, &sb).await;
+
+        // 首回合：spawn 的 created 帧武装 engaged=true，收尾帧解除。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions", sb.webui_url()),
+            serde_json::json!({
+                "project_id": project_id,
+                "prompt": "turn one",
+                "agent": "native",
+            }),
+        )
+        .await
+        .expect("create native session");
+        assert_eq!(status, 201, "native spawn must not be rejected: {body}");
+        let key = body["key"].as_str().expect("session key").to_string();
+        let created = next_phase_frame(&mut ws, &key).await;
+        assert_eq!(
+            created["params"]["turn_engaged"].as_bool(),
+            Some(true),
+            "the first turn is armed by the spawn frame: {created}"
+        );
+        let first_settle = loop {
+            let ev = next_phase_frame(&mut ws, &key).await;
+            if ev["params"]["turn_engaged"].as_bool() == Some(false) {
+                break ev;
+            }
+        };
+        assert_eq!(
+            first_settle["params"]["status_slug"].as_str(),
+            Some("done"),
+            "{first_settle}"
+        );
+
+        // 第 2、3 回合（空闲直投）：开轮武装帧必须重新出现，且先于收尾帧。
+        for turn in ["turn two", "turn three"] {
+            let (status, _) = post_json(
+                &cli,
+                &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+                serde_json::json!({ "message": turn }),
+            )
+            .await
+            .expect("send follow-up");
+            assert_eq!(status, 200, "{turn} accepted");
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+            let mut rearmed = false;
+            let settle = loop {
+                let ev = tokio::time::timeout(
+                    deadline - tokio::time::Instant::now(),
+                    next_phase_frame(&mut ws, &key),
+                )
+                .await
+                .expect("timed out waiting for the settle frame");
+                match ev["params"]["turn_engaged"].as_bool() {
+                    Some(true) => rearmed = true,
+                    // re-arm 之前的 false 是上一回合滞留的陈旧收尾帧
+                    // （Finished 与 TurnSummary 各发一帧 engaged=false，循环
+                    // 上轮只消费其一）：通道 FIFO 保证本回合的 re-arm 先于
+                    // 本回合收尾，故 skip、不判收尾。
+                    Some(false) if rearmed => break ev,
+                    Some(false) => {}
+                    _ => {}
+                }
+            };
+            assert_eq!(
+                settle["params"]["status_slug"].as_str(),
+                Some("done"),
+                "{turn} settles done: {settle}"
+            );
+            assert!(
+                rearmed,
+                "{turn}（空闲直投开轮）缺 turn_engaged=true 武装相位帧——\
+                 回合完成通知依赖 true→false 迁移，缺帧即第 2+ 回合的终点\
+                 对非聚焦通知层不可达（ACP emit_turn_card 开轮即 publish_updated，\
+                 native 必须同契约）"
+            );
+        }
     }
 
 }

@@ -825,6 +825,40 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     expect(bodies?.[0]?.textContent).toContain('chunk three')
   })
 
+  // ── fix-webui-qa-round11 4.1（B-4）：多行提交保留换行 ──
+  // spec「three-line message renders as three lines」：容器 pre-wrap（渲染
+  // 不再把 \n 折叠成空格）+ 文本逐字保留换行（wire 往返语义），两者合成
+  // 三行视觉呈现；用户气泡与 agent 回显同一容器同一规则（恢复后的转录走
+  // 同一路径，reload 不丢行结构）。jsdom 算不出布局/继承样式，容器的
+  // pre-wrap 断言走组件样式表（dashboard.test 同姿态）。
+  it('a three-line message renders as three lines in user bubble and agent echo (round11 4.1)', async () => {
+    const threeLines = '键盘行甲\n键盘行乙\n键盘行丙'
+    const el = await mount({
+      entries: [
+        entry({ position: 0, kind: 'prompt', content: threeLines, created_at_unix: FIXED_DATES.T1 }),
+        entry({ position: 1, kind: 'content', content: threeLines, created_at_unix: FIXED_DATES.T1 }),
+      ],
+    })
+    // 渲染半边：文本逐字保留换行（三行 = 两处 \n），气泡容器与回显同构。
+    const bodies = [...el.shadowRoot!.querySelectorAll<HTMLElement>('.turn-block .body')]
+    expect(bodies.length).toBe(2)
+    for (const body of bodies) {
+      expect(body.textContent, '文本内容逐字保留 \\n').toBe(threeLines)
+      expect(body.textContent?.split('\n')).toHaveLength(3)
+    }
+    // 容器半边：.turn-block .body 规则带 pre-wrap（渲染层不再折叠换行），
+    // 且长 token 折行语义（overflow-wrap: anywhere）不回退。
+    const { SebasTranscriptView: Impl } = await import('./transcript-view.js')
+    const styles = (Impl as typeof import('./transcript-view.js').SebasTranscriptView).styles
+    const css = (Array.isArray(styles) ? styles : [styles])
+      .map((s) => (s as unknown as { cssText: string }).cssText)
+      .join('\n')
+    const bodyRule = css.match(/\.turn-block \.body\s*\{[^}]*\}/)?.[0] ?? ''
+    expect(bodyRule).toContain('white-space: pre-wrap')
+    expect(bodyRule).toContain('overflow-wrap: anywhere')
+    el.remove()
+  })
+
   // ── fix-webui-qa-round10 2.4（B-DEF-02）：模型徽章按回合观察值保真 ──
   // round9 4.3 的「与会话头同源（current_model 下传）」语义被 B-DEF-02 证伪
   // （切模型后历史徽章被回溯改写）：徽章改读 model_change 留痕重放的回合

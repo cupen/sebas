@@ -1488,14 +1488,27 @@ export class SebasProjectRail extends LitElement {
     const archived = [...this.archivedSessions].sort((a, b) => b.archived_at - a.archived_at)
     return html`
       <div class="group-section" data-testid="history-group">
-        <button type="button" class="group-head" data-testid="history-group-head" aria-expanded=${this.historyOpen ? 'true' : 'false'} @click=${() => (this.historyOpen = !this.historyOpen)}>
+        <button
+          type="button"
+          class="group-head"
+          data-testid="history-group-head"
+          aria-expanded=${this.historyOpen ? 'true' : 'false'}
+          @click=${(e: Event) => {
+            // （fix-webui-qa-round11 3c GUI 复核）点在「历史」链接上不折叠：
+            // 折叠判定看 composedPath 是否含链接。链接自身不再
+            // stopPropagation——那会挡住 document 级 SPA 拦截器（事件到不了
+            // document），浏览器回落原生 href 造成整页刷新，丢掉 SPA 状态
+            // （分栏布局、未读游标、turn-notify 迁移锚）。
+            if (e.composedPath().some((n) => n instanceof HTMLAnchorElement)) return
+            this.historyOpen = !this.historyOpen
+          }}
+        >
           <span class="chevron ${this.historyOpen ? 'open' : ''}" aria-hidden="true">▶</span
           ><a
             class="group-link"
             href="/sessions"
             data-testid="history-sessions-link"
             title="打开全部会话总览"
-            @click=${(e: Event) => e.stopPropagation()}
             >历史</a
           ><span class="group-count" data-testid="history-session-count">${this.sessionTotal}</span>
         </button>

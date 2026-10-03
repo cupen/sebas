@@ -57,7 +57,13 @@ export interface ChartPadding {
   left: number
 }
 
-const DEFAULT_PADDING: ChartPadding = { top: 12, right: 12, bottom: 22, left: 46 }
+/**
+ * 右缘 inset 32：最右 x 轴刻度是**中心锚**（text-anchor: middle）的日期文本
+ * （天粒度 `YYYY-MM-DD` ≈ 56px，右半 ≈ 28px）——右 padding 12 时右半伸出
+ * viewBox 被裁（QA A-5 实锤「2026-10」）。32 ≥ 28 保证最右刻度完整可见
+ * （fix-webui-qa-round11 4.5，两种粒度：小时粒度 `HH:00` 更短，自动覆盖）。
+ */
+const DEFAULT_PADDING: ChartPadding = { top: 12, right: 32, bottom: 22, left: 46 }
 
 /** 计数的人类可读形（轴标签用）：0 / 999 / 1.2k / 3.4M / 1.2G。 */
 export function formatCount(n: number): string {

@@ -93,6 +93,7 @@ import {
   canControlServices,
   canManageAgents,
   canManageProviders,
+  canManageSkills,
   canManageUsers,
 } from './role-visibility.js'
 // （fix-webui-qa-round8 7.5）技能预览只渲染正文：frontmatter 剥离。
@@ -1357,7 +1358,11 @@ export class SebasSettingsModal extends LitElement {
 
   connectedCallback(): void {
     super.connectedCallback()
-    window.addEventListener('keydown', this.onKeydown)
+    // （fix-webui-qa-round11 4.4，A-4/D6）capture 相位挂监听：焦点在弹窗外
+    // （rail、正文、遮罩、body）时 Esc 也响应——keydown 从焦点元素出发，
+    // 窗口 capture 站在传播最前端，任何中途 stopPropagation 都拦不住它
+    // （bubble 相位的旧挂法正是「先点弹窗内部 Esc 才生效」的成因）。
+    window.addEventListener('keydown', this.onKeydown, true)
     // system 模式下 OS 切换明暗时：wa-dark class 由 main.ts 的监听处理，
     // 这里只需让 Appearance 分区的提示文案保持真实。
     if (typeof window.matchMedia === 'function') {
@@ -1368,7 +1373,7 @@ export class SebasSettingsModal extends LitElement {
   }
 
   disconnectedCallback(): void {
-    window.removeEventListener('keydown', this.onKeydown)
+    window.removeEventListener('keydown', this.onKeydown, true)
     if (typeof window.matchMedia === 'function') {
       window
         .matchMedia('(prefers-color-scheme: light)')
@@ -1436,8 +1441,18 @@ export class SebasSettingsModal extends LitElement {
     if (changed.has('section') && this.open) writeLastSection(this.section)
   }
 
+  /**
+   * （fix-webui-qa-round11 4.4，A-4/D6）Esc 关闭走窗口级 **capture** keydown：
+   * 弹窗打开期间不依赖焦点落点一律响应。让位规则：事件路径上存在内部
+   * `wa-dialog`（删除确认 / 编辑表单等二次对话框）时不关整窗——Esc 交给
+   * 该对话框自身的关闭语义（只关确认层，不连带设置弹窗）。
+   */
   private onKeydown = (e: KeyboardEvent): void => {
-    if (this.open && e.key === 'Escape') this.requestClose()
+    if (!this.open || e.key !== 'Escape') return
+    if (e.composedPath().some((n) => n instanceof HTMLElement && n.localName === 'wa-dialog')) {
+      return
+    }
+    this.requestClose()
   }
 
   /** 统一出口：先翻自身 open，再通知宿主（无宿主监听时也能自行关闭）。 */
@@ -2944,10 +2959,12 @@ export class SebasSettingsModal extends LitElement {
               open
               @wa-hide=${guardedHide(() => (this.agentDelete = null))}
             >
-              <p class="dialog-text">
-                删除 agent <strong>${this.agentDelete.id}</strong>？已建会话不受影响
-                （继续到自然结束）；引用它的项目默认 agent 会被清除。之后在创建会话下拉
-                中立即可见。
+              <!-- （fix-webui-qa-round11 4.6，A-6）确认文案 = 完整短句：整段
+                   经一个表达式产出，模板换行不再把「下拉中」截成「下拉
+                   中立即可见」的断句歧义；四个语义点逐句点名（agent、已建
+                   会话跑到自然结束、项目默认被清除、创建下拉立即消失）。 -->
+              <p class="dialog-text" data-testid="agent-delete-copy">
+                ${`删除 agent ${this.agentDelete.id}？已创建的会话不受影响，会继续运行到自然结束；引用它的项目默认 agent 会被清除；它将立即从创建会话下拉中消失。`}
               </p>
               ${this.agentDelete.error
                 ? html`<div class="callout callout-error" role="alert">${this.agentDelete.error}</div>`
@@ -3068,9 +3085,12 @@ export class SebasSettingsModal extends LitElement {
   }
 
   /** 单个 skill 行：名字（点开预览）/ invalid 徽标（悬停显原因）/
-   * description / attachment 数 / 删除按钮。 */
+   * description / attachment 数 / 删除按钮。删除是改仓动作（settings.manage
+   * 档，fix-webui-qa-round11 2.2）：只读角色不渲染删除控件——防线在服务端
+   * 路由层（DELETE 403），这里是 D8 呈现裁剪。 */
   private renderSkillRow(s: SkillEntry) {
     const open = this.skillPreview?.name === s.name
+    const canDelete = canManageSkills(this.role)
     return html`
       <div class="skills-row" data-testid="skill-row" data-name=${s.name}>
         <div class="skills-row-main">
@@ -3091,14 +3111,16 @@ export class SebasSettingsModal extends LitElement {
             ${s.attachments.length} 个附件
           </span>
           <span class="provider-row-actions">
-            <button
-              class="row-action danger"
-              title="删除"
-              ?disabled=${this.skillBusy}
-              @click=${() => (this.skillDelete = { name: s.name, error: '' })}
-            >
-              🗑
-            </button>
+            ${canDelete
+              ? html`<button
+                  class="row-action danger"
+                  title="删除"
+                  ?disabled=${this.skillBusy}
+                  @click=${() => (this.skillDelete = { name: s.name, error: '' })}
+                >
+                  🗑
+                </button>`
+              : nothing}
           </span>
         </div>
         ${open ? this.renderSkillPreview() : nothing}

@@ -14,6 +14,7 @@
  * | Settings → Services 分区 | services.control | ✓ | ✓ | | |
  * | Agents 写入口（New/Edit/Delete） | agents.manage（settings.manage 档） | ✓ | ✓ | | |
  * | Provider/别名/默认选择写入口（fix-webui-qa-round10 3.2） | settings.manage | ✓ | ✓ | | |
+ * | Skills 删除入口（fix-webui-qa-round11 2.2） | settings.manage 档 | ✓ | ✓ | | |
  * | 「新建会话」入口（sessions.write） | sessions.write | ✓ | ✓ | ✓ | |
  *
  * （Users 分区在鉴权关闭的宿主上**不**因 null 放开：auth=false 没有用户
@@ -50,6 +51,17 @@ export function canManageAgents(role: Role | null): boolean {
  * 对全部登录角色保留。
  */
 export function canManageProviders(role: Role | null): boolean {
+  return role === null || role === 'root' || role === 'admin'
+}
+
+/**
+ * Skills 分区的删除入口（fix-webui-qa-round11 2.2，A-1/D2）：归
+ * settings.manage 档（root/admin，与 provider 变更面同键）——删除是改仓
+ * 动作，服务端对 DELETE /api/skills/{name} 的 403 执法在 `required_permission`
+ * 中央表，这里只决定只读角色的技能行不渲染删除控件。列表/预览/刷新/同步
+ * （投影不动仓）对全部登录角色保留。
+ */
+export function canManageSkills(role: Role | null): boolean {
   return role === null || role === 'root' || role === 'admin'
 }
 

@@ -1190,6 +1190,56 @@ describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
     el.remove()
   })
 
+  // ── fix-webui-qa-round11 2.2（A-1/D2）：技能删除控件随角色裁剪 ──
+  // spec「viewer cannot delete a skill：no delete affordance is rendered」：
+  // settings.manage 档（root/admin）才渲染行内 🗑；member/viewer 只读浏览
+  // （列表/预览/刷新/同步全保留）。防线在服务端 DELETE 403，这里是呈现裁剪。
+  describe('技能删除控件随角色裁剪（fix-webui-qa-round11 2.2）', () => {
+    async function mountAs(
+      role: 'root' | 'admin' | 'member' | 'viewer' | null,
+    ): Promise<SebasSettingsModal> {
+      const el = document.createElement('sebas-settings-modal') as SebasSettingsModal
+      if (role !== null) el.role = role
+      el.open = true
+      document.body.appendChild(el)
+      await el.updateComplete
+      await new Promise((r) => setTimeout(r, 0))
+      await el.updateComplete
+      return el
+    }
+
+    it('member/viewer 的技能行不渲染删除按钮，浏览面（列表/刷新/同步）保留', async () => {
+      for (const role of ['member', 'viewer'] as const) {
+        const el = await mountAs(role)
+        await goto(el, 'skills')
+        expect(el.section).toBe('skills')
+        // 列表照常加载（读不受影响）。
+        expect(apiMocks.skillsList).toHaveBeenCalled()
+        expect(skillRows(el).length).toBe(3)
+        // 每一行都没有 🗑。
+        for (const row of skillRows(el)) {
+          expect(row.querySelector('button[title="删除"]'), `${role} 不得见删除控件`).toBeNull()
+        }
+        // 刷新/同步（投影不动仓）保留。
+        const buttons = waButtons(el).map((b) => b.textContent?.trim())
+        expect(buttons).toContain('刷新')
+        expect(buttons).toContain('同步')
+        el.remove()
+      }
+    })
+
+    it('root/admin（及鉴权关闭宿主）删除控件照常呈现', async () => {
+      for (const role of ['root', 'admin', null] as const) {
+        const el = await mountAs(role)
+        await goto(el, 'skills')
+        for (const row of skillRows(el)) {
+          expect(row.querySelector('button[title="删除"]'), `删除控件 @ ${role}`).toBeTruthy()
+        }
+        el.remove()
+      }
+    })
+  })
+
   it('invalid entry preview states the missing SKILL.md honestly (text null on the wire)', async () => {
     const el = await mount()
     await goto(el, "skills")
@@ -1431,6 +1481,31 @@ describe('add-agent-settings-and-session-titles：Agents 分区（/api/agents*�
     expect(el.shadowRoot!.querySelector('[data-testid="agent-action"]')?.textContent).toContain(
       '已删除',
     )
+    el.remove()
+  })
+
+  // （fix-webui-qa-round11 4.6，A-6）确认文案 = 完整短句、空格统一：四个
+  // 语义点逐句点名，且不存在「下拉 中立即可见」式跨行/跨词断句歧义。
+  it('delete confirmation copy reads as complete unambiguous sentences (round11 4.6)', async () => {
+    const el = await mount()
+    await goto(el, "agents")
+    agentRows(el)
+      .find((r) => r.dataset['id'] === 'claude')!
+      .querySelector<HTMLElement>('button[title="删除"]')!
+      .click()
+    await settle(el)
+    const copy = el
+      .shadowRoot!
+      .querySelector('[data-testid="agent-delete-copy"]')!
+      .textContent!.replace(/\s+/g, ' ')
+    // 点名 agent 本体。
+    expect(copy).toContain('删除 agent claude？')
+    // 三个后果逐句完整：已建会话跑到自然结束、项目默认清除、创建下拉立即消失。
+    expect(copy).toContain('已创建的会话不受影响，会继续运行到自然结束；')
+    expect(copy).toContain('引用它的项目默认 agent 会被清除；')
+    expect(copy).toContain('它将立即从创建会话下拉中消失。')
+    // 旧歧义断句（「中立即可见」）必须绝迹。
+    expect(copy).not.toContain('中立')
     el.remove()
   })
 
@@ -1909,6 +1984,50 @@ describe('sebas-settings-modal closing', () => {
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
     await el.updateComplete
     expect(el.open).toBe(false)
+    el.remove()
+  })
+
+  // （fix-webui-qa-round11 4.4，A-4/D6）Esc 关闭改走窗口级 capture：焦点在
+  // 弹窗外、且途中有人 stopPropagation（bubble 相位的 window 监听收不到）
+  // 时依然关闭——capture 站在传播最前端，不依赖焦点落点。
+  it('Escape closes it even when a mid-path handler stops propagation (capture phase, round11 4.4)', async () => {
+    const el = await mount()
+    const stopper = (e: Event): void => e.stopPropagation()
+    document.addEventListener('keydown', stopper)
+    try {
+      // 焦点语义在 jsdom 里以「事件从弹窗外元素派发」模拟：document 上的
+      // bubble 监听把它掐断后，bubble 相位的 window 监听不再收得到。
+      document.body.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, composed: true }),
+      )
+      await el.updateComplete
+      expect(el.open, 'capture 相位的 Esc 必须仍然关闭弹窗').toBe(false)
+    } finally {
+      document.removeEventListener('keydown', stopper)
+    }
+    el.remove()
+  })
+
+  // （fix-webui-qa-round11 4.4）让位规则：内部二次确认对话框打开时，Esc 只
+  // 关确认层（对话框自身的关闭语义），不连带整个设置弹窗。
+  it('Escape while an inner confirm dialog is open does not close the whole modal (round11 4.4)', async () => {
+    const el = await mount()
+    await goto(el, 'agents')
+    el.shadowRoot!
+      .querySelector<HTMLElement>('[data-testid="agent-row"][data-id="claude"]')!
+      .querySelector<HTMLElement>('button[title="删除"]')!
+      .click()
+    await el.updateComplete
+    const dlg = [...el.shadowRoot!.querySelectorAll<HTMLDialogElement>('wa-dialog')].find(
+      (d) => d.getAttribute('label') === '删除 agent',
+    )
+    expect(dlg, '删除确认对话框在场').toBeTruthy()
+    // 事件从确认对话框出发（composedPath 含 wa-dialog）→ 整窗让位。
+    dlg!.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, composed: true }),
+    )
+    await el.updateComplete
+    expect(el.open, '确认层在场时 Esc 不得连带关闭设置弹窗').toBe(true)
     el.remove()
   })
 

@@ -8,7 +8,9 @@ import {
   type SebasLineChart,
 } from './line-chart.js'
 
-const PAD = { top: 12, right: 12, bottom: 22, left: 46 }
+// 与 DEFAULT_PADDING 同步（right=32 是 fix-webui-qa-round11 4.5 的右缘
+// inset——最右 x 刻度的中心锚日期文本右半 ≈28px，必须留在 viewBox 内）。
+const PAD = { top: 12, right: 32, bottom: 22, left: 46 }
 
 describe('computeChartGeometry (data → points/paths pure functions)', () => {
   const W = 640
@@ -85,6 +87,30 @@ describe('computeChartGeometry (data → points/paths pure functions)', () => {
     // 单点窗口：单刻度居中。
     const single = computeChartGeometry([{ name: 'a', values: [1] }], W, H)
     expect(single.xLabels).toHaveLength(1)
+  })
+
+  // （fix-webui-qa-round11 4.5，A-5）右缘刻度完整可见：最右 x 刻度是中心
+  // 锚的日期文本（天粒度 YYYY-MM-DD ≈56px，右半 ≈28px）——右 padding
+  // 必须把它留在 viewBox 内，旧值 12 会裁成「2026-10」。
+  it('rightmost x-axis label stays fully inside the viewBox at both granularities (round11 4.5)', () => {
+    const W = 720 // usage 视图的图表宽度
+    const HALF_DAY_LABEL = 28 // YYYY-MM-DD 中心锚的右半宽
+    // 天粒度：14 桶（usage 视图近 14 天）。
+    const day = computeChartGeometry(
+      [{ name: 'a', values: Array.from({ length: 14 }, (_, i) => i) }],
+      W,
+      260,
+    )
+    const lastDay = day.xLabels[day.xLabels.length - 1]!
+    expect(lastDay.x + HALF_DAY_LABEL).toBeLessThanOrEqual(W)
+    // 小时粒度：24 桶（今天 0–23 时）；标签更短，同一 inset 自动覆盖。
+    const hour = computeChartGeometry(
+      [{ name: 'a', values: Array.from({ length: 24 }, (_, i) => i) }],
+      W,
+      260,
+    )
+    const lastHour = hour.xLabels[hour.xLabels.length - 1]!
+    expect(lastHour.x + HALF_DAY_LABEL).toBeLessThanOrEqual(W)
   })
 
   it('ignores non-finite values instead of poisoning the scale', () => {

@@ -431,7 +431,8 @@ fn is_protected_path(path: &str) -> bool {
 /// | `/api/providers*` 写（增/改/删，fix-webui-qa-round10 3.1）、`/api/model-aliases*` 写 | 非安全方法 | `settings.manage`（member/viewer 只读；spec「Provider and alias mutations are role-gated」）。例外：`POST /api/providers/{name}/probe` 只读拨测不执法 |
 /// | `/api/providers*` 读、`/api/provider-presets`、`/api/provider-defaults` | GET | 无（认证即可——spec「Read access … remains available to signed-in roles」） |
 /// | `/api/sessions*` 写、`/api/projects*` 写、`/api/permissions/*`（answer） | 非安全方法 | `sessions.write` |
-/// | `/api/skills*`（skills 管理面读 + 删/sync） | 全部 | 无——add-agent-skills 5.3：仅登录门 + 非安全方法同源校验（fix-webui-qa-round10 3.1 起 provider 变更面已单独收进 settings.manage，skills 面的「同一权限档」表述随之失效，执法不变） |
+/// | `/api/skills` 读（list/detail）、`POST /api/skills/sync`（投影） | GET / POST | 无——add-agent-skills 5.3：仅登录门 + 非安全方法同源校验 |
+/// | `DELETE /api/skills/{name}`（改仓，fix-webui-qa-round11 2.1） | 非安全方法 | `settings.manage`（root/admin；member/viewer 403 类型化权限错误，与 provider 变更面同键） |
 /// | `/api/agents*` 写（POST / PUT / DELETE，gate-agent-directory-writes 1.1） | 非安全方法 | `settings.manage` 档（spec agents.manage 行：root/admin——同一执法函数的再标注，不新设权限位） |
 /// | `/api/fs/mkdir`（目录选择器新建子目录，add-webui-round7-gaps 3.1） | 非安全方法 | `sessions.write`（为注册项目服务的写面；viewer 只读） |
 /// | 其余 `/api/*`（summary / sessions 与 projects 读 / env / agents 读 / nodes / about / archive 读 / browse-dirs）与 `/ws` | 全部 | 无（认证即可，viewer 可读） |
@@ -472,12 +473,16 @@ fn required_permission(path: &str, method: &str) -> Option<Permission> {
     if path == "/api/provider-presets" || path == "/api/provider-defaults" {
         return None;
     }
-    // skills 管理面（add-agent-skills 5.3）：挂到 provider 管理面同一权限档
-    // ——读（list/detail）= 管理面读、删/sync = 管理面写，都只要求登录 +
-    // 非安全方法同源校验（auth_guard 既有防线），不按角色执法。显式列出，
-    // 防止未来新增 `/api/*` 规则误捕这些路径。
+    // skills 管理面（add-agent-skills 5.3；fix-webui-qa-round11 2.1，A-1/D2）：
+    // 读（list/detail）与 sync（投影）维持登录门（不按角色执法）；**删除**是
+    // 改仓动作，挂 `settings.manage`（root/admin，与 provider 变更面同键，
+    // rbac 矩阵本身不动）——member/viewer 在 RBAC 层得 403 类型化权限错误，
+    // 与项目注册拒绝同款。显式列出，防止未来新增 `/api/*` 规则误捕这些路径。
     if path == "/api/skills" || path == "/api/skills/sync" || path.starts_with("/api/skills/") {
-        return None;
+        if path == "/api/skills/sync" {
+            return None;
+        }
+        return mutating.then_some(Permission::SettingsManage);
     }
     // admin 控制面（含服务启停/升级/回滚——同一控制面）。
     if path.starts_with("/api/admin/") {
@@ -1525,10 +1530,10 @@ mod auth_guard_tests {
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
-    /// add-agent-skills 5.3：skills 四端点挂 provider 管理面**同一权限档**
-    /// （读=管理面读、删/sync=管理面写——都不按角色执法，只要求登录）。
-    /// viewer 读放行；member 的删/sync 到达 handler（UnwiredSkills 下分别
-    /// 得 404/200，绝不是 401/403）；匿名仍被登录门拦 401。
+    /// add-agent-skills 5.3 + fix-webui-qa-round11 2.1（A-1/D2）：skills 读面
+    /// 与 sync 维持登录门；**删除**挂 `settings.manage`（root/admin）。
+    /// viewer 读放行；member 的删在 RBAC 层 403（类型化权限错误）、sync 照旧
+    /// 到达 handler（UnwiredSkills 下 200）；匿名仍被登录门拦 401。
     #[tokio::test]
     async fn skills_endpoints_follow_provider_plane_permission_tier() {
         let (app, _dir, _auth) = rbac_app().await;
@@ -1543,7 +1548,8 @@ mod auth_guard_tests {
             "viewer 读 skills 不得被角色拦: {body}"
         );
 
-        // member 写（删 / sync）：穿过角色执法到达 handler。
+        // member 删：改仓动作挂 settings.manage，RBAC 层 403（不再到达
+        // handler——A-1 的越权删除面在服务端关闭）。
         let (status, body) = req(
             app.clone(),
             "DELETE",
@@ -1555,9 +1561,15 @@ mod auth_guard_tests {
         .await;
         assert_eq!(
             status,
-            StatusCode::NOT_FOUND,
-            "member 删 skills 必须到达 handler（404 缺条目）: {status} {body}"
+            StatusCode::FORBIDDEN,
+            "member 删 skills 必须 403（settings.manage）: {status} {body}"
         );
+        assert!(
+            body.contains("权限不足"),
+            "错误体是类型化权限错误（与项目注册拒绝同款）: {body}"
+        );
+
+        // member sync：投影不是改仓，维持登录门（到达 handler → 200）。
         let (status, body) = req(
             app.clone(),
             "POST",

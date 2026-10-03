@@ -40,4 +40,13 @@ describe('renderMarkdown', () => {
     expect(html).toContain('<code>npm test</code>')
     expect(html).toContain('<a href="https://example.com"')
   })
+
+  // （fix-webui-qa-round11 4.1，B-4）单换行在段内逐字保留（breaks:false）：
+  // wire 往返的 `\n` 不被管线吃掉，pre-wrap 容器（transcript .body）据此
+  // 渲染出真实的行结构——三行提交渲染为三行的管线半边合同。
+  it('keeps single newlines inside a paragraph verbatim for pre-wrap containers (round11 4.1)', () => {
+    const html = renderMarkdown('键盘行甲\n键盘行乙\n键盘行丙')
+    // 段内单换行逐字保留（块间的尾随换行不产生可见空行，无碍）。
+    expect(html).toContain('<p>键盘行甲\n键盘行乙\n键盘行丙</p>')
+  })
 })

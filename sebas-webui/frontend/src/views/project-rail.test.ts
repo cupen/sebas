@@ -2697,8 +2697,22 @@ describe('fix-webui-qa-round8: menu close, /sessions entry, anchor race', () => 
     expect(link.getAttribute('href')).toBe('/sessions')
     // 点击链接区导航（SPA 拦截由 shell 文档级监听承接），绝不折叠组。
     const before = head.getAttribute('aria-expanded')
+    // （fix-webui-qa-round11 3c GUI 复核）链接点击必须能冒泡到 document 且
+    // 不 preventDefault——曾在此处 stopPropagation，把事件挡死在 rail 内，
+    // shell 拦截器永远收不到，浏览器回落原生 href 整页刷新（丢 SPA 状态、
+    // 吞掉历史页的回合终点通知）。
+    let reachedDocument = false
+    let prevented = true
+    const spy = (e: Event) => {
+      reachedDocument = true
+      prevented = e.defaultPrevented
+    }
+    document.addEventListener('click', spy)
     link.click()
+    document.removeEventListener('click', spy)
     await el.updateComplete
+    expect(reachedDocument).toBe(true)
+    expect(prevented).toBe(false)
     expect(head.getAttribute('aria-expanded')).toBe(before)
     // chevron 仍是折叠开关。
     ;(head as HTMLElement).click()

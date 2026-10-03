@@ -15,7 +15,7 @@
 
 import { LitElement, css, html, nothing, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { api, type AgentKindInfo, type ArchiveDetail, type ArchiveEntry, type ConversationEntryView, type NodeInfo, type NodesResponse, type PendingSubmission, type Project, type SessionDetail, type Summary, errorText } from '../api/client.js'
+import { api, type AgentKindInfo, type ArchiveDetail, type ArchiveEntry, type ConversationEntryView, type NodeInfo, type NodesResponse, type PendingSubmission, type Project, type SessionDetail, type Summary, ApiError, errorText } from '../api/client.js'
 // （fix-webui-qa-round9 4.6）工作台形态持久化：聚焦会话 key 存 localStorage，
 // core 重启（服务端指针清零）后重新打开工作台时恢复。
 import { loadPersistedWorkbenchFocus, savePersistedWorkbenchFocus } from './workbench-persist.js'
@@ -37,6 +37,9 @@ import { archivedEntryLabel, fullSessionLabel, truncateName, RAIL_FOCUS_EVENT, S
 // （round3 3.1 → fix-webui-qa-round8 5.1）焦点转换只登记开卷边界，锚的
 // 推进统一走 transcript 的已见驱动单一路径。
 import { armOpeningSeam, peekOpeningSeam, readAnchorCount } from './unread-cursor.js'
+// （fix-webui-qa-round11 3.1）聚焦会话投影：非聚焦回合终点通知的判定输入
+// （帧观测在 app-shell，焦点事实只有工作台知道）。
+import { setFocusedSession } from './turn-notify.js'
 // （fix-webui-qa-round8 4.4）聚焦链接等展示位的会话标识友好化（渠道 · 本地段）。
 import { friendlySessionKey } from './session-key-label.js'
 
@@ -1070,6 +1073,9 @@ export class SebasDashboard extends LitElement {
   disconnectedCallback(): void {
     this.unsubscribe?.()
     this.unlistenNarrow?.()
+    // （fix-webui-qa-round11 3.1）工作台卸载 = 无聚焦：turn-notify 的焦点
+    // 投影随之清空（文档路由上任何会话的回合终点都应可达）。
+    setFocusedSession(null)
     window.removeEventListener('sebas:refetch', this.refetch)
     window.removeEventListener(RAIL_FOCUS_EVENT, this.onRailFocus)
     window.removeEventListener(SESSION_LABEL_CHANGED_EVENT, this.onSessionLabelChanged)
@@ -1122,6 +1128,11 @@ export class SebasDashboard extends LitElement {
     // workbench-rail-polish 3.2：渲染即核对一拍（聚焦 key 常在请求之后才
     // 随 summary 到达——这趟渲染往往就是首个能落焦的时机）。
     this.focusComposerTick()
+    // （fix-webui-qa-round11 3.1）聚焦会话投影：每次渲染后把 effectiveFocusKey
+    // 写进 turn-notify（非聚焦回合终点通知的判定输入）。key 随 summary 到达
+    // 而定，渲染后投影保证它不滞后一拍；卸载时清空（见 disconnectedCallback），
+    // 文档路由上「无聚焦 = 一切终点都可达」。
+    setFocusedSession(this.effectiveFocusKey())
   }
 
   /**
@@ -1791,6 +1802,14 @@ export class SebasDashboard extends LitElement {
    * refetch 从同一游标重试。会话切换只换 focus 不清表，切回已见会话从
    * 各自游标增量续传；F5 / 元素重建清空 Map，自然回到全量。
    */
+  /**
+   * （fix-webui-qa-round11 4.2，B-5/D5）不可得会话登记表：首拉 404（不存在
+   * /已关闭）的 encoded key 集合。周期同步在 [`loadFocused`] 入口据此跳过
+   * 请求（至多一次失手/导航，无重试环）；元素重建（F5）自然清空，深链
+   * 重载回到单次失手语义。
+   */
+  private unavailableKeys = new Set<string>()
+
   private loadFocused(key: string | null): void {
     // 7.3：焦点清空（会话移除）时保留提示；切到别的会话才清除。
     if (key !== null && key !== this.droppedPendingFor) this.droppedPending = null
@@ -1804,6 +1823,17 @@ export class SebasDashboard extends LitElement {
       this.fetchSeq += 1
       this.focusedDetail = null
       this.focusedUnavailable = false
+      return
+    }
+    // （fix-webui-qa-round11 4.2，B-5/D5）不可得会话止停轮询（数据层）：
+    // 首拉已判不可得的会话（不存在/已关闭 → 404）在这里跳过后续一切请求
+    // ——周期同步（refreshLists/refetch/onComposerSent）再聚焦它也不再打
+    // 入，呈现保持既有「会话不可得」居中态。标记随元素重建（F5）清空，
+    // 深链重载回到「至多一次失手」。
+    if (this.unavailableKeys.has(key)) {
+      this.fetchSeq += 1
+      this.focusedDetail = null
+      this.focusedUnavailable = true
       return
     }
     // 3.2（D4）：请求代际（沿用 project-rail 同款模式）——并发触发下只有
@@ -1825,6 +1855,9 @@ export class SebasDashboard extends LitElement {
         this.sessionEntries.set(d.encoded_key, merged)
         this.focusedDetail = { ...d, entries: merged }
         this.focusedUnavailable = false
+        // （fix-webui-qa-round11 4.2）装载成功 = 不可得标记出清（标记只该
+        // 挡住已证 404 的会话；显式刷新路径清标后重试成功即复位）。
+        this.unavailableKeys.delete(d.encoded_key)
         // （fix-webui-qa-round9 4.6）聚焦 detail 装载成功 = 形态落盘的唯一
         // 漏斗——rail 切换 / 深链 / 创建会话（summary 收敛）三条到达线在此
         // 汇合，重启后的恢复以这份记录为准。
@@ -1858,11 +1891,23 @@ export class SebasDashboard extends LitElement {
         // 指针往往还没落位，这里补一拍投影（幂等）。
         this.followFocusedProject()
       })
-      .catch(() => {
+      .catch((e) => {
         if (seq !== this.fetchSeq) return
         if (this.effectiveFocusKey() !== key) return
+        // （fix-webui-qa-round11 4.2，B-5/D5）**404 才是「不可得」**：会话
+        // 不存在/已关闭。首拉 404 → 温和空态 + 记入不可得集合（后续周期
+        // 同步跳过，404 不再刷屏）；增量 404 → 会话已从服务端消失，同样
+        // 记入（已有转录冻结呈现，不再重复打入）。其它失败（网络抖动等）
+        // 保持既有自愈语义：游标/序列原样保留，下次 refetch 重试。
+        if (e instanceof ApiError && e.status === 404) {
+          this.focusedDetail = null
+          this.focusedUnavailable = true
+          this.unavailableKeys.add(key)
+          return
+        }
         if (!incremental) {
-          // 首拉失败：无本地序列可保，照旧温和空态。
+          // 非失配的首拉失败：无本地序列可保，照旧温和空态（可经后续
+          // refetch 自愈，不进不可得集合）。
           this.focusedDetail = null
           this.focusedUnavailable = true
         }
