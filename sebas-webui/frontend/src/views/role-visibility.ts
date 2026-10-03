@@ -13,7 +13,8 @@
  * | Settings → Users 分区 | users.manage | ✓ | | | |
  * | Settings → Services 分区 | services.control | ✓ | ✓ | | |
  * | Agents 写入口（New/Edit/Delete） | agents.manage（settings.manage 档） | ✓ | ✓ | | |
- * | 「新建会话」入口（rail 项目行「+」） | sessions.write | ✓ | ✓ | ✓ | |
+ * | Provider/别名/默认选择写入口（fix-webui-qa-round10 3.2） | settings.manage | ✓ | ✓ | | |
+ * | 「新建会话」入口（sessions.write） | sessions.write | ✓ | ✓ | ✓ | |
  *
  * （Users 分区在鉴权关闭的宿主上**不**因 null 放开：auth=false 没有用户
  * 面可管理，保持既有隐藏；其余三个入口在 auth=false 的单机形态照旧可用。）
@@ -37,6 +38,18 @@ export function canControlServices(role: Role | null): boolean {
  * 任何已认证角色都可浏览。
  */
 export function canManageAgents(role: Role | null): boolean {
+  return role === null || role === 'root' || role === 'admin'
+}
+
+/**
+ * Provider/别名/默认选择的写入口（fix-webui-qa-round10 3.2，C-DEF-02）：
+ * 归 settings.manage 档（root/admin）——provider 携带上游凭据，属管理面
+ * （spec「Provider and alias mutations are role-gated」）；服务端对变更面
+ * 的 403 执法在 `required_permission` 中央表，这里只决定 member/viewer 的
+ * 设置页不呈现写控件（新建/编辑/删除/设默认/清默认）。provider 列表**读**
+ * 对全部登录角色保留。
+ */
+export function canManageProviders(role: Role | null): boolean {
   return role === null || role === 'root' || role === 'admin'
 }
 

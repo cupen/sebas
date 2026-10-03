@@ -884,7 +884,15 @@ describe('history group (archived sessions)', () => {
     const heads = [...el.shadowRoot!.querySelectorAll('.group-head')]
     const historyHead = heads.find((h) => h.textContent?.includes('历史'))
     expect(historyHead).toBeTruthy()
-    expect(historyHead!.querySelector('.group-count')?.textContent).toBe('3')
+    // （fix-webui-qa-round10 5.1，B-DEF-01）组头计数 = /api/sessions 的
+    // total_sessions（会话页统计同源），不再等于归档条数——本用例归档 3 条
+    // 而会话表默认 3 行，两源恰好重合；把会话表换成 2 行让计数可辨。
+    mockOf(apiMock.sessions).mockResolvedValue(sessionList(sessionRows.slice(0, 2)))
+    await el.refresh()
+    await el.updateComplete
+    expect(
+      el.shadowRoot!.querySelector('[data-testid="history-session-count"]')?.textContent,
+    ).toBe('2')
     // （5.5）组头是原生 <button>：role=button 语义来自元素本身（保留
     // Enter/Space 键盘行为），不再是 div[role=button]。
     expect(historyHead!.tagName.toLowerCase()).toBe('button')
@@ -894,7 +902,39 @@ describe('history group (archived sessions)', () => {
     const labels = [...el.shadowRoot!.querySelectorAll('.group-section li.session-item.archived .session-name')].map(
       (n) => n.textContent,
     )
+    // 归档组列表语义不变：仍列出全部 3 条归档（计数跟会话统计、列表跟
+    // 归档条目，两口径从此分离）。
     expect(labels).toEqual(['New session', 'Mid session', 'Old session'])
+    el.remove()
+  })
+
+  // ── fix-webui-qa-round10 5.1（B-DEF-01）：历史徽章接会话统计源 ──
+
+  it('the history badge tracks session creation and closing via the shared refresh channel (round10 5.1)', async () => {
+    const el = await mount()
+    const countText = () =>
+      el.shadowRoot!.querySelector('[data-testid="history-session-count"]')?.textContent
+    const baseline = Number(countText())
+    expect(baseline).toBe(sessionRows.length)
+    // 新建会话（session.created 帧 → 防抖重取，或 sebas:refetch——测试走
+    // 同一 refresh 收敛点）：total +1，无需整页 reload。
+    mockOf(apiMock.sessions).mockResolvedValue(
+      sessionList([...sessionRows, row({ project_id: 'proj-alpha' })]),
+    )
+    await el.refresh()
+    await el.updateComplete
+    expect(Number(countText())).toBe(baseline + 1)
+    // 关闭/归档：total 回落到 2（归档条目进归档组列表，不进该计数）。
+    mockOf(apiMock.sessions).mockResolvedValue(sessionList(sessionRows.slice(0, 2)))
+    mockOf(apiMock.archiveList).mockResolvedValue({
+      archived_sessions: [
+        { session_key: 'a%00', project_path: '/p', label: 'a1', archived_at: 1, retention_deadline: 2 },
+        { session_key: 'b%00', project_path: '/p', label: 'a2', archived_at: 3, retention_deadline: 4 },
+      ],
+    })
+    await el.refresh()
+    await el.updateComplete
+    expect(countText()).toBe('2')
     el.remove()
   })
 

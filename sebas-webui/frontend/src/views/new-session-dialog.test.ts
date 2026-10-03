@@ -427,8 +427,49 @@ describe('sebas-new-session-dialog', () => {
     expect(codex!.hasAttribute('disabled')).toBe(true)
     // （polish-workbench-walkthrough-ux 4.3）默认可见文案 = 操作者语言 +
     // 补救入口；实现性成因（cause）只进 tooltip。
-    expect(codex?.textContent ?? '').toContain('不可用——到「设置 → 模型」检查配置')
+    // （fix-webui-qa-round10 1.3，A-DEF-02）二进制缺失指引「设置 → Agent」。
+    expect(codex?.textContent ?? '').toContain('不可用——到「设置 → Agent」检查启动定义')
     expect((codex as unknown as { title: string }).title).toContain('command not found')
+  })
+
+  // ── fix-webui-qa-round10 1.3（A-DEF-02）：不可用文案按 cause 分流 ──
+
+  it('guidance routes by cause: binary problems point to Settings → Agent (round10 1.3)', async () => {
+    const { agentUnavailableLabel } = await import('./new-session-dialog.js')
+    // ACP/claude 行的不可达成因都是 launch 定义面问题 → 「设置 → Agent」。
+    expect(
+      agentUnavailableLabel({
+        id: 'claude-error',
+        display: 'claude-error',
+        cause: 'command not found',
+      }),
+    ).toContain('设置 → Agent')
+    expect(
+      agentUnavailableLabel({ id: 'broken', display: 'broken', cause: 'empty command' }),
+    ).toContain('设置 → Agent')
+    // 且不再误指模型页。
+    expect(
+      agentUnavailableLabel({
+        id: 'claude-error',
+        display: 'claude-error',
+        cause: 'command not found',
+      }),
+    ).not.toContain('设置 → 模型')
+  })
+
+  it('only the native credential cause points to Settings → Models (round10 1.3)', async () => {
+    const { agentUnavailableLabel } = await import('./new-session-dialog.js')
+    // native 内核的凭据缺失是唯一的「设置 → 模型」成因
+    // （spec「only a model/credential-caused unavailability directs to
+    // Settings → Models」）。
+    const native = agentUnavailableLabel({
+      id: 'native',
+      display: 'Native Kernel',
+      cause: 'native backend needs SEBAS_AGENT_PROVIDER_API_KEY',
+    })
+    expect(native).toContain('未配置模型凭据')
+    expect(native).toContain('设置 → 模型')
+    expect(native).not.toContain('设置 → Agent')
   })
 
   it('reopen resets the mode to the explicit ask default (D5b)', async () => {

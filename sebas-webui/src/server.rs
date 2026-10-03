@@ -428,9 +428,10 @@ fn is_protected_path(path: &str) -> bool {
 /// | `/api/users*`（列表/创建/改密/改角色/启停/删除） | 全部 | `users.manage`（spec：用户管理面**全部**仅限 root，含列表） |
 /// | `/api/admin/*`（状态/事件/服务启停/升级/回滚/restart-core/login） | 全部 | `services.control` |
 /// | `/api/settings`（卡片/显示偏好写） | 非安全方法 | `settings.manage`（GET 认证即可） |
+/// | `/api/providers*` 写（增/改/删，fix-webui-qa-round10 3.1）、`/api/model-aliases*` 写 | 非安全方法 | `settings.manage`（member/viewer 只读；spec「Provider and alias mutations are role-gated」）。例外：`POST /api/providers/{name}/probe` 只读拨测不执法 |
+/// | `/api/providers*` 读、`/api/provider-presets`、`/api/provider-defaults` | GET | 无（认证即可——spec「Read access … remains available to signed-in roles」） |
 /// | `/api/sessions*` 写、`/api/projects*` 写、`/api/permissions/*`（answer） | 非安全方法 | `sessions.write` |
-/// | `/api/providers*`、`/api/provider-presets`、`/api/provider-defaults`、`/api/model-aliases*`（provider 管理面读 + 写） | 全部 | 无——design D3 明确排除在角色执法外，仅登录门 + 自身守卫（POST-only + origin） |
-/// | `/api/skills*`（skills 管理面读 + 删/sync） | 全部 | 无——add-agent-skills 5.3：与 provider 管理面**同一权限档**（读=管理面读、删/sync=管理面写，都不按角色执法）；仅登录门 + 非安全方法同源校验 |
+/// | `/api/skills*`（skills 管理面读 + 删/sync） | 全部 | 无——add-agent-skills 5.3：仅登录门 + 非安全方法同源校验（fix-webui-qa-round10 3.1 起 provider 变更面已单独收进 settings.manage，skills 面的「同一权限档」表述随之失效，执法不变） |
 /// | `/api/agents*` 写（POST / PUT / DELETE，gate-agent-directory-writes 1.1） | 非安全方法 | `settings.manage` 档（spec agents.manage 行：root/admin——同一执法函数的再标注，不新设权限位） |
 /// | `/api/fs/mkdir`（目录选择器新建子目录，add-webui-round7-gaps 3.1） | 非安全方法 | `sessions.write`（为注册项目服务的写面；viewer 只读） |
 /// | 其余 `/api/*`（summary / sessions 与 projects 读 / env / agents 读 / nodes / about / archive 读 / browse-dirs）与 `/ws` | 全部 | 无（认证即可，viewer 可读） |
@@ -439,20 +440,36 @@ fn is_protected_path(path: &str) -> bool {
 /// admin 控制面自身的 `SEBAS_CONTROL_SECRET` 会话保持第二层不动；RBAC 只
 /// 是在其外再按角色拦截 viewer/member（design D3）。
 fn required_permission(path: &str, method: &str) -> Option<Permission> {
+    let mutating = !is_safe_method(method);
     // 用户管理面：列表也在内——非 root 一律 403，即使已认证（spec
     // 「用户管理（root 专用）」）。
     if path == "/api/users" || path.starts_with("/api/users/") {
         return Some(Permission::UsersManage);
     }
-    // provider 管理面（读 + 写）：不纳入 RBAC（design D3 / proposal
-    // Non-goals）。显式列出，防止未来新增 `/api/*` 规则误捕这些路径。
-    if path == "/api/providers"
-        || path.starts_with("/api/providers/")
-        || path == "/api/provider-presets"
-        || path == "/api/provider-defaults"
-        || path == "/api/model-aliases"
-        || path.starts_with("/api/model-aliases/")
-    {
+    // provider 管理面（fix-webui-qa-round10 3.1，C-DEF-02）：
+    //  - **变更面**挂 `settings.manage`（root/admin；member/viewer 只读）——
+    //    provider 增/改/删（含 API key 材料）、模型别名增/改/删（spec
+    //    「Provider and alias mutations are role-gated」）。此前整面
+    //    「不纳入 RBAC」的旧决策随 QA 实测（member 可创建带 key 的
+    //    provider）被否：provider 携带上游凭据，属管理面。
+    //  - **读面**（GET 列表/详情/`provider-defaults`/`provider-presets`）
+    //    保持登录门（spec「Read access to the provider list remains
+    //    available to signed-in roles」）。
+    //  - `POST /api/providers/{name}/probe` 是只读拨测（core 侧对上游发一次
+    //    GET 抓模型列表，不落库），不属变更面，认证即可。
+    //  - 「默认 provider/model 选择」当前无服务端写路由（前端 ★ 仅浏览器
+    //    本地偏好，`set_defaults` op 无 webui 调用方）；将来若补服务端
+    //    路由，按同一 `settings.manage` 档执法。
+    if path == "/api/providers" || path.starts_with("/api/providers/") {
+        if method == "POST" && path.ends_with("/probe") {
+            return None;
+        }
+        return mutating.then_some(Permission::SettingsManage);
+    }
+    if path == "/api/model-aliases" || path.starts_with("/api/model-aliases/") {
+        return mutating.then_some(Permission::SettingsManage);
+    }
+    if path == "/api/provider-presets" || path == "/api/provider-defaults" {
         return None;
     }
     // skills 管理面（add-agent-skills 5.3）：挂到 provider 管理面同一权限档
@@ -466,7 +483,6 @@ fn required_permission(path: &str, method: &str) -> Option<Permission> {
     if path.starts_with("/api/admin/") {
         return Some(Permission::ServicesControl);
     }
-    let mutating = !is_safe_method(method);
     if path == "/api/settings" {
         return mutating.then_some(Permission::SettingsManage);
     }
@@ -1481,11 +1497,12 @@ mod auth_guard_tests {
         assert_ne!(status, StatusCode::FORBIDDEN, "root 不得被 RBAC 层拦截");
     }
 
-    /// spec「router BFF 仅登录门」：member 调 router BFF 写不因角色被拦
-    /// （登录门 + 自身 POST-only/origin 守卫照常）。FakeBackend 无 router
-    /// 可达 → 503（到达 handler 的证据），绝不是 401/403。
+    /// （fix-webui-qa-round10 3.1，C-DEF-02）provider 变更面收进
+    /// settings.manage 后，旧的「router BFF 仅登录门」表述对 provider 面
+    /// 失效：member 的 provider 写在 RBAC 层 403（不再到达 handler）；
+    /// 未登录仍被登录门拦 401（认证门先于角色执法）。
     #[tokio::test]
-    async fn member_router_bff_write_is_not_role_blocked() {
+    async fn member_provider_write_is_role_blocked_at_the_rbac_layer() {
         let (app, _dir, _auth) = rbac_app().await;
         let bob = login_cookie(&app, "bob", "password8").await;
         let (status, body) = req(
@@ -1499,11 +1516,11 @@ mod auth_guard_tests {
         .await;
         assert_eq!(
             status,
-            StatusCode::SERVICE_UNAVAILABLE,
-            "member 的 router BFF 写必须穿过角色执法到达 handler: {status} {body}"
+            StatusCode::FORBIDDEN,
+            "member 的 provider 写必须被 RBAC 层拦截（settings.manage）: {status} {body}"
         );
 
-        // 未登录仍被登录门拦（BFF 只豁免角色执法，不豁免登录）。
+        // 未登录仍被登录门拦（角色执法之前认证门先行）。
         let (status, _) = req(app, "POST", "/api/providers", None, None, None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }

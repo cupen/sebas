@@ -1495,7 +1495,12 @@ describe('add-agent-settings-and-session-titles：Agents 分区（/api/agents*�
     el.remove()
   })
 
-  it('duplicate agent id at create time shows a visible warning (round2 3.3)', async () => {
+  // ── fix-webui-qa-round10 1.4（A-DEF-03）：dup-id 提示与实际行为一致 ──
+  // 原 round2 3.3 的「新建重名 = 覆盖预告」被证伪（服务端实际 409 拒绝，
+  // 覆盖从未发生）：新建路径不再预告覆盖，只呈现拒绝 error；编辑路径保存
+  // 确实更新启动定义，覆盖提示只在它为真的地方出现。
+
+  it('create with an existing id promises nothing — no overwrite warning (round10 1.4)', async () => {
     const el = await mount()
     await goto(el, "agents")
     waButtons(el)
@@ -1504,9 +1509,55 @@ describe('add-agent-settings-and-session-titles：Agents 分区（/api/agents*�
     await settle(el)
     setWaInput(el, 'Agent id', 'claude')
     await settle(el)
+    // 新建重名：无覆盖预告（spec「no warning promising an overwrite is
+    // shown alongside the rejection」）。
+    expect(
+      el.shadowRoot!.querySelector('[data-testid="agent-duplicate-warning"]'),
+    ).toBeNull()
+    el.remove()
+  })
+
+  it('create with an existing id surfaces only the rejection error (round10 1.4)', async () => {
+    apiMocks.agentsCreate.mockRejectedValue(
+      Object.assign(new Error("agent 'claude' 已存在"), { status: 409 }),
+    )
+    const el = await mount()
+    await goto(el, "agents")
+    waButtons(el)
+      .find((b) => b.textContent?.trim() === '＋ 新建 agent')!
+      .click()
+    await settle(el)
+    setWaInput(el, 'Agent id', 'claude')
+    await settle(el)
+    const dlg = dialogByLabel(el, '新建 agent')
+    waButtonsIn(dlg)
+      .find((b) => b.textContent?.trim() === '保存')!
+      .click()
+    await settle(el)
+    // 恰好一种结果：可见的拒绝 error，命名重复 id；无覆盖 warning 同框。
+    const err = el.shadowRoot!.querySelector('[data-testid="agent-form-error"]')
+    expect(err).toBeTruthy()
+    expect(err!.textContent).toContain('claude')
+    expect(err!.textContent).toContain('已存在')
+    expect(
+      el.shadowRoot!.querySelector('[data-testid="agent-duplicate-warning"]'),
+    ).toBeNull()
+    el.remove()
+  })
+
+  it('edit mode shows the overwrite warning, where it is true (round10 1.4)', async () => {
+    apiMocks.agentsUpdate.mockResolvedValue({ updated: 'claude' })
+    const el = await mount()
+    await goto(el, "agents")
+    agentRows(el)
+      .find((r) => r.dataset['id'] === 'claude')!
+      .querySelector<HTMLElement>('button[title="编辑"]')!
+      .click()
+    await settle(el)
     const warn = el.shadowRoot!.querySelector('[data-testid="agent-duplicate-warning"]')
     expect(warn).toBeTruthy()
-    expect(warn!.textContent).toContain('覆盖')
+    expect(warn!.textContent).toContain('更新')
+    expect(warn!.textContent).toContain('claude')
     el.remove()
   })
 })
@@ -1577,6 +1628,100 @@ describe('gate-agent-directory-writes 2.1：Agents 写入口随角色裁剪', ()
     expect(empty).toBeTruthy()
     expect(empty!.textContent).not.toContain('新建 agent')
     el.remove()
+  })
+})
+
+// ── fix-webui-qa-round10 3.2（C-DEF-02）：provider 变更面写入口随角色裁剪 ──
+// spec「Member cannot mutate a provider … the settings UI does not offer the
+// mutation controls to that member」：settings.manage 档（root/admin）才呈现
+// 新建/设默认/清默认/行内编辑删除；member/viewer 只读浏览（列表保留）。
+describe('fix-webui-qa-round10 3.2：Provider/默认选择写入口随角色裁剪', () => {
+  async function mountAs(
+    role: 'root' | 'admin' | 'member' | 'viewer' | null,
+  ): Promise<SebasSettingsModal> {
+    const el = document.createElement('sebas-settings-modal') as SebasSettingsModal
+    if (role !== null) el.role = role
+    el.open = true
+    document.body.appendChild(el)
+    await el.updateComplete
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    return el
+  }
+
+  async function gotoModels(el: SebasSettingsModal): Promise<void> {
+    await goto(el, 'models')
+  }
+
+  it('member/viewer 只读：无新建/设默认/编辑/删除控件，列表仍可浏览', async () => {
+    for (const role of ['member', 'viewer'] as const) {
+      const el = await mountAs(role)
+      await gotoModels(el)
+      // 读面保留：provider 列表照常呈现。
+      const row = el.shadowRoot!.querySelector<HTMLElement>('.provider-row')
+      expect(row, `${role} 仍能浏览 provider 列表`).toBeTruthy()
+      expect(row!.textContent).toContain('alpha')
+      // 写控件全部不呈现。
+      const buttons = [...el.shadowRoot!.querySelectorAll('wa-button')].map((b) =>
+        b.textContent?.trim(),
+      )
+      expect(buttons.join('|'), `${role} 不得见「新建」`).not.toContain('新建（预设）')
+      expect(buttons.join('|'), `${role} 不得见「新建（自定义）」`).not.toContain('新建（自定义）')
+      for (const b of el.shadowRoot!.querySelectorAll<HTMLElement>('button[title]')) {
+        const t = b.getAttribute('title') ?? ''
+        expect(t, `${role} 不得见行内写控件: ${t}`).not.toBe('设为新建会话的默认')
+        expect(t, `${role} 不得见行内写控件: ${t}`).not.toBe('编辑')
+        expect(t, `${role} 不得见行内写控件: ${t}`).not.toBe('删除')
+        expect(t, `${role} 不得见行内写控件: ${t}`).not.toBe('清除新建会话的默认值')
+      }
+      el.remove()
+    }
+  })
+
+  it('root/admin（及鉴权关闭宿主）写控件全在：新建 + ★/✎/🗑 + 清默认', async () => {
+    for (const role of ['root', 'admin', null] as const) {
+      const el = await mountAs(role)
+      await gotoModels(el)
+      const toolbar = el.shadowRoot!.querySelector('.provider-toolbar')!
+      expect(toolbar.textContent, `${role} 必须见「新建（预设）」`).toContain('新建（预设）')
+      expect(toolbar.textContent, `${role} 必须见「新建（自定义）」`).toContain('新建（自定义）')
+      const row = el
+        .shadowRoot!
+        .querySelector<HTMLElement>('.provider-row')
+      expect(row!.querySelector('button[title="设为新建会话的默认"]'), `${role} ★`).toBeTruthy()
+      expect(row!.querySelector('button[title="编辑"]'), `${role} ✎`).toBeTruthy()
+      expect(row!.querySelector('button[title="删除"]'), `${role} 🗑`).toBeTruthy()
+      el.remove()
+    }
+  })
+
+  it('清默认控件（✕）仅在持有写权限且已设默认时呈现', async () => {
+    const el = await mountAs('member')
+    await gotoModels(el)
+    // 组件 state 直写（defaults 读面独立于本测试的裁剪面）。
+    ;(el as unknown as { defaults: { provider: string; model: string | null } | null }).defaults = {
+      provider: 'alpha',
+      model: null,
+    }
+    await el.updateComplete
+    expect(
+      el.shadowRoot!.querySelector('button[title="清除新建会话的默认值"]'),
+      'member 已设默认也不得见清默认控件',
+    ).toBeNull()
+    el.remove()
+
+    const el2 = await mountAs('admin')
+    await gotoModels(el2)
+    ;(el2 as unknown as { defaults: { provider: string; model: string | null } | null }).defaults = {
+      provider: 'alpha',
+      model: null,
+    }
+    await el2.updateComplete
+    expect(
+      el2.shadowRoot!.querySelector('button[title="清除新建会话的默认值"]'),
+      'admin 已设默认时清默认控件在',
+    ).toBeTruthy()
+    el2.remove()
   })
 })
 

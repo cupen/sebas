@@ -89,7 +89,12 @@ import { getThemeMode, resolvesToLight, setThemeMode, type ThemeMode } from '../
 // 分区可见性映射表（add-webui-multiuser-rbac 5.4 起；gate-agent-directory-
 // writes 2.1 收编为共享单表）：users/services 分区裁剪与 agents 写入口、
 // （经 app-shell 下传 rail 的）新建会话入口同一事实源。
-import { canControlServices, canManageAgents, canManageUsers } from './role-visibility.js'
+import {
+  canControlServices,
+  canManageAgents,
+  canManageProviders,
+  canManageUsers,
+} from './role-visibility.js'
 // （fix-webui-qa-round8 7.5）技能预览只渲染正文：frontmatter 剥离。
 import { stripFrontmatter } from './skill-frontmatter.js'
 // （fix-webui-qa-round8 6.1）模型别名管理分区（独立模块挂入）。
@@ -2233,10 +2238,11 @@ export class SebasSettingsModal extends LitElement {
           ${this.renderModels()}
         `
       // （fix-webui-qa-round8 6.1）模型别名分区 = 独立模块（不膨胀单文件）。
+      // （fix-webui-qa-round10 3.2）角色下传：写控件随 settings.manage 档裁剪。
       case 'aliases':
         return html`
           ${this.renderSectionHead(section)}
-          <sebas-model-aliases></sebas-model-aliases>
+          <sebas-model-aliases .role=${this.role}></sebas-model-aliases>
         `
       case 'agents':
         return html`
@@ -2270,20 +2276,29 @@ export class SebasSettingsModal extends LitElement {
    */
   private renderModels() {
     const providers = this.adminProviders
+    // （fix-webui-qa-round10 3.2，C-DEF-02）provider 变更面按角色裁剪：
+    // settings.manage 档（root/admin）才呈现写控件（新建/设默认/清默认/
+    // 行内编辑删除）；member/viewer 只读浏览，防线在服务端 403。role 为
+    // null（鉴权关闭宿主）保持既有可用。
+    const canWrite = canManageProviders(this.role)
     return html`
       <div class="provider-toolbar">
-        <wa-button variant="brand" appearance="filled" @click=${() => this.openCreatePreset()}>
-          ＋ 新建（预设）
-        </wa-button>
-        <wa-button appearance="outlined" @click=${() => this.openCreateCustom()}>
-          ＋ 新建（自定义）
-        </wa-button>
+        ${canWrite
+          ? html`
+              <wa-button variant="brand" appearance="filled" @click=${() => this.openCreatePreset()}>
+                ＋ 新建（预设）
+              </wa-button>
+              <wa-button appearance="outlined" @click=${() => this.openCreateCustom()}>
+                ＋ 新建（自定义）
+              </wa-button>
+            `
+          : nothing}
         <span class="label" role="status">
           ${this.defaults?.provider
             ? `默认：${this.defaults.provider}${this.defaults.model ? ` / ${this.defaults.model}` : ''}`
             : '未设置默认'}
         </span>
-        ${this.defaults?.provider
+        ${canWrite && this.defaults?.provider
           ? html`<button
               class="row-action"
               title="清除新建会话的默认值"
@@ -2342,25 +2357,27 @@ export class SebasSettingsModal extends LitElement {
             ? html`<span class="provider-badge default" role="status">默认</span>`
             : nothing}
           <span class="provider-row-url" title=${url ?? ''}>${url ?? '无 base URL'}</span>
-          <span class="provider-row-actions">
-            <button
-              class="row-action"
-              title="设为新建会话的默认"
-              ?disabled=${this.busy}
-              @click=${() => this.openSetDefault(p)}
-            >
-              ★
-            </button>
-            <button class="row-action" title="编辑" @click=${() => this.openEdit(p)}>✎</button>
-            <button
-              class="row-action danger"
-              title="删除"
-              ?disabled=${this.busy}
-              @click=${() => (this.deleteTarget = p.name)}
-            >
-              🗑
-            </button>
-          </span>
+          ${canManageProviders(this.role)
+            ? html`<span class="provider-row-actions">
+                <button
+                  class="row-action"
+                  title="设为新建会话的默认"
+                  ?disabled=${this.busy}
+                  @click=${() => this.openSetDefault(p)}
+                >
+                  ★
+                </button>
+                <button class="row-action" title="编辑" @click=${() => this.openEdit(p)}>✎</button>
+                <button
+                  class="row-action danger"
+                  title="删除"
+                  ?disabled=${this.busy}
+                  @click=${() => (this.deleteTarget = p.name)}
+                >
+                  🗑
+                </button>
+              </span>`
+            : nothing}
         </div>
         ${p.models.length > 0
           ? html`<div class="provider-row-models">
@@ -2615,16 +2632,15 @@ export class SebasSettingsModal extends LitElement {
   }
 
   /**
-   * （fix-webui-qa-round2 3.3，C10）重名创建的可见提示：新建 id 与目录中
-   * 既有条目同名（含 tombstone 之外的活行）= 保存将覆盖其启动定义——
-   * 表单就地点名，不再静默产生歧义条目。编辑模式天然覆盖自身 id，不提示。
+   * （fix-webui-qa-round10 1.4，A-DEF-03）提示与实际行为一致，恰好一种结果：
+   * 新建路径遇已存在 id **不再预告覆盖**——服务端会以 409 拒绝保存，表单只
+   * 呈现那一条拒绝 error（spec「MUST NOT simultaneously promise an overwrite
+   * while rejecting the save」）；编辑既有行时保存确实会覆盖其启动定义
+   * （PUT 合并语义：提交的键逐字段覆盖），此时才出现覆盖提示（它为真）。
    */
   private duplicateAgentWarning(form: NonNullable<typeof this.agentForm>): string | null {
-    if (form.mode !== 'create') return null
-    const id = form.id.trim()
-    if (!id) return null
-    const exists = (this.agentsCatalog ?? []).some((a) => a.id === id)
-    return exists ? `目录中已存在 agent「${id}」——保存将覆盖它的启动定义（删除过的 id 会借此复活）。` : null
+    if (form.mode !== 'edit') return null
+    return `保存将更新 agent「${form.id}」的现有启动定义（只提交改动面，未提交的字段保留）。`
   }
 
   /**

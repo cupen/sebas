@@ -49,14 +49,24 @@ import '@awesome.me/webawesome/dist/components/option/option.js'
 
 /**
  * 不可用 agent 的操作者措辞（polish-workbench-walkthrough-ux 4.3）：默认
- * 可见文案只给成因归类与补救入口（Settings → Models），内部 env 名等实现
- * 标识一律移入 tooltip（title 属性）——spec「unavailable cause speaks
- * operator language」。native 专项点名「未配置模型凭据」。
+ * 可见文案只给成因归类与补救入口，内部 env 名等实现标识一律移入 tooltip
+ * （title 属性）——spec「unavailable cause speaks operator language」。
+ *
+ * （fix-webui-qa-round10 1.3，A-DEF-02）文案按成因分流：二进制/启动定义
+ * 类缺失指引「设置 → Agent」（路径配置面），只有 native 内核的模型凭据
+ * 缺失指引「设置 → 模型」——此前 ACP 行与 native 行共用同一句模型页指引，
+ * 二进制路径配错被误导去模型页。catalog wire 里 ACP 行的 cause 只会是
+ * launch 定义面问题（`command not found` / `empty command`），native 行的
+ * cause 是凭据缺失——按 id 分类即按成因分类，无需新增协议字段。
  */
-export function agentUnavailableLabel(a: { id: string; display: string }): string {
+export function agentUnavailableLabel(a: {
+  id: string
+  display: string
+  cause?: string | null
+}): string {
   return a.id === 'native'
     ? `${a.display}（未配置模型凭据——到「设置 → 模型」配置）`
-    : `${a.display}（不可用——到「设置 → 模型」检查配置）`
+    : `${a.display}（不可用——到「设置 → Agent」检查启动定义）`
 }
 
 /** 创建对话框确认事件 detail：与 POST /api/sessions 的创建面同词汇。 */

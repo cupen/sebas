@@ -12,9 +12,10 @@
  */
 
 import { LitElement, css, html, nothing } from 'lit'
-import { customElement, state } from 'lit/decorators.js'
-import { api, ApiError, type ModelAliasEntry } from '../api/client.js'
+import { customElement, property, state } from 'lit/decorators.js'
+import { api, ApiError, type ModelAliasEntry, type Role } from '../api/client.js'
 import { icon } from '../components/icons.js'
+import { canManageProviders } from './role-visibility.js'
 import { viewStyles } from '../styles/shared.js'
 import { guardedHide } from '../components/wa-hide-guard.js'
 import '@awesome.me/webawesome/dist/components/button/button.js'
@@ -25,6 +26,12 @@ import '@awesome.me/webawesome/dist/components/dialog/dialog.js'
 
 @customElement('sebas-model-aliases')
 export class SebasModelAliases extends LitElement {
+  /**
+   * 宿主设置弹窗下传的当前角色（fix-webui-qa-round10 3.2，C-DEF-02）：
+   * 别名写控件（新建/编辑/删除）按 settings.manage 档裁剪（root/admin）；
+   * member/viewer 只读浏览。null = 鉴权关闭宿主，保持既有可用。
+   */
+  @property({ attribute: false }) role: Role | null = null
   /** 别名表（providers 读面下发）；null = 加载中。 */
   @state() private aliases: Record<string, ModelAliasEntry> | null = null
   /** 已注册 provider 名（新建/编辑的 provider 下拉数据源）。 */
@@ -168,11 +175,19 @@ export class SebasModelAliases extends LitElement {
       return html`<div class="skel-row"><div class="skel skel-line" style="width:60%"></div></div>`
     }
     const rows = this.rows()
+    const canWrite = canManageProviders(this.role)
     return html`
       <div class="toolbar">
-        <wa-button variant="brand" appearance="filled" data-testid="alias-create" @click=${() => this.openCreate()}>
-          ＋ 新建别名
-        </wa-button>
+        ${canWrite
+          ? html`<wa-button
+              variant="brand"
+              appearance="filled"
+              data-testid="alias-create"
+              @click=${() => this.openCreate()}
+            >
+              ＋ 新建别名
+            </wa-button>`
+          : nothing}
       </div>
       ${rows.length === 0
         ? html`<div class="empty" data-testid="alias-empty">尚无模型别名。别名把一个短名映射到某个 provider（可选带上游模型），模型选择面可用短名代替完整 id。</div>`
@@ -188,22 +203,26 @@ export class SebasModelAliases extends LitElement {
                       ? html`<span class="upstream">· ${entry.upstream_model}</span>`
                       : nothing}
                     <span class="spacer"></span>
-                    <button
-                      class="row-action"
-                      title="编辑"
-                      aria-label=${`编辑别名 ${alias}`}
-                      @click=${() => this.openEdit(alias, entry)}
-                    >
-                      ✎
-                    </button>
-                    <button
-                      class="row-action danger"
-                      title="删除"
-                      aria-label=${`删除别名 ${alias}`}
-                      @click=${() => (this.deleteTarget = alias)}
-                    >
-                      🗑
-                    </button>
+                    ${canWrite
+                      ? html`
+                          <button
+                            class="row-action"
+                            title="编辑"
+                            aria-label=${`编辑别名 ${alias}`}
+                            @click=${() => this.openEdit(alias, entry)}
+                          >
+                            ✎
+                          </button>
+                          <button
+                            class="row-action danger"
+                            title="删除"
+                            aria-label=${`删除别名 ${alias}`}
+                            @click=${() => (this.deleteTarget = alias)}
+                          >
+                            🗑
+                          </button>
+                        `
+                      : nothing}
                   </div>
                 `,
               )}

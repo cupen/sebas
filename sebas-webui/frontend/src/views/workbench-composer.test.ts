@@ -526,6 +526,83 @@ describe('model chip (4.2, design D3)', () => {
     expect(el.shadowRoot?.querySelector('[data-testid="model-menu"]')).toBeNull()
   })
 
+  // ── fix-webui-qa-round10 4.1/4.2（B-DEF-03）：模型切换的派发与拒绝投影 ──
+  // 静态溯源结论（写入 tasks.md 4.1 备注）：composer 菜单点击**非当前**模型
+  // 即经 setSessionModel 真实下发（POST /api/sessions/{key}/model → 驱动
+  // `session/set_config_option`），链路无断点；桩（fake-acp-agent）只在
+  // set_config_option 时拒绝 reject-listed 模型，prompt 不拒绝。QA B8 的
+  // 「bad-model 无拒绝」是旅程踩偏：bad-model 是会话初始模型（configOptions
+  // 第一项），点击「已当前」的选项**不构成切换**（下面第一条钉住该语义），
+  // 随后的发消息自然没有类型化拒绝。拒绝的显式呈现走转录错误条目（驱动
+  // MODEL_UNCHANGED_MARKER，e2e fakeacp_model_rejection… 已钉进程级链路），
+  // composer 侧对 HTTP 级拒绝（如 claude 控制面拒绝）就地呈现类型化错误、
+  // 芯片不翻面（回退 = 会话有效模型的服务端真值，芯片无乐观写）。
+
+  it('clicking the already-current model is a no-op — no dispatch (round10 4.1)', async () => {
+    seedCatalog()
+    const el = await mount(focus) // currentModel = 'sonnet'
+    ;(el.shadowRoot?.querySelector('[data-testid="model-chip"]') as HTMLElement).click()
+    await el.updateComplete
+    ;(el.shadowRoot?.querySelector('.menu-item[data-model="sonnet"]') as HTMLElement).click()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+
+    expect(api.setSessionModel).not.toHaveBeenCalled()
+    expect(el.shadowRoot?.querySelector('[data-testid="composer-error"]')).toBeNull()
+    el.remove()
+  })
+
+  it('a rejected switch surfaces the typed error and the chip stays on the effective model (round10 4.2)', async () => {
+    seedCatalog()
+    ;(api.setSessionModel as ReturnType<typeof vi.fn>).mockRejectedValue(
+      Object.assign(new Error('模型 "bad-model" 被拒绝（invalid model id）'), { status: 502 }),
+    )
+    const el = await mount({
+      ...focus,
+      sessionModels: ['bad-model', 'ok-model'],
+      currentModel: 'ok-model',
+    })
+    ;(el.shadowRoot?.querySelector('[data-testid="model-chip"]') as HTMLElement).click()
+    await el.updateComplete
+    ;(el.shadowRoot?.querySelector('.menu-item[data-model="bad-model"]') as HTMLElement).click()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+
+    // 类型化拒绝就地呈现（点名模型）；非静默成功。
+    const err = el.shadowRoot?.querySelector<HTMLElement>('[data-testid="composer-error"]')
+    expect(err).toBeTruthy()
+    expect(err!.textContent).toContain('bad-model')
+    // 芯片不翻面：无乐观写，回退会话有效模型的服务端真值。
+    const chip = el.shadowRoot?.querySelector<HTMLElement>('[data-testid="model-chip"]')
+    expect(chip?.textContent).toContain('ok-model')
+    expect(chip?.textContent).not.toContain('bad-model')
+    el.remove()
+  })
+
+  it('an accepted switch dispatches and the chip follows the parent server truth (round10 4.2)', async () => {
+    seedCatalog()
+    const el = await mount({
+      ...focus,
+      sessionModels: ['bad-model', 'ok-model'],
+      currentModel: 'bad-model',
+    })
+    ;(el.shadowRoot?.querySelector('[data-testid="model-chip"]') as HTMLElement).click()
+    await el.updateComplete
+    ;(el.shadowRoot?.querySelector('.menu-item[data-model="ok-model"]') as HTMLElement).click()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+
+    // 恰好一次下发；成功面无错误条目。
+    expect(api.setSessionModel).toHaveBeenCalledTimes(1)
+    expect(api.setSessionModel).toHaveBeenCalledWith('web%00web-1', 'ok-model')
+    expect(el.shadowRoot?.querySelector('[data-testid="composer-error"]')).toBeNull()
+    // 芯片跟随父层下传的服务端真值（接受后由 dashboard refetch 带回新模型；
+    // 属性未变时仍显旧值——绝不本地伪造新模型）。
+    const chip = el.shadowRoot?.querySelector<HTMLElement>('[data-testid="model-chip"]')
+    expect(chip?.textContent).toContain('bad-model')
+    el.remove()
+  })
+
   it('switching a session model goes through setSessionModel only (preselect-last-used-model 2.1)', async () => {
     seedCatalog()
     const el = await mount(focus)

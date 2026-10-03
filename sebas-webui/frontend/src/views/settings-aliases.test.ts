@@ -44,8 +44,9 @@ const snapshot = {
   },
 }
 
-async function mount(): Promise<SebasModelAliases> {
+async function mount(role: 'root' | 'admin' | 'member' | 'viewer' | null = null): Promise<SebasModelAliases> {
   const el = document.createElement('sebas-model-aliases') as SebasModelAliases
+  if (role !== null) el.role = role
   document.body.appendChild(el)
   await el.updateComplete
   await new Promise((r) => setTimeout(r, 0))
@@ -146,5 +147,36 @@ describe('sebas-model-aliases (router-model-aliases 别名管理 WebUI 入口)',
     // 编辑器未关闭（失败不假装成功）。
     expect(el.shadowRoot!.querySelector('[data-testid="alias-save"]')).toBeTruthy()
     el.remove()
+  })
+
+  // ── fix-webui-qa-round10 3.2（C-DEF-02）：别名写控件随角色裁剪 ──
+  // spec「Member cannot mutate a provider … the settings UI does not offer
+  // the mutation controls to that member」对别名面同样成立：settings.manage
+  // 档（root/admin，及鉴权关闭宿主）才呈现新建/编辑/删除；member/viewer
+  // 只读浏览（列表保留），防线在服务端 403。
+
+  it('member/viewer see no write controls; the list stays browsable', async () => {
+    for (const role of ['member', 'viewer'] as const) {
+      const el = await mount(role)
+      expect(el.shadowRoot!.querySelector('[data-testid="alias-create"]'), `${role} 不得见新建`).toBeNull()
+      expect(el.shadowRoot!.querySelector('[data-testid="alias-list"]'), `${role} 列表保留`).toBeTruthy()
+      expect(rows(el).length).toBe(2)
+      for (const row of rows(el)) {
+        expect(row.querySelector('button[title="编辑"]'), `${role} 不得见编辑`).toBeNull()
+        expect(row.querySelector('button[title="删除"]'), `${role} 不得见删除`).toBeNull()
+      }
+      el.remove()
+    }
+  })
+
+  it('root/admin (and auth-disabled hosts) keep the full write surface', async () => {
+    for (const role of ['root', 'admin', null] as const) {
+      const el = await mount(role)
+      expect(el.shadowRoot!.querySelector('[data-testid="alias-create"]'), `${role} 新建在`).toBeTruthy()
+      const row = rows(el)[0]!
+      expect(row.querySelector('button[title="编辑"]'), `${role} 编辑在`).toBeTruthy()
+      expect(row.querySelector('button[title="删除"]'), `${role} 删除在`).toBeTruthy()
+      el.remove()
+    }
   })
 })

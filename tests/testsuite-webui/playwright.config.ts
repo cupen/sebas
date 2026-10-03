@@ -39,6 +39,10 @@ export default defineConfig({
     // qa-round7-ws-auth 的被测前提是「未认证登录页」（webui-ws-rpc 升级 401
     // 静默闸）——只在 auth-on 形态成立，与 auth.spec.ts 同名单跑 9898。
     /qa-round7-ws-auth\.spec\.ts/,
+    // provider-gate 的角色执法前提是 auth-on + 预置 admin/admin（成员/观察者
+    // 经 users API 现场建户）——只在 auth-on 形态跑（playwright.auth.config.ts
+    // testMatch 同名单），auth=off 主沙箱零用户必红。
+    /provider-gate\.spec\.ts/,
     /deployment\.spec\.ts/,
     /approval-detached\.spec\.ts/,
     // core-link-badge 的停核/恢复半边只在 detached 双进程拓扑成立（翻转
