@@ -26,9 +26,11 @@ export default defineConfig({
   // admin）——users-admin 是 2026-09-23 验收补的 Users 管理闭环旅程；
   // agents-gate 是 gate-agent-directory-writes 补的 agents 写执法旅程
   // （viewer/member 经 users API 现场自愈建户）；qa-round7-ws-auth 是
-  // fix-webui-qa-round7 3.2 的未认证 WS 静默 + 登录后实时链路旅程。
+  // fix-webui-qa-round7 3.2 的未认证 WS 静默 + 登录后实时链路旅程；
+  // provider-gate 是 fix-webui-qa-round10 3.x 的 provider/别名变更面
+  // 角色执法旅程（member/viewer 只读 + 服务端 403 + admin 全管）。
   testMatch:
-    /auth\.spec\.ts|users-admin\.spec\.ts|agents-gate\.spec\.ts|qa-round7-ws-auth\.spec\.ts/,
+    /auth\.spec\.ts|users-admin\.spec\.ts|agents-gate\.spec\.ts|qa-round7-ws-auth\.spec\.ts|provider-gate\.spec\.ts/,
   timeout: 30_000,
   retries: 1,
   workers: 1,

@@ -1293,3 +1293,258 @@ mod usage_timeseries_route {
         assert_eq!(body["cause"], "invalid_param");
     }
 }
+// ── fix-webui-qa-round10 3.1（C-DEF-02）：provider 变更面角色门禁 ───────────
+// spec「Provider and alias mutations are role-gated」：provider/别名的增删改
+// 挂 settings.manage（root/admin）；member/viewer 只读（服务端 403，防线在
+// 路由层）；provider 列表读面对全部登录角色保留。QA 实测 member 可创建带
+// key 的 provider——本模块把收紧后的矩阵钉成 API 测试。
+mod provider_role_gate {
+    use axum::body::Body;
+    use axum::extract::ConnectInfo;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use sebas_feishu::cards::CardConfig;
+    use sebas_webui::auth::AuthHandle;
+    use sebas_webui::build_router_with_auth;
+    use sebas_webui::models::RouterInfo;
+    use sebas_webui::rbac::Role;
+    use serde_json::Value;
+    use std::net::{IpAddr, SocketAddr};
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    fn test_addr() -> SocketAddr {
+        SocketAddr::new(IpAddr::from([127, 0, 0, 1]), 12345)
+    }
+
+    /// 带鉴权的 app + providers 域接线（mutation 放行到 seam——RBAC 在
+    /// auth_guard 层执法，业务成败与本模块无关）。
+    async fn rbac_app() -> (axum::Router, tempfile::TempDir, Arc<AuthHandle>) {
+        let dir = tempfile::tempdir().unwrap();
+        let auth = Arc::new(AuthHandle::open_with_iterations(
+            dir.path().join("auth.db"),
+            1000,
+        ));
+        let backend = sebas_webui::session_backend::FakeBackend::new();
+        backend.set_state_domain(
+            "providers",
+            Some(serde_json::json!({
+                "providers": {"anthropic": {"name": "anthropic"}},
+                "deleted": []
+            })),
+        );
+        backend.set_state_mutate_ok(true);
+        let app = build_router_with_auth(
+            Arc::new(backend),
+            RouterInfo::default(),
+            CardConfig::default(),
+            None,
+            Arc::new(sebas_webui::agent_kinds::ConfigAgentKindProvider::new(
+                Vec::new(),
+            )),
+            30,
+            auth.clone(),
+        );
+        auth.setup_root("alice", "password8").await.unwrap();
+        let store = auth.user_store().unwrap();
+        store.create("ada", "password8", Role::Admin).unwrap();
+        store.create("bob", "password8", Role::Member).unwrap();
+        store.create("vic", "password8", Role::Viewer).unwrap();
+        (app, dir, auth)
+    }
+
+    async fn request(
+        app: &axum::Router,
+        method: &str,
+        uri: &str,
+        cookie: Option<&str>,
+        body: Option<String>,
+    ) -> (StatusCode, Value) {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("host", "127.0.0.1:12345")
+            .extension(ConnectInfo(test_addr()));
+        if let Some(c) = cookie {
+            builder = builder.header("cookie", c);
+        }
+        if body.is_some() {
+            builder = builder.header("content-type", "application/json");
+        }
+        let req = builder.body(Body::from(body.unwrap_or_default())).unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let v = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes)
+                .unwrap_or_else(|e| panic!("non-JSON body from {uri} [{status}]: {e}"))
+        };
+        (status, v)
+    }
+
+    async fn login(app: &axum::Router, username: &str, password: &str) -> String {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/auth/login")
+            .header("host", "127.0.0.1:12345")
+            .extension(ConnectInfo(test_addr()))
+            .header("content-type", "application/json")
+            .body(Body::from(format!(
+                r#"{{"username":"{username}","password":"{password}"}}"#
+            )))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "login {username}");
+        resp.headers()
+            .get("set-cookie")
+            .and_then(|v| v.to_str().ok())
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .trim()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn member_cannot_mutate_providers_but_reads_stay_open() {
+        let (app, _dir, _auth) = rbac_app().await;
+        let member = login(&app, "bob", "password8").await;
+
+        // 创建（含 key 材料）/编辑/删除 → 403（防线在路由层，store 不动）。
+        let (status, v) = request(
+            &app,
+            "POST",
+            "/api/providers",
+            Some(&member),
+            Some(r#"{"name":"evil","api_key":"sk-member-key"}"#.into()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "member 创建 provider 必须 403: {v}");
+
+        let (status, v) = request(
+            &app,
+            "PUT",
+            "/api/providers/anthropic",
+            Some(&member),
+            Some(r#"{"api_key":"sk-swapped"}"#.into()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "member 编辑 provider 必须 403: {v}");
+
+        let (status, v) =
+            request(&app, "DELETE", "/api/providers/anthropic", Some(&member), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "member 删除 provider 必须 403: {v}");
+
+        // 读面对 member 保留（spec「Read access … remains available」）。
+        let (status, _) = request(&app, "GET", "/api/providers", Some(&member), None).await;
+        assert_eq!(status, StatusCode::OK, "member 读 provider 列表放行");
+        let (status, _) = request(&app, "GET", "/api/provider-defaults", Some(&member), None).await;
+        assert_eq!(status, StatusCode::OK, "member 读 defaults 放行");
+    }
+
+    #[tokio::test]
+    async fn member_cannot_mutate_model_aliases() {
+        let (app, _dir, _auth) = rbac_app().await;
+        let member = login(&app, "bob", "password8").await;
+        for (method, uri, body) in [
+            (
+                "POST",
+                "/api/model-aliases",
+                Some(r#"{"alias":"fast","provider":"anthropic"}"#.to_string()),
+            ),
+            (
+                "PUT",
+                "/api/model-aliases/fast",
+                Some(r#"{"alias":"fast","provider":"anthropic"}"#.to_string()),
+            ),
+            ("DELETE", "/api/model-aliases/fast", None),
+        ] {
+            let (status, v) = request(&app, method, uri, Some(&member), body).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "member {method} {uri} 必须 403: {v}");
+        }
+    }
+
+    #[tokio::test]
+    async fn admin_retains_full_provider_management() {
+        let (app, _dir, _auth) = rbac_app().await;
+        let admin = login(&app, "ada", "password8").await;
+        let (status, v) = request(
+            &app,
+            "POST",
+            "/api/providers",
+            Some(&admin),
+            Some(r#"{"name":"deepseek","api_key":"sk-admin-key"}"#.into()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "admin 创建放行: {v}");
+        let (status, v) = request(
+            &app,
+            "PUT",
+            "/api/providers/anthropic",
+            Some(&admin),
+            Some(r#"{"api_key":"sk-rotated"}"#.into()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "admin 编辑放行: {v}");
+        let (status, v) = request(
+            &app,
+            "POST",
+            "/api/model-aliases",
+            Some(&admin),
+            Some(r#"{"alias":"fast","provider":"anthropic"}"#.into()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "admin 建别名放行: {v}");
+    }
+
+    #[tokio::test]
+    async fn viewer_sees_the_provider_list_read_only() {
+        let (app, _dir, _auth) = rbac_app().await;
+        let viewer = login(&app, "vic", "password8").await;
+        let (status, _) = request(&app, "GET", "/api/providers", Some(&viewer), None).await;
+        assert_eq!(status, StatusCode::OK, "viewer 读 provider 列表放行");
+        let (status, v) = request(
+            &app,
+            "POST",
+            "/api/providers",
+            Some(&viewer),
+            Some(r#"{"name":"x"}"#.into()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "viewer 写 provider 必须 403: {v}");
+    }
+
+    #[tokio::test]
+    async fn provider_probe_stays_open_to_members_read_only_dial() {
+        // probe 是只读拨测（抓模型列表，不落库）——不属变更面：member 不吃
+        // 403（FakeBackend 无抓取结果时按 seam 语义 503/4xx，都不是 403）。
+        let (app, _dir, _auth) = rbac_app().await;
+        let member = login(&app, "bob", "password8").await;
+        let (status, _) = request(
+            &app,
+            "POST",
+            "/api/providers/anthropic/probe",
+            Some(&member),
+            None,
+        )
+        .await;
+        assert_ne!(status, StatusCode::FORBIDDEN, "probe 不是变更面：member 不吃 403");
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_provider_writes_stay_401() {
+        let (app, _dir, _auth) = rbac_app().await;
+        let (status, _) = request(
+            &app,
+            "POST",
+            "/api/providers",
+            None,
+            Some(r#"{"name":"x"}"#.into()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "门禁之前认证门先行");
+    }
+}

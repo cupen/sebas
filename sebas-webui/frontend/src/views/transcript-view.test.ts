@@ -298,6 +298,54 @@ describe('groupConversation (run model)', () => {
     expect(text.content).toBe('abcd')
   })
 
+  // ── fix-webui-qa-round10 2.4（B-DEF-02）：回合观察模型时间线（纯函数）──
+
+  it('turnObservedModels replays model_change timeline per agent turn (round10 2.4)', async () => {
+    const { turnObservedModels } = await import('./transcript-view.js')
+    const modelChange = (pos: number, from: string | null, to: string) =>
+      entry({
+        position: pos,
+        kind: 'content',
+        element_type: 'model_change',
+        content: JSON.stringify({ from, to }),
+        created_at_unix: FIXED_DATES.T1,
+      })
+    const units = groupConversation([
+      entry({ position: 0, kind: 'prompt', content: 'q1', created_at_unix: FIXED_DATES.T1 }),
+      entry({ position: 1, kind: 'content', content: 'a1', created_at_unix: FIXED_DATES.T1 }),
+      modelChange(2, null, 'b'),
+      entry({ position: 3, kind: 'prompt', content: 'q2', created_at_unix: FIXED_DATES.T2 }),
+      entry({ position: 4, kind: 'content', content: 'a2', created_at_unix: FIXED_DATES.T2 }),
+    ])
+    const timeline = turnObservedModels(units)
+    // 切换前的回合无观察值（空串 = 无徽章）；切换后的回合取新模型。
+    expect(timeline.get(1)).toBe('')
+    expect(timeline.get(4)).toBe('b')
+    // model_change 自身不产生映射。
+    expect(timeline.size).toBe(2)
+  })
+
+  it('turnObservedModels: a mid-turn switch splits the turn and the tail takes the new model', async () => {
+    const { turnObservedModels } = await import('./transcript-view.js')
+    const units = groupConversation([
+      entry({ position: 0, kind: 'prompt', content: 'q', created_at_unix: FIXED_DATES.T1 }),
+      entry({ position: 1, kind: 'content', content: 'before ', created_at_unix: FIXED_DATES.T1 }),
+      entry({
+        position: 2,
+        kind: 'content',
+        element_type: 'model_change',
+        content: JSON.stringify({ from: 'a', to: 'b' }),
+        created_at_unix: FIXED_DATES.T1,
+      }),
+      entry({ position: 3, kind: 'content', content: 'after', created_at_unix: FIXED_DATES.T2 }),
+    ])
+    // model_change 终结当前 agent 单元：切换后的条目自成新单元，取新模型
+    // （「切换从下一回合生效」语义）。
+    const timeline = turnObservedModels(units)
+    expect(timeline.get(1)).toBe('')
+    expect(timeline.get(3)).toBe('b')
+  })
+
   it('text → tool → text: the process run sits between the text segments at its arrival position (2.1)', () => {
     const entries = [
       entry({ position: 0, kind: 'prompt', content: 'go', created_at_unix: FIXED_DATES.T1 }),
@@ -777,17 +825,83 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     expect(bodies?.[0]?.textContent).toContain('chunk three')
   })
 
-  // （fix-webui-qa-round9 4.3）回合块呈现生效模型名——与会话头同源；
-  // 模型不可知时如实缺省（芯片整枚不渲染，不伪造）。
-  it('agent turn frames carry the effective model chip (round9 4.3)', async () => {
-    const el = await mount({
-      entries: streamedTurn('do it', ['chunk one'], FIXED_DATES.T1),
-      currentModel: 'claude-sonnet-4',
+  // ── fix-webui-qa-round10 2.4（B-DEF-02）：模型徽章按回合观察值保真 ──
+  // round9 4.3 的「与会话头同源（current_model 下传）」语义被 B-DEF-02 证伪
+  // （切模型后历史徽章被回溯改写）：徽章改读 model_change 留痕重放的回合
+  // 观察值，会话当前模型不再参与（currentModel 属性退役为传参兼容）。
+
+  it('a turn after a model_change shows the new model; earlier turns keep theirs (round10 2.4)', async () => {
+    // 时间线：turn A（无观察 → 无徽章）→ model_change a→b → turn B（b）→
+    // model_change b→c → turn C（c）。切到 c 后 A/B 的徽章原样不动。
+    const entries: ConversationEntryView[] = [
+      entry({ position: 0, kind: 'prompt', content: 'q1', created_at_unix: FIXED_DATES.T1 }),
+      entry({ position: 1, kind: 'content', content: 'answer a', created_at_unix: FIXED_DATES.T1 }),
+      entry({
+        position: 2,
+        kind: 'content',
+        element_type: 'model_change',
+        content: JSON.stringify({ from: 'a', to: 'b' }),
+        created_at_unix: FIXED_DATES.T1,
+      }),
+      entry({ position: 3, kind: 'prompt', content: 'q2', created_at_unix: FIXED_DATES.T3 }),
+      entry({ position: 4, kind: 'content', content: 'answer b', created_at_unix: FIXED_DATES.T3 }),
+      entry({
+        position: 5,
+        kind: 'content',
+        element_type: 'model_change',
+        content: JSON.stringify({ from: 'b', to: 'c' }),
+        created_at_unix: FIXED_DATES.T3,
+      }),
+      entry({ position: 6, kind: 'prompt', content: 'q3', created_at_unix: FIXED_DATES.T3 }),
+      entry({ position: 7, kind: 'content', content: 'answer c', created_at_unix: FIXED_DATES.T3 }),
+    ]
+    const el = await mount({ entries, currentModel: 'c' })
+    const turns = el.shadowRoot!.querySelectorAll<HTMLElement>('.turn-block.is-assistant')
+    expect(turns.length).toBe(3)
+    const chipOf = (t: HTMLElement) =>
+      t.querySelector<HTMLElement>('[data-testid="turn-model"]')?.textContent ?? null
+    // 首个回合无观察值：无徽章（不伪造），且不回填会话当前模型 c。
+    expect(chipOf(turns[0]!)).toBeNull()
+    expect(chipOf(turns[1]!)).toBe('b')
+    expect(chipOf(turns[2]!)).toBe('c')
+    el.remove()
+  })
+
+  it('switching the session model later never rewrites earlier badges (round10 2.4)', async () => {
+    // B-DEF-02 的直接复现面：徽章文本在 currentModel 翻转前后逐字节不变
+    // （QA：bad-model 时期的回复在切到 ok-model 后被改写成 ok-model）。
+    const modelChange: ConversationEntryView = {
+      position: 3,
+      kind: 'content',
+      element_type: 'model_change',
+      content: JSON.stringify({ from: 'bad-model', to: 'ok-model' }),
+      created_at_unix: FIXED_DATES.T1,
+    }
+    const q = entry({ position: 4, kind: 'prompt', content: 'q', created_at_unix: FIXED_DATES.T3 })
+    const a = entry({
+      position: 5,
+      kind: 'content',
+      content: 'answer',
+      created_at_unix: FIXED_DATES.T3,
     })
-    const assistant = el.shadowRoot!.querySelector<HTMLElement>('.turn-block.is-assistant')!
-    const chip = assistant.querySelector<HTMLElement>('[data-testid="turn-model"]')
-    expect(chip).toBeTruthy()
-    expect(chip?.textContent).toBe('claude-sonnet-4')
+    const badgesAt = (el: SebasTranscriptView): (string | null)[] =>
+      [...el.shadowRoot!.querySelectorAll<HTMLElement>('.turn-block.is-assistant')].map(
+        (t) => t.querySelector<HTMLElement>('[data-testid="turn-model"]')?.textContent ?? null,
+      )
+    const before = await mount({
+      entries: [q, a],
+      currentModel: 'bad-model',
+    })
+    expect(badgesAt(before)).toEqual([null])
+    before.remove()
+    const after = await mount({
+      entries: [q, a, modelChange],
+      currentModel: 'ok-model',
+    })
+    // 同一批历史条目在切换落痕后重渲：仍无徽章（无观察值不回填），
+    // 绝不显示 ok-model。
+    expect(badgesAt(after)).toEqual([null])
+    after.remove()
   })
 
   it('unknown model renders no model chip — never a fabricated placeholder (round9 4.3)', async () => {
@@ -797,6 +911,8 @@ describe('sebas-transcript-view (conversation rendering)', () => {
         currentModel: model,
       })
       const assistant = el.shadowRoot!.querySelector<HTMLElement>('.turn-block.is-assistant')!
+      // （round10 2.4）无 model_change 留痕 = 无观察值：无论会话当前模型
+      // 是什么都无徽章（观察不到就如实缺省，不伪造）。
       expect(assistant.querySelector('[data-testid="turn-model"]')).toBeNull()
       el.remove()
     }
@@ -2474,6 +2590,91 @@ describe('transcript layout contract for arbitrary content (round7 1.2, D1)', ()
     // 两侧 meta 行都渲染 time 节点（用户 + agent）。
     const times = el.shadowRoot!.querySelectorAll('.turn-block .meta time.time')
     expect(times.length).toBe(2)
+    el.remove()
+  })
+
+  // ── fix-webui-qa-round10 2.1/2.2/2.3：直播态不空白 + 超宽内容不撑破容器 ──
+  // C-DEF-01（直播态整面空白：DOM/aria 完好、console 零错误、reload 恢复）
+  // 与 C-DEF-03（容器被超宽内容撑到 5350px 隐藏溢出、滚动区无可见滚动条）
+  // 同域：超宽内容沿布局链撑出的数千 px 宽图层既是溢出面也是合成层失效
+  // （空白绘制）的病灶。绘制级断言（非零绘制尺寸）需要真实浏览器，属
+  // Playwright 链（GUI 复核留主 agent）；这里以 DOM/CSS 合同钉住机制面。
+
+  it('the conversation scroll never scrolls horizontally — width pinned to layout (round10 2.2)', async () => {
+    const el = await mount({
+      entries: streamedTurn('table', ['wide'], FIXED_DATES.T1),
+    })
+    const css = await styleText(el)
+    // .scroll 的 overflow-x 收敛为 hidden：overflow-y:auto 曾把缺省
+    // visible 计算成 auto，超宽内容把容器撑出数千 px 隐藏横向溢出。
+    const scrollRule = css.match(/\.scroll\s*\{([^}]*)\}/)?.[1] ?? ''
+    expect(scrollRule).toMatch(/overflow-x:\s*hidden/)
+    expect(scrollRule).toMatch(/overflow-y:\s*auto/)
+    el.remove()
+  })
+
+  it('turn blocks pin their inline size against oversized content (round10 2.3)', async () => {
+    const el = await mount({
+      entries: streamedTurn('table', ['wide'], FIXED_DATES.T1),
+    })
+    const css = await styleText(el)
+    // .flow/.msg-block 挂 inline-size 包含：内容固有宽度不参与宽度计算，
+    // 宽表/长代码行只能在条目内层滚动区横向滚动（对话面布局宽恒定）。
+    const flowRule = css.match(/\.turn-block \.flow,\s*\n\s*\.turn-block \.msg-block\s*\{([^}]*)\}/)?.[1] ?? ''
+    expect(flowRule).toMatch(/contain:\s*inline-size/)
+    expect(flowRule).toMatch(/min-width:\s*0/)
+    expect(flowRule).toMatch(/max-width:/)
+    // 行级收缩守卫：超宽内容的 min-content 不沿 flex 链上传。
+    const turnRule = css.match(/\.turn-block\s*\{([^}]*)\}/)?.[1] ?? ''
+    expect(turnRule).toMatch(/min-width:\s*0/)
+    expect(turnRule).toMatch(/max-width:\s*100%/)
+    el.remove()
+  })
+
+  it('oversized turn after a wide-table turn keeps rendering entries in the DOM (round10 2.1)', async () => {
+    // 直播态空白绘制的 DOM 半边合同：宽表回合定稿后连续流式回合，条目
+    // 仍在文档中（绘制可见性由浏览器套件复核）。回放 QA 复现序列：
+    // 宽表回合（含 <table> 的 markdown 定稿）→ 下一回合流式帧到达。
+    const wideTable = [
+      '| c001 | c002 | c003 |',
+      '|---|---|---|',
+      '| v | v | v |',
+    ].join('\n')
+    const entries: ConversationEntryView[] = [
+      entry({ position: 0, kind: 'prompt', content: 'table', created_at_unix: FIXED_DATES.T1 }),
+      entry({ position: 1, kind: 'content', content: wideTable, created_at_unix: FIXED_DATES.T1 }),
+      entry({ position: 2, kind: 'prompt', content: 'go on', created_at_unix: FIXED_DATES.T3 }),
+      entry({ position: 3, kind: 'content', content: 'streaming tail', created_at_unix: FIXED_DATES.T3 }),
+    ]
+    const el = await mount({ entries, turnLive: true })
+    // 两个回合块都在 DOM；宽表回合正文在档（markdown 管线 mock 下以源文
+    // 本呈现）、流式尾回合有文本节点。
+    const turns = el.shadowRoot!.querySelectorAll<HTMLElement>('.turn-block.is-assistant')
+    expect(turns.length).toBe(2)
+    expect(turns[0]!.querySelector('.body')?.textContent).toContain('c001')
+    expect(turns[1]!.querySelector('.body')?.textContent).toContain('streaming tail')
+    // 条目存在于文档且带非零 DOM 尺寸语义（jsdom 无布局——绘制尺寸断言
+    // 属浏览器套件；这里钉住「条目不缺失、不隐藏」的 DOM 前提）。
+    for (const t of turns) {
+      expect(t.hasAttribute('hidden')).toBe(false)
+    }
+    el.remove()
+  })
+
+  it('entry scroll regions present a visible scrollbar affordance (round10 2.2)', async () => {
+    const el = await mount({ entries: streamedTurn('code', ['x'], FIXED_DATES.T1) })
+    const css = await styleText(el)
+    // 表格/代码块滚动区挂可见滚动条（Firefox scrollbar-* + Chromium
+    // ::-webkit-scrollbar 双通道），右缘不再是无可发现的硬裁切。
+    expect(css).toMatch(
+      /\.turn-block \.body pre,\s*\n\s*\.turn-block \.body table[^{]*\{[^}]*scrollbar-width:\s*thin/,
+    )
+    expect(css).toMatch(
+      /\.turn-block \.body pre::-webkit-scrollbar,\s*\n\s*\.turn-block \.body table::-webkit-scrollbar[^{]*\{[^}]*height:\s*8px/,
+    )
+    expect(css).toMatch(
+      /\.turn-block \.body pre::-webkit-scrollbar-thumb,[^{]*\{[^}]*background:\s*var\(--sebas-border-strong/,
+    )
     el.remove()
   })
 })

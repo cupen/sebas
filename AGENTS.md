@@ -234,6 +234,13 @@ pointing `[acp.agents.claude] path` at the `tests/bin` fake-claude stub
 (built by `cargo build`) lets ACP sessions complete full turns with zero real
 credentials. Let `<SB>` be the throwaway dir (e.g. `/tmp/sebas-debug`).
 
+fake-claude 桩的触发词面（`perm`/`parallel`/`drip`/`flood`/`stream`/`table`/
+`crash`/`refuse` 等，按原文匹配）：`perm` 在 **bypassPermissions（Auto 档）**
+按桩设计走直接执行分支——tool_result 后**没有**「perm turn finished」收尾正文
+（stub 的 early return，非缺陷；O-B-01/fix-webui-qa-round10 6.2 核实结论）。
+审批路径（ask/edit/allow 档）才有环后正文。GUI 验收时 Auto 档 perm 回合以
+「✓ perm done tool_result + Done 终态」为完整预期，勿把缺正文记为缺陷。
+
 `--debug` 的 `test` provider 是一个**场景模型**：请求体的 `model` 决定应答形状
 （`test/<scenario>`，未知场景回落到 bare `test` 的 echo），零凭据、零外呼、形状确定
 ——**工作台行为类验收默认用它**（extend-test-model-scenarios；进程级 journey 在

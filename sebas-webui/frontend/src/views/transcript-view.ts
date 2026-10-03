@@ -509,6 +509,31 @@ export function groupConversation(entries: ErrorCountedView[]): TurnUnit[] {
   return units
 }
 
+/**
+ * 回合观察模型时间线（fix-webui-qa-round10 2.4，B-DEF-02，纯函数）：按单元
+ * 序重放 `model_change` 留痕（`{from, to}`），得到每个 agent 回合**开始时刻**
+ * 的生效模型。徽章只读这个观察值——绝不从会话当前模型回填，切换模型不改写
+ * 历史回合的徽章（spec「Turn model badge is frozen at observation time」）。
+ *
+ * 观察不到就如实缺省：第一条 model_change 之前的回合（含整场零切换的会话）
+ * 无观察值 → 空串（徽章整枚不渲染，不伪造）。model_change 单元自身与
+ * 操作者/错误/提示单元不产生映射；mid-turn 切换会终结当前 agent 单元
+ * （groupConversation 对 model_change flush），切换后的条目自成新单元、
+ * 取新模型——与「切换从下一回合生效」的语义一致。
+ */
+export function turnObservedModels(units: TurnUnit[]): Map<number, string> {
+  const out = new Map<number, string>()
+  let effective: string | null = null
+  for (const u of units) {
+    if (u.kind === 'model_change') {
+      effective = parseModelChangePayload(u.entry.content).to
+      continue
+    }
+    if (u.kind === 'agent') out.set(u.position, effective ?? '')
+  }
+  return out
+}
+
 /** The newest entry timestamp of a turn — the turn's seam edge (D5). */
 export function unitMaxTs(unit: TurnUnit): number {
   if (
@@ -879,10 +904,11 @@ export class SebasTranscriptView extends LitElement {
    */
   @property({ attribute: false }) agentDisplay: string | null = null
   /**
-   * （fix-webui-qa-round9 4.3，agent-workbench）回合帧的生效模型名：与会话
-   * 头部的模型标识**同源**（dashboard 从 detail/summary 的 `current_model`
-   * 读出后下传，帧 model 观察值或会话当前模型）。空/null = 模型不可知，
-   * 如实缺省不显示（不伪造）。
+   * （fix-webui-qa-round9 4.3 引入；fix-webui-qa-round10 2.4 退役为徽章
+   * 真源）会话当前模型（dashboard 从 detail/summary 的 `current_model` 下传）。
+   * 徽章改读回合观察时间线（`turnObservedModels`，model_change 留痕重放）后
+   * 本属性不再参与回合徽章渲染——会话当前模型变化不得改写历史回合的徽章
+   * （B-DEF-02）；保留属性仅为 dashboard 传参面兼容。
    */
   @property({ attribute: false }) currentModel: string | null = null
   /**
@@ -925,6 +951,12 @@ export class SebasTranscriptView extends LitElement {
    * 分组后索引与回合一一对应）。
    */
   @state() private turnUnits: TurnUnit[] = []
+  /**
+   * （fix-webui-qa-round10 2.4，B-DEF-02）回合开始时刻的观察模型（agent 回
+   * 单元 position → 模型名，空串 = 无观察）：徽章唯一真源，随 rebuildUnits
+   * 同步重算。会话当前模型（currentModel）不再参与。
+   */
+  @state() private observedModels = new Map<number, string>()
 
   /**
    * （fix-webui-qa-round8 3.1）「跳到最新」浮标的可见态（纯派生）：未处于
@@ -986,6 +1018,12 @@ export class SebasTranscriptView extends LitElement {
     .scroll {
       max-height: 58vh;
       overflow-y: auto;
+      /* （fix-webui-qa-round10 2.2，C-DEF-03）对话面永不横向滚动：overflow-y
+         的 auto 会把缺省的 overflow-x: visible 计算成 auto——超宽内容的
+         scrollWidth 曾把容器撑出数千 px 的隐藏横向溢出（QA 实测 5350px）。
+         横向滚动收敛到条目内层滚动区（table/pre 各自 overflow-x:auto），
+         容器宽度钉在布局宽。 */
+      overflow-x: hidden;
       padding: var(--sebas-space-4) var(--sebas-space-5);
       /* 4.1（D5.1）：滚动提交是瞬时贴底——smooth 动画在逐帧流式下永远追
          不上目标（下一帧又抬高 scrollHeight，动画互相打断），去掉。 */
@@ -1093,6 +1131,9 @@ export class SebasTranscriptView extends LitElement {
       gap: 10px;
       align-items: flex-start;
       max-width: 100%;
+      /* （fix-webui-qa-round10 2.2）行级收缩守卫：回合块自身的最小宽度不参与
+         内容固有宽度（超宽内容的 min-content 不得沿 flex 链上传撑破容器）。 */
+      min-width: 0;
     }
     .turn-block.is-user {
       flex-direction: row-reverse;
@@ -1102,6 +1143,13 @@ export class SebasTranscriptView extends LitElement {
       flex: 1;
       min-width: 0;
       max-width: min(680px, calc(100% - 60px));
+      /* （fix-webui-qa-round10 2.3，C-DEF-01/C-DEF-03）行内尺寸包含：内容
+         固有宽度（宽表/长代码行）不再参与 .flow 的宽度计算——对话面宽度
+         钉死在布局宽，超宽内容只能在条目内层滚动区横向滚动。这也是直播态
+         空白绘制（QA 三次复现：DOM/aria 完好、console 零错误、reload 恢复）
+         的对因修复——超宽内容撑出的数千 px 宽图层是合成层失效的病灶，
+         宽度钉死后该图层不再存在。 */
+      contain: inline-size;
     }
     .turn-block .msg-block {
       padding: 9px 14px;
@@ -1321,6 +1369,33 @@ export class SebasTranscriptView extends LitElement {
       /* 3c：.body 的 anywhere 会继承进单元格，把文字表格压到一字符宽，
          横滚永不触发——表格内恢复 normal，min-content 超宽时走上横滚。 */
       overflow-wrap: normal;
+    }
+    /* （fix-webui-qa-round10 2.2，C-DEF-03）条目内层滚动区的**可见滚动条**：
+       表格/代码块横滚可用但滚动条不可见、右缘硬裁切无可供发现提示（QA
+       实测）。滚动条样式在明暗主题下都取边框色阶 token——Firefox 走
+       scrollbar-color/width，Chromium 系走 ::-webkit-scrollbar。 */
+    .turn-block .body pre,
+    .turn-block .body table,
+    .view-all-body table {
+      scrollbar-width: thin;
+      scrollbar-color: var(--sebas-border-strong, rgba(127, 127, 127, 0.55)) transparent;
+    }
+    .turn-block .body pre::-webkit-scrollbar,
+    .turn-block .body table::-webkit-scrollbar,
+    .view-all-body table::-webkit-scrollbar {
+      height: 8px;
+      width: 8px;
+    }
+    .turn-block .body pre::-webkit-scrollbar-thumb,
+    .turn-block .body table::-webkit-scrollbar-thumb,
+    .view-all-body table::-webkit-scrollbar-thumb {
+      background: var(--sebas-border-strong, rgba(127, 127, 127, 0.55));
+      border-radius: 999px;
+    }
+    .turn-block .body pre::-webkit-scrollbar-track,
+    .turn-block .body table::-webkit-scrollbar-track,
+    .view-all-body table::-webkit-scrollbar-track {
+      background: transparent;
     }
     .turn-block .body code {
       font-family: var(--sebas-font-mono);
@@ -1625,6 +1700,9 @@ export class SebasTranscriptView extends LitElement {
   private rebuildUnits(): void {
     const merged = [...this.entries, ...this.streamEntries]
     this.turnUnits = groupConversation(mergeSpawnErrors(merged))
+    // （fix-webui-qa-round10 2.4，B-DEF-02）回合观察模型时间线与回合分组同
+    // 源重算：徽章只读它，绝不读会话当前模型。
+    this.observedModels = turnObservedModels(this.turnUnits)
   }
 
   /**
@@ -2353,9 +2431,11 @@ export class SebasTranscriptView extends LitElement {
     const ts = formatTime(u.startedAt)
     const label = resolveAgentDisplay(this.agentDisplay)
     const avatar = label === 'assistant' ? 'AI' : graphemes(label)[0]?.toUpperCase() ?? 'AI'
-    // （fix-webui-qa-round9 4.3）回合块呈现生效模型名——与会话头同源；
-    // 模型不可知（空/纯空白）时如实缺省，不伪造占位。
-    const model = this.currentModel?.trim() ?? ''
+    // （fix-webui-qa-round10 2.4，B-DEF-02）回合徽章读**回合观察模型**（该
+    // 回合开始时生效的模型，model_change 留痕重放）——不再读会话当前模型：
+    // 切换模型只影响之后的回合，历史徽章绝不回溯改写。观察不到（该回合前
+    // 无任何 model_change 留痕）如实无徽章，不伪造。
+    const model = this.observedModels.get(u.position)?.trim() ?? ''
     return html`
       <div class="turn-block is-assistant" data-turn-position=${u.position}>
         <div class="avatar assistant">${avatar}</div>

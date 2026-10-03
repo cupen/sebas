@@ -237,6 +237,15 @@ export class SebasProjectRail extends LitElement {
    */
   @state() private focusedKey: string | null = null
   @state() private archivedSessions: ArchiveEntry[] = []
+  /**
+   * （fix-webui-qa-round10 5.1，B-DEF-01）会话统计真值：`GET /api/sessions`
+   * 的 `total_sessions`——会话总览页统计区用的**同一份**数字（同源同帧）。
+   * 「历史」组头的计数徽章读它，随 session.created / session.removed /
+   * `sebas:refetch`（建会话、关闭、归档的既有刷新通道）与节点轮询兜底联动，
+   * 不再是恒 0 的静态数；归档组本身仍只列归档条目（「历史组 = 归档」语义
+   * 不变），徽章口径 = 会话页统计（spec「Badge tracks session creation」）。
+   */
+  @state() private sessionTotal = 0
   @state() private expanded: Record<string, boolean> = {}
   @state() private historyOpen = false
   /** 8.4：等待组默认展开（它就是要你看见）。 */
@@ -649,6 +658,8 @@ export class SebasProjectRail extends LitElement {
       const list = await api.sessions()
       if (seq !== this.fetchSeq) return
       this.sessions = list.recent_sessions
+      // （fix-webui-qa-round10 5.1，B-DEF-01）会话总览同源统计（历史组徽章）。
+      this.sessionTotal = list.total_sessions
       this.focusedKey = list.active_session_key
       // （4.2）聚焦缺省展开的**物化**：无记录且其下有聚焦会话的项目，此刻
       // 把展开写进记录（随写持久化）。物化让缺省成为显式状态——之后的聚焦
@@ -1470,6 +1481,10 @@ export class SebasProjectRail extends LitElement {
     // （「历史」标签 + 计数）直达 /sessions，归档为空也渲染组头——总览页
     // 不再只能手输 URL。折叠/展开收窄到 chevron（组头的导航语义与开合
     // 语义分离，点击标签绝不误折叠）。
+    // （fix-webui-qa-round10 5.1，B-DEF-01）组头计数 = /api/sessions 的
+    // `total_sessions`（会话页统计区同一份数字），随建会话/关闭/归档的
+    // 刷新通道联动——不再是「归档条数」（恒 0 被 QA 证伪为误导：会话页
+    // 「N 总计」同框时徽章恒 0）。归档组列表语义不变（仍只列归档条目）。
     const archived = [...this.archivedSessions].sort((a, b) => b.archived_at - a.archived_at)
     return html`
       <div class="group-section" data-testid="history-group">
@@ -1482,7 +1497,7 @@ export class SebasProjectRail extends LitElement {
             title="打开全部会话总览"
             @click=${(e: Event) => e.stopPropagation()}
             >历史</a
-          ><span class="group-count">${archived.length}</span>
+          ><span class="group-count" data-testid="history-session-count">${this.sessionTotal}</span>
         </button>
         ${this.historyOpen && archived.length > 0 ? html`<ul class="sessions">${archived.map((a) => this.renderArchivedSessionRow(a))}</ul>` : nothing}
       </div>`
