@@ -110,6 +110,11 @@ impl DispatchHandle {
                 self.apply_event(session_id.as_str(), event).await;
                 self.flush_card(session_id.as_str()).await;
                 let sid = session_id.as_str();
+                // （fix-webui-qa-round12 2.1，design D2）退役**之前**登记会话
+                // 累计 usage 幸存者：retire 抹掉 session_id 绑定后 drop_card
+                // 的自动登记反查不到 key——crash→resume（同 key，可能换
+                // routing id）后的 usage 合并以它为锚，累计不回退。
+                self.stash_usage_survivor(sid).await;
                 if let Some(key) = self.map.lookup_key_by_session(sid).await {
                     self.reply_targets.clear(&key).await;
                     // workbench-turn-queue 5.2（design D5）：退役**之前**发出

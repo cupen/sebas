@@ -1529,7 +1529,8 @@ describe('ws event dispatch, throttling and resync (fix-webui-streaming-liveness
     apiMocks.summary.mockResolvedValue(focusedSummary())
     let releaseStale!: (d: SessionDetail) => void
     const stale = new Promise<SessionDetail>((resolve) => (releaseStale = resolve))
-    // 首拉（代际 A）挂起；随后的 refetch（代际 B）立即返回含新条目的快照。
+    // 首拉（代际 A）挂起；随后的显式重取（resync，代际 B，force 越过在飞闸）
+    // 立即返回含新条目的快照。
     apiMocks.session.mockImplementationOnce(() => stale)
     apiMocks.session.mockResolvedValue({
       ...detailFixture(),
@@ -1540,7 +1541,7 @@ describe('ws event dispatch, throttling and resync (fix-webui-streaming-liveness
     })
     const el = await mount()
     await settle(el)
-    window.dispatchEvent(new Event('sebas:refetch'))
+    wsMocks.emit({ type: 'session.resync' })
     await settle(el)
     expect(transcriptOf(el)!.entries.map((e) => e.content)).toContain('from newer fetch')
     // 迟到的 A 响应（旧快照）到达：不得回退 B 的缓冲。
@@ -1549,6 +1550,31 @@ describe('ws event dispatch, throttling and resync (fix-webui-streaming-liveness
     const entries = transcriptOf(el)!.entries
     expect(entries).toHaveLength(4)
     expect(entries[3].content).toBe('from newer fetch')
+    el.remove()
+  })
+
+  it('a summary-convergent reload does not double-fire while a load is in flight (round12 5.3, O-5)', async () => {
+    // 深链首载在飞时，summary 收敛触发的同 key 重取被在飞装载吸收——死会话
+    // 深链「每次导航至多一次失败请求」的请求侧闸门（装载数据由在飞请求收敛）。
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    let releaseFirst!: (d: SessionDetail) => void
+    const first = new Promise<SessionDetail>((resolve) => (releaseFirst = resolve))
+    apiMocks.session.mockImplementationOnce(() => first)
+    apiMocks.session.mockResolvedValue(detailFixture())
+    const el = await mount()
+    await settle(el)
+    const callsAfterMount = apiMocks.session.mock.calls.length
+    expect(callsAfterMount).toBe(1)
+    // summary 再收敛（sebas:refetch → refreshLists）：同 key 在飞 → 跳过。
+    window.dispatchEvent(new Event('sebas:refetch'))
+    await settle(el)
+    expect(apiMocks.session.mock.calls.length).toBe(callsAfterMount)
+    releaseFirst(detailFixture())
+    await settle(el)
+    // 落地后再来一次（显式重取类）照常发得出去。
+    window.dispatchEvent(new Event('sebas:refetch'))
+    await settle(el)
+    expect(apiMocks.session.mock.calls.length).toBe(callsAfterMount + 1)
     el.remove()
   })
 

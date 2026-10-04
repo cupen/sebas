@@ -313,6 +313,8 @@ mod role_gate {
         _root: tempfile::TempDir,
         app: axum::Router,
         store: PathBuf,
+        /// claude 的 backend 落点（sync 投影目标；门禁用例断言它不被写/清）。
+        backend: PathBuf,
         auth: Arc<AuthHandle>,
     }
 
@@ -320,7 +322,12 @@ mod role_gate {
         async fn new() -> AuthHarness {
             let root = tempfile::tempdir().unwrap();
             let store = root.path().join("skills");
-            let service = FsSkillsService::with_placements(store.clone(), Vec::new(), Vec::new());
+            let backend = root.path().join("home").join(".claude").join("skills");
+            let service = FsSkillsService::with_placements(
+                store.clone(),
+                vec![("claude".into(), backend.clone())],
+                Vec::new(),
+            );
             let auth = Arc::new(AuthHandle::open_with_iterations(
                 root.path().join("auth.db"),
                 1000,
@@ -343,6 +350,7 @@ mod role_gate {
                 _root: root,
                 app,
                 store,
+                backend,
                 auth,
             }
         }
@@ -457,6 +465,96 @@ mod role_gate {
         let vic = h.login("vic", "password8").await;
         let (status, body) = h.req("GET", "/api/skills", Some(&vic), None).await;
         assert_eq!(status, StatusCode::OK, "viewer 读面不得被角色拦: {body}");
+        drop(h.auth);
+    }
+
+    // ── POST /api/skills/sync 的角色门禁（fix-webui-qa-round12 3.3，R12-A-1/D3）──
+    //
+    // sync 会把仓投影进 backend 落点并清理上次投影过、仓里已删的条目——可
+    // 触发删除效果的写操作，与 DELETE 同挂 settings.manage：member/viewer 得
+    // 403 类型化权限错误且 backend 落点不被写入/清理；root sync 成功。
+
+    /// 快照目录树的（相对路径, 内容）集，供「逐字不变」断言。
+    fn tree_snapshot(root: &Path) -> Vec<(String, Vec<u8>)> {
+        let mut out = Vec::new();
+        for entry in walkdir(root) {
+            let rel = entry.strip_prefix(root).unwrap().to_string_lossy().into_owned();
+            let data = if entry.is_dir() { Vec::new() } else { std::fs::read(&entry).unwrap() };
+            out.push((rel, data));
+        }
+        out.sort();
+        out
+    }
+
+    fn walkdir(root: &Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            out.push(dir.clone());
+            if let Ok(rd) = std::fs::read_dir(&dir) {
+                for e in rd.flatten() {
+                    if e.path().is_dir() {
+                        stack.push(e.path());
+                    } else {
+                        out.push(e.path());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn member_and_viewer_sync_is_rejected_and_placements_untouched() {
+        let h = AuthHarness::new().await;
+        seed_skill(&h.store);
+        // 落点里放一个私有条目（sync 对名外条目只计数不动；被拒请求则连
+        // 计数都不该发生——目录树逐字不变）。
+        let private = h.backend.join("private-skill");
+        std::fs::create_dir_all(&private).unwrap();
+        std::fs::write(private.join("SKILL.md"), "# private\n").unwrap();
+        let before = tree_snapshot(&h.backend);
+
+        for (who, user) in [("member", "bob"), ("viewer", "vic")] {
+            let cookie = h.login(user, "password8").await;
+            let (status, body) =
+                h.req("POST", "/api/skills/sync", Some(&cookie), Some("{}".into())).await;
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "{who} sync 必须 403: {status} {body}"
+            );
+            assert_eq!(
+                body["error"],
+                format!("权限不足：{who} 角色无权执行该操作"),
+                "类型化权限错误（与 DELETE 同款）: {body}"
+            );
+            // backend 落点不被写入或清理（spec「no backend placement directory
+            // is written or cleaned」）。
+            assert_eq!(
+                tree_snapshot(&h.backend),
+                before,
+                "{who} 的被拒 sync 不得触 backend 落点"
+            );
+        }
+        drop(h.auth);
+    }
+
+    #[tokio::test]
+    async fn root_sync_succeeds_and_projects_the_store() {
+        let h = AuthHarness::new().await;
+        seed_skill(&h.store);
+        let cookie = h.login("alice", "password8").await;
+        let (status, body) = h.req("POST", "/api/skills/sync", Some(&cookie), Some("{}".into())).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body["reports"][0]["written"][0], "beads",
+            "root sync 把仓条目投影进 claude 落点: {body}"
+        );
+        assert!(
+            h.backend.join("beads").join("SKILL.md").is_file(),
+            "root sync 把仓条目投影进 claude 落点"
+        );
         drop(h.auth);
     }
 }

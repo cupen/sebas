@@ -442,13 +442,14 @@ async fn cancelled_turn_appends_a_stop_entry_and_normal_finish_does_not() {
     );
 }
 
-/// （fix-webui-qa-round8 5.2 + review 补修）会话内模型切换留痕：spawn 窗口
-/// 的**初始观察**（driver 首帧把种子模型纠偏成 agent 真实模型）只更新映射、
-/// 不落条目——它是快照记账，不是操作者动作；其后的 ModelChanged 才是操作
-/// 者切换，落 `model_change` 系统条目（含新旧模型名）。观察值与当前一致时
-/// 整体 no-op（纠偏帧重复到达不重写）。
+/// （fix-webui-qa-round8 5.2 → fix-webui-qa-round12 4.1，design D4 重构）
+/// `model_change` 留痕条目的产生点收口到「操作者显式切换成功」：只有携带
+/// 在途标记（SetModel 指令经 `emit` 出站时登记）的 ModelChanged 落条目；
+/// agent 子进程自发的模型观察/重报（spawn 首帧纠偏、crash 重启重报）只更新
+/// 快照、绝不产生回执；SetModel 被拒（模型未变标记错误）取走在途标记——
+/// 拒绝后的 ModelChanged 同样静默。
 #[tokio::test]
-async fn model_change_lands_a_transcript_entry_with_old_and_new_model() {
+async fn model_change_lands_a_transcript_entry_only_for_operator_switches() {
     let (router, _rx) = DispatchHandle::new(SessionMap::new());
     let key = web_key("model");
     router
@@ -457,17 +458,27 @@ async fn model_change_lands_a_transcript_entry_with_old_and_new_model() {
         .await
         .unwrap();
 
-    // 初始观察（spawn 窗口纠偏）：映射更新、转录**无**条目。
+    // agent 自发观察 #1（spawn 窗口纠偏，无在途标记）：映射更新、转录无条目。
     router.apply_model_changed("s-model", "model-b").await;
     let turns = router.session_turns(&key, 0).await.unwrap();
     assert!(
         !turns.iter().any(|e| e.element_type == "model_change".into()),
-        "the spawn-window observation must not land a transcript entry: {turns:?}"
+        "a child-initiated observation must not land a transcript entry: {turns:?}"
     );
     let info = router.session_info_for(&key).await.expect("session");
     assert_eq!(info.current_model.as_deref(), Some("model-b"));
 
-    // 中程操作者切换：from = 初始观察后的生效模型，条目落账。
+    // 操作者显式切换：SetModel 经 emit 出站（在途标记登记）→ ModelChanged
+    // （成功回执）→ 恰一条条目，from = 切换前生效模型。
+    router
+        .emit(sebas_dispatch::Out::SendAcp {
+            session_id: "s-model".into(),
+            cmd: sebas_acp::AcpCommand::SetModel {
+                session_id: "s-model".into(),
+                model_id: "model-c".into(),
+            },
+        })
+        .await;
     router.apply_model_changed("s-model", "model-c").await;
     let turns = router.session_turns(&key, 0).await.unwrap();
     let entries: Vec<&TurnEntry> = turns
@@ -480,14 +491,51 @@ async fn model_change_lands_a_transcript_entry_with_old_and_new_model() {
     assert_eq!(payload["from"], "model-b");
     assert_eq!(payload["to"], "model-c");
 
-    // 纠偏帧重复到达（观察值 == 当前值）：整体 no-op，不重写、不落条目。
-    router.apply_model_changed("s-model", "model-c").await;
+    // crash 重启后的子进程模型重报（无在途标记）：快照照常跟随、零回执。
+    router.apply_model_changed("s-model", "model-d").await;
     let turns = router.session_turns(&key, 0).await.unwrap();
-    let entries: Vec<&TurnEntry> = turns
+    let count = turns
         .iter()
         .filter(|e| e.element_type == "model_change".into())
-        .collect();
-    assert_eq!(entries.len(), 1, "a same-model observation is a no-op");
+        .count();
+    assert_eq!(count, 1, "a restart re-report is silent");
+    let info = router.session_info_for(&key).await.expect("session");
+    assert_eq!(info.current_model.as_deref(), Some("model-d"));
+
+    // 操作者切换被拒：非终态 Error（模型未变标记）取走在途标记 → 其后的
+    // ModelChanged（agent 观察回退旧模型）不落成功回执。
+    router
+        .emit(sebas_dispatch::Out::SendAcp {
+            session_id: "s-model".into(),
+            cmd: sebas_acp::AcpCommand::SetModel {
+                session_id: "s-model".into(),
+                model_id: "model-e".into(),
+            },
+        })
+        .await;
+    router
+        .apply_event(
+            "s-model",
+            &AcpEvent::Error {
+                session_id: "s-model".into(),
+                message: format!(
+                    "set model \"model-e\" 被拒绝（会话仍使用原模型），{}",
+                    sebas_acp::MODEL_UNCHANGED_MARKER
+                ),
+                terminal: false,
+            },
+        )
+        .await;
+    router.apply_model_changed("s-model", "model-d").await;
+    let turns = router.session_turns(&key, 0).await.unwrap();
+    let count = turns
+        .iter()
+        .filter(|e| e.element_type == "model_change".into())
+        .count();
+    assert_eq!(
+        count, 1,
+        "a rejected switch must not produce a success receipt"
+    );
 }
 
 /// 3.2 主契约：restore 携带身份四项——恢复后 `agent_kind` / desired mode /

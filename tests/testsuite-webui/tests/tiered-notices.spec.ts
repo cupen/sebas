@@ -131,4 +131,39 @@ test.describe('分级通知层', () => {
       expect(collector.clean()).toEqual([])
     })
   })
+
+  test.describe('回合终点通知', () => {
+    // fix-webui-qa-round12 1.4（R12-B-2）：非聚焦会话的回合终点通知由 /ws
+    // 全局会话事件流驱动——操作者驻留历史页、会话在本标签页从未打开过（API
+    // 形态 = 「另一客户端」），回合终点帧到达即弹 info 瞬时条。QA 第 11/12 轮
+    // 的「零通知」是旅程形状伪影：fake provider 的回合毫秒级收敛，GUI 发送
+    // 后操作者尚未离开工作台终点就已发生（聚焦抑制按 spec 生效）；本旅程用
+    // 「页面驻留历史页 + 会话经 API 创建」复现规格场景本身。
+    // 边界（如实上报）：failed → error toast 的分支由 turn-notify 单测承载
+    // ——fake-claude 的 refuse 是非终结错误（status 停留 done，errors 旅程
+    // 已钉），browser 层无确定性的 failed 终态生产者。
+    test('历史页驻留 + 从未打开过的会话回合完成 → info 通知', async ({ page }) => {
+      const shell = new AppShell(page)
+      await page.goto('/')
+      await expect(shell.brand).toBeVisible()
+      // 全程驻留历史页：本标签页从头到尾不聚焦目标会话。
+      await page.goto('/sessions')
+
+      // 另一客户端发起回合（API 形态）：不 await——终点帧在 POST 进行中就会
+      // 推到本页，通知是 5s 瞬时条，先起轮再等toast才不竞速。
+      const created = createSession(page.request, { prompt: 'turn-notify-probe' })
+      await expect(
+        page.locator('wa-toast-item').filter({ hasText: '的回合已完成' }),
+      ).toBeVisible({ timeout: 20_000 })
+
+      // 终点通知不驻留：等它按瞬时语义消失（info 默认 5s），证明没有产生
+      // 驻留条。
+      await created.catch(() => {}) // 会话创建本体失败会让上面断言先红，这里只收敛 promise
+      await expect(
+        page.locator('wa-toast-item').filter({ hasText: '的回合已完成' }),
+      ).toHaveCount(0, { timeout: 10_000 })
+
+      expect(collector.clean()).toEqual([])
+    })
+  })
 })

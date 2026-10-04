@@ -89,3 +89,122 @@ async fn reported_usage_accumulates_across_turns_and_survives_finish() {
     assert_eq!(usage.total_output, 35, "session-cumulative output");
     assert_eq!(usage.model.as_deref(), Some("claude-x"));
 }
+
+// ── fix-webui-qa-round12 2.1（R12-B-1，design D2）：crash 不回退 ─────────────
+
+/// crash（terminal Error → 退役 + drop_card）后，同 key 的恢复会话（fallback-
+/// fresh 换 routing id）的首次 usage 上报以幸存的会话累计为基线续增：头部与
+/// 卡态累计单调不回退（600·60 → 恢复后 700·70，而非新子进程的 100·10）。
+#[tokio::test]
+async fn crash_then_recovered_child_accumulates_on_top_of_the_preserved_total() {
+    let (router, _out_rx) = DispatchHandle::new(SessionMap::new());
+    let key = web_key("crash");
+    spawn_session(&router, &key, "s-crash").await;
+
+    // 已完成回合累计到 600·60。
+    router
+        .dispatch_acp_event(AcpEvent::UsageUpdate {
+            session_id: "s-crash".into(),
+            usage: turn_usage(Some("claude-x"), Some(600), Some(60)),
+        })
+        .await;
+
+    // crash：watchdog 的 terminal Error 走即时路径（退役 + drop_card）。
+    router
+        .apply_event_to_out(
+            "s-crash".to_string(),
+            &AcpEvent::Error {
+                session_id: "s-crash".into(),
+                message: "agent process exited or hung (watchdog)".into(),
+                terminal: true,
+            },
+        )
+        .await;
+
+    // 幸存窗口：卡态已清、映射已退役，投影以幸存者兜底——头部不消失不回退。
+    let info = router.session_info_for(&key).await.expect("retired row stays");
+    let usage = info.usage.expect("survivor keeps the cumulative visible");
+    assert_eq!(usage.total_input, 600, "pre-crash input preserved");
+    assert_eq!(usage.total_output, 60, "pre-crash output preserved");
+
+    // 恢复：fallback-fresh 换 routing id（同 key 新映射）。
+    router
+        .map
+        .insert(key.clone(), Mapping::active("s-new"))
+        .await
+        .unwrap();
+
+    // 恢复后的第一个回合：新子进程重报 100·10 —— 在保留值之上续增。
+    router
+        .dispatch_acp_event(AcpEvent::UsageUpdate {
+            session_id: "s-new".into(),
+            usage: turn_usage(Some("claude-x"), Some(100), Some(10)),
+        })
+        .await;
+    let info = router.session_info_for(&key).await.expect("recovered session");
+    let usage = info.usage.expect("recovered session projects Some");
+    assert_eq!(
+        usage.total_input, 700,
+        "recovered turns accumulate on top of the preserved total"
+    );
+    assert_eq!(usage.total_output, 70, "output likewise monotonic");
+
+    // 卡态是唯一的后续记账基线：下一回合继续累加（幸存者已一次性并入）。
+    router
+        .dispatch_acp_event(AcpEvent::UsageUpdate {
+            session_id: "s-new".into(),
+            usage: turn_usage(None, Some(10), Some(1)),
+        })
+        .await;
+    let info = router.session_info_for(&key).await.unwrap();
+    let usage = info.usage.expect("still reported");
+    assert_eq!(usage.total_input, 710, "subsequent turns keep accumulating");
+}
+
+/// 显式 close 清除幸存者：关闭会话的历史用量不得复活到同 key 的未来新会话
+/// （对照上一用例：resume 保留、close 清零）。
+#[tokio::test]
+async fn explicit_close_clears_the_survivor_for_the_key() {
+    let (router, _out_rx) = DispatchHandle::new(SessionMap::new());
+    let key = web_key("close");
+    spawn_session(&router, &key, "s-old").await;
+    router
+        .dispatch_acp_event(AcpEvent::UsageUpdate {
+            session_id: "s-old".into(),
+            usage: turn_usage(Some("claude-x"), Some(600), Some(60)),
+        })
+        .await;
+    router
+        .apply_event_to_out(
+            "s-old".to_string(),
+            &AcpEvent::Error {
+                session_id: "s-old".into(),
+                message: "crashed".into(),
+                terminal: true,
+            },
+        )
+        .await;
+
+    // 操作者显式关闭（不走 resume）。
+    router.web_close_session(key.clone()).await;
+
+    // 同 key 的新会话从零开始：首回合上报 5·1 → 累计恰为 5·1。
+    router
+        .map
+        .insert(key.clone(), Mapping::active("s-fresh"))
+        .await
+        .unwrap();
+    router
+        .dispatch_acp_event(AcpEvent::UsageUpdate {
+            session_id: "s-fresh".into(),
+            usage: turn_usage(None, Some(5), Some(1)),
+        })
+        .await;
+    let info = router.session_info_for(&key).await.expect("fresh session");
+    let usage = info.usage.expect("fresh session reports its own");
+    assert_eq!(
+        usage.total_input, 5,
+        "a closed session's usage must not resurrect on a new session"
+    );
+    assert_eq!(usage.total_output, 1);
+}

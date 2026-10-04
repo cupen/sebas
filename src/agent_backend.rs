@@ -791,6 +791,40 @@ impl NativeAgentBackend {
             }
         }
     }
+
+    /// （fix-webui-qa-round12 4.2，D4）静默应用会话级模型 override：与
+    /// [`SessionBackend::set_session_model`] 同一状态迁移（override 写入 +
+    /// 内核下发），但**不落** `model_change` 回执条目——会话创建表单的模型
+    /// 选定不是「切换」（spec：switch receipts are operator-driven）。返回
+    /// None = 无留痕价值（创建时选定 = 内核缺省，from == to，无切换事实）。
+    async fn apply_model_override(
+        &self,
+        key: &ChannelKey,
+        model_id: &str,
+    ) -> Result<Option<TurnEntry>, SessionRejection> {
+        let encoded = Self::encode_key(key);
+        let mut g = self.sessions.write().await;
+        let Some(session) = g.get_mut(&encoded) else {
+            return Err(SessionRejection::UnknownSession {
+                key: encoded,
+            });
+        };
+        let from = session
+            .current_model_override
+            .clone()
+            .or_else(|| Some(session.default_model.clone()));
+        session.current_model_override = Some(model_id.to_string());
+        session.handle.set_model(model_id.to_string()).await;
+        if from.as_deref() == Some(model_id) {
+            return Ok(None);
+        }
+        let entry = TurnEntry::model_change(
+            session.transcript.len() as u64,
+            serde_json::json!({ "from": from, "to": model_id }),
+        );
+        session.transcript.push(entry.clone());
+        Ok(Some(entry))
+    }
 }
 
 #[async_trait::async_trait]
@@ -940,36 +974,18 @@ impl SessionBackend for NativeAgentBackend {
     /// 不在 `available_models` 内仍接受（与 ACP 行为一致 —— 模型 ID 合法性
     /// 由内核 LLM 客户端实时校验）。
     ///
-    /// （fix-webui-qa-round8 5.2）切换落一条 `model_change` 系统条目（含新旧
-    /// 模型名）——与 ACP 引擎面 `apply_model_changed` 的留痕对齐，两条执行体
-    /// 行为一致。
+    /// （fix-webui-qa-round8 5.2 → fix-webui-qa-round12 4.2，D4）操作者显式
+    /// 切换：落一条 `model_change` 系统条目（含新旧模型名）——回执只由
+    /// 操作者切换产生；会话创建表单的模型选定走
+    /// [`NativeAgentBackend::apply_model_override`]（静默，不产生「切换」
+    /// 回执）。
     async fn set_session_model(
         &self,
         key: ChannelKey,
         model_id: String,
     ) -> Result<(), SessionRejection> {
-        let encoded = Self::encode_key(&key);
-        let entry = {
-            let mut g = self.sessions.write().await;
-            let Some(session) = g.get_mut(&encoded) else {
-                return Err(SessionRejection::UnknownSession { key: encoded });
-            };
-            let from = session
-                .current_model_override
-                .clone()
-                .or_else(|| Some(session.default_model.clone()));
-            session.current_model_override = Some(model_id.clone());
-            let entry = TurnEntry::model_change(
-                session.transcript.len() as u64,
-                serde_json::json!({ "from": from, "to": model_id }),
-            );
-            session.transcript.push(entry.clone());
-            entry
-        };
-        NativeSession::broadcast_entry(&self.turn_events, &key, entry);
-        let g = self.sessions.read().await;
-        if let Some(session) = g.get(&encoded) {
-            session.handle.set_model(model_id).await;
+        if let Some(entry) = self.apply_model_override(&key, &model_id).await? {
+            NativeSession::broadcast_entry(&self.turn_events, &key, entry);
         }
         Ok(())
     }
@@ -1562,9 +1578,10 @@ impl SessionBackend for DualSessionBackend {
             // 会话同样生效——走会话级 override 缝（作用于后续 turn 并
             // 反映在快照 current_model 上），不再被静默丢弃。会话刚由
             // 本调用建成，set 理论不会失败；万一失败也不否定已建成的
-            // 会话。
+            // 会话。（fix-webui-qa-round12 4.2，D4）创建表单的模型选定走
+            // 静默 override——不是「切换」，不落 model_change 回执。
             if let Some(m) = model {
-                let _ = self.native.set_session_model(key.clone(), m).await;
+                let _ = self.native.apply_model_override(&key, &m).await;
             }
             Ok(key)
         }

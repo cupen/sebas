@@ -3000,24 +3000,31 @@ export class SebasSettingsModal extends LitElement {
         </div>
       `
     const list = this.skills
+    // 同步与删除同门槛（fix-webui-qa-round12 3.2，R12-A-1/D3）：sync 会把仓
+    // 投影进 backend 落点并清理已删条目，属写操作——只读角色不渲染同步按钮
+    // （「刷新」是只读重列，保留）。防线在服务端（POST sync 403），这里是
+    // D8 呈现裁剪。
+    const canSync = canManageSkills(this.role)
     return html`
       <div class="provider-toolbar">
         <wa-button appearance="outlined" ?disabled=${this.skillBusy} @click=${() => this.refreshSkills()}>
           刷新
         </wa-button>
-        <wa-button
-          variant="brand"
-          appearance="filled"
-          ?disabled=${this.skillBusy}
-          @click=${() => void this.runSkillsSync()}
-        >
-          ${this.skillBusy ? '同步中…' : '同步'}
-        </wa-button>
+        ${canSync
+          ? html`<wa-button
+              variant="brand"
+              appearance="filled"
+              ?disabled=${this.skillBusy}
+              @click=${() => void this.runSkillsSync()}
+            >
+              ${this.skillBusy ? '同步中…' : '同步'}
+            </wa-button>`
+          : nothing}
         <span class="label" role="status">
           ${list === null ? '' : `仓内 ${list.length} 个技能`}
         </span>
       </div>
-      ${this.renderSkillSyncPanel()}
+      ${canSync ? this.renderSkillSyncPanel() : nothing}
       ${list === null
         ? html`
             <div class="panel panel-pad">

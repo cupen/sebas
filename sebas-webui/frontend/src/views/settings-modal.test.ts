@@ -1190,11 +1190,13 @@ describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
     el.remove()
   })
 
-  // ── fix-webui-qa-round11 2.2（A-1/D2）：技能删除控件随角色裁剪 ──
-  // spec「viewer cannot delete a skill：no delete affordance is rendered」：
-  // settings.manage 档（root/admin）才渲染行内 🗑；member/viewer 只读浏览
-  // （列表/预览/刷新/同步全保留）。防线在服务端 DELETE 403，这里是呈现裁剪。
-  describe('技能删除控件随角色裁剪（fix-webui-qa-round11 2.2）', () => {
+  // ── fix-webui-qa-round11 2.2（A-1/D2）+ fix-webui-qa-round12 3.2（R12-A-1/D3）：
+  // 技能删除与同步控件随角色裁剪。spec「viewer cannot delete a skill：no delete
+  // affordance is rendered」+「viewer sees no sync affordance」：settings.manage
+  // 档（root/admin）才渲染行内 🗑 与工具条「同步」（sync 会投影清理 backend
+  // 落点，属写操作）；member/viewer 只读浏览（列表/预览/刷新保留）。防线在
+  // 服务端 DELETE/sync 403，这里是呈现裁剪。
+  describe('技能删除与同步控件随角色裁剪（round11 2.2 + round12 3.2）', () => {
     async function mountAs(
       role: 'root' | 'admin' | 'member' | 'viewer' | null,
     ): Promise<SebasSettingsModal> {
@@ -1208,7 +1210,7 @@ describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
       return el
     }
 
-    it('member/viewer 的技能行不渲染删除按钮，浏览面（列表/刷新/同步）保留', async () => {
+    it('member/viewer 不渲染删除与同步控件，刷新与浏览面保留', async () => {
       for (const role of ['member', 'viewer'] as const) {
         const el = await mountAs(role)
         await goto(el, 'skills')
@@ -1220,21 +1222,23 @@ describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
         for (const row of skillRows(el)) {
           expect(row.querySelector('button[title="删除"]'), `${role} 不得见删除控件`).toBeNull()
         }
-        // 刷新/同步（投影不动仓）保留。
+        // 同步按钮不渲染（写操作）；刷新（只读重列）保留。
         const buttons = waButtons(el).map((b) => b.textContent?.trim())
-        expect(buttons).toContain('刷新')
-        expect(buttons).toContain('同步')
+        expect(buttons, `${role} 不得见同步控件`).not.toContain('同步')
+        expect(buttons, `${role} 的刷新保留`).toContain('刷新')
         el.remove()
       }
     })
 
-    it('root/admin（及鉴权关闭宿主）删除控件照常呈现', async () => {
+    it('root/admin（及鉴权关闭宿主）删除与同步控件照常呈现', async () => {
       for (const role of ['root', 'admin', null] as const) {
         const el = await mountAs(role)
         await goto(el, 'skills')
         for (const row of skillRows(el)) {
           expect(row.querySelector('button[title="删除"]'), `删除控件 @ ${role}`).toBeTruthy()
         }
+        const buttons = waButtons(el).map((b) => b.textContent?.trim())
+        expect(buttons, `同步控件 @ ${role}`).toContain('同步')
         el.remove()
       }
     })

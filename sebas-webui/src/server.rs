@@ -431,8 +431,8 @@ fn is_protected_path(path: &str) -> bool {
 /// | `/api/providers*` 写（增/改/删，fix-webui-qa-round10 3.1）、`/api/model-aliases*` 写 | 非安全方法 | `settings.manage`（member/viewer 只读；spec「Provider and alias mutations are role-gated」）。例外：`POST /api/providers/{name}/probe` 只读拨测不执法 |
 /// | `/api/providers*` 读、`/api/provider-presets`、`/api/provider-defaults` | GET | 无（认证即可——spec「Read access … remains available to signed-in roles」） |
 /// | `/api/sessions*` 写、`/api/projects*` 写、`/api/permissions/*`（answer） | 非安全方法 | `sessions.write` |
-/// | `/api/skills` 读（list/detail）、`POST /api/skills/sync`（投影） | GET / POST | 无——add-agent-skills 5.3：仅登录门 + 非安全方法同源校验 |
-/// | `DELETE /api/skills/{name}`（改仓，fix-webui-qa-round11 2.1） | 非安全方法 | `settings.manage`（root/admin；member/viewer 403 类型化权限错误，与 provider 变更面同键） |
+/// | `/api/skills` 读（list/detail） | GET | 无——add-agent-skills 5.3：仅登录门 + 非安全方法同源校验 |
+/// | `DELETE /api/skills/{name}`（改仓，fix-webui-qa-round11 2.1）、`POST /api/skills/sync`（投影+清理 backend 落点，fix-webui-qa-round12 3.1） | 非安全方法 | `settings.manage`（root/admin；member/viewer 403 类型化权限错误，与 provider 变更面同键） |
 /// | `/api/agents*` 写（POST / PUT / DELETE，gate-agent-directory-writes 1.1） | 非安全方法 | `settings.manage` 档（spec agents.manage 行：root/admin——同一执法函数的再标注，不新设权限位） |
 /// | `/api/fs/mkdir`（目录选择器新建子目录，add-webui-round7-gaps 3.1） | 非安全方法 | `sessions.write`（为注册项目服务的写面；viewer 只读） |
 /// | 其余 `/api/*`（summary / sessions 与 projects 读 / env / agents 读 / nodes / about / archive 读 / browse-dirs）与 `/ws` | 全部 | 无（认证即可，viewer 可读） |
@@ -473,15 +473,15 @@ fn required_permission(path: &str, method: &str) -> Option<Permission> {
     if path == "/api/provider-presets" || path == "/api/provider-defaults" {
         return None;
     }
-    // skills 管理面（add-agent-skills 5.3；fix-webui-qa-round11 2.1，A-1/D2）：
-    // 读（list/detail）与 sync（投影）维持登录门（不按角色执法）；**删除**是
-    // 改仓动作，挂 `settings.manage`（root/admin，与 provider 变更面同键，
-    // rbac 矩阵本身不动）——member/viewer 在 RBAC 层得 403 类型化权限错误，
-    // 与项目注册拒绝同款。显式列出，防止未来新增 `/api/*` 规则误捕这些路径。
+    // skills 管理面（add-agent-skills 5.3；fix-webui-qa-round11 2.1，A-1/D2；
+    // fix-webui-qa-round12 3.1，R12-A-1/D3）：读（list/detail）维持登录门
+    // （不按角色执法）；**删除与 sync（投影）都是改仓/改 backend 落点的写
+    // 动作**——sync 会把仓投影进 backend 落点并清理上次投影过、仓里已删的
+    // 条目，属可触发删除效果的写操作，与删除同挂 `settings.manage`（root/
+    // admin，与 provider 变更面同键，rbac 矩阵本身不动）——member/viewer 在
+    // RBAC 层得 403 类型化权限错误，与项目注册拒绝同款。显式列出，防止未来
+    // 新增 `/api/*` 规则误捕这些路径。
     if path == "/api/skills" || path == "/api/skills/sync" || path.starts_with("/api/skills/") {
-        if path == "/api/skills/sync" {
-            return None;
-        }
         return mutating.then_some(Permission::SettingsManage);
     }
     // admin 控制面（含服务启停/升级/回滚——同一控制面）。

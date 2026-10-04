@@ -294,7 +294,9 @@ export class SebasDashboard extends LitElement {
    * 反映本轮。
    */
   private onComposerSent = (): void => {
-    this.loadFocused(this.effectiveFocusKey())
+    // force（fix-webui-qa-round12 5.3）：发送后的乐观重取是显式重取类——
+    // 越过在飞闸（在飞装载早于本次发送，不含新回合的事实）。
+    this.loadFocused(this.effectiveFocusKey(), { force: true })
   }
 
   /**
@@ -473,7 +475,9 @@ export class SebasDashboard extends LitElement {
    */
   private handleResync(): void {
     this.sessionEntries.clear()
-    this.loadFocused(this.effectiveFocusKey())
+    // force（fix-webui-qa-round12 5.3）：resync 的全量重取是显式重取类——
+    // 越过在飞闸，此刻要的是一份新的。
+    this.loadFocused(this.effectiveFocusKey(), { force: true })
   }
 
   /**
@@ -1108,15 +1112,11 @@ export class SebasDashboard extends LitElement {
     // 深链参数变化（/sessions/A → /sessions/B 复用同一元素）：立即按新 key
     // 取 detail（读即设服务端焦点）。
     if (changed.has('deepLinkKey')) this.loadFocused(this.effectiveFocusKey())
-    // 聚焦即拉起（workbench-live-conversation-flow 3.1）：焦点换了就触发
-    // 一次 activate（幂等——已活/在途是服务端 no-op）。深链、rail 点击、
-    // 创建会话三条聚焦路径都经过这里，拉起带 resume；失败 fire-and-forget
-    // （占位保留，spawn 失败经事件流就地呈现）。
+    // 聚焦即拉起（workbench-live-conversation-flow 3.1）：activate 已移挂到
+    // loadFocused 的**装载成功**路径（fix-webui-qa-round12 5.3，O-5/D6）——
+    // 原先在 willUpdate 与首拉并行出膛，死会话深链的 404 落地前 activate
+    // 先行失手（每次导航第二条失败请求）。装载成功才拉起，幂等锚不变。
     const focusKey = this.effectiveFocusKey()
-    if (focusKey !== null && focusKey !== this.activatedFocusKey) {
-      this.activatedFocusKey = focusKey
-      void api.activateSession(focusKey).catch(() => undefined)
-    }
     // （3.5）焦点换了：上一个会话的终止残影不再有意义。
     if (this.terminatedFor !== null && this.terminatedFor !== focusKey) {
       this.terminatedFor = null
@@ -1591,11 +1591,13 @@ export class SebasDashboard extends LitElement {
                 </div>`
               : html`
           <div class="composer-area">
-            <sebas-review-cards
-              .sessionKey=${visibleFocusKey}
-              .sessionPhase=${this.focusedDetail?.status_slug ?? d.active_session?.status_slug ?? null}
-              @review-pending-changed=${this.onReviewPendingChanged}
-            ></sebas-review-cards>
+            ${this.focusedDetail?.encoded_key === visibleFocusKey
+              ? html`<sebas-review-cards
+                  .sessionKey=${visibleFocusKey}
+                  .sessionPhase=${this.focusedDetail?.status_slug ?? d.active_session?.status_slug ?? null}
+                  @review-pending-changed=${this.onReviewPendingChanged}
+                ></sebas-review-cards>`
+              : nothing}
             <sebas-pending-stack
               .sessionKey=${visibleFocusKey}
               .pending=${this.focusedDetail?.pending ?? []}
@@ -1810,7 +1812,17 @@ export class SebasDashboard extends LitElement {
    */
   private unavailableKeys = new Set<string>()
 
-  private loadFocused(key: string | null): void {
+  /**
+   * （fix-webui-qa-round11 4.2 收口 → fix-webui-qa-round12 5.3，O-5/D6）同
+   * key 在飞装载登记：key → 该装载的请求代际。深链聚焦变更与周期同步同拍
+   * 触发时，并发请求会在任一响应落地前双双穿过不可得闸——「至多一次失手/
+   * 导航」被并发击穿。装载落地按代际自清（force 新代际登记时旧登记自然被
+   * 覆盖，迟到响应只清自己的登记）。
+   */
+  private inflightFocusLoads = new Map<string, number>()
+
+  private loadFocused(key: string | null, opts: { force?: boolean } = {}): void {
+    const force = opts.force === true
     // 7.3：焦点清空（会话移除）时保留提示；切到别的会话才清除。
     if (key !== null && key !== this.droppedPendingFor) this.droppedPending = null
     if (!key) {
@@ -1836,10 +1848,22 @@ export class SebasDashboard extends LitElement {
       this.focusedUnavailable = true
       return
     }
+    // （fix-webui-qa-round11 4.2 收口 → fix-webui-qa-round12 5.3，O-5/D6）
+    // 同 key 并发去重：深链聚焦变更 / 周期同步同拍触发时，两笔同 key 请求会
+    // 在任一响应落地前都穿过上面的不可得闸——「至多一次失手/导航」被并发
+    // 击穿。在飞即跳过（summary 收敛类的重复装载被在飞装载吸收——响应落地
+    // 才放行，原 queueMicrotask 短窗在 lit 首个更新微任务前后就会放行第二笔
+    // 同 key 装载，深链首载 4 条 404 里的两条 detail 就是这么来的）；
+    // **显式重取类**（composer 乐观重取 / resync 全量重取）经 `force` 越过
+    // 在飞闸——它们的语义是「此刻要一份新的」，在飞装载先行作废（代际守卫
+    // 丢弃迟到响应）。
+    if (this.inflightFocusLoads.has(key) && !force) return
     // 3.2（D4）：请求代际（沿用 project-rail 同款模式）——并发触发下只有
     // 最新一次 loadFocused 的响应允许落状态，迟到的旧响应（哪怕还聚焦同
-    // 一会话）直接丢弃，绝不回退较新的缓冲。
+    // 一会话）直接丢弃，绝不回退较新的缓冲。在飞登记以代际为值（force 新
+    // 代际覆盖旧登记：迟到的旧响应只清自己的登记）。
     const seq = ++this.fetchSeq
+    this.inflightFocusLoads.set(key, seq)
     const cached = this.sessionEntries.get(key)
     const cursor = cached && cached.length > 0 ? cached[cached.length - 1].position : undefined
     const incremental = cursor !== undefined
@@ -1847,6 +1871,7 @@ export class SebasDashboard extends LitElement {
     const pending = incremental ? api.session(key, cursor) : api.session(key)
     pending
       .then((d) => {
+        if (this.inflightFocusLoads.get(key) === seq) this.inflightFocusLoads.delete(key)
         if (seq !== this.fetchSeq) return
         if (this.effectiveFocusKey() !== d.encoded_key) return
         // merge 成功才推进游标（序列表即游标真源）；status/pending 等其余
@@ -1890,8 +1915,19 @@ export class SebasDashboard extends LitElement {
         // （round3 4.2）深链窗口的归属核对：detail 到达时 summary 的焦点
         // 指针往往还没落位，这里补一拍投影（幂等）。
         this.followFocusedProject()
+        // （fix-webui-qa-round12 5.3，O-5/D6）聚焦即拉起改挂在**装载成功**
+        // 之后（原在 willUpdate 与首拉并行）：死会话深链的首个 404 落地前
+        // activate 已经出膛，是「每次导航至多一次失败请求」的第二枪——
+        // 拉起以 detail 可得为前提后，不可得会话不再产生 activate 失手；
+        // 活会话的拉起只晚几毫秒（detail 落地即发），warm-up 语义不变。
+        // 幂等锚保留：同 key 只拉起一次。
+        if (this.activatedFocusKey !== d.encoded_key) {
+          this.activatedFocusKey = d.encoded_key
+          void api.activateSession(d.encoded_key).catch(() => undefined)
+        }
       })
       .catch((e) => {
+        if (this.inflightFocusLoads.get(key) === seq) this.inflightFocusLoads.delete(key)
         if (seq !== this.fetchSeq) return
         if (this.effectiveFocusKey() !== key) return
         // （fix-webui-qa-round11 4.2，B-5/D5）**404 才是「不可得」**：会话
@@ -1914,6 +1950,7 @@ export class SebasDashboard extends LitElement {
         // 增量失败：序列与游标原样保留（视图继续渲染已有对话），下次
         // refetch 从同一游标自愈。
       })
+
   }
 
   /**

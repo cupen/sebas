@@ -64,6 +64,20 @@ describe('turn-notify：回合终点通知（fix-webui-qa-round11 3.1）', () =>
     expect(observeTurnFrame(frame({ turn_engaged: false, status_slug: 'done' }))).toBe(true)
   })
 
+  it('本标签页从未打开过的会话：created 首帧入迁移锚，终点照常弹（fix-webui-qa-round12 1.3）', () => {
+    // 另一标签页/另一客户端创建并发起回合；本标签页从加载起就停在历史页、
+    // 从未聚焦它——第一帧是 session.created（占用占位），终点帧照样触发。
+    const messages: string[] = []
+    subscribeNotices((s) => {
+      for (const i of s.items) messages.push(i.message)
+    })
+    expect(
+      observeTurnFrame({ ...frame({ turn_engaged: true, status_slug: 'working' }), type: 'session.created' }),
+    ).toBe(false)
+    expect(observeTurnFrame(frame({ turn_engaged: false, status_slug: 'done' }))).toBe(true)
+    expect(messages).toContain('会话「sess-a」的回合已完成。')
+  })
+
   it('首见帧不判终点（无迁移依据），回归占用也不弹', () => {
     expect(observeTurnFrame(frame({ turn_engaged: false, status_slug: 'done' }))).toBe(false)
     // 已知空闲后的空闲帧仍无迁移。

@@ -4731,13 +4731,14 @@ async fn pending_management_unavailable_uses_honest_cause_text() {
         queue_three_pending(&cli, &base, &project_id, &hint).await;
 
     // 用合法编码 key 但绕开 webui 路由：直接对 feishu channel 编码键（沙箱
-    // feishu disabled，route() 落到 NativeAgentBackend 的 trait 默认实现 →
-    // Unavailable cause = "此后端不承载待执行队列"）。WebUI 路由 decode 该
-    // key 仍合法（webui 不按 channel 过滤），仅后端不可用。
+    // feishu disabled，route() 落到 NativeAgentBackend）。round8 2.2 起 native
+    // 侧承载影子队列，pending/remove/move 对**未知会话**是类型化 UnknownSession
+    // （404「会话不存在」，与 ACP 面同词表）——不再是 trait 默认的 503
+    // 「此后端不承载待执行队列」（round5 时代的期望；本轮 D5 裁决以现行
+    // 契约为准，503 面由 session_backend 单测的 FakeBackend 承载）。
     //
     // 编码约定：「channel%00reference」；is_native（src/agent_backend.rs）
     // 只认 feishu + `agent-` 前缀才路由 native 侧——引用缺前缀会落 ACP 桥
-    // 得 PendingRejected::Unknown（404），断言的 503/诚实文案就永不匹配
     // （round5 6.1 修的键形状），故取一个不存在的 `agent-` 形 feishu 引用。
     let feishu_encoded = "feishu%00agent-round5-native-pending";
     for (op, suffix) in [("remove", "/remove"), ("move", "/move")] {
@@ -4751,17 +4752,13 @@ async fn pending_management_unavailable_uses_honest_cause_text() {
             .await
             .unwrap_or_else(|e| panic!("{op} feishu channel: {e}"));
         assert_eq!(
-            status, 503,
-            "{op} on a non-queue-holding channel must 503 (Unavailable), got {body}"
+            status, 404,
+            "{op} on a native key with no live session must be a typed UnknownSession, got {body}"
         );
         let message = body["error"].as_str().unwrap_or_default();
         assert!(
-            message.contains("操作不可用"),
-            "{op} message must use the round5 honest cause prefix: {message}"
-        );
-        assert!(
-            message.contains("此后端不承载待执行队列"),
-            "{op} message must name the routing gap: {message}"
+            message.contains("会话不存在"),
+            "{op} message must be the typed unknown-session rejection: {message}"
         );
         assert!(
             !message.contains("核心不可达"),
@@ -6139,11 +6136,20 @@ async fn sebas_home_journey_pins_every_file_location() {
         "core's config validation must materialize <home>/cache/downloads"
     );
     // run/：派生 socket 在场（0700 目录 + 0600 socket 的形态断言在单测侧；
-    // 这里证实物与位置）。
+    // 这里证实物与位置）。Windows 侧 IPC 是按路径映射的命名管道
+    // （sebas_ipc::bind → `\\.\pipe\sebas/<路径>`），路径本身不落文件——
+    // 派生目录 `<home>/run/` 就是文件系统侧的见证，管道名以该路径为键。
+    #[cfg(unix)]
     let derived_socket = sb.path.join("run/core.sock");
+    #[cfg(unix)]
     assert!(
         derived_socket.exists(),
         "the derived channel socket must live at <home>/run/core.sock"
+    );
+    #[cfg(windows)]
+    assert!(
+        sb.path.join("run").is_dir(),
+        "the derived run/ dir (named-pipe namespace key <home>/run/core.sock) must exist"
     );
     // node/：真节点的派生状态目录（身份已写入）。
     let node_dir = sb.path.join("node");
@@ -8274,14 +8280,21 @@ async fn receipt_phase_cancel_stops_the_turn_and_the_session_stays_talkative() {
     let (_status, settled) = get_json_status(&cli, &detail_url)
         .await
         .expect("detail after cancel");
-    let settled_entries = settled["entries"].as_array().expect("entries").len();
+    // （fix-webui-qa-round12 5.2，D5 裁决）session-lifecycle spec「取消最终
+    // 生效并留痕：the transcript shows the turn was stopped」——呈现形态是
+    // 中性 notice（round8 7.3：操作者停止不是失败，error 红泡语义废除），
+    // 不再要求 error 条目。
     assert!(
         settled["entries"]
             .as_array()
             .expect("entries")
             .iter()
-            .any(|e| e["element_type"].as_str() == Some("error")),
-        "the stopped turn must leave a visible error entry: {settled}"
+            .any(|e| e["element_type"].as_str() == Some("notice")
+                && e["content"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("回合已取消")),
+        "the stopped turn must leave a visible stop notice: {settled}"
     );
 
     // 会话仍可对话：下一条消息孵化全新会话并完成完整回合（「下一消息
@@ -8299,7 +8312,8 @@ async fn receipt_phase_cancel_stops_the_turn_and_the_session_stays_talkative() {
         .await
         .expect("detail after the follow-up");
     assert!(
-        grown["entries"].as_array().expect("entries").len() > settled_entries,
+        grown["entries"].as_array().expect("entries").len()
+            > settled["entries"].as_array().expect("entries").len(),
         "the follow-up turn must append on top of the preserved transcript: {grown}"
     );
 }
@@ -8774,7 +8788,8 @@ async fn archive_restore_preserves_the_row_naming_sources() {
         .expect("cancel over the operator surface");
         assert_eq!(status, 200, "in-flight cancel must be accepted: {body}");
 
-        // 回合收尾后取消如实呈现（⚠ 行落在收尾标记之后）。
+        // 回合收尾后取消如实呈现：取消的回合照样走到收尾（有回合标记，不是
+        // 悬空在飞）。
         let cancelled = drive_native_turn(
             &cli,
             &sb,
@@ -8784,15 +8799,19 @@ async fn archive_restore_preserves_the_row_naming_sources() {
             |_| PermissionDecision::AllowOnce,
         )
         .await;
-        // 取消的回合照样走到收尾（有回合标记），不是悬空在飞。
         assert!(
             cancelled.summary().contains("model calls"),
             "the cancelled turn still settles with its turn marker: {:?}",
             cancelled.entries
         );
-        let entries = wait_entry_containing(&cli, &sb, &key2, "turn cancelled").await;
+        // （fix-webui-qa-round12 5.2，D5 裁决：取消的留痕形态 = round8 7.3 起
+        // 的中性 notice「回合已取消…」，不再是 ⚠ error 行——session-lifecycle
+        // spec 只要求 the transcript shows the turn was stopped）。
+        let entries = wait_entry_containing(&cli, &sb, &key2, "回合已取消").await;
         assert!(
-            entries.iter().any(|(_, c)| c.contains("⚠ turn cancelled")),
+            entries
+                .iter()
+                .any(|(t, c)| t == "notice" && c.contains("回合已取消")),
             "the operator surface reports the cancellation honestly: {entries:?}"
         );
         // 流确实停在半路：会话转录里的正文比完整长文短（不是吐完再取消）。

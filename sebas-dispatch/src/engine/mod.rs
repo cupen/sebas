@@ -34,7 +34,6 @@ use crate::commands::{Command, RouterAction};
 use crate::crud::ProviderForms;
 use crate::state::{Mapping, SessionMap};
 use sebas_domain::session::{CardPhase, SessionMode, TurnElementType, TurnKind};
-use std::collections::HashSet;
 use sebas_acp::claude::manager::SessionManager;
 use sebas_acp::claude::session::{AcpCommand, AcpEvent};
 use sebas_channels::card::{AppUsage, ChannelCard, TurnChrome};
@@ -347,18 +346,30 @@ pub struct DispatchHandle {
     /// position 必然更大，陈旧标记在下次 Finished 时自然识别为过期并丢弃；
     /// 无 prompt（空闲会话的 /cancel）不打标——没有可标注的回合。
     cancelled_turns: Arc<RwLock<HashMap<String, u64>>>,
-    /// （fix-webui-qa-round8 5.2 review 补修）已做过**初始模型观察**的会话
-    /// （routing session_id）。spawn 窗口里 driver 的第一帧观察（system
-    /// init / 首个 assistant 帧）会把 spawn 种子模型纠偏成 agent 真实模型
-    /// （D5 自愈）——那是快照记账，不是操作者动作；它落转录条目会让每个
-    /// 会话开局多一条「模型已切换」噪音（main 链 dialog/empty-turn 三旅程
-    /// 的 turn-block 计数全体 +1 的根因）。首条之后的 ModelChanged 才是
-    /// 操作者切换，落 `model_change` 留痕条目。
-    model_seen: Arc<RwLock<HashSet<String>>>,
+    /// （fix-webui-qa-round8 5.2 review 补修→fix-webui-qa-round12 4.1/D4 重构）
+    /// **操作者在途模型切换**（routing session_id → 目标 model id）：webui 的
+    /// SetModel 指令经 [`Self::emit`] 漏斗时登记，`ModelChanged` 到达时消费—
+    /// —只有携带在途标记的切换（= 操作者显式切换的成功回执）落 `model_change`
+    /// 留痕条目；无标记的 ModelChanged（crash 重启后的子进程模型重报、native
+    /// 场景模型重报等 agent 自发观察）只更新快照、绝不产生回执。SetModel 被
+    /// 拒（模型未变标记错误）时取走标记、不落成功回执（spec「rejected switch
+    /// SHALL NOT produce a success receipt」）。纯内存、随事件消费。
+    pending_model_switches: Arc<RwLock<HashMap<String, String>>>,
     /// 会话面 checkpoint 指纹登记（fix-webui-qa-round9 1.2，
     /// session-transcript-durability）：session_id → 上次成功写入的快照
     /// 内容指纹。逻辑在 [`checkpoint`]（子模块可访问私有字段）。
     checkpoints: checkpoint::CheckpointRegistry,
+    /// （fix-webui-qa-round12 2.1，design D2）会话累计 usage 的 **key 键幸存
+    /// 者**：crash（terminal Error）/ 死亡确认（通道关闭）/ idle-kill 的
+    /// `drop_card` 会把卡态（`usage_total` 的宿主）一起清掉，而 fallback-fresh
+    /// resume 换 routing session_id——按 session_id 键的 checkpoint 追不回来。
+    /// 累计值改以 **channel key**（跨 resume 稳定的会话身份）为幸存锚：
+    /// drop_card 时存入，同 key 的下一个 UsageUpdate 合并回去（新子进程的
+    /// 回合在保留值之上继续累计，单调不回退），显式 close 时清除（关闭的
+    /// 会话不复活历史用量）。纯内存、不持久化——重启恢复走 checkpoint
+    /// restore 链路（session_id 不变的场景），幸存者只覆盖同进程内的
+    /// crash→resume 窗口。
+    usage_survivors: Arc<tokio::sync::Mutex<HashMap<ChannelKey, (crate::card_state::CardUsage, bool)>>>,
 }
 
 impl Clone for DispatchHandle {
@@ -383,9 +394,10 @@ impl Clone for DispatchHandle {
             turn_events: self.turn_events.clone(),
             turn_log: self.turn_log.clone(),
             stall: self.stall.clone(),
-            cancelled_turns: self.cancelled_turns.clone(),
-            model_seen: self.model_seen.clone(),
-            checkpoints: self.checkpoints.clone(),
+                cancelled_turns: self.cancelled_turns.clone(),
+                pending_model_switches: self.pending_model_switches.clone(),
+                checkpoints: self.checkpoints.clone(),
+            usage_survivors: self.usage_survivors.clone(),
         }
     }
 }
@@ -464,8 +476,9 @@ impl DispatchHandle {
                 turn_events,
                 stall: stall::StallRegistry::default(),
                 cancelled_turns: Arc::new(RwLock::new(HashMap::new())),
-                model_seen: Arc::new(RwLock::new(HashSet::new())),
+                pending_model_switches: Arc::new(RwLock::new(HashMap::new())),
                 checkpoints: checkpoint::CheckpointRegistry::default(),
+                usage_survivors: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             },
             rx,
         )
@@ -563,18 +576,27 @@ impl DispatchHandle {
                     // （add-webui-round7-gaps 3c）快照吃会话累计量，且只在
                     // 上报过 token 的会话上投影——通用 ACP（context/cost 非
                     // token）保持 None，webui 显「未上报」而非 0 冒充。
+                    // （fix-webui-qa-round12 2.1）crash 幸存窗口：卡态尚未
+                    // 重新上报（resume 后新子进程首帧之前）以幸存者投影，
+                    // 头部 Token 不在 crash→resume 之间消失。
                     let usage = if st.usage_reported {
                         Some(CardUsage {
                             model: st.usage.model.clone(),
                             ..st.usage_total.clone()
                         })
                     } else {
-                        None
+                        self.usage_survivor_totals(key).await
                     };
                     (Some(st.status_emoji), prompt, usage, receipt)
                 }
                 // 无卡态：命名来源只剩迁移位（dormant 退役行 / 恢复行）。
-                None => (None, m.prompt_preview.clone().filter(|p| !p.is_empty()), None, false),
+                // （fix-webui-qa-round12 2.1）usage 同样以幸存者兜底。
+                None => (
+                    None,
+                    m.prompt_preview.clone().filter(|p| !p.is_empty()),
+                    self.usage_survivor_totals(key).await,
+                    false,
+                ),
             },
             None => (None, None, None, false),
         };
@@ -1197,6 +1219,20 @@ impl DispatchHandle {
                 self.checkpoint_spawn(session_id);
             }
         }
+        // （fix-webui-qa-round12 4.1，design D4）操作者显式模型切换的出站漏斗
+        // 登记：SetModel 指令离开引擎时记「在途切换」（sid → 目标 model），
+        // 后续 ModelChanged 到达时消费——回执只由操作者切换的成功回执产生，
+        // agent 自发的模型重报（无标记）一律静默（见 apply_model_changed）。
+        if let Out::SendAcp {
+            session_id,
+            cmd: AcpCommand::SetModel { model_id, .. },
+        } = &out
+        {
+            self.pending_model_switches
+                .write()
+                .await
+                .insert(session_id.clone(), model_id.clone());
+        }
         if let Err(e) = self.tx.send(out).await {
             tracing::error!(?e, "router→outbound channel closed; dropping message");
             debug_assert!(false, "router→outbound channel send failed: {e}");
@@ -1407,6 +1443,19 @@ impl DispatchHandle {
             self.report_auto_mode_switch_failed(session_id, &sw, message)
                 .await;
         }
+        // （fix-webui-qa-round12 4.1，design D4）SetModel 被执行体拒绝（非终态
+        // Error，带驱动「模型未变」标记）→ 取走在途操作者切换标记：拒绝不产
+        // 生成功回执（spec「rejected switch SHALL NOT produce a success
+        // receipt」），后续 ModelChanged（若有）按 agent 自发观察静默入快照。
+        if let AcpEvent::Error {
+            terminal: false,
+            message,
+            ..
+        } = event
+            && message.contains(sebas_acp::MODEL_UNCHANGED_MARKER)
+        {
+            self.pending_model_switches.write().await.remove(session_id);
+        }
         match event {
             AcpEvent::TextDelta { delta, .. } => {
                 self.transcript_push(session_id, TurnEntry::markdown(0, delta.clone()))
@@ -1503,11 +1552,39 @@ impl DispatchHandle {
         }
         // FSM 转移从闭包里带出来：供返回值（reaction 契约）与 Updated 事件共用。
         let next_cell = std::sync::Mutex::new(None);
+        // （fix-webui-qa-round12 2.1，design D2）crash 幸存者预先取走（闭包
+        // 内不可 await）：agent 子进程重启（crash→resume，routing id 已换）
+        // 后的首次 usage 上报到达时，把 key 键幸存的历史累计并入卡态——新
+        // 子进程的回合在保留值之上继续累计（`+=` 基线即历史值），单调不回
+        // 退。幸存者取走即弃（一次性合并）。
+        let usage_survivor = if matches!(event, AcpEvent::UsageUpdate { .. }) {
+            match self.map.lookup_key_by_session(session_id).await {
+                Some(key) => self
+                    .usage_survivors
+                    .lock()
+                    .await
+                    .remove(&key)
+                    .map(|(total, reported)| (key, total, reported)),
+                None => None,
+            }
+        } else {
+            None
+        };
         self.card_states
             .apply(session_id, |st| {
                 // Handle usage updates separately — they don't affect the FSM
                 // or the card body, but update accumulated token counts.
                 if let AcpEvent::UsageUpdate { usage, .. } = event {
+                    if let Some((_, total, reported)) = &usage_survivor {
+                        st.usage_total.total_input =
+                            st.usage_total.total_input.max(total.total_input);
+                        st.usage_total.total_output =
+                            st.usage_total.total_output.max(total.total_output);
+                        st.usage_reported = st.usage_reported || *reported;
+                        if st.usage_total.model.is_none() {
+                            st.usage_total.model = total.model.clone();
+                        }
+                    }
                     if let Some(model) = &usage.model {
                         st.usage.model = Some(model.clone());
                     }
@@ -1773,8 +1850,56 @@ impl DispatchHandle {
     }
 
     /// drop_card：session 死亡/通道关时清 CardState（防无界增长）。openspec/specs/feishu-cards/spec.md。
+    ///
+    /// （fix-webui-qa-round12 2.1，design D2）清除前把会话累计 usage 登记
+    /// 进 key 键幸存者表——映射仍在场（Active）的死亡路径（死亡确认 /
+    /// idle-kill）经本漏斗自动登记；terminal Error 路径先退役后清理（退役
+    /// 即抹 session_id 绑定，届时反查不到 key），由
+    /// [`Self::stash_usage_survivor`] 在退役**之前**显式调用。无卡态/从未
+    /// 上报/映射不在场 → no-op。
     pub async fn drop_card(&self, session_id: &str) {
+        self.stash_usage_survivor(session_id).await;
         self.card_states.drop(session_id).await;
+    }
+
+    /// （fix-webui-qa-round12 2.1）把会话累计 usage 登记进 key 键幸存者表
+    /// （见 [`Self::drop_card`] 文档）：max 合并（并存的幸存者取大），从不
+    /// 降低既有值。必须在映射退役（session_id 绑定被抹）**之前**调用。
+    async fn stash_usage_survivor(&self, session_id: &str) {
+        let Some(st) = self.card_states.snapshot(session_id).await else {
+            return;
+        };
+        if !st.usage_reported {
+            return;
+        }
+        if let Some(key) = self.map.lookup_key_by_session(session_id).await {
+            self.usage_survivors
+                .lock()
+                .await
+                .entry(key)
+                .and_modify(|(total, reported)| {
+                    total.total_input = total.total_input.max(st.usage_total.total_input);
+                    total.total_output = total.total_output.max(st.usage_total.total_output);
+                    *reported |= st.usage_reported;
+                })
+                .or_insert((st.usage_total.clone(), st.usage_reported));
+        }
+    }
+
+    /// （fix-webui-qa-round12 2.1）显式 close 时清除 key 的 usage 幸存者：
+    /// 关闭的会话永远消失，其历史用量不得复活到同 key 的未来新会话。
+    pub async fn forget_usage_survivor(&self, key: &ChannelKey) {
+        self.usage_survivors.lock().await.remove(key);
+    }
+
+    /// （fix-webui-qa-round12 2.1）key 的幸存累计只读视图（快照投影兜底用，
+    /// 不取走——取走发生在 UsageUpdate 合并点）。
+    async fn usage_survivor_totals(&self, key: &ChannelKey) -> Option<CardUsage> {
+        self.usage_survivors
+            .lock()
+            .await
+            .get(key)
+            .map(|(total, _)| total.clone())
     }
 
     /// Record a `SessionKey -> session_id` mapping. Called by the dispatcher
@@ -1882,30 +2007,24 @@ impl DispatchHandle {
     /// 会话模型切换成功（AcpEvent::ModelChanged）后更新映射的 current model，
     /// 并发布 Updated 让快照/订阅者立即反映新模型。
     ///
-    /// （fix-webui-qa-round8 5.2）切换同时落一条 `model_change` 系统条目
-    /// （含新旧模型名，`from` = 切换前映射里的当前模型，未知为 null）——
-    /// 中程切换不再无痕，转录与 rail 快照同一事实。条目只在本函数落账
-    /// （apply_event 的 ModelChanged 分支经这里； pump 与即时两条到达线
-    /// 都收敛到这一处，绝不重复入账）。
+    /// （fix-webui-qa-round12 4.1，design D4）`model_change` 留痕条目的产生点
+    /// 收口到「操作者显式切换成功」：只有携带在途标记（[`Self::emit`] 漏斗在
+    /// SetModel 指令出站时登记）的 ModelChanged 才落条目——它必然是操作者
+    /// 切换的成功回执。agent 子进程自发的模型观察/重报（spawn 首帧纠偏、
+    /// crash 重启后的 default 重报、native 场景模型重报）只更新快照映射，
+    /// 绝不产生回执（O-2：crash 后每回合弹「模型已切换：default → fake」的
+    /// 根除点）。SetModel 被拒的路径不经这里（拒绝是 Error 事件，在途标记
+    /// 在 Error 臂取走即弃，成功回执不落）。
     pub async fn apply_model_changed(&self, session_id: &str, model_id: &str) {
         if let Some(key) = self.map.lookup_key_by_session(session_id).await {
             let previous = self.map.get(&key).await.and_then(|m| m.current_model);
-            // （5.2 review 补修）spawn 窗口的**初始观察**（driver 首帧把种子
-            // 模型纠偏成 agent 真实模型，D5 自愈）只记账不落条目——它是快照
-            // 校正，不是操作者动作；此后（首条之后）的 ModelChanged 才是操
-            // 作者切换，落 `model_change` 留痕。观察值与当前一致时整体 no-op
-            // （纠偏帧重复到达不重写）。
-            let first_observation = !self
-                .model_seen
-                .read()
-                .await
-                .contains(session_id);
-            self.model_seen
+            let operator_switch = self
+                .pending_model_switches
                 .write()
                 .await
-                .insert(session_id.to_string());
+                .remove(session_id);
             self.map.set_current_model(&key, model_id.to_string()).await;
-            if !first_observation && previous.as_deref() != Some(model_id) {
+            if operator_switch.is_some() && previous.as_deref() != Some(model_id) {
                 self.transcript_push(
                     session_id,
                     TurnEntry::model_change(
@@ -2522,6 +2641,11 @@ impl DispatchHandle {
             // 泊车不可越过会话存活）、时钟退役——复用 id 不继承 stale 事实。
             self.stall.drop_session(sid).await;
         }
+        // （fix-webui-qa-round12 2.1）显式 close 不留 usage 幸存者：关闭的
+        // 会话历史用量随会话消失，不得复活到同 key 的未来新会话（drop_card
+        // 的幸存登记是死亡 resume 路径专用，这里对冲清除；与 sid 无关——
+        // Spawning 占位关闭同样清）。
+        self.forget_usage_survivor(&key).await;
 
         // Remove the mapping. Active/Dormant keys are indexed by session_id;
         // Spawning placeholders (no session_id) must be removed by key.
