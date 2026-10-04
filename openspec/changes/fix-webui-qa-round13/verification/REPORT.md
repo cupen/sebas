@@ -115,3 +115,26 @@
 - 覆盖：QA-B 20 PASS + QA-A 34 PASS = **54 项 PASS**；新缺陷 **2+2 观察**；无 P1/P2 新缺陷
 - console：两簇合计 pageerror=0；4xx/5xx 仅测试故意触发与 2 次外部清场断连
 - round12 已修 5 项（1.x/2.x/3.x）全部 GUI 复核不回归
+
+## 集成与遗留（git-finish 收尾）
+
+- 集成：`feat/webui-qa-round11` rebase 到最新 main（无操作，分支已基于其上）后
+  `--no-ff` 合入，`merge: 第十一至十三轮 GUI 验收缺陷收口`（cf13d6e），已推送
+  `144ae77..559efe1`。合并后复验：cargo build 0 错、前端 943 全绿、sebas-webui
+  lib 220 全绿。
+- 合并后复验揪出 **round12 漏网一处**：server.rs 文件内单测仍按「sync 登录门、
+  member 200」旧合同断言（其 3.1 已把 sync 改挂 settings.manage 但漏翻新此
+  测试；API 层的 skills_webui_test 是新口径）。已按新合同修正并单独提交
+  （559efe1）。
+- **main 既有红（与本三轮无关，后续立项）**：
+  `cargo test -p sebas-webui --test session_endpoints_test` 中所有经
+  `spawn_and_drive_project_session` 的用例在本机确定性 400（「spawn must
+  return 201」）——在基线 144ae77（round10 合并点）的干净 worktree 同样必红；
+  根因指向 Windows 下 tempdir 与 workspace root 的包含性判定
+  （`stored_path_in_workspace_root`，api.rs create 的 add-workspace-root 2.3
+  检查），疑为路径规范化（\?\ 前缀 / 大小写 / 8.3）问题。旅程级套件
+  （e2e/acceptance）不受影响。
+- e2e 全量跑中的 1 例环境抖动（round-trip reachability 超时）定向复跑 1.09s
+  通过，详见上文整体验收节。
+- 沙箱 `target/qa-r13-sandbox/` 保留（round11 先例）供复现；服务已停、端口
+  9877/8791 已释放。
