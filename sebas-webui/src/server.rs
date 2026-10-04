@@ -1530,10 +1530,12 @@ mod auth_guard_tests {
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
-    /// add-agent-skills 5.3 + fix-webui-qa-round11 2.1（A-1/D2）：skills 读面
-    /// 与 sync 维持登录门；**删除**挂 `settings.manage`（root/admin）。
-    /// viewer 读放行；member 的删在 RBAC 层 403（类型化权限错误）、sync 照旧
-    /// 到达 handler（UnwiredSkills 下 200）；匿名仍被登录门拦 401。
+    /// add-agent-skills 5.3 + fix-webui-qa-round11 2.1（A-1/D2） +
+    /// fix-webui-qa-round12 3.1（R12-A-1）：skills 读面维持登录门；**删除与
+    /// sync** 都挂 `settings.manage`（root/admin）——sync 的投影会清理
+    /// backend 落点副本，是可触发删除效果的写操作（round13 QA 结论同）。
+    /// viewer 读放行；member 的删与 sync 均在 RBAC 层 403（类型化权限
+    /// 错误）；匿名仍被登录门拦 401。
     #[tokio::test]
     async fn skills_endpoints_follow_provider_plane_permission_tier() {
         let (app, _dir, _auth) = rbac_app().await;
@@ -1569,7 +1571,8 @@ mod auth_guard_tests {
             "错误体是类型化权限错误（与项目注册拒绝同款）: {body}"
         );
 
-        // member sync：投影不是改仓，维持登录门（到达 handler → 200）。
+        // member sync：与删除同键 settings.manage（R12-A-1），RBAC 层 403
+        // （不再到达 handler）。
         let (status, body) = req(
             app.clone(),
             "POST",
@@ -1581,8 +1584,12 @@ mod auth_guard_tests {
         .await;
         assert_eq!(
             status,
-            StatusCode::OK,
-            "member sync 必须到达 handler: {status} {body}"
+            StatusCode::FORBIDDEN,
+            "member sync 必须 403（settings.manage，与删除同款）: {status} {body}"
+        );
+        assert!(
+            body.contains("权限不足"),
+            "错误体是类型化权限错误（与删除同款）: {body}"
         );
 
         // 匿名：登录门照常（豁免的是角色执法，不是登录）。
