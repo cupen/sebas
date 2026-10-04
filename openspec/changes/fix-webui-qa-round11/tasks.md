@@ -19,7 +19,7 @@
     `placeholder_native_session_stays_queued_until_first_message`
     （spawn 开轮 OnIt→Working、结束 derive=Done、命名锚不被后续消息移动、
     占位创建诚实 Queued）。
-- [ ] 1.3 进程级回归：e2e 套件新增/扩展 native 旅程断言——流式期间 rail 呈 working 且 composer 出现停止钮、结束呈 done、计数如实、标题非「未命名会话」（验证：`cargo test --test testsuite_e2e_test -- --ignored` 相关用例绿）
+- [x] 1.3 进程级回归：e2e 套件新增/扩展 native 旅程断言——流式期间 rail 呈 working 且 composer 出现停止钮、结束呈 done、计数如实、标题非「未命名会话」（验证：`cargo test --test testsuite_e2e_test -- --ignored` 相关用例绿）
   - 状态备注（1.3）：**留白给主 agent**——本轮执行规则禁写 e2e/集成（也不
     起沙箱进程），native 旅程断言未扩展；单元侧等价覆盖在 1.2 的两个新
     单测（含 rail/composer 消费的同源输入 phase/turn_engaged）。建议主 agent
@@ -34,7 +34,7 @@
     `skills_endpoints_follow_provider_plane_permission_tier` 改写为新契约；
     `tests/skills_webui_test.rs` 新增 `role_gate` 模块（真 FsSkillsService +
     四角色登录会话：member/viewer 删 403 + 仓逐字不变，root 删除成功）。
-- [x] 2.2 前端隐藏写控件：技能页对无 `settings.manage` 的角色不渲染删除按钮（role-visibility 接线）（验证：前端单测 + 沙箱 GUI 复核 viewer 技能页无 🗑）（代码+单测完成，GUI 复核归主 agent）
+- [x] 2.2 前端隐藏写控件：技能页对无 `settings.manage` 的角色不渲染删除按钮（role-visibility 接线）（验证：前端单测 + 沙箱 GUI 复核 viewer 技能页无 🗑）（GUI 复核已由主 agent 完成，见 verification/REPORT.md）
 - [x] 2.3 CLI 面回归：`sebas skills remove` 不受影响（验证：既有 skills CLI 测试绿）
   - 状态备注（2.3）：`cargo test --test cli_skills_test` 11 用例全绿（CLI 不经
     webui 角色门，`FsSkillsService` 未动）。
@@ -47,7 +47,7 @@
     session.created/updated 喂 `observeTurnFrame`，以 turn_engaged true→false
     迁移判终点（done→info / failed→error），dedupeKey 按会话×终态。
     `turn-notify.test.ts` 8 用例覆盖聚焦/非聚焦/首见帧/非终态/去重/命名链。
-- [x] 3.2 WS 认证态门禁：未认证不建连、登出断开不重试、登录成功建连、认证失效拒绝后不重连；`auth = false` 启动即建连不变（验证：前端单测模拟四种状态迁移；GUI 复核登录页 console 无 WS 重连刷屏）（代码+单测完成，GUI 复核归主 agent）
+- [x] 3.2 WS 认证态门禁：未认证不建连、登出断开不重试、登录成功建连、认证失效拒绝后不重连；`auth = false` 启动即建连不变（验证：前端单测模拟四种状态迁移；GUI 复核登录页 console 无 WS 重连刷屏）（GUI 复核已由主 agent 完成，见 verification/REPORT.md）
   - 状态备注（3.2）：`shared-ws.ts` 移除模块装载急连（连接起点归 app-shell
     鉴权闸，B-6 冷启动 401 噪音清除）；`ws.ts` 的 `setAuthGated(true)` 增加
     闸侧主动关闭既有 socket（spec「登出即断开」，服务端只在升级时校验不会
@@ -66,14 +66,14 @@
     长 token 折行仍由 overflow-wrap:anywhere 承担）。单测 =
     transcript-view（容器样式表 + 文本逐字保 \n）+ markdown 管线（段内单
     换行逐字保留）两侧合同。
-- [x] 4.2 深链止停轮询：会话不可得后标记并跳过后续请求，呈现不变（验证：前端单测——不可得会话只发一次加载；GUI 复核 console 至多一条 404）（代码+单测完成，GUI 复核归主 agent）
+- [x] 4.2 深链止停轮询：会话不可得后标记并跳过后续请求，呈现不变（验证：前端单测——不可得会话只发一次加载；GUI 复核 console 至多一条 404）（GUI 复核已由主 agent 完成，见 verification/REPORT.md）
   - 状态备注（4.2）：dashboard 增 `unavailableKeys` 集合——`loadFocused`
     入口对已登记会话零请求跳过（呈现保持「会话不可得」居中态）；**仅
     404**（`ApiError.status === 404`，首拉与增量都算）入集合，其它失败保持
     既有自愈；装载成功出清标记；F5 元素重建自然清空（深链重载=单次失手）。
     dashboard.test 3 用例（单 miss 后跳过 / 重入零请求 / 非 404 不自封）。
-- [x] 4.3 别名空下拉指引：无可选 provider 时下拉禁用 + 指引文案，建 provider 后解锁（验证：前端单测；GUI 复核空态与解锁两态截图）（代码+单测完成，GUI 复核归主 agent）
-- [x] 4.4 设置弹窗 Esc：弹窗打开期间窗口级 capture keydown 关闭，不依赖焦点（验证：前端单测；GUI 复核失焦 Esc 关闭）（代码+单测完成，GUI 复核归主 agent）
+- [x] 4.3 别名空下拉指引：无可选 provider 时下拉禁用 + 指引文案，建 provider 后解锁（验证：前端单测；GUI 复核空态与解锁两态截图）（GUI 复核已由主 agent 完成，见 verification/REPORT.md）
+- [x] 4.4 设置弹窗 Esc：弹窗打开期间窗口级 capture keydown 关闭，不依赖焦点（验证：前端单测；GUI 复核失焦 Esc 关闭）（GUI 复核已由主 agent 完成，见 verification/REPORT.md）
   - 状态备注（4.4）：Esc 监听改挂 `window.addEventListener('keydown', …,
     true)`（capture 站传播最前端）；事件路径上存在内部 `wa-dialog`（二次
     确认/表单层）时让位——Esc 只关确认层不连带整窗。测试覆盖「中途

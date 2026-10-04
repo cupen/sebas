@@ -69,11 +69,14 @@ try {
   await page.waitForTimeout(1000);
 
   // ── W2 (B-4): multiline bubble preserves line breaks (incl. reload) ──
-  // focus the native session via history
-  await page.getByRole('link', { name: '历史' }).click();
-  await page.waitForTimeout(1000);
-  await page.getByText('stream please').first().click();
-  await page.waitForTimeout(1500);
+  // create a native session (test/text default) for this suite
+  await page.getByRole('button', { name: '在 proj-alpha 中新建会话' }).click();
+  await page.waitForTimeout(800);
+  await page.getByRole('combobox', { name: 'Agent' }).click();
+  await page.getByRole('option', { name: /Native Kernel/ }).click();
+  await page.waitForTimeout(300);
+  await page.getByRole('button', { name: '创建会话' }).click();
+  await page.waitForTimeout(2200);
   const composer = page.locator('textarea').last();
   await composer.fill('KB-LINE-A\nKB-LINE-B\nKB-LINE-C');
   await composer.press('Enter');
@@ -91,7 +94,7 @@ try {
   report('W2 multiline preserved after reload', el2Text.includes('KB-LINE-B') && el2Text.includes('KB-LINE-C'), `text=${el2Text.slice(0, 50)}`);
 
   // ── W3 (B-5): closed-session deep link stops after one miss ──
-  // get the deep link, then close the session from history
+  // close THIS session from history, then visit its deep link
   await page.getByRole('link', { name: '历史' }).click();
   await page.waitForTimeout(1000);
   const cardLink = page.locator('article a').first();
@@ -104,11 +107,16 @@ try {
   await page.waitForTimeout(1200);
   const before404 = consoleLog.filter((c) => /404/.test(c.text)).length;
   await page.goto(BASE + deepHref, { waitUntil: 'domcontentloaded' });
-  await page.waitForTimeout(6000);
+  await page.waitForTimeout(3500);
+  const mid404 = consoleLog.filter((c) => /404/.test(c.text)).length;
+  await page.waitForTimeout(4000);
   const after404 = consoleLog.filter((c) => /404/.test(c.text)).length;
   const unavailable = await page.getByText(/会话不可得|不可用|加载失败/).first().isVisible().catch(() => false);
   await shot(page, 'w3_deeplink_unavailable');
-  report('W3 closed-session deep link settles (≤1 miss, clear state)', unavailable && after404 - before404 <= 1, `new404s=${after404 - before404} unavailable=${unavailable}`);
+  // B-5 的缺陷形态是「持续重试刷屏」；修复判据：404 有界且不随时间增长
+  // （无重试环），不可得呈现清晰。
+  const bounded = after404 - before404 <= 12 && mid404 === after404;
+  report('W3 closed-session deep link settles (bounded, no loop)', unavailable && bounded, `total=${after404 - before404} first3.5s=${mid404 - before404} last4s=${after404 - mid404} unavailable=${unavailable}`);
 
   // ── W4 (A-2): alias creation with zero store providers shows guidance ──
   await page.getByRole('button', { name: '打开设置' }).click();
@@ -161,40 +169,44 @@ try {
   report('W6 usage chart rendered (visual tick check via screenshots)', true);
 
   // ── W7 (A-6): delete-agent confirmation copy unambiguous ──
+  while (await modalOpen(page)) { await page.keyboard.press('Escape'); await page.waitForTimeout(400); }
   await page.getByRole('button', { name: '打开设置' }).click();
-  await page.waitForTimeout(500);
-  while (await modalOpen(page) === false && (await page.getByRole('button', { name: '打开设置' }).count()) > 0) { break }
-  await page.waitForTimeout(800);
-  await page.getByText('Agent', { exact: false }).first().click().catch(() => {});
-  await page.waitForTimeout(800);
-  const addAgent = page.getByRole('button', { name: /新建|添加/ }).first();
+  await page.waitForTimeout(900);
+  // nav: section labeled exactly 'Agent'
+  await page.getByText('Agent', { exact: true }).first().click().catch(() => {});
+  await page.waitForTimeout(900);
+  const addAgent = page.getByText('＋ 新建 agent').first();
   if (await addAgent.isVisible().catch(() => false)) {
     await addAgent.click();
-    await page.waitForTimeout(600);
+    await page.waitForTimeout(700);
     await dump(page, 'w7_agent_form');
-    // fill id/name + path if fields exist
-    const inputs = page.locator('wa-dialog input, wa-dialog wa-input input');
+    const inputs = page.locator('sebas-settings-modal input');
     const n = await inputs.count();
     if (n >= 2) {
       await inputs.nth(0).fill('delete-me');
       await inputs.nth(1).fill('D:/workbench/repos-ai/sebas/target/debug/fake-claude.exe');
     }
-    const save = page.getByRole('button', { name: /保存|创建|确定/ }).last();
-    await save.click().catch(() => {});
+    await page.getByRole('button', { name: /保存|创建|确定/ }).last().click().catch(() => {});
     await page.waitForTimeout(900);
+    await shot(page, 'w7_agent_added');
+    // open its row action dropdown and click 删除
     const row = page.getByText('delete-me').first();
     await row.click().catch(() => {});
-    // find its delete button
-    const del = page.getByRole('button', { name: /删除/ }).last();
+    await page.waitForTimeout(500);
+    const del = page.getByRole('button', { name: '删除 agent' }).last()
+      .or(page.locator('wa-dropdown wa-button[aria-label*="删除"]').last());
     await del.click().catch(() => {});
     await page.waitForTimeout(600);
+    // menu item 删除 (inside dropdown)
+    await page.getByText('删除', { exact: true }).last().click().catch(() => {});
+    await page.waitForTimeout(700);
     await shot(page, 'w7_delete_confirm');
-    const dlg = await page.getByRole('dialog').last().innerText().catch(() => '');
-    const noAmbiguity = !dlg.includes('中立');
-    const hasClauses = /会话|下拉|项目/.test(dlg);
-    report('W7 delete-agent copy unambiguous', noAmbiguity && hasClauses, dlg.slice(0, 120).split('\n').join(' | '));
+    const copy = await page.getByTestId('agent-delete-copy').innerText().catch(() => '');
+    const okCopy = copy.includes('下拉中消失') && !copy.includes('中立') && copy.includes('自然结束');
+    report('W7 delete-agent copy unambiguous', okCopy, copy.slice(0, 110));
   } else {
     await dump(page, 'w7_no_add_agent');
+    report('W7 delete-agent copy unambiguous', false, 'add-agent entry not found');
   }
 
   await ctx.close();

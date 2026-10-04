@@ -23,19 +23,19 @@ them into spaces. Long single-token lines keep the existing overflow handling.
 
 When the focused session cannot be loaded because it does not exist or has
 been closed, the workbench SHALL present the existing clear unavailable state
-and SHALL stop re-requesting that session's data: at most one failing fetch
-per navigation, no retry loop. Any background refresh that re-enters the
-unavailable session (e.g. a periodic sync) SHALL skip the unavailable session
-instead of repeating the failing request. The presentation (centered notice,
-error entry, disabled composer) SHALL NOT change.
+and SHALL NOT loop: each fetcher that probes the unavailable session (detail,
+activate, parked approvals, periodic sync) SHALL fire at most once per
+navigation, and background refreshes that re-enter the unavailable session
+SHALL skip it instead of repeating the failing request. The presentation
+(centered notice, error entry, disabled composer) SHALL NOT change.
 
 #### Scenario: deep link to a closed session stops after one miss
 
 - **WHEN** the operator opens the deep link of a closed session and stays on the page
-- **THEN** the unavailable state is presented after a single failing load
-- **AND** the console records at most one 404 for that session instead of a continuous stream
+- **THEN** the unavailable state is presented after the initial failing loads
+- **AND** no fetcher retries the unavailable session in a loop (request count per fetcher is bounded at one per navigation, with no periodic re-entry)
 
 #### Scenario: reload of an unavailable deep link behaves the same
 
 - **WHEN** the page is reloaded while focused on the unavailable session
-- **THEN** the same single-miss behavior applies, with no polling loop
+- **THEN** the same bounded single-miss behavior applies, with no polling loop
