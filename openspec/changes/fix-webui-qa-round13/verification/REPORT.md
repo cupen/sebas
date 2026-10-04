@@ -65,6 +65,36 @@
 - **console**：pageerror=0；console.error 14 条均为测试故意触发的预期 4xx（401/403/404 资源镜像）
 - 详情：`findings-a.md`
 
+## round13 收口执行（spec-go）
+
+- **B-1 改判**：非缺陷。证据 `mode-vocabulary.ts`（round2 M-C6：allow 与 auto 同映射
+  bypass tier；round7 描述互相点名等价）。收口 = AGENTS.md 过时句修正（task 5.1）+
+  QA-BRIEF/REPORT 标注更正。
+- **3a 执行**（subagent 包干 13 task）：全部完成。关键发现——B-2 根因不是
+  min-height/gap 而是展开面板继承了 `.body` 的 `white-space: pre-wrap`（round11 4.1
+  为多行提交所设），修法收敛在展开态 `.fold-body` 恢复 `normal`，pre 代码块/折叠态/
+  横滚不回退；门禁 pnpm 943 全绿（基线 936 + 新增 7）。
+- **3b 验收**（主 agent）：tasks 全勾核对、门禁重跑、spec 三条抽查对照代码全过。
+- **6.1 GUI 抽查**（主 agent 真浏览器）：`r13_thinking_expanded.png`（空带绝迹）、
+  `r13_usage_source_note.png`（说明行 + 刻度 0/62/123/185/246 互异）、
+  `r13_native_hint.png`（无 env 一次性实例：禁用提示点名 env、无设置页误导）。
+- **3c review**（subagent）：spec 逐条覆盖核对通过；补 1 个集成单测
+  （`agent_kinds_test.rs` provider 配置不翻转 native 可用性）；修 2 个过时测试断言
+  （first-paint 旧 native 文案、usage US2 locator）；**发现并收口主 spec 矛盾**——
+  change 内补 `specs/agent-workbench` delta（native cause 口径反转），避免归档后
+  语料冲突；6.2 定向套件 13/13 + 16/16 绿。
+- **过渡提交**：94cfe93（round11 文档）→ 67ce88d（round12 实现）→ 186fe47（round13）。
+
+## 整体验收
+
+- `invoke testsuite-e2e`：87 例中 86 绿 + 1 红（`session_lifecycle.session_round_trip_via_webui_http`，
+  症状「spawned core reachability 超时」，core.log 显示启动正常、webui.log 空——负载下
+  的环境性抖动；**定向复跑 1.09s 通过**，且 round13 零 Rust 改动、其余 86 例全绿，
+  不归属任何本轮 change）
+- `invoke testsuite-acceptance`：全绿（含 projects_session / session_and_turn /
+  remote_node 各旅程）
+- 前端单测 943 全绿、`agent_kinds_test` 7/7、`openspec validate --strict` valid
+
 ## 缺陷总账（round13 新增，全部来自本轮 GUI 验收）
 
 | ID | 级别 | 一句话 | 处置建议 |
