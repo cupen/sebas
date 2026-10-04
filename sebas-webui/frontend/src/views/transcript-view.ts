@@ -1543,6 +1543,20 @@ export class SebasTranscriptView extends LitElement {
       line-height: 1.6;
       margin-top: var(--sebas-space-2);
       border-top: 1px dashed var(--sebas-border);
+      /* （fix-webui-qa-round13 1.1，B-2）展开态留白收敛：.body 的 pre-wrap
+         （round11 4.1，为多行提交保留换行而设）经类名与继承进入展开面板，
+         模板缩进换行与 markdown 块间换行在 pre-wrap 下逐个变成可见空行——
+         「💭 thinking」标签与内容之间被撑出大段空带（QA b48/a54 两轮采样
+         稳定复现）。展开体内恢复 normal，空白排版交还给块级元素的 margin；
+         pre 代码块语义不回退（UA 默认 white-space:pre 直接命中 pre 元素，
+         继承值不参与），长内容的 pre/table 横滚（overflow-x）不受影响。
+         折叠态不经过本分支，形态不变。 */
+      white-space: normal;
+    }
+    /* 内层条目体同样挂 .body（直接命中 pre-wrap），继承压不过直接规则——
+       一并恢复 normal，思维内容自身携带的原始换行交回 markdown 段落语义。 */
+    .turn-block .fold-body .body {
+      white-space: normal;
     }
     /* 过程折叠的二级折叠（4.4/4.5）：collapsed 同为单行行内 link；相邻
        条目以虚线分隔，沿用同一视觉语言。 */

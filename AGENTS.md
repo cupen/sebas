@@ -238,7 +238,8 @@ fake-claude 桩的触发词面（`perm`/`parallel`/`drip`/`flood`/`stream`/`tabl
 `crash`/`refuse` 等，按原文匹配）：`perm` 在 **bypassPermissions（Auto 档）**
 按桩设计走直接执行分支——tool_result 后**没有**「perm turn finished」收尾正文
 （stub 的 early return，非缺陷；O-B-01/fix-webui-qa-round10 6.2 核实结论）。
-审批路径（ask/edit/allow 档）才有环后正文。GUI 验收时 Auto 档 perm 回合以
+审批路径（ask/edit 档）才有环后正文；allow 与 auto 同为放行档（round2 M-C6），
+无审批卡无环后正文。GUI 验收时 Auto 档 perm 回合以
 「✓ perm done tool_result + Done 终态」为完整预期，勿把缺正文记为缺陷。
 
 `--debug` 的 `test` provider 是一个**场景模型**：请求体的 `model` 决定应答形状

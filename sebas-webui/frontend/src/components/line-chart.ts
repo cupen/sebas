@@ -84,7 +84,8 @@ function trim(v: number): string {
  * - 多系列折线：每系列按值缩放到内框；
  * - 单点系列：不产出 path，只产出 marker（画点不画线）；
  * - 全零窗口：y 上限取 max(1, …)，所有系列平铺在基线（平线）；
- * - 刻度：y 轴 4 等分（0 基线在内），x 轴均匀采样 ≤ maxXTicks 个（含首尾）。
+ * - 刻度：y 轴 4 等分（0 基线在内），相邻等值标签去重（round13 观察-2：
+ *   小值域下 1/1/1/0/0 形态绝迹）；x 轴均匀采样 ≤ maxXTicks 个（含首尾）。
  */
 export function computeChartGeometry(
   series: ChartSeries[],
@@ -113,10 +114,19 @@ export function computeChartGeometry(
     .map((pts, si) => (series[si]!.values.length === 1 ? pts : []))
 
   // y 刻度：0 基线起 4 等分（peak ≥ 1，全零窗口平线画在 0 刻度上）。
-  const yTicks: YTick[] = [0, 1, 2, 3, 4].map((i) => {
+  // （fix-webui-qa-round13 2.1，观察-2）相邻等值标签去重：小值域下 4 等分
+  // 产出 formatCount 取整后相同的相邻刻度（QA round13 观察 y 轴呈现
+  // 1/1/1/0/0），读感像渲染瑕疵。按**渲染标签**判等（轴上的重复是标签级
+  // 现象），等值相邻只保留首个（run 头）——0 基线刻度（run 头恒为首个）
+  // 与轴的位置单调性保持，去重后仍自底向上递增；峰顶若与下方刻度同标签
+  // 则不再重复标出。轴不换库、数据聚合不动。
+  const rawTicks: YTick[] = [0, 1, 2, 3, 4].map((i) => {
     const value = (peak * i) / 4
     return { value, y: yAt(value) }
   })
+  const yTicks: YTick[] = rawTicks.filter(
+    (t, i) => i === 0 || formatCount(t.value) !== formatCount(rawTicks[i - 1]!.value),
+  )
 
   // x 刻度：≤ maxXTicks 均匀采样，恒含首尾（n===1 时单刻度居中）。
   const xLabels: XLabel[] = sampleIndices(n, maxXTicks).map((i) => ({

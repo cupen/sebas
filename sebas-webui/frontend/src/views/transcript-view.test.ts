@@ -808,6 +808,46 @@ describe('thinking fold membership and distinguishability (fix-webui-qa-round3 D
     expect(foldRule).not.toMatch(/\bbackground:/)
     el.remove()
   })
+
+  // ── fix-webui-qa-round13 1.1（B-2）：展开面板留白收敛 ──
+  // 空带来源 = .body 的 pre-wrap（round11 4.1）经类名与继承进入展开面板，
+  // 把模板缩进换行与 markdown 块间换行逐个渲染成可见空行（QA b48/a54：
+  // 💭 thinking 标签与内容之间大段空带，两轮采样稳定）。修法钉在展开态
+  // 样式：fold-body 与内层条目体恢复 normal；jsdom 算不出布局，容器断言
+  // 走组件样式表（round11 4.1 同姿态）。
+  it('expanded fold body collapses whitespace-driven blank bands (round13 1.1, B-2)', async () => {
+    const el = await mount({
+      entries: [
+        entry({ position: 0, kind: 'prompt', content: 'think please', created_at_unix: FIXED_DATES.T1 }),
+        entry({ position: 1, kind: 'content', element_type: 'thinking', content: 'hmm', created_at_unix: FIXED_DATES.T1 }),
+      ],
+    })
+    const assistant = el.shadowRoot!.querySelector<HTMLElement>('.turn-block.is-assistant')!
+    // 展开体在场：收敛的是空白排版，内容行零变化。
+    assistant.querySelector<HTMLButtonElement>('.process-fold button.fold-link')!.click()
+    await el.updateComplete
+    const foldBody = assistant.querySelector<HTMLElement>('.process-fold .fold-body')!
+    expect(foldBody.textContent).toContain('hmm')
+    const { SebasTranscriptView: Impl } = await import('./transcript-view.js')
+    const styles = (Impl as typeof import('./transcript-view.js').SebasTranscriptView).styles
+    const css = (Array.isArray(styles) ? styles : [styles])
+      .map((s) => (s as unknown as { cssText: string }).cssText)
+      .join('\n')
+    // 展开体与内层条目体恢复 normal（模板/markdown 换行不再成为可见空行）。
+    const foldWsRule = css.match(/\.turn-block \.fold-body\s*\{[^}]*\}/)?.[0] ?? ''
+    expect(foldWsRule).toContain('white-space: normal')
+    const innerWsRule = css.match(/\.turn-block \.fold-body \.body\s*\{[^}]*\}/)?.[0] ?? ''
+    expect(innerWsRule).toContain('white-space: normal')
+    // 级联成立：fold-body 自身同挂 .body（同特异性 (0,2,0)），恢复规则必须
+    // 晚于 pre-wrap 主规则；内层选择器特异性更高，不受顺序影响。
+    const bodyRuleStart = css.indexOf(css.match(/\.turn-block \.body\s*\{[^}]*\}/)?.[0] ?? '')
+    expect(bodyRuleStart).toBeGreaterThanOrEqual(0)
+    expect(css.indexOf(foldWsRule)).toBeGreaterThan(bodyRuleStart)
+    // 语义不回退：外层 .body 的 pre-wrap（多行提交，round11 4.1）原样保留
+    // ——收敛只发生在展开面板分支内。
+    expect(css.match(/\.turn-block \.body\s*\{[^}]*\}/)?.[0] ?? '').toContain('white-space: pre-wrap')
+    el.remove()
+  })
 })
 
 describe('sebas-transcript-view (conversation rendering)', () => {
