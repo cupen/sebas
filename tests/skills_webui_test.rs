@@ -298,3 +298,263 @@ async fn detail_of_invalid_entry_is_200_with_null_text_not_404() {
     );
     assert_eq!(body["attachments"], serde_json::json!(["ref.md"]));
 }
+
+// ── DELETE /api/skills/{name} 的角色门禁（fix-webui-qa-round11 2.1，A-1/D2）──
+//
+// 删除是改仓动作，挂 `settings.manage`（root/admin）：viewer/member 得 403
+// 类型化权限错误且仓目录逐字不变；root 删除成功。真文件系统服务 + 真登录
+// 会话，覆盖「守卫在服务端路由层」的合同（前端隐藏只是呈现优化）。
+mod role_gate {
+    use super::*;
+    use sebas_webui::rbac::Role;
+    use std::net::SocketAddr;
+
+    struct AuthHarness {
+        _root: tempfile::TempDir,
+        app: axum::Router,
+        store: PathBuf,
+        /// claude 的 backend 落点（sync 投影目标；门禁用例断言它不被写/清）。
+        backend: PathBuf,
+        auth: Arc<AuthHandle>,
+    }
+
+    impl AuthHarness {
+        async fn new() -> AuthHarness {
+            let root = tempfile::tempdir().unwrap();
+            let store = root.path().join("skills");
+            let backend = root.path().join("home").join(".claude").join("skills");
+            let service = FsSkillsService::with_placements(
+                store.clone(),
+                vec![("claude".into(), backend.clone())],
+                Vec::new(),
+            );
+            let auth = Arc::new(AuthHandle::open_with_iterations(
+                root.path().join("auth.db"),
+                1000,
+            ));
+            auth.setup_root("alice", "password8").await.unwrap();
+            let users = auth.user_store().expect("用户库在场");
+            users.create("ada", "password8", Role::Admin).unwrap();
+            users.create("bob", "password8", Role::Member).unwrap();
+            users.create("vic", "password8", Role::Viewer).unwrap();
+            let app = build_router_with_skills(
+                Arc::new(FakeBackend::new()),
+                RouterInfo::default(),
+                CardConfig::default(),
+                Arc::new(ConfigAgentKindProvider::new(Vec::new())),
+                auth.clone(),
+                root.path().to_path_buf(),
+                Arc::new(service),
+            );
+            AuthHarness {
+                _root: root,
+                app,
+                store,
+                backend,
+                auth,
+            }
+        }
+
+        /// 登录换会话 cookie（login handler 需要 ConnectInfo 扩展）。
+        async fn login(&self, username: &str, password: &str) -> String {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/auth/login")
+                .header("content-type", "application/json")
+                .header("host", "127.0.0.1:12345")
+                .extension(axum::extract::ConnectInfo(SocketAddr::from((
+                    [127, 0, 0, 1],
+                    50_000,
+                ))))
+                .body(Body::from(format!(
+                    r#"{{"username":"{username}","password":"{password}"}}"#
+                )))
+                .unwrap();
+            let resp = self.app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "login as {username}");
+            resp.headers()
+                .get("set-cookie")
+                .and_then(|v| v.to_str().ok())
+                .unwrap()
+                .split(';')
+                .next()
+                .unwrap()
+                .trim()
+                .to_string()
+        }
+
+        async fn req(
+            &self,
+            method: &str,
+            uri: &str,
+            cookie: Option<&str>,
+            body: Option<String>,
+        ) -> (StatusCode, Value) {
+            let mut builder = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("host", "127.0.0.1:12345");
+            if let Some(cookie) = cookie {
+                builder = builder.header("cookie", cookie);
+            }
+            if body.is_some() {
+                builder = builder.header("content-type", "application/json");
+            }
+            let req = builder.body(Body::from(body.unwrap_or_default())).unwrap();
+            let resp = self.app.clone().oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            let v = if bytes.is_empty() {
+                Value::Null
+            } else {
+                serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+            };
+            (status, v)
+        }
+    }
+
+    fn seed_skill(store: &Path) {
+        let dir = store.join("beads");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), SKILL_BODY).unwrap();
+    }
+
+    #[tokio::test]
+    async fn member_and_viewer_delete_is_rejected_and_store_untouched() {
+        let h = AuthHarness::new().await;
+        seed_skill(&h.store);
+        let before = std::fs::read_to_string(h.store.join("beads").join("SKILL.md")).unwrap();
+
+        for (who, user) in [("member", "bob"), ("viewer", "vic")] {
+            let cookie = h.login(user, "password8").await;
+            let (status, body) = h.req("DELETE", "/api/skills/beads", Some(&cookie), None).await;
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "{who} 删技能必须 403: {status} {body}"
+            );
+            assert_eq!(
+                body["error"],
+                format!("权限不足：{who} 角色无权执行该操作"),
+                "类型化权限错误（与项目注册拒绝同款）: {body}"
+            );
+            // 仓目录逐字不变：守卫在 handler 之前（A-1 的越权删除被关闭）。
+            assert!(h.store.join("beads").is_dir(), "{who} 删除不得触仓");
+            assert_eq!(
+                std::fs::read_to_string(h.store.join("beads").join("SKILL.md")).unwrap(),
+                before,
+                "仓内容逐字不变"
+            );
+        }
+        drop(h.auth);
+    }
+
+    #[tokio::test]
+    async fn root_delete_succeeds_and_read_gate_stays_open() {
+        let h = AuthHarness::new().await;
+        seed_skill(&h.store);
+        let cookie = h.login("alice", "password8").await;
+
+        // root 删除成功（改仓动作放行）。
+        let (status, body) = h.req("DELETE", "/api/skills/beads", Some(&cookie), None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["status"], "deleted");
+        assert!(!h.store.join("beads").exists(), "root 删除触仓成功");
+
+        // 读面维持登录门：viewer 列表照常 200（只收写，不收读）。
+        let vic = h.login("vic", "password8").await;
+        let (status, body) = h.req("GET", "/api/skills", Some(&vic), None).await;
+        assert_eq!(status, StatusCode::OK, "viewer 读面不得被角色拦: {body}");
+        drop(h.auth);
+    }
+
+    // ── POST /api/skills/sync 的角色门禁（fix-webui-qa-round12 3.3，R12-A-1/D3）──
+    //
+    // sync 会把仓投影进 backend 落点并清理上次投影过、仓里已删的条目——可
+    // 触发删除效果的写操作，与 DELETE 同挂 settings.manage：member/viewer 得
+    // 403 类型化权限错误且 backend 落点不被写入/清理；root sync 成功。
+
+    /// 快照目录树的（相对路径, 内容）集，供「逐字不变」断言。
+    fn tree_snapshot(root: &Path) -> Vec<(String, Vec<u8>)> {
+        let mut out = Vec::new();
+        for entry in walkdir(root) {
+            let rel = entry.strip_prefix(root).unwrap().to_string_lossy().into_owned();
+            let data = if entry.is_dir() { Vec::new() } else { std::fs::read(&entry).unwrap() };
+            out.push((rel, data));
+        }
+        out.sort();
+        out
+    }
+
+    fn walkdir(root: &Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            out.push(dir.clone());
+            if let Ok(rd) = std::fs::read_dir(&dir) {
+                for e in rd.flatten() {
+                    if e.path().is_dir() {
+                        stack.push(e.path());
+                    } else {
+                        out.push(e.path());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn member_and_viewer_sync_is_rejected_and_placements_untouched() {
+        let h = AuthHarness::new().await;
+        seed_skill(&h.store);
+        // 落点里放一个私有条目（sync 对名外条目只计数不动；被拒请求则连
+        // 计数都不该发生——目录树逐字不变）。
+        let private = h.backend.join("private-skill");
+        std::fs::create_dir_all(&private).unwrap();
+        std::fs::write(private.join("SKILL.md"), "# private\n").unwrap();
+        let before = tree_snapshot(&h.backend);
+
+        for (who, user) in [("member", "bob"), ("viewer", "vic")] {
+            let cookie = h.login(user, "password8").await;
+            let (status, body) =
+                h.req("POST", "/api/skills/sync", Some(&cookie), Some("{}".into())).await;
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "{who} sync 必须 403: {status} {body}"
+            );
+            assert_eq!(
+                body["error"],
+                format!("权限不足：{who} 角色无权执行该操作"),
+                "类型化权限错误（与 DELETE 同款）: {body}"
+            );
+            // backend 落点不被写入或清理（spec「no backend placement directory
+            // is written or cleaned」）。
+            assert_eq!(
+                tree_snapshot(&h.backend),
+                before,
+                "{who} 的被拒 sync 不得触 backend 落点"
+            );
+        }
+        drop(h.auth);
+    }
+
+    #[tokio::test]
+    async fn root_sync_succeeds_and_projects_the_store() {
+        let h = AuthHarness::new().await;
+        seed_skill(&h.store);
+        let cookie = h.login("alice", "password8").await;
+        let (status, body) = h.req("POST", "/api/skills/sync", Some(&cookie), Some("{}".into())).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body["reports"][0]["written"][0], "beads",
+            "root sync 把仓条目投影进 claude 落点: {body}"
+        );
+        assert!(
+            h.backend.join("beads").join("SKILL.md").is_file(),
+            "root sync 把仓条目投影进 claude 落点"
+        );
+        drop(h.auth);
+    }
+}

@@ -397,8 +397,12 @@ export class WsClient implements ReactiveController {
    * （fix-webui-qa-round3 2.7 / D11）鉴权闸。宿主（app-shell）从
    * `/api/auth/me` 探得未认证（登录页/首启设置页/会话失效跳登录）时置
    * true：未在途的连接不再发起、排定的重连就地取消；置 false（认证就绪）
-   * 即恢复既有连接姿态（等价 reconnectNow）。已连接的 socket 不动——服务
-   * 端会话失效自会关它，届时闸还在，不再重连。
+   * 即恢复既有连接姿态（等价 reconnectNow）。
+   *
+   * （fix-webui-qa-round11 3.2，D4/B-6）置 true 时**主动关闭已建立的连接**：
+   * /ws 的鉴权只在升级时校验，服务端不会因会话注销而掐断已打开的 socket
+   * ——spec「登出即断开：现有 /ws 连接关闭，且不再自动重连」由闸侧收口；
+   * onclose 的 scheduleReconnect 在闸下静默，不产生重连。
    */
   setAuthGated(gated: boolean): void {
     this.authGated = gated
@@ -407,6 +411,7 @@ export class WsClient implements ReactiveController {
         clearTimeout(this.reconnectTimer)
         this.reconnectTimer = null
       }
+      this.socket?.close()
       return
     }
     this.reconnectNow()

@@ -179,4 +179,70 @@ describe('sebas-model-aliases (router-model-aliases 别名管理 WebUI 入口)',
       el.remove()
     }
   })
+
+  // ── fix-webui-qa-round11 4.3（A-2）：零可选 provider 的空态指引 ──
+  // spec「Alias creation guides when no provider target exists」：下拉禁用
+  // + 指引文案（指向「模型」分区），不呈现静默空下拉；保存键同禁（表单
+  // 不允许提交无目标的别名）。
+  describe('alias form guides when no provider target exists (round11 4.3)', () => {
+    function emptyStoreSnapshot() {
+      return { providers: [], config_providers: [], model_aliases: {} }
+    }
+
+    async function openCreate(el: SebasModelAliases): Promise<void> {
+      el.shadowRoot!.querySelector<HTMLElement>('[data-testid="alias-create"]')!.click()
+      await el.updateComplete
+    }
+
+    it('empty dropdown renders disabled with guidance pointing to the models section; save is blocked', async () => {
+      apiMocks.providers.mockResolvedValue(emptyStoreSnapshot())
+      const el = await mount()
+      await openCreate(el)
+      const select = el.shadowRoot!.querySelector<HTMLInputElement>('[data-testid="alias-provider-select"]')!
+      expect(select, '空态下拉在场').toBeTruthy()
+      expect(select.hasAttribute('disabled'), '下拉禁用态').toBe(true)
+      const hint = el.shadowRoot!.querySelector('[data-testid="alias-provider-empty-hint"]')!
+      expect(hint.textContent).toContain('模型')
+      expect(hint.textContent).toContain('provider')
+      // 保存键禁用：无目标不可提交（CRUD 零调用）。
+      const save = el.shadowRoot!.querySelector<HTMLButtonElement>('[data-testid="alias-save"]')!
+      expect((save as unknown as { disabled: boolean }).disabled).toBe(true)
+      save.click()
+      await new Promise((r) => setTimeout(r, 0))
+      await el.updateComplete
+      expect(apiMocks.aliasCreate).not.toHaveBeenCalled()
+      el.remove()
+    })
+
+    it('creating a provider unlocks the form: the dropdown offers the new target', async () => {
+      apiMocks.providers.mockResolvedValue(emptyStoreSnapshot())
+      const el = await mount()
+      await openCreate(el)
+      expect(el.shadowRoot!.querySelector('[data-testid="alias-provider-empty-hint"]')).toBeTruthy()
+      el.remove()
+
+      // 操作者在「模型」分区建了 provider 后重进别名分区 = 新元素重挂
+      // （connectedCallback 重读 providers）→ 下拉解锁、可选中新行。
+      apiMocks.providers.mockResolvedValue({
+        providers: [{ name: 'qa-provider' }],
+        config_providers: [],
+        model_aliases: {},
+      })
+      const el2 = await mount()
+      await openCreate(el2)
+      expect(el2.shadowRoot!.querySelector('[data-testid="alias-provider-empty-hint"]')).toBeNull()
+      const select = el2.shadowRoot!.querySelector<HTMLInputElement>('[data-testid="alias-provider-select"]')!
+      expect(select.hasAttribute('disabled')).toBe(false)
+      // 正常提交走通（目标的解锁面）。
+      const nameInput = el2.shadowRoot!.querySelector<HTMLInputElement>('[data-testid="alias-name-input"]')!
+      nameInput.value = 'qa'
+      nameInput.dispatchEvent(new Event('input'))
+      await el2.updateComplete
+      el2.shadowRoot!.querySelector<HTMLElement>('[data-testid="alias-save"]')!.click()
+      await new Promise((r) => setTimeout(r, 0))
+      await el2.updateComplete
+      expect(apiMocks.aliasCreate).toHaveBeenCalledWith('qa', 'qa-provider', undefined)
+      el2.remove()
+    })
+  })
 })

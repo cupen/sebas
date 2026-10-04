@@ -22,6 +22,7 @@ use sebas_agent::policy::{Approver, ApproverHub, PolicyConfig, PolicyEngine};
 use sebas_agent::session::{AgentEvent, SessionConfig, SessionHandle, SessionManager};
 use sebas_agent::tools::ToolRegistry;
 use sebas_channels::ChannelKey;
+use sebas_domain::session::CardPhase;
 use sebas_dispatch::{
     PendingApproval, PendingSubmission, SessionEvent, SessionIdentity, SessionInfo, TurnEntry,
     TurnStreamEvent, count_chat_messages,
@@ -80,6 +81,16 @@ struct NativeSession {
     /// 提交立即开轮不入队（它在飞，不在栈上）；`close` / 终态拆除随会话
     /// 清空。remove/move 因此对队列内容有完整否决权。
     pending_queue: Vec<PendingSubmission>,
+    /// （fix-webui-qa-round11 1.2，design D1）卡相位真值：回合开始 →
+    /// `OnIt`、正常结束 → `Done`、失败 → `CrossMark`。与 ACP 卡态同一
+    /// 词汇、同一元数据通道（`SessionInfo.phase`）——`SessionStatus::derive`
+    /// 继续单点派生，native 会话不再因「输入恒空」永远落在 Queued。
+    /// `None` = 尚无任何回合（占位创建），诚实呈 Queued。
+    card_phase: Option<CardPhase>,
+    /// （fix-webui-qa-round11 1.2）首条用户消息预览（行命名锚定值，与 ACP
+    /// `first_prompt_preview` 同语义）：spawn 首条 prompt 或占位创建后的
+    /// 第一条 `message()` 落定，后续消息绝不移动它。
+    first_prompt_preview: Option<String>,
 }
 
 impl NativeSession {
@@ -154,7 +165,7 @@ impl NativeSession {
         count_chat_messages(&self.transcript)
     }
 
-    fn info(&self, key: &ChannelKey) -> SessionInfo {
+    fn info(&self, key: &ChannelKey, parked_approvals: u32) -> SessionInfo {
         // Native keys are feishu-channel `agent-{8-hex}` references with no
         // thread part; feed the flattened SessionInfo directly off the key.
         SessionInfo {
@@ -162,7 +173,11 @@ impl NativeSession {
             key: key.reference.clone(),
             session_id: Some(self.handle.key.clone()),
             status: sebas_domain::session::SessionPhase::Active,
-            phase: None,
+            // （fix-webui-qa-round11 1.2，design D1）卡相位随回合真值回填
+            // （OnIt/Done/CrossMark）——`SessionStatus::derive` 的输入不再是
+            // 恒空，native 会话与 ACP 同一派生单点推进 Working/Done/Failed；
+            // None（占位创建、尚无回合）诚实落 Queued。
+            phase: self.card_phase.clone(),
             user_prompt: Some(self.prompt.clone()),
             last_active_unix: chrono::Utc::now().timestamp(),
             project_dir: self.workdir.clone(),
@@ -196,13 +211,19 @@ impl NativeSession {
             // AgentEvent 词汇不动，命令表恒空（composer 不渲染面板、
             // `/` 前缀按普通文本放行的诚实退化）。
             available_commands: Vec::new(),
-            // fix-pending-queue-liveness 2.3：native 内核不产 ACP 卡片相位，
-            // 回合占用事实不可得——如实 false（前端回退 slug 判定）。
-            turn_engaged: false,
+            // fix-pending-queue-liveness 2.3 + fix-webui-qa-round11 1.2：回合
+            // 占用事实 = 宿主在飞近似 ∨ 泊车审批在等（与 ACP 的 WORKING ∨
+            // 泊车同表）。composer 的停止钮据此对 native in-flight 回合出现。
+            turn_engaged: self.in_flight || parked_approvals > 0,
             spawn_failure_reason: None,
-            parked_approvals: 0,
+            parked_approvals,
             label: None,
-            first_prompt_preview: None,
+            // （fix-webui-qa-round11 1.2）首条消息预览随行下发——行命名链的
+            // 锚定数据源，native 会话首条消息后不再「未命名会话」。
+            first_prompt_preview: self
+                .first_prompt_preview
+                .clone()
+                .filter(|p| !p.is_empty()),
         }
     }
 }
@@ -421,9 +442,24 @@ impl NativeAgentBackend {
     }
 
     async fn session_info(&self, encoded: &str) -> Option<SessionInfo> {
+        // 泊车数先取（pending_approvals 与 sessions 无同时持锁——读守卫在
+        // 语句末即释放，锁序 sessions → pending_approvals 不变）。
+        let parked = self.parked_count(encoded).await;
         let g = self.sessions.read().await;
         g.get(encoded)
-            .map(|s| s.info(&Self::decode_agent_key(encoded)))
+            .map(|s| s.info(&Self::decode_agent_key(encoded), parked))
+    }
+
+    /// （fix-webui-qa-round11 1.2）某会话的泊车审批数：`info()` 的
+    /// `parked_approvals` / `turn_engaged` 泊车维度输入（waiting 投影与
+    /// composer 停止钮同源）。
+    async fn parked_count(&self, encoded: &str) -> u32 {
+        self.pending_approvals
+            .read()
+            .await
+            .get(encoded)
+            .map(|m| m.len() as u32)
+            .unwrap_or(0)
     }
 
     /// encode_key 的逆：严格解码（无 NUL / 非法转义 → None）。退路保持旧
@@ -497,6 +533,15 @@ impl NativeAgentBackend {
                 let Some(session) = g.get_mut(&encoded) else {
                     break;
                 };
+                // （fix-webui-qa-round11 1.2）泊车审批数是 `info()` 的输入之一
+                // （waiting 投影 + turn_engaged 的泊车维度）。sessions →
+                // pending_approvals 与 PermissionRequest 分支同序，无反向持锁。
+                let parked = pending_approvals
+                    .read()
+                    .await
+                    .get(&encoded)
+                    .map(|m| m.len() as u32)
+                    .unwrap_or(0);
                 match ev {
                     AE::TextDelta { delta, .. } => {
                         // D2：逐 delta 落账 + 实时 turn 事件（不再只写
@@ -527,7 +572,7 @@ impl NativeAgentBackend {
                             format!("📖 **{tool_name}**\n```json\n{args_str}\n```"),
                         );
                         Some(SessionEvent::Updated {
-                            session: session.info(&key),
+                            session: session.info(&key, parked),
                         })
                     }
                     AE::ToolEnd {
@@ -541,7 +586,7 @@ impl NativeAgentBackend {
                             format!("✓ **{tool_name}**\n{result}"),
                         );
                         Some(SessionEvent::Updated {
-                            session: session.info(&key),
+                            session: session.info(&key, parked),
                         })
                     }
                     AE::PermissionRequest {
@@ -559,6 +604,8 @@ impl NativeAgentBackend {
                             format!("⏳ **{tool_name}** awaits approval — {reason}"),
                         );
                         // 泊车登记（读模型半边）：决策/回合终态负责清除。
+                        // 本帧的泊车数在登记后重算（info 帧如实带 1，
+                        // waiting/turn_engaged 投影不再等下一次翻转）。
                         pending_approvals
                             .write()
                             .await
@@ -572,6 +619,12 @@ impl NativeAgentBackend {
                                     args: args.clone(),
                                 },
                             );
+                        let parked = pending_approvals
+                            .read()
+                            .await
+                            .get(&encoded)
+                            .map(|m| m.len() as u32)
+                            .unwrap_or(parked);
                         let _ = notices.send(PermissionNotice {
                             request_id,
                             session_id: encoded.clone(),
@@ -580,7 +633,7 @@ impl NativeAgentBackend {
                             reason,
                         });
                         Some(SessionEvent::Updated {
-                            session: session.info(&key),
+                            session: session.info(&key, parked),
                         })
                     }
                     AE::ToolPolicy {
@@ -594,7 +647,7 @@ impl NativeAgentBackend {
                             format!("🛡 **{tool_name}** policy: {outcome}"),
                         );
                         Some(SessionEvent::Updated {
-                            session: session.info(&key),
+                            session: session.info(&key, parked),
                         })
                     }
                     AE::SessionSummary {
@@ -629,6 +682,8 @@ impl NativeAgentBackend {
                         // （2.2 review 补修）summary 落账 = 上一轮的零输出判定
                         // 完结：此刻出队队头、置 in_flight 并交由锁外投递内核。
                         // 队列空（最后一轮）则 in_flight 保持 false。
+                        // （fix-webui-qa-round11 1.2）出队即下一回合开轮：卡
+                        // 相位回 OnIt（Working 真值随 Updated 帧下发）。
                         if advance_queue
                             && let Some(head) = if session.pending_queue.is_empty() {
                                 None
@@ -638,10 +693,11 @@ impl NativeAgentBackend {
                         {
                             session.in_flight = true;
                             session.turn_visible_output = false;
+                            session.card_phase = Some(CardPhase::OnIt);
                             dispatch = Some(head.text);
                         }
                         Some(SessionEvent::Updated {
-                            session: session.info(&key),
+                            session: session.info(&key, parked),
                         })
                     }
                     AE::Error {
@@ -672,7 +728,12 @@ impl NativeAgentBackend {
                         }
                         // workbench-interaction-polish 1.1：turn 终态（含取消
                         // 的非 terminal "turn cancelled"）复位在飞标志。
+                        // （fix-webui-qa-round11 1.2）失败回合的卡相位真值 =
+                        // CrossMark（SessionStatus::derive 派生 Failed）。取消
+                        // 是中性操作，同样终回合——相位落 CrossMark 与 ACP 的
+                        // 取消终态一致（可再开新一轮，开轮即回 OnIt）。
                         session.in_flight = false;
+                        session.card_phase = Some(CardPhase::CrossMark);
                         // 回合已终：内核对悬空审批 fail-closed，泊车登记随之清除。
                         pending_approvals.write().await.remove(&encoded);
                         // （2.2 review 补修）回合已终：排队队头等 summary 落账
@@ -688,13 +749,17 @@ impl NativeAgentBackend {
                         // 正文已逐 delta 落账（2.1），收尾无积压可 flush；
                         // Updated 仍照发——状态/段计数随快照刷新。
                         session.in_flight = false;
+                        // （fix-webui-qa-round11 1.2）正常结束的卡相位真值 =
+                        // Done（rail/历史/计数随 derive 单点推进 done，native
+                        // 会话不再永远 Queued）。
+                        session.card_phase = Some(CardPhase::Done);
                         // 回合已终：悬空审批不再待决（fail-closed），清登记。
                         pending_approvals.write().await.remove(&encoded);
                         // （2.2 review 补修）回合已终：排队队头等 summary 落账
                         // 后由本 pump 出队投递（advance_queue）。
                         advance_queue = true;
                         Some(SessionEvent::Updated {
-                            session: session.info(&key),
+                            session: session.info(&key, parked),
                         })
                     }
                 }
@@ -726,15 +791,62 @@ impl NativeAgentBackend {
             }
         }
     }
+
+    /// （fix-webui-qa-round12 4.2，D4）静默应用会话级模型 override：与
+    /// [`SessionBackend::set_session_model`] 同一状态迁移（override 写入 +
+    /// 内核下发），但**不落** `model_change` 回执条目——会话创建表单的模型
+    /// 选定不是「切换」（spec：switch receipts are operator-driven）。返回
+    /// None = 无留痕价值（创建时选定 = 内核缺省，from == to，无切换事实）。
+    async fn apply_model_override(
+        &self,
+        key: &ChannelKey,
+        model_id: &str,
+    ) -> Result<Option<TurnEntry>, SessionRejection> {
+        let encoded = Self::encode_key(key);
+        let mut g = self.sessions.write().await;
+        let Some(session) = g.get_mut(&encoded) else {
+            return Err(SessionRejection::UnknownSession {
+                key: encoded,
+            });
+        };
+        let from = session
+            .current_model_override
+            .clone()
+            .or_else(|| Some(session.default_model.clone()));
+        session.current_model_override = Some(model_id.to_string());
+        session.handle.set_model(model_id.to_string()).await;
+        if from.as_deref() == Some(model_id) {
+            return Ok(None);
+        }
+        let entry = TurnEntry::model_change(
+            session.transcript.len() as u64,
+            serde_json::json!({ "from": from, "to": model_id }),
+        );
+        session.transcript.push(entry.clone());
+        Ok(Some(entry))
+    }
 }
 
 #[async_trait::async_trait]
 impl SessionBackend for NativeAgentBackend {
     async fn snapshot(&self) -> Vec<SessionInfo> {
+        // 泊车数快照先行（读守卫随语句结束释放，不与 sessions 锁重叠持有）。
+        let parked: std::collections::HashMap<String, u32> = self
+            .pending_approvals
+            .read()
+            .await
+            .iter()
+            .map(|(k, v)| (k.clone(), v.len() as u32))
+            .collect();
         let g = self.sessions.read().await;
         let mut out: Vec<SessionInfo> = g
             .iter()
-            .map(|(encoded, s)| s.info(&Self::decode_agent_key(encoded)))
+            .map(|(encoded, s)| {
+                s.info(
+                    &Self::decode_agent_key(encoded),
+                    parked.get(encoded).copied().unwrap_or(0),
+                )
+            })
             .collect();
         out.sort_by_key(|s| std::cmp::Reverse(s.last_active_unix));
         out
@@ -808,6 +920,11 @@ impl SessionBackend for NativeAgentBackend {
                     turn_visible_output: false,
                     // （2.2）首条提交立即开轮，不入影子队列。
                     pending_queue: Vec::new(),
+                    // （fix-webui-qa-round11 1.2）带 prompt 的 spawn 即开轮：
+                    // 卡相位 OnIt、首条消息即命名锚——rail 呈 Working 而非
+                    // Queued；占位创建两者皆 None/空（诚实 Queued + 未命名）。
+                    card_phase: (!prompt.trim().is_empty()).then_some(CardPhase::OnIt),
+                    first_prompt_preview: (!prompt.trim().is_empty()).then_some(prompt.clone()),
                 },
             );
             // （fix-webui-qa-round8 2.1）首条 prompt 与 ACP `seed_card` 等价：
@@ -857,36 +974,18 @@ impl SessionBackend for NativeAgentBackend {
     /// 不在 `available_models` 内仍接受（与 ACP 行为一致 —— 模型 ID 合法性
     /// 由内核 LLM 客户端实时校验）。
     ///
-    /// （fix-webui-qa-round8 5.2）切换落一条 `model_change` 系统条目（含新旧
-    /// 模型名）——与 ACP 引擎面 `apply_model_changed` 的留痕对齐，两条执行体
-    /// 行为一致。
+    /// （fix-webui-qa-round8 5.2 → fix-webui-qa-round12 4.2，D4）操作者显式
+    /// 切换：落一条 `model_change` 系统条目（含新旧模型名）——回执只由
+    /// 操作者切换产生；会话创建表单的模型选定走
+    /// [`NativeAgentBackend::apply_model_override`]（静默，不产生「切换」
+    /// 回执）。
     async fn set_session_model(
         &self,
         key: ChannelKey,
         model_id: String,
     ) -> Result<(), SessionRejection> {
-        let encoded = Self::encode_key(&key);
-        let entry = {
-            let mut g = self.sessions.write().await;
-            let Some(session) = g.get_mut(&encoded) else {
-                return Err(SessionRejection::UnknownSession { key: encoded });
-            };
-            let from = session
-                .current_model_override
-                .clone()
-                .or_else(|| Some(session.default_model.clone()));
-            session.current_model_override = Some(model_id.clone());
-            let entry = TurnEntry::model_change(
-                session.transcript.len() as u64,
-                serde_json::json!({ "from": from, "to": model_id }),
-            );
-            session.transcript.push(entry.clone());
-            entry
-        };
-        NativeSession::broadcast_entry(&self.turn_events, &key, entry);
-        let g = self.sessions.read().await;
-        if let Some(session) = g.get(&encoded) {
-            session.handle.set_model(model_id).await;
+        if let Some(entry) = self.apply_model_override(&key, &model_id).await? {
+            NativeSession::broadcast_entry(&self.turn_events, &key, entry);
         }
         Ok(())
     }
@@ -900,12 +999,25 @@ impl SessionBackend for NativeAgentBackend {
     ///   对齐。
     async fn message(&self, key: ChannelKey, message: String) -> Result<(), SessionRejection> {
         let encoded = Self::encode_key(&key);
+        // 泊车数先取（读守卫随语句释放；锁序 sessions → pending_approvals）。
+        let parked = self.parked_count(&encoded).await;
         let (entry, info_frame, dispatch) = {
             // 写锁：in_flight 置位与会话查找同临界区（prompt 只借用 handle）。
             let mut g = self.sessions.write().await;
             let Some(session) = g.get_mut(&encoded) else {
                 return Err(SessionRejection::UnknownSession { key: encoded });
             };
+            // （fix-webui-qa-round11 1.2）首条消息落命名锚（后续消息绝不
+            // 移动它），提交即回卡相位 OnIt——rail 立即呈 Working。
+            if session
+                .first_prompt_preview
+                .as_deref()
+                .unwrap_or("")
+                .is_empty()
+            {
+                session.first_prompt_preview = Some(message.clone());
+            }
+            session.card_phase = Some(CardPhase::OnIt);
             // workbench-interaction-polish 1.1：空闲时这条 prompt 立即开轮。
             let mut dispatch: Option<String> = None;
             if !session.in_flight {
@@ -930,8 +1042,11 @@ impl SessionBackend for NativeAgentBackend {
             }
             session.in_flight = true;
             let entry = session.push_prompt_entry(message.clone());
-            let info_frame = dispatch.is_none().then(|| SessionEvent::Updated {
-                session: session.info(&key),
+            // 两条分支都发：排队帧带 pending 全量，空闲直投帧带开轮 working 真值
+            // ——后续回合必须重新武装 turn_engaged，否则前端终点通知与 rail
+            // working 翻转只在首回合成立（fix-webui-qa-round11 3c review）。
+            let info_frame = Some(SessionEvent::Updated {
+                session: session.info(&key, parked),
             });
             (entry, info_frame, dispatch)
         };
@@ -1000,6 +1115,7 @@ impl SessionBackend for NativeAgentBackend {
         pending_id: u64,
     ) -> Result<Vec<PendingSubmission>, SessionRejection> {
         let encoded = Self::encode_key(&key);
+        let parked = self.parked_count(&encoded).await;
         let frame = {
             let mut g = self.sessions.write().await;
             let Some(session) = g.get_mut(&encoded) else {
@@ -1012,7 +1128,7 @@ impl SessionBackend for NativeAgentBackend {
             };
             session.pending_queue.remove(pos);
             let _ = self.events.send(SessionEvent::Updated {
-                session: session.info(&key),
+                session: session.info(&key, parked),
             });
             session.pending_view()
         };
@@ -1028,6 +1144,7 @@ impl SessionBackend for NativeAgentBackend {
         to_index: usize,
     ) -> Result<Vec<PendingSubmission>, SessionRejection> {
         let encoded = Self::encode_key(&key);
+        let parked = self.parked_count(&encoded).await;
         let frame = {
             let mut g = self.sessions.write().await;
             let Some(session) = g.get_mut(&encoded) else {
@@ -1046,7 +1163,7 @@ impl SessionBackend for NativeAgentBackend {
             let moved = session.pending_queue.remove(from);
             session.pending_queue.insert(to_index, moved);
             let _ = self.events.send(SessionEvent::Updated {
-                session: session.info(&key),
+                session: session.info(&key, parked),
             });
             session.pending_view()
         };
@@ -1461,9 +1578,10 @@ impl SessionBackend for DualSessionBackend {
             // 会话同样生效——走会话级 override 缝（作用于后续 turn 并
             // 反映在快照 current_model 上），不再被静默丢弃。会话刚由
             // 本调用建成，set 理论不会失败；万一失败也不否定已建成的
-            // 会话。
+            // 会话。（fix-webui-qa-round12 4.2，D4）创建表单的模型选定走
+            // 静默 override——不是「切换」，不落 model_change 回执。
             if let Some(m) = model {
-                let _ = self.native.set_session_model(key.clone(), m).await;
+                let _ = self.native.apply_model_override(&key, &m).await;
             }
             Ok(key)
         }
@@ -1810,6 +1928,128 @@ mod tests {
             "native sessions must never advertise commands: {:?}",
             info.available_commands
         );
+        backend.close(key).await.unwrap();
+    }
+
+    /// 纯文本脚本 manager：一回合一段收尾文本，无工具、无审批卡。
+    fn plain_manager() -> SessionManager {
+        let llm = FakeLlmClient::scripted(vec![FakeLlmClient::say("turn answer")]);
+        SessionManager::new(
+            Arc::new(llm),
+            ToolRegistry::with_sandbox(
+                Duration::from_secs(10),
+                sebas_agent::policy::SandboxMode::Firewall,
+            ),
+            SessionConfig::default(),
+        )
+        .with_policy(Arc::new(PolicyEngine::new(PolicyConfig::default())))
+        .with_approver(sebas_agent::policy::ApproverHub::new())
+    }
+
+    async fn info_for(backend: &NativeAgentBackend, key: &ChannelKey) -> SessionInfo {
+        backend
+            .snapshot()
+            .await
+            .into_iter()
+            .find(|s| s.channel_key() == *key)
+            .expect("native session in snapshot")
+    }
+
+    /// （fix-webui-qa-round11 1.2，design D1）native 生命周期真值回填：
+    /// 开轮 → 卡相位 OnIt（`SessionStatus::derive` 读 Working、turn_engaged
+    /// 真——composer 停止钮的数据源）；正常结束 → Done；首条消息落命名锚
+    /// 且后续消息绝不移动它。派生保持 `SessionStatus::derive` 单点。
+    #[tokio::test]
+    async fn native_session_backfills_card_phase_and_title() {
+        let backend = NativeAgentBackend::with_manager(plain_manager());
+        let ws = tempfile::tempdir().unwrap();
+        let key = backend
+            .spawn("first message".into(), Some(ws.path().to_string_lossy().into()))
+            .await
+            .expect("spawn");
+
+        // 开轮即 OnIt：spawn 返回后快照读 Working（不是 Queued）。
+        let info = info_for(&backend, &key).await;
+        assert_eq!(info.phase, Some(CardPhase::OnIt), "spawn 开轮即 OnIt");
+        assert_eq!(info.status, sebas_domain::session::SessionPhase::Active);
+        assert_eq!(
+            sebas_webui::models::SessionStatus::derive(&info.status, info.phase.as_ref()),
+            sebas_webui::models::SessionStatus::Working,
+        );
+        assert!(info.turn_engaged, "在飞事实随开轮置真（停止钮数据源）");
+        assert_eq!(
+            info.first_prompt_preview.as_deref(),
+            Some("first message"),
+            "首条消息即命名锚"
+        );
+
+        // 回合正常结束 → Done、在飞复位；命名锚不动。
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if info_for(&backend, &key).await.phase == Some(CardPhase::Done) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("turn must settle to Done");
+        let info = info_for(&backend, &key).await;
+        assert_eq!(
+            sebas_webui::models::SessionStatus::derive(&info.status, info.phase.as_ref()),
+            sebas_webui::models::SessionStatus::Done,
+            "native 会话结束后 derive 单点读 Done"
+        );
+        assert!(!info.turn_engaged, "终态在飞复位");
+        assert_eq!(info.first_prompt_preview.as_deref(), Some("first message"));
+
+        // 第二条消息：开新一轮（回 OnIt），命名锚仍是首条。
+        backend
+            .message(key.clone(), "second message".into())
+            .await
+            .expect("message");
+        let info = info_for(&backend, &key).await;
+        assert_eq!(info.phase, Some(CardPhase::OnIt));
+        assert!(info.turn_engaged);
+        assert_eq!(
+            info.first_prompt_preview.as_deref(),
+            Some("first message"),
+            "后续消息绝不移动命名锚"
+        );
+        backend.close(key).await.unwrap();
+    }
+
+    /// 占位创建（空 prompt）诚实呈 Queued（无相位、未命名、不在飞）；
+    /// 首条 `message()` 落相位与命名锚——rail/历史/计数不再被恒空输入钉死。
+    #[tokio::test]
+    async fn placeholder_native_session_stays_queued_until_first_message() {
+        let backend = NativeAgentBackend::with_manager(plain_manager());
+        let ws = tempfile::tempdir().unwrap();
+        let key = backend
+            .spawn(String::new(), Some(ws.path().to_string_lossy().into()))
+            .await
+            .expect("spawn");
+
+        let info = info_for(&backend, &key).await;
+        assert_eq!(info.phase, None, "占位创建无回合 → 无卡相位");
+        assert_eq!(
+            sebas_webui::models::SessionStatus::derive(&info.status, info.phase.as_ref()),
+            sebas_webui::models::SessionStatus::Queued,
+        );
+        assert!(!info.turn_engaged);
+        assert!(info.first_prompt_preview.is_none(), "尚无消息 → 未命名");
+
+        backend
+            .message(key.clone(), "hello".into())
+            .await
+            .expect("message");
+        let info = info_for(&backend, &key).await;
+        assert_eq!(info.phase, Some(CardPhase::OnIt));
+        assert_eq!(
+            sebas_webui::models::SessionStatus::derive(&info.status, info.phase.as_ref()),
+            sebas_webui::models::SessionStatus::Working,
+        );
+        assert_eq!(info.first_prompt_preview.as_deref(), Some("hello"));
         backend.close(key).await.unwrap();
     }
 

@@ -35,6 +35,18 @@ function localTzOffsetMinutes(): number {
   return -new Date().getTimezoneOffset()
 }
 
+/**
+ * （fix-webui-qa-round13 4.1，观察-1）数据源口径说明（usage-statistics spec
+ * 「数据源口径 SHALL 钉死为 router 用量记录」）：usage 页只呈现经 router
+ * 的流量聚合（usage.db 单写者归 router，架构不动）；ACP 直连回合不经
+ * router、不产生用量记录，其 token 计数呈现于会话头部，不入本视图。
+ * 有数据与「无用量数据」空态同带此行——纯 ACP 窗口的空态读作**口径
+ * 事实**（这里本来只看 router）而非故障或覆盖缺口。唯一出处在此常量，
+ * 视图两处渲染同一份措辞。
+ */
+export const USAGE_SOURCE_NOTE =
+  '用量统计来自 router 流量；ACP 直连会话不经 router、不产生用量记录，其 token 计数见各会话头部，不计入本页。'
+
 /** 桶标签的人类可读形：天粒度原样（`YYYY-MM-DD`），小时粒度补成 `HH:00`。 */
 export function bucketLabel(bucket: string, granularity: Granularity): string {
   if (granularity === 'hour') return `${bucket}:00`
@@ -227,6 +239,14 @@ export class SebasUsage extends LitElement {
         font-size: 0.76rem;
         margin-top: var(--sebas-space-2);
       }
+      /* （fix-webui-qa-round13 4.1）数据源口径说明行：图表态贴摘要区上方
+         （.meta 的上边距让位给下边距），空态面板内与成因 hint 拉开一行。 */
+      .source-note {
+        margin: 0 0 var(--sebas-space-3);
+      }
+      .empty .source-note {
+        margin: var(--sebas-space-2) 0 0;
+      }
       .reload {
         margin-left: auto;
       }
@@ -314,6 +334,11 @@ export class SebasUsage extends LitElement {
                 : '窗口内没有任何经 router 的请求。'
             }
           </p>
+          <!-- （fix-webui-qa-round13 4.1）口径说明随空态在场：纯 ACP 窗口
+               （router 用量记录为零）读作数据源口径事实，不伪装成 router
+               故障，也不渲染空图（spec 场景「纯 ACP 流量窗口呈现无数据
+               空态」）。 -->
+          <p class="hint source-note" data-testid="usage-source-note">${USAGE_SOURCE_NOTE}</p>
         </div>
       </section>
     `
@@ -379,6 +404,9 @@ export class SebasUsage extends LitElement {
           : isAllZero(this.data)
             ? this.renderNoData()
             : html`
+                <!-- （fix-webui-qa-round13 4.1，观察-1）数据源口径说明：
+                     摘要区上方一行，钉死「本页 = router 用量记录」。 -->
+                <p class="meta source-note" data-testid="usage-source-note">${USAGE_SOURCE_NOTE}</p>
                 <div class="summary" data-testid="usage-summary">
                   <div class="stat">
                     <div class="num">${t!.requests}</div>

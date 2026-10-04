@@ -33,6 +33,9 @@ import {
   RAIL_DEFAULT_PX,
   saveRailWidth,
 } from './views/split-persist.js'
+// （fix-webui-qa-round11 3.1，B-3/D3）回合终点通知：shell 常驻订阅相位帧，
+// 非聚焦会话的回合完成/失败经分级通知层可达（焦点由 dashboard 投影）。
+import { observeTurnFrame } from './views/turn-notify.js'
 
 // The sidebar tree + settings modal are shell-owned; the outlet views are
 // registered in main.ts.
@@ -633,6 +636,9 @@ export class SebasApp extends LitElement {
     // 通知就地呈现（点名会话与释放的搁浅条目数）。shell 常驻订阅，会话无
     // 论是否聚焦都可见。
     this.unsubscribeStall = sharedWs.subscribe(this.onSessionTurnStalled)
+    // （fix-webui-qa-round11 3.1）回合终点通知：非聚焦会话的回合完成/失败
+    // → info/error 瞬时 toast（聚焦判定由 dashboard 投影进 turn-notify）。
+    this.unsubscribeTurnSettle = sharedWs.subscribe(this.onTurnSettleFrame)
     // 会话过期 / 中途启用鉴权：任何 API 401 都把界面切回登录页。首启设置
     // 页态除外——零用户时登录门永不可过（没有凭据能试）。
     setUnauthorizedHandler(() => {
@@ -667,6 +673,17 @@ export class SebasApp extends LitElement {
   }
 
   private unsubscribeStall?: () => void
+
+  private unsubscribeTurnSettle?: () => void
+
+  /**
+   * （fix-webui-qa-round11 3.1）相位帧 → 回合终点通知的转发。判定与去重
+   * 都在 turn-notify 模块（focus 投影消费方）；这里只做事件分流。
+   */
+  private onTurnSettleFrame = (ev: { type: string }): void => {
+    if (ev.type !== 'session.updated' && ev.type !== 'session.created') return
+    observeTurnFrame(ev as Parameters<typeof observeTurnFrame>[0])
+  }
 
   /**
    * fix-pending-queue-liveness 2.2：看门狗强制收尾通知（warn 低档）。文案
@@ -882,6 +899,8 @@ export class SebasApp extends LitElement {
     this.unsubscribeWs = null
     this.unsubscribeStall?.()
     this.unsubscribeStall = undefined
+    this.unsubscribeTurnSettle?.()
+    this.unsubscribeTurnSettle = undefined
     super.disconnectedCallback()
   }
 

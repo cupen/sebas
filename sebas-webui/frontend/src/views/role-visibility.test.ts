@@ -11,6 +11,8 @@ import {
   canCreateSessions,
   canControlServices,
   canManageAgents,
+  canManageProviders,
+  canManageSkills,
   canManageUsers,
 } from './role-visibility.js'
 import type { Role } from '../api/client.js'
@@ -63,5 +65,36 @@ describe('role→入口可见性映射表（gate-agent-directory-writes 2.1）',
       expect(canCreateSessions(role as Role | null)).toBe(true)
     }
     expect(canCreateSessions('viewer')).toBe(false)
+  })
+
+  // （fix-webui-qa-round11 2.2，A-1/D2）Skills 删除入口归 settings.manage 档：
+  // 删除是改仓动作，与服务端 DELETE /api/skills/{name} 的 403 执法同键——
+  // 呈现层对 member/viewer 不渲染删除控件；auth=false（null）保持既有可用。
+  it('skills 删除入口与 settings.manage 同档（root/admin/null），A-1 逐格钉死', () => {
+    for (const role of [null, 'root', 'admin'] as const) {
+      expect(canManageSkills(role as Role | null)).toBe(true)
+    }
+    for (const role of ['member', 'viewer'] as const) {
+      expect(canManageSkills(role)).toBe(false)
+    }
+    // 与 provider 变更面同一权限键——两谓词逐角色取值一致（同一矩阵行）。
+    for (const role of [null, 'root', 'admin', 'member', 'viewer'] as const) {
+      expect(canManageSkills(role as Role | null)).toBe(canManageProviders(role as Role | null))
+    }
+  })
+
+  // （fix-webui-qa-round12 3.2，R12-A-1/D3）同步入口与删除同门槛：sync 会把
+  // 仓投影进 backend 落点并清理上次投影过、仓里已删的条目——可触发删除效果
+  // 的写操作（spec agent-skills delta「Deletion and projection (sync) … SHALL
+  // be gated to root/admin」），member/viewer 不渲染同步按钮；「刷新」是只读
+  // 重列，不在本谓词的裁剪范围（无对应入口谓词——刷新对全角色保留）。
+  it('skills 同步入口与删除同门槛（root/admin/null），R12-A-1 逐格钉死', () => {
+    // 同一谓词承载删除与同步（同一权限键 → 同一呈现裁剪）。
+    for (const role of [null, 'root', 'admin'] as const) {
+      expect(canManageSkills(role as Role | null), `sync @ ${role}`).toBe(true)
+    }
+    for (const role of ['member', 'viewer'] as const) {
+      expect(canManageSkills(role), `sync @ ${role}`).toBe(false)
+    }
   })
 })

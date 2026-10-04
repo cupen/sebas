@@ -457,19 +457,53 @@ describe('sebas-new-session-dialog', () => {
     ).not.toContain('设置 → 模型')
   })
 
-  it('only the native credential cause points to Settings → Models (round10 1.3)', async () => {
+  // ── fix-webui-qa-round13 3.1：native 禁用提示如实化 ──
+  // 「到「设置 → 模型」配置」的旧指引失实（QA round13 实证：设置页配全
+  // provider 也不点亮 native）——native 的真实启用条件是 core 进程启动 env
+  // （webui spec「不可用 agent 的禁用提示如实」）。提示 SHALL 提及 env 词
+  // 至少其一、如实说明 WebUI 内无法满足、SHALL NOT 再引导设置页。
+
+  it('native disabled hint states the core env condition without the settings-page detour (round13 3.1)', async () => {
     const { agentUnavailableLabel } = await import('./new-session-dialog.js')
-    // native 内核的凭据缺失是唯一的「设置 → 模型」成因
-    // （spec「only a model/credential-caused unavailability directs to
-    // Settings → Models」）。
     const native = agentUnavailableLabel({
       id: 'native',
       display: 'Native Kernel',
-      cause: 'native backend needs SEBAS_AGENT_PROVIDER_API_KEY',
+      cause: 'native backend needs SEBAS_AGENT_PROVIDER_API_KEY (or SEBAS_AGENT_ROUTER_URL)',
     })
-    expect(native).toContain('未配置模型凭据')
-    expect(native).toContain('设置 → 模型')
+    // 真实启用条件：core env（两个变量至少点名其一）。
+    expect(native).toMatch(/SEBAS_AGENT_PROVIDER_API_KEY|SEBAS_AGENT_ROUTER_URL/)
+    // 如实说明该条件无法在 WebUI 内满足。
+    expect(native).toContain('WebUI')
+    // 失实引导移除：不出现「到「设置 → 模型」配置」字样；ACP 的
+    // 「设置 → Agent」口径不受影响（native 行也不再误指 Agent 页）。
+    expect(native).not.toContain('设置 → 模型')
     expect(native).not.toContain('设置 → Agent')
+  })
+
+  it('a disabled native option in the dialog renders the env-condition hint (round13 3.1)', async () => {
+    ;(api.agents as ReturnType<typeof vi.fn>).mockResolvedValue({
+      agents: [
+        { id: 'claude', display: 'Claude Code', reachable: true },
+        {
+          id: 'native',
+          display: 'Native Kernel',
+          reachable: false,
+          cause: 'native backend needs SEBAS_AGENT_PROVIDER_API_KEY (or SEBAS_AGENT_ROUTER_URL)',
+        },
+      ],
+    })
+    const el = await mount({ open: true, defaultAgent: 'claude' })
+    const nativeOpt = el.shadowRoot?.querySelector(
+      'wa-option[value="native"]',
+    ) as HTMLElement | null
+    expect(nativeOpt).toBeTruthy()
+    expect(nativeOpt!.hasAttribute('disabled')).toBe(true)
+    // 选项可见文案含 env 词、不含设置页引导；原始 cause 仍在 tooltip。
+    expect(nativeOpt!.textContent).toMatch(/SEBAS_AGENT_PROVIDER_API_KEY|SEBAS_AGENT_ROUTER_URL/)
+    expect(nativeOpt!.textContent).not.toContain('设置 → 模型')
+    expect((nativeOpt as unknown as { title: string }).title).toContain(
+      'SEBAS_AGENT_PROVIDER_API_KEY',
+    )
   })
 
   it('reopen resets the mode to the explicit ask default (D5b)', async () => {

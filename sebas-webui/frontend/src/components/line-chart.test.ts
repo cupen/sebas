@@ -8,7 +8,9 @@ import {
   type SebasLineChart,
 } from './line-chart.js'
 
-const PAD = { top: 12, right: 12, bottom: 22, left: 46 }
+// 与 DEFAULT_PADDING 同步（right=32 是 fix-webui-qa-round11 4.5 的右缘
+// inset——最右 x 刻度的中心锚日期文本右半 ≈28px，必须留在 viewBox 内）。
+const PAD = { top: 12, right: 32, bottom: 22, left: 46 }
 
 describe('computeChartGeometry (data → points/paths pure functions)', () => {
   const W = 640
@@ -73,6 +75,37 @@ describe('computeChartGeometry (data → points/paths pure functions)', () => {
     }
   })
 
+  // ── fix-webui-qa-round13 2.1（观察-2）：y 轴刻度去重 ──
+  // 小值域下 4 等分取整产出等值相邻标签（QA round13：y 轴呈现 1/1/1/0/0）。
+  // 刻度生成按渲染标签判等去重：等值相邻只保留一个，轴单调不变。
+  it('dedupes adjacent equal labels on small-value axes — max=1 (round13 2.1)', () => {
+    const geo = computeChartGeometry([{ name: 'a', values: [1, 0, 1, 1, 0] }], W, H)
+    // 峰值 1：原始 4 等分 0/0.25/0.5/0.75/1 取整后是 0/0/1/1/1 —— 去重后
+    // 相邻互异（1/1/1/0/0 形态绝迹），且 0 基线刻度保留。
+    const labels = geo.yTicks.map((t) => formatCount(t.value))
+    expect(labels[0]).toBe('0')
+    for (let i = 1; i < labels.length; i++) {
+      expect(labels[i], `相邻刻度互异：${labels.join('/')}`).not.toBe(labels[i - 1])
+    }
+    expect(geo.yTicks[0]!.value).toBe(0)
+    // 轴单调不变：保留的刻度像素位置自底向上严格递减，值严格递增。
+    for (let i = 1; i < geo.yTicks.length; i++) {
+      expect(geo.yTicks[i]!.y).toBeLessThan(geo.yTicks[i - 1]!.y)
+      expect(geo.yTicks[i]!.value).toBeGreaterThan(geo.yTicks[i - 1]!.value)
+    }
+  })
+
+  it('keeps small-value axes adjacent-distinct at max=5 without over-pruning (round13 2.1)', () => {
+    const geo = computeChartGeometry([{ name: 'a', values: [5, 1, 0, 2] }], W, H)
+    // 峰值 5：原始刻度 0/1.25/2.5/3.75/5 取整后 0/1/3/4/5 本就互异——
+    // 去重不误伤（5 个全保留），相邻互异断言照常成立。
+    expect(geo.yTicks).toHaveLength(5)
+    const labels = geo.yTicks.map((t) => formatCount(t.value))
+    for (let i = 1; i < labels.length; i++) {
+      expect(labels[i]).not.toBe(labels[i - 1])
+    }
+  })
+
   it('samples x labels within the cap and always includes both ends', () => {
     const values = Array.from({ length: 30 }, (_, i) => i)
     const geo = computeChartGeometry([{ name: 'a', values }], W, H)
@@ -85,6 +118,30 @@ describe('computeChartGeometry (data → points/paths pure functions)', () => {
     // 单点窗口：单刻度居中。
     const single = computeChartGeometry([{ name: 'a', values: [1] }], W, H)
     expect(single.xLabels).toHaveLength(1)
+  })
+
+  // （fix-webui-qa-round11 4.5，A-5）右缘刻度完整可见：最右 x 刻度是中心
+  // 锚的日期文本（天粒度 YYYY-MM-DD ≈56px，右半 ≈28px）——右 padding
+  // 必须把它留在 viewBox 内，旧值 12 会裁成「2026-10」。
+  it('rightmost x-axis label stays fully inside the viewBox at both granularities (round11 4.5)', () => {
+    const W = 720 // usage 视图的图表宽度
+    const HALF_DAY_LABEL = 28 // YYYY-MM-DD 中心锚的右半宽
+    // 天粒度：14 桶（usage 视图近 14 天）。
+    const day = computeChartGeometry(
+      [{ name: 'a', values: Array.from({ length: 14 }, (_, i) => i) }],
+      W,
+      260,
+    )
+    const lastDay = day.xLabels[day.xLabels.length - 1]!
+    expect(lastDay.x + HALF_DAY_LABEL).toBeLessThanOrEqual(W)
+    // 小时粒度：24 桶（今天 0–23 时）；标签更短，同一 inset 自动覆盖。
+    const hour = computeChartGeometry(
+      [{ name: 'a', values: Array.from({ length: 24 }, (_, i) => i) }],
+      W,
+      260,
+    )
+    const lastHour = hour.xLabels[hour.xLabels.length - 1]!
+    expect(lastHour.x + HALF_DAY_LABEL).toBeLessThanOrEqual(W)
   })
 
   it('ignores non-finite values instead of poisoning the scale', () => {
@@ -179,6 +236,20 @@ describe('sebas-line-chart rendering', () => {
     const svg = el.shadowRoot!.querySelector('svg')!
     expect(svg.querySelectorAll('polyline')).toHaveLength(0)
     expect(svg.querySelectorAll('circle.marker')).toHaveLength(1)
+    el.remove()
+  })
+
+  // （fix-webui-qa-round13 2.1，观察-2）呈现层回归钉子：小值域下实际渲染
+  // 的 y 刻度文本序列相邻互异（QA 观察的 1/1/1/0/0 形态绝迹）。
+  it('renders a y tick sequence with no adjacent duplicate texts (round13 2.1)', async () => {
+    const el = await mount([{ name: 'a', values: [1, 0, 1] }], ['d1', 'd2', 'd3'])
+    const texts = [...el.shadowRoot!.querySelectorAll<SVGElement>('text.ytick')].map(
+      (t) => t.textContent?.trim() ?? '',
+    )
+    expect(texts.length).toBeGreaterThanOrEqual(2)
+    for (let i = 1; i < texts.length; i++) {
+      expect(texts[i], `呈现的刻度相邻互异：${texts.join('/')}`).not.toBe(texts[i - 1])
+    }
     el.remove()
   })
 

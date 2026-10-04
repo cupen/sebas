@@ -85,12 +85,16 @@ test.describe('工作台首屏', () => {
         .newSessionDialog()
         .locator('wa-option[value="native"]')
       await expect(nativeOption).toBeDisabled()
-      // polish-workbench-walkthrough-ux 4.3：可见文案只给成因归类与补救入口
-      // （Settings → Models），实现标识移入 title；native 专项点名「未配置
-      // 模型凭据」。展示名走 catalog 的 display（native = "Native Kernel"）。
+      // fix-webui-qa-round13 3.1（webui spec「不可用 agent 的禁用提示如实」）：
+      // native 禁用提示如实改述真实启用条件——core 进程 env（QA round13 实证
+      // 设置页配 provider 不能点亮 native），提示点名 env、不再引导设置页；
+      // 原始 cause（同类 env 名）仍在 title tooltip。展示名走 catalog 的
+      // display（native = "Native Kernel"）。
       await expect(nativeOption).toContainText('Native Kernel')
-      await expect(nativeOption).toContainText('未配置模型凭据')
-      await expect(nativeOption).toContainText('设置 → 模型')
+      await expect(nativeOption).toContainText(
+        /SEBAS_AGENT_PROVIDER_API_KEY|SEBAS_AGENT_ROUTER_URL/,
+      )
+      await expect(nativeOption).not.toContainText('设置 → 模型')
 
       // 目录不可得（沙箱无 provider 目录）→ 显式说明，不渲染空下拉。
       await expect(

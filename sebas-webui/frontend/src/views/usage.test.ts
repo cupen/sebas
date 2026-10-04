@@ -208,6 +208,46 @@ describe('sebas-usage view', () => {
     el.remove()
   })
 
+  // ── fix-webui-qa-round13 4.1（观察-1）：数据源口径钉死 ──
+  // usage 页 = router 用量记录呈现；页面 SHALL 以一行数据源说明交代口径
+  // （spec「数据源口径 SHALL 钉死为 router 用量记录」）。
+
+  it('pins the data source with a router note line above the summary (round13 4.1)', async () => {
+    const el = await mount()
+    const note = el.shadowRoot!.querySelector('[data-testid="usage-source-note"]')
+    expect(note).toBeTruthy()
+    expect(note!.textContent).toContain('router', '说明行点名数据源 = router 流量')
+    expect(note!.textContent).toContain('ACP', '说明行交代 ACP 直连的去向（会话头部）')
+    el.remove()
+  })
+
+  it('the pure-ACP (all-zero) window keeps the no-data empty state WITH the source note (round13 4.2)', async () => {
+    // spec 场景「纯 ACP 流量窗口呈现无数据空态」：router 用量记录为零 →
+    // 「无用量数据」空态 + 口径说明行；不渲染空图、不呈现 router 不可达。
+    apiMocks.usageTimeseries.mockResolvedValue(
+      fixture({
+        buckets: zeroBuckets(),
+        totals: {
+          model: 'total',
+          requests: 0,
+          input_tokens: 0,
+          output_tokens: 0,
+          cache_read_tokens: 0,
+          cache_creation_tokens: 0,
+        },
+      }),
+    )
+    const el = await mount()
+    const text = el.shadowRoot!.textContent ?? ''
+    expect(text).toContain('暂无用量数据')
+    expect(text).not.toContain('router 不可达', '空态不伪装成 router 故障')
+    const note = el.shadowRoot!.querySelector('[data-testid="usage-source-note"]')
+    expect(note).toBeTruthy()
+    expect(note!.textContent).toContain('router')
+    expect(el.shadowRoot!.querySelector('sebas-line-chart')).toBeNull('不渲染无刻度的空图')
+    el.remove()
+  })
+
   it('granularity toggle refetches with hour and flips the pressed state', async () => {
     const el = await mount()
     expect(apiMocks.usageTimeseries).toHaveBeenCalledTimes(1)

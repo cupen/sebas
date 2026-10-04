@@ -316,11 +316,12 @@ describe('WsClient', () => {
     expect(FakeSocket.instances).toHaveLength(1)
   })
 
-  it('an eager host (addController forwards hostConnected) connects at construction', () => {
-    // Regression: the sharedWs shim originally used a no-op addController,
-    // which never invoked hostConnected → connect() never ran and the app
-    // had no live socket at all. The shim's contract is that constructing
-    // the client through a lifecycle-forwarding host opens the socket.
+  it('a lifecycle-forwarding host connects at hostConnected (WsClient-level contract)', () => {
+    // Regression: a host whose addController never invoked hostConnected left
+    // the client with no live socket at all. hostConnected() is the connect
+    // trigger for view-hosted controllers; the shared singleton deliberately
+    // uses a non-forwarding host — its connection start is owned by the auth
+    // gate (fix-webui-qa-round11 3.2), covered in shared-ws.test.ts.
     const host = {
       addController: (c: { hostConnected?: () => void }) => c.hostConnected?.(),
       requestUpdate: () => {},

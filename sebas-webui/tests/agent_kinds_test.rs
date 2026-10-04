@@ -136,6 +136,67 @@ async fn agents_catalog_still_lists_native_when_no_provider_entries() {
     assert_eq!(agents[0]["id"], "native");
 }
 
+/// fix-webui-qa-round13 webui delta 场景「配置 provider 不改变 native 可用性」：
+/// Settings → 模型 配好 provider（settings.db 的 providers 域有行）也不点亮
+/// native——catalog 里 native 行的可用性唯一来自 execution_bodies 的 core env
+/// 上报（api.rs agent_kinds：`reachable = execution_bodies.native.ok`），
+/// provider 配置不在该读取路径上（QA round13 b18/b20-b22 观测的合同化）。
+#[tokio::test]
+async fn provider_config_does_not_flip_native_availability() {
+    use sebas_webui::session_backend::{ExecutionBodyStatus, FakeBackend};
+
+    let fake = FakeBackend::new();
+    // core env 缺失时的如实上报（src/agent_backend.rs build_native_manager）。
+    fake.set_execution_bodies(Some(vec![ExecutionBodyStatus {
+        name: "native".into(),
+        ok: false,
+        cause: Some(
+            "native backend needs SEBAS_AGENT_PROVIDER_API_KEY (or SEBAS_AGENT_ROUTER_URL)".into(),
+        ),
+    }]));
+    // 操作者在设置页配全 provider（QA round13 b18 同款：协议 + key + base_url）。
+    fake.set_state_domain(
+        "providers",
+        Some(serde_json::json!({
+            "providers": {
+                "anthropic": {
+                    "name": "anthropic",
+                    "api_key": "sk-provider-configured",
+                    "base_url_anthropic": "https://api.anthropic.com",
+                }
+            }
+        })),
+    );
+    let app = build_router_with_agent_kind_provider(
+        Arc::new(fake),
+        RouterInfo::default(),
+        CardConfig::default(),
+        Arc::new(CannedProvider {
+            kinds: vec![],
+            default_kind: "claude".to_string(),
+        }),
+    );
+
+    let (status, v) = get_json(&app, "/api/agents").await;
+    assert_eq!(status, StatusCode::OK);
+    let native = v["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == "native")
+        .expect("native row always present");
+    // provider 配置在场，native 仍由 env 决定：不可用 + env cause 原样透传。
+    assert_eq!(
+        native["reachable"], false,
+        "provider config must not light native up: {native}"
+    );
+    assert_eq!(
+        native["cause"],
+        "native backend needs SEBAS_AGENT_PROVIDER_API_KEY (or SEBAS_AGENT_ROUTER_URL)",
+        "cause keeps naming the env condition: {native}"
+    );
+}
+
 /// preselect-last-used-model 3.2：`/api/about` 载荷携带装配点注入的
 /// default agent kind 运行时真值（About INSTANCE 段只读行的数据源）。
 #[tokio::test]

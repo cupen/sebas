@@ -14,6 +14,7 @@
  * | Settings → Services 分区 | services.control | ✓ | ✓ | | |
  * | Agents 写入口（New/Edit/Delete） | agents.manage（settings.manage 档） | ✓ | ✓ | | |
  * | Provider/别名/默认选择写入口（fix-webui-qa-round10 3.2） | settings.manage | ✓ | ✓ | | |
+ * | Skills 删除入口（fix-webui-qa-round11 2.2） | settings.manage 档 | ✓ | ✓ | | |
  * | 「新建会话」入口（sessions.write） | sessions.write | ✓ | ✓ | ✓ | |
  *
  * （Users 分区在鉴权关闭的宿主上**不**因 null 放开：auth=false 没有用户
@@ -50,6 +51,21 @@ export function canManageAgents(role: Role | null): boolean {
  * 对全部登录角色保留。
  */
 export function canManageProviders(role: Role | null): boolean {
+  return role === null || role === 'root' || role === 'admin'
+}
+
+/**
+ * Skills 分区的删除与同步入口（fix-webui-qa-round11 2.2，A-1/D2；
+ * fix-webui-qa-round12 3.2，R12-A-1/D3）：归 settings.manage 档（root/admin，
+ * 与 provider 变更面同键）——删除是改仓动作，同步（sync）会把仓投影进
+ * backend 落点并清理上次投影过、仓里已删的条目，属可触发删除效果的写操作，
+ * 与删除同门槛（spec agent-skills delta「Deletion and projection (sync) …
+ * SHALL be gated to root/admin」）。服务端对 DELETE /api/skills/{name} 与
+ * POST /api/skills/sync 的 403 执法在 `required_permission` 中央表，这里只
+ * 决定只读角色的技能行不渲染删除控件、工具条不渲染同步按钮（「刷新」是
+ * 只读重列，保留）。列表/预览对全部登录角色保留。
+ */
+export function canManageSkills(role: Role | null): boolean {
   return role === null || role === 'root' || role === 'admin'
 }
 

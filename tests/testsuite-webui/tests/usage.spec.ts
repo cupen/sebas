@@ -214,8 +214,11 @@ test.describe('用量视图 /usage', () => {
       // 24 小时桶重渲染：polyline 顶点数 = 24（零填充全窗口）。
       const points = await chart.locator('svg polyline').first().getAttribute('points')
       expect(points!.trim().split(/\s+/)).toHaveLength(24)
-      // 副标题点明小时面口径。
-      await expect(view.locator('.meta')).toContainText('今天 0–23 时')
+      // 副标题点明小时面口径。（fix-webui-qa-round13 4.1 后 `.meta` 有两行：
+      // 数据源说明 + 本副标题——用副标题独有的时区措辞过滤锁定，再断言文本。）
+      await expect(view.locator('.meta', { hasText: '桶边界按本机时区' })).toContainText(
+        '今天 0–23 时',
+      )
       // 按下态翻转。
       await expect(view.locator('[data-testid="granularity-hour"]')).toHaveAttribute(
         'aria-pressed',

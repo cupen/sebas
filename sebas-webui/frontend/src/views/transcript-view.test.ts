@@ -808,6 +808,46 @@ describe('thinking fold membership and distinguishability (fix-webui-qa-round3 D
     expect(foldRule).not.toMatch(/\bbackground:/)
     el.remove()
   })
+
+  // ── fix-webui-qa-round13 1.1（B-2）：展开面板留白收敛 ──
+  // 空带来源 = .body 的 pre-wrap（round11 4.1）经类名与继承进入展开面板，
+  // 把模板缩进换行与 markdown 块间换行逐个渲染成可见空行（QA b48/a54：
+  // 💭 thinking 标签与内容之间大段空带，两轮采样稳定）。修法钉在展开态
+  // 样式：fold-body 与内层条目体恢复 normal；jsdom 算不出布局，容器断言
+  // 走组件样式表（round11 4.1 同姿态）。
+  it('expanded fold body collapses whitespace-driven blank bands (round13 1.1, B-2)', async () => {
+    const el = await mount({
+      entries: [
+        entry({ position: 0, kind: 'prompt', content: 'think please', created_at_unix: FIXED_DATES.T1 }),
+        entry({ position: 1, kind: 'content', element_type: 'thinking', content: 'hmm', created_at_unix: FIXED_DATES.T1 }),
+      ],
+    })
+    const assistant = el.shadowRoot!.querySelector<HTMLElement>('.turn-block.is-assistant')!
+    // 展开体在场：收敛的是空白排版，内容行零变化。
+    assistant.querySelector<HTMLButtonElement>('.process-fold button.fold-link')!.click()
+    await el.updateComplete
+    const foldBody = assistant.querySelector<HTMLElement>('.process-fold .fold-body')!
+    expect(foldBody.textContent).toContain('hmm')
+    const { SebasTranscriptView: Impl } = await import('./transcript-view.js')
+    const styles = (Impl as typeof import('./transcript-view.js').SebasTranscriptView).styles
+    const css = (Array.isArray(styles) ? styles : [styles])
+      .map((s) => (s as unknown as { cssText: string }).cssText)
+      .join('\n')
+    // 展开体与内层条目体恢复 normal（模板/markdown 换行不再成为可见空行）。
+    const foldWsRule = css.match(/\.turn-block \.fold-body\s*\{[^}]*\}/)?.[0] ?? ''
+    expect(foldWsRule).toContain('white-space: normal')
+    const innerWsRule = css.match(/\.turn-block \.fold-body \.body\s*\{[^}]*\}/)?.[0] ?? ''
+    expect(innerWsRule).toContain('white-space: normal')
+    // 级联成立：fold-body 自身同挂 .body（同特异性 (0,2,0)），恢复规则必须
+    // 晚于 pre-wrap 主规则；内层选择器特异性更高，不受顺序影响。
+    const bodyRuleStart = css.indexOf(css.match(/\.turn-block \.body\s*\{[^}]*\}/)?.[0] ?? '')
+    expect(bodyRuleStart).toBeGreaterThanOrEqual(0)
+    expect(css.indexOf(foldWsRule)).toBeGreaterThan(bodyRuleStart)
+    // 语义不回退：外层 .body 的 pre-wrap（多行提交，round11 4.1）原样保留
+    // ——收敛只发生在展开面板分支内。
+    expect(css.match(/\.turn-block \.body\s*\{[^}]*\}/)?.[0] ?? '').toContain('white-space: pre-wrap')
+    el.remove()
+  })
 })
 
 describe('sebas-transcript-view (conversation rendering)', () => {
@@ -823,6 +863,40 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     expect(bodies?.length).toBe(1)
     expect(bodies?.[0]?.textContent).toContain('chunk one')
     expect(bodies?.[0]?.textContent).toContain('chunk three')
+  })
+
+  // ── fix-webui-qa-round11 4.1（B-4）：多行提交保留换行 ──
+  // spec「three-line message renders as three lines」：容器 pre-wrap（渲染
+  // 不再把 \n 折叠成空格）+ 文本逐字保留换行（wire 往返语义），两者合成
+  // 三行视觉呈现；用户气泡与 agent 回显同一容器同一规则（恢复后的转录走
+  // 同一路径，reload 不丢行结构）。jsdom 算不出布局/继承样式，容器的
+  // pre-wrap 断言走组件样式表（dashboard.test 同姿态）。
+  it('a three-line message renders as three lines in user bubble and agent echo (round11 4.1)', async () => {
+    const threeLines = '键盘行甲\n键盘行乙\n键盘行丙'
+    const el = await mount({
+      entries: [
+        entry({ position: 0, kind: 'prompt', content: threeLines, created_at_unix: FIXED_DATES.T1 }),
+        entry({ position: 1, kind: 'content', content: threeLines, created_at_unix: FIXED_DATES.T1 }),
+      ],
+    })
+    // 渲染半边：文本逐字保留换行（三行 = 两处 \n），气泡容器与回显同构。
+    const bodies = [...el.shadowRoot!.querySelectorAll<HTMLElement>('.turn-block .body')]
+    expect(bodies.length).toBe(2)
+    for (const body of bodies) {
+      expect(body.textContent, '文本内容逐字保留 \\n').toBe(threeLines)
+      expect(body.textContent?.split('\n')).toHaveLength(3)
+    }
+    // 容器半边：.turn-block .body 规则带 pre-wrap（渲染层不再折叠换行），
+    // 且长 token 折行语义（overflow-wrap: anywhere）不回退。
+    const { SebasTranscriptView: Impl } = await import('./transcript-view.js')
+    const styles = (Impl as typeof import('./transcript-view.js').SebasTranscriptView).styles
+    const css = (Array.isArray(styles) ? styles : [styles])
+      .map((s) => (s as unknown as { cssText: string }).cssText)
+      .join('\n')
+    const bodyRule = css.match(/\.turn-block \.body\s*\{[^}]*\}/)?.[0] ?? ''
+    expect(bodyRule).toContain('white-space: pre-wrap')
+    expect(bodyRule).toContain('overflow-wrap: anywhere')
+    el.remove()
   })
 
   // ── fix-webui-qa-round10 2.4（B-DEF-02）：模型徽章按回合观察值保真 ──
