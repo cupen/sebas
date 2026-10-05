@@ -201,7 +201,7 @@ export class SebasSetup extends LitElement {
           <span class="name">sebas<small>${APP_TAGLINE}</small></span>
         </div>
         <p class="title">创建管理员账户</p>
-        <p class="hint">这是此实例的第一个账户（root），之后可在 Settings 内管理其他用户。</p>
+        <p class="hint">这是此实例的第一个账户（root），之后可在设置内管理其他用户。</p>
         <form novalidate @submit=${this.submit}>
           <label>
             用户名

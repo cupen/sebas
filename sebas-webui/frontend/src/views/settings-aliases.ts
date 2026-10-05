@@ -34,8 +34,14 @@ export class SebasModelAliases extends LitElement {
   @property({ attribute: false }) role: Role | null = null
   /** 别名表（providers 读面下发）；null = 加载中。 */
   @state() private aliases: Record<string, ModelAliasEntry> | null = null
-  /** 已注册 provider 名（新建/编辑的 provider 下拉数据源）。 */
+  /** 已注册 provider 名（store 行；新建/编辑的 provider 下拉第一段数据源）。 */
   @state() private providerNames: string[] = []
+  /**
+   * （fix-webui-qa-round14 3.3，D-4-2）config.toml 种子 provider 行（只读
+   * 存档语义）：与 store 行一并进目标 provider 下拉（store 在前、种子补后，
+   * 去重——同名时 store 行赢）。别名可以指向仅存在于 config 种子的 provider。
+   */
+  @state() private seedProviderNames: string[] = []
   @state() private error = ''
   @state() private busy = false
 
@@ -82,6 +88,13 @@ export class SebasModelAliases extends LitElement {
         .map((p) => String(p['name'] ?? ''))
         .filter((n) => n.length > 0)
       this.providerNames = names
+      // （3.3，D-4-2）config.toml 种子行并入：store 已有的名字不重复列
+      // （store 行是运行时权威）。种子行只作为别名目标选项呈现，可建别名
+      // ——服务端校验是否接受以它为准，本面如实提供选项。
+      const storeSet = new Set(names)
+      this.seedProviderNames = (d.config_providers ?? [])
+        .map((p) => String(p['name'] ?? ''))
+        .filter((n) => n.length > 0 && !storeSet.has(n))
       this.aliases = d.model_aliases ?? {}
       this.error = ''
     } catch (e) {
@@ -89,8 +102,25 @@ export class SebasModelAliases extends LitElement {
     }
   }
 
+  /**
+   * 目标 provider 下拉的全量选项（3.3）：store 行在前，config.toml 种子行
+   * 补后（标注来源）。零可选 provider = 空表（下拉禁用 + 原因文案的判定据）。
+   */
+  private targetProviderOptions(): Array<{ name: string; seed: boolean }> {
+    return [
+      ...this.providerNames.map((n) => ({ name: n, seed: false })),
+      ...this.seedProviderNames.map((n) => ({ name: n, seed: true })),
+    ]
+  }
+
   private openCreate(): void {
-    this.editor = { original: '', alias: '', provider: this.providerNames[0] ?? '', upstream: '', error: '' }
+    this.editor = {
+      original: '',
+      alias: '',
+      provider: this.providerNames[0] ?? this.seedProviderNames[0] ?? '',
+      upstream: '',
+      error: '',
+    }
   }
 
   private openEdit(alias: string, entry: ModelAliasEntry): void {
@@ -251,11 +281,12 @@ export class SebasModelAliases extends LitElement {
                     this.editor = { ...(this.editor as NonNullable<typeof this.editor>), alias: v }
                   }}
                 ></wa-input>
-                ${this.providerNames.length === 0
+                ${this.targetProviderOptions().length === 0
                   ? html`
                       <!-- （fix-webui-qa-round11 4.3，A-2）零可选 provider 的空态：
                            下拉禁用 + 指引文案（指向「模型」分区），不再静默
-                           空下拉；保存键同禁——表单不允许提交无目标的别名。 -->
+                           空下拉；保存键同禁——表单不允许提交无目标的别名。
+                           （3.3）空态判定 = store 行 ∪ config 种子行全空。 -->
                       <wa-select
                         data-testid="alias-provider-select"
                         label="目标 provider"
@@ -282,8 +313,16 @@ export class SebasModelAliases extends LitElement {
                           }
                         }}
                       >
-                        ${this.providerNames.map(
-                          (n) => html`<wa-option value=${n}>${n}</wa-option>`,
+                        ${this.targetProviderOptions().map(
+                          (o) =>
+                            html`<wa-option
+                                value=${o.name}
+                                ?disabled=${o.seed}
+                                title=${o.seed
+                                  ? `config 种子 provider 不能作为别名目标：别名只能绑定在「模型」分区创建的 provider（store 外键约束）`
+                                  : nothing}
+                              >${o.seed ? `${o.name}（config 种子·不可选）` : o.name}</wa-option
+                              >`,
                         )}
                       </wa-select>
                     `}
@@ -308,7 +347,7 @@ export class SebasModelAliases extends LitElement {
                 variant="brand"
                 data-testid="alias-save"
                 ?loading=${this.busy}
-                ?disabled=${this.providerNames.length === 0}
+                ?disabled=${this.targetProviderOptions().length === 0}
                 @click=${() => void this.submitEditor()}
                 >保存</wa-button
               >

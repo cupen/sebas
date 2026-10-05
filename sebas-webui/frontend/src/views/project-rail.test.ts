@@ -23,6 +23,8 @@ import {
   serializeRailExpanded,
   archivedEntryLabel,
 } from './project-rail.js'
+// （fix-webui-qa-round14 2.1）被拒呈现经 notice 层——用例经订阅观察入栈条目。
+import { resetNotices, subscribeNotices } from '../notify.js'
 
 // ---- localStorage polyfill --------------------------------------------
 // 测试环境的全局没有 localStorage；徽标读锚走共享游标模块（写全局），用
@@ -884,15 +886,17 @@ describe('history group (archived sessions)', () => {
     const heads = [...el.shadowRoot!.querySelectorAll('.group-head')]
     const historyHead = heads.find((h) => h.textContent?.includes('历史'))
     expect(historyHead).toBeTruthy()
-    // （fix-webui-qa-round10 5.1，B-DEF-01）组头计数 = /api/sessions 的
-    // total_sessions（会话页统计同源），不再等于归档条数——本用例归档 3 条
-    // 而会话表默认 3 行，两源恰好重合；把会话表换成 2 行让计数可辨。
+    // （fix-webui-qa-round14 4.5）组头计数回归主 spec 明文（agent-workbench
+    // 「The History group SHALL show the total count of archived sessions」）
+    // ——= 归档总数，与面板内容一致；不再随会话表涨落（round10 的
+    // total_sessions 口径与面板 3 条归档不一致，正是 QA-1 UX 缺口 3）。
+    // 会话表换成 2 行证明计数不再跟随它。
     mockOf(apiMock.sessions).mockResolvedValue(sessionList(sessionRows.slice(0, 2)))
     await el.refresh()
     await el.updateComplete
     expect(
       el.shadowRoot!.querySelector('[data-testid="history-session-count"]')?.textContent,
-    ).toBe('2')
+    ).toBe('3')
     // （5.5）组头是原生 <button>：role=button 语义来自元素本身（保留
     // Enter/Space 键盘行为），不再是 div[role=button]。
     expect(historyHead!.tagName.toLowerCase()).toBe('button')
@@ -902,40 +906,83 @@ describe('history group (archived sessions)', () => {
     const labels = [...el.shadowRoot!.querySelectorAll('.group-section li.session-item.archived .session-name')].map(
       (n) => n.textContent,
     )
-    // 归档组列表语义不变：仍列出全部 3 条归档（计数跟会话统计、列表跟
-    // 归档条目，两口径从此分离）。
+    // 归档组列表语义不变：仍列出全部 3 条归档（计数 = 列表 = 归档总数）。
     expect(labels).toEqual(['New session', 'Mid session', 'Old session'])
     el.remove()
   })
 
-  // ── fix-webui-qa-round10 5.1（B-DEF-01）：历史徽章接会话统计源 ──
+  // ── fix-webui-qa-round14 4.5：历史徽章 = 归档总数（主 spec 明文）──
 
-  it('the history badge tracks session creation and closing via the shared refresh channel (round10 5.1)', async () => {
-    const el = await mount()
-    const countText = () =>
-      el.shadowRoot!.querySelector('[data-testid="history-session-count"]')?.textContent
-    const baseline = Number(countText())
-    expect(baseline).toBe(sessionRows.length)
-    // 新建会话（session.created 帧 → 防抖重取，或 sebas:refetch——测试走
-    // 同一 refresh 收敛点）：total +1，无需整页 reload。
-    mockOf(apiMock.sessions).mockResolvedValue(
-      sessionList([...sessionRows, row({ project_id: 'proj-alpha' })]),
-    )
-    await el.refresh()
-    await el.updateComplete
-    expect(Number(countText())).toBe(baseline + 1)
-    // 关闭/归档：total 回落到 2（归档条目进归档组列表，不进该计数）。
-    mockOf(apiMock.sessions).mockResolvedValue(sessionList(sessionRows.slice(0, 2)))
+  it('the history badge tracks the archive total, not live-session counts (round14 4.5)', async () => {
     mockOf(apiMock.archiveList).mockResolvedValue({
       archived_sessions: [
         { session_key: 'a%00', project_path: '/p', label: 'a1', archived_at: 1, retention_deadline: 2 },
         { session_key: 'b%00', project_path: '/p', label: 'a2', archived_at: 3, retention_deadline: 4 },
       ],
     })
+    const el = await mount()
+    const countText = () =>
+      el.shadowRoot!.querySelector('[data-testid="history-session-count"]')?.textContent
+    expect(countText()).toBe('2')
+    // 新建会话（session.created 帧 → 防抖重取，或 sebas:refetch——测试走
+    // 同一 refresh 收敛点）：total 涨、归档数不变——徽章不再跟随建会话。
+    mockOf(apiMock.sessions).mockResolvedValue(
+      sessionList([...sessionRows, row({ project_id: 'proj-alpha' })]),
+    )
     await el.refresh()
     await el.updateComplete
     expect(countText()).toBe('2')
+    // 再归档一个：徽章跟随归档组 +1（数字与面板内容一致）。
+    mockOf(apiMock.archiveList).mockResolvedValue({
+      archived_sessions: [
+        { session_key: 'a%00', project_path: '/p', label: 'a1', archived_at: 1, retention_deadline: 2 },
+        { session_key: 'b%00', project_path: '/p', label: 'a2', archived_at: 3, retention_deadline: 4 },
+        { session_key: 'c%00', project_path: '/p', label: 'a3', archived_at: 5, retention_deadline: 6 },
+      ],
+    })
+    await el.refresh()
+    await el.updateComplete
+    expect(countText()).toBe('3')
     el.remove()
+  })
+
+  // ── fix-webui-qa-round14 4.4：历史组开合态持久（D-1-1）──
+
+  it('history expanded state persists across reloads and defaults to collapsed (round14 4.4)', async () => {
+    mockOf(apiMock.archiveList).mockResolvedValue({
+      archived_sessions: [
+        { session_key: 'a%00', project_path: '/p', label: 'a1', archived_at: 1, retention_deadline: 2 },
+      ],
+    })
+    const first = await mount()
+    const head = () =>
+      first.shadowRoot!.querySelector<HTMLButtonElement>('[data-testid="history-group-head"]')!
+    // 缺省收起（向后兼容：无存储记录 = 收起）。
+    expect(head().getAttribute('aria-expanded')).toBe('false')
+    expect(first.shadowRoot!.querySelector('li.session-item.archived')).toBeNull()
+    // 展开：toggle 写 localStorage（RAIL_HISTORY_OPEN_KEY）。
+    head().click()
+    await first.updateComplete
+    expect(head().getAttribute('aria-expanded')).toBe('true')
+    expect(seenStore.get('sebas.rail-history-open')).toBe('1')
+    // 重载（新实例）：展开态恢复，不再回弹（D-1-1）。
+    const second = await mount()
+    expect(
+      second
+        .shadowRoot!
+        .querySelector('[data-testid="history-group-head"]')!
+        .getAttribute('aria-expanded'),
+    ).toBe('true')
+    expect(second.shadowRoot!.querySelector('li.session-item.archived')).toBeTruthy()
+    // 收起：记录随 toggle 移除（回到缺省收起）。
+    second
+      .shadowRoot!
+      .querySelector<HTMLButtonElement>('[data-testid="history-group-head"]')!
+      .click()
+    await second.updateComplete
+    expect(seenStore.has('sebas.rail-history-open')).toBe(false)
+    first.remove()
+    second.remove()
   })
 
   it('does not render a branch name in the project row (D8), probing still runs', async () => {
@@ -2761,3 +2808,306 @@ describe('fix-webui-qa-round8: menu close, /sessions entry, anchor race', () => 
     el.remove()
   })
 })
+
+// ─── fix-webui-qa-round14：被拒可见 / viewer 只读 / 状态一致性 ──────────────
+
+/** 新建会话对话框的等待式取用（同「creation dialog wiring」块的 dialogOf）。 */
+async function round14DialogOf(el: SebasProjectRail) {
+  const dialog = el.shadowRoot!.querySelector(
+    'sebas-new-session-dialog',
+  ) as unknown as HTMLElement & {
+    updateComplete: Promise<boolean>
+    open: boolean
+    projectId: string | null
+    projectName: string | null
+    defaultAgent: string | null
+  }
+  await dialog.updateComplete
+  return dialog
+}
+
+describe('round14 2.1: typed creation rejection is surfaced via the notice layer', () => {
+  it('a failed creation pushes the backend message as a notice and never pushes a phantom URL', async () => {
+    mockOf(apiMock.createSession).mockRejectedValue(new Error('会话数已达上限 32'))
+    const notices: string[] = []
+    subscribeNotices((s) => {
+      notices.length = 0
+      notices.push(...s.items.map((i) => i.message))
+    })
+    window.history.replaceState({}, '', '/')
+    const el = await mount()
+    ;(
+      el.shadowRoot!.querySelector('button[aria-label="在 alpha 中新建会话"]') as HTMLButtonElement
+    ).click()
+    await el.updateComplete
+    const dialog = await round14DialogOf(el)
+    dialog.dispatchEvent(
+      new CustomEvent('dialog-confirm', {
+        detail: { agent: 'codex', model: null, mode: 'ask', title: '' },
+        bubbles: true,
+        composed: true,
+      }),
+    )
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+
+    // 后端类型化文案经 notice 层呈现 + 对话框内就地呈现。
+    expect(notices.some((m) => m.includes('会话数已达上限 32'))).toBe(true)
+    expect(dialog.shadowRoot!.querySelector('[data-testid="dialog-error"]')).toBeTruthy()
+    // 失败路径不 pushState——浏览器留在工作台，无幻影 /sessions/<key> 历史。
+    expect(window.location.pathname).toBe('/')
+    el.remove()
+    resetNotices()
+  })
+})
+
+describe('round14 2.5: viewer opens sessions through a pure-GET read-only view', () => {
+  it('viewer click skips the switch write and lands on the deep link directly', async () => {
+    window.history.replaceState({}, '', '/')
+    // 共享 mock 的调用记录跨用例累积：清账后再断言「未发起写」。
+    mockOf(apiMock.switchSession).mockClear()
+    const el = await mount()
+    el.role = 'viewer'
+    await el.updateComplete
+    ;(el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).click()
+    await el.updateComplete
+    const first = el.shadowRoot!.querySelector('li.session-item') as HTMLElement
+    first.click()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+
+    // 不发起 switch 写（sessions.write 执法档）。
+    expect(apiMock.switchSession).not.toHaveBeenCalled()
+    // 地址直落该会话的只读视图（dashboard 以 GET detail 渲染）。
+    const key = (el as unknown as { sessions: SessionRow[] }).sessions[0]!.encoded_key
+    expect(window.location.pathname).toBe(`/sessions/${key}`)
+    el.remove()
+  })
+
+  it('roles with sessions.write still ride the switch path', async () => {
+    window.history.replaceState({}, '', '/')
+    mockOf(apiMock.switchSession).mockClear()
+    mockOf(apiMock.switchSession).mockResolvedValue({
+      status: 'switched',
+      redirect: '/sessions/oc_1%00',
+      active_session_key: 'oc_1%00',
+    })
+    const el = await mount()
+    el.role = 'member'
+    await el.updateComplete
+    ;(el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).click()
+    await el.updateComplete
+    const first = el.shadowRoot!.querySelector('li.session-item') as HTMLElement
+    first.click()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(apiMock.switchSession).toHaveBeenCalledTimes(1)
+    el.remove()
+  })
+})
+
+describe('round14 4.1: unread badge attribution is strictly per session key', () => {
+  it('a frame for session A only patches row A (never leaks msg_count into row B)', async () => {
+    const el = await mount()
+    // 展开 alpha 项目组（点击项目行 = toggle 展开），行内徽标才可见。
+    ;(el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).click()
+    await el.updateComplete
+    const rows = (el as unknown as { sessions: SessionRow[] }).sessions
+    const a = rows[0]!
+    const b = rows[1]!
+    expect(a.msg_count).toBe(0)
+    expect(b.msg_count).toBe(0)
+    wsMocks.emit({
+      type: 'session.updated',
+      session_id: a.encoded_key,
+      status_slug: 'done',
+      turn_engaged: false,
+      msg_count: 3,
+      pending: [],
+      label: null,
+    })
+    await el.updateComplete
+    const after = (el as unknown as { sessions: SessionRow[] }).sessions
+    expect(after.find((r) => r.encoded_key === a.encoded_key)!.msg_count).toBe(3)
+    // 行级归属：B 行的 msg_count 不被 A 的帧触碰。
+    expect(after.find((r) => r.encoded_key === b.encoded_key)!.msg_count).toBe(0)
+    // B 无读锚 = fully-read；A 建锚 0 后，徽标只落在 A 行（写锚自带
+    // ANCHOR_ADVANCED_EVENT 广播，rail 失效计数就地重渲染）。
+    writeFocusAnchor(a.encoded_key, 0)
+    await el.updateComplete
+    const badgeRows = el.shadowRoot!.querySelectorAll('li.session-item.unread')
+    expect(badgeRows).toHaveLength(1)
+    expect(badgeRows[0]!.querySelector('[data-testid="session-unread"]')?.textContent).toBe('3')
+    el.remove()
+  })
+})
+
+describe('round14 4.2/4.3: rail waiting presentation is status_slug-driven', () => {
+  it('a force-settle frame (done) replaces the waiting chip and dot in place', async () => {
+    const waiting = row({ project_id: 'proj-alpha', status_slug: 'waiting' })
+    mockOf(apiMock.sessions).mockResolvedValue(sessionList([waiting]))
+    const el = await mount()
+    // 展开项目组（聚焦缺省展开物化）：行在项目分组里呈现，而非只靠等待组。
+    mockOf(apiMock.sessions).mockResolvedValue({
+      ...sessionList([waiting]),
+      active_session_key: waiting.encoded_key,
+    })
+    await el.refresh()
+    await el.updateComplete
+    const findRow = () => el.shadowRoot!.querySelector('li.session-item') as HTMLElement
+    expect(findRow().querySelector('[data-testid="session-waiting"]')).toBeTruthy()
+    expect(findRow().querySelector('.session-dot')!.getAttribute('data-status')).toBe('waiting')
+
+    // 停滞收尾：settle 帧携带 settled 相位（done、turn_engaged=false）。
+    wsMocks.emit({
+      type: 'session.updated',
+      session_id: waiting.encoded_key,
+      status_slug: 'done',
+      turn_engaged: false,
+      msg_count: waiting.msg_count,
+      pending: [],
+      label: null,
+    })
+    await el.updateComplete
+    // 等待呈现被 settled 态就地替换：无滞留 chip、圆点随帧翻转。
+    expect(findRow().querySelector('[data-testid="session-waiting"]')).toBeNull()
+    expect(findRow().querySelector('.session-dot')!.getAttribute('data-status')).toBe('done')
+    el.remove()
+  })
+
+  it('a stale remote parked count no longer pins the waiting chip (frames drive it)', async () => {
+    // 行快照取样于泊车窗口：remote 泊车计数 > 0，但收尾帧已把 slug 翻成
+    // done——旧判定（remote 臂）会滞留等待呈现，新判定只认 slug。
+    const settled = row({
+      project_id: 'proj-alpha',
+      status_slug: 'done',
+      remote: {
+        node_id: 'local',
+        node_status: 'online',
+        parked_approvals: 1,
+      } as SessionRow['remote'],
+    })
+    mockOf(apiMock.sessions).mockResolvedValue({
+      ...sessionList([settled]),
+      active_session_key: settled.encoded_key,
+    })
+    const el = await mount()
+    const rowEl = el.shadowRoot!.querySelector('li.session-item') as HTMLElement
+    expect(rowEl).toBeTruthy()
+    expect(rowEl.querySelector('[data-testid="session-waiting"]')).toBeNull()
+    expect((el as unknown as { waitingSessions: () => SessionRow[] }).waitingSessions()).toEqual([])
+    el.remove()
+  })
+
+  it('a waiting frame flips a done row into the waiting presentation in real time', async () => {
+    const done = row({ project_id: 'proj-alpha', status_slug: 'done' })
+    mockOf(apiMock.sessions).mockResolvedValue({
+      ...sessionList([done]),
+      active_session_key: done.encoded_key,
+    })
+    const el = await mount()
+    expect(el.shadowRoot!.querySelector('[data-testid="session-waiting"]')).toBeNull()
+    wsMocks.emit({
+      type: 'session.updated',
+      session_id: done.encoded_key,
+      status_slug: 'waiting',
+      turn_engaged: true,
+      msg_count: done.msg_count,
+      pending: [],
+      label: null,
+    })
+    await el.updateComplete
+    const rowEl = el.shadowRoot!.querySelector('li.session-item') as HTMLElement
+    expect(rowEl).toBeTruthy()
+    expect(rowEl.querySelector('[data-testid="session-waiting"]')).toBeTruthy()
+    expect(rowEl.querySelector('.session-dot')!.getAttribute('data-status')).toBe('waiting')
+    // 等待组同步入组（slug 单一真源）。
+    expect(
+      (el as unknown as { waitingSessions: () => SessionRow[] }).waitingSessions(),
+    ).toHaveLength(1)
+    el.remove()
+  })
+})
+
+describe('round14 4.6: creation immediately projects the owning project path', () => {
+  it('a successful creation dispatches PROJECT_FOLLOW_EVENT with the project path before summary convergence', async () => {
+    mockOf(apiMock.createSession).mockResolvedValue({ key: 'oc_new' })
+    const follows: Array<string | undefined> = []
+    const listener = (e: Event): void => {
+      follows.push((e as CustomEvent<{ path?: string }>).detail?.path)
+    }
+    window.addEventListener('sebas:project-follow', listener)
+    try {
+      const el = await mount()
+      ;(
+        el.shadowRoot!.querySelector(
+          'button[aria-label="在 beta 中新建会话"]',
+        ) as HTMLButtonElement
+      ).click()
+      await el.updateComplete
+      const dialog = await round14DialogOf(el)
+      dialog.dispatchEvent(
+        new CustomEvent('dialog-confirm', {
+          detail: { agent: 'codex', model: null, mode: 'ask', title: '' },
+          bubbles: true,
+          composed: true,
+        }),
+      )
+      await new Promise((r) => setTimeout(r, 0))
+      await el.updateComplete
+      // 创建成功的瞬间（不等 summary 往返）即反投影新会话所属项目。
+      expect(follows).toContain('/home/me/beta')
+      el.remove()
+    } finally {
+      window.removeEventListener('sebas:project-follow', listener)
+    }
+  })
+})
+
+describe('round14 4.7: optional creation title rides the create-then-rename fallback', () => {
+  it('a non-empty title sets the session label right after creation', async () => {
+    mockOf(apiMock.createSession).mockResolvedValue({ key: 'oc_new' })
+    mockOf(apiMock.setSessionLabel).mockResolvedValue({ status: 'ok' })
+    const el = await mount()
+    ;(
+      el.shadowRoot!.querySelector('button[aria-label="在 alpha 中新建会话"]') as HTMLButtonElement
+    ).click()
+    await el.updateComplete
+    const dialog = await round14DialogOf(el)
+    dialog.dispatchEvent(
+      new CustomEvent('dialog-confirm', {
+        detail: { agent: 'codex', model: null, mode: 'ask', title: '  smoke-1  ' },
+        bubbles: true,
+        composed: true,
+      }),
+    )
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(mockOf(apiMock.setSessionLabel)).toHaveBeenCalledWith('oc_new', 'smoke-1')
+    el.remove()
+  })
+
+  it('an empty title keeps the current naming behavior (no label call)', async () => {
+    // 同文件早前用例的调用记录会留在共享 mock 上：先清账再断言「未调用」。
+    mockOf(apiMock.setSessionLabel).mockClear()
+    mockOf(apiMock.createSession).mockResolvedValue({ key: 'oc_new' })
+    const el = await mount()
+    ;(
+      el.shadowRoot!.querySelector('button[aria-label="在 alpha 中新建会话"]') as HTMLButtonElement
+    ).click()
+    await el.updateComplete
+    const dialog = await round14DialogOf(el)
+    dialog.dispatchEvent(
+      new CustomEvent('dialog-confirm', {
+        detail: { agent: 'codex', model: null, mode: 'ask', title: '' },
+        bubbles: true,
+        composed: true,
+      }),
+    )
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(mockOf(apiMock.setSessionLabel)).not.toHaveBeenCalled()
+    el.remove()
+  })
+})
+

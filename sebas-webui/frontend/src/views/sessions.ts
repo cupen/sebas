@@ -3,16 +3,18 @@
  * switch, close (with confirmation), live updates over the shared WebSocket.
  */
 
-import { LitElement, css, html } from 'lit'
-import { customElement, state } from 'lit/decorators.js'
+import { LitElement, css, html, nothing } from 'lit'
+import { customElement, property, state } from 'lit/decorators.js'
 import { api, ApiError, errorText, type AgentKindInfo, type SessionList } from '../api/client.js'
 import { sharedWs } from '../api/shared-ws.js'
 import { navigate } from '../router.js'
 import { icon } from '../components/icons.js'
 import { viewStyles } from '../styles/shared.js'
-import type { Project } from '../api/client.js'
+import type { Project, Role } from '../api/client.js'
 import { fullSessionLabel } from './project-rail.js'
+import { canCreateSessions } from './role-visibility.js'
 import { agentUnavailableLabel } from './new-session-dialog.js'
+import { notify } from '../notify.js'
 import { guardedHide } from '../components/wa-hide-guard.js'
 import '../components/status-badge.js'
 import '@awesome.me/webawesome/dist/components/button/button.js'
@@ -21,9 +23,36 @@ import '@awesome.me/webawesome/dist/components/dialog/dialog.js'
 import '@awesome.me/webawesome/dist/components/select/select.js'
 import '@awesome.me/webawesome/dist/components/option/option.js'
 
+/**
+ * 写动作被拒的统一呈现（fix-webui-qa-round14 2.4，webui-user-management
+ * 「被拒操作明确呈现」）：403 = 「无权限」口径（后端 message 已点名角色
+ * 限制，原样跟上）；其余拒绝/失败 = 后端类型化文案原样呈现。经 notice 层
+ * 弹出——**绝不写读失败横幅**（那会替换整个列表，D-5-3 的语义误导）。
+ */
+export function reportActionRejection(err: unknown): void {
+  const text = errorText(err)
+  if (err instanceof ApiError && err.status === 403) {
+    notify({ level: 'error', message: `无权限：${text}` })
+    return
+  }
+  notify({ level: 'error', message: text, dedupeKey: `sessions-action:${text}` })
+}
+
 @customElement('sebas-sessions')
-export class SebasSessions extends LitElement {
+export class SebasSessions extends LitElement {  /**
+   * 当前登录用户角色（fix-webui-qa-round14 2.3，shell 从 /api/auth/me 下传）：
+   * `/sessions` 总览页消费与工作台 rail 同一 role→visibility 映射——无
+   * sessions.write 的角色（viewer）不呈现新建表单与卡片写操作按钮；防线
+   * 仍在服务端 403（呈现层优化不构成防线）。`null` = 宿主未启用登录鉴权，
+   * 保持既有可用。
+   */
+  @property({ attribute: false }) role: Role | null = null
   @state() private data: SessionList | null = null
+  /**
+   * 读失败横幅（「加载失败」）的唯一载体——**只有列表读请求失败才写它**
+   * （fix-webui-qa-round14 2.4，D-5-3）：写动作（创建/聚焦/关闭）被拒走
+   * notice 层（「无权限」/类型化拒绝文案），绝不替换整个列表。
+   */
   @state() private error = ''
   @state() private prompt = ''
   @state() private agent = ''
@@ -188,8 +217,12 @@ export class SebasSessions extends LitElement {
   connectedCallback(): void {
     super.connectedCallback()
     this.refetch()
-    this.loadKinds()
-    this.loadProjects()
+    // （fix-webui-qa-round14 2.3）viewer 无新建表单：表单数据源（项目/agent
+    // 目录）不再加载——只读列表只需要 sessions 读面。
+    if (canCreateSessions(this.role)) {
+      this.loadKinds()
+      this.loadProjects()
+    }
     this.unsubscribe = sharedWs.subscribe(() => this.refetch())
     window.addEventListener('sebas:refetch', this.refetch)
   }
@@ -251,7 +284,7 @@ export class SebasSessions extends LitElement {
     // 项目必选：没有目标项目就没有归属，服务端也会 400——这里先如实拦住，
     // 并给出可操作的说明而不是发一个注定失败的请求。
     if (!this.projectId) {
-      this.error = '会话必须从属于项目：请先注册并在上方选择一个项目。'
+      notify({ level: 'error', message: '会话必须从属于项目：请先注册并在上方选择一个项目。' })
       return
     }
     if (!this.prompt.trim() || this.creating) return
@@ -265,7 +298,11 @@ export class SebasSessions extends LitElement {
       this.prompt = ''
       navigate(`/sessions/${key}`)
     } catch (err) {
-      this.error = errorText(err)
+      // （fix-webui-qa-round14 2.1/2.4，D-5-3）创建失败经 notice 层就地呈现
+      // 后端类型化文案（如「会话数已达上限 32」；403 走「无权限」口径）——
+      // 绝不写 this.error（那是读失败横幅，替换整个列表），也不 pushState
+      // 幻影会话 URL。
+      reportActionRejection(err)
     } finally {
       this.creating = false
     }
@@ -276,7 +313,9 @@ export class SebasSessions extends LitElement {
       const { redirect } = await api.switchSession(encodedKey)
       navigate(redirect)
     } catch (err) {
-      this.error = errorText(err)
+      // （fix-webui-qa-round14 2.4）被拒动作明确呈现（403 = 无权限口径），
+      // 列表保留、不被读失败横幅替换。
+      reportActionRejection(err)
     }
   }
 
@@ -289,7 +328,7 @@ export class SebasSessions extends LitElement {
       this.refetch()
     } catch (err) {
       if (err instanceof ApiError && err.status === 404) this.refetch()
-      else this.error = errorText(err)
+      else reportActionRejection(err)
     }
   }
 
@@ -319,11 +358,18 @@ export class SebasSessions extends LitElement {
       `
     if (!this.data) return this.renderLoading()
     const d = this.data
+    // （fix-webui-qa-round14 2.3，D-5-1）角色可见性：/sessions 总览页消费
+    // 与工作台 rail 同一映射——viewer 无 sessions.write，新建表单与卡片写
+    // 操作按钮不呈现（只读列表照常渲染）；卡片标题链接是纯 GET 深链（
+    // dashboard 只读视图），保留。
+    const canWrite = canCreateSessions(this.role)
     return html`
       <header class="page-head">
         <div>
           <h1 class="page-title">会话</h1>
-          <p class="page-sub">创建、聚焦与关闭 agent 会话。</p>
+          <p class="page-sub">
+            ${canWrite ? '创建、聚焦与关闭 agent 会话。' : '只读总览——你的角色没有会话写权限。'}
+          </p>
         </div>
       </header>
 
@@ -334,6 +380,8 @@ export class SebasSessions extends LitElement {
         <span class="chip"><b>${d.total_sessions}</b> 总计</span>
       </div>
 
+      ${canWrite
+        ? html`
       <form class="panel composer" @submit=${this.create}>
         <span class="composer-label">新建会话</span>
         <div class="row">
@@ -385,6 +433,8 @@ export class SebasSessions extends LitElement {
           >
         </div>
       </form>
+      `
+        : nothing}
 
       ${d.recent_sessions.length === 0
         ? html`
@@ -393,7 +443,9 @@ export class SebasSessions extends LitElement {
                 <span class="glyph">${icon('sessions', 20)}</span>
                 <span class="title">还没有运行中的会话</span>
                 <p class="hint">
-                  在上方启动第一个会话——描述任务，agent 会接手执行。
+                  ${canWrite
+                    ? '在上方启动第一个会话——描述任务，agent 会接手执行。'
+                    : '当前没有任何会话——只读角色可在此浏览创建后的会话。'}
                 </p>
               </div>
             </section>
@@ -419,23 +471,27 @@ export class SebasSessions extends LitElement {
                       <span>${row.last_active}</span>
                     </div>
                     <div class="foot">
-                      ${row.is_active
-                        ? html`<span class="focused-chip">聚焦中</span>`
-                        : html`<wa-button
+                      ${!canWrite
+                        ? nothing
+                        : row.is_active
+                          ? html`<span class="focused-chip">聚焦中</span>`
+                          : html`<wa-button
+                              size="s"
+                              appearance="plain"
+                              @click=${() => this.switchTo(row.encoded_key)}
+                              >聚焦</wa-button
+                            >`}
+                      <span class="spacer"></span>
+                      ${canWrite
+                        ? html`<wa-button
                             size="s"
                             appearance="plain"
-                            @click=${() => this.switchTo(row.encoded_key)}
-                            >聚焦</wa-button
-                          >`}
-                      <span class="spacer"></span>
-                      <wa-button
-                        size="s"
-                        appearance="plain"
-                        variant="danger"
-                        aria-label=${`关闭会话 ${fullSessionLabel(row)}`}
-                        @click=${() => (this.closeTarget = row.encoded_key)}
-                        >关闭</wa-button
-                      >
+                            variant="danger"
+                            aria-label=${`关闭会话 ${fullSessionLabel(row)}`}
+                            @click=${() => (this.closeTarget = row.encoded_key)}
+                            >关闭</wa-button
+                          >`
+                        : nothing}
                     </div>
                   </article>
                 `,

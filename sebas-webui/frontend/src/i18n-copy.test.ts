@@ -91,6 +91,17 @@ const SWEEP: ReadonlyArray<[string, ReadonlyArray<[string, string]>]> = [
       ['label="Execution node"', 'label="执行节点"'],
       ['>Add project</wa-button>', '>添加项目</wa-button>'],
       ['<wa-dialog label="Remove project"', '<wa-dialog label="移除项目"'],
+      // （fix-webui-qa-round14 5.1，D-5-4）归档 toast 的界面语言一致：
+      // 「History」英文残留退役，中文基准文案在位。
+      ['可在 History 中查看或恢复', '可在历史中查看或恢复'],
+    ],
+  ],
+  [
+    'views/setup-view.ts',
+    [
+      // （fix-webui-qa-round14 5.1，D-5-4）首启设置页的「Settings」英文残留
+      // 退役，与全站「设置」口径一致。
+      ['可在 Settings 内管理其他用户', '可在设置内管理其他用户'],
     ],
   ],
   [

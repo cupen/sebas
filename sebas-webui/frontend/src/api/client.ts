@@ -576,6 +576,13 @@ export interface AgentKindInfo {
   // ---- 以下为 store 行的 launch 定义回填面（fix-webui-qa-round2 2.4，
   // ---- M-A4）：仅 /api/agents 对 store 行富化时出现；键缺省 = 未设置。
   driver_raw?: string
+  /**
+   * （fix-webui-qa-round14 4.8，D-4-4）store 行的存量启动 path（未兜底）：
+   * 编辑表单切「启动定义」到 claude 形态时 path 预填以它——不得以硬编码
+   * `claude` 覆盖存量值（agent-settings「以存储值预填」明文）。键缺省 =
+   * 未设置（config 种子行 / 内置行不携带）。
+   */
+  path_raw?: string
   args?: string[]
   work_dir?: string | null
   sessions_dir?: string | null

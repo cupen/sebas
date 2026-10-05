@@ -803,6 +803,21 @@ pub async fn agent_kinds(State(state): State<WebUiState>) -> Response {
     // display 随 catalog 行透传（键缺省 = 未设置）。catalog 基形不带这些
     // 字段——探测面与配置面词表分离是既有合同，这里按 id 只对 store 行
     // **加键**，不改动其它消费面。
+    // （fix-webui-qa-round14 4.8，D-4-4）`path_raw` 同批透传：编辑表单切
+    // 「启动定义」到 claude 形态时，path 预填以存量值（非硬编码 `claude`）
+    // ——agent-settings「编辑表单以存储值预填全部字段」明文。
+    let enriched = enrich_agent_catalog_rows(agents, &store_rows);
+    Json(json!({ "agents": enriched })).into_response()
+}
+
+/// catalog 探测行 × store 行快照的富化（纯函数，[`agent_kinds`] 的装配半边）：
+/// 按 id 把 store 行的 launch 定义字段（driver/display/path/args/work_dir/
+/// sessions_dir 的原始值）加到对应 catalog 行上——键缺省 = 未设置。内置
+/// `native` 行与 config-only 行不在 store 快照里，原样透传。
+pub(crate) fn enrich_agent_catalog_rows(
+    agents: Vec<crate::agent_kinds::AgentKindInfo>,
+    store_rows: &[serde_json::Value],
+) -> Vec<serde_json::Value> {
     let launch_by_id: std::collections::BTreeMap<String, serde_json::Map<String, serde_json::Value>> =
         store_rows
             .iter()
@@ -813,7 +828,7 @@ pub async fn agent_kinds(State(state): State<WebUiState>) -> Response {
             })
             .zip(store_rows.iter().filter_map(|r| r.as_object().cloned()))
             .collect();
-    let enriched: Vec<serde_json::Value> = agents
+    agents
         .into_iter()
         .map(|a| {
             let mut v = serde_json::to_value(&a).unwrap_or(serde_json::Value::Null);
@@ -823,6 +838,9 @@ pub async fn agent_kinds(State(state): State<WebUiState>) -> Response {
                 }
                 if let Some(d) = launch.get("display") {
                     obj.insert("display_raw".into(), d.clone());
+                }
+                if let Some(p) = launch.get("path") {
+                    obj.insert("path_raw".into(), p.clone());
                 }
                 if let Some(args) = launch.get("args") {
                     obj.insert("args".into(), args.clone());
@@ -836,8 +854,7 @@ pub async fn agent_kinds(State(state): State<WebUiState>) -> Response {
             }
             v
         })
-        .collect();
-    Json(json!({ "agents": enriched })).into_response()
+        .collect()
 }
 
 // ---- Auth endpoints（webui 登录鉴权，见 `auth` 模块） ----
@@ -3441,6 +3458,58 @@ mod ws_resync_tests {
             panic!("resync must ride a Notification frame");
         };
         assert_eq!(notification.method, "session.resync");
+    }
+}
+
+#[cfg(test)]
+mod agent_catalog_enrichment_tests {
+    //! fix-webui-qa-round14 4.8（D-4-4）：store 行 launch 定义的 catalog 富化
+    //! ——`path_raw` 与既有 driver_raw/args/... 同批透传，编辑表单切「启动
+    //! 定义」到 claude 形态时 path 预填以存量值。
+
+    use super::*;
+
+    fn kind(id: &str) -> crate::agent_kinds::AgentKindInfo {
+        crate::agent_kinds::AgentKindInfo {
+            id: id.into(),
+            display: id.into(),
+            reachable: true,
+            cause: None,
+            version: None,
+            display_raw: None,
+        }
+    }
+
+    #[test]
+    fn store_path_is_passed_through_as_path_raw() {
+        let agents = vec![kind("myclaude"), kind("native")];
+        let store_rows = vec![serde_json::json!({
+            "id": "myclaude",
+            "driver": "claude",
+            "path": "D:/tools/claude-custom.exe",
+        })];
+        let enriched = enrich_agent_catalog_rows(agents, &store_rows);
+        let row = &enriched[0];
+        assert_eq!(
+            row.get("path_raw").and_then(|v| v.as_str()),
+            Some("D:/tools/claude-custom.exe"),
+            "存量启动 path 必须随 catalog 行下发"
+        );
+        assert_eq!(row.get("driver_raw").and_then(|v| v.as_str()), Some("claude"));
+        // 不在 store 快照里的行（内置 native）原样透传，无加键。
+        assert!(enriched[1].get("path_raw").is_none());
+    }
+
+    #[test]
+    fn rows_without_an_explicit_path_carry_no_path_raw_key() {
+        // store 行缺 path 键（claude 缺省语义归探测侧兜底）：不加键——前端
+        // 以内置缺省 `claude` 预填，语义与 server 侧 source_from_store_item
+        // 的回退一致。
+        let agents = vec![kind("plain")];
+        let store_rows = vec![serde_json::json!({ "id": "plain", "driver": "claude" })];
+        let enriched = enrich_agent_catalog_rows(agents, &store_rows);
+        assert!(enriched[0].get("path_raw").is_none());
+        assert!(enriched[0].get("driver_raw").is_some());
     }
 }
 

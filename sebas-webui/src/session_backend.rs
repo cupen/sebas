@@ -448,6 +448,21 @@ fn remote_node_of(node: Option<&str>) -> Option<&str> {
         .filter(|n| !n.is_empty() && *n != crate::projects::LOCAL_NODE_ID)
 }
 
+/// fix-webui-qa-round14（D-3-1 服务端半边）：引擎的创建拒绝原样映射为
+/// 类型化会话拒绝——`rejection_response` 据此把「会话数已达上限 N」等文案
+/// 以 400 交给前端（spec「Session creation rejections are surfaced」）。
+/// 此前引擎吞掉 Capacity 返回幻影 key，创建以 201 假成功。
+fn rejection_from_dispatch(e: sebas_dispatch::error::DispatchError) -> SessionRejection {
+    match e {
+        sebas_dispatch::error::DispatchError::Capacity(limit) => {
+            SessionRejection::Capacity { limit }
+        }
+        sebas_dispatch::error::DispatchError::Conflict(msg) => SessionRejection::Unavailable {
+            cause: msg,
+        },
+    }
+}
+
 /// 代码内置 preset 表的 JSON 形状（make-core-own-provider-data 1.3；与 core
 /// channel 的 presets 域 / router `/admin/presets` 同一 wire：name + 三槽位 +
 /// api_key_env + models）。preset 数据跟随代码，只读、无存储副本。models 是
@@ -624,10 +639,10 @@ impl SessionBackend for InProcessBackend {
         // "surface as a Removed event later"——dispatch 立即把错误事件推进
         // transcript、会话标记 spawn-failed 并发布 Updated；Removed 只作为
         // 后续显式关闭等状态变更的次要信号。
-        Ok(self
-            .router
+        self.router
             .web_spawn(prompt, project_dir, None, None, None)
-            .await)
+            .await
+            .map_err(rejection_from_dispatch)
     }
 
     /// Spawn through the router with the agent kind pinned（D2：agent id 即
@@ -653,10 +668,10 @@ impl SessionBackend for InProcessBackend {
             });
         }
         let kind = agent_kind_of(agent);
-        Ok(self
-            .router
+        self.router
             .web_spawn(prompt, project_dir, Some(kind), model, mode)
-            .await)
+            .await
+            .map_err(rejection_from_dispatch)
     }
 
     /// 0-turn placeholder: create the session row without spawning an agent
@@ -676,10 +691,10 @@ impl SessionBackend for InProcessBackend {
             });
         }
         let kind = agent_kind_of(agent);
-        Ok(self
-            .router
+        self.router
             .web_create_placeholder(project_dir, Some(kind), model, mode)
-            .await)
+            .await
+            .map_err(rejection_from_dispatch)
     }
 
     async fn set_session_model(

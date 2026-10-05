@@ -33,6 +33,8 @@ import {
   SESSION_PROVIDED_GROUP_LABEL,
   saveLastUsedPair,
   toModelCatalog,
+  toAliasChoices,
+  mergeAliasEntries,
 } from './model-catalog.js'
 
 function provider(name: string, models: ProviderAdmin['models']): ProviderAdmin {
@@ -245,5 +247,84 @@ describe('groupSessionModels (design D3)', () => {
 
   it('empty session models yield no groups', () => {
     expect(groupSessionModels([], catalog)).toEqual([])
+  })
+})
+
+// ─── fix-webui-qa-round14 3.1/3.2（D-4-1）：别名并入模型选择面的纯函数 ───────
+
+describe('toAliasChoices / mergeAliasEntries（round14 3.1/3.2）', () => {
+  const aliases = toAliasChoices({
+    zeta: { provider: 'z.ai' },
+    claude: { provider: 'anthropic', upstream_model: 'sonnet' },
+  })
+
+  it('normalizes the alias record into a name-sorted choice list', () => {
+    expect(aliases.map((a) => a.alias)).toEqual(['claude', 'zeta'])
+    expect(aliases[0]).toEqual({
+      alias: 'claude',
+      provider: 'anthropic',
+      upstream_model: 'sonnet',
+    })
+  })
+
+  it('tolerates a missing/empty alias record', () => {
+    expect(toAliasChoices(null)).toEqual([])
+    expect(toAliasChoices(undefined)).toEqual([])
+    expect(toAliasChoices({})).toEqual([])
+  })
+
+  it('merges alias entries first with catalog models deduped on collision', () => {
+    const merged = mergeAliasEntries(['claude', 'sonnet', 'haiku'], aliases)
+    // 别名在前带标记；同名目录条目（claude）被别名替换，只出现一次。
+    expect(merged).toEqual([
+      { value: 'claude', alias: true },
+      { value: 'zeta', alias: true },
+      { value: 'sonnet', alias: false },
+      { value: 'haiku', alias: false },
+    ])
+  })
+
+  it('models pass through untouched when there are no aliases', () => {
+    expect(mergeAliasEntries(['m1', 'm2'], [])).toEqual([
+      { value: 'm1', alias: false },
+      { value: 'm2', alias: false },
+    ])
+  })
+})
+
+describe('loadModelCatalog carries the alias choices (round14 3.1/3.2)', () => {
+  it('aliases ride the providers read payload without extra requests', async () => {
+    ;(api.providers as ReturnType<typeof vi.fn>).mockResolvedValue({
+      providers: [provider('alpha', [{ id: 'a1', tags: [] }])],
+      model_aliases: { deep: { provider: 'alpha' } },
+    })
+    ;(api.providerDefaults as ReturnType<typeof vi.fn>).mockResolvedValue({
+      default_provider: null,
+      default_model: null,
+    })
+    const { aliases, unavailable } = await loadModelCatalog()
+    expect(unavailable).toBe(false)
+    expect(aliases.map((a) => a.alias)).toEqual(['deep'])
+  })
+
+  it('aliases alone keep the surface usable when the catalog has no models', async () => {
+    ;(api.providers as ReturnType<typeof vi.fn>).mockResolvedValue({
+      providers: [],
+      model_aliases: { deep: { provider: 'alpha' } },
+    })
+    ;(api.providerDefaults as ReturnType<typeof vi.fn>).mockResolvedValue({
+      default_provider: null,
+      default_model: null,
+    })
+    const { aliases, unavailable } = await loadModelCatalog()
+    expect(unavailable).toBe(false)
+    expect(aliases).toHaveLength(1)
+  })
+
+  it('a providers read failure yields an empty alias list', async () => {
+    ;(api.providers as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('503'))
+    const { aliases, unavailable } = await loadModelCatalog()
+    expect(unavailable).toBe(true)
+    expect(aliases).toEqual([])
   })
 })

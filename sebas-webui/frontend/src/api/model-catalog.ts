@@ -10,7 +10,7 @@
  * provider without models contributes no models (never a fabricated one).
  */
 
-import type { ProviderAdmin } from './client.js'
+import type { ProviderAdmin, ModelAliasEntry } from './client.js'
 import { api } from './client.js'
 
 /** Wire shape of `GET /api/provider-defaults`（双 null = 未设置）. */
@@ -66,9 +66,16 @@ export function toModelCatalog(
  * 目录加载结果：`catalog` 只在 `unavailable=false` 时可信。空目录与读取
  * 失败都落在 `unavailable=true`——消费方显示显式不可用提示，绝不伪造选项、
  * 绝不渲染空列表（4.4 语义，由 composer 芯片与创建对话框共用）。
+ *
+ * （fix-webui-qa-round14 3.1/3.2）`aliases` 是别名短名清单（模型选择面的
+ * 并入项）。注意 `unavailable` 语义随别名消费面微调：目录 pairs 为空但
+ * 存在别名时不再是「全不可用」——别名本身是可用的模型取值，消费方仍应
+ * 渲染别名选择面（catalog 为 null 时按「无目录模型」处理）。
  */
 export interface LoadedCatalog {
   catalog: ModelCatalog | null
+  /** 别名短名（fix-webui-qa-round14 3.1/3.2）；读取失败/无别名 = 空表。 */
+  aliases: ModelAliasChoice[]
   unavailable: boolean
 }
 
@@ -77,6 +84,11 @@ export interface LoadedCatalog {
  * defaults 读取失败不拖垮目录（双 null 兜底）；providers 读取失败或目录为
  * 空 = 显式不可用（本函数不抛——消费方拿统一形状，无需各自 try/catch）。
  * 创建对话框与 composer 模型芯片共用，避免双份 fetch 漂移（design D2）。
+ *
+ * （fix-webui-qa-round14 3.1/3.2，D-4-1）`model_aliases` 随同一份 providers
+ * 响应下发（零额外请求），经 [`toAliasChoices`] 规整进 [`LoadedCatalog`]——
+ * composer 模型菜单与创建弹窗下拉据此并入别名短名。读取失败 aliases 为空，
+ * 不拖垮目录本身。
  */
 export async function loadModelCatalog(): Promise<LoadedCatalog> {
   try {
@@ -85,10 +97,15 @@ export async function loadModelCatalog(): Promise<LoadedCatalog> {
       api.providerDefaults().catch(() => null),
     ])
     const catalog = toModelCatalog(providers.providers, defaults)
-    if (catalog.pairs.length === 0) return { catalog, unavailable: true }
-    return { catalog, unavailable: false }
+    const aliases = toAliasChoices(providers.model_aliases)
+    if (catalog.pairs.length === 0 && aliases.length === 0) {
+      return { catalog, aliases, unavailable: true }
+    }
+    // 有目录模型或别名任一在场 = 选择面可用（unavailable=false 时 catalog
+    // 仍可能只有空 pairs——消费方按「无目录模型」处理，不渲染空 provider 级）。
+    return { catalog, aliases, unavailable: false }
   } catch {
-    return { catalog: null, unavailable: true }
+    return { catalog: null, aliases: [], unavailable: true }
   }
 }
 
@@ -162,6 +179,65 @@ export interface SessionModelGroup {
 
 /** 兜底组的显示名（design D3：会话提供、置底）。 */
 export const SESSION_PROVIDED_GROUP_LABEL = '会话提供'
+
+// ─── fix-webui-qa-round14 3.1/3.2：模型别名进入模型选择面（D-4-1）────────────
+
+/** 一个可选的模型别名（providers 读面 `model_aliases` 的规整形）。 */
+export interface ModelAliasChoice {
+  /** 别名短名——选中即以它为模型值（经既有 set_model 控制帧路径）。 */
+  alias: string
+  /** 目标 provider（来源徽标的 tooltip 内容）。 */
+  provider: string
+  /** 上游模型覆写；缺省 = 目标 provider 默认模型。 */
+  upstream_model?: string
+}
+
+/** composer 模型菜单「别名」组的显示名（来源徽标同词）。 */
+export const ALIAS_GROUP_LABEL = '别名'
+
+/** 模型菜单的一个条目：提交值 + 来源标记（别名条目带 `alias: true`）。 */
+export interface ModelMenuEntry {
+  value: string
+  alias: boolean
+}
+
+/**
+ * providers 读面的 `model_aliases` 记录 → 规整的别名清单（按名字典序稳定
+ * 输出）。`null`/缺省 = 无别名（消费面回退纯目录模型）。
+ */
+export function toAliasChoices(
+  payload: Record<string, ModelAliasEntry> | null | undefined,
+): ModelAliasChoice[] {
+  return Object.entries(payload ?? {})
+    .map(([alias, entry]) => ({
+      alias,
+      provider: entry.provider,
+      ...(entry.upstream_model ? { upstream_model: entry.upstream_model } : {}),
+    }))
+    .sort((a, b) => a.alias.localeCompare(b.alias))
+}
+
+/**
+ * 目录模型列表与别名的合并（design 决策 3）：别名条目在前、带来源标记；
+ * 同名冲突时别名条目优先（目录/会话模型条目被别名替换——同一个名字只能
+ * 出现一次，选中语义归别名）。
+ */
+export function mergeAliasEntries(
+  models: readonly string[],
+  aliases: readonly ModelAliasChoice[],
+): ModelMenuEntry[] {
+  const aliasNames = new Set(aliases.map((a) => a.alias))
+  const entries: ModelMenuEntry[] = aliases.map((a) => ({ value: a.alias, alias: true }))
+  for (const m of models) {
+    if (!aliasNames.has(m)) entries.push({ value: m, alias: false })
+  }
+  return entries
+}
+
+/** 一个别名条目的悬浮说明（来源徽标 tooltip：目标 provider + 上游覆写）。 */
+export function aliasEntryTitle(choice: ModelAliasChoice): string {
+  return `别名 → ${choice.provider}${choice.upstream_model ? ` · ${choice.upstream_model}` : ''}`
+}
 
 /**
  * （workbench-interaction-polish 4.2，design D3）把会话平铺的
