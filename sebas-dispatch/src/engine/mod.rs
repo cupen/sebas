@@ -2104,7 +2104,7 @@ impl DispatchHandle {
         kind: Option<String>,
         model: Option<String>,
         mode: Option<String>,
-    ) -> ChannelKey {
+    ) -> Result<ChannelKey, crate::error::DispatchError> {
         let key = ChannelKey::web_new();
         // workbench-agent-identity-and-process-folds 收尾：带 prompt 的直接
         // spawn 也把 kind/model/mode 记入映射（此前只记 project_dir，
@@ -2143,11 +2143,14 @@ impl DispatchHandle {
                     mode,
                 })
                 .await;
-                key
+                Ok(key)
             }
             Err(e) => {
+                // fix-webui-qa-round14（D-3-1 服务端半边）：拒绝原样上抛——
+                // 此前 Capacity 被吞掉后仍返回新 key，webui 以 201 回给前端
+                // 并跳转幻影会话 URL（引擎映射里根本没有这个会话）。
                 tracing::warn!(?e, "web_spawn: begin_spawn failed");
-                key
+                Err(e)
             }
         }
     }
@@ -2163,7 +2166,7 @@ impl DispatchHandle {
         kind: Option<String>,
         model: Option<String>,
         mode: Option<String>,
-    ) -> ChannelKey {
+    ) -> Result<ChannelKey, crate::error::DispatchError> {
         let key = ChannelKey::web_new();
         match self
             .map
@@ -2175,11 +2178,13 @@ impl DispatchHandle {
                 if !matches!(outcome, crate::state::BeginSpawn::AlreadySpawning) {
                     self.publish_created(&key).await;
                 }
-                key
+                Ok(key)
             }
             Err(e) => {
+                // fix-webui-qa-round14（D-3-1 服务端半边）：与 web_spawn 同款
+                // ——Capacity 等拒绝原样上抛，绝不再吞掉后返回幻影 key。
                 tracing::warn!(?e, "web_create_placeholder: begin_spawn_with failed");
-                key
+                Err(e)
             }
         }
     }

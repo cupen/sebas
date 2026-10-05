@@ -29,7 +29,8 @@ async fn events_follow_create_status_change_remove() {
             None,
             None,
         )
-        .await;
+        .await
+        .unwrap();
     // status change: Spawning → Active.
     router.activate(&key, "s1".into(), None, None).await;
     // remove.
@@ -143,7 +144,8 @@ async fn applying_events_to_snapshot_reproduces_router_state() {
         .unwrap();
     let kb_key = router
         .web_spawn("spawn me".into(), None, None, None, None)
-        .await;
+        .await
+        .unwrap();
     router.activate(&kb_key, "s-b".into(), None, None).await;
     let _ = router.web_close_session(ka).await;
 

@@ -355,7 +355,8 @@ async fn fail_spawn_surfaces_error_inline_and_keeps_session_visible() {
     // webui 建会话：占位插入（Created）。
     let key = router
         .web_spawn("hello".into(), None, None, None, None)
-        .await;
+        .await
+        .unwrap();
 
     // spawn 失败：dispatch 以失败原因回调。
     router.fail_spawn(&key, "agent binary missing").await;
@@ -512,7 +513,8 @@ async fn web_spawn_with_kind_exposes_agent_kind_in_session_info() {
             Some("m-free".into()),
             Some("edit".into()),
         )
-        .await;
+        .await
+        .unwrap();
 
     let info = router
         .session_info_snapshot()
@@ -545,7 +547,8 @@ async fn web_spawn_without_kind_keeps_agent_kind_none() {
 
     let key = router
         .web_spawn("hello".into(), None, None, None, None)
-        .await;
+        .await
+        .unwrap();
     let info = router
         .session_info_snapshot()
         .await
@@ -567,7 +570,8 @@ async fn web_spawn_followup_during_spawn_window_queues_not_double_spawns() {
 
     let key = router
         .web_spawn("hello".into(), None, Some("opencode".into()), None, None)
-        .await;
+        .await
+        .unwrap();
 
     // 先消费掉 web_spawn 自身发出的首个 WebSpawn。
     let first = tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
@@ -600,4 +604,34 @@ async fn web_spawn_followup_during_spawn_window_queues_not_double_spawns() {
     // 激活时 drain 队列。
     let drained = map.activate(&key, "s1".into(), None, None).await;
     assert_eq!(drained, vec!["race".to_string()]);
+}
+
+/// fix-webui-qa-round14（D-3-1 服务端半边）：容量满时 `web_spawn` /
+/// `web_create_placeholder` SHALL 返回 `Err(Capacity)` 而不是吞掉拒绝后
+/// 返回幻影 key——此前 Err 臂照发新 key，webui 以 201 假成功并跳转幻影
+/// 会话 URL（引擎映射里根本没有该会话）。
+#[tokio::test]
+async fn capacity_rejection_propagates_instead_of_a_phantom_key() {
+    let map = SessionMap::with_capacity(1);
+    let (router, _out_rx) = DispatchHandle::new(map);
+
+    let first = router
+        .web_spawn("hello".into(), None, None, None, None)
+        .await
+        .expect("first spawn within capacity");
+    let _ = first;
+
+    let second = router
+        .web_spawn("hello".into(), None, None, None, None)
+        .await;
+    assert!(
+        matches!(&second, Err(sebas_dispatch::error::DispatchError::Capacity(1))),
+        "second spawn must be rejected with Capacity, got {second:?}"
+    );
+
+    let placeholder = router.web_create_placeholder(None, None, None, None).await;
+    assert!(
+        matches!(&placeholder, Err(sebas_dispatch::error::DispatchError::Capacity(1))),
+        "placeholder at capacity must be rejected, got {placeholder:?}"
+    );
 }

@@ -37,6 +37,7 @@ __pycache__/
 config/config.prod.toml
 target-qa/
 target-qa-r5/
+target-gate/
 .beads.gate.lock
 __no_overlay__.json
 
