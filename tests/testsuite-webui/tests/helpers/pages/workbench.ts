@@ -123,7 +123,13 @@ export class FocusedSession {
     // （session-parallel-liveness-and-unread-polish 3.6/D6b）会话状态只挂 rail
     // 行首彩色圆点一处：session-head 的 status-badge 与状态边框已下线，焦点
     // 会话的状态面改由 rail 当前行（`li.session-item.current`）的圆点承载。
-    this.statusBadge = page.locator('sebas-project-rail li.session-item.current .session-dot')
+    // （fix-webui-qa-round14 4.2）泊车中的聚焦会话同时呈现在项目组与「等待
+    // 你处理」组（本地泊车入组是本 change 的修复语义）——同一行渲染两份、
+    // 两份都带 current 且圆点同态，`.first()` 取项目组那份，避免 strict
+    // violation（等待组的副本状态逐字相同，取哪份断言都等价）。
+    this.statusBadge = page
+      .locator('sebas-project-rail li.session-item.current .session-dot')
+      .first()
     this.chatId = page.locator('sebas-dashboard .session-head .ident .chat')
     this.transcript = page.locator('sebas-dashboard .turn-stream-area')
     this.emptyConversation = page
