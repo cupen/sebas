@@ -43,6 +43,9 @@ export default defineConfig({
     // 经 users API 现场建户）——只在 auth-on 形态跑（playwright.auth.config.ts
     // testMatch 同名单），auth=off 主沙箱零用户必红。
     /provider-gate\.spec\.ts/,
+    // qa-round14-rbac（fix-webui-qa-round14 viewer 只读口径）同理：viewer/
+    // member 经 users API 现场建户——只在 auth-on 形态跑。
+    /qa-round14-rbac\.spec\.ts/,
     /deployment\.spec\.ts/,
     /approval-detached\.spec\.ts/,
     // core-link-badge 的停核/恢复半边只在 detached 双进程拓扑成立（翻转

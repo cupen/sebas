@@ -3132,3 +3132,83 @@ describe('skill preview strips frontmatter (fix-webui-qa-round8 7.5)', () => {
     el.remove()
   })
 })
+
+// ── fix-webui-qa-round14 4.8（D-4-4）：编辑切「启动定义」后 path 预填保真 ────
+
+describe('agent edit path prefill fidelity (round14 4.8)', () => {
+  // Agents 分区的局部助手（同上方 add-agent-settings describe 的同名实现）。
+  function agentRows(el: SebasSettingsModal): HTMLElement[] {
+    return [...el.shadowRoot!.querySelectorAll<HTMLElement>('[data-testid="agent-row"]')]
+  }
+  function dialogByLabel(el: SebasSettingsModal, label: string): HTMLDialogElement {
+    const dlg = [
+      ...el.shadowRoot!.querySelectorAll<HTMLDialogElement>('wa-dialog'),
+    ].find((d) => d.getAttribute('label') === label)
+    expect(dlg, `dialog ${label} must exist`).toBeTruthy()
+    return dlg!
+  }
+
+  it('switching the launch shape to claude prefills the stored path, not the hardcoded claude', async () => {
+    apiMocks.agents.mockResolvedValue({
+      agents: [
+        {
+          id: 'myclaude',
+          display: 'myclaude',
+          reachable: true,
+          driver_raw: 'claude',
+          // 存量 store 行的自定义二进制路径（path_raw 随 /api/agents 富化面
+          // 下传，task 4.8 后端半边）。
+          path_raw: 'D:/tools/claude-custom.exe',
+        },
+      ],
+    })
+    const el = await mount()
+    await goto(el, "agents")
+    agentRows(el)
+      .find((r) => r.dataset['id'] === 'myclaude')!
+      .querySelector<HTMLElement>('button[title="编辑"]')!
+      .click()
+    await settle(el)
+    const dlg = dialogByLabel(el, '编辑 agent myclaude')
+    // 初始形态 = 「不改」；切到 claude 形态后 path 输入框以存量值预填。
+    const shapeSelect = dlg.querySelector(
+      '[data-testid="agent-form-shape"]',
+    ) as unknown as HTMLSelectElement
+    expect(shapeSelect).toBeTruthy()
+    shapeSelect.value = 'claude'
+    shapeSelect.dispatchEvent(new Event('change', { bubbles: true, composed: true }))
+    await settle(el)
+    const pathInput = dlg.querySelector(
+      '[data-testid="agent-form-path"]',
+    ) as unknown as { value: string } | null
+    // 存量值保真：不得被硬编码 `claude` 覆盖（agent-settings「以存储值
+    // 预填全部字段」明文）。
+    expect(pathInput?.value).toBe('D:/tools/claude-custom.exe')
+    el.remove()
+  })
+
+  it('a claude store row without an explicit path keeps the builtin claude default', async () => {
+    apiMocks.agents.mockResolvedValue({
+      agents: [{ id: 'plain', display: 'plain', reachable: true, driver_raw: 'claude' }],
+    })
+    const el = await mount()
+    await goto(el, "agents")
+    agentRows(el)
+      .find((r) => r.dataset['id'] === 'plain')!
+      .querySelector<HTMLElement>('button[title="编辑"]')!
+      .click()
+    await settle(el)
+    const dlg = dialogByLabel(el, '编辑 agent plain')
+    const shapeSelect = dlg.querySelector(
+      '[data-testid="agent-form-shape"]',
+    ) as unknown as HTMLSelectElement
+    shapeSelect.value = 'claude'
+    shapeSelect.dispatchEvent(new Event('change', { bubbles: true, composed: true }))
+    await settle(el)
+    const pathInput = dlg.querySelector(
+      '[data-testid="agent-form-path"]',
+    ) as unknown as { value: string } | null
+    expect(pathInput?.value).toBe('claude')
+    el.remove()
+  })
+})

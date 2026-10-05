@@ -18,6 +18,7 @@ import { customElement, property, state } from 'lit/decorators.js'
 import { navigate } from '../router.js'
 import {
   api,
+  ApiError,
   type Project,
   type ProjectBranchInfo,
   type Role,
@@ -39,6 +40,10 @@ import {
 } from './unread-cursor.js'
 import { notify } from '../notify.js'
 import { COMPOSER_FOCUS_REQUEST } from './workbench-composer.js'
+// （fix-webui-qa-round14 4.6，D-2-1）创建成功瞬间的项目标签反投影事件
+// （与 dashboard 聚焦收敛共用同一 shell 入口；事件名独立成无副作用模块，
+// 避免 rail → dashboard 的循环依赖拖入整组组件注册）。
+import { PROJECT_FOLLOW_EVENT } from './focus-events.js'
 import type { NewSessionDialogConfirm } from './new-session-dialog.js'
 import '../components/folder-picker.js'
 import './new-session-dialog.js'
@@ -114,6 +119,41 @@ export function addPathScopeHintFrom(error: string): string | null {
  * 时静默忽略（与项目删除语义一致）。
  */
 export const RAIL_EXPANDED_KEY = 'sebas.rail-expanded'
+
+/**
+ * （fix-webui-qa-round14 4.4）历史组开合态的 localStorage 键：`'1'` = 已
+ * 展开。并入 workbench-persist / split-persist 同一 `sebas.*` 本地存储域；
+ * 键不存在 = 缺省收起（向后兼容），D-1-1「展开被刷新回弹」由此关闭。
+ */
+export const RAIL_HISTORY_OPEN_KEY = 'sebas.rail-history-open'
+
+/** 读历史组开合态（缺省收起；存储不可得同样收起）。 */
+export function loadHistoryOpen(store: Storage | null): boolean {
+  try {
+    return store?.getItem(RAIL_HISTORY_OPEN_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+/** 写历史组开合态（写失败静默放弃——开合是尽力而为的形态记忆）。 */
+export function saveHistoryOpen(open: boolean, store: Storage | null): void {
+  try {
+    if (open) store?.setItem(RAIL_HISTORY_OPEN_KEY, '1')
+    else store?.removeItem(RAIL_HISTORY_OPEN_KEY)
+  } catch {
+    /* 隐私模式等 storage 不可用：开合退化为纯内存。 */
+  }
+}
+
+/** window.localStorage 的防御性取用（jsdom 早期/隐私模式可能缺席）。 */
+function safeStorage(): Storage | null {
+  try {
+    return window.localStorage
+  } catch {
+    return null
+  }
+}
 
 /** 解析持久化的展开态：非法/缺失 JSON → `{}`（全收起）；数组元素取字符串。 */
 export function parseRailExpanded(raw: string | null): Record<string, boolean> {
@@ -237,17 +277,12 @@ export class SebasProjectRail extends LitElement {
    */
   @state() private focusedKey: string | null = null
   @state() private archivedSessions: ArchiveEntry[] = []
-  /**
-   * （fix-webui-qa-round10 5.1，B-DEF-01）会话统计真值：`GET /api/sessions`
-   * 的 `total_sessions`——会话总览页统计区用的**同一份**数字（同源同帧）。
-   * 「历史」组头的计数徽章读它，随 session.created / session.removed /
-   * `sebas:refetch`（建会话、关闭、归档的既有刷新通道）与节点轮询兜底联动，
-   * 不再是恒 0 的静态数；归档组本身仍只列归档条目（「历史组 = 归档」语义
-   * 不变），徽章口径 = 会话页统计（spec「Badge tracks session creation」）。
-   */
-  @state() private sessionTotal = 0
   @state() private expanded: Record<string, boolean> = {}
-  @state() private historyOpen = false
+  /**
+   * （fix-webui-qa-round14 4.4）历史组开合态：localStorage 持久（缺省收起），
+   * 随 toggle 写回——展开不再被刷新回弹（D-1-1）。
+   */
+  @state() private historyOpen = loadHistoryOpen(safeStorage())
   /** 8.4：等待组默认展开（它就是要你看见）。 */
   @state() private waitingOpen = true
   @state() private branchByPath: Record<string, ProjectBranchInfo> = {}
@@ -658,8 +693,6 @@ export class SebasProjectRail extends LitElement {
       const list = await api.sessions()
       if (seq !== this.fetchSeq) return
       this.sessions = list.recent_sessions
-      // （fix-webui-qa-round10 5.1，B-DEF-01）会话总览同源统计（历史组徽章）。
-      this.sessionTotal = list.total_sessions
       this.focusedKey = list.active_session_key
       // （4.2）聚焦缺省展开的**物化**：无记录且其下有聚焦会话的项目，此刻
       // 把展开写进记录（随写持久化）。物化让缺省成为显式状态——之后的聚焦
@@ -768,13 +801,36 @@ export class SebasProjectRail extends LitElement {
    * （fix-webui-qa-round3 2.6 / D10）选择写 URL：地址更新为该会话的
    * `/sessions/{key}` 深链形（history pushState，不引发页面跳转）——刷新
    * / 重开自持焦点；rail 标记仍由焦点指针派生，不因 URL 直接改写。
+   *
+   * （fix-webui-qa-round14 2.5，webui-user-management「viewer 只读视图」）
+   * viewer 打开会话 = **纯 GET 只读视图**：跳过 `switch` 写（sessions.write
+   * 执法档，全局活跃焦点指针是写面产物），直接以深链进入——dashboard 读
+   * detail（GET 即设 display 指针）渲染转录，composer 不呈现。后续写仍被
+   * 服务端 403 拒绝并有明确呈现。
    */
   private async openSession(row: SessionRow) {
+    if (!canCreateSessions(this.role)) {
+      this.focusedKey = row.encoded_key
+      // rail-declutter-unread D3：只读打开同样是开卷——先登记未读边界
+      // （与 switch 路径同一语义，锚推进仍归 transcript 的已见驱动路径）。
+      armOpeningSeam(row.encoded_key, readAnchorCount(row.encoded_key))
+      navigate(`/sessions/${row.encoded_key}`)
+      window.dispatchEvent(
+        new CustomEvent(RAIL_FOCUS_EVENT, { detail: { key: row.encoded_key } }),
+      )
+      return
+    }
     let resp: { status: string; redirect: string; active_session_key: string } | undefined
     try {
       resp = await api.switchSession(row.encoded_key)
     } catch (err) {
-      this.error = err instanceof Error ? err.message : String(err)
+      // （fix-webui-qa-round14 2.4）权限拒绝明确呈现（点名角色限制），
+      // 不再只落静默的 rail 错误条；列表照常保留（读失败才替换列表）。
+      if (err instanceof ApiError && err.status === 403) {
+        notify({ level: 'error', message: `无权限：${err.message}` })
+      } else {
+        this.error = err instanceof Error ? err.message : String(err)
+      }
       void this.refresh()
       return
     }
@@ -838,6 +894,22 @@ export class SebasProjectRail extends LitElement {
         model: e.detail.model,
         mode: e.detail.mode,
       })
+      // （fix-webui-qa-round14 4.7）可选预命名：`POST /api/sessions` 无
+      // title 形参（task 1.2 核实），走「创建后立即重命名」兜底——创建成功
+      // 即以操作者输入设置 label。重命名失败不回滚创建（会话已在场、行名
+      // 等自动命名），如实弹一条 error 通知说明。空值/旧事件缺省 = 现行
+      // 命名行为不变。
+      const title = (e.detail.title ?? '').trim()
+      if (title) {
+        try {
+          await api.setSessionLabel(created.key, title)
+        } catch (renameErr) {
+          notify({
+            level: 'error',
+            message: `会话已创建，但预命名失败：${renameErr instanceof Error ? renameErr.message : String(renameErr)}`,
+          })
+        }
+      }
       // （round3 3.1）创建即见过：读锚在本浏览器就地立基（0 轮占位）。
       // 创建路径没有 rail 点击（服务端 set_focus 直达焦点），此前锚永远
       // 缺位，而无锚会话按 spec 读作 fully-read——新会话之后的非聚焦新回复
@@ -857,8 +929,17 @@ export class SebasProjectRail extends LitElement {
       //    「当前」标记由 refresh() 后的 active_session_key 回填（创建请求
       //    服务端已 set_focus）。
       void this.refresh()
+      // （fix-webui-qa-round14 4.6，D-2-1）项目标签即时反投影：创建成功的
+      // 瞬间就把新会话所属项目路径投给 shell（PROJECT_FOLLOW_EVENT）——
+      // 此前要等 summary 往返（refresh → active_session_key → follow）才
+      // 纠正，主区标题在这窗口里挂着上一个项目（QA-2 D-2-1 实锤）。summary
+      // 收敛后的再投影与它幂等（同路径 no-op）。
+      window.dispatchEvent(
+        new CustomEvent(PROJECT_FOLLOW_EVENT, { detail: { path: p.path } }),
+      )
       // （fix-webui-qa-round3 2.6 / D10）创建即聚焦：地址同样投影为该会话的
-      // /sessions/{key}（刷新自持焦点）。
+      // /sessions/{key}（刷新自持焦点）。失败路径绝不走到这里——不产生
+      // 幻影会话 URL（spec「no phantom session URL」）。
       navigate(`/sessions/${created.key}`)
       // ③ 一次性 composer 对焦请求（COMPOSER_FOCUS_REQUEST，dashboard 接力
       //    到 focusInput）。setTimeout(0)：在 /sessions 上创建时先让路由
@@ -869,8 +950,13 @@ export class SebasProjectRail extends LitElement {
         0,
       )
     } catch (err) {
-      // 失败留在对话框内就地呈现——不假装创建成功。
-      this.newSessionError = err instanceof Error ? err.message : String(err)
+      // 失败留在对话框内就地呈现——不假装创建成功。（fix-webui-qa-round14
+      // 2.1，D-3-1/D-4-3）类型化拒绝（如「会话数已达上限 32」）同时经 notice
+      // 层呈现——后端 Display 文案原样上屏（task 1.2 已核实可达），操作者在
+      // 动作点上得到显式失败反馈；不 pushState、不产生幻影会话 URL。
+      const message = err instanceof Error ? err.message : String(err)
+      this.newSessionError = message
+      notify({ level: 'error', message, dedupeKey: `session-create-failed:${message}` })
     } finally {
       this.creatingSession = false
     }
@@ -992,10 +1078,11 @@ export class SebasProjectRail extends LitElement {
     try {
       await api.archiveSession(row.encoded_key)
       // （fix-webui-qa-findings M6）归档成功回执：效果落在 History 组（行
-      // 从项目列表消失），toast 点名会话。
+      // 从项目列表消失），toast 点名会话。（5.1）「History」→「历史」：
+      // 界面语言一致的中文基准文案（QA-5 D-5-4）。
       notify({
         level: 'info',
-        message: `会话「${truncateName(fullSessionLabel(row))}」已归档，可在 History 中查看或恢复。`,
+        message: `会话「${truncateName(fullSessionLabel(row))}」已归档，可在历史中查看或恢复。`,
       })
       this.closeConfirmDialog()
       void this.refresh()
@@ -1262,9 +1349,13 @@ export class SebasProjectRail extends LitElement {
       if (r.project_id !== id) continue
       count += 1
       // 8.4 + polish-workbench-walkthrough-ux 3.6：橙点只标「在等操作员
-      // 决定」（悬空审批 > 0 / waiting）——queued/starting/failed 的占位与
-      // 排队不属于「需介入」，全新占位会话不再误亮橙点。
-      if (r.status_slug === 'waiting' || (r.remote?.parked_approvals ?? 0) > 0) {
+      // 决定」（waiting 投影）——queued/starting/failed 的占位与排队不属于
+      // 「需介入」，全新占位会话不再误亮橙点。（fix-webui-qa-round14 4.2，
+      // D-3-2）单一真源 = `status_slug`：行/帧投影已把本地与远端泊车折进
+      // waiting slug（models.rs with_parked_approvals），不再叠加帧载荷外的
+      // `remote.parked_approvals` 臂——那个臂不随帧补丁更新，泊车解除/收尾
+      // 后只能等全量 refresh 自愈（等待标记滞留的根因，task 1.1）。
+      if (r.status_slug === 'waiting') {
         waiting = true
       }
     }
@@ -1274,10 +1365,13 @@ export class SebasProjectRail extends LitElement {
   /**
    * 8.4：等待操作员决定（悬空审批 > 0）的会话。它们单独成组——「在等人」与
    * 「在干活」必须是两个可分辨的集合，把等待埋在项目分组里就等于只有点开
-   * 才发现。
+   * 才发现。（fix-webui-qa-round14 4.2）与行级 chip 同一真源：
+   * `status_slug === 'waiting'`（帧到达即就地翻转；行/帧投影已把本地与远端
+   * 泊车折进 waiting slug），不再只认帧外的 remote 泊车计数——本地泊车会话
+   * 同样入组，收尾翻转即时出组。
    */
   waitingSessions(): SessionRow[] {
-    return this.sessions.filter((r) => (r.remote?.parked_approvals ?? 0) > 0)
+    return this.sessions.filter((r) => r.status_slug === 'waiting')
   }
 
   // ─── Renderers ──────────────────────────────────────────────────
@@ -1309,10 +1403,13 @@ export class SebasProjectRail extends LitElement {
     // 不显示，99+ 封顶。（round3 6.1：聚焦会话可见期间不呈现，见 rowUnread。）
     const unread = this.rowUnread(row)
     const badge = unread > UNREAD_BADGE_CAP ? `${UNREAD_BADGE_CAP}+` : String(unread)
-    // 8.4：悬空审批 > 0 = 在等人，不是在跑（状态词由后端投影为 waiting，
-    // 这里再按 remote 兜一层，老报文/直接 mock 的 remote 也能正确标）。
+    // 8.4：悬空审批 > 0 = 在等人，不是在跑。（fix-webui-qa-round14 4.2，
+    // D-3-2）呈现单一真源 = `status_slug`：帧到达即就地翻转（onWsEvent 行内
+    // 补丁），force-settle 的 settled 帧（status done）即刻替换等待呈现。
+    // 帧载荷外的 `remote.parked_approvals` 不再参与「是否等待」判定——它不随
+    // 帧更新，是滞留根因；仅当 slug 为 waiting 时仍用它显示泊车计数。
     const remote = row.remote ?? null
-    const waiting = (remote?.parked_approvals ?? 0) > 0 || row.status_slug === 'waiting'
+    const waiting = row.status_slug === 'waiting'
     // 8.5：会话标注所属节点；节点不可用时把成因写在 title 上。
     const nodeId = remote?.node_id ?? null
     const nodeLabel = nodeId ?? (row.project_id ? LOCAL_NODE : null)
@@ -1481,10 +1578,13 @@ export class SebasProjectRail extends LitElement {
     // （「历史」标签 + 计数）直达 /sessions，归档为空也渲染组头——总览页
     // 不再只能手输 URL。折叠/展开收窄到 chevron（组头的导航语义与开合
     // 语义分离，点击标签绝不误折叠）。
-    // （fix-webui-qa-round10 5.1，B-DEF-01）组头计数 = /api/sessions 的
-    // `total_sessions`（会话页统计区同一份数字），随建会话/关闭/归档的
-    // 刷新通道联动——不再是「归档条数」（恒 0 被 QA 证伪为误导：会话页
-    // 「N 总计」同框时徽章恒 0）。归档组列表语义不变（仍只列归档条目）。
+    // （fix-webui-qa-round14 4.5）组头计数回归主 spec 明文（agent-workbench
+    // 「The History group SHALL show the total count of archived sessions」）
+    // ——= **归档总数**（面板列的就是归档条目，数字与内容一致）。round10
+    // 的 total_sessions 口径与面板内容不一致（QA-1 UX 缺口 3：3 活跃时徽章
+    // 3、面板 1 条），随本 change 翻回。
+    // （fix-webui-qa-round14 4.4）开合态持久（RAIL_HISTORY_OPEN_KEY，缺省
+    // 收起）：toggle 即写 localStorage，刷新不再回弹（D-1-1）。
     const archived = [...this.archivedSessions].sort((a, b) => b.archived_at - a.archived_at)
     return html`
       <div class="group-section" data-testid="history-group">
@@ -1501,6 +1601,7 @@ export class SebasProjectRail extends LitElement {
             // （分栏布局、未读游标、turn-notify 迁移锚）。
             if (e.composedPath().some((n) => n instanceof HTMLAnchorElement)) return
             this.historyOpen = !this.historyOpen
+            saveHistoryOpen(this.historyOpen, safeStorage())
           }}
         >
           <span class="chevron ${this.historyOpen ? 'open' : ''}" aria-hidden="true">▶</span
@@ -1510,7 +1611,7 @@ export class SebasProjectRail extends LitElement {
             data-testid="history-sessions-link"
             title="打开全部会话总览"
             >历史</a
-          ><span class="group-count" data-testid="history-session-count">${this.sessionTotal}</span>
+          ><span class="group-count" data-testid="history-session-count">${archived.length}</span>
         </button>
         ${this.historyOpen && archived.length > 0 ? html`<ul class="sessions">${archived.map((a) => this.renderArchivedSessionRow(a))}</ul>` : nothing}
       </div>`

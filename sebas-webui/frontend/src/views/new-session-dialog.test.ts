@@ -693,3 +693,109 @@ describe('sebas-new-session-dialog', () => {
     expect(confirmed).toHaveBeenCalledTimes(1)
   })
 })
+
+// ── fix-webui-qa-round14 3.2（D-4-1）：模型下拉并入别名短名 ────────────────
+
+describe('model select merges alias short names (round14 3.2)', () => {
+  function seedProvidersWithAliases() {
+    ;(api.providers as ReturnType<typeof vi.fn>).mockResolvedValue({
+      providers: [
+        { name: 'deepseek', models: [{ id: 'deepseek-chat', tags: [] }] },
+        { name: 'anthropic', models: [{ id: 'sonnet', tags: [] }] },
+      ],
+      model_aliases: {
+        'my-claude': { provider: 'anthropic', upstream_model: 'sonnet' },
+        sonnet: { provider: 'anthropic' },
+      },
+    })
+  }
+
+  it('offers alias short names alongside catalog models with source markers', async () => {
+    seedProvidersWithAliases()
+    const el = await mount({ open: true, defaultAgent: 'claude' })
+    const modelSel = syncWaSelect(el, 'dialog-model-select') as HTMLElement & { value: string }
+    // 预选仍是目录第一对（别名不参与预选）。
+    expect(modelSel.value).toBe('deepseek-chat')
+    const options = [
+      ...modelSel.querySelectorAll('wa-option'),
+    ].map((o) => o.getAttribute('value'))
+    // 别名短名与目录模型并排可选；同名冲突（sonnet）别名优先——目录条目
+    // 被替换，不重复出现。
+    expect(options).toContain('my-claude')
+    expect(options.filter((v) => v === 'sonnet')).toHaveLength(1)
+    expect(options).toContain('deepseek-chat')
+    const aliasOption = modelSel.querySelector('wa-option[value="my-claude"]')!
+    // 来源徽标：选项文案点名「别名」，悬浮 title 点名目标 provider。
+    expect(aliasOption.textContent).toContain('别名')
+    expect(aliasOption.getAttribute('title')).toContain('anthropic')
+    el.remove()
+  })
+
+  it('selecting an alias submits the alias string as the model value and skips last-used memory', async () => {
+    seedProvidersWithAliases()
+    const el = await mount({ open: true, defaultAgent: 'claude' })
+    await pick(el, 'dialog-model-select', 'my-claude')
+    const confirmed = vi.fn()
+    el.addEventListener('dialog-confirm', confirmed)
+    confirmButton(el).click()
+    await new Promise((r) => setTimeout(r, 0))
+
+    expect(confirmed).toHaveBeenCalledTimes(1)
+    const detail = (confirmed.mock.calls[0]![0] as CustomEvent).detail as Record<string, unknown>
+    expect(detail.model).toBe('my-claude')
+    // (provider, alias) 不是目录对：不写 last-used 记忆。
+    expect(localStorage.getItem(LAST_USED_PAIR_KEY)).toBeNull()
+    el.remove()
+  })
+
+  it('an empty catalog with aliases still renders the alias-capable model select', async () => {
+    ;(api.providers as ReturnType<typeof vi.fn>).mockResolvedValue({
+      providers: [],
+      model_aliases: { deep: { provider: 'deepseek' } },
+    })
+    const el = await mount({ open: true, defaultAgent: 'claude' })
+    // 目录模型为空但别名在场：不再落「尚未配置」引导，模型下拉只含别名。
+    expect(el.shadowRoot?.querySelector('[data-testid="dialog-catalog-unavailable"]')).toBeNull()
+    expect(el.shadowRoot?.querySelector('[data-testid="dialog-provider-select"]')).toBeNull()
+    const modelSel = syncWaSelect(el, 'dialog-model-select') as HTMLElement & { value: string }
+    const options = [...modelSel.querySelectorAll('wa-option')].map((o) =>
+      o.getAttribute('value'),
+    )
+    expect(options).toEqual(['deep'])
+    el.remove()
+  })
+})
+
+// ── fix-webui-qa-round14 4.7：可选预命名（创建后立即重命名兜底链的输入端）──
+
+describe('optional session title input (round14 4.7)', () => {
+  it('carries the trimmed title in dialog-confirm detail; empty stays empty', async () => {
+    ;(api.providers as ReturnType<typeof vi.fn>).mockResolvedValue({ providers: [] })
+    const el = await mount({ open: true, defaultAgent: 'claude' })
+    const input = el.shadowRoot?.querySelector(
+      '[data-testid="dialog-title-input"]',
+    ) as unknown as HTMLInputElement & { value: string }
+    expect(input).toBeTruthy()
+    input.value = '  smoke-1  '
+    input.dispatchEvent(new Event('input', { bubbles: true, composed: true }))
+    await el.updateComplete
+
+    const confirmed = vi.fn()
+    el.addEventListener('dialog-confirm', confirmed)
+    confirmButton(el).click()
+    await new Promise((r) => setTimeout(r, 0))
+    const detail = (confirmed.mock.calls[0]![0] as CustomEvent).detail as Record<string, unknown>
+    expect(detail.title).toBe('smoke-1')
+    el.remove()
+
+    // 空值 = 现行命名行为（detail.title 为空串）。
+    const el2 = await mount({ open: true, defaultAgent: 'claude' })
+    const confirmed2 = vi.fn()
+    el2.addEventListener('dialog-confirm', confirmed2)
+    confirmButton(el2).click()
+    await new Promise((r) => setTimeout(r, 0))
+    const detail2 = (confirmed2.mock.calls[0]![0] as CustomEvent).detail as Record<string, unknown>
+    expect(detail2.title).toBe('')
+    el2.remove()
+  })
+})

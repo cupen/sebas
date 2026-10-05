@@ -1612,3 +1612,84 @@ describe('slash text dispatches identically via Enter and the send button (round
     decided.remove()
   })
 })
+
+// ── fix-webui-qa-round14 3.1（D-4-1）：别名短名并入模型菜单 ────────────────
+
+describe('model menu merges alias short names (round14 3.1, D-4-1)', () => {
+  function seedCatalogWithAliases() {
+    ;(api.providers as ReturnType<typeof vi.fn>).mockResolvedValue({
+      providers: [
+        { name: 'anthropic', models: [{ id: 'sonnet', tags: [] }, { id: 'haiku', tags: [] }] },
+      ],
+      // 别名 my-claude → anthropic（上游 sonnet 覆写）；同名冲突（sonnet）
+      // 时别名条目优先。
+      model_aliases: {
+        'my-claude': { provider: 'anthropic', upstream_model: 'sonnet' },
+        sonnet: { provider: 'anthropic' },
+      },
+    })
+  }
+
+  it('offers the alias group with source markers ahead of catalog groups', async () => {
+    seedCatalogWithAliases()
+    const el = await mount(focus)
+    const chip = el.shadowRoot!.querySelector('[data-testid="model-chip"]') as HTMLElement
+    chip.click()
+    await el.updateComplete
+
+    const groups = [
+      ...(el.shadowRoot?.querySelectorAll('[data-testid="model-group"]') ?? []),
+    ].map((n) => n.textContent?.trim())
+    // 「别名」组置顶，目录组随后。
+    expect(groups[0]).toBe('别名')
+    expect(groups).toContain('anthropic')
+
+    const items = [
+      ...(el.shadowRoot?.querySelectorAll('.menu-item') ?? []),
+    ] as HTMLElement[]
+    const values = items.map((i) => i.getAttribute('data-model'))
+    // 别名条目在前；同名冲突（sonnet 目录条目被别名替换，只出现一次）。
+    expect(values.slice(0, 2)).toEqual(['my-claude', 'sonnet'])
+    expect(values.filter((v) => v === 'sonnet')).toHaveLength(1)
+    expect(values).toContain('haiku')
+    // 别名条目带来源徽标；目录条目不带。
+    const aliasItems = [
+      ...(el.shadowRoot?.querySelectorAll('.menu-item [data-testid="model-alias-tag"]') ?? []),
+    ] as HTMLElement[]
+    expect(aliasItems).toHaveLength(2)
+    const myClaude = items.find((i) => i.getAttribute('data-model') === 'my-claude')!
+    expect(myClaude.querySelector('[data-testid="model-alias-tag"]')).toBeTruthy()
+    expect(myClaude.getAttribute('title')).toContain('anthropic')
+    const haiku = items.find((i) => i.getAttribute('data-model') === 'haiku')!
+    expect(haiku.querySelector('[data-testid="model-alias-tag"]')).toBeNull()
+    el.remove()
+  })
+
+  it('selecting an alias submits the alias string as the model value (set_model path)', async () => {
+    seedCatalogWithAliases()
+    const el = await mount(focus)
+    ;(el.shadowRoot!.querySelector('[data-testid="model-chip"]') as HTMLElement).click()
+    await el.updateComplete
+    ;(el.shadowRoot!.querySelector('.menu-item[data-model="my-claude"]') as HTMLElement).click()
+    await el.updateComplete
+    // 选中即以别名为模型值（走既有 setSessionModel 控制帧路径）。
+    expect(api.setSessionModel).toHaveBeenCalledWith('web%00web-1', 'my-claude')
+    el.remove()
+  })
+
+  it('a session without catalog models still opens the menu with alias entries only', async () => {
+    seedCatalogWithAliases()
+    const el = await mount({ sessionKey: 'web%00web-9', sessionModels: [], currentModel: null })
+    // 无目录模型但别名在场：不再落「无可用模型」占位，而是可开菜单。
+    expect(el.shadowRoot?.querySelector('[data-testid="model-chip-unavailable"]')).toBeNull()
+    const chip = el.shadowRoot!.querySelector('[data-testid="model-chip"]') as HTMLElement
+    expect(chip).toBeTruthy()
+    chip.click()
+    await el.updateComplete
+    const values = [
+      ...(el.shadowRoot?.querySelectorAll('.menu-item') ?? []),
+    ].map((i) => (i as HTMLElement).getAttribute('data-model'))
+    expect(values).toEqual(['my-claude', 'sonnet'])
+    el.remove()
+  })
+})

@@ -1098,6 +1098,139 @@ mod multiuser_rbac {
         let (status, _) = request(&app, "DELETE", "/api/users/424242", Some(&alice), None).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
+
+    /// fix-webui-qa-round14（webui-user-management viewer 只读口径）夹具：
+    /// rbac_app 的用户面 + 一条可寻址的 FakeBackend 会话（backend 句柄一并
+    /// 交出，供断言焦点指针的副作用）。
+    async fn rbac_app_with_session()
+    -> (axum::Router, Arc<sebas_webui::session_backend::FakeBackend>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let auth = Arc::new(AuthHandle::open_with_iterations(
+            dir.path().join("auth.db"),
+            1000,
+        ));
+        auth.setup_root("alice", "password8").await.unwrap();
+        let store = auth.user_store().unwrap();
+        store.create("bob", "password8", Role::Member).unwrap();
+        store.create("vic", "password8", Role::Viewer).unwrap();
+        let backend = Arc::new(sebas_webui::session_backend::FakeBackend::new());
+        backend
+            .set_sessions(vec![sebas_dispatch::SessionInfo {
+                channel: "web".into(),
+                key: "web-fake-1".into(),
+                session_id: None,
+                status: "active".into(),
+                phase: None,
+                user_prompt: None,
+                last_active_unix: 0,
+                project_dir: None,
+                current_model: None,
+                available_models: None,
+                agent_kind: None,
+                usage: None,
+                backend: None,
+                pending: Vec::new(),
+                remote: None,
+                desired_mode: sebas_dispatch::engine::ask_mode(),
+                effective_mode: None,
+                msg_count: 0,
+                available_commands: Vec::new(),
+                turn_engaged: false,
+                spawn_failure_reason: None,
+                parked_approvals: 0,
+                label: None,
+                first_prompt_preview: None,
+            }])
+            .await;
+        let app = build_router_with_auth(
+            backend.clone(),
+            RouterInfo::default(),
+            CardConfig::default(),
+            None,
+            Arc::new(sebas_webui::agent_kinds::ConfigAgentKindProvider::new(
+                Vec::new(),
+            )),
+            30,
+            auth,
+        );
+        (app, backend, dir)
+    }
+
+    // ── fix-webui-qa-round14（webui-user-management「viewer 只读」delta）────
+    //
+    // 服务端半边的集成钉子：viewer 的**读面**（GET 转录 detail）不挂
+    // sessions.write 权限词——「viewer 打开会话 = 纯 GET 只读视图」的执法
+    // 前提；同一会话的 **switch 写**（sessions.write 档）对 viewer 403 且
+    // 零副作用（前端「打开不触发 switch」的执法面）。member 对照：同一写
+    // 操作放行到 handler（焦点指针落位）。
+    #[tokio::test]
+    async fn viewer_reads_the_transcript_but_switch_stays_write_gated() {
+        use sebas_channels::ChannelKey;
+        use sebas_webui::SessionBackend as _;
+        let (app, backend, _dir) = rbac_app_with_session().await;
+        let vic = login_cookie(&app, "vic", "password8").await;
+        let bob = login_cookie(&app, "bob", "password8").await;
+
+        let key = ChannelKey::new("web", "web-fake-1");
+        let encoded =
+            urlencoding::encode(&format!("{}\0{}", key.channel.as_str(), key.reference))
+                .into_owned();
+
+        // 写档对照先立：viewer 的会话创建（sessions.write）403。
+        let (status, v) = request(
+            &app,
+            "POST",
+            "/api/sessions",
+            Some(&vic),
+            Some(r#"{"agent":"native"}"#.into()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "viewer create must 403: {v}");
+
+        // viewer switch：403（路由层执法，handler 不可达）且焦点指针零副作用
+        // ——被拒的「打开」绝不落全局活跃焦点。
+        let (status, v) = request(
+            &app,
+            "POST",
+            &format!("/api/sessions/{encoded}/switch"),
+            Some(&vic),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "viewer switch must 403: {v}");
+        assert_eq!(
+            backend.focused().await,
+            None,
+            "rejected switch must not move the focus pointer"
+        );
+
+        // viewer 的转录读面开放：GET detail 200（读不挂写权限词）。
+        let (status, v) = request(
+            &app,
+            "GET",
+            &format!("/api/sessions/{encoded}"),
+            Some(&vic),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "viewer GET detail must be open: {v}");
+
+        // member 对照：同一 switch 写放行（handler 可达，焦点指针落位）。
+        let (status, v) = request(
+            &app,
+            "POST",
+            &format!("/api/sessions/{encoded}/switch"),
+            Some(&bob),
+            None,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "member switch must reach the handler: {v}"
+        );
+        assert_eq!(backend.focused().await, Some(key));
+    }
 }
 
 // （add-usage-statistics 3.1）`GET /api/usage/timeseries` 的路由级单测：

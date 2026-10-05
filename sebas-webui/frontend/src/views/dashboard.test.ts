@@ -2763,3 +2763,46 @@ describe('closed-session deep link settles without polling (round11 4.2)', () =>
     el.remove()
   })
 })
+
+// ── fix-webui-qa-round14 2.5：viewer 打开会话 = 纯 GET 只读视图 ─────────────
+
+describe('viewer read-only workbench (round14 2.5, webui-user-management)', () => {
+  it('viewer focus keeps the GET transcript but never fires the activate write', async () => {
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    apiMocks.session.mockResolvedValue(detailFixture())
+    // 角色在连接前就位（mount 即触发首次装载，迟到置角色拦不住第一发）。
+    const el = document.createElement('sebas-dashboard') as SebasDashboard
+    el.role = 'viewer'
+    document.body.appendChild(el)
+    await el.updateComplete
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+
+    // 转录照常渲染（GET detail 已装载）。
+    expect(el.shadowRoot!.querySelector('sebas-transcript-view')).toBeTruthy()
+    // activate 是 sessions.write 面（拉起子进程）：viewer 的打开不发它。
+    expect(apiMocks.activateSession).not.toHaveBeenCalled()
+    // composer 整体让位给只读说明。
+    expect(el.shadowRoot!.querySelector('sebas-workbench-composer')).toBeNull()
+    expect(
+      el.shadowRoot!.querySelector('[data-testid="composer-viewer-readonly"]'),
+    ).toBeTruthy()
+    el.remove()
+  })
+
+  it('roles with sessions.write keep the composer and the activate call', async () => {
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    apiMocks.session.mockResolvedValue(detailFixture())
+    const el = await mount()
+    el.role = 'member'
+    await el.updateComplete
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('sebas-workbench-composer')).toBeTruthy()
+    expect(el.shadowRoot!.querySelector('[data-testid="composer-viewer-readonly"]')).toBeNull()
+    expect(apiMocks.activateSession).toHaveBeenCalledWith('oc_live%00')
+    el.remove()
+  })
+})

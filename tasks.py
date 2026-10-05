@@ -596,9 +596,15 @@ _NATIVE_SCENARIO_MODELS = (
 
 
 def _sandbox_bin(name):
-    """Repo-built binary; native Windows processes need the .exe suffix."""
+    """Repo-built binary; native Windows processes need the .exe suffix.
+
+    Honors CARGO_TARGET_DIR: when the default target dir is unusable (e.g. a
+    running sandbox holds locks on target/debug/*.exe), the whole gate can run
+    against an alternate build tree via CARGO_TARGET_DIR=target-gate — build
+    and sandbox launch must agree on the same tree, so both go through here."""
+    target_dir = os.environ.get("CARGO_TARGET_DIR", "target")
     suffix = ".exe" if os.name == "nt" or sys.platform.startswith(("msys", "cygwin")) else ""
-    return os.path.join("target", "debug", name + suffix)
+    return os.path.join(target_dir, "debug", name + suffix)
 
 
 def _cfg_path(path):

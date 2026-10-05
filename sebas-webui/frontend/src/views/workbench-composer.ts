@@ -74,7 +74,10 @@ import {
   loadModelCatalog,
   groupSessionModels,
   SESSION_PROVIDED_GROUP_LABEL,
+  ALIAS_GROUP_LABEL,
+  aliasEntryTitle,
   type ModelCatalog,
+  type ModelAliasChoice,
 } from '../api/model-catalog.js'
 import { renderMarkdown } from '../components/markdown.js'
 import { MODE_OPTIONS } from './mode-vocabulary.js'
@@ -229,6 +232,11 @@ export class SebasWorkbenchComposer extends LitElement {
    * id 归回 provider 组；目录不可得时芯片退化为平铺，不伪造分组。
    */
   @state() private catalog: ModelCatalog | null = null
+  /**
+   * （fix-webui-qa-round14 3.1，D-4-1）别名短名清单（模型菜单「别名」组的
+   * 数据源）；读取失败/无别名 = 空表，菜单保持纯目录模型。
+   */
+  @state() private aliases: ModelAliasChoice[] = []
   /** 中程切换聚焦会话模型时的在途标记（add-acp-model-selection 语义）。 */
   @state() private modelSwitching = false
   /** 中程切换会话权限模式的在途标记（add-agent-mode-selection 语义）。 */
@@ -362,8 +370,11 @@ export class SebasWorkbenchComposer extends LitElement {
 
   /** 目录加载（design D2：与创建对话框共用 loadModelCatalog，防漂移）。 */
   private async loadCatalog(): Promise<void> {
-    const { catalog } = await loadModelCatalog()
+    const { catalog, aliases } = await loadModelCatalog()
     this.catalog = catalog
+    // （fix-webui-qa-round14 3.1，D-4-1）别名短名随同一份读面到位——模型
+    // 菜单并入「别名」组（来源徽标区分），读取失败为空表即无并入面。
+    this.aliases = aliases
   }
 
   /** 跟随模式输入门禁：无聚焦会话或 core 不可达 = 禁用。 */
@@ -716,7 +727,9 @@ export class SebasWorkbenchComposer extends LitElement {
   // ─── 模型芯片（design D3）────────────────────────────────────────────
 
   private openModelMenu(): void {
-    if (this.sessionModels.length === 0) return
+    // （fix-webui-qa-round14 3.1）别名在场即可开菜单——即使会话未上报任何
+    // 可选模型，别名短名仍是可用的模型取值（选中走既有 set_model 路径）。
+    if (this.sessionModels.length === 0 && this.aliases.length === 0) return
     this.modelMenuOpen = true
     // 捕获阶段监听 document 点击：点菜单外任意处收起（打开菜单的那次点击
     // 已过捕获阶段，不会立刻自吞）。
@@ -748,24 +761,46 @@ export class SebasWorkbenchComposer extends LitElement {
    * 分组视图（design D3）：目录交叉引用 → provider 组；查不到 → 「会话提供」
    * 置底；目录不可得 → 单组平铺（消费方据 groups.length===1 &&
    * provider===null 识别平铺态，不渲染组头）。
+   *
+   * （fix-webui-qa-round14 3.1，D-4-1）别名组置顶：一个「别名」组容纳全部
+   * 别名短名（来源徽标区分目录模型）；同名冲突时别名优先——其余组里与别名
+   * 同名的条目被折叠（mergeAliasEntries 的冲突语义跨组应用）。
    */
   private modelGroups() {
-    return groupSessionModels(this.sessionModels, this.catalog)
+    const groups = groupSessionModels(this.sessionModels, this.catalog)
+    if (this.aliases.length === 0) return groups
+    const aliasNames = new Set(this.aliases.map((a) => a.alias))
+    const deduped = groups.map((g) => ({
+      provider: g.provider,
+      models: g.models.filter((m) => !aliasNames.has(m)),
+    }))
+    return [{ provider: ALIAS_GROUP_LABEL, models: this.aliases.map((a) => a.alias) }, ...deduped]
+  }
+
+  /** 一个条目的别名身份（渲染来源徽标用）：查别名表，命中即别名条目。 */
+  private aliasChoiceFor(value: string): ModelAliasChoice | null {
+    return this.aliases.find((a) => a.alias === value) ?? null
   }
 
   private renderModelChip() {
-    if (this.sessionModels.length === 0) {
-      // 子进程拉起中（workbench-live-conversation-flow 3.2）：模型表要等
-      // agent 上报，此刻「无可用模型」是误导——显式呈现启动中。
-      if (this.childStarting) {
-        return html`<span
-          class="label placeholder model-chip-empty"
-          data-testid="model-chip-starting"
-          role="status"
-          title="子进程拉起中，模型表随后可用"
-          >启动中…</span
-        >`
-      }
+    // （fix-webui-qa-round14 3.1）别名在场 = 模型菜单有可用条目：会话未上报
+    // 模型时不再落「无可用模型」占位，而是渲染只含别名组的可开菜单（选中
+    // 以别名串为模型值，走既有 set_model 路径）；子进程启动中的「启动中…」
+    // 形态与只读 current 形态优先级不变。
+    const hasModels = this.sessionModels.length > 0 || this.aliases.length > 0
+    // 子进程拉起中（workbench-live-conversation-flow 3.2）：模型表要等
+    // agent 上报，此刻「无可用模型」是误导——显式呈现启动中（优先于别名面：
+    // spawn 窗口里 set_model 尚无接收方）。
+    if (this.childStarting && this.sessionModels.length === 0) {
+      return html`<span
+        class="label placeholder model-chip-empty"
+        data-testid="model-chip-starting"
+        role="status"
+        title="子进程拉起中，模型表随后可用"
+        >启动中…</span
+      >`
+    }
+    if (!hasModels) {
       // （workbench-composer-input-polish 2.4）有观察 current 但无切换选项
       // 的会话：芯片只读展示当前模型（spec「observed current model renders
       // read-only」）——不再是误导性的「无可用模型」占位。
@@ -841,9 +876,12 @@ export class SebasWorkbenchComposer extends LitElement {
     `
   }
 
-  private renderModelItems(models: string[]) {
-    return models.map(
-      (m) => html`
+  private renderModelItems(models: readonly string[]) {
+    return models.map((m) => {
+      // （fix-webui-qa-round14 3.1，D-4-1）别名条目带来源徽标（title 点名
+      // 目标 provider），与目录/会话模型一眼可分；选中即以别名串为模型值。
+      const alias = this.aliasChoiceFor(m)
+      return html`
         <button
           class="menu-item"
           type="button"
@@ -851,18 +889,24 @@ export class SebasWorkbenchComposer extends LitElement {
           aria-selected=${this.currentModel === m ? 'true' : 'false'}
           data-model=${m}
           ?disabled=${this.modelSwitching}
+          title=${alias ? aliasEntryTitle(alias) : nothing}
           @click=${() => {
             this.closeModelMenu()
             if (m !== this.currentModel) void this.switchModel(m)
           }}
         >
           <span class="menu-item-label">${m}</span>
+          ${alias
+            ? html`<span class="alias-tag" data-testid="model-alias-tag" title=${aliasEntryTitle(alias)}
+                >${ALIAS_GROUP_LABEL}</span
+              >`
+            : nothing}
           ${this.currentModel === m
             ? html`<span class="current-tag" data-testid="model-current-tag">当前</span>`
             : nothing}
         </button>
-      `,
-    )
+      `
+    })
   }
 
   /**
@@ -1372,6 +1416,18 @@ export class SebasWorkbenchComposer extends LitElement {
         background: var(--sebas-accent-soft);
         border-radius: var(--sebas-radius-full);
         padding: 0 6px;
+      }
+      /* （fix-webui-qa-round14 3.1，D-4-1）别名条目的来源徽标：与「当前」
+         标签同族的中性 pill（waiting 琥珀提亮），把别名短名与目录模型区分开。 */
+      .menu-item .alias-tag {
+        flex: 0 0 auto;
+        font-size: 0.62rem; font-weight: 700;
+        color: var(--sebas-status-waiting);
+        background: var(--sebas-status-waiting-bg);
+        border: 1px solid var(--sebas-status-waiting-border);
+        border-radius: var(--sebas-radius-full);
+        padding: 0 6px;
+        white-space: nowrap;
       }
 
       /* ── 提交控件状态机（design D4）──────────────────────────────────── */

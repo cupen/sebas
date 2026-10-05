@@ -2591,12 +2591,16 @@ export class SebasSettingsModal extends LitElement {
     // 为准——`display` 缺省回退 id，「显式设置为与 id 相同」与「从未设置」
     // 在它面前可区分（此前回填丢失正是 QA 观测的保真缺陷）。
     const display = a.display_raw ?? (a.display !== a.id ? a.display : '')
+    // （fix-webui-qa-round14 4.8，D-4-4）path 预填保真：claude 形态的存量
+    // store 行以 path_raw 回填（无记录回退内置缺省 `claude`）——操作者切
+    // 「启动定义」到 claude 形态时不得被硬编码值覆盖存量。
+    const storedPath = a.driver_raw === 'claude' ? (a.path_raw ?? 'claude') : 'claude'
     this.agentForm = {
       mode: 'edit',
       id: a.id,
       display,
       shape: '',
-      path: 'claude',
+      path: storedPath,
       commandText: 'opencode acp',
       sessionsDir: a.sessions_dir ?? '',
       workDir: a.work_dir ?? '',

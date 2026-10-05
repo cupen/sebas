@@ -426,9 +426,12 @@ describe('deep-link reachability (workbench-conversation-view 3.1)', () => {
     // 模板身份复用 DOM——聚焦切换不再拆毁重建 dashboard）。
     const outlet = src.match(/private renderOutlet\(\)[\s\S]*?\n  \}/)?.[0] ?? ''
     expect(outlet).toContain(".deepLinkKey=${this.routeId === 'session-deep-link'")
-    // 仅两个非工作台出口。
-    expect((outlet.match(/<sebas-sessions>/g) ?? []).length).toBe(1)
+    // 仅两个非工作台出口。（fix-webui-qa-round14 2.3/2.5）sessions 面与
+    // dashboard 均下传角色——总览页按 sessions.write 裁剪写入口，工作台
+    // 承载 viewer 纯 GET 只读视图。
+    expect((outlet.match(/<sebas-sessions\b/g) ?? []).length).toBe(1)
     expect((outlet.match(/<sebas-usage>/g) ?? []).length).toBe(1)
+    expect(outlet).toContain('.role=${this.authRole}')
   })
 
   it('the sessions grid wraps within its container (D3 layout contract)', () => {

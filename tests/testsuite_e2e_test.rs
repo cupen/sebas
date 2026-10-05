@@ -11145,6 +11145,98 @@ mod agent_catalog {
         let key2 = body["key"].as_str().expect("key").to_string();
         wait_turn_done(&cli, &sb, &format!("{}/api/sessions/{key2}", sb.webui_url())).await;
     }
+
+    /// fix-webui-qa-round14 4.8（D-4-4）：存量启动 path 以 `path_raw` 走完
+    /// 「config 种子 / store 行 → agents 表 → catalog 富化 → wire」全程——
+    /// 编辑表单切「启动定义」到 claude 形态时 path 预填以存量值（不得被
+    /// 硬编码 `claude` 覆盖）的**数据源**。纯函数与 handler 级各有一层单测
+    /// （api.rs enrichment tests / agent_kinds_test.rs）；这里钉进程级：
+    /// config 种子的 claude 行与 UI 建的 store 行都带 `path_raw`，无显式
+    /// path 的 store 行不带键。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn catalog_wire_carries_stored_paths_as_path_raw() {
+        let sb = Sandbox::new("testsuite_e2e", "agent-path-raw");
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
+        let agents_url = format!("{}/api/agents", sb.webui_url());
+        let fake = forward_slash(Path::new(env!("CARGO_BIN_EXE_fake-claude")));
+
+        // 1) config 种子行（Sandbox 模板的 [acp.agents.claude] path）：启动
+        //    导入 agents 表后，path 原样随 catalog 行下发。
+        let (status, body) = get_json_status(&cli, &agents_url).await.expect("catalog");
+        assert_eq!(status, 200, "{body}");
+        let claude = body["agents"]
+            .as_array()
+            .and_then(|a| a.iter().find(|a| a["id"] == "claude").cloned())
+            .expect("config seed claude row");
+        assert_eq!(
+            claude["path_raw"], fake,
+            "config-seeded path must ride the catalog as path_raw: {claude}"
+        );
+
+        // 2) UI 建 store 行（带显式 path）→ path_raw 在场；无 path 的行 →
+        //    不加键（前端以内置缺省预填）。
+        let (status, body) = post_json(
+            &cli,
+            &agents_url,
+            serde_json::json!({"id": "stub-path", "driver": "claude", "path": fake}),
+        )
+        .await
+        .expect("create agent with path");
+        assert_eq!(status, 201, "{body}");
+        let (status, body) = post_json(
+            &cli,
+            &agents_url,
+            serde_json::json!({"id": "plain-no-path", "driver": "claude"}),
+        )
+        .await
+        .expect("create agent without path");
+        assert_eq!(status, 201, "{body}");
+
+        let hint = sb.path.clone();
+        let catalog = wait_for(
+            "both new store rows to appear in the catalog",
+            Duration::from_secs(15),
+            &hint,
+            {
+                let cli = cli.clone();
+                let url = agents_url.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    Box::pin(async move {
+                        let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+                        let ids: Vec<&str> = v["agents"]
+                            .as_array()?
+                            .iter()
+                            .filter_map(|a| a["id"].as_str())
+                            .collect();
+                        (ids.contains(&"stub-path") && ids.contains(&"plain-no-path")).then_some(v)
+                    })
+                }
+            },
+        )
+        .await;
+        let row = |id: &str| {
+            catalog["agents"]
+                .as_array()
+                .and_then(|a| a.iter().find(|a| a["id"] == id).cloned())
+                .unwrap_or_else(|| panic!("{id} must be listed: {catalog}"))
+        };
+        assert_eq!(
+            row("stub-path")["path_raw"], fake,
+            "stored path must ride the catalog row: {}",
+            row("stub-path")
+        );
+        assert!(
+            row("plain-no-path").get("path_raw").is_none(),
+            "a store row without an explicit path carries no path_raw key: {}",
+            row("plain-no-path")
+        );
+    }
 }
 
 // ── add-agent-settings-and-session-titles：会话自动标题 journey（6.3）────────

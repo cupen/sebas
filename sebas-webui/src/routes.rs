@@ -751,7 +751,10 @@ pub async fn alias_delete(
 }
 
 /// 别名 body 校验（与旧 router admin 同一规则：非空、无 `/`、无 `*`、
-/// provider 存在于 store）。返回 (alias, entry wire)。
+/// provider 存在于 store——state 的 aliases 表对 providers 表有外键，
+/// 「别名只绑定 store provider」是持久层编码的域规则（fix-webui-qa-round14
+/// GUI 复验实测：放行 config 种子会在写入时 FOREIGN KEY 失败）；种子行在
+/// 前端目标下拉中列出但禁选并说明。返回 (alias, entry wire)。
 fn validated_alias(
     snapshot: &serde_json::Value,
     body: &serde_json::Value,

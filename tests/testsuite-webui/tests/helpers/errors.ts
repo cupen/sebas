@@ -107,6 +107,13 @@ export class ErrorCollector {
       // DESIGN — the journey asserts the inline Chinese reason (mkdir-error),
       // not network silence.
       if (text.includes('400') && /\/api\/fs\/mkdir/.test(url)) return
+      // Intentional typed-rejection probe (fix-webui-qa-round14 2.1 journey):
+      // the creation dialog's POST /api/sessions is route-intercepted to
+      // answer the capacity rejection (400 {"error": 会话数已达上限 N}) BY
+      // DESIGN — the journey asserts the notice toast + inline dialog error +
+      // no phantom URL, not network silence. Anchored to the exact create
+      // endpoint so keyed-item 4xx noise never matches.
+      if (text.includes('400') && /\/api\/sessions$/.test(url)) return
       if (url && !/^https?:\/\/127\.0\.0\.1:/i.test(url)) return
       this.consoleErrors.push(url ? `${text} (${url})` : text)
     })

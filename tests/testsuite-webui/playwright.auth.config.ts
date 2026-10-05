@@ -28,9 +28,11 @@ export default defineConfig({
   // （viewer/member 经 users API 现场自愈建户）；qa-round7-ws-auth 是
   // fix-webui-qa-round7 3.2 的未认证 WS 静默 + 登录后实时链路旅程；
   // provider-gate 是 fix-webui-qa-round10 3.x 的 provider/别名变更面
-  // 角色执法旅程（member/viewer 只读 + 服务端 403 + admin 全管）。
+  // 角色执法旅程（member/viewer 只读 + 服务端 403 + admin 全管）；
+  // qa-round14-rbac 是 fix-webui-qa-round14 的 viewer 只读口径旅程
+  // （纯 GET 只读视图不发 switch + /sessions 角色可见性 + 服务端半边）。
   testMatch:
-    /auth\.spec\.ts|users-admin\.spec\.ts|agents-gate\.spec\.ts|qa-round7-ws-auth\.spec\.ts|provider-gate\.spec\.ts/,
+    /auth\.spec\.ts|users-admin\.spec\.ts|agents-gate\.spec\.ts|qa-round7-ws-auth\.spec\.ts|provider-gate\.spec\.ts|qa-round14-rbac\.spec\.ts/,
   timeout: 30_000,
   retries: 1,
   workers: 1,

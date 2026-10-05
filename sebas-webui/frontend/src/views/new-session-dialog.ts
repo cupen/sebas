@@ -40,7 +40,11 @@ import {
   loadModelCatalog,
   preselectLastUsed,
   saveLastUsedPair,
+  ALIAS_GROUP_LABEL,
+  aliasEntryTitle,
+  mergeAliasEntries,
   type ModelCatalog,
+  type ModelAliasChoice,
 } from '../api/model-catalog.js'
 import { MODE_OPTIONS } from './mode-vocabulary.js'
 import '@awesome.me/webawesome/dist/components/dialog/dialog.js'
@@ -80,6 +84,11 @@ export interface NewSessionDialogConfirm {
   model: string | null
   /** （3.2，D5b）控制面 mode，非空：预填 'ask'，wire 无条件发送。 */
   mode: string
+  /**
+   * （fix-webui-qa-round14 4.7）可选预命名：非空 = 创建后立即以它设置会话
+   * label（rail 执行创建→重命名兜底链）；空串 = 现行命名行为不变。
+   */
+  title: string
 }
 
 @customElement('sebas-new-session-dialog')
@@ -121,8 +130,15 @@ export class SebasNewSessionDialog extends LitElement {
   @state() private model: string | null = null
   /** Settings 目录；`null` = 目录尚未取得或不可得。 */
   @state() private catalog: ModelCatalog | null = null
+  /**
+   * （fix-webui-qa-round14 3.2，D-4-1）别名短名清单（模型下拉并入项）；
+   * 读取失败/无别名 = 空表。
+   */
+  @state() private aliases: ModelAliasChoice[] = []
   /** 目录显式不可得（空目录或读取失败）：就地说明，不渲染空下拉。 */
   @state() private catalogUnavailable = false
+  /** （4.7）可选预命名输入（空 = 现行命名行为）。 */
+  @state() private sessionTitle = ''
   /** 选定的权限模式。（3.2，D5b）非空：打开即预填 'ask'（真源如此）。 */
   @state() private mode: string = 'ask'
 
@@ -183,6 +199,8 @@ export class SebasNewSessionDialog extends LitElement {
       void this.loadCatalog()
       // （3.2，D5b）mode 回到显式缺省 ask——不再有「agent 默认」空路径。
       this.mode = 'ask'
+      // （4.7）预命名输入随新弹窗会话清空（空 = 现行命名行为）。
+      this.sessionTitle = ''
       // （round3 1.2 第三轮）重开 = 新的弹窗会话：300ms 同窗去重窗口归零。
       this.lastConfirmAt = Number.NEGATIVE_INFINITY
       this.agent = ''
@@ -237,15 +255,35 @@ export class SebasNewSessionDialog extends LitElement {
   }
 
   private async loadCatalog(): Promise<void> {
-    const { catalog, unavailable } = await loadModelCatalog()
-    this.catalog = unavailable ? null : catalog
+    const { catalog, aliases, unavailable } = await loadModelCatalog()
+    this.catalog = catalog
+    this.aliases = aliases
     this.catalogUnavailable = unavailable
-    if (unavailable) {
+    if (unavailable && aliases.length === 0) {
       this.selectedProvider = null
       this.model = null
     } else {
       this.applyCatalogPreselect()
     }
+  }
+
+  /**
+   * （fix-webui-qa-round14 3.2，D-4-1）模型下拉的选项集：当前 provider 的
+   * 目录模型并入别名短名（mergeAliasEntries：别名在前带来源标记、同名冲突
+   * 别名优先）。别名是跨 provider 的一等短名——目标 provider 的模型都并入，
+   * 不随 provider 切换消失。
+   */
+  private modelOptions(): ReturnType<typeof mergeAliasEntries> {
+    const providerModels =
+      this.selectedProvider && this.catalog
+        ? this.catalog.pairs.filter((p) => p.provider === this.selectedProvider).map((p) => p.model)
+        : []
+    return mergeAliasEntries(providerModels, this.aliases)
+  }
+
+  /** 选中值是否一个别名短名（确认时跳过 last-used 记忆：目录对不存在）。 */
+  private selectionIsAlias(value: string | null): boolean {
+    return value !== null && this.aliases.some((a) => a.alias === value)
   }
 
   /**
@@ -271,13 +309,22 @@ export class SebasNewSessionDialog extends LitElement {
     this.lastConfirmAt = now
     // 记忆唯一写入点（preselect-last-used-model 1.2）：创建对话框的确认
     // 动作——会话内模型 chip 的切换不经过这里，绝不写 last-used 记忆。
-    // 目录不可得（未选模型）时无对可记，跳过。
-    if (this.selectedProvider && this.model) {
+    // 目录不可得（未选模型）时无对可记，跳过。（3.2）选中的是别名短名时
+    // 同样跳过——(provider, alias) 不是目录对，写进去会被预选判定淘汰。
+    if (this.selectedProvider && this.model && !this.selectionIsAlias(this.model)) {
       saveLastUsedPair({ provider: this.selectedProvider, model: this.model })
     }
+    // （fix-webui-qa-round14 4.7 / GUI 复验 D-14-1）标题以确认时刻的输入框
+    // 实时值为准：`@input` 绑定依赖 composed input 事件穿出 wa-input 影子根
+    // ——Chromium 里成立，WebKit（Safari/IAB）不穿透，`sessionTitle` 状态
+    // 会滞留空串。确认时直读元素 `value` 对两类引擎都活；状态值仅作兜底。
+    const titleInput = this.renderRoot.querySelector<HTMLInputElement>(
+      '[data-testid="dialog-title-input"]',
+    )
+    const typedTitle = (titleInput?.value ?? this.sessionTitle ?? '').trim()
     this.dispatchEvent(
       new CustomEvent<NewSessionDialogConfirm>('dialog-confirm', {
-        detail: { agent: this.agent, model: this.model, mode: this.mode },
+        detail: { agent: this.agent, model: this.model, mode: this.mode, title: typedTitle },
         bubbles: true,
         composed: true,
       }),
@@ -317,8 +364,6 @@ export class SebasNewSessionDialog extends LitElement {
   }
 
   render() {
-    const providers = this.catalogProviders
-    const providerModels = this.selectedProvider ? this.modelsFor(this.selectedProvider) : []
     // （5.3）关闭即整棵移出 ARIA 树（条件渲染），不留残影。
     if (!this.open) return nothing
     return html`
@@ -331,6 +376,19 @@ export class SebasNewSessionDialog extends LitElement {
         data-testid="new-session-dialog"
       >
         <div class="form">
+          <!-- （4.7）可选预命名：非空 = 创建后立即以它命名（rail 的创建→
+               重命名兜底链），空 = 现行命名行为不变。 -->
+          <wa-input
+            label="会话名称（可选）"
+            aria-label="会话名称"
+            data-testid="dialog-title-input"
+            placeholder="留空则按现行方式自动命名"
+            .value=${this.sessionTitle}
+            @input=${(e: Event) => {
+              this.sessionTitle = (e.target as HTMLInputElement).value
+            }}
+          ></wa-input>
+
           <!-- agent 必选：唯一选 agent 的地方；不可达 agent 禁选并标注 cause。 -->
           <wa-select
             label="Agent"
@@ -357,42 +415,61 @@ export class SebasNewSessionDialog extends LitElement {
             )}
           </wa-select>
 
-          <!-- 两级模型选择（可选）：目录空/不可得显式引导到 Settings →
-               Models，绝不渲染空列表。 -->
-          ${this.catalogUnavailable
+          <!-- 两级模型选择（可选）：目录空/不可得且无别名时显式引导到
+               Settings → Models，绝不渲染空列表。（fix-webui-qa-round14 3.2，
+               D-4-1）模型下拉并入别名短名（来源徽标 + 同名别名优先）；目录
+               模型为空但别名在场时，仍渲染仅含别名的模型下拉（别名短名本身
+               是可用的模型取值），不再落入「尚未配置」引导。 -->
+          ${this.catalogUnavailable && this.aliases.length === 0
             ? html`<p class="hint" data-testid="dialog-catalog-unavailable" role="status">
                 尚未配置 provider 模型——仍可创建会话，将使用 agent
                 内置的默认模型；需要指定模型时到「设置 → 模型」添加
                 provider。
               </p>`
             : html`
-                <wa-select
-                  label="Provider"
-                  aria-label="Provider"
-                  data-testid="dialog-provider-select"
-                  value=${this.selectedProvider ?? ''}
-                  hoist
-                  @change=${(e: Event) => {
-                    const v = (e.target as HTMLSelectElement).value
-                    this.selectedProvider = v
-                    const models = this.modelsFor(v)
-                    this.model = models[0] ?? null
-                  }}
-                >
-                  ${providers.map((p) => html`<wa-option value=${p}>${p}</wa-option>`)}
-                </wa-select>
+                ${this.catalogProviders.length > 0
+                  ? html`
+                      <wa-select
+                        label="Provider"
+                        aria-label="Provider"
+                        data-testid="dialog-provider-select"
+                        value=${this.selectedProvider ?? ''}
+                        hoist
+                        @change=${(e: Event) => {
+                          const v = (e.target as HTMLSelectElement).value
+                          this.selectedProvider = v
+                          const models = this.modelsFor(v)
+                          this.model = models[0] ?? null
+                        }}
+                      >
+                        ${this.catalogProviders.map(
+                          (p) => html`<wa-option value=${p}>${p}</wa-option>`,
+                        )}
+                      </wa-select>
+                    `
+                  : nothing}
                 <wa-select
                   label="模型"
                   aria-label="模型"
                   data-testid="dialog-model-select"
                   value=${this.model ?? ''}
-                  ?disabled=${providerModels.length === 0}
+                  ?disabled=${this.modelOptions().length === 0}
                   hoist
                   @change=${(e: Event) => {
                     this.model = (e.target as HTMLSelectElement).value || null
                   }}
                 >
-                  ${providerModels.map((m) => html`<wa-option value=${m}>${m}</wa-option>`)}
+                  ${this.modelOptions().map((entry) =>
+                    entry.alias
+                      ? html`<wa-option
+                          value=${entry.value}
+                          title=${aliasEntryTitle(
+                            this.aliases.find((a) => a.alias === entry.value)!,
+                          )}
+                          >${ALIAS_GROUP_LABEL} · ${entry.value}</wa-option
+                        >`
+                      : html`<wa-option value=${entry.value}>${entry.value}</wa-option>`,
+                  )}
                 </wa-select>
               `}
 

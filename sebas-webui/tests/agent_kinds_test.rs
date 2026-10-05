@@ -342,4 +342,59 @@ mod store_row_probe {
     // `agent_store_probe_test.rs`：它要装进程级全局状态引擎（install_fresh
     // 串行锁），与本文件里「无引擎」前提的 InProcessBackend 用例同跑会互相
     // 污染（全局引擎一装，catalog union 就读到别人的行）。
+
+    // ── fix-webui-qa-round14 4.8（D-4-4）：存量启动 path 随 catalog 行下发 ──
+    //
+    // 单测（api.rs `agent_catalog_enrichment_tests`）钉的是纯函数半边；这里
+    // 经**真实 handler**（FakeBackend 的 agents 域快照 → enrich → JSON wire）
+    // 钉集成半边：store 行的 `path` 必须以 `path_raw` 原样到达
+    // `GET /api/agents`——编辑表单切「启动定义」到 claude 形态时 path 预填
+    // 以存量值（agent-settings「以存储值预填全部字段」明文），不得被硬编码
+    // `claude` 覆盖；缺 path 的 store 行不加键（前端以内置缺省预填）。
+    #[tokio::test]
+    async fn catalog_wire_carries_the_stored_path_as_path_raw() {
+        let exe = existing_executable();
+        let stored = exe.to_string_lossy().replace('\\', "/");
+        let snapshot = serde_json::json!({
+            "agents": [
+                {
+                    "id": "claude-custom",
+                    "driver": "claude",
+                    "path": stored,
+                    "source": "ui",
+                    "created_at": 0,
+                    "updated_at": 0,
+                },
+                {
+                    // 无显式 path 的 store 行（claude 缺省语义归探测侧兜底）。
+                    "id": "claude-plain",
+                    "driver": "claude",
+                    "source": "ui",
+                    "created_at": 0,
+                    "updated_at": 0,
+                },
+            ],
+            "deleted_ids": []
+        });
+        let app = app_with_store_rows(snapshot).await;
+        let (status, v) = get_json(&app, "/api/agents").await;
+        assert_eq!(status, StatusCode::OK);
+        let agents = v["agents"].as_array().expect("agents array");
+        let custom = agents
+            .iter()
+            .find(|a| a["id"] == "claude-custom")
+            .expect("custom row in catalog");
+        assert_eq!(
+            custom["path_raw"], stored,
+            "存量启动 path 必须原样随 catalog 行下发: {custom}"
+        );
+        let plain = agents
+            .iter()
+            .find(|a| a["id"] == "claude-plain")
+            .expect("plain row in catalog");
+        assert!(
+            plain.get("path_raw").is_none(),
+            "缺 path 的 store 行不加键（前端以内置缺省 `claude` 预填）: {plain}"
+        );
+    }
 }

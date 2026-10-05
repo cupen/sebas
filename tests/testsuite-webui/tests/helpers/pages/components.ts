@@ -47,9 +47,22 @@ export class ProjectRail {
   }
 
 
-  /** Expand the History group (archived sessions; hidden when empty). */
+  /**
+   * Expand the History group (archived sessions; hidden when empty).
+   *
+   * （fix-webui-qa-round14 4.4）展开态随 toggle 持久（localStorage，reload
+   * 恢复）——盲点会话不再成立：组可能已经是展开的（同一测试前半段展开过、
+   * 或 reload 后从存储恢复），再点会把它**收起**。与 ensureProjectExpanded
+   * 同款幂等：先读 aria-expanded，收起才点，点后复核。
+   */
   async expandHistory(): Promise<void> {
-    await this.host.locator('.group-head', { hasText: '历史' }).click()
+    const head = this.host.locator('[data-testid="history-group-head"]')
+    await head.waitFor({ state: 'visible', timeout: 15_000 })
+    for (let guard = 0; guard < 5; guard++) {
+      if ((await head.getAttribute('aria-expanded')) !== 'false') return
+      await head.locator('.chevron').click()
+      await this.page.waitForTimeout(250)
+    }
   }
 
   /**

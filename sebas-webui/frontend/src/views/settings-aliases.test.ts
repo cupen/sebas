@@ -246,3 +246,74 @@ describe('sebas-model-aliases (router-model-aliases 别名管理 WebUI 入口)',
     })
   })
 })
+
+// ── fix-webui-qa-round14 3.3（D-4-2）：目标 provider 下拉并入 config 种子行 ──
+
+describe('alias target dropdown includes config.toml seed providers (round14 3.3)', () => {
+  async function openCreate(el: SebasModelAliases): Promise<void> {
+    el.shadowRoot!.querySelector<HTMLElement>('[data-testid="alias-create"]')!.click()
+    await el.updateComplete
+  }
+
+  function optionNames(el: SebasModelAliases): string[] {
+    const select = el.shadowRoot!.querySelector('[data-testid="alias-provider-select"]')!
+    return [...select.querySelectorAll('wa-option')].map((o) => o.getAttribute('value') as string)
+  }
+
+  it('a config.toml seed provider is offered as a target even without a store row', async () => {
+    apiMocks.providers.mockResolvedValue({
+      providers: [{ name: 'store-only' }],
+      config_providers: [{ name: 'anthropic', source: 'config', editable: false }],
+      model_aliases: {},
+    })
+    const el = await mount('root')
+    await openCreate(el)
+    const names = optionNames(el)
+    // store 行在前、种子行补后（标注来源），别名可以指向仅存在于 config
+    // 种子的 provider。
+    expect(names).toEqual(['store-only', 'anthropic'])
+    const seedOption = el.shadowRoot!.querySelector('wa-option[value="anthropic"]')!
+    expect(seedOption.textContent).toContain('config 种子')
+    el.remove()
+  })
+
+  it('seed names already present as store rows are not duplicated', async () => {
+    apiMocks.providers.mockResolvedValue({
+      providers: [{ name: 'anthropic' }],
+      config_providers: [{ name: 'anthropic', source: 'config', editable: false }],
+      model_aliases: {},
+    })
+    const el = await mount('root')
+    await openCreate(el)
+    expect(optionNames(el)).toEqual(['anthropic'])
+    el.remove()
+  })
+
+  it('zero store AND zero seed providers keeps the disabled empty state', async () => {
+    apiMocks.providers.mockResolvedValue({
+      providers: [],
+      config_providers: [],
+      model_aliases: {},
+    })
+    const el = await mount('root')
+    await openCreate(el)
+    const select = el.shadowRoot!.querySelector('[data-testid="alias-provider-select"]')!
+    expect(select.hasAttribute('disabled')).toBe(true)
+    expect(el.shadowRoot!.querySelector('[data-testid="alias-provider-empty-hint"]')).toBeTruthy()
+    el.remove()
+  })
+
+  it('seeds alone (empty store) unlock the dropdown with the seed target', async () => {
+    apiMocks.providers.mockResolvedValue({
+      providers: [],
+      config_providers: [{ name: 'anthropic', source: 'config', editable: false }],
+      model_aliases: {},
+    })
+    const el = await mount('root')
+    await openCreate(el)
+    // 空态消失：种子行即可选目标（预填也是它）。
+    expect(el.shadowRoot!.querySelector('[data-testid="alias-provider-empty-hint"]')).toBeNull()
+    expect(optionNames(el)).toEqual(['anthropic'])
+    el.remove()
+  })
+})

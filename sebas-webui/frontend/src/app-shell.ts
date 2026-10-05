@@ -968,7 +968,9 @@ export class SebasApp extends LitElement {
   private renderOutlet() {
     switch (this.routeId) {
       case 'sessions':
-        return html`<sebas-sessions></sebas-sessions>`
+        // （fix-webui-qa-round14 2.3）角色下传：/sessions 总览页按
+        // sessions.write 裁剪写入口。
+        return html`<sebas-sessions .role=${this.authRole}></sebas-sessions>`
       // （add-usage-statistics 4.2）用量看数面（文档型路由，padded 列宽）。
       case 'usage':
         return html`<sebas-usage></sebas-usage>`
@@ -984,6 +986,7 @@ export class SebasApp extends LitElement {
           .coreReachability=${this.coreReachability}
           .deepLinkKey=${this.routeId === 'session-deep-link' ? (this.params['key'] ?? null) : null}
           .archivedEntry=${this.archivedEntry}
+          .role=${this.authRole}
           @archive-view-close=${this.onArchiveViewClose}
         ></sebas-dashboard>`
     }

@@ -15,7 +15,7 @@
 
 import { LitElement, css, html, nothing, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { api, type AgentKindInfo, type ArchiveDetail, type ArchiveEntry, type ConversationEntryView, type NodeInfo, type NodesResponse, type PendingSubmission, type Project, type SessionDetail, type Summary, ApiError, errorText } from '../api/client.js'
+import { api, type AgentKindInfo, type ArchiveDetail, type ArchiveEntry, type ConversationEntryView, type NodeInfo, type NodesResponse, type PendingSubmission, type Project, type Role, type SessionDetail, type Summary, ApiError, errorText } from '../api/client.js'
 // （fix-webui-qa-round9 4.6）工作台形态持久化：聚焦会话 key 存 localStorage，
 // core 重启（服务端指针清零）后重新打开工作台时恢复。
 import { loadPersistedWorkbenchFocus, savePersistedWorkbenchFocus } from './workbench-persist.js'
@@ -34,6 +34,9 @@ import { sessionUsageView } from './session-usage.js'
 // add-agent-settings-and-session-titles 7.1：聚焦头部同走 fullSessionLabel
 // 命名链，truncateName 提供展示截断（全文进 title）。
 import { archivedEntryLabel, fullSessionLabel, truncateName, RAIL_FOCUS_EVENT, SESSION_LABEL_CHANGED_EVENT } from './project-rail.js'
+// （fix-webui-qa-round14 2.5）viewer 只读口径：打开会话 = 纯 GET 只读视图
+// （无 composer、不调 activate/switch 写）。
+import { canCreateSessions } from './role-visibility.js'
 // （round3 3.1 → fix-webui-qa-round8 5.1）焦点转换只登记开卷边界，锚的
 // 推进统一走 transcript 的已见驱动单一路径。
 import { armOpeningSeam, peekOpeningSeam, readAnchorCount } from './unread-cursor.js'
@@ -49,8 +52,13 @@ import { friendlySessionKey } from './session-key-label.js'
  * 路径。app-shell 监听后更新 `selectedPath`——主区标题与项目上下文跟随
  * 聚焦会话，而项目行的 `rail-select` 语义保持独立（两条链路收敛到 shell
  * 的同一状态源，不另立状态）。
+ *
+ * （fix-webui-qa-round14 4.6）事件名常量迁至无副作用的 focus-events 模块
+ * （rail 创建链同投该事件，不得为拿一个字符串拖入 dashboard 的组件注册
+ * 图）；此处按既有导出位再导出，dashboard.test 等既有消费点不受影响。
  */
-export const PROJECT_FOLLOW_EVENT = 'sebas:project-follow'
+export { PROJECT_FOLLOW_EVENT } from './focus-events.js'
+import { PROJECT_FOLLOW_EVENT } from './focus-events.js'
 
 /**
  * 聚焦会话 → 所属项目路径（4.1 纯函数）：按 `project_id` 在注册项目列表
@@ -225,6 +233,13 @@ export class SebasDashboard extends LitElement {
    * pointer only）。会话关闭/焦点他移后由 effective-focus 收敛逻辑清空。
    */
   @property({ attribute: false }) deepLinkKey: string | null = null
+  /**
+   * （fix-webui-qa-round14 2.5）当前登录用户角色（shell 从 /api/auth/me 下传）：
+   * viewer 打开会话 = 纯 GET 只读视图——转录照常渲染，composer 整体让位给
+   * 只读说明，聚焦装载不再附带 activate 写（拉起子进程是 sessions.write 面）。
+   * `null` = 宿主未启用登录鉴权，保持既有完整工作台。
+   */
+  @property({ attribute: false }) role: Role | null = null
 /**
  * Selected project path — owned by the app-shell（侧栏项目树驱动），
  * 这里只消费。`null` = 未选择项目。The selection only affects the
@@ -1591,6 +1606,14 @@ export class SebasDashboard extends LitElement {
                 </div>`
               : html`
           <div class="composer-area">
+            ${!canCreateSessions(this.role)
+              ? html`<div class="composer no-focus" data-testid="composer-viewer-readonly">
+                  <span class="no-focus-hint">
+                    只读视图——当前角色（viewer）没有会话写权限：可浏览转录，
+                    不能发送消息或切换模型。
+                  </span>
+                </div>`
+              : html`
             ${this.focusedDetail?.encoded_key === visibleFocusKey
               ? html`<sebas-review-cards
                   .sessionKey=${visibleFocusKey}
@@ -1629,6 +1652,7 @@ export class SebasDashboard extends LitElement {
               .coreReachability=${this.coreReachability}
               @composer-sent=${this.onComposerSent}
             ></sebas-workbench-composer>
+          `}
           </div>`
           }
         </div>
@@ -1920,7 +1944,10 @@ export class SebasDashboard extends LitElement {
         // activate 已经出膛，是「每次导航至多一次失败请求」的第二枪——
         // 拉起以 detail 可得为前提后，不可得会话不再产生 activate 失手；
         // 活会话的拉起只晚几毫秒（detail 落地即发），warm-up 语义不变。
-        // 幂等锚保留：同 key 只拉起一次。
+        // 幂等锚保留：同 key 只拉起一次。（fix-webui-qa-round14 2.5）viewer
+        // 只读视图不拉起：activate 是 sessions.write 面（拉起子进程），viewer
+        // 的打开必须保持纯 GET。
+        if (!canCreateSessions(this.role)) return
         if (this.activatedFocusKey !== d.encoded_key) {
           this.activatedFocusKey = d.encoded_key
           void api.activateSession(d.encoded_key).catch(() => undefined)

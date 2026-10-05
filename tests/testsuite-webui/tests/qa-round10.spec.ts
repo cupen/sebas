@@ -17,15 +17,18 @@
  *     scrollbar」：结算后表格自身 scrollWidth > clientWidth（横滚在条目内层），
  *     且滚动区带可见滚动条样式（getComputedStyle 的 scrollbar-width:thin +
  *     影子样式里的 ::-webkit-scrollbar 通道）。
- *  3. 「Rail history badge reflects live session counts」：rail 的历史组头
- *     计数徽章与 GET /api/sessions 的 total_sessions（会话页统计同源）相等，
- *     且建会话/关闭后免整页 reload 跟随（WS/轮询刷新通道）。
+ *  3. 「Rail history badge = archived total」（fix-webui-qa-round14 4.5 翻新
+ *     口径）：agent-workbench 主 spec「The History group SHALL show the total
+ *     count of archived sessions」明文——徽章 = 归档总数（与归档面板内容
+ *     一致），建会话/关闭**不再**跟随 live 会话统计（round10 的
+ *     total_sessions 口径与面板内容不一致，QA-1 UX 缺口 3），归档才涨。
  *
  * 数据源：fake-claude 触发词（`table` 富 markdown / `drip` 流式）——与
  * qa-round7-transcript-layout、conversation-streaming 同机制，零装配改动。
  */
 import { expect, test, type Page } from '@playwright/test'
 import {
+  archiveSession,
   createSession,
   ensureSceneProject,
   ErrorCollector,
@@ -33,7 +36,6 @@ import {
   getSession,
   ProjectRail,
   resetState,
-  sessionPath,
   waitStatus,
   type StatusSlug,
 } from './helpers/index'
@@ -162,7 +164,7 @@ test.describe('转录直播态与超宽内容（fix-webui-qa-round10 2.x）', ()
   })
 })
 
-test.describe('rail 历史徽章（fix-webui-qa-round10 5.1）', () => {
+test.describe('rail 历史徽章（fix-webui-qa-round14 4.5：徽章 = 归档总数）', () => {
   test.describe.configure({ retries: 1 })
 
   let collector: ErrorCollector
@@ -174,7 +176,10 @@ test.describe('rail 历史徽章（fix-webui-qa-round10 5.1）', () => {
     expect(collector.consoleErrors).toEqual([])
   })
 
-  test('历史组头计数与会话页统计同源，建会话/关闭免 reload 联动', async ({ page, request }) => {
+  test('历史组头计数 = 归档总数：建会话不动它、归档即涨（免 reload 联动）', async ({
+    page,
+    request,
+  }) => {
     const rail = new ProjectRail(page)
     await resetState(request)
     await ensureSceneProject(request)
@@ -184,31 +189,31 @@ test.describe('rail 历史徽章（fix-webui-qa-round10 5.1）', () => {
     const badge = rail.host.locator('[data-testid="history-session-count"]')
     await expect(badge).toBeVisible()
 
-    const totalOf = async (): Promise<number> => {
-      const d = (await (await request.get('/api/sessions')).json()) as { total_sessions: number }
-      return d.total_sessions
+    // 归档总数真值（GET /api/archive 的 archived_sessions——面板列的就是它）。
+    const archivedOf = async (): Promise<number> => {
+      const d = (await (await request.get('/api/archive')).json()) as {
+        archived_sessions: unknown[]
+      }
+      return d.archived_sessions.length
     }
 
-    // 同源：徽章文本 === GET /api/sessions 的 total_sessions（会话页统计区
-    // 同一份数字；rail 首拉在飞行中，轮询到相等）。
-    const baseline = await totalOf()
+    // 同源：徽章文本 === 归档总数（沙箱内既有归档不管多少，动态对齐）。
+    const baseline = await archivedOf()
     await expect(badge).toHaveText(String(baseline), { timeout: 15_000 })
 
-    // 建会话：徽章随统计 +1——无整页 reload（WS session.created / 轮询通道）。
+    // 建会话：徽章**不**跟随 live 会话表（round14 4.5 的行为翻转点——
+    // round10 旧断言在此必然红：徽章曾随 total_sessions +1）。
     await createSession(request, { prompt: null })
-    await expect(badge).toHaveText(String(baseline + 1), { timeout: 15_000 })
+    await expect(badge).toHaveText(String(baseline), { timeout: 15_000 })
 
-    // 关闭：徽章跟随统计回落（session.removed 通道）——仍与本源相等。
+    // 归档：徽章跟随归档组 +1（session.removed → 刷新通道，免 reload），
+    // 且与归档面板真值收敛一致。
     const key = await createSession(request, { prompt: null })
-    await expect(badge).toHaveText(String(baseline + 2), { timeout: 15_000 })
-    const resp = await request.post(`${sessionPath(key)}/close`)
-    expect(resp.ok(), `close must succeed: ${resp.status()}`).toBe(true)
+    await archiveSession(request, key)
+    await expect(badge).toHaveText(String(baseline + 1), { timeout: 15_000 })
     await expect
-      .poll(
-        async () => (await totalOf()) === Number(await badge.textContent()),
-        { timeout: 15_000 },
-      )
-      .toBe(true)
+      .poll(async () => Number(await badge.textContent()), { timeout: 15_000 })
+      .toBe(await archivedOf())
   })
 })
 

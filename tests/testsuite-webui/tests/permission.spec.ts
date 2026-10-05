@@ -134,7 +134,12 @@ test.describe('审批卡片旅程', () => {
 
       // 泊车可观察面的另一半：rail 当前行亮 waiting（status_slug=waiting +
       // 「等待」徽标）——「泊车了但 rail 看不出在等人」同为 violation。
-      const currentRow = page.locator('sebas-project-rail li.session-item.current')
+      // （fix-webui-qa-round14 4.2）本地泊车的聚焦会话在项目组与等待组各渲染
+      // 一份（同带 current、同态）——`.first()` 取项目组副本，避免 strict
+      // violation；两份呈现逐字相同，断言哪份都等价。
+      const currentRow = page
+        .locator('sebas-project-rail li.session-item.current')
+        .first()
       await expect(currentRow).toHaveClass(/waiting/, { timeout: 15_000 })
       await expect(currentRow.locator('[data-testid="session-waiting"]')).toBeVisible()
 
