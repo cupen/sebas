@@ -34,7 +34,7 @@ The system SHALL define an `AgentDriver` trait that abstracts driving one third-
 
 ### Requirement: Product default agent is pi
 
-默认 agent 的解析顺序 SHALL 为：显式 `[acp] default` 永远优先；无显式 default 且恰好只配一个 agent 时，该 agent 为隐式默认（既有规则不变）；一个 agent 都未配置时，回退探测 SHALL 依次尝试 `pi` 与 `claude`（以二进制可解析为准，命中的选择写入启动日志，两者皆缺时按既有口径失败）。随附的示例配置 SHALL 种子 `pi`（默认）与 `claude`（保留可切回）两个条目并显式声明 `default = "pi"`。缺省/隐式解析出的默认 agent 若二进制不可达，SHALL 在目录与 spawn 处如实报不可达及原因，不得静默改选其它 agent。
+默认 agent 的解析顺序 SHALL 为：显式 `[acp] default` 永远优先；无显式 default 且恰好只配一个 agent 时，该 agent 为隐式默认（既有规则不变）；**配了多个 agent 且无显式 default 时**，SHALL 取优先链 `pi` → `claude` 中**已配置**者，两者都未配置则取已配置 agent 中字典序最小者（确定性；绝不留下未设 default 的多 agent 配置——否则启动会去探测未配置的 `pi` 二进制而失败）；一个 agent 都未配置时，回退探测 SHALL 依次尝试 `pi` 与 `claude` 二进制（以可解析为准，命中者写入启动日志，两者皆缺时按既有口径失败）。随附的示例配置 SHALL 种子 `pi`（默认）与 `claude`（保留可切回）两个条目并显式声明 `default = "pi"`。缺省/隐式解析出的默认 agent 若二进制不可达，SHALL 在目录与 spawn 处如实报不可达及原因，不得静默改选其它 agent。
 
 #### Scenario: fresh example config defaults to pi
 
@@ -45,6 +45,12 @@ The system SHALL define an `AgentDriver` trait that abstracts driving one third-
 
 - **WHEN** 配置声明 `[acp] default = "claude"`（或任何已配置 agent 的 id）
 - **THEN** 默认 agent 为该 id，回退探测不参与
+
+#### Scenario: multi-agent config without a default resolves deterministically
+
+- **WHEN** 配置了多个 agent 且未设 `[acp] default`（例如 `claude` + 一个自定义 ACP agent，未配置 `pi`）
+- **THEN** 默认 agent 取优先链中已配置者（此处 `claude`），启动不因探测未配置的 `pi` 二进制而失败
+- **AND** 若 `pi` 也在已配置之列，`pi` 优先（产品默认决策）
 
 #### Scenario: zero-agent fallback probes pi then claude
 

@@ -53,7 +53,7 @@ pi 无权限系统：不产生 `PermissionRequest`，`SetMode` 应答非终态�
 
 ### D6：默认 agent 解析链
 
-显式 `[acp] default` > 单 agent 隐式默认（不变）> 零 agent 回退探测链 `pi` → `claude`（二进制可解析为准，命中写启动日志，皆缺按既有口径失败）。示例配置种子 `pi`（默认）+ `claude`（保留）。启动期对默认 agent 二进制的硬失败检查保留，但缺省/隐式默认不可达时在目录与 spawn 处如实报因，不静默改选。备选「直接翻转常量为 pi」：会让零 agent + 无 pi 的存量环境拒绝启动，探测链避免该回归。
+显式 `[acp] default` > 单 agent 隐式默认 > 多 agent 无 default（取优先链 `pi`→`claude` 中已配置者，都未配则取已配置 agent 字典序最小者）> 零 agent 回退探测链 `pi` → `claude`（二进制可解析为准，命中写启动日志，皆缺按既有口径失败）。示例配置种子 `pi`（默认）+ `claude`（保留）。启动期对默认 agent 二进制的硬失败检查保留，但缺省/隐式默认不可达时在目录与 spawn 处如实报因，不静默改选。备选「直接翻转常量为 pi」：会让零 agent + 无 pi 的存量环境拒绝启动，探测链避免该回归——多 agent 无 default 的存量 config（如 e2e 沙箱的 claude+fakeacp）同理必须落到已配置的 agent，否则会去探测未配置的 pi 而启动失败。
 
 ### D7：模块落点
 

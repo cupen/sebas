@@ -427,12 +427,22 @@ impl AcpConfig {
             .unwrap_or_else(default_idle_kill)
     }
 
-    /// When `default` is absent and exactly one agent is configured, that
-    /// agent becomes the implicit default (lets a bare `acp` hint resolve
-    /// to the only configured kind). When **no agent** is configured either,
-    /// the fallback chain (`pi` → `claude`, add-pi-driver D6) is probed: the
-    /// first binary that resolves on disk/PATH becomes the default and the
-    /// choice is logged. Idempotent; called once in `parse`.
+    /// Resolve the implicit default when no explicit `default` is set
+    /// (add-pi-driver D6). Resolution order:
+    ///
+    /// 1. exactly one agent configured → that agent;
+    /// 2. several agents configured → the first of the priority chain
+    ///    (`pi` → `claude`) that **is configured**; if neither is, the
+    ///    alphabetically-first configured agent (deterministic — never leaves a
+    ///    multi-agent config without a default, which would otherwise fail
+    ///    startup by probing an unconfigured binary);
+    /// 3. no agents configured → probe the fallback chain's binaries
+    ///    (`pi` → `claude`); the first that resolves becomes the default, and
+    ///    when neither resolves the hardcoded [`DEFAULT_FALLBACK_KIND`] is kept
+    ///    so validation reports it honestly as unreachable rather than silently
+    ///    picking another agent.
+    ///
+    /// Idempotent; called once in `parse`.
     fn apply_implicit_default(&mut self) {
         if self.default.is_some() {
             return;
@@ -444,14 +454,25 @@ impl AcpConfig {
             }
             return;
         }
-        if self.agents.is_empty() {
-            let probed = probe_fallback_kind();
-            tracing::info!(
-                kind = %probed,
-                "no agent configured; fallback default resolved by probing pi then claude"
-            );
-            self.default = Some(probed.to_string());
+        if !self.agents.is_empty() {
+            // 多 agent：优先链中「已配置」者，否则取字典序最小的已配置 agent
+            // （确定性），绝不留下未设 default 的多 agent 配置。
+            let chosen = DEFAULT_FALLBACK_KINDS
+                .iter()
+                .find(|k| self.agents.contains_key(**k))
+                .map(|k| (*k).to_string())
+                .or_else(|| self.agents.keys().min().cloned());
+            if let Some(kind) = chosen {
+                self.default = Some(kind);
+            }
+            return;
         }
+        let probed = probe_fallback_kind();
+        tracing::info!(
+            kind = %probed,
+            "no agent configured; fallback default resolved by probing pi then claude"
+        );
+        self.default = Some(probed.to_string());
     }
 }
 
@@ -2037,5 +2058,31 @@ startup_timeout_secs = 45
         acp.apply_implicit_default();
         assert!(acp.default.is_some(), "zero-agent fallback must set a default");
         assert!(!acp.default_kind().is_empty());
+    }
+
+    /// 多 agent 且未设 default：优先链中的已配置者胜出（pi 未配则选 claude），
+    /// 绝不留下未设 default 的多 agent 配置（否则启动会去探测未配置的 pi
+    /// 二进制而失败——e2e 沙箱正是 claude+fakeacp 无 default 的形态）。
+    #[test]
+    fn multi_agent_without_default_prefers_a_configured_chain_member() {
+        let cfg = Config::parse(
+            "[acp.agents.claude]\ndriver = \"claude\"\npath = \"/bin/true\"\n\n[acp.agents.fakeacp]\ndriver = \"acp\"\ncommand = [\"/bin/true\"]\n",
+        )
+        .expect("multi-agent config without default parses");
+        assert_eq!(
+            cfg.acp.default_kind(),
+            "claude",
+            "pi 未配置时多 agent 缺省应落到已配置的 claude"
+        );
+    }
+
+    /// 多 agent 且 pi 已配置：pi 优先于 claude（默认 agent = pi 的产品决策）。
+    #[test]
+    fn multi_agent_with_pi_configured_defaults_to_pi() {
+        let cfg = Config::parse(
+            "[acp.agents.pi]\ndriver = \"pi\"\npath = \"/bin/true\"\n\n[acp.agents.claude]\ndriver = \"claude\"\npath = \"/bin/true\"\n",
+        )
+        .expect("pi+claude config parses");
+        assert_eq!(cfg.acp.default_kind(), "pi");
     }
 }
