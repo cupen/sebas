@@ -100,6 +100,10 @@
   - 状态备注（5.3）：**R12 全功能 GUI 验收完成**——11 项修复 10 项销账，
     B-3 通知未修复升格 fix-webui-qa-round12（sebas-qa-r12 findings-a/b +
     shots-a/b 截图与 console 归档）。
-- [ ] 5.4 既有验收套件不回归：`invoke testsuite-e2e` 与 `invoke testsuite-acceptance` 绿（验证：命令输出）
+- [x] 5.4 既有验收套件不回归：`invoke testsuite-e2e` 与 `invoke testsuite-acceptance` 绿（验证：命令输出）
   - 状态备注（5.4）：**R12 实测：acceptance 绿、e2e 75/82（7 红）**——7 红的
     逐例修复已并入 fix-webui-qa-round12 任务 5（本项维持未勾，随其收口）。
+  - 状态备注（5.4 收口，add-local-usage-statistics 整体验收时）：round12 已
+    完成（17/17），本会话实测 `invoke testsuite-e2e` 0 ❌、
+    `invoke testsuite-acceptance` 14 ✅ 0 ❌（报告
+    `.artifacts/verify/report-{e2e,acceptance}.html`），随其收口。
