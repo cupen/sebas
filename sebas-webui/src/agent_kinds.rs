@@ -98,12 +98,15 @@ pub async fn discover_agent(source: &AgentKindSource) -> AgentKindInfo {
     // proved reachability. Probe the RESOLVED path: on Windows a bare name may
     // only exist as a PATHEXT-suffixed file (`opencode.cmd`), which a raw
     // spawn of the bare name would miss.
-    let version = tokio::process::Command::new(resolved_binary(exe).unwrap_or_else(|| exe.into()))
-        .arg("--version")
-        .output()
-        .await
-        .ok()
-        .filter(|o| o.status.success())
+    let probe_path = resolved_binary(exe).unwrap_or_else(|| exe.into());
+    let version = output_with_etxtbsy_retry(|| {
+        let mut cmd = tokio::process::Command::new(&probe_path);
+        cmd.arg("--version");
+        cmd
+    })
+    .await
+    .ok()
+    .filter(|o| o.status.success())
         .map(|o| {
             let out = String::from_utf8_lossy(&o.stdout).trim().to_string();
             if out.is_empty() {
@@ -136,11 +139,14 @@ async fn pi_auth_cause(driver: &str, exe: &str) -> Option<String> {
     if driver != "pi" {
         return None;
     }
-    let out = tokio::process::Command::new(resolved_binary(exe).unwrap_or_else(|| exe.into()))
-        .args(["auth", "check"])
-        .output()
-        .await
-        .ok()?;
+    let out = output_with_etxtbsy_retry(|| {
+        let mut cmd =
+            tokio::process::Command::new(resolved_binary(exe).unwrap_or_else(|| exe.into()));
+        cmd.args(["auth", "check"]);
+        cmd
+    })
+    .await
+    .ok()?;
     let status = String::from_utf8_lossy(&out.stdout).trim().to_string();
     match status.as_str() {
         "ready" => None,
@@ -155,6 +161,38 @@ async fn pi_auth_cause(driver: &str, exe: &str) -> Option<String> {
 /// `$PATH`. Mirrors `config.rs::check_binary_reachable` semantics.
 fn binary_reachable(exe: &str) -> bool {
     resolved_binary(exe).is_some()
+}
+
+/// Run a probe command, retrying briefly on `ETXTBSY` ("Text file busy").
+///
+/// Two real situations hit this: (1) in multi-threaded processes a sibling
+/// thread's just-written file may still hold an inherited write fd at fork
+/// time, so a freshly exec'd path fails with ETXTBSY for a few milliseconds;
+/// (2) right after an install the freshly written bin can briefly be busy. The
+/// Linux man page's own guidance is to retry — we retry a handful of times with
+/// a short backoff, which also keeps the install-probe path honest.
+pub(crate) async fn output_with_etxtbsy_retry<F>(
+    mut build: F,
+) -> std::io::Result<std::process::Output>
+where
+    F: FnMut() -> tokio::process::Command,
+{
+    const ATTEMPTS: u32 = 20;
+    for attempt in 0..ATTEMPTS {
+        match build().output().await {
+            Ok(out) => return Ok(out),
+            Err(e) if is_etxtbsy(&e) && attempt + 1 < ATTEMPTS => {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!("retry loop returns on the final attempt")
+}
+
+/// `ETXTBSY` (os error 26) — the exec target is open for writing somewhere.
+pub(crate) fn is_etxtbsy(e: &std::io::Error) -> bool {
+    e.raw_os_error() == Some(26)
 }
 
 /// Resolve `exe` to a spawnable file path: a slash-containing path is checked

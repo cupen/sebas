@@ -3,6 +3,7 @@
 
 pub mod admin;
 pub mod admin_auth;
+pub mod agent_install;
 pub mod agent_kinds;
 pub mod api;
 pub mod archive;

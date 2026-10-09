@@ -11606,3 +11606,287 @@ mod auto_title {
         );
     }
 }
+
+// ── add-agent-auto-install：一键安装 agent 的进程级旅程（task 4.1）───────────
+//
+// 旅程 = 沙箱（`SEBAS_HOME` 钉一次性目录，安装前缀派生进沙箱）+ PATH 垫
+// **fake npm**（design D7：绝不真拨 registry）→ `POST /api/agents/install`
+// → 断言响应 installed/path/version/agent_created → `GET /api/agents` 出现
+// 新行且可达 → fake npm 的 argv 日志证明真实 npm 未被触发。
+//
+// fake npm 与 `sebas-webui/src/agent_install.rs` 单测里的脚本同剧本（unix sh，
+// 记录 argv + 按剧本往 `$4/bin` 落假 bin）；这里**垫进 webui 子进程的 PATH**
+// （e2e 是真实进程，不走显式路径注入），故脚本必须同时诚实应答
+// `npm --version`（handler 步骤 3 的在场探测）。
+mod agent_auto_install {
+    use super::*;
+
+    /// 写一个 fake `npm`（unix sh 脚本）：剧本与日志路径烘焙进脚本。返回脚本
+    /// 路径；调用方把它的目录前置进 webui 子进程的 PATH。
+    #[cfg(unix)]
+    fn fake_npm(dir: &Path, mode: &str, version: &str, log: &Path) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.join("npm");
+        let body = format!(
+            r#"#!/bin/sh
+printf '%s\n' "$@" >> "{log}"
+# npm 在场探测（handler 先跑 `npm --version`）：任何剧本都要诚实应答。
+if [ "$1" = "--version" ]; then
+  echo "{version}"
+  exit 0
+fi
+case "{mode}" in
+  ok)
+    # argv: install --global --prefix <prefix> <package>
+    prefix="$4"
+    pkg="$5"
+    case "$pkg" in
+      "@anthropic-ai/claude-code") name=claude ;;
+      "opencode-ai") name=opencode ;;
+      *) name=pkg ;;
+    esac
+    mkdir -p "$prefix/bin"
+    printf '#!/bin/sh\necho {version}\n' > "$prefix/bin/$name"
+    chmod +x "$prefix/bin/$name"
+    exit 0
+    ;;
+  fail)
+    echo "npm ERR! network unreachable" >&2
+    exit 7
+    ;;
+esac
+exit 0
+"#,
+            log = log.display(),
+            mode = mode,
+            version = version,
+        );
+        std::fs::write(&script, body).expect("write fake npm");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake npm");
+        script
+    }
+
+    /// PATH 垫法：fake npm 目录前置 + 沙箱 webui 子进程继承的 PATH 兜底
+    /// （脚本内 mkdir/chmod 仍需解析）。返回给 `spawn_webui_extra` 的 extra env。
+    #[cfg(unix)]
+    fn padded_path(npm_dir: &Path) -> String {
+        let real = std::env::var("PATH").unwrap_or_default();
+        format!("{}:{real}", forward_slash(npm_dir))
+    }
+
+    fn catalog_row<'a>(catalog: &'a serde_json::Value, id: &str) -> &'a serde_json::Value {
+        catalog["agents"]
+            .as_array()
+            .unwrap_or_else(|| panic!("agents array missing: {catalog}"))
+            .iter()
+            .find(|a| a["id"].as_str() == Some(id))
+            .unwrap_or_else(|| panic!("agent '{id}' must be listed: {catalog}"))
+    }
+
+    /// task 4.1 主旅程：一键安装 opencode → 私有前缀 bin 就位、目录新行可达、
+    /// 新建会话对话框可选（catalog 有该行即可选）、真实 npm 全程未被触发。
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn one_click_install_seeds_a_reachable_agent_without_touching_real_npm() {
+        let sb = Sandbox::new("testsuite_e2e", "agent-auto-install");
+        let npm_dir = sb.path.join("fake-npm");
+        std::fs::create_dir_all(&npm_dir).expect("mkdir fake-npm");
+        let argv_log = sb.path.join("fake-npm-argv.log");
+        let _script = fake_npm(&npm_dir, "ok", "9.9.9", &argv_log);
+        let path_env = padded_path(&npm_dir);
+
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        // PATH 垫进 webui 子进程 env：handler 的 npm 探测与安装都走它。
+        let _webui = sb.spawn_webui_extra(&sb.core_secret, &[("PATH", &path_env)]);
+        wait_reachable(&cli, &sb).await;
+        let agents_url = format!("{}/api/agents", sb.webui_url());
+
+        // 安装前：opencode 尚不在目录（沙箱 config 只种子了 claude）。
+        let (_, before) = get_json_status(&cli, &agents_url).await.expect("catalog");
+        assert!(
+            !before["agents"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a["id"] == "opencode"),
+            "opencode must be absent before the install: {before}"
+        );
+
+        // 一键安装（真实 HTTP，未带 Origin = CLI/curl 同源放行）。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/agents/install", sb.webui_url()),
+            serde_json::json!({ "recipe": "opencode" }),
+        )
+        .await
+        .expect("POST /api/agents/install");
+        assert_eq!(status, 200, "install response: {body}");
+        assert_eq!(body["installed"], true, "{body}");
+        assert_eq!(body["agent_created"], true, "no prior definition: {body}");
+        assert_eq!(body["version"], "9.9.9", "{body}");
+
+        // 落点在 sebas home 下的私有前缀（沙箱内）。
+        let expected_bin = sb
+            .path
+            .join("agent-tools")
+            .join("opencode")
+            .join("bin")
+            .join("opencode");
+        assert_eq!(
+            body["path"].as_str(),
+            Some(expected_bin.to_string_lossy().as_ref()),
+            "response carries the private-prefix bin absolute path: {body}"
+        );
+        assert!(
+            expected_bin.starts_with(&sb.path),
+            "installed bin lives under the sandbox home: {expected_bin:?}"
+        );
+        assert!(
+            expected_bin.is_file(),
+            "fake npm wrote the bin: {expected_bin:?}"
+        );
+
+        // fake npm 的 argv 日志 = 「真实 npm 未被触发」的进程级证据。
+        let argv: Vec<String> = std::fs::read_to_string(&argv_log)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert!(
+            argv.iter().any(|a| a == "install"),
+            "fake npm ran install: {argv:?}"
+        );
+        assert!(
+            argv.iter()
+                .any(|a| a == &forward_slash(&sb.path.join("agent-tools").join("opencode"))),
+            "prefix rides argv inside the sandbox: {argv:?}"
+        );
+        assert!(
+            argv.iter().any(|a| a == "opencode-ai"),
+            "the official package name rides argv: {argv:?}"
+        );
+
+        // 目录联动：新行出现且可达，path 指私有 bin——新建会话对话框无需重启
+        // 即可选用（对话框的数据源正是该目录）。
+        let hint = sb.path.clone();
+        let listed = wait_for(
+            "the freshly installed opencode row to appear reachable",
+            Duration::from_secs(15),
+            &hint,
+            {
+                let cli = cli.clone();
+                let url = agents_url.clone();
+                let bin = expected_bin.to_string_lossy().to_string();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    let bin = bin.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        let row = v["agents"]
+                            .as_array()?
+                            .iter()
+                            .find(|a| a["id"] == "opencode" && a["reachable"] == true)?
+                            .clone();
+                        (row["path_raw"].as_str() == Some(bin.as_str())).then_some(row)
+                    })
+                }
+            },
+        )
+        .await;
+        assert_eq!(listed["version"], "9.9.9", "{listed}");
+        assert_eq!(listed["args"], serde_json::json!(["acp"]), "{listed}");
+
+        // 重复安装即升级（design D6）：重写假 bin 版本后再装一次——成功、无
+        // 冲突，agent_created=false（该 id 已有定义，不覆盖），目录版本刷新。
+        let _script2 = fake_npm(&npm_dir, "ok", "10.0.0", &argv_log);
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/agents/install", sb.webui_url()),
+            serde_json::json!({ "recipe": "opencode" }),
+        )
+        .await
+        .expect("reinstall opencode");
+        assert_eq!(status, 200, "reinstall is not a 409: {body}");
+        assert_eq!(body["installed"], true, "{body}");
+        assert_eq!(
+            body["agent_created"], false,
+            "existing definition untouched: {body}"
+        );
+        assert_eq!(body["version"], "10.0.0", "{body}");
+        let (_, catalog) = get_json_status(&cli, &agents_url).await.expect("catalog");
+        assert_eq!(
+            catalog_row(&catalog, "opencode")["version"],
+            "10.0.0",
+            "the catalog reflects the upgraded probe: {catalog}"
+        );
+
+        // config 种子受尊重（spec「config 种子定义同受尊重」的进程级半边）：
+        // 沙箱 config.toml 的 `[acp.agents.claude]` 已被 core 种子导入 store，
+        // 安装 claude 因此**不建新行**（agent_created=false）——即便私有前缀
+        // 的 bin 真的装出来了，既有定义也不被覆盖。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/agents/install", sb.webui_url()),
+            serde_json::json!({ "recipe": "claude" }),
+        )
+        .await
+        .expect("install claude against a config-seeded id");
+        assert_eq!(status, 200, "install succeeds: {body}");
+        assert_eq!(body["installed"], true, "{body}");
+        assert_eq!(
+            body["agent_created"], false,
+            "the config-seeded claude id must not be re-created: {body}"
+        );
+        let (_, catalog) = get_json_status(&cli, &agents_url).await.expect("catalog");
+        // 原 config 种子行（fake-claude path）保持不动。
+        let claude_row = catalog_row(&catalog, "claude");
+        let fake = forward_slash(Path::new(env!("CARGO_BIN_EXE_fake-claude")));
+        assert_eq!(
+            claude_row["path_raw"], fake,
+            "the seeded claude path is not overwritten by the install: {claude_row}"
+        );
+    }
+
+    /// spec「npm 缺失诚实报错」的进程级半边：PATH 里没有 npm → typed 400 +
+    /// Node.js 指引，目录零变化、私有前缀未创建。
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn install_without_npm_is_a_typed_400_and_leaves_no_trace() {
+        let sb = Sandbox::new("testsuite_e2e", "agent-auto-install-nonpm");
+        // 垫一个**非空但无 npm** 的目录：webui 的 npm 探测必然失败。
+        let empty_dir = sb.path.join("empty-bin");
+        std::fs::create_dir_all(&empty_dir).expect("mkdir empty-bin");
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui_extra(&sb.core_secret, &[("PATH", &forward_slash(&empty_dir))]);
+        wait_reachable(&cli, &sb).await;
+
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/agents/install", sb.webui_url()),
+            serde_json::json!({ "recipe": "claude" }),
+        )
+        .await
+        .expect("POST /api/agents/install");
+        assert_eq!(status, 400, "npm missing is a typed 400: {body}");
+        let err = body["error"].as_str().unwrap_or_default();
+        assert!(err.contains("npm"), "{err}");
+        assert!(err.contains("Node.js"), "minimal guidance: {err}");
+        assert!(
+            !sb.path.join("agent-tools").exists(),
+            "no private prefix is created when npm is missing"
+        );
+    }
+}

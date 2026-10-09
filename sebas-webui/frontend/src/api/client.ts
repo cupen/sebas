@@ -607,6 +607,18 @@ export interface AgentLaunchPayload {
   sessions_dir?: string | null
 }
 
+/**
+ * （add-agent-auto-install 3.1）`POST /api/agents/install` 的应答：
+ * 私有前缀里最终 bin 的绝对路径 + 探测版本（探测不到则缺省），以及本次是否
+ * 补建了 agents store 行（false = 该 id 已有定义，未改动）。
+ */
+export interface AgentInstallResult {
+  installed: boolean
+  path: string
+  version?: string
+  agent_created: boolean
+}
+
 export interface AdminStatus {
   adapter_ok: boolean
   status: {
@@ -1116,6 +1128,12 @@ export const api = {
     put<{ updated: string }>(`/api/agents/${encodeURIComponent(id)}`, patch),
   agentsDelete: (id: string) =>
     del<{ deleted: string }>(`/api/agents/${encodeURIComponent(id)}`),
+  /**
+   * （add-agent-auto-install 3.1）一键安装已知 agent 配方：WebUI 后端以操作员
+   * npm 把配方包装进 sebas 私有前缀，装完按需补一条 agents store 行。
+   * `agent_created=false` = 该 id 已有定义（store 行或 config 种子），未改动。
+   */
+  agentInstall: (recipe: string) => post<AgentInstallResult>('/api/agents/install', { recipe }),
   /**
    * （add-remote-execution-node 8.2）执行节点可用性。本机节点恒在列且在线；
    * 远端节点来自 core 注册表，`remote_available=false` 表示注册表不可得
