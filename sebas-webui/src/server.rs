@@ -375,6 +375,10 @@ fn build_router_full(
         // add-agent-settings-and-session-titles 4.1：agent 管理面（增删改）；
         // 读面 GET /api/agents 在 core 路由里（driver-free catalog）。
         .route("/api/agents", post(routes::agent_create))
+        // add-agent-auto-install 2.1：一键安装已知配方。静态段
+        // `/api/agents/install` 注册在 `/api/agents/{id}` 之前（axum 0.8 静态段
+        // 优先，双保险）。
+        .route("/api/agents/install", post(routes::agent_install))
         .route(
             "/api/agents/{id}",
             axum::routing::put(routes::agent_update).delete(routes::agent_delete),
@@ -2476,6 +2480,17 @@ mod workspace_root_tests {
         assert_eq!(required_permission("/api/fs/mkdir", "GET"), None);
         // 读面不受影响：browse-dirs 维持「认证即可」。
         assert_eq!(required_permission("/api/fs/browse-dirs", "GET"), None);
+    }
+
+    /// add-agent-auto-install 2.1：安装端点与 agents 写面同档
+    /// （settings.manage = root/admin）；GET 不设权限词。
+    #[test]
+    fn agent_install_route_is_a_settings_manage_surface() {
+        assert_eq!(
+            required_permission("/api/agents/install", "POST"),
+            Some(crate::rbac::Permission::SettingsManage)
+        );
+        assert_eq!(required_permission("/api/agents/install", "GET"), None);
     }
 
     /// 就绪日志的引导 URL：通配 bind 呈现为 127.0.0.1（浏览器不可点

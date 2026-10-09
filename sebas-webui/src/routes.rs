@@ -1024,6 +1024,116 @@ pub async fn agent_delete(State(state): State<WebUiState>, Path(id): Path<String
     )
 }
 
+/// POST /api/agents/install：一键 npm 安装已知配方（add-agent-auto-install）。
+///
+/// 流程（design D1–D7）：
+/// 1. 封闭配方表解析——未知 recipe = typed 400，**不 spawn 任何子进程**；
+/// 2. per-recipe in-flight 锁——并发同 recipe = 409；
+/// 3. `npm --version` 在场探测——缺失 = typed 400 + 最小指引，目录零变化；
+/// 4. 同步执行 `npm install --global --prefix <私有前缀> <包>`（300s 超时）；
+///    非零退出 = 400 携带 stderr 尾部摘要，不建行、不报成功；
+/// 5. 装后按目录探测同一口径复核私有 bin，返回绝对路径与版本；
+/// 6. 按 spawn 解析口径（store ∪ config，扣除墓碑）判缺失，无定义才建标准行
+///    （已有定义一律不动，`agent_created=false`）。
+pub async fn agent_install(
+    State(state): State<WebUiState>,
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> axum::response::Response {
+    use crate::agent_install as install;
+
+    // 1. 配方解析（封闭表；未知即拒绝，不 spawn）。
+    let Some(name) = body
+        .get("recipe")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+    else {
+        return bad_request("缺少 recipe 字段").into_response();
+    };
+    let Some(recipe) = install::recipe(&name) else {
+        return bad_request(&format!(
+            "未知 recipe '{name}'：只支持内置配方 claude / opencode"
+        ))
+        .into_response();
+    };
+
+    // 2. per-recipe in-flight 锁（并发同 recipe → 409）。
+    let Some(_guard) = install::try_acquire(recipe.name) else {
+        return conflict(format!("recipe '{}' 正在安装中，请稍候", recipe.name));
+    };
+
+    // 3. npm 在场探测（缺失即拒，不落任何文件）。
+    if !install::npm_available().await {
+        return bad_request(&install::InstallFailure::NpmMissing.message()).into_response();
+    }
+
+    // 4. 同步执行安装（超时/非零退出 → 诚实失败，不建行）。
+    let prefix = install::install_prefix(recipe.name);
+    if let Err(failure) = install::run_npm_install(&prefix, recipe.package).await {
+        return bad_request(&failure.message()).into_response();
+    }
+
+    // 5. 复核探测（与目录探测同一口径）。
+    let bin = install::bin_path(&prefix, recipe.bin);
+    let (reachable, version, cause) = install::probe_recipe_bin(recipe, &bin).await;
+    if !reachable {
+        return bad_request(&format!(
+            "安装完成但二进制不可达（{}）：{}",
+            bin.display(),
+            cause.unwrap_or_else(|| "探测失败".to_string())
+        ))
+        .into_response();
+    }
+
+    // 6. 建行判定（store ∪ config 注册表，扣除墓碑）。
+    let Some(snapshot) = agents_snapshot(&state).await else {
+        return err_503_core_unreachable();
+    };
+    let store_ids = install::store_ids_from_snapshot(&snapshot);
+    let deleted_ids = install::deleted_ids_from_snapshot(&snapshot);
+    let config_ids: std::collections::HashSet<String> = state
+        .agent_kinds
+        .agent_kinds()
+        .await
+        .into_iter()
+        .map(|a| a.id)
+        .collect();
+    let agent_created =
+        if install::has_existing_definition(&store_ids, &config_ids, &deleted_ids, recipe.name) {
+            false
+        } else {
+            let def = install::recipe_agent_definition(recipe, &bin);
+            match state
+                .backend
+                .state_mutate(
+                    "agents",
+                    serde_json::json!({"op": "put", "id": recipe.name, "agent": def}),
+                )
+                .await
+            {
+                Ok(()) => true,
+                Err(cause) => return map_mutation_error(&cause).into_response(),
+            }
+        };
+
+    let mut payload = serde_json::Map::new();
+    payload.insert("installed".into(), serde_json::json!(true));
+    payload.insert(
+        "path".into(),
+        serde_json::json!(bin.to_string_lossy().to_string()),
+    );
+    if let Some(v) = version {
+        payload.insert("version".into(), serde_json::json!(v));
+    }
+    payload.insert("agent_created".into(), serde_json::json!(agent_created));
+    (
+        axum::http::StatusCode::OK,
+        axum::Json(serde_json::Value::Object(payload)),
+    )
+        .into_response()
+}
+
 /// Health probe: `GET /health`.
 pub async fn health() -> &'static str {
     "ok\n"
