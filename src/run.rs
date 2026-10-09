@@ -21,7 +21,7 @@ use crate::dispatch::dispatch_out_without_feishu;
 use crate::error::Result;
 use crate::ws_loop::spawn_test_session;
 use sebas_acp::claude::manager::{AgentEntry, SessionManager};
-use sebas_acp::{AcpDriver, AgentDriver, ClaudeDriver};
+use sebas_acp::{AcpDriver, AgentDriver, ClaudeDriver, PiDriver};
 use sebas_channels::AdapterRegistry;
 use sebas_dispatch::engine::DispatchHandle;
 use sebas_router::config::RouterConfig;
@@ -44,6 +44,11 @@ fn build_agent_registry(cfg: &Config) -> HashMap<String, AgentEntry> {
                 // /空表回退内置（resolved_models 单点归一）。
                 AgentConfig::Claude(c) => Arc::new(ClaudeDriver::with_models(c.resolved_models())),
                 AgentConfig::Acp { .. } => Arc::new(AcpDriver),
+                // pi 驱动实例携带自己的 sessions 目录（`--session-dir` 钉住），
+                // 与 claude 的 `with_models` 同为「实例级配置注入」先例。
+                AgentConfig::Pi(c) => Arc::new(PiDriver::with_sessions_dir(Some(
+                    c.sessions_dir.clone(),
+                ))),
             };
             let entry = AgentEntry {
                 driver,

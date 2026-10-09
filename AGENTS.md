@@ -276,6 +276,27 @@ addr=127.0.0.1:<port>`，router 侧用自定义 provider（`[provider.fake]` 哑
 工具环（带 tools 无 tool_result → tool_use；有 tool_result → 终文本），fake 秒回
 也让限流用例确定性复现。
 
+**pi agent 沙箱配方（add-pi-driver）**：pi 是第三个一等 driver
+（`driver = "pi"`，走 `pi --mode rpc` 的 stdio JSONL 协议，不是 ACP）。沙箱里
+零真实凭据跑 pi 会话有两条路：
+
+- **协议语义级（默认，零外部依赖）**：`tests/pi_driver_integration_test.rs`
+  用 fake pi 桩（POSIX sh 脚本讲握手 + 剧本回合）经 `SessionManager` 跑完
+  建会话/回合/恢复/切模型/取消/看门狗探针七条旅程——不需要 Node 或 pi 在场。
+- **真实二进制端到端（skip-if-absent）**：装 pi（`npm i -g
+  @earendil-works/pi-coding-agent`，Node ≥22.19）后，把 pi 的自定义 provider
+  指向 `sebas fake-provider`：写 pi 的 `models.json`（pi 自有配置，sebas 不代写）
+  把 base URL 指到 fake-provider 的 `addr`，再在 pi 侧 `/login` 或配 api key。
+  **pi 的自有状态落 `~/.pi`**——沙箱必须把 `HOME` 或 `PI_CODING_AGENT_SESSION_DIR`
+  钉进 `<SB>`，否则扫到操作员真实 pi 会话；`[acp.agents.pi] sessions_dir` 经
+  `--session-dir` 钉在 `<SB>` 内（sebas 侧半边）。
+- **凭据边界**：sebas **不翻译也不代写** pi 的凭据/`models.json`（design D5，
+  一个文件一个写入者）；pi 子进程继承 sebas 进程 env（标准 API key env 表由 pi
+  自读）。reachability 用二进制在场探测 + `pi auth check`（ready/not_ready/
+  invalid）区分「装了没登录」。
+- **v1 无权限**：pi 无内置权限系统，工具以子进程权限直跑；`SetMode` 返回非终态
+  「不支持」（不产生审批卡）——看门狗周期探针因此被容忍，GUI 验收勿记为缺陷。
+
 1. `mkdir -p` every dir the config references — `work_dir` must **exist on
    disk before any ACP session spawns** — then write `<SB>/config.toml`:
 

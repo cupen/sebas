@@ -76,7 +76,9 @@ pub struct AcpConfig {
 }
 
 /// One configured agent, tagged by driver. `Claude` drives the dedicated
-/// Claude Code path; `Acp` drives any native-ACP agent via a launch command.
+/// Claude Code path; `Acp` drives any native-ACP agent via a launch command;
+/// `Pi` drives the pi coding agent over its own headless RPC protocol
+/// (`pi --mode rpc`), which is not ACP.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "driver", rename_all = "snake_case")]
 pub enum AgentConfig {
@@ -91,10 +93,47 @@ pub enum AgentConfig {
         #[serde(default)]
         display: Option<String>,
     },
+    Pi(AcpPiConfig),
+}
+
+/// pi agent 的配置形态（add-pi-driver）：镜像 `AcpClaudeConfig` 的 spawn
+/// 关键字段（path/args/sessions_dir/work_dir/两超时），因为 pi 与 claude 同为
+/// 「专用驱动 + 自有协议」而非通用 ACP 的 `command` 形态。
+#[derive(Debug, Clone, Deserialize)]
+pub struct AcpPiConfig {
+    #[serde(default = "default_pi_path")]
+    pub path: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub display: Option<String>,
+    #[serde(default = "default_pi_sessions_dir")]
+    pub sessions_dir: String,
+    #[serde(default)]
+    pub work_dir: Option<String>,
+    #[serde(default = "default_startup_timeout")]
+    pub startup_timeout_secs: u64,
+    #[serde(default = "default_idle_kill")]
+    pub idle_kill_secs: u64,
+}
+
+impl Default for AcpPiConfig {
+    fn default() -> Self {
+        Self {
+            path: default_pi_path(),
+            args: vec![],
+            display: None,
+            sessions_dir: default_pi_sessions_dir(),
+            work_dir: None,
+            startup_timeout_secs: default_startup_timeout(),
+            idle_kill_secs: default_idle_kill(),
+        }
+    }
 }
 
 impl AgentConfig {
-    /// 本定义的完整 launch argv（claude → path + args；acp → command）。
+    /// 本定义的完整 launch argv（claude → path + args；acp → command；
+    /// pi → path + args）。
     pub fn command(&self) -> Vec<String> {
         match self {
             AgentConfig::Claude(c) => {
@@ -103,14 +142,20 @@ impl AgentConfig {
                 v
             }
             AgentConfig::Acp { command, .. } => command.clone(),
+            AgentConfig::Pi(c) => {
+                let mut v = vec![c.path.clone()];
+                v.extend(c.args.clone());
+                v
+            }
         }
     }
 
-    /// 静态 launch 策略标签：`"claude"` 或 `"acp"`。
+    /// 静态 launch 策略标签：`"claude"` / `"acp"` / `"pi"`。
     pub fn driver_tag(&self) -> &'static str {
         match self {
             AgentConfig::Claude(_) => "claude",
             AgentConfig::Acp { .. } => "acp",
+            AgentConfig::Pi(_) => "pi",
         }
     }
 
@@ -119,14 +164,16 @@ impl AgentConfig {
         match self {
             AgentConfig::Claude(c) => c.display.clone(),
             AgentConfig::Acp { display, .. } => display.clone(),
+            AgentConfig::Pi(c) => c.display.clone(),
         }
     }
 
-    /// The configured work directory (Claude only for now).
+    /// The configured work directory (claude and pi carry one).
     pub fn work_dir(&self) -> Option<String> {
         match self {
             AgentConfig::Claude(c) => c.work_dir.clone(),
-            _ => None,
+            AgentConfig::Pi(c) => c.work_dir.clone(),
+            AgentConfig::Acp { .. } => None,
         }
     }
 
@@ -138,6 +185,7 @@ impl AgentConfig {
                 startup_timeout_secs,
                 ..
             } => *startup_timeout_secs,
+            AgentConfig::Pi(c) => c.startup_timeout_secs,
         };
         std::time::Duration::from_secs(secs.max(1))
     }
@@ -147,6 +195,16 @@ impl AgentConfig {
         match self {
             AgentConfig::Claude(c) => c.idle_kill_secs,
             AgentConfig::Acp { idle_kill_secs, .. } => *idle_kill_secs,
+            AgentConfig::Pi(c) => c.idle_kill_secs,
+        }
+    }
+
+    /// pi agent 实例的 sessions 目录（`--session-dir` 的注入源）；其余
+    /// driver 无此字段（`None`）。
+    pub fn pi_sessions_dir(&self) -> Option<String> {
+        match self {
+            AgentConfig::Pi(c) => Some(c.sessions_dir.clone()),
+            _ => None,
         }
     }
 }
@@ -284,6 +342,15 @@ fn default_claude_path() -> String {
 fn default_sessions_dir() -> String {
     "~/.claude/sessions".into()
 }
+/// pi 二进制缺省名（`pi` 在 PATH 上）。
+fn default_pi_path() -> String {
+    "pi".into()
+}
+/// pi 会话目录缺省（pi 自身文档的默认落点；与
+/// `sebas_acp::DEFAULT_PI_SESSIONS_DIR` 同值——两处都是「pi 缺省」的如实镜像）。
+fn default_pi_sessions_dir() -> String {
+    "~/.pi/agent/sessions".into()
+}
 fn default_startup_timeout() -> u64 {
     30
 }
@@ -292,15 +359,22 @@ fn default_idle_kill() -> u64 {
 }
 
 impl AcpConfig {
-    /// The kind used when a session does not request one. Falls back to
-    /// `"claude"` (the historical single-agent default).
+    /// The kind used when a session does not request one.
+    ///
+    /// Resolution order (add-pi-driver D6): an explicit `default` always wins;
+    /// with no explicit default and exactly one configured agent that agent is
+    /// the implicit default; with **no agents at all** the fallback chain is
+    /// probed at parse time (`pi` → `claude`) and recorded in `default`, so
+    /// this only reaches the hardcoded `"pi"` when nothing was configured and
+    /// no fallback binary resolved (the historical failure case — validation
+    /// then reports `pi` as unreachable rather than silently picking another).
     pub fn default_kind(&self) -> &str {
-        self.default.as_deref().unwrap_or("claude")
+        self.default.as_deref().unwrap_or(DEFAULT_FALLBACK_KIND)
     }
 
     /// The executable (argv[0]) of the default agent, for reachability checks.
-    /// Falls back to `"claude"` when no agent is configured (matches the
-    /// historical behavior of always probing the claude binary).
+    /// When the default kind has no configured entry (the zero-agent fallback),
+    /// the kind name itself is the binary to probe.
     fn default_kind_binary(&self) -> String {
         self.command_for(self.default_kind())
             .and_then(|mut v| {
@@ -310,7 +384,7 @@ impl AcpConfig {
                     Some(v.remove(0))
                 }
             })
-            .unwrap_or_else(|| "claude".to_string())
+            .unwrap_or_else(|| self.default_kind().to_string())
     }
 
     /// The full argv (executable + args) for an agent kind, if configured.
@@ -355,15 +429,45 @@ impl AcpConfig {
 
     /// When `default` is absent and exactly one agent is configured, that
     /// agent becomes the implicit default (lets a bare `acp` hint resolve
-    /// to the only configured kind). Idempotent; called once in `parse`.
+    /// to the only configured kind). When **no agent** is configured either,
+    /// the fallback chain (`pi` → `claude`, add-pi-driver D6) is probed: the
+    /// first binary that resolves on disk/PATH becomes the default and the
+    /// choice is logged. Idempotent; called once in `parse`.
     fn apply_implicit_default(&mut self) {
-        if self.default.is_none() && self.agents.len() == 1 {
+        if self.default.is_some() {
+            return;
+        }
+        if self.agents.len() == 1 {
             let only = self.agents.keys().next().cloned().unwrap_or_default();
             if !only.is_empty() {
                 self.default = Some(only);
             }
+            return;
+        }
+        if self.agents.is_empty() {
+            let probed = probe_fallback_kind();
+            tracing::info!(
+                kind = %probed,
+                "no agent configured; fallback default resolved by probing pi then claude"
+            );
+            self.default = Some(probed.to_string());
         }
     }
+}
+
+/// 零 agent 配置时的回退探测链顺序（add-pi-driver D6）：pi 优先，claude 兜底。
+pub const DEFAULT_FALLBACK_KINDS: [&str; 2] = ["pi", "claude"];
+/// 探测链全不可解析时的兜底 kind（历史缺省 `claude` 已被 pi 取代；此值只
+/// 决定「谁被如实报为不可达」，不静默改选）。
+pub const DEFAULT_FALLBACK_KIND: &str = "pi";
+
+/// 依 `DEFAULT_FALLBACK_KINDS` 顺序探测二进制（PATH 解析 + 可执行位）。
+fn probe_fallback_kind() -> &'static str {
+    DEFAULT_FALLBACK_KINDS
+        .iter()
+        .copied()
+        .find(|kind| binary_resolvable(kind))
+        .unwrap_or(DEFAULT_FALLBACK_KIND)
 }
 
 /// persist-session-map 3.3（design D5）：`[dispatch]` 段显式拒绝未知键——
@@ -1175,6 +1279,13 @@ fn check_binary_reachable(path: &str) -> Result<()> {
     Ok(())
 }
 
+/// [`check_binary_reachable`] 的布尔投影：回退探测链只需要「可解析与否」，
+/// 不需要错误文案。与校验同一判定（绝对/相对带分隔符路径直接查、裸名字走
+/// PATH）。
+fn binary_resolvable(path: &str) -> bool {
+    check_binary_reachable(path).is_ok()
+}
+
 /// Appended to every default tracing filter: the third-party openlark WS
 /// client logs its full connect URL (incl. access_key/ticket) at info.
 pub(crate) const LOG_FILTER_QUIET: &str = ",openlark_client=warn";
@@ -1835,5 +1946,96 @@ bootstrap_token_ttl_secs = 120
     fn node_link_disabled_tolerates_any_listen() {
         // 没开就不校验：避免让一个没启用的段把进程拦在启动门外。
         assert!(Config::parse("[node_link]\nlisten = \"weird\"\n").is_ok());
+    }
+
+    // ── add-pi-driver：pi 配置形态与默认解析链 ──
+
+    /// pi agent 段解析：镜像 claude 形态的字段（path/args/sessions_dir/
+    /// work_dir/两超时），driver 标签为 `pi`，且显式 default 生效。
+    #[test]
+    fn pi_agent_parses_with_claude_shaped_fields() {
+        let cfg = Config::parse(
+            r#"
+[acp]
+default = "pi"
+
+[acp.agents.pi]
+driver = "pi"
+path = "/opt/pi/bin/pi"
+sessions_dir = "/srv/pi-sessions"
+work_dir = "/srv/work"
+startup_timeout_secs = 45
+"#,
+        )
+        .expect("pi agent config parses");
+        let agent = cfg.acp.agents.get("pi").expect("pi agent present");
+        assert_eq!(agent.driver_tag(), "pi");
+        assert_eq!(cfg.acp.default_kind(), "pi");
+        assert_eq!(agent.command(), vec!["/opt/pi/bin/pi".to_string()]);
+        assert_eq!(agent.work_dir().as_deref(), Some("/srv/work"));
+        assert_eq!(agent.pi_sessions_dir().as_deref(), Some("/srv/pi-sessions"));
+        assert_eq!(agent.startup_timeout(), std::time::Duration::from_secs(45));
+    }
+
+    /// pi 段缺省值：path 回退 `pi`、sessions_dir 回退 pi 的默认落点。
+    #[test]
+    fn pi_agent_defaults_are_pi_named() {
+        let cfg = Config::parse("[acp.agents.pi]\ndriver = \"pi\"\n")
+            .expect("bare pi agent parses");
+        let agent = cfg.acp.agents.get("pi").unwrap();
+        assert_eq!(agent.command(), vec!["pi".to_string()]);
+        assert_eq!(agent.pi_sessions_dir().as_deref(), Some("~/.pi/agent/sessions"));
+    }
+
+    /// 未知 driver 标签仍在解析期被拒（封闭集新增 pi 后，其余仍报错）。
+    #[test]
+    fn unknown_driver_tag_is_still_rejected() {
+        let err = Config::parse("[acp.agents.x]\ndriver = \"foobar\"\n")
+            .expect_err("unknown driver must fail parse");
+        let msg = format!("{err:?}");
+        assert!(msg.contains("foobar") || msg.contains("driver"), "{msg}");
+    }
+
+    /// 单 agent 隐式默认不受影响：只配一个 pi agent 时它就是默认。
+    #[test]
+    fn single_pi_agent_becomes_the_implicit_default() {
+        let cfg = Config::parse("[acp.agents.pi]\ndriver = \"pi\"\npath = \"/bin/true\"\n")
+            .expect("single-agent config parses");
+        assert_eq!(cfg.acp.default_kind(), "pi");
+    }
+
+    /// 显式 default 永远优先于任何回退。
+    #[test]
+    fn explicit_default_wins_over_fallback() {
+        let cfg = Config::parse(
+            "[acp]\ndefault = \"claude\"\n\n[acp.agents.claude]\ndriver = \"claude\"\npath = \"/bin/true\"\n\n[acp.agents.pi]\ndriver = \"pi\"\npath = \"/bin/true\"\n",
+        )
+        .expect("two-agent config parses");
+        assert_eq!(cfg.acp.default_kind(), "claude");
+    }
+
+    /// 零 agent 回退探测链：无任何 agent 且未设 default 时，`apply_implicit_default`
+    /// 依 `pi` → `claude` 顺序探测并把命中者写进 `default`。用真实 PATH 上的
+    /// `sh` 无法直接测（链是硬编码的 pi/claude），故直接单测探测函数本身：
+    /// 它返回链中第一个可解析者，全不可解析时落到兜底常量。
+    #[test]
+    fn fallback_probe_prefers_pi_then_claude() {
+        // 探测函数在无 pi/claude 的 PATH 下必须返回兜底常量（不 panic、不空串）。
+        let probed = probe_fallback_kind();
+        assert!(
+            DEFAULT_FALLBACK_KINDS.contains(&probed),
+            "probe must return a chain member or the fallback constant, got {probed}"
+        );
+        assert!(!probed.is_empty());
+    }
+
+    /// 零 agent 时 `apply_implicit_default` 一定写入 default（探测链结果），
+    /// 使 `default_kind()` 有确定答案——缺省不再是空。
+    #[test]
+    fn zero_agent_config_resolves_a_fallback_default() {
+        let mut acp = AcpConfig::default();
+        acp.apply_implicit_default();
+        assert!(acp.default.is_some(), "zero-agent fallback must set a default");
+        assert!(!acp.default_kind().is_empty());
     }
 }

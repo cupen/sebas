@@ -6,12 +6,26 @@ app_secret = ""
 
 # Agent 接入（[acp.agents.<name>]）：
 #   driver = "claude"  → Claude Code CLI（stream-json + control protocol）
+#   driver = "pi"      → pi coding agent（自有 headless RPC：`pi --mode rpc`）
 #   driver = "acp"     → 任意支持 Agent Client Protocol v1 的 CLI（opencode/gemini…）
 #
 # 本段只是**种子源**（add-agent-settings-and-session-titles）：core 启动时把
 # 这里的条目幂等导入状态库 agents 表（同 id 已存在则以 Settings 管理的行
 # 为准、本段被忽略）。之后 agent 目录的增删改在 WebUI Settings → Agents
 # 进行（免重启生效），不写回本文件。
+#
+# 默认 agent（add-pi-driver）：显式 `default` 永远优先；只配一个 agent 时它
+# 即隐式默认；一个都没配时按 `pi` → `claude` 顺序探测二进制。把默认换回
+# claude 只需改下面这一行（或删掉它、只留 claude 段）。
+[acp]
+default = "pi"
+
+[acp.agents.pi]
+driver = "pi"
+# path 缺省 = "pi"（PATH 查找）；sessions_dir 缺省 = "~/.pi/agent/sessions"。
+# 附加 CLI 参数同 claude：必须键值形式（位置参数在解析期报错）。
+# args = ["--provider", "anthropic"]
+
 [acp.agents.claude]
 driver = "claude"
 # 附加 CLI 参数必须用键值形式（`--flag value`；fix-webui-qa-defects 6.2）。
