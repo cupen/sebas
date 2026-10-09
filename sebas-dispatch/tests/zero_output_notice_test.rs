@@ -150,6 +150,7 @@ async fn process_only_turn_does_not_append_notice() {
             session_id: "s-tool".into(),
             tool_name: "Bash".into(),
             args: serde_json::json!({"command": "ls"}),
+            tool_use_id: None,
         })
         .await;
     router

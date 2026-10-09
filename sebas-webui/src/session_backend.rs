@@ -1379,6 +1379,7 @@ impl FakeBackend {
                 .unwrap_or(0),
             // webui 侧自建条目（本地回显等）无结构化标题。
             title: None,
+            tool_use_id: None,
             failure_class: None,
         });
     }

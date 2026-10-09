@@ -319,6 +319,11 @@ pub struct ConversationEntryView {
     /// 序列化时省略键。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_class: Option<String>,
+    /// （fold-tool-calls-into-process-tree 4.5）工具条目的上游 call id，
+    /// 原样透传给前端（按 id 把调用与结果配对成一块）。`None` = 旧条目，
+    /// 序列化时省略键。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_use_id: Option<String>,
 }
 
 /// 唯一显式转换（add-domain-layer 3.4，spec「presentation views no longer
@@ -334,6 +339,7 @@ impl From<&sebas_dispatch::TurnEntry> for ConversationEntryView {
             content: t.content.clone(),
             created_at_unix: t.created_at_unix,
             title: t.title.clone(),
+            tool_use_id: t.tool_use_id.clone(),
             failure_class: t.failure_class.clone(),
         }
     }
@@ -484,6 +490,9 @@ mod tests {
             // fix-webui-qa-findings D2：`permission_mode_result` 保持一等条目
             // 类型（不再归一为 markdown——权限 spec「first-class entry」）。
             ("content", "permission_mode_result"),
+            // fold-tool-calls-into-process-tree 2.2：新增的带 title/tool_use_id
+            // 工具条目（可选字段演进样本）——渲染仍是一等 tool 条目。
+            ("content", "tool"),
         ];
         assert_eq!(entries.len(), baseline.len(), "黄金转录条目数变了");
 
@@ -527,6 +536,7 @@ mod tests {
                 content: r#"{"from":"a","to":"b"}"#.to_string(),
                 created_at_unix: 0,
                 title: None,
+                tool_use_id: None,
                 failure_class: None,
             };
             let view = crate::models::ConversationEntryView::from(&entry)
@@ -746,6 +756,7 @@ mod conversion_tests {
             content: "📖".into(),
             created_at_unix: 42,
             title: Some("Read · a".into()),
+            tool_use_id: Some("tc-1".into()),
             failure_class: None,
         };
         let view = ConversationEntryView::from(&t);
@@ -754,6 +765,7 @@ mod conversion_tests {
         assert_eq!(view.element_type, "tool");
         assert_eq!(view.created_at_unix, 42);
         assert_eq!(view.title.as_deref(), Some("Read · a"));
+        assert_eq!(view.tool_use_id.as_deref(), Some("tc-1"));
         assert!(view.failure_class.is_none());
     }
 }

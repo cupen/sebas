@@ -35,6 +35,10 @@ pub fn translate_notification(
                 session_id: sid(),
                 tool_name: tc.title.clone(),
                 args: tc.raw_input.clone().unwrap_or(Value::Null),
+                // fold-tool-calls-into-process-tree 1.2：通用 ACP 路径同样
+                // 带上 call id（ToolCall 通知必带 tool_call_id），前端按 id
+                // 配对调用与结果。
+                tool_use_id: Some(tc.tool_call_id.to_string()),
             }]
         }
         SessionUpdate::ToolCallUpdate(upd) => tool_update(&sid(), tool_names, upd),
@@ -101,11 +105,14 @@ fn tool_update(
             session_id: session_id.to_string(),
             tool_name: name,
             result,
+            // fold-tool-calls-into-process-tree 1.1：与 ToolStart 同源 id。
+            tool_use_id: Some(upd.tool_call_id.to_string()),
         }],
         ToolCallStatus::Failed => vec![AcpEvent::ToolEnd {
             session_id: session_id.to_string(),
             tool_name: name,
             result,
+            tool_use_id: Some(upd.tool_call_id.to_string()),
         }],
         ToolCallStatus::InProgress => vec![AcpEvent::ToolProgress {
             session_id: session_id.to_string(),

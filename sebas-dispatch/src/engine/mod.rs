@@ -21,6 +21,9 @@ pub use events::{
 // 失败分类词表（fix-webui-qa-defects 5.1/5.2，design D5）：webui 前端标签
 // 映射与 wire 值同源，避免字符串漂移。
 pub use events::failure_class;
+// 工具条目结构化标题的唯一规则（fold-tool-calls-into-process-tree 3.1）：
+// native 载体投影点经 crate 根复用入口，键序表不得复制。
+pub use events::tool_entry_title;
 pub use maps::{
     AutoModeSwitch, AutoModeSwitchMap, MsgIdMap, PermCardEntry, PermCardMap, ReplyTargetMap,
 };
@@ -1481,7 +1484,10 @@ impl DispatchHandle {
                 }
             }
             AcpEvent::ToolStart {
-                tool_name, args, ..
+                tool_name,
+                args,
+                tool_use_id,
+                ..
             } => {
                 let args_str = serde_json::to_string_pretty(args).unwrap_or_default();
                 // workbench-conversation-view 1.3（design D2）：工具条目打
@@ -1490,25 +1496,35 @@ impl DispatchHandle {
                 // workbench-agent-identity-and-process-folds 1.2：再附结构化
                 // 标题（`{tool} · {key_arg}`，偏好键序提取 + 200 字符上限）
                 // 供前端二级折叠收起时显示。
-                self.transcript_push(
-                    session_id,
-                    TurnEntry::tool(0, format!("📖 **{tool_name}**\n```json\n{args_str}\n```"))
-                        .with_title(events::tool_entry_title(false, tool_name, Some(args))),
+                // fold-tool-calls-into-process-tree 2.3：上游 call id 一并
+                // 落进转录条目——前端按 id 把调用与结果精确配对成一块。
+                let mut entry = TurnEntry::tool(
+                    0,
+                    format!("📖 **{tool_name}**\n```json\n{args_str}\n```"),
                 )
-                .await;
+                .with_title(events::tool_entry_title(false, tool_name, Some(args)));
+                if let Some(id) = tool_use_id {
+                    entry = entry.with_tool_use_id(id.clone());
+                }
+                self.transcript_push(session_id, entry).await;
             }
             AcpEvent::ToolEnd {
-                tool_name, result, ..
+                tool_name,
+                result,
+                tool_use_id,
+                ..
             } => {
                 // workbench-agent-identity-and-process-folds 1.2：完成态标题
-                // 带 `✓ ` 前缀；ToolEnd wire 不携带 args（无 call id 可配对），
-                // 传 None → 标题退化为 `✓ {tool}`。
-                self.transcript_push(
-                    session_id,
+                // 带 `✓ ` 前缀；ToolEnd wire 不携带 args，传 None → 标题退化
+                // 为 `✓ {tool}`。fold-tool-calls-into-process-tree 2.3：结果
+                // 条目携带与配对调用相等的 id（合并块的 ✓/✗ 章数据源）。
+                let mut entry =
                     TurnEntry::tool(0, format!("✓ **{tool_name}**\n{result}"))
-                        .with_title(events::tool_entry_title(true, tool_name, None)),
-                )
-                .await;
+                        .with_title(events::tool_entry_title(true, tool_name, None));
+                if let Some(id) = tool_use_id {
+                    entry = entry.with_tool_use_id(id.clone());
+                }
+                self.transcript_push(session_id, entry).await;
             }
             AcpEvent::Finished { session_id } => {
                 // （2.2，design D2）被取消的回合在此收尾：cancel 命令发出的

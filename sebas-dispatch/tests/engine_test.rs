@@ -165,11 +165,13 @@ async fn assistant_text_after_tool_result_lands_in_order() {
             session_id: sid.into(),
             tool_name: "Bash".into(),
             args: serde_json::json!({"command": "rm -rf /"}),
+            tool_use_id: None,
         },
         AcpEvent::ToolEnd {
             session_id: sid.into(),
             tool_name: "Bash".into(),
             result: "perm done\n".into(),
+            tool_use_id: None,
         },
         AcpEvent::TextDelta {
             session_id: sid.into(),
@@ -200,6 +202,52 @@ async fn assistant_text_after_tool_result_lands_in_order() {
         turns[3].content.contains("perm turn finished"),
         "the post-loop assistant text is preserved verbatim"
     );
+}
+
+// fold-tool-calls-into-process-tree 2.3：事件里的 `tool_use_id` 落进工具
+// 转录条目（结果条目与配对调用同 id）；标题沿用既有规则——ToolStart 带
+// args 出结构化标题，ToolEnd 无 args 退化为 `✓ {tool}`。
+#[tokio::test]
+async fn tool_entries_carry_tool_use_id_and_structured_titles() {
+    let (router, _rx) = DispatchHandle::new(SessionMap::new());
+    let key = ChannelKey::new("web", "tool-id");
+    router
+        .map
+        .insert(key.clone(), Mapping::active("s-toolid"))
+        .await
+        .unwrap();
+    router.seed_card("s-toolid".to_string(), "perm".into()).await;
+
+    let sid = "s-toolid";
+    for evt in [
+        AcpEvent::ToolStart {
+            session_id: sid.into(),
+            tool_name: "Read".into(),
+            args: serde_json::json!({"file_path": "src/main.rs"}),
+            tool_use_id: Some("tc-1".into()),
+        },
+        AcpEvent::ToolEnd {
+            session_id: sid.into(),
+            tool_name: "Read".into(),
+            result: "contents".into(),
+            tool_use_id: Some("tc-1".into()),
+        },
+    ] {
+        router.apply_event_to_out(sid.into(), &evt).await;
+    }
+
+    let turns = router.session_turns(&key, 0).await.unwrap();
+    let tools: Vec<&sebas_dispatch::TurnEntry> = turns
+        .iter()
+        .filter(|t| t.element_type == sebas_domain::vocabulary::TurnElementType::Tool)
+        .collect();
+    assert_eq!(tools.len(), 2, "call + result both land as tool entries");
+    // 调用条目：id + 结构化标题（偏好键序提取 file_path）。
+    assert_eq!(tools[0].tool_use_id.as_deref(), Some("tc-1"));
+    assert_eq!(tools[0].title.as_deref(), Some("Read · src/main.rs"));
+    // 结果条目：同一 id；wire 无 args → 标题退化为 `✓ Read`。
+    assert_eq!(tools[1].tool_use_id.as_deref(), Some("tc-1"));
+    assert_eq!(tools[1].title.as_deref(), Some("✓ Read"));
 }
 
 // （fix-webui-qa-round2 2.2，D-B218）session-slash-commands「Command

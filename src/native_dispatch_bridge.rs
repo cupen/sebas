@@ -91,11 +91,22 @@ impl DispatchNativeBridge {
                     bridge.router.touch_native_session(&key).await;
                 }
                 AgentEvent::ToolStart {
-                    tool_name, args, ..
+                    tool_name,
+                    args,
+                    tool_use_id,
+                    ..
                 } => {
                     let args_str = serde_json::to_string_pretty(&args).unwrap_or_default();
                     let rendered = format!("📖 **{tool_name}**\n```json\n{args_str}\n```");
-                    let entry = TurnEntry::markdown(0, rendered);
+                    // fold-tool-calls-into-process-tree 3.1：native 载体升为
+                    // 一等 tool 条目（`element_type = "tool"` + 结构化标题 +
+                    // call id），与 ACP 面同构——不再以 markdown 正文呈现。
+                    let mut entry = TurnEntry::tool(0, rendered).with_title(
+                        sebas_dispatch::tool_entry_title(false, &tool_name, Some(&args)),
+                    );
+                    if let Some(id) = &tool_use_id {
+                        entry = entry.with_tool_use_id(id.clone());
+                    }
                     bridge
                         .router
                         .push_transcript_entry(&session_id, entry)
@@ -103,10 +114,21 @@ impl DispatchNativeBridge {
                     bridge.router.touch_native_session(&key).await;
                 }
                 AgentEvent::ToolEnd {
-                    tool_name, result, ..
+                    tool_name,
+                    result,
+                    tool_use_id,
+                    ..
                 } => {
                     let rendered = format!("✓ **{tool_name}**\n{result}");
-                    let entry = TurnEntry::markdown(0, rendered);
+                    // fold-tool-calls-into-process-tree 3.1：结果条目同为一等
+                    // tool 条目；ToolEnd wire 无 args → 标题退化 `✓ {tool}`
+                    // （与 ACP 面同一口径），call id 与配对调用相等。
+                    let mut entry = TurnEntry::tool(0, rendered).with_title(
+                        sebas_dispatch::tool_entry_title(true, &tool_name, None),
+                    );
+                    if let Some(id) = &tool_use_id {
+                        entry = entry.with_tool_use_id(id.clone());
+                    }
                     bridge
                         .router
                         .push_transcript_entry(&session_id, entry)
@@ -301,5 +323,76 @@ mod tests {
         .expect("native session should be registered");
         let info = router.session_info_for(&key).await.expect("mapping exists");
         assert!(info.session_id.is_some(), "native session_id should be set");
+    }
+
+    /// fold-tool-calls-into-process-tree 3.1：native 载体的工具痕迹升为
+    /// 一等 tool 条目——`element_type == tool`、结构化标题（`Read · <path>`
+    /// 形态，复用 sebas-dispatch 的键序规则）、调用与结果携带相等 call id。
+    #[tokio::test]
+    async fn tool_traces_land_as_first_class_tool_entries_with_titles_and_ids() {
+        let llm = sebas_agent::llm::fake::FakeLlmClient::scripted(vec![
+            sebas_agent::llm::fake::FakeLlmClient::call_tools(vec![(
+                "tc-read-1",
+                "read",
+                serde_json::json!({"path": "src/main.rs"}),
+            )]),
+            sebas_agent::llm::fake::FakeLlmClient::say("done"),
+        ]);
+        let manager = Arc::new(
+            SessionManager::new(
+                Arc::new(llm),
+                sebas_agent::tools::ToolRegistry::with_sandbox(
+                    std::time::Duration::from_secs(10),
+                    sebas_agent::policy::SandboxMode::Firewall,
+                ),
+                Default::default(),
+            )
+            .with_policy(Arc::new(sebas_agent::policy::PolicyEngine::new(
+                Default::default(),
+            ))),
+        );
+        let (router, mut out_rx) = DispatchHandle::new(SessionMap::new());
+        tokio::spawn(async move { while out_rx.recv().await.is_some() {} });
+        let bridge = DispatchNativeBridge::new(manager, router.clone());
+
+        let key = ChannelKey::new("feishu", "agent-f-tool");
+        bridge.prompt(key.clone(), "go".into());
+
+        // 等回合收尾（转录里出现正文 "done" 即内核两个 model call 都已落账）。
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Some(turns) = router.session_turns(&key, 0).await
+                    && turns.iter().any(|t| t.content.contains("done"))
+                {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("turn should finish");
+
+        let turns = router.session_turns(&key, 0).await.expect("transcript");
+        let tools: Vec<_> = turns
+            .iter()
+            .filter(|t| {
+                t.element_type == sebas_domain::session::TurnElementType::Tool
+            })
+            .collect();
+        assert_eq!(tools.len(), 2, "call + result both land as tool entries");
+        // 调用条目：一等 tool + `Read · src/main.rs` 形态标题 + call id。
+        assert_eq!(
+            tools[0].tool_use_id.as_deref(),
+            Some("tc-read-1"),
+            "invocation carries the upstream call id"
+        );
+        assert_eq!(
+            tools[0].title.as_deref(),
+            Some("read · src/main.rs"),
+            "structured title reuses the dispatch key-order rule"
+        );
+        // 结果条目：同一 id；ToolEnd 无 args → 标题退化 `✓ read`。
+        assert_eq!(tools[1].tool_use_id.as_deref(), Some("tc-read-1"));
+        assert_eq!(tools[1].title.as_deref(), Some("✓ read"));
     }
 }

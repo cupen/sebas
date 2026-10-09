@@ -23,6 +23,9 @@ pub use crate::engine::{
 /// 错误条目失败分类词表（fix-webui-qa-defects 5.1/5.2）：`TurnEntry
 /// ::failure_class` 的合法值。webui 标签映射与 wire 值同源。
 pub use crate::engine::failure_class;
+/// 工具条目结构化标题的唯一规则（fold-tool-calls-into-process-tree 3.1）：
+/// native 载体投影点复用入口，键序表不得复制。
+pub use crate::engine::tool_entry_title;
 pub use cards::{CardConfig, ThinkingDisplay};
 pub use commands::{Command, RouterAction, parse_command};
 pub use crud::{CrudForm, CrudStore, FileStore, InMemoryStore, Item, ProviderForms};

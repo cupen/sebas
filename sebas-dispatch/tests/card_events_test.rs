@@ -187,6 +187,7 @@ fn tool_start_folds_into_collapsible_panel() {
             session_id: "s".into(),
             tool_name: "Bash".into(),
             args: serde_json::json!({"cmd":"ls"}),
+            tool_use_id: None,
         },
         &cfg(),
     );
@@ -226,6 +227,7 @@ fn tool_start_fold_disabled_emits_hr_then_markdown() {
             session_id: "s".into(),
             tool_name: "Bash".into(),
             args: serde_json::json!({"cmd":"ls"}),
+            tool_use_id: None,
         },
         &c,
     );
@@ -294,6 +296,7 @@ fn tool_lifecycle_folds_into_single_panel() {
             session_id: "s".into(),
             tool_name: "Bash".into(),
             args: serde_json::json!({"cmd": "ls"}),
+            tool_use_id: None,
         },
         &cfg_fold_tool(),
     );
@@ -312,6 +315,7 @@ fn tool_lifecycle_folds_into_single_panel() {
             session_id: "s".into(),
             tool_name: "Bash".into(),
             result: "x".repeat(20),
+            tool_use_id: None,
         },
         &cfg_fold_tool(),
     );
@@ -358,6 +362,7 @@ fn tool_end_zero_suppresses_result_output() {
             session_id: "s".into(),
             tool_name: "Bash".into(),
             args: serde_json::json!({"cmd": "ls"}),
+            tool_use_id: None,
         },
         &cfg(),
     );
@@ -367,6 +372,7 @@ fn tool_end_zero_suppresses_result_output() {
             session_id: "s".into(),
             tool_name: "Bash".into(),
             result: "whatever".into(),
+            tool_use_id: None,
         },
         &cfg(),
     );
@@ -399,6 +405,7 @@ fn tool_end_hard_limit_truncates_inside_panel() {
             session_id: "s".into(),
             tool_name: "Bash".into(),
             args: serde_json::json!({}),
+            tool_use_id: None,
         },
         &cfg_fold_tool(),
     );
@@ -408,6 +415,7 @@ fn tool_end_hard_limit_truncates_inside_panel() {
             session_id: "s".into(),
             tool_name: "Bash".into(),
             result: big,
+            tool_use_id: None,
         },
         &cfg_fold_tool(),
     );
@@ -451,6 +459,7 @@ fn tool_end_fold_disabled_shows_full_content_inline() {
             session_id: "s".into(),
             tool_name: "Bash".into(),
             result: big,
+            tool_use_id: None,
         },
         &c,
     );
@@ -497,6 +506,7 @@ fn total_budget_drops_hr_with_following_element() {
             session_id: "s".into(),
             tool_name: "Bash".into(),
             args: serde_json::json!({}),
+            tool_use_id: None,
         },
         &c,
     ); // body = [Hr, Markdown]
@@ -577,6 +587,7 @@ fn tool_start_renders_args_in_code_fence() {
             session_id: "s".into(),
             tool_name: "Bash".into(),
             args: serde_json::json!({"command": "ls /tmp"}),
+            tool_use_id: None,
         },
         &cfg(),
     );
@@ -603,6 +614,7 @@ fn parent_element_count_limit_drops_oldest_child() {
             session_id: "s".into(),
             tool_name: "Bash".into(),
             args: serde_json::json!({"cmd":"echo 1"}),
+            tool_use_id: None,
         },
         &cfg(),
     );
@@ -614,6 +626,7 @@ fn parent_element_count_limit_drops_oldest_child() {
                 session_id: "s".into(),
                 tool_name: format!("Tool{i}"),
                 args: serde_json::json!({"cmd": format!("echo {i}")}),
+                tool_use_id: None,
             },
             &cfg(),
         );
@@ -654,6 +667,7 @@ fn progress_note_limit_keeps_only_latest() {
             session_id: "s".into(),
             tool_name: "Bash".into(),
             args: serde_json::json!({"cmd":"sleep"}),
+            tool_use_id: None,
         },
         &cfg_fold_tool(),
     );

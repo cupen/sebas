@@ -1547,6 +1547,7 @@ mod tests {
             content: content.into(),
             created_at_unix: 0,
             title: None,
+            tool_use_id: None,
             failure_class: None,
         };
 
@@ -1613,6 +1614,7 @@ mod tests {
             content: payload.to_string(),
             created_at_unix: 0,
             title: None,
+            tool_use_id: None,
             failure_class: None,
         };
         let ok = parse_mode_result_entry(&entry(json!({
@@ -1689,6 +1691,7 @@ mod tests {
             .to_string(),
             created_at_unix: 0,
             title: None,
+            tool_use_id: None,
             failure_class: None,
         };
         fe.apply_turns(key, vec![entry]).await;

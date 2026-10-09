@@ -27,7 +27,9 @@ export const NATIVE_WEBUI_PORT = 9894
 export default defineConfig({
   testDir: './tests',
   // fix-webui-qa-round8 2.3：native 转录/影子队列旅程与本装配同姿态，同名单。
-  testMatch: /test-model-scenarios\.spec\.ts|qa-round8-native\.spec\.ts/,
+  // fold-tool-calls-into-process-tree 6.1：合并工具块的 native 验收旅程同场。
+  testMatch:
+    /test-model-scenarios\.spec\.ts|qa-round8-native\.spec\.ts|tool-call-fold\.spec\.ts/,
   // 工具环 + 权限决策 + 长文流式：单条用例的预算比默认 30s 宽。
   timeout: 90_000,
   retries: 1,

@@ -1117,6 +1117,17 @@ fn message_parse_warning(shown: &mut bool, raw: Option<&serde_json::Value>) -> O
     }
 }
 
+/// fold-tool-calls-into-process-tree 1.1/1.2：非空 call id → `Some`，空串
+/// （`tool_use_id` 键缺失时的 `unwrap_or("")` 兜底）→ `None`——空 id 上 wire
+/// 会让多个无 id 调用在消费端错误地互相配对，缺省才是诚实形态。
+fn non_empty_id(id: &str) -> Option<String> {
+    if id.is_empty() {
+        None
+    } else {
+        Some(id.to_string())
+    }
+}
+
 pub(crate) fn map_message(
     session_id: &str,
     tool_names: &mut HashMap<String, String>,
@@ -1140,6 +1151,10 @@ pub(crate) fn map_message(
                             session_id: sid(),
                             tool_name: t.name.clone(),
                             args: t.input.clone(),
+                            // fold-tool-calls-into-process-tree 1.2：调用 id
+                            // 随事件上 wire（此前只进查表、用完即弃），前端
+                            // 据此把调用与结果配对成一块。
+                            tool_use_id: non_empty_id(&t.id),
                         })
                     }
                     _ => None,
@@ -1196,6 +1211,9 @@ pub(crate) fn map_message(
                         session_id: sid(),
                         tool_name,
                         result,
+                        // fold-tool-calls-into-process-tree 1.1：查表用的
+                        // `tool_use_id` 一并带上（同帧同 id），配对不再靠位置。
+                        tool_use_id: non_empty_id(id),
                     });
                 }
             }
@@ -2171,6 +2189,94 @@ mod tests {
             &evts[..],
             [AcpEvent::ToolEnd { tool_name, .. }] if tool_name == "unknown"
         ));
+    }
+
+    // ── fold-tool-calls-into-process-tree 1.1/1.2：call id 上 wire ─────────
+
+    /// ToolStart 携带 `ContentBlock::ToolUse` 的 id；同一调用的 ToolEnd（经
+    /// `User(tool_result)` 查表）携带相等 id——前端按 id 配对调用与结果，
+    /// 不再靠位置猜。
+    #[test]
+    fn tool_start_and_end_carry_the_same_tool_use_id() {
+        let mut names = HashMap::new();
+        let m = assistant_msg(serde_json::json!([
+            {"type": "tool_use", "id": "tc-par-1", "name": "Read", "input": {"path": "src/main.rs"}}
+        ]));
+        let start = map_message("s1", &mut names, &m);
+        assert!(matches!(
+            &start[..],
+            [AcpEvent::ToolStart { tool_use_id: Some(id), .. }] if id == "tc-par-1"
+        ));
+
+        let v = serde_json::json!({
+            "type": "user",
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "tc-par-1", "content": "ok", "is_error": false}
+            ]}
+        });
+        let m: Message = serde_json::from_value(v).expect("user message parses");
+        let end = map_message("s1", &mut names, &m);
+        assert!(matches!(
+            &end[..],
+            [AcpEvent::ToolEnd { tool_use_id: Some(id), .. }] if id == "tc-par-1"
+        ));
+    }
+
+    /// 并行调用各带各的 id（互异），结果帧按各自 id 回流——并行同名工具的
+    /// 精确配对正是本 change 的动机。
+    #[test]
+    fn parallel_tool_uses_carry_distinct_ids() {
+        let mut names = HashMap::new();
+        let m = assistant_msg(serde_json::json!([
+            {"type": "tool_use", "id": "tc-a", "name": "Read", "input": {"path": "a"}},
+            {"type": "tool_use", "id": "tc-b", "name": "Read", "input": {"path": "b"}}
+        ]));
+        let evts = map_message("s1", &mut names, &m);
+        let ids: Vec<&String> = evts
+            .iter()
+            .filter_map(|e| match e {
+                AcpEvent::ToolStart { tool_use_id, .. } => tool_use_id.as_ref(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, [&"tc-a".to_string(), &"tc-b".to_string()]);
+    }
+
+    /// 缺失/空 `tool_use_id` 不上 wire（None，键省略）——空 id 会让无 id
+    /// 调用在消费端错误互相配对。旧 JSON（无该键）反序列化为 None。
+    #[test]
+    fn missing_tool_use_id_is_none_and_omitted_from_the_wire() {
+        // 反序列化姿态：旧报文（无 tool_use_id 键）→ None，不报错。
+        let old = serde_json::json!({
+            "type": "tool_end",
+            "session_id": "s1",
+            "tool_name": "Bash",
+            "result": "ok"
+        });
+        let back: AcpEvent = serde_json::from_value(old).expect("legacy tool_end parses");
+        assert!(matches!(
+            back,
+            AcpEvent::ToolEnd { tool_use_id: None, .. }
+        ));
+
+        // 序列化姿态：None 不产生键（旧字节形状零变化）。
+        let ev = AcpEvent::ToolStart {
+            session_id: "s1".into(),
+            tool_name: "Bash".into(),
+            args: serde_json::json!({"command": "ls"}),
+            tool_use_id: None,
+        };
+        let j = serde_json::to_value(&ev).unwrap();
+        assert!(j.get("tool_use_id").is_none(), "{j}");
+        // 带值时键在且值正确。
+        let ev = AcpEvent::ToolEnd {
+            session_id: "s1".into(),
+            tool_name: "Bash".into(),
+            result: "ok".into(),
+            tool_use_id: Some("tc-par-1".into()),
+        };
+        let j = serde_json::to_value(&ev).unwrap();
+        assert_eq!(j["tool_use_id"], "tc-par-1");
     }
 
     #[test]

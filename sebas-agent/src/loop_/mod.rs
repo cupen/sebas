@@ -71,11 +71,20 @@ impl<'a> TurnEmit<'a> {
         });
     }
 
-    pub(crate) fn tool_start(&self, tool_name: &str, args: serde_json::Value) {
+    /// `tool_use_id` = 内核 tool-use call id（`calls[i].0`，与
+    /// `PermissionRequest.request_id` 同源）——前端按它把调用与结果配对
+    /// （fold-tool-calls-into-process-tree 1.3）。
+    pub(crate) fn tool_start(
+        &self,
+        tool_use_id: &str,
+        tool_name: &str,
+        args: serde_json::Value,
+    ) {
         self.send(AgentEvent::ToolStart {
             session_id: self.session_id.into(),
             tool_name: tool_name.into(),
             args,
+            tool_use_id: non_empty_id(tool_use_id),
         });
     }
 
@@ -88,11 +97,13 @@ impl<'a> TurnEmit<'a> {
         });
     }
 
-    pub(crate) fn tool_end(&self, tool_name: &str, result: &str) {
+    /// `tool_use_id` 必须与同一次调用的 `tool_start` 相等（配对契约）。
+    pub(crate) fn tool_end(&self, tool_use_id: &str, tool_name: &str, result: &str) {
         self.send(AgentEvent::ToolEnd {
             session_id: self.session_id.into(),
             tool_name: tool_name.into(),
             result: result.into(),
+            tool_use_id: non_empty_id(tool_use_id),
         });
     }
 
@@ -341,8 +352,8 @@ impl TurnEngine {
                     let mut batch = i;
                     while batch < run_end {
                         let batch_end = (batch + self.max_concurrent_readonly).min(run_end);
-                        for (_id, name, input) in &calls[batch..batch_end] {
-                            emit.tool_start(name, (*input).clone());
+                        for (id, name, input) in &calls[batch..batch_end] {
+                            emit.tool_start(id, name, (*input).clone());
                         }
                         let ctx = make_ctx(tool_ctx_base, &cancel);
                         let futs = calls[batch..batch_end].iter().map(|(id, name, input)| {
@@ -350,7 +361,7 @@ impl TurnEngine {
                         });
                         let done = futures_util::future::join_all(futs).await;
                         for (k, out) in done.into_iter().enumerate() {
-                            emit_tool_end(emit, calls[batch + k].1, &out);
+                            emit_tool_end(emit, calls[batch + k].0, calls[batch + k].1, &out);
                             outputs[batch + k] = Some(out);
                             counters.tool_calls += 1;
                         }
@@ -363,10 +374,10 @@ impl TurnEngine {
                         break;
                     }
                     let (id, name, input) = calls[i];
-                    emit.tool_start(name, input.clone());
+                    emit.tool_start(id, name, input.clone());
                     let ctx = make_ctx(tool_ctx_base, &cancel);
                     let out = execute_one(registry, id, name, input, &ctx, emit).await;
-                    emit_tool_end(emit, name, &out);
+                    emit_tool_end(emit, id, name, &out);
                     outputs[i] = Some(out);
                     counters.tool_calls += 1;
                     i += 1;
@@ -460,13 +471,25 @@ async fn execute_one(
 
 /// ToolEnd 文本：错误是数据（C4），失败原因必须让模型看见。
 /// 同时发射结构化孪生事件 ToolFinish（design N6）。
-fn emit_tool_end(emit: &TurnEmit<'_>, tool_name: &str, out: &ToolOutput) {
+/// `tool_use_id`（fold-tool-calls-into-process-tree 1.3）随 ToolEnd 上 wire，
+/// 与同一次调用的 ToolStart 相等。
+fn emit_tool_end(emit: &TurnEmit<'_>, tool_use_id: &str, tool_name: &str, out: &ToolOutput) {
     let end_text = match &out.error {
         Some(kind) => format!("{}: {}", kind, out.output),
         None => out.output.clone(),
     };
-    emit.tool_end(tool_name, &end_text);
+    emit.tool_end(tool_use_id, tool_name, &end_text);
     emit.tool_finish(tool_name, out);
+}
+
+/// fold-tool-calls-into-process-tree 1.3：非空 id → `Some`，空串 → `None`
+/// （空 id 上 wire 会让无 id 调用在消费端错误互相配对）。
+fn non_empty_id(id: &str) -> Option<String> {
+    if id.is_empty() {
+        None
+    } else {
+        Some(id.to_string())
+    }
 }
 
 /// 策略门控执行（task 1.3，design N1）：Allow 直跑；Deny 可升级（带理由的
@@ -1232,6 +1255,51 @@ mod tests {
             outcome,
             TurnOutcome::Finished { reason: FinishReason::Budget { which: "tokens" } }
         );
+    }
+
+    /// fold-tool-calls-into-process-tree 1.3：同一次调用的 start/end 事件
+    /// 携带相等的 `tool_use_id`，并行批次内两个调用的 id 互异——前端按 id
+    /// 精确配对调用与结果（不靠位置、不靠工具名）。
+    #[tokio::test]
+    async fn tool_start_and_end_events_carry_equal_ids_and_parallel_ids_differ() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, tx, mut rx) = setup(dir.path());
+        let registry = ToolRegistry::new(Duration::from_secs(10));
+        // 并行批次：两个只读工具（read 在白名单内）各带各的 id。
+        let llm = FakeLlmClient::scripted(vec![
+            FakeLlmClient::call_tools(vec![
+                ("tc-a", "read", serde_json::json!({"path": "a"})),
+                ("tc-b", "read", serde_json::json!({"path": "b"})),
+            ]),
+            FakeLlmClient::say("done"),
+        ]);
+        let mut history = Vec::new();
+        let emit = TurnEmit::new("s1", &tx);
+        TurnEngine::new(BudgetConfig::default())
+            .run_turn(&llm, &registry, &ctx, &mut history, "go", "sys", "m", CancellationToken::new(), &emit)
+            .await;
+        let evs = collect(&mut rx);
+        // start 序（响应序）= end 序：id 与同调用相等，批次内互异。
+        let starts: Vec<Option<&String>> = evs
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::ToolStart { tool_use_id, .. } => Some(tool_use_id.as_ref()),
+                _ => None,
+            })
+            .collect();
+        let ends: Vec<Option<&String>> = evs
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::ToolEnd { tool_use_id, .. } => Some(tool_use_id.as_ref()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(starts.len(), 2, "both parallel calls announce: {evs:?}");
+        assert_eq!(ends.len(), 2, "both parallel calls settle: {evs:?}");
+        assert_eq!(starts[0], Some(&"tc-a".to_string()));
+        assert_eq!(starts[1], Some(&"tc-b".to_string()));
+        assert_eq!(starts, ends, "each call's end id equals its start id");
+        assert_ne!(starts[0], starts[1], "ids within a parallel batch differ");
     }
 
     #[tokio::test]

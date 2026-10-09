@@ -278,6 +278,7 @@ async fn session_info_projects_visible_reply_segment_count() {
                 session_id: "s-cnt".into(),
                 tool_name: "read_file".into(),
                 args: serde_json::json!({ "path": "/tmp/x" }),
+                tool_use_id: None,
             },
         )
         .await;
@@ -332,6 +333,7 @@ async fn tool_events_are_labelled_tool_in_turn_content() {
                 session_id: "s-tool".into(),
                 tool_name: "read_file".into(),
                 args: serde_json::json!({ "path": "/tmp/x" }),
+                tool_use_id: None,
             },
         )
         .await;
@@ -342,6 +344,7 @@ async fn tool_events_are_labelled_tool_in_turn_content() {
                 session_id: "s-tool".into(),
                 tool_name: "read_file".into(),
                 result: "file body".into(),
+                tool_use_id: None,
             },
         )
         .await;

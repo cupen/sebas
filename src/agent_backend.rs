@@ -98,14 +98,24 @@ impl NativeSession {
     /// transcript length) and return the landed entry for the live turn
     /// event. The clone keeps the transcript authoritative; the returned
     /// entry rides the broadcast.
-    fn push_entry(&mut self, element_type: &str, content: String) -> TurnEntry {
+    /// `title` / `tool_use_id` 仅工具条目携带（fold-tool-calls-into-process-
+    /// tree 3.2）：一等 tool 条目 = `element_type = "tool"` + 结构化标题 +
+    /// 上游 call id，其余条目两参恒 `None`。
+    fn push_entry(
+        &mut self,
+        element_type: &str,
+        content: String,
+        title: Option<String>,
+        tool_use_id: Option<String>,
+    ) -> TurnEntry {
         let entry = TurnEntry {
             position: self.transcript.len() as u64,
             kind: sebas_domain::session::TurnKind::Content,
             element_type: sebas_domain::session::TurnElementType::from_wire(element_type),
             content,
             created_at_unix: chrono::Utc::now().timestamp().max(0) as u64,
-            title: None,
+            title,
+            tool_use_id,
             failure_class: None,
         };
         self.transcript.push(entry.clone());
@@ -123,6 +133,7 @@ impl NativeSession {
             content,
             created_at_unix: chrono::Utc::now().timestamp().max(0) as u64,
             title: None,
+            tool_use_id: None,
             failure_class: None,
         };
         self.transcript.push(entry.clone());
@@ -496,15 +507,50 @@ impl NativeAgentBackend {
             element_type: &str,
             content: String,
         ) {
+            land_entry(session, turn_events, key, element_type, content, None, None);
+        }
+        /// fold-tool-calls-into-process-tree 3.2：一等 tool 条目出口——
+        /// `element_type = "tool"` + 结构化标题（复用 `sebas_dispatch`
+        /// ::tool_entry_title，键序表不复制）+ 上游 call id。
+        #[allow(clippy::too_many_arguments)]
+        fn land_tool(
+            session: &mut NativeSession,
+            turn_events: &broadcast::Sender<TurnStreamEvent>,
+            key: &ChannelKey,
+            content: String,
+            title: String,
+            tool_use_id: Option<String>,
+        ) {
+            land_entry(
+                session,
+                turn_events,
+                key,
+                "tool",
+                content,
+                Some(title),
+                tool_use_id,
+            );
+        }
+        fn land_entry(
+            session: &mut NativeSession,
+            turn_events: &broadcast::Sender<TurnStreamEvent>,
+            key: &ChannelKey,
+            element_type: &str,
+            content: String,
+            title: Option<String>,
+            tool_use_id: Option<String>,
+        ) {
             // extend-test-model-scenarios 3.4：可见输出记账（判据与
             // `sebas-dispatch` 引擎面 `turn_has_visible_output` 同表：
             // markdown/thinking/tool/error 且内容非空；notice 本身不算）。
+            // tool 与 markdown 同在可见输出表——本 change 把工具痕迹从
+            // markdown 升为 tool 条目，记账语义不变（task 3.2）。
             if matches!(element_type, "markdown" | "thinking" | "tool" | "error")
                 && !content.is_empty()
             {
                 session.turn_visible_output = true;
             }
-            let entry = session.push_entry(element_type, content);
+            let entry = session.push_entry(element_type, content, title, tool_use_id);
             let _ = turn_events.send(TurnStreamEvent {
                 channel: key.channel_str().to_string(),
                 key: key.reference.clone(),
@@ -561,29 +607,43 @@ impl NativeAgentBackend {
                     }
                     AE::ToolProgress { .. } | AE::ToolFinish { .. } => None,
                     AE::ToolStart {
-                        tool_name, args, ..
+                        tool_name,
+                        args,
+                        tool_use_id,
+                        ..
                     } => {
+                        // fold-tool-calls-into-process-tree 3.2：调用条目升为
+                        // 一等 tool 条目（📖 参数段 + 结构化标题 + call id），
+                        // 不再以 markdown 正文呈现。
                         let args_str = serde_json::to_string_pretty(&args).unwrap_or_default();
-                        land(
+                        land_tool(
                             session,
                             &turn_events,
                             &key,
-                            "markdown",
                             format!("📖 **{tool_name}**\n```json\n{args_str}\n```"),
+                            sebas_dispatch::tool_entry_title(false, &tool_name, Some(&args)),
+                            tool_use_id,
                         );
                         Some(SessionEvent::Updated {
                             session: session.info(&key, parked),
                         })
                     }
                     AE::ToolEnd {
-                        tool_name, result, ..
+                        tool_name,
+                        result,
+                        tool_use_id,
+                        ..
                     } => {
-                        land(
+                        // fold-tool-calls-into-process-tree 3.2：结果条目同为
+                        // 一等 tool 条目；ToolEnd wire 无 args → 标题退化
+                        // `✓ {tool}`（与 ACP 面同一口径），id 与配对调用相等。
+                        land_tool(
                             session,
                             &turn_events,
                             &key,
-                            "markdown",
                             format!("✓ **{tool_name}**\n{result}"),
+                            sebas_dispatch::tool_entry_title(true, &tool_name, None),
+                            tool_use_id,
                         );
                         Some(SessionEvent::Updated {
                             session: session.info(&key, parked),
@@ -2096,9 +2156,14 @@ mod tests {
             .into_iter()
             .find(|s| s.channel_key() == key)
             .expect("native session in snapshot");
+        // fold-tool-calls-into-process-tree 3.3：工具痕迹升为一等 tool 条目
+        // 后，`count_chat_messages` 对它与 ACP 面同口径——tool 不计数但打断
+        // markdown 连续段。段落变为：⏳ 审批痕迹一段 + 🛡 策略痕迹与收尾正文
+        // 一段 = 2（工具痕迹自身恒 0——「tool traces must not add」不回归；
+        // 增量来自 markdown 段被 tool 打断，非工具计数）。
         assert_eq!(
-            info.msg_count, 1,
-            "one reply flush counts 1; the two tool traces must not add"
+            info.msg_count, 2,
+            "tool traces add nothing; the approval trace and the policy+reply run count one each"
         );
 
         backend.close(key).await.unwrap();
@@ -2660,6 +2725,61 @@ mod tests {
                 .iter()
                 .all(|e| e.element_type != sebas_domain::vocabulary::TurnElementType::Notice),
             "a turn with text must not carry a zero-output notice: {streamed:?}"
+        );
+        backend.close(key).await.unwrap();
+    }
+
+    /// fold-tool-calls-into-process-tree 3.2：webui 面的工具痕迹升为一等
+    /// tool 条目——`element_type = "tool"` + 结构化标题（`Read · <path>`
+    /// 形态）+ 调用/结果相等的 call id；且 `turn_visible_output` 记账语义
+    /// 不变（`tool` 与 `markdown` 同在可见输出表：纯工具回合不补零输出
+    /// notice）。
+    #[tokio::test]
+    async fn native_tool_traces_land_as_first_class_tool_entries() {
+        let backend = backend_with(FakeLlmClient::scripted(vec![
+            FakeLlmClient::call_tools(vec![(
+                "tc-read-9",
+                "read",
+                serde_json::json!({"path": "src/lib.rs"}),
+            )]),
+            FakeLlmClient::say("done after read"),
+        ]));
+        let mut turns = backend.subscribe_turn_events();
+        let ws = tempfile::tempdir().unwrap();
+        let key = backend
+            .spawn("go".into(), Some(ws.path().to_string_lossy().into()))
+            .await
+            .expect("spawn");
+
+        let streamed = collect_turn(&mut turns).await;
+        let tools: Vec<_> = streamed
+            .iter()
+            .filter(|e| e.element_type == sebas_domain::vocabulary::TurnElementType::Tool)
+            .collect();
+        assert_eq!(tools.len(), 2, "call + result both land as tool entries: {streamed:?}");
+        assert_eq!(
+            tools[0].tool_use_id.as_deref(),
+            Some("tc-read-9"),
+            "invocation carries the upstream call id"
+        );
+        assert_eq!(
+            tools[0].title.as_deref(),
+            Some("read · src/lib.rs"),
+            "structured title reuses the dispatch key-order rule"
+        );
+        assert_eq!(
+            tools[1].tool_use_id.as_deref(),
+            Some("tc-read-9"),
+            "result carries the pairing id"
+        );
+        assert_eq!(tools[1].title.as_deref(), Some("✓ read"));
+        // 记账语义不变：本轮可见输出 = 工具条目（非空），收尾不得补零输出
+        // notice（tool 与 markdown 同在可见输出表）。
+        assert!(
+            streamed
+                .iter()
+                .all(|e| e.element_type != sebas_domain::vocabulary::TurnElementType::Notice),
+            "a tool-only turn is visible output, never zero-output: {streamed:?}"
         );
         backend.close(key).await.unwrap();
     }

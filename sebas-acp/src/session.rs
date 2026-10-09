@@ -144,6 +144,13 @@ pub enum AcpEvent {
         session_id: String,
         tool_name: String,
         args: Value,
+        /// （fold-tool-calls-into-process-tree 1.2）上游 tool-use call id：
+        /// 前端按它把 📖 调用条目与 ✓ 结果条目精确配对成一块（并行同名工具
+        /// 不再靠位置猜）。可选：`#[serde(default)]` 兼容旧报文/旧 fixture
+        /// 反序列化（缺键 → None）；`skip_serializing_if` 让 None 不上 wire
+        /// （只增可选字段，旧字节形状零变化）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_use_id: Option<String>,
     },
     ToolProgress {
         session_id: String,
@@ -154,6 +161,11 @@ pub enum AcpEvent {
         session_id: String,
         tool_name: String,
         result: String,
+        /// （fold-tool-calls-into-process-tree 1.1）上游 tool-use call id：
+        /// driver 在 `User(tool_result)` 分支已用它查表拿工具名，这里一并
+        /// 带上（此前用完即弃）。serde 姿态与 `ToolStart.tool_use_id` 同族。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_use_id: Option<String>,
     },
     PermissionRequest {
         session_id: String,

@@ -31,10 +31,16 @@ where
 fn golden_turn_entries_round_trip() {
     let doc = golden();
     let entries = doc["turn_entries"].as_array().expect("turn_entries array");
-    assert_eq!(entries.len(), 7, "六种 element_type + prompt 条目");
+    // fold-tool-calls-into-process-tree 2.2：既有 7 条零变化 + 新增 1 条
+    // 带 title/tool_use_id 的工具条目（可选字段演进的往返样本）。
+    assert_eq!(entries.len(), 8, "六种 element_type + prompt 条目 + 带 id 工具条目");
     for (i, sample) in entries.iter().enumerate() {
         assert_round_trip::<TurnEntry>(sample, &format!("turn_entry[{i}]"));
     }
+    // 新增样本的往返必须保留可选键（id 是配对契约的载体）。
+    let last = entries.last().expect("non-empty");
+    assert_eq!(last["tool_use_id"], "toolu_golden_01");
+    assert_eq!(last["title"], "Read · src/main.rs");
 }
 
 #[test]

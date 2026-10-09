@@ -239,6 +239,12 @@ export interface ProcessItem {
    * Absent (legacy entries) → the fold falls back to a generic label.
    */
   title?: string | null
+  /**
+   * （fold-tool-calls-into-process-tree 4.1）上游 tool-use call id：前端按
+   * 它把一次调用的 📖 条目与 ✓ 结果条目精确配对成一块（并行同名工具不靠
+   * 位置猜）。`null`/缺省 = 旧持久化条目无 id（退化为未配对自成一块）。
+   */
+  toolUseId?: string | null
   /** The source entry's transcript position — the DOM identity key. */
   position: number
 }
@@ -259,18 +265,31 @@ export interface ProcessRun {
 }
 
 /**
- * （fix-webui-qa-round2 1.3，D-C3a）已决策的工具结果：从过程折叠里提升到
- * 转写层级的独立条目。此前结果与请求同折在 process fold 内，二级折叠点击
- * 会连带父级收起——结果内容实际上不可达。提升后：✓已执行/✗已拒绝章常驻
- * 条目、展开体独立开合（与过程折叠互不连带）。
+ * （fold-tool-calls-into-process-tree 4.1，D1/D2）一次工具调用的合并块：
+ * 📖 调用条目与 ✓ 结果条目按 `toolUseId` 精确配对后合并为一个过程折叠的
+ * 子折叠——收起标题 = 调用态结构化标题 + ✓/✗ 结果章，展开体 = 参数段 +
+ * 结果段。`result === null` = 结果未到（回合中断 / 转录截断 / 并行在跑）
+ * ——调用自成一块（调用态标题，无章），不丢参数。`position`（调用条目
+ * position）是块的 DOM 身份。
  */
-export interface ToolResultRun {
-  type: 'tool_result'
-  item: ProcessItem
+export interface ToolCallBlock {
+  type: 'tool_call'
+  /** The 📖 invocation entry (or a lone ✓/✗ entry when the invocation is missing). */
+  invocation: ProcessItem
+  /** The paired ✓/✗ result entry, when it has landed. */
+  result: ProcessItem | null
+  /** The invocation entry's transcript position — the block's DOM identity. */
   position: number
 }
 
-export type AgentRun = TextRun | ProcessRun | ToolResultRun
+/**
+ * 过程折叠体的一个节点（fold-tool-calls-into-process-tree 4.2）：thinking
+ * 条目保持二级条目形态，工具条目一律合并为 {@link ToolCallBlock}（单棵
+ * 过程树——不再有顶层 tool_result 块）。
+ */
+export type ProcessNode = ProcessItem | ToolCallBlock
+
+export type AgentRun = TextRun | ProcessRun
 
 /** The operator's submission — its own turn. */
 export interface OperatorUnit {
@@ -373,33 +392,21 @@ export function isDecidedToolResult(e: {
  * contiguous thinking/tool entries accumulate into a process run. A kind
  * change opens the next run — that is what keeps each process fold at the
  * position where its entries actually happened, between the text segments.
- * （fix-webui-qa-round2 1.3，D-C3a）已决策的工具结果不入过程折叠：它们
- * 提升为独立的 tool_result run（过程折叠只包未决策的过程帧，结果条目
- * 顶层可读、开合互不连带）。Error entries never reach this function:
- * `groupConversation` routes them into standalone counted bubbles upstream
- * (D5). Callers pre-filter empty entries (they carry nothing to display
- * and do not break a run).
+ * （fold-tool-calls-into-process-tree 4.2）工具条目**全部留在过程 run 内**
+ * （原 D-C3a 的顶层 lift 退役）：过程折叠是单棵树，调用与结果在折叠体内
+ * 按 id 配对合并（见 {@link mergeToolCalls}）。Error entries never reach
+ * this function: `groupConversation` routes them into standalone counted
+ * bubbles upstream (D5). Callers pre-filter empty entries (they carry
+ * nothing to display and do not break a run).
  */
 export function splitAgentRuns(entries: ConversationEntryView[]): AgentRun[] {
   const runs: AgentRun[] = []
   for (const e of entries) {
-    if (isDecidedToolResult(e)) {
-      runs.push({
-        type: 'tool_result',
-        item: {
-          elementType: e.element_type,
-          content: e.content,
-          title: e.title ?? null,
-          position: e.position,
-        },
-        position: e.position,
-      })
-      continue
-    }
     const item: ProcessItem = {
       elementType: e.element_type,
       content: e.content,
       title: e.title ?? null,
+      toolUseId: e.tool_use_id ?? null,
       position: e.position,
     }
     const last = runs[runs.length - 1]
@@ -420,6 +427,153 @@ export function splitAgentRuns(entries: ConversationEntryView[]): AgentRun[] {
     runs.push({ type: 'text', content: closeUnclosedFence(e.content), position: e.position })
   }
   return runs
+}
+
+/**
+ * （fold-tool-calls-into-process-tree review F1，纯函数）跨 run 配对预通过：
+ * native 载体对每次泊车/决策向转录落 markdown 条目（⏳ awaits approval /
+ * 🛡 policy），会把同一调用的结果条目切进调用之后的另一个过程 run——
+ * {@link mergeToolCalls} 只在单 run 内配对，被门控的调用于是呈两块（结果
+ * 与调用分家、调用块与汇总行无章），恰是 spec 禁止的「依赖落账相邻性」。
+ * 这里在整个 agent 回合范围内按 id 重聚：已决结果搬回其调用所在 run
+ * （插在调用条目之后，重复结果不认领、留原地自成一块），搬空的过程 run
+ * 丢弃；正文 run（⏳/🛡 停留处）原样保留。配对仍是纯派生：每次分组都从
+ * 完整条目序列重算。
+ */
+export function foldCrossRunToolResults(runs: AgentRun[]): AgentRun[] {
+  const shape = (it: ProcessItem) => ({
+    element_type: it.elementType,
+    content: it.content,
+    title: it.title,
+  })
+  const home = new Map<string, { run: number; index: number }>()
+  runs.forEach((r, ri) => {
+    if (r.type !== 'process') return
+    r.items.forEach((it, ii) => {
+      if (
+        it.elementType === 'tool' &&
+        it.toolUseId &&
+        !home.has(it.toolUseId) &&
+        !isDecidedToolResult(shape(it))
+      ) {
+        home.set(it.toolUseId, { run: ri, index: ii })
+      }
+    })
+  })
+  if (home.size === 0) return runs
+  const claimed = new Set<string>()
+  const adopt = new Map<number, { after: number; item: ProcessItem }[]>()
+  const next: AgentRun[] = runs.map((r, ri) => {
+    if (r.type !== 'process') return r
+    const stay: ProcessItem[] = []
+    for (const it of r.items) {
+      const id = it.toolUseId
+      const spot = id ? home.get(id) : undefined
+      if (
+        it.elementType === 'tool' &&
+        id &&
+        spot &&
+        spot.run < ri &&
+        !claimed.has(id) &&
+        isDecidedToolResult(shape(it))
+      ) {
+        claimed.add(id)
+        const list = adopt.get(spot.run) ?? []
+        list.push({ after: spot.index, item: it })
+        adopt.set(spot.run, list)
+        continue
+      }
+      stay.push(it)
+    }
+    return { ...r, items: stay }
+  })
+  if (adopt.size === 0) return runs
+  return next
+    .map((r, ri) => {
+      if (r.type !== 'process' || !adopt.has(ri)) return r
+      const items = [...r.items]
+      for (const { after, item } of (adopt.get(ri) ?? []).sort((a, b) => b.after - a.after)) {
+        items.splice(after + 1, 0, item)
+      }
+      return { ...r, items }
+    })
+    .filter((r) => r.type !== 'process' || r.items.length > 0)
+}
+
+/**
+ * （fold-tool-calls-into-process-tree 4.1，纯函数）按 `tool_use_id` 把过程
+ * run 里的工具条目配对合并为 {@link ToolCallBlock}：📖 调用开块并在
+ * open 表登记（按 id）；✓/✗ 结果经 id 查表并入**自己的**调用块——并行
+ * 同名工具（Read A + Read B）不靠位置、不靠工具名，绝不错配。配不上
+ * （结果未到 / 转录截断 / 旧条目无 id）的条目自成一块，内容零丢失。配对
+ * 是纯派生：每次渲染都从完整条目序列重算，刷新后自然一致。
+ */
+export function mergeToolCalls(items: ProcessItem[]): ProcessNode[] {
+  const out: ProcessNode[] = []
+  const open = new Map<string, ToolCallBlock>()
+  for (const it of items) {
+    if (it.elementType !== 'tool') {
+      out.push(it)
+      continue
+    }
+    if (!isDecidedToolResult({ element_type: it.elementType, content: it.content, title: it.title })) {
+      const block: ToolCallBlock = {
+        type: 'tool_call',
+        invocation: it,
+        result: null,
+        position: it.position,
+      }
+      out.push(block)
+      if (it.toolUseId) open.set(it.toolUseId, block)
+      continue
+    }
+    const block = it.toolUseId ? open.get(it.toolUseId) : undefined
+    if (block && !block.result) {
+      block.result = it
+    } else {
+      // 未配对结果（调用缺失 / 旧条目无 id / 重复结果）：自成一块。
+      out.push({
+        type: 'tool_call',
+        invocation: it,
+        result: null,
+        position: it.position,
+      })
+    }
+  }
+  return out
+}
+
+/**
+ * （fold-tool-calls-into-process-tree 4.2，纯函数）合并块的执行结果章：
+ * 已配对 → 结果条目定章（显式拒绝记号 = 已拒绝，否则已执行）；未配对但
+ * 调用条目自带已决标记（截断转录里的孤立 ✓/✗）→ 从调用条目定章；调用
+ * 仍在跑 / 未配对调用 → null（无章，调用态标题）。
+ */
+export function toolCallBlockOutcome(block: ToolCallBlock): 'ok' | 'denied' | null {
+  const shape = (it: ProcessItem): { element_type?: string; content: string; title?: string | null } => ({
+    element_type: it.elementType,
+    content: it.content,
+    title: it.title,
+  })
+  if (block.result) {
+    return toolResultDenied(block.result.content, block.result.title) ? 'denied' : 'ok'
+  }
+  if (isDecidedToolResult(shape(block.invocation))) {
+    return toolResultDenied(block.invocation.content, block.invocation.title) ? 'denied' : 'ok'
+  }
+  return null
+}
+
+/**
+ * （fold-tool-calls-into-process-tree 4.2，纯函数）合并块的拒绝态：
+ * 结果条目或调用条目任一携带显式拒绝记号即整块挂 ✗（被拒调用的收起
+ * 行与 data-denied 数据源）。
+ */
+export function toolCallBlockDenied(block: ToolCallBlock): boolean {
+  return (
+    (block.result !== null && toolResultDenied(block.result.content, block.result.title)) ||
+    toolResultDenied(block.invocation.content, block.invocation.title)
+  )
 }
 
 /**
@@ -461,7 +615,7 @@ export function groupConversation(entries: ErrorCountedView[]): TurnUnit[] {
     const first = pending[0]
     units.push({
       kind: 'agent',
-      runs: splitAgentRuns(pending),
+      runs: foldCrossRunToolResults(splitAgentRuns(pending)),
       position: first.position,
       startedAt: first.created_at_unix,
       maxTs: pending.reduce((m, e) => Math.max(m, e.created_at_unix || 0), 0),
@@ -1506,34 +1660,24 @@ export class SebasTranscriptView extends LitElement {
       color: var(--sebas-status-failed, #b91c1c);
       background: var(--sebas-status-failed-bg, #fee2e2);
     }
-    /* （fix-webui-qa-round2 1.3，D-C3a）顶层工具结果块：轻分区（虚线左边
-       界 + 常驻决策章），展开体默认可见。与过程折叠同视觉语言但独立开合。 */
+    /* （fold-tool-calls-into-process-tree 4.2）工具调用合并块：过程折叠
+       的子折叠——轻分区（虚线左边界 + 常驻决策章），默认收起，开合独立
+       托管（原 D-C3a 的顶层默认展开块退役）。被拒块的拒绝色落在拒绝章
+       （outcome-denied）上。 */
     .turn-block .tool-result {
-      margin: var(--sebas-space-2) 0;
+      margin: var(--sebas-space-2) 0 0;
       padding-left: var(--sebas-space-3);
       border-left: 2px dashed var(--sebas-border);
       min-width: 0;
     }
-    .turn-block .tool-result .result-link .running {
-      font-family: var(--sebas-font-mono);
-      font-size: 0.76rem;
-      color: var(--sebas-text-faint);
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .turn-block .tool-result .result-icon {
-      background: var(--sebas-surface-2);
-      color: var(--sebas-text-dim);
-    }
-    .turn-block .tool-result[data-denied='true'] .result-icon {
-      background: var(--sebas-status-failed-bg, #fee2e2);
+    .turn-block .tool-result[data-denied='true'] > .fold-link {
       color: var(--sebas-status-failed, #b91c1c);
     }
-    .turn-block .tool-result .result-body {
-      padding: var(--sebas-space-1) 0 0;
-      font-size: 0.8rem;
-      line-height: 1.6;
+    /* 合并块展开体：参数段在上、结果段在下，两段间虚线分隔（D4）。 */
+    .turn-block .tool-call-body .call-result {
+      margin-top: var(--sebas-space-2);
+      padding-top: var(--sebas-space-2);
+      border-top: 1px dashed var(--sebas-border);
     }
     /* 展开内容：work-block-body 同款（0.82rem/1.6 + 虚线顶边）。挂 .body
        复用 markdown 排版规则（后写的字号覆盖之）。 */
@@ -2501,58 +2645,94 @@ export class SebasTranscriptView extends LitElement {
       }
       return html`<div class="body">${unsafeHTML(renderMarkdown(r.content))}</div>`
     }
-    if (r.type === 'tool_result') {
-      return this.renderToolResultRun(r)
-    }
     return this.renderProcessRun(r)
   }
 
   /**
-   * （fix-webui-qa-round2 1.3，D-C3a）顶层工具结果块：✓已执行/✗已拒绝章
-   * 常驻头部（含刷新后——条目从转录重推导，决策标识永不丢失），展开体
-   * **默认展开**（结果内容零折叠可达，spec「无需折叠任何其它条目即可读
-   * 到 tool 结果内容」），开合状态独立托管（`result:<position>` 键）——
-   * 与过程折叠互不连带。被拒条目的展开详情与标题同挂 ✗（既有口径）。
+   * （fold-tool-calls-into-process-tree 4.2）合并块渲染（原顶层
+   * `renderToolResultRun` 并入过程树）：收起行 = 调用态结构化标题 +
+   * ✓已执行/✗已拒绝章（已配对才带章；未配对调用保持调用态标题，D5），
+   * 默认收起；展开体 = 参数段 + 结果段（各走既有截断 + 「查看全部」）。
+   * 开合只写自己的 id（`item:<position>`），绝不触碰祖先折叠（D7）。
    */
-  private renderToolResultRun(r: ToolResultRun) {
-    const id = `result:${r.position}`
-    const open = this.foldOpen.get(id) !== false
-    const denied = toolResultDenied(r.item.content, r.item.title)
-    const { full } = processItemLabel(r.item)
+  private renderToolCallBlock(block: ToolCallBlock) {
+    const id = `item:${block.position}`
+    const open = this.foldOpen.get(id) === true
+    const denied = toolCallBlockDenied(block)
+    const { label, full } = processItemLabel(block.invocation)
+    const outcome = toolCallBlockOutcome(block)
     return html`
-      <div class="tool-result" data-testid="tool-result-entry" data-denied=${denied}>
-        <div class="tool-result-head">
-          <button
-            type="button"
-            class="fold-link result-link"
-            data-testid="tool-result-link"
-            aria-expanded=${open}
-            title=${full ?? nothing}
-            @click=${this.toggleFold(id)}
-          >
-            <span class="kind-icon result-icon" aria-hidden="true"
-              >${icon(denied ? 'stop' : 'forward', 11)}</span
-            >
-            <span class="running">${full ?? r.item.elementType}</span>
-            ${denied
-              ? html`<span class="outcome outcome-denied" data-testid="tool-outcome-denied"
-                  >✗ 已拒绝</span
-                >`
-              : html`<span class="outcome outcome-ok" data-testid="tool-outcome">✓ 已执行</span>`}
-          </button>
-        </div>
-        ${open ? html`<div class="body result-body">${this.renderResultBody(r.item)}</div>` : nothing}
+      <div
+        class="tool-result"
+        data-testid="tool-result-entry"
+        data-position=${block.position}
+        data-denied=${denied}
+      >
+        <button
+          type="button"
+          class="fold-link item-link"
+          data-testid="tool-result-link"
+          aria-expanded=${open}
+          title=${full ?? nothing}
+          @click=${this.toggleFold(id)}
+        >
+          <span class="item-title">${label}</span>
+          ${outcome === 'ok'
+            ? html`<span class="outcome outcome-ok" data-testid="tool-outcome">✓ 已执行</span>`
+            : nothing}
+          ${outcome === 'denied'
+            ? html`<span class="outcome outcome-denied" data-testid="tool-outcome-denied"
+                >✗ 已拒绝</span
+              >`
+            : nothing}
+        </button>
+        ${open ? this.renderToolCallBody(block) : nothing}
       </div>
     `
   }
 
-  /** 结果块展开体：与二级条目同一截断口径（超长走「查看全部」弹层）。 */
-  private renderResultBody(it: ProcessItem) {
-    const content = deniedDetailContent(it.content, it.title)
-    const cut = truncateHtml({ ...it, content })
-    if (!cut.truncated) {
-      return html`${unsafeHTML(renderMarkdown(content))}`
-    }
+  /**
+   * 合并块展开体（fold-tool-calls-into-process-tree 4.3）：参数段（📖 调用
+   * 条目的 markdown + json）+ 结果段（✓ 条目内容），两段各走既有
+   * `truncateHtml` + 「查看全部」弹层；被拒结果的首行 ✓ 改写为 ✗（既有
+   * 口径）。任一段超阈值即在容器上挂 `data-truncated`（与二级条目同一
+   * 明示合同）。未配对块只有参数段（调用态）。
+   */
+  private renderToolCallBody(block: ToolCallBlock) {
+    const cutArgs = truncateHtml({
+      ...block.invocation,
+      content: deniedDetailContent(block.invocation.content, block.invocation.title),
+    })
+    const cutResult = block.result
+      ? truncateHtml({
+          ...block.result,
+          content: deniedDetailContent(block.result.content, block.result.title),
+        })
+      : null
+    const truncated = cutArgs.truncated || (cutResult?.truncated ?? false)
+    const body = html`
+      <div class="call-args">
+        ${cutArgs.truncated
+          ? this.truncatedSection(block.invocation, cutArgs)
+          : unsafeHTML(renderMarkdown(cutArgs.preview))}
+      </div>
+      ${block.result
+        ? html`<div class="call-result">
+            ${cutResult!.truncated
+              ? this.truncatedSection(block.result!, cutResult!)
+              : unsafeHTML(renderMarkdown(cutResult!.preview))}
+          </div>`
+        : nothing}
+    `
+    return truncated
+      ? html`<div class="body item-body tool-call-body" data-testid="tool-call-body" data-truncated>
+          ${body}
+        </div>`
+      : html`<div class="body item-body tool-call-body" data-testid="tool-call-body">${body}</div>`
+  }
+
+  /** 单段截断体：预览 + 明示省略量 + 「查看全部」出口（4.5）。 */
+  private truncatedSection(it: ProcessItem, cut: TruncateResult) {
     return html`
       ${unsafeHTML(renderMarkdown(cut.preview))}
       <p class="truncation-note" data-testid="truncation-note">
@@ -2608,9 +2788,16 @@ export class SebasTranscriptView extends LitElement {
         ${open
           ? html`<div class="body fold-body">
               ${repeat(
-                mergeAdjacentThinking(r.items),
-                (it) => it.position,
-                (it) => this.renderProcessItem(it),
+                // （fold-tool-calls-into-process-tree 4.2）单棵过程树：思考
+                // 段保持二级条目，工具条目按 id 配对合并为合并块（各自默认
+                // 收起）。键 = 合并块取调用 position（流式期间调用先落、
+                // 结果后并入，块的 DOM 身份不随配对移动）。
+                mergeToolCalls(mergeAdjacentThinking(r.items)) as ProcessNode[],
+                (node) => ('type' in node ? `tc:${node.position}` : node.position),
+                (node) =>
+                  'type' in node
+                    ? this.renderToolCallBlock(node)
+                    : this.renderProcessItem(node),
               )}
             </div>`
           : nothing}
@@ -2636,42 +2823,25 @@ export class SebasTranscriptView extends LitElement {
    * {@link renderViewAllDialog}）。
    */
   private renderProcessItem(it: ProcessItem) {
-    const { label, full } = processItemLabel(it)
+    const { label } = processItemLabel(it)
     // （fix-webui-qa-round3 D1）thinking 条目的二级折叠标题标明 thinking：
     // glyph + data-element-type 已有词，收起行再加 thinking 专用 glyph——
-    // 与工具条目（title 词）在视觉上分开（spec「thinking 段的第二级折叠
+    // 与工具合并块（title 词）在视觉上分开（spec「thinking 段的第二级折叠
     // 标题 SHALL 标明 thinking」）。
-    const isThinking = it.elementType === 'thinking'
     // （fix-webui-qa-round6 3.1，design D4）thinking 条目按 element_type 分支
     // 补内容渲染：展开的过程折叠内**默认**显示条目携带的 thinking 文本（与
     // markdown 同层，不再要求对二级折叠的第二次点击）——占位词「thinking」
     // 只作为条目标签保留在标题行，绝不再顶替内容。
-    if (isThinking) {
-      return html`
-        <div class="process-item" data-position=${it.position} data-element-type=${it.elementType}>
-          <span class="item-link" data-testid="thinking-item-head">
-            <span class="kind-icon item-kind-icon" aria-hidden="true">${icon('thinking', 10)}</span>
-            <span class="item-title">${label}</span>
-          </span>
-          ${this.renderItemBody(it)}
-        </div>
-      `
-    }
-    const id = `item:${it.position}`
-    const open = this.foldOpen.get(id) === true
+    // （fold-tool-calls-into-process-tree 4.2）工具条目不再以裸二级条目
+    // 到达——一律经 mergeToolCalls 合并后走 renderToolCallBlock（单棵
+    // 过程树）。
     return html`
       <div class="process-item" data-position=${it.position} data-element-type=${it.elementType}>
-        <button
-          type="button"
-          class="fold-link item-link"
-          data-testid="process-item-link"
-          aria-expanded=${open}
-          title=${full ?? nothing}
-          @click=${this.toggleFold(id)}
-        >
+        <span class="item-link" data-testid="thinking-item-head">
+          <span class="kind-icon item-kind-icon" aria-hidden="true">${icon('thinking', 10)}</span>
           <span class="item-title">${label}</span>
-        </button>
-        ${open ? this.renderItemBody(it) : nothing}
+        </span>
+        ${this.renderItemBody(it)}
       </div>
     `
   }

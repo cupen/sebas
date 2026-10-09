@@ -49,9 +49,11 @@ import {
   deniedLabel,
   entriesAwaitReceipt,
   errorEntryLabel,
+  foldCrossRunToolResults,
   groupConversation,
   isDecidedToolResult,
   mergeSpawnErrors,
+  mergeToolCalls,
   middleTruncate,
   processItemLabel,
   processRunDenied,
@@ -61,11 +63,13 @@ import {
   resolveAgentDisplay,
   splitAgentRuns,
   toolResultDenied,
+  toolCallBlockDenied,
+  toolCallBlockOutcome,
   truncateHtml,
   unitMaxTs,
   unitSegmentCount,
 } from './transcript-view.js'
-import type { ProcessItem, ProcessRun, ToolResultRun } from './transcript-view.js'
+import type { ProcessItem, ProcessRun, ToolCallBlock } from './transcript-view.js'
 import type { SebasTranscriptView } from './transcript-view.js'
 import {
   armOpeningSeam,
@@ -271,12 +275,16 @@ describe('splitAgentRuns (D1, 1.1)', () => {
     expect(splitAgentRuns([entry({ position: 1, content: 'only' })].map((e) => e))).toEqual([
       { type: 'text', content: 'only', position: 1 },
     ])
-    const proc = splitAgentRuns([entry({ position: 1, element_type: 'tool', content: 'x', title: 't' })])
+    const proc = splitAgentRuns([
+      entry({ position: 1, element_type: 'tool', content: 'x', title: 't', tool_use_id: 'tc-1' }),
+    ])
     if (proc[0].type !== 'process') return expect.unreachable()
+    // fold-tool-calls-into-process-tree 4.1：条目携带上游 call id（配对键）。
     expect(proc[0].items[0]).toEqual({
       elementType: 'tool',
       content: 'x',
       title: 't',
+      toolUseId: 'tc-1',
       position: 1,
     } satisfies ProcessItem)
   })
@@ -1064,7 +1072,7 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     expect(foldRule).not.toMatch(/\bbackground:/)
   })
 
-  it('process folds and second-level folds collapse by default; titles show with generic fallback (2.1/2.2)', async () => {
+  it('process folds and tool-call blocks collapse by default; titles show with generic fallback (2.1/2.2 + fold-tool-calls 4.3)', async () => {
     const entries = [
       entry({ position: 0, kind: 'prompt', content: 'go', created_at_unix: FIXED_DATES.T1 }),
       entry({ position: 1, kind: 'content', element_type: 'thinking', content: 'deep thought', created_at_unix: FIXED_DATES.T1 }),
@@ -1084,46 +1092,50 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     // run 尾条目无 title → 通用标签、link 不带 title 属性。
     expect(link.hasAttribute('title')).toBe(false)
     expect(link.querySelector('.fold-count')?.textContent?.trim()).toBe('3')
-    // 外层默认收起（无展开体——二级折叠只在展开体内渲染，收起态不残留
-    // 隐藏 DOM）；展开后二级全部默认收起。
+    // 外层默认收起（无展开体——子折叠只在展开体内渲染，收起态不残留
+    // 隐藏 DOM）。
     expect(link.getAttribute('aria-expanded')).toBe('false')
     expect(fold.querySelector('.fold-body')).toBeNull()
     link.click()
     await el.updateComplete
-    const items = [...assistant.querySelectorAll<HTMLElement>('.process-item')]
-    expect(items.length).toBe(3)
-    // （fix-webui-qa-round6 3.1）thinking 条目不再有二级折叠——展开体外层
-    // 后内容默认在场；tool 条目保持二级折叠且默认收起。
-    expect(items[0].querySelector('.body.item-body')?.textContent).toContain('deep thought')
-    const toolItems = items.filter((d) => d.dataset.elementType === 'tool')
-    expect(toolItems.length).toBe(2)
-    toolItems.forEach((d) =>
-      expect(d.querySelector<HTMLButtonElement>('button.fold-link')!.getAttribute('aria-expanded')).toBe('false'),
+    // （fold-tool-calls-into-process-tree 4.2/4.3）单棵过程树：thinking 是
+    // 二级条目、工具条目是合并块，两者都默认收起。
+    const thinkingItem = assistant.querySelector<HTMLElement>('.process-item')!
+    expect(thinkingItem.dataset.position).toBe('1')
+    expect(thinkingItem.querySelector('.item-title')?.textContent?.trim()).toBe('thinking')
+    expect(thinkingItem.querySelector('.body.item-body')?.textContent).toContain('deep thought')
+    const blocks = [...assistant.querySelectorAll<HTMLElement>('[data-testid="tool-result-entry"]')]
+    expect(blocks.length).toBe(2)
+    // 两个块都默认收起（foldOpen 未命中即收起）。
+    blocks.forEach((d) =>
+      expect(
+        d.querySelector<HTMLButtonElement>('[data-testid="tool-result-link"]')!.getAttribute('aria-expanded'),
+      ).toBe('false'),
     )
-    // 二级 link：有 title 显示 title 且 title 属性保全量；无 title 回退
+    // 块标题：有 title 显示结构化标题且 title 属性保全量；无 title 回退
     // 通用标签（tool）且不带 title 属性。
-    expect(items[0].dataset.position).toBe('1')
-    expect(items[0].querySelector('.item-title')?.textContent?.trim()).toBe('thinking')
-    expect(items[0].querySelector('button.fold-link')).toBeNull()
-    expect(items[1].querySelector('.item-title')?.textContent?.trim()).toBe(
+    expect(blocks[0].dataset.position).toBe('2')
+    expect(blocks[0].querySelector('.item-title')?.textContent?.trim()).toBe(
       'read_file · src/app.ts',
     )
-    expect(items[1].querySelector('button.fold-link')!.getAttribute('title')).toBe(
+    expect(blocks[0].querySelector('[data-testid="tool-result-link"]')!.getAttribute('title')).toBe(
       'read_file · src/app.ts',
     )
-    expect(items[2].querySelector('.item-title')?.textContent?.trim()).toBe('tool')
-    // 展开层级：逐条点击二级 link 才展开（键盘同路径——原生 button 激活）。
-    // （fix-webui-qa-round6 3.1）link 清单只含 tool 条目——thinking 无二级
-    // 折叠，内容默认在场。
-    const itemLinks = [...assistant.querySelectorAll<HTMLButtonElement>('.process-item button.fold-link')]
-    expect(itemLinks.length).toBe(2)
-    itemLinks.forEach((b) => expect(b.getAttribute('aria-expanded')).toBe('false'))
-    itemLinks[0].click()
+    expect(blocks[1].dataset.position).toBe('3')
+    expect(blocks[1].querySelector('.item-title')?.textContent?.trim()).toBe('tool')
+    // 展开层级：点击合并块自身的 link 才展开（键盘同路径——原生 button
+    // 激活）；展开的是参数段（调用态，无章）。
+    const blockLink = blocks[0].querySelector<HTMLButtonElement>('[data-testid="tool-result-link"]')!
+    blockLink.click()
     await el.updateComplete
-    expect(itemLinks[0].getAttribute('aria-expanded')).toBe('true')
-    expect(items[1].textContent).toContain('read_file')
-    // 其余二级折叠不受影响（thinking 条目无折叠可动）。
-    expect(itemLinks[1].getAttribute('aria-expanded')).toBe('false')
+    expect(blockLink.getAttribute('aria-expanded')).toBe('true')
+    expect(blocks[0].textContent).toContain('read_file')
+    // 其余块不受影响。
+    expect(
+      blocks[1]
+        .querySelector<HTMLButtonElement>('[data-testid="tool-result-link"]')!
+        .getAttribute('aria-expanded'),
+    ).toBe('false')
     // 再点一次同一 link：收起（点击切换展开/收起）；外层同理。
     link.click()
     await el.updateComplete
@@ -1214,9 +1226,12 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     expect(fold2.dataset.processId).toBe('2')
     expect(fold2.querySelector('.fold-body')).toBeTruthy()
     expect(fold2.getAttribute('data-process-count')).toBe('2')
-    const items = fold2.querySelectorAll<HTMLElement>('.process-item')
-    expect(items.length).toBe(2)
-    expect(items[1].dataset.position).toBe('3')
+    // （fold-tool-calls-into-process-tree 4.2）新条目是工具调用 → 就地追加
+    // 的是合并块（不再是裸二级条目）。
+    expect(fold2.querySelectorAll('.process-item')).toHaveLength(1)
+    const block = fold2.querySelector<HTMLElement>('[data-testid="tool-result-entry"]')!
+    expect(block).toBeTruthy()
+    expect(block.dataset.position).toBe('3')
   })
 
   it('a fold that appears later starts collapsed while an expanded sibling stays open (D2/D3)', async () => {
@@ -1247,7 +1262,7 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     expect(folds[1].querySelector('.fold-body')).toBeNull()
   })
 
-  it('second-level folds keep position-keyed DOM identity (2.2)', async () => {
+  it('second-level nodes keep position-keyed DOM identity (2.2 + fold-tool-calls 4.1)', async () => {
     const entries = [
       entry({ position: 0, kind: 'prompt', content: 'go', created_at_unix: FIXED_DATES.T1 }),
       entry({ position: 4, kind: 'content', element_type: 'thinking', content: 'a', created_at_unix: FIXED_DATES.T1 }),
@@ -1255,11 +1270,18 @@ describe('sebas-transcript-view (conversation rendering)', () => {
       entry({ position: 17, kind: 'content', element_type: 'tool', content: 'c', created_at_unix: FIXED_DATES.T1 }),
     ]
     const el = await mount({ entries })
-    // 二级折叠在展开体内：先展开外层折叠。
+    // 子节点在展开体内：先展开外层折叠。
     el.shadowRoot!.querySelector<HTMLButtonElement>('.process-fold button.fold-link')!.click()
     await el.updateComplete
-    const items = el.shadowRoot!.querySelectorAll<HTMLElement>('.process-item')
-    expect([...items].map((d) => d.dataset.position)).toEqual(['4', '9', '17'])
+    // thinking 保持二级条目；工具条目是合并块——各自的 DOM 身份都是条目
+    // position（data-position），节点序 = 到达序。
+    const nodes = el.shadowRoot!.querySelectorAll<HTMLElement>(
+      '.process-item, [data-testid="tool-result-entry"]',
+    )
+    expect([...nodes].map((d) => d.dataset.position)).toEqual(['4', '9', '17'])
+    expect(nodes[0].classList.contains('process-item')).toBe(true)
+    expect(nodes[1].getAttribute('data-testid')).toBe('tool-result-entry')
+    expect(nodes[2].getAttribute('data-testid')).toBe('tool-result-entry')
   })
 
   it('long titles are middle-truncated in the summary while the title attribute keeps the full string (2.3)', async () => {
@@ -1272,7 +1294,11 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     const el = await mount({ entries })
     el.shadowRoot!.querySelector<HTMLButtonElement>('.process-fold button.fold-link')!.click()
     await el.updateComplete
-    const link = el.shadowRoot!.querySelector<HTMLButtonElement>('.process-item button.fold-link')!
+    // （fold-tool-calls-into-process-tree 4.2）工具条目的标题住在合并块的
+    // 收起行上。
+    const link = el.shadowRoot!.querySelector<HTMLButtonElement>(
+      '[data-testid="tool-result-link"]',
+    )!
     const shown = link.querySelector<HTMLElement>('.item-title')?.textContent?.trim()
     expect(shown).toBe(middleTruncate(long))
     expect(shown).toContain('…')
@@ -1648,7 +1674,9 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     el.shadowRoot!.querySelector<HTMLButtonElement>('.process-fold button.fold-link')!.click()
     await el.updateComplete
     fold = el.shadowRoot!.querySelector<HTMLElement>('.process-fold')!
-    expect(fold.querySelectorAll('.process-item')).toHaveLength(2)
+    // （fold-tool-calls-into-process-tree 4.2）重复 position 帧不重复渲染：
+    // thinking 二级条目 1 + 工具合并块 1。
+    expect(fold.querySelectorAll('.process-item, [data-testid="tool-result-entry"]')).toHaveLength(2)
     // 收起复原（后续断言继续以收起态为准）。
     el.shadowRoot!.querySelector<HTMLButtonElement>('.process-fold button.fold-link')!.click()
     await el.updateComplete
@@ -2186,10 +2214,10 @@ describe('truncation + view-all dialog (fix-webui-streaming-liveness 4.5)', () =
 
   it('an expanded over-threshold entry shows the preview, the omission notice and view-all', async () => {
     const el = await mount({ entries: longEntries() })
-    // 展开外层折叠 + 该二级条目（二级 body 只在其自身展开时渲染）。
+    // 展开外层折叠 + 该合并块（块 body 只在其自身展开时渲染）。
     el.shadowRoot!.querySelector<HTMLButtonElement>('.process-fold button.fold-link')!.click()
     await el.updateComplete
-    el.shadowRoot!.querySelector<HTMLButtonElement>('.process-item button.fold-link')!.click()
+    el.shadowRoot!.querySelector<HTMLButtonElement>('[data-testid="tool-result-link"]')!.click()
     await el.updateComplete
     const body = el.shadowRoot!.querySelector('[data-truncated]')
     expect(body).toBeTruthy()
@@ -2202,19 +2230,15 @@ describe('truncation + view-all dialog (fix-webui-streaming-liveness 4.5)', () =
 
   it('an expanded under-threshold entry renders in full with no truncation note', async () => {
     const el = await mount({ entries: mixedTurnEntries() })
-    // 外层折叠全部展开：thinking 条目（round6 3.1）内容默认在场；tool 条目
-    // 再点自己的二级折叠。
+    // 外层折叠全部展开：thinking 条目（round6 3.1）内容默认在场；工具条目
+    // 是合并块，再点块自身的 link。
     for (const fold of [
       ...el.shadowRoot!.querySelectorAll<HTMLButtonElement>('.process-fold button.fold-link'),
     ]) {
       fold.click()
       await el.updateComplete
     }
-    el.shadowRoot!
-      .querySelector<HTMLButtonElement>(
-        '.process-item[data-element-type="tool"] button.fold-link',
-      )!
-      .click()
+    el.shadowRoot!.querySelector<HTMLButtonElement>('[data-testid="tool-result-link"]')!.click()
     await el.updateComplete
     expect(el.shadowRoot!.querySelector('[data-truncated]')).toBeNull()
     expect(el.shadowRoot!.querySelector('[data-testid="truncation-note"]')).toBeNull()
@@ -2225,7 +2249,7 @@ describe('truncation + view-all dialog (fix-webui-streaming-liveness 4.5)', () =
     const el = await mount({ entries: longEntries() })
     el.shadowRoot!.querySelector<HTMLButtonElement>('.process-fold button.fold-link')!.click()
     await el.updateComplete
-    el.shadowRoot!.querySelector<HTMLButtonElement>('.process-item button.fold-link')!.click()
+    el.shadowRoot!.querySelector<HTMLButtonElement>('[data-testid="tool-result-link"]')!.click()
     await el.updateComplete
 
     el.shadowRoot!.querySelector<HTMLButtonElement>('button.view-all')!.click()
@@ -2390,19 +2414,23 @@ describe('notice entries (close-acceptance-blind-spots 4.2, design D3)', () => {
   })
 })
 
-// ── fix-webui-qa-round2 1.3（D-C3a）：已决工具结果顶层化 ─────────────────────
+// ── fold-tool-calls-into-process-tree 4.1/4.2/4.3：合并块与单棵过程树 ────────
+// （原 D-C3a「已决结果顶层化」契约退役：调用与结果按 tool_use_id 配对合并
+// 为过程折叠内的一个收起块，顶层 tool_result 块不复存在。）
 
-describe('decided tool results lift to top-level runs (round2 1.3, D-C3a)', () => {
-  const requestEntry = (pos: number): ConversationEntryView => ({
+describe('tool call blocks merge invocation and result (fold-tool-calls 4.1)', () => {
+  const requestEntry = (pos: number, id?: string): ConversationEntryView => ({
     position: pos,
     kind: 'content',
     element_type: 'tool',
     content: '📖 **Bash**\n```json\n{"command": "rm -rf /"}\n```',
     title: 'Bash · rm -rf /',
+    tool_use_id: id ?? null,
     created_at_unix: FIXED_DATES.T1,
   })
   const resultEntry = (
     pos: number,
+    id?: string,
     content = '✓ **Bash**\nperm done\n',
   ): ConversationEntryView => ({
     position: pos,
@@ -2410,20 +2438,13 @@ describe('decided tool results lift to top-level runs (round2 1.3, D-C3a)', () =
     element_type: 'tool',
     content,
     title: '✓ Bash',
-    created_at_unix: FIXED_DATES.T1,
-  })
-  const toView = (it: ProcessItem): ConversationEntryView => ({
-    position: it.position,
-    kind: 'content',
-    element_type: 'tool',
-    content: it.content,
-    title: it.title,
+    tool_use_id: id ?? null,
     created_at_unix: FIXED_DATES.T1,
   })
 
-  it('isDecidedToolResult: ✓/✗ titled tool entries lift; requests and thinking stay', () => {
+  it('isDecidedToolResult: ✓/✗ titled tool entries are results; requests and thinking are not', () => {
     expect(isDecidedToolResult(resultEntry(0))).toBe(true)
-    expect(isDecidedToolResult(resultEntry(0, '✗ **Bash**\ndenied by fake'))).toBe(true)
+    expect(isDecidedToolResult(resultEntry(0, undefined, '✗ **Bash**\ndenied by fake'))).toBe(true)
     expect(isDecidedToolResult(requestEntry(0))).toBe(false)
     expect(
       isDecidedToolResult({
@@ -2431,33 +2452,178 @@ describe('decided tool results lift to top-level runs (round2 1.3, D-C3a)', () =
         content: 'the request was denied earlier',
         title: null,
       }),
-    // thinking entries never lift even when the text mentions denial.
+      // thinking entries are never results even when the text mentions denial.
     ).toBe(false)
   })
 
-  it('splitAgentRuns: decided results become standalone runs between process frames', () => {
-    const runs = splitAgentRuns([requestEntry(0), resultEntry(1)])
-    expect(runs.map((r) => r.type)).toEqual(['process', 'tool_result'])
+  it('splitAgentRuns: decided results stay inside the process run (no top-level tool_result runs)', () => {
+    const runs = splitAgentRuns([requestEntry(0, 'tc-1'), resultEntry(1, 'tc-1')])
+    expect(runs.map((r) => r.type)).toEqual(['process'])
     const fold = runs[0] as ProcessRun
-    // the fold keeps only the pre-decision frame.
-    expect(fold.items).toHaveLength(1)
-    const lifted = runs[1] as ToolResultRun
-    expect(lifted.item.title).toBe('✓ Bash')
-    expect(lifted.position).toBe(1)
+    // 过程 run 收全部两条原始条目（合并是渲染层的纯派生）。
+    expect(fold.items).toHaveLength(2)
   })
 
-  it('parallel: two requests share the fold, both results lift separately', () => {
+  it('mergeToolCalls: a paired invocation+result becomes ONE block', () => {
+    const items = splitAgentRuns([requestEntry(0, 'tc-1'), resultEntry(1, 'tc-1')])
+    if (items[0].type !== 'process') return expect.unreachable()
+    const nodes = mergeToolCalls(items[0].items)
+    expect(nodes).toHaveLength(1)
+    const block = nodes[0] as ToolCallBlock
+    expect(block.type).toBe('tool_call')
+    expect(block.invocation.title).toBe('Bash · rm -rf /')
+    expect(block.result!.title).toBe('✓ Bash')
+    expect(block.position).toBe(0)
+    // 配对成功 → 结果章 ✓（collapse 行即读）。
+    expect(toolCallBlockOutcome(block)).toBe('ok')
+    expect(toolCallBlockDenied(block)).toBe(false)
+  })
+
+  it('mergeToolCalls: an unpaired invocation renders as its own call-state block (no outcome)', () => {
+    const items = splitAgentRuns([requestEntry(0, 'tc-1')])
+    if (items[0].type !== 'process') return expect.unreachable()
+    const nodes = mergeToolCalls(items[0].items)
+    expect(nodes).toHaveLength(1)
+    const block = nodes[0] as ToolCallBlock
+    expect(block.type).toBe('tool_call')
+    expect(block.result).toBeNull()
+    // 调用态标题：无 ✓/✗ 章。
+    expect(toolCallBlockOutcome(block)).toBeNull()
+  })
+
+  it('mergeToolCalls: concurrent calls to the same tool pair by id, never by position', () => {
+    const entries = [
+      requestEntry(0, 'tc-a'),
+      { ...requestEntry(1, 'tc-b'), title: 'Read · /tmp/b', content: '📖 **Read**\n```json\n{"file_path": "/tmp/b"}\n```' },
+      { ...resultEntry(2, 'tc-b'), content: '✓ **Read**\ncontent of b' },
+      { ...resultEntry(3, 'tc-a'), content: '✓ **Read**\ncontent of a' },
+    ]
+    const runs = splitAgentRuns(entries)
+    if (runs[0].type !== 'process') return expect.unreachable()
+    const nodes = mergeToolCalls(runs[0].items)
+    expect(nodes).toHaveLength(2)
+    const [blockA, blockB] = nodes.map((n) => n as ToolCallBlock)
+    // 结果乱序回流：各自按 id 回到自己的调用块——b 的结果先到也不串块。
+    expect(blockA.invocation.title).toBe('Bash · rm -rf /')
+    expect(blockA.result!.content).toContain('content of a')
+    expect(blockB.invocation.title).toBe('Read · /tmp/b')
+    expect(blockB.result!.content).toContain('content of b')
+  })
+
+  it('mergeToolCalls: a lone result (truncated transcript) still renders as its own block', () => {
+    const runs = splitAgentRuns([resultEntry(0, 'tc-x')])
+    if (runs[0].type !== 'process') return expect.unreachable()
+    const nodes = mergeToolCalls(runs[0].items)
+    expect(nodes).toHaveLength(1)
+    const block = nodes[0] as ToolCallBlock
+    expect(block.result).toBeNull()
+    // 孤立 ✓ 条目自带已决标记 → 保留 ✓ 章（内容零丢失）。
+    expect(toolCallBlockOutcome(block)).toBe('ok')
+  })
+
+  // ── fold-tool-calls-into-process-tree review F1：跨 run 配对 ──────────────
+  // native 载体对泊车/决策落 markdown 条目（⏳/🛡），把同一调用的结果切进
+  // 另一个过程 run；foldCrossRunToolResults 在回合范围内按 id 把结果搬回
+  // 调用所在 run（spec「配对 SHALL NOT rely on arrival position」）。
+
+  const textEntry = (pos: number, content: string): ConversationEntryView => ({
+    position: pos,
+    kind: 'content',
+    element_type: 'markdown',
+    content,
+    created_at_unix: FIXED_DATES.T1,
+  })
+
+  it('foldCrossRunToolResults: a result split off by parking notes moves back to its invocation run', () => {
+    // native 被门控序列：tool(调用) → markdown(⏳/🛡) → tool(✓ 结果)。
     const runs = splitAgentRuns([
-      requestEntry(0),
-      { ...requestEntry(1), title: 'Read · /tmp/x' },
-      resultEntry(2),
-      resultEntry(3, '✗ **Read**\ndenied by fake'),
+      requestEntry(0, 'toolu_1'),
+      textEntry(1, '⏳ bash awaits approval'),
+      textEntry(2, '🛡 policy allow'),
+      resultEntry(3, 'toolu_1'),
     ])
-    expect(runs.map((r) => r.type)).toEqual(['process', 'tool_result', 'tool_result'])
+    expect(runs.map((r) => r.type)).toEqual(['process', 'text', 'process'])
+    const regrouped = foldCrossRunToolResults(runs)
+    // 结果搬回调用所在 run；被搬空的过程 run 丢弃；正文 run 原样保留。
+    expect(regrouped.map((r) => r.type)).toEqual(['process', 'text'])
+    const fold = regrouped[0] as ProcessRun
+    expect(fold.items).toHaveLength(2)
+    expect((regrouped[1] as { content: string }).content).toContain('awaits approval')
+    // 逐 run 合并后：一块、带结果、✓ 章（调用块与汇总行都能读到达成）。
+    const nodes = mergeToolCalls(fold.items)
+    expect(nodes).toHaveLength(1)
+    const block = nodes[0] as ToolCallBlock
+    expect(block.result).not.toBeNull()
+    expect(toolCallBlockOutcome(block)).toBe('ok')
   })
 
-  it('render: top-level block with a persistent outcome chip and independent toggle', async () => {
-    const runs = splitAgentRuns([requestEntry(1), resultEntry(2)])
+  it('foldCrossRunToolResults: parallel results scattered across runs each return to their own call', () => {
+    const runs = splitAgentRuns([
+      requestEntry(0, 'tc-a'),
+      { ...requestEntry(1, 'tc-b'), title: 'Read · /tmp/b', content: '📖 **Read**' },
+      textEntry(2, '⏳ a awaits approval'),
+      textEntry(3, '⏳ b awaits approval'),
+      { ...resultEntry(4, 'tc-b'), content: '✓ **Read**\nb done' },
+      { ...resultEntry(5, 'tc-a'), content: '✓ **Bash**\na done' },
+    ])
+    const regrouped = foldCrossRunToolResults(runs)
+    // 两个结果都回到第一个 run；中间泊车正文不动；收尾 run 搬空即弃。
+    expect(regrouped.map((r) => r.type)).toEqual(['process', 'text'])
+    const nodes = mergeToolCalls((regrouped[0] as ProcessRun).items)
+    expect(nodes).toHaveLength(2)
+    const [a, b] = nodes.map((n) => n as ToolCallBlock)
+    expect(a.result!.content).toContain('a done')
+    expect(b.result!.content).toContain('b done')
+  })
+
+  it('foldCrossRunToolResults: a lone result in a later run without any invocation stays put', () => {
+    const runs = splitAgentRuns([resultEntry(0, 'tc-x'), textEntry(1, 'done'), resultEntry(2, 'tc-y')])
+    const regrouped = foldCrossRunToolResults(runs)
+    // 没有可认领的调用：三条 run 原样（孤立结果自成一块的契约不破坏）。
+    expect(regrouped.map((r) => r.type)).toEqual(['process', 'text', 'process'])
+    expect(regrouped).toBe(runs)
+  })
+
+  it('foldCrossRunToolResults: duplicate results — only the first is claimed, the rest stay', () => {
+    const runs = splitAgentRuns([
+      requestEntry(0, 'tc-1'),
+      textEntry(1, '🛡 policy'),
+      resultEntry(2, 'tc-1'),
+      resultEntry(3, 'tc-1'),
+    ])
+    const regrouped = foldCrossRunToolResults(runs)
+    expect(regrouped.map((r) => r.type)).toEqual(['process', 'text', 'process'])
+    const first = mergeToolCalls((regrouped[0] as ProcessRun).items)
+    expect(first).toHaveLength(1)
+    expect((first[0] as ToolCallBlock).result).not.toBeNull()
+    // 重复结果留在原地，走「未配对结果自成一块」的既有契约。
+    const last = mergeToolCalls((regrouped[2] as ProcessRun).items)
+    expect(last).toHaveLength(1)
+    expect((last[0] as ToolCallBlock).result).toBeNull()
+  })
+
+  it('groupConversation: gated native turn renders ONE merged block in the invocation fold', () => {
+    const entries: ConversationEntryView[] = [
+      { position: 0, kind: 'prompt', element_type: 'markdown', content: 'go', created_at_unix: FIXED_DATES.T1 },
+      requestEntry(1, 'toolu_1'),
+      textEntry(2, '⏳ bash awaits approval'),
+      resultEntry(3, 'toolu_1'),
+    ]
+    const units = groupConversation(mergeSpawnErrors(entries))
+    const agent = units.find((u) => u.kind === 'agent')
+    if (!agent || agent.kind !== 'agent') return expect.unreachable()
+    const processRuns = agent.runs.filter((r) => r.type === 'process') as ProcessRun[]
+    // 单棵树：整个回合只剩调用所在的一个过程 run。
+    expect(processRuns).toHaveLength(1)
+    const nodes = mergeToolCalls(processRuns[0].items)
+    expect(nodes).toHaveLength(1)
+    const block = nodes[0] as ToolCallBlock
+    expect(block.type).toBe('tool_call')
+    expect(block.result).not.toBeNull()
+    expect(toolCallBlockOutcome(block)).toBe('ok')
+  })
+
+  it('render: one collapsed block inside the process fold; expanding reveals args + result', async () => {
     const entries: ConversationEntryView[] = [
       {
         position: 0,
@@ -2466,46 +2632,63 @@ describe('decided tool results lift to top-level runs (round2 1.3, D-C3a)', () =
         content: 'perm',
         created_at_unix: FIXED_DATES.T1,
       },
-      ...runs.flatMap((r) =>
-        r.type === 'process'
-          ? r.items.map(toView)
-          : [toView((r as ToolResultRun).item)],
-      ),
+      requestEntry(1, 'tc-1'),
+      resultEntry(2, 'tc-1'),
     ]
     const el = await mount({ entries })
-    // 结果块在顶层（不在 .process-fold 内），章常驻、展开体默认可见。
-    const block = el.shadowRoot!.querySelector('[data-testid="tool-result-entry"]')
-    expect(block).toBeTruthy()
-    expect(block!.closest('.process-fold')).toBeNull()
-    expect(block!.textContent).toContain('✓ 已执行')
-    expect(el.shadowRoot!.querySelector('[data-testid="tool-outcome"]')).toBeTruthy()
-    const body = block!.querySelector('.result-body')
-    expect(body?.textContent).toContain('perm done')
-    // 开合独立：点结果块不连带过程折叠（aria-expanded 只翻自己）。
-    const foldLink = el.shadowRoot!.querySelector<HTMLButtonElement>(
-      '.process-fold button.fold-link',
-    )!
-    const before = foldLink.getAttribute('aria-expanded')
-    block!.querySelector<HTMLButtonElement>('[data-testid="tool-result-link"]')!.click()
+    // 单棵过程树：合并块在 .process-fold 内，不存在与过程折叠并列的顶层
+    // 结果块；回合内只有 div.process-fold 一层树。
+    const fold = el.shadowRoot!.querySelector<HTMLElement>('.process-fold')!
+    expect(fold).toBeTruthy()
+    expect(el.shadowRoot!.querySelector('[data-testid="tool-result-entry"]')).toBeNull()
+    // 过程折叠收起行的 ✓/✗ 章（过程汇总行）在合并块展开前即可读。
+    expect(fold.querySelector('[data-testid="tool-outcome"]')?.textContent).toContain('✓ 已执行')
+    // 展开过程折叠：合并块在场且默认收起（aria-expanded=false、体不在 DOM）。
+    fold.querySelector<HTMLButtonElement>('button.fold-link')!.click()
     await el.updateComplete
+    const block = el.shadowRoot!.querySelector<HTMLElement>('[data-testid="tool-result-entry"]')!
+    expect(block).toBeTruthy()
+    expect(block.closest('.process-fold')).toBe(fold)
+    const blockLink = block.querySelector<HTMLButtonElement>('[data-testid="tool-result-link"]')!
+    expect(blockLink.getAttribute('aria-expanded')).toBe('false')
+    expect(block.querySelector('[data-testid="tool-call-body"]')).toBeNull()
+    // 收起标题自带关键参数 + 结果章（不展开即可读）。
+    expect(block.querySelector('.item-title')?.textContent).toContain('Bash · rm -rf /')
+    expect(block.querySelector('[data-testid="tool-outcome"]')?.textContent).toContain('✓ 已执行')
+    // 展开合并块：参数段 + 结果段都在；父折叠保持展开（D7 层级不死锁）。
+    blockLink.click()
+    await el.updateComplete
+    expect(blockLink.getAttribute('aria-expanded')).toBe('true')
+    const body = block.querySelector('[data-testid="tool-call-body"]')!
+    expect(body.textContent).toContain('rm -rf /')
+    expect(body.textContent).toContain('perm done')
     expect(
-      el.shadowRoot!.querySelector('.process-fold button.fold-link')!.getAttribute('aria-expanded'),
-    // the process fold must not toggle with the result block.
-    ).toBe(before)
-    // 收起后章仍在头部可见（决策标识常驻）。
+      fold.querySelector<HTMLButtonElement>('button.fold-link')!.getAttribute('aria-expanded'),
+    ).toBe('true')
+    // 再点收起：体离开 DOM，父折叠仍展开。
+    blockLink.click()
+    await el.updateComplete
+    expect(block.querySelector('[data-testid="tool-call-body"]')).toBeNull()
     expect(
-      el.shadowRoot!.querySelector('[data-testid="tool-result-entry"] [data-testid="tool-outcome"]'),
-    ).toBeTruthy()
+      fold.querySelector<HTMLButtonElement>('button.fold-link')!.getAttribute('aria-expanded'),
+    ).toBe('true')
     el.remove()
   })
 
-  it('denied result renders the ✗ chip', async () => {
-    const runs = splitAgentRuns([
-      { ...resultEntry(0), content: '✓ **Bash**\ndenied by fake' },
-    ])
-    const el = await mount({ entries: runs.flatMap((r) => [toView((r as ToolResultRun).item)]) })
-    expect(el.shadowRoot!.querySelector('[data-testid="tool-outcome-denied"]')).toBeTruthy()
-    expect(el.shadowRoot!.querySelector('[data-testid="tool-outcome"]')).toBeNull()
+  it('render: denied result carries the ✗ chip while collapsed (permission-flow)', async () => {
+    const entries: ConversationEntryView[] = [
+      requestEntry(0, 'tc-1'),
+      resultEntry(1, 'tc-1', '✓ **Bash**\ndenied by fake'),
+    ]
+    const el = await mount({ entries })
+    el.shadowRoot!.querySelector<HTMLButtonElement>('.process-fold button.fold-link')!.click()
+    await el.updateComplete
+    const block = el.shadowRoot!.querySelector<HTMLElement>('[data-testid="tool-result-entry"]')!
+    expect(block.getAttribute('data-denied')).toBe('true')
+    expect(block.querySelector('[data-testid="tool-outcome-denied"]')?.textContent).toContain(
+      '✗ 已拒绝',
+    )
+    expect(block.querySelector('[data-testid="tool-outcome"]')).toBeNull()
     el.remove()
   })
 })

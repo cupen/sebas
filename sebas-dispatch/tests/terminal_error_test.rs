@@ -126,6 +126,7 @@ async fn terminal_error_preserves_pre_death_transcript() {
                 session_id: "s1".into(),
                 tool_name: "Bash".into(),
                 args: serde_json::json!({}),
+                tool_use_id: None,
             },
         )
         .await;
@@ -137,6 +138,7 @@ async fn terminal_error_preserves_pre_death_transcript() {
                 session_id: "s1".into(),
                 tool_name: "Bash".into(),
                 result: "step2".into(),
+                tool_use_id: None,
             },
         )
         .await;

@@ -85,6 +85,15 @@
       "element_type": "permission_mode_result",
       "content": "{\"request_id\":\"r1\",\"ok\":false,\"mode\":\"auto\",\"detail\":\"nope\"}",
       "created_at_unix": 0
+    },
+    {
+      "position": 7,
+      "kind": "content",
+      "element_type": "tool",
+      "content": "📖 **Read**",
+      "created_at_unix": 0,
+      "title": "Read · src/main.rs",
+      "tool_use_id": "toolu_golden_01"
     }
   ],
   "remote_session_views": [

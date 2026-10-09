@@ -50,6 +50,10 @@ export interface ConversationEntry {
   element_type: string
   content: string
   created_at_unix: number
+  /** fold-tool-calls-into-process-tree：工具条目的结构化标题（`Read · a` / `✓ Read`）。 */
+  title?: string | null
+  /** fold-tool-calls-into-process-tree 2.1：上游 call id（调用/结果配对键）。 */
+  tool_use_id?: string | null
 }
 
 export interface SessionDetail {

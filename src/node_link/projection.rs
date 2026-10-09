@@ -1107,6 +1107,7 @@ pub fn turn_entry_of(entry: &LogEntry) -> TurnEntry {
         created_at_unix: entry.at_unix.max(0) as u64,
         // 节点日志无结构化标题来源（workbench-agent-identity-and-process-folds）。
         title: None,
+        tool_use_id: None,
         failure_class: None,
     }
 }

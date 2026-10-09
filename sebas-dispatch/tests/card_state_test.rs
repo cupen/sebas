@@ -95,6 +95,7 @@ async fn apply_event_accumulates_without_emitting_out() {
                 session_id: "s1".into(),
                 tool_name: "Bash".into(),
                 args: serde_json::json!({}),
+                tool_use_id: None,
             },
         )
         .await;
@@ -105,6 +106,7 @@ async fn apply_event_accumulates_without_emitting_out() {
                 session_id: "s1".into(),
                 tool_name: "Bash".into(),
                 result: "ok".into(),
+                tool_use_id: None,
             },
         )
         .await;
@@ -324,6 +326,7 @@ async fn phase_transitions_emit_reactions_card_first() {
                 session_id: "r1".into(),
                 tool_name: "Read".into(),
                 args: serde_json::json!({"path": "a"}),
+                tool_use_id: None,
             },
         )
         .await;

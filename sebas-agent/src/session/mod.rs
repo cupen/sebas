@@ -36,6 +36,12 @@ pub enum AgentEvent {
         session_id: String,
         tool_name: String,
         args: serde_json::Value,
+        /// （fold-tool-calls-into-process-tree 1.3）内核 tool-use call id
+        /// （`calls[i].0`，与 `PermissionRequest.request_id == tool_use_id`
+        /// 同源契约）。serde 姿态与 sebas-acp 同族：缺省兼容旧报文，None
+        /// 不上 wire。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_use_id: Option<String>,
     },
     ToolProgress {
         session_id: String,
@@ -46,6 +52,10 @@ pub enum AgentEvent {
         session_id: String,
         tool_name: String,
         result: String,
+        /// （fold-tool-calls-into-process-tree 1.3）同一次调用的 end 事件
+        /// 携带与 start 相等的 id——前端按 id 把调用与结果合并成一块。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_use_id: Option<String>,
     },
     /// 策略审批请求（request_id == tool_use_id，permission-flow 关联契约）。
     /// 消费端（webui 审查卡 / 飞书卡）呈现后经 `SessionHandle::answer_permission`
@@ -473,6 +483,7 @@ mod tests {
                 session_id: sid.clone(),
                 tool_name: "bash".into(),
                 args: serde_json::json!({"command": "ls"}),
+                tool_use_id: Some("t1".into()),
             },
             AgentEvent::ToolProgress {
                 session_id: sid.clone(),
@@ -483,6 +494,7 @@ mod tests {
                 session_id: sid.clone(),
                 tool_name: "bash".into(),
                 result: "out".into(),
+                tool_use_id: Some("t1".into()),
             },
             AgentEvent::Finished {
                 session_id: sid.clone(),
@@ -505,6 +517,41 @@ mod tests {
             .unwrap()["type"],
             "finished"
         );
+    }
+
+    /// fold-tool-calls-into-process-tree 1.3：`tool_use_id` 的 serde 姿态——
+    /// 旧报文（无该键）反序列化为 None；None 不上 wire（旧字节形状零变化）。
+    #[test]
+    fn agent_event_tool_use_id_field_is_additive() {
+        let old = serde_json::json!({
+            "type": "tool_end",
+            "session_id": "s1",
+            "tool_name": "bash",
+            "result": "ok"
+        });
+        let back: AgentEvent = serde_json::from_value(old).expect("legacy tool_end parses");
+        assert!(matches!(
+            back,
+            AgentEvent::ToolEnd { tool_use_id: None, .. }
+        ));
+
+        let ev = AgentEvent::ToolStart {
+            session_id: "s1".into(),
+            tool_name: "bash".into(),
+            args: serde_json::json!({"command": "ls"}),
+            tool_use_id: None,
+        };
+        let j = serde_json::to_value(&ev).unwrap();
+        assert!(j.get("tool_use_id").is_none(), "{j}");
+
+        let ev = AgentEvent::ToolEnd {
+            session_id: "s1".into(),
+            tool_name: "bash".into(),
+            result: "ok".into(),
+            tool_use_id: Some("tc-a".into()),
+        };
+        let j = serde_json::to_value(&ev).unwrap();
+        assert_eq!(j["tool_use_id"], "tc-a");
     }
 
     /// 记录 system 提示词的 scripted client——验证「每个 turn 的首次模型请求

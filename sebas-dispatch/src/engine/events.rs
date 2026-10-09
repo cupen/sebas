@@ -127,9 +127,13 @@ fn truncate_chars(s: &str, max: usize) -> String {
 /// （workbench-agent-identity-and-process-folds 1.2）工具条目的结构化标题：
 /// `done=false` 为调用开始（`{tool} · {key_arg}`），`done=true` 带完成前缀
 /// （`✓ {tool} · {key_arg}`）；提取不到关键参数就只有工具名（带/不带 ✓）。
-/// 注意：`AcpEvent::ToolEnd` 不携带 args（wire 无 call id 可配对），完成态
-/// 调用方传 `None`，标题即 `✓ {tool}`。
-pub(crate) fn tool_entry_title(
+/// 注意：`AcpEvent::ToolEnd` 不携带 args，完成态调用方传 `None`，标题即
+/// `✓ {tool}`。
+///
+/// （fold-tool-calls-into-process-tree 3.1）公开为**可复用入口**：native
+/// 载体的两个投影点（根 crate `agent_backend` / `native_dispatch_bridge`）
+/// 升一等 tool 条目时复用本规则，不复制键序表。
+pub fn tool_entry_title(
     done: bool,
     tool_name: &str,
     args: Option<&serde_json::Value>,
@@ -603,6 +607,7 @@ fn chat_message_count_ignores_noise_and_empty_entries() {
             content: String::new(),
             created_at_unix: 1,
             title: None,
+            tool_use_id: None,
             failure_class: None,
         },
         TurnEntry::markdown(2, " still same segment"),

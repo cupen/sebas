@@ -338,6 +338,13 @@ pub struct TurnEntry {
     /// 不破坏旧消费端）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// （fold-tool-calls-into-process-tree 2.1）工具条目的上游 call id：
+    /// 前端按它把一次调用的 📖 调用条目与 ✓ 结果条目精确配对合并成一块
+    /// （并行同名工具不靠位置猜）。`None` = 旧持久化条目无 id，前端退化为
+    /// 「未配对调用自成一块」形态。serde 姿态与 `title` 同族：`#[serde(
+    /// default)]` 兼容旧 JSON，`skip_serializing_if` 让 None 不上 wire。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_use_id: Option<String>,
     /// （fix-webui-qa-defects 5.1/5.2，design D5）错误条目的失败分类：
     /// `"spawn"`（spawn 失败）| `"stall"`（回合停滞强收）| `"generic"`
     /// （回合终态错误，含 refusal）。前端气泡标签据此如实分类渲染，不再
@@ -522,6 +529,7 @@ impl TurnEntry {
             // `sebas_domain::prim::now_unix`——add-domain-layer 2.5。）
             created_at_unix: u64::try_from(crate::prim::now_unix()).unwrap_or(0),
             title: None,
+            tool_use_id: None,
             failure_class: None,
         }
     }
@@ -530,6 +538,13 @@ impl TurnEntry {
     /// 仅工具条目使用，链在 [`TurnEntry::tool`] 之后；其余条目保持 `None`。
     pub fn with_title(mut self, title: impl Into<String>) -> Self {
         self.title = Some(title.into());
+        self
+    }
+
+    /// 附加上游 call id（fold-tool-calls-into-process-tree 2.1/2.3）：工具
+    /// 调用/结果条目链在 `TurnEntry::tool` 之后，前端按它配对合并。
+    pub fn with_tool_use_id(mut self, id: impl Into<String>) -> Self {
+        self.tool_use_id = Some(id.into());
         self
     }
 
@@ -692,6 +707,39 @@ mod tests {
         let n = TurnEntry::notice(5, "no output");
         assert_eq!(n.element_type, TurnElementType::Notice);
         assert!(n.failure_class.is_none());
+    }
+
+    /// fold-tool-calls-into-process-tree 2.1：`tool_use_id` 字段的 serde
+    /// 姿态——带 id 往返一致；None 不上 wire（JSON 不含该键，旧字节形状
+    /// 零变化）；旧 JSON（无该键）反序列化为 None。
+    #[test]
+    fn turn_entry_tool_use_id_field_is_additive() {
+        // 带 id：完整往返。
+        let paired = TurnEntry::tool(0, "📖 **Read**")
+            .with_title("Read · src/main.rs")
+            .with_tool_use_id("toolu_01");
+        let json = serde_json::to_string(&paired).unwrap();
+        assert_eq!(serde_json::from_str::<TurnEntry>(&json).unwrap(), paired);
+        assert!(json.contains(r#""tool_use_id""#), "{json}");
+        assert!(json.contains("toolu_01"), "{json}");
+
+        // None：键不上 wire。
+        let bare = TurnEntry::tool(1, "✓ **Read**");
+        let json = serde_json::to_string(&bare).unwrap();
+        assert!(!json.contains("tool_use_id"), "{json}");
+
+        // 旧形状：无 tool_use_id 字段（连 title 也没有）→ None，不报错。
+        let legacy = r#"{
+            "position": 7,
+            "kind": "content",
+            "element_type": "tool",
+            "content": "📖 **Read**",
+            "created_at_unix": 42,
+            "title": "Read · a"
+        }"#;
+        let back: TurnEntry = serde_json::from_str(legacy).unwrap();
+        assert_eq!(back.title.as_deref(), Some("Read · a"));
+        assert_eq!(back.tool_use_id, None);
     }
 
     #[test]

@@ -705,6 +705,7 @@ mod tests {
                 session_id: "s1".into(),
                 tool_name: "Bash".into(),
                 args: serde_json::json!({}),
+                tool_use_id: None,
             },
             &c,
         );
@@ -714,6 +715,7 @@ mod tests {
                 session_id: "s1".into(),
                 tool_name: "Bash".into(),
                 result: "shhh".into(),
+                tool_use_id: None,
             },
             &c,
         );

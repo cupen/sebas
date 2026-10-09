@@ -406,11 +406,16 @@ pub(crate) fn translate_event(
             out
         }
         PiEvent::ToolExecutionStart {
-            tool_name, args, ..
+            tool_name,
+            args,
+            tool_call_id,
         } => vec![AcpEvent::ToolStart {
             session_id: sid(),
             tool_name: tool_name.clone(),
             args: args.clone(),
+            // fold-tool-calls-into-process-tree 1.2：pi 路径同带 call id；
+            // 缺失（空串兜底）时 None，不让空 id 在消费端错误配对。
+            tool_use_id: non_empty_call_id(tool_call_id.as_str()),
         }],
         PiEvent::ToolExecutionUpdate {
             tool_name,
@@ -424,11 +429,14 @@ pub(crate) fn translate_event(
         PiEvent::ToolExecutionEnd {
             tool_name,
             result,
+            tool_call_id,
             ..
         } => vec![AcpEvent::ToolEnd {
             session_id: sid(),
             tool_name: tool_name.clone(),
             result: render_tool_payload(result),
+            // fold-tool-calls-into-process-tree 1.1：与 start 同源 id。
+            tool_use_id: non_empty_call_id(tool_call_id.as_str()),
         }],
         PiEvent::AgentSettled { .. } | PiEvent::AgentEnd { .. } | PiEvent::Other(_) => Vec::new(),
     }
@@ -450,6 +458,17 @@ fn render_tool_payload(v: &Value) -> String {
         return String::new();
     }
     v.to_string()
+}
+
+/// fold-tool-calls-into-process-tree 1.1/1.2：非空 call id → `Some`。
+/// pi 事件缺 `toolCallId` 时解析层以空串兜底，这里收敛为 `None`——
+/// 空 id 上 wire 会让无 id 调用在消费端错误互相配对。
+fn non_empty_call_id(id: &str) -> Option<String> {
+    if id.is_empty() {
+        None
+    } else {
+        Some(id.to_string())
+    }
 }
 
 // ── 握手应答解析 ──────────────────────────────────────────────────────
@@ -644,6 +663,7 @@ mod tests {
                 session_id: sid.into(),
                 tool_name: "bash".into(),
                 args: serde_json::json!({"command": "ls -la"}),
+                tool_use_id: Some("call_abc".into()),
             }],
         );
         let events = translate_event(
@@ -670,6 +690,7 @@ mod tests {
                 session_id: sid.into(),
                 tool_name: "bash".into(),
                 result: "complete output".into(),
+                tool_use_id: Some("call_abc".into()),
             }],
         );
 

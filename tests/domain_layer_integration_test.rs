@@ -360,6 +360,7 @@ fn conversation_entry_view_serializes_identically_to_canonical_turn_entry() {
         content: "📖 x".into(),
         created_at_unix: 42,
         title: Some("Read · a".into()),
+        tool_use_id: Some("tc-1".into()),
         failure_class: Some("generic".into()),
     };
     let view = sebas_webui::models::ConversationEntryView::from(&canonical);

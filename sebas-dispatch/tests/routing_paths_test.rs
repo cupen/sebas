@@ -374,6 +374,7 @@ async fn dispatch_acp_event_routes_every_variant() {
             session_id: "s1".into(),
             tool_name: "Bash".into(),
             args: serde_json::Value::Null,
+            tool_use_id: None,
         },
         AcpEvent::ToolProgress {
             session_id: "s1".into(),
@@ -384,6 +385,7 @@ async fn dispatch_acp_event_routes_every_variant() {
             session_id: "s1".into(),
             tool_name: "Bash".into(),
             result: "r".into(),
+            tool_use_id: None,
         },
         AcpEvent::Error {
             session_id: "s1".into(),

@@ -4,11 +4,13 @@
  *
  * - 两侧交替: submissions and agent replies alternate in transcript order,
  *   each submission rendered as the operator's own turn bubble (2.3).
- * - 过程折叠: a gated tool call ("perm" trigger) folds into the turn's
- *   single process fold — collapsed by default, summary `process · N`
- *   (process-folds 2.1) — and expands level by level: second-level per-entry
- *   folds titled by the structured title (`Bash · rm -rf /` / `✓ Bash`),
- *   whose payload stays hidden until each is expanded (2.2).
+ * - 过程折叠: a gated tool call ("perm" trigger) lands inside the turn's
+ *   single process fold — collapsed by default, summary `过程 · N` — and its
+ *   invocation and result merge into ONE collapsed tool call block titled by
+ *   the structured title (`Bash · rm -rf /`) with the outcome marker on the
+ *   collapsed row; expanding the block reveals arguments and result together
+ *   (fold-tool-calls-into-process-tree; D-C3's nested dead-end must not
+ *   regress: toggling the sub-block never touches its parent).
  * - 就地聚焦: a rail click focuses the session in place; the workbench
  *   renders its conversation without a page change (3.1).
  * - 模型两级选择: with a provider catalog configured in Settings, the
@@ -93,7 +95,7 @@ test.describe('对话视图（workbench-conversation-view）', () => {
   })
 
   test.describe('过程折叠', () => {
-    test('the gated tool call folds into the turn process fold and expands level by level', async ({
+    test('the gated tool call merges into one tool call block inside the turn process fold', async ({
       page,
     }) => {
       const detail = new FocusedSession(page)
@@ -111,42 +113,51 @@ test.describe('对话视图（workbench-conversation-view）', () => {
       await cards.allowOnce().click()
       await expect(cards.all()).toHaveCount(0, { timeout: 15_000 })
 
-      // fix-webui-qa-round2 1.3（D-C3a）：决策后的 tool_result 不再嵌进过程
-      // 折叠——它提升为转写层级的独立结果块（章常驻、展开体默认可见、开合
-      // 与过程折叠互不连带）；过程折叠只包未决策前的过程帧（请求），折叠行
-      // 三段式（`process` 标签 + 尾条目 title + 计数）不变。
+      // fold-tool-calls-into-process-tree（D1）：调用与结果按 tool_use_id 配对
+      // 合并为过程折叠内的**一块**收起合并块，顶层 tool_result 块退役。过程
+      // 折叠收起行 = `process` 标签 + 尾条目（✓ 结果条目）title + 计数（调用
+      // + 结果 = 2）+ 执行结果章（permission-flow MODIFIED：决策结果收起态可
+      // 读，且汇总行同挂 ✓）。
       const fold = detail.processFold().first()
       await expect(fold).toBeVisible({ timeout: 15_000 })
       const outerLink = fold.locator('[data-testid="process-fold-link"]')
       await expect(outerLink.locator('.label')).toHaveText('过程')
-      // 尾条目 = 工具请求（结果已顶层化），计数 = 1。
-      await expect(outerLink.locator('.running')).toHaveText('Bash · rm -rf /')
-      await expect(outerLink.locator('.fold-count')).toHaveText('1')
+      await expect(outerLink.locator('.running')).toHaveText('✓ Bash')
+      await expect(outerLink.locator('.fold-count')).toHaveText('2')
       await expect(outerLink).toHaveAttribute('aria-expanded', 'false')
       await expect(fold.locator('.fold-body')).toHaveCount(0)
-      // 折叠无已决章（结果标识移到了顶层结果块上）。
-      await expect(fold.locator('[data-testid="tool-outcome"]')).toHaveCount(0)
+      // 结果章上折叠行（不再随顶层块下沉消失）。
+      await expect(outerLink.locator('[data-testid="tool-outcome"]')).toHaveText('✓ 已执行')
 
-      // 顶层结果块：✓已执行章常驻、内容零折叠可达。
-      const resultBlock = detail.host.locator('[data-testid="tool-result-entry"]')
-      await expect(resultBlock).toBeVisible()
-      await expect(resultBlock.locator('[data-testid="tool-outcome"]')).toHaveText('✓ 已执行')
-      await expect(resultBlock.locator('.result-body')).toContainText('perm done')
+      // 收起态下无顶层结果块：合并块只在折叠体内（懒渲染，展开后才在 DOM）。
+      await expect(detail.host.locator('[data-testid="tool-result-entry"]')).toHaveCount(0)
 
-      // 展开过程折叠：只剩请求帧本身（第二级折叠仍在，独立开合）。
+      // 展开过程折叠：合并块在场且**默认收起**——收起标题 = 调用条目的结构化
+      // 标题（工具名 · 关键参数），✓ 章同行可读。
       await outerLink.click()
       await expect(outerLink).toHaveAttribute('aria-expanded', 'true')
-      const items = detail.processItems()
-      await expect(items).toHaveCount(1)
-      await expect(items.nth(0).locator('.item-title')).toHaveText('Bash · rm -rf /')
-      await expect(items.nth(0).locator('.item-body')).toHaveCount(0)
-      await items.nth(0).locator('[data-testid="process-item-link"]').click()
-      await expect(items.nth(0).locator('.item-body')).toContainText('rm -rf /')
+      const resultBlock = detail.host.locator('[data-testid="tool-result-entry"]')
+      await expect(resultBlock).toHaveCount(1)
+      const blockLink = resultBlock.locator('[data-testid="tool-result-link"]')
+      await expect(blockLink).toHaveAttribute('aria-expanded', 'false')
+      await expect(resultBlock.locator('.item-title')).toHaveText('Bash · rm -rf /')
+      await expect(blockLink.locator('[data-testid="tool-outcome"]')).toHaveText('✓ 已执行')
+      await expect(resultBlock.locator('[data-testid="tool-call-body"]')).toHaveCount(0)
 
-      // 开合互不连带：收起过程折叠不影响结果块的展开体（反之亦然）。
-      await outerLink.click()
-      await expect(outerLink).toHaveAttribute('aria-expanded', 'false')
-      await expect(resultBlock.locator('.result-body')).toBeVisible()
+      // 展开合并块本身：参数段 + 结果段同时可读（一次调用一块，📖 与 ✓ 不再
+      // 是两个独立块）。
+      await blockLink.click()
+      await expect(blockLink).toHaveAttribute('aria-expanded', 'true')
+      const body = resultBlock.locator('[data-testid="tool-call-body"]')
+      await expect(body).toBeVisible()
+      await expect(body.locator('.call-args')).toContainText('rm -rf /')
+      await expect(body.locator('.call-result')).toContainText('perm done')
+
+      // 开合互不连带（D7，D-C3 死路不得回归）：收起子块不动父折叠。
+      await blockLink.click()
+      await expect(blockLink).toHaveAttribute('aria-expanded', 'false')
+      await expect(outerLink).toHaveAttribute('aria-expanded', 'true')
+      await expect(fold.locator('.fold-body')).toBeVisible()
 
       expect(collector.clean()).toEqual([])
     })

@@ -395,6 +395,12 @@ export interface ConversationEntryView {
    * 中性标签——错误气泡标签不再一律写死「spawn failed」。
    */
   failure_class?: string | null
+  /**
+   * （fold-tool-calls-into-process-tree 4.5）工具条目的上游 call id：
+   * 前端按它把一次调用的 📖 条目与 ✓ 结果条目精确配对合并成一块。可选：
+   * 旧持久化条目没有该字段（undefined/null），前端退化为未配对自成一块。
+   */
+  tool_use_id?: string | null
 }
 
 export interface SessionDetail {
