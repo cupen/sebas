@@ -37,6 +37,12 @@ pub struct DispatchNativeBridge {
     /// 新会话的默认执行体：`true` = feishu 新会话走原生内核；`false` =
     /// 走 acp 桥（现状）。既有原生会话不受此影响（按 sessions map 判定）。
     default_native: bool,
+    /// （add-local-usage-statistics 3.2）native 直连回合的本地落账 sink：
+    /// pump 在 `SessionSummary` 帧结算一行交它（满载丢弃语义在 sink 侧）。
+    /// `None` = 本装配经 router（`SEBAS_AGENT_ROUTER_URL` 已注入，router 已
+    /// 记账）→ **不本地记**（双算规避的写入侧分叉，design D1）；装配在
+    /// Arc 之后完成，所以走 `RwLock` 注入而非构造参数。
+    local_usage: std::sync::RwLock<Option<crate::usage_local::LocalUsageSink>>,
 }
 
 impl DispatchNativeBridge {
@@ -56,7 +62,20 @@ impl DispatchNativeBridge {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             pending: Arc::new(Mutex::new(HashMap::new())),
             default_native,
+            local_usage: std::sync::RwLock::new(None),
         })
+    }
+
+    /// （add-local-usage-statistics 3.2）装配点注入 native 直连回合的本地
+    /// 落账 sink（run.rs 按 `SEBAS_AGENT_ROUTER_URL` 门控后传入；`None` =
+    /// 经 router 的装配，不本地记）。桥以 `Arc` 共享、装配晚于构造，所以是
+    /// 后注入方法；幂等覆盖（重复 set 以最后一次为准）。sink 是廉价 Clone
+    /// （通道发送端 + 查询句柄），按值注入。
+    pub fn set_local_usage(&self, sink: Option<crate::usage_local::LocalUsageSink>) {
+        *self
+            .local_usage
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = sink;
     }
 
     /// 编码 `ChannelKey` 为 router/通道侧形态（复用 router 的共享实现）。
@@ -79,6 +98,10 @@ impl DispatchNativeBridge {
         session_id: String,
         mut rx: tokio::sync::broadcast::Receiver<AgentEvent>,
     ) {
+        // （add-local-usage-statistics 3.2）回合终态观察：内核的收尾序列是
+        // 「终态事件（Finished/Error）先行、SessionSummary 随后」——落账行
+        // 的 status/error 从这里取（summary 帧自身不携带终态）。消费即清。
+        let mut last_terminal: Option<(u16, Option<String>)> = None;
         while let Ok(ev) = rx.recv().await {
             match ev {
                 AgentEvent::TextDelta { delta, .. } => {
@@ -156,11 +179,23 @@ impl DispatchNativeBridge {
                         .await;
                 }
                 AgentEvent::Finished { .. } => {
+                    last_terminal = Some((
+                        crate::usage_local::TURN_STATUS_FINISHED,
+                        None,
+                    ));
                     bridge.router.touch_native_session(&key).await;
                 }
                 AgentEvent::Error {
                     message, terminal, ..
                 } => {
+                    // 非 terminal 的「turn cancelled」= 操作者中性取消（499）；
+                    // 其余 Error（含 terminal 崩坏）= 失败（500）。
+                    let status = if !terminal && message == "turn cancelled" {
+                        crate::usage_local::TURN_STATUS_CANCELLED
+                    } else {
+                        crate::usage_local::TURN_STATUS_FAILED
+                    };
+                    last_terminal = Some((status, Some(message.clone())));
                     let rendered = format!("⚠ {message}");
                     let entry = TurnEntry::markdown(0, rendered);
                     bridge
@@ -170,6 +205,27 @@ impl DispatchNativeBridge {
                     if terminal {
                         bridge.router.fail_native_session(&key).await;
                     }
+                }
+                AgentEvent::SessionSummary { usage, turn_ms, .. } => {
+                    // （add-local-usage-statistics 3.2/D5）native 回合结算一行：
+                    // usage 如实透传（None 保 None），终态取上面观察到的收尾；
+                    // sink 未装配（经 router 的装配）= 不本地记（双算规避）。
+                    if let Some(sink) = bridge
+                        .local_usage
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone()
+                    {
+                        let (status, error) =
+                            last_terminal.take().unwrap_or((crate::usage_local::TURN_STATUS_FINISHED, None));
+                        sink.record(usage.unwrap_or_default().into_turn_record(
+                            crate::usage_local::PROTOCOL_NATIVE,
+                            status,
+                            turn_ms,
+                            error,
+                        ));
+                    }
+                    bridge.router.touch_native_session(&key).await;
                 }
                 _ => {}
             }
@@ -394,5 +450,187 @@ mod tests {
         // 结果条目：同一 id；ToolEnd 无 args → 标题退化 `✓ read`。
         assert_eq!(tools[1].tool_use_id.as_deref(), Some("tc-read-1"));
         assert_eq!(tools[1].title.as_deref(), Some("✓ read"));
+    }
+
+    // ---- add-local-usage-statistics 2.4：双算规避的两种装配分叉 ----
+    //
+    // run.rs 的装配门控（`native_records_locally_from_env`）只有两个出口：
+    // 直连装配注入 sink（Some）→ pump 落行；经 router 的装配注入 None →
+    // pump 零动作（router 已记）。ACP 会话恒落的半边由
+    // sebas-dispatch/tests/local_usage_capture_test.rs 钉住（钩子无条件装配）。
+
+    /// 桥 + 真实本地账本的一轮回合 harness：fake 内核一段带 usage 的文本
+    /// 回合，等收尾后从 `db` 路径读回落好的行。
+    async fn bridge_turn_rows(
+        sink: Option<crate::usage_local::LocalUsageSink>,
+        db: &std::path::Path,
+    ) -> Vec<crate::usage_local::LocalUsageRow> {
+        let llm = sebas_agent::llm::fake::FakeLlmClient::scripted(vec![
+            sebas_agent::llm::fake::FakeLlmClient::say_with_usage("done", 3, 9),
+        ]);
+        let manager = Arc::new(
+            SessionManager::new(
+                Arc::new(llm),
+                sebas_agent::tools::ToolRegistry::with_sandbox(
+                    std::time::Duration::from_secs(10),
+                    sebas_agent::policy::SandboxMode::Firewall,
+                ),
+                Default::default(),
+            )
+            .with_policy(Arc::new(sebas_agent::policy::PolicyEngine::new(
+                Default::default(),
+            ))),
+        );
+        let (router, mut out_rx) = DispatchHandle::new(SessionMap::new());
+        tokio::spawn(async move { while out_rx.recv().await.is_some() {} });
+        let bridge = DispatchNativeBridge::new(manager, router.clone());
+        bridge.set_local_usage(sink);
+
+        let key = ChannelKey::new("feishu", "agent-f-usage");
+        bridge.prompt(key.clone(), "go".into());
+
+        // 等回合收尾（转录里出现正文 "done" 即 summary 已发射——落账在
+        // 同一 pump 循环内先行完成）。
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Some(turns) = router.session_turns(&key, 0).await
+                    && turns.iter().any(|t| t.content.contains("done"))
+                {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("turn should finish");
+        // writer 是异步的：再给一点提交时间。
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        use sebas_db::record::Record;
+        let conn = sebas_db::conn::open(db).expect("open local usage db");
+        let mut stmt = conn
+            .prepare("SELECT id, key, protocol, model, provider, upstream_model, status,
+                             latency_ms, ttft_ms, input_tokens, output_tokens,
+                             cache_read_tokens, cache_creation_tokens, error, ts
+                      FROM local_usage_records ORDER BY id")
+            .expect("prepare");
+        stmt.query_map([], crate::usage_local::LocalUsageRow::from_row)
+            .expect("query")
+            .collect::<sebas_db::rusqlite::Result<Vec<_>>>()
+            .expect("collect")
+    }
+
+    #[tokio::test]
+    async fn direct_native_turn_lands_one_local_row() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("usage_local.db");
+        let sink = crate::usage_local::LocalUsageSink::spawn(
+            &db,
+            sebas_router::usage::RetentionPolicy {
+                prune_interval_secs: 0,
+                ..Default::default()
+            },
+        )
+        .expect("spawn sink");
+        let rows = bridge_turn_rows(Some(sink), &db).await;
+        assert_eq!(rows.len(), 1, "直连回合恰好一行, got {}", rows.len());
+        assert_eq!(rows[0].protocol, "native");
+        assert_eq!(rows[0].input_tokens, Some(3));
+        assert_eq!(rows[0].output_tokens, Some(9));
+        assert_eq!(rows[0].status, 200, "Finished = 完成");
+    }
+
+    /// 无 usage 的直连回合（task 3.2）：仍落一行（只计请求数），token 逐
+    /// 字段 NULL（不以全零冒充「已上报 0」）。
+    #[tokio::test]
+    async fn native_turn_without_usage_lands_a_request_only_row() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("usage_local.db");
+        let sink = crate::usage_local::LocalUsageSink::spawn(
+            &db,
+            sebas_router::usage::RetentionPolicy {
+                prune_interval_secs: 0,
+                ..Default::default()
+            },
+        )
+        .expect("spawn sink");
+        // harness 固定用 say_with_usage；这里手工装配一轮回合（纯文本、零
+        // usage）以钉「无 usage 也有一行」的另一半。
+        let llm = sebas_agent::llm::fake::FakeLlmClient::scripted(vec![
+            sebas_agent::llm::fake::FakeLlmClient::say("plain done"),
+        ]);
+        let manager = Arc::new(
+            SessionManager::new(
+                Arc::new(llm),
+                sebas_agent::tools::ToolRegistry::with_sandbox(
+                    std::time::Duration::from_secs(10),
+                    sebas_agent::policy::SandboxMode::Firewall,
+                ),
+                Default::default(),
+            )
+            .with_policy(Arc::new(sebas_agent::policy::PolicyEngine::new(
+                Default::default(),
+            ))),
+        );
+        let (router, mut out_rx) = DispatchHandle::new(SessionMap::new());
+        tokio::spawn(async move { while out_rx.recv().await.is_some() {} });
+        let bridge = DispatchNativeBridge::new(manager, router.clone());
+        bridge.set_local_usage(Some(sink));
+
+        let key = ChannelKey::new("feishu", "agent-f-nousage");
+        bridge.prompt(key.clone(), "go".into());
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Some(turns) = router.session_turns(&key, 0).await
+                    && turns.iter().any(|t| t.content.contains("plain done"))
+                {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("turn should finish");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        use sebas_db::record::Record;
+        let conn = sebas_db::conn::open(&db).expect("open local usage db");
+        let mut stmt = conn
+            .prepare("SELECT id, key, protocol, model, provider, upstream_model, status,
+                             latency_ms, ttft_ms, input_tokens, output_tokens,
+                             cache_read_tokens, cache_creation_tokens, error, ts
+                      FROM local_usage_records ORDER BY id")
+            .expect("prepare");
+        let rows = stmt
+            .query_map([], crate::usage_local::LocalUsageRow::from_row)
+            .expect("query")
+            .collect::<sebas_db::rusqlite::Result<Vec<_>>>()
+            .expect("collect");
+        assert_eq!(rows.len(), 1, "无 usage 回合也有一行（请求数），got {rows:?}");
+        assert_eq!(rows[0].input_tokens, None, "未上报保 NULL，不冒充零");
+        assert_eq!(rows[0].output_tokens, None);
+        assert_eq!(rows[0].status, 200);
+    }
+
+    #[tokio::test]
+    async fn router_routed_native_assembly_lands_no_local_row() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("usage_local.db");
+        // 账本本身在库里（不是「库不存在」）：装配为 None 只是 pump 不落行。
+        // sink 全程保活（库与表在场），只是不交给桥。
+        let sink = crate::usage_local::LocalUsageSink::spawn(
+            &db,
+            sebas_router::usage::RetentionPolicy {
+                prune_interval_secs: 0,
+                ..Default::default()
+            },
+        )
+        .expect("spawn sink");
+        let rows = bridge_turn_rows(None, &db).await;
+        assert!(
+            rows.is_empty(),
+            "经 router 的装配不本地记（router 已记），got {rows:?}"
+        );
+        drop(sink);
     }
 }

@@ -22,6 +22,7 @@ use sebas_agent::policy::{Approver, ApproverHub, PolicyConfig, PolicyEngine};
 use sebas_agent::session::{AgentEvent, SessionConfig, SessionHandle, SessionManager};
 use sebas_agent::tools::ToolRegistry;
 use sebas_channels::ChannelKey;
+use sebas_channels::card::AppUsage;
 use sebas_domain::session::CardPhase;
 use sebas_dispatch::{
     PendingApproval, PendingSubmission, SessionEvent, SessionIdentity, SessionInfo, TurnEntry,
@@ -91,6 +92,11 @@ struct NativeSession {
     /// `first_prompt_preview` 同语义）：spawn 首条 prompt 或占位创建后的
     /// 第一条 `message()` 落定，后续消息绝不移动它。
     first_prompt_preview: Option<String>,
+    /// （add-local-usage-statistics 3.1）会话累计 usage（快照芯片的数据源，
+    /// 与 ACP 卡态 `usage` 同一呈现面）：逐回合 `SessionSummary` 累计（跨
+    /// 回合求和、`None` 保 None）。`None` = 从未有 token 上报（门控语义：
+    /// 不冒充全零，快照 `usage` 保持缺席）。
+    session_usage: Option<sebas_domain::usage::TurnTokenUsage>,
 }
 
 impl NativeSession {
@@ -201,9 +207,14 @@ impl NativeSession {
             available_models: Some(self.available_models.clone()),
             // 原生内核不属于任何 ACP kind（add-composer-agent-binding）。
             agent_kind: None,
-            // 原生内核 usage 暂不经快照面暴露（extract-im-service 2.3 覆盖
-            // ACP 卡片 footer 数据源；native 面另接）。
-            usage: None,
+            // 原生内核 usage（add-local-usage-statistics 3.1）：快照 `usage`
+            // 从恒 None 改为如实携带——逐回合 summary 累计的中立计数折算成
+            // 芯片形状（`AppUsage`）。从未上报的会话保持 None（门控语义）。
+            usage: self.session_usage.as_ref().map(|u| AppUsage {
+                model: u.model.clone(),
+                total_input: u.input_tokens.unwrap_or(0),
+                total_output: u.output_tokens.unwrap_or(0),
+            }),
             // wire-webui-sebas-agent-e2e D4：native 会话在快照/事件中自带执行体标。
             backend: Some("native".into()),
             // （fix-webui-qa-round8 2.2）native 会话的待执行栈 = 宿主影子队列
@@ -276,6 +287,12 @@ pub struct NativeAgentBackend {
     /// （fix-webui-qa-round8 2.2）影子队列条目的稳定 id 源（后端级单调，跨
     /// 会话唯一——remove/move 按 `(key, id)` 寻址）。
     next_pending_id: std::sync::atomic::AtomicU64,
+    /// （add-local-usage-statistics 3.2）native 直连回合的本地落账 sink：
+    /// pump 在 `SessionSummary` 帧结算一行交它。`None` = 本装配经 router
+    /// （`SEBAS_AGENT_ROUTER_URL` 已注入，router 已记）→ 不本地记（design
+    /// D1 双算规避的写入侧分叉）。装配晚于构造（run.rs 顺序），走 `RwLock`
+    /// 注入；sink 是廉价 Clone（通道发送端 + 查询句柄），按值存。
+    local_usage: std::sync::RwLock<Option<crate::usage_local::LocalUsageSink>>,
 }
 
 /// 无凭据时的占位 LLM 客户端：任何调用都以 terminal 错误失败。
@@ -439,7 +456,18 @@ impl NativeAgentBackend {
             available_models,
             default_model,
             next_pending_id: std::sync::atomic::AtomicU64::new(1),
+            local_usage: std::sync::RwLock::new(None),
         })
+    }
+
+    /// （add-local-usage-statistics 3.2）装配点注入 native 直连回合的本地
+    /// 落账 sink（run.rs 按 `SEBAS_AGENT_ROUTER_URL` 门控后传入；`None` =
+    /// 经 router 的装配，不本地记）。幂等覆盖（重复 set 以最后一次为准）。
+    pub fn set_local_usage(&self, sink: Option<crate::usage_local::LocalUsageSink>) {
+        *self
+            .local_usage
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = sink;
     }
 
     /// 会话键编码走 `sebas-channels` 的唯一实现（canonical URL-safe
@@ -488,6 +516,7 @@ impl NativeAgentBackend {
     /// 广播一条 `TurnStreamEvent`（逐 delta、逐工具痕迹），webui 据此实时
     /// 呈现——transcript 与 turn 流由同一段代码产出，粒度天然一致。broadcast
     /// `send` 是同步的，锁内发送不会阻塞 pump。
+    #[allow(clippy::too_many_arguments)]
     async fn pump(
         mut rx: broadcast::Receiver<AgentEvent>,
         key: ChannelKey,
@@ -497,6 +526,9 @@ impl NativeAgentBackend {
         turn_events: broadcast::Sender<TurnStreamEvent>,
         notices: broadcast::Sender<PermissionNotice>,
         pending_approvals: Arc<RwLock<HashMap<String, HashMap<String, PendingApproval>>>>,
+        // （add-local-usage-statistics 3.2）native 直连回合的本地落账 sink；
+        // `None` = 经 router 的装配（router 已记，不本地记）。
+        local_usage: Option<crate::usage_local::LocalUsageSink>,
     ) {
         use AgentEvent as AE;
         // transcript 落账 + turn 事件广播的一体化出口（锁内调用）。
@@ -566,6 +598,10 @@ impl NativeAgentBackend {
         // 发送在内核 cmd 通道上等待，绝不持锁跨 await）。
         let mut advance_queue = false;
         let mut dispatch: Option<String> = None;
+        // （add-local-usage-statistics 3.2）回合终态观察：内核收尾序列是
+        // 「终态（Finished/Error）先行、SessionSummary 随后」——落账行的
+        // status/error 从这里取（summary 帧自身不携带终态）。消费即清。
+        let mut last_terminal: Option<(u16, Option<String>)> = None;
         loop {
             let ev = match rx.recv().await {
                 Ok(ev) => ev,
@@ -714,6 +750,7 @@ impl NativeAgentBackend {
                         turn_ms,
                         model_calls,
                         tool_calls,
+                        usage,
                         ..
                     } => {
                         // extend-test-model-scenarios 3.4：回合正常收尾但本轮零
@@ -729,6 +766,30 @@ impl NativeAgentBackend {
                                 "notice",
                                 sebas_domain::session::ZERO_OUTPUT_NOTICE.to_string(),
                             );
+                        }
+                        // （add-local-usage-statistics 3.1）快照 usage 的累计：
+                        // 逐回合 summary 求和（None 保 None）——芯片在下一帧
+                        // Updated 起如实携带；从未上报的会话保持缺席。
+                        if let Some(u) = &usage {
+                            match session.session_usage.as_mut() {
+                                Some(acc) => acc.accumulate(u),
+                                None => session.session_usage = Some(u.clone()),
+                            }
+                        }
+                        // （add-local-usage-statistics 3.2/D5）直连回合落账一行：
+                        // usage 如实透传（None = 只计请求数），终态取上面观察
+                        // 到的收尾；sink 未装配（经 router）= 不本地记。
+                        if let Some(sink) = &local_usage {
+                            let (status, error) = last_terminal.take().unwrap_or((
+                                crate::usage_local::TURN_STATUS_FINISHED,
+                                None,
+                            ));
+                            sink.record(usage.clone().unwrap_or_default().into_turn_record(
+                                crate::usage_local::PROTOCOL_NATIVE,
+                                status,
+                                turn_ms,
+                                error,
+                            ));
                         }
                         land(
                             session,
@@ -794,6 +855,17 @@ impl NativeAgentBackend {
                         // 取消终态一致（可再开新一轮，开轮即回 OnIt）。
                         session.in_flight = false;
                         session.card_phase = Some(CardPhase::CrossMark);
+                        // （add-local-usage-statistics 3.2）回合终态观察：非
+                        // terminal 的「turn cancelled」= 操作者中性取消（499），
+                        // 其余 Error（含 terminal 崩坏）= 失败（500）。
+                        last_terminal = Some((
+                            if !terminal && message == "turn cancelled" {
+                                crate::usage_local::TURN_STATUS_CANCELLED
+                            } else {
+                                crate::usage_local::TURN_STATUS_FAILED
+                            },
+                            Some(message.clone()),
+                        ));
                         // 回合已终：内核对悬空审批 fail-closed，泊车登记随之清除。
                         pending_approvals.write().await.remove(&encoded);
                         // （2.2 review 补修）回合已终：排队队头等 summary 落账
@@ -809,6 +881,9 @@ impl NativeAgentBackend {
                         // 正文已逐 delta 落账（2.1），收尾无积压可 flush；
                         // Updated 仍照发——状态/段计数随快照刷新。
                         session.in_flight = false;
+                        // （add-local-usage-statistics 3.2）回合终态观察：
+                        // Finished = 完成（200）。
+                        last_terminal = Some((crate::usage_local::TURN_STATUS_FINISHED, None));
                         // （fix-webui-qa-round11 1.2）正常结束的卡相位真值 =
                         // Done（rail/历史/计数随 derive 单点推进 done，native
                         // 会话不再永远 Queued）。
@@ -985,6 +1060,8 @@ impl SessionBackend for NativeAgentBackend {
                     // Queued；占位创建两者皆 None/空（诚实 Queued + 未命名）。
                     card_phase: (!prompt.trim().is_empty()).then_some(CardPhase::OnIt),
                     first_prompt_preview: (!prompt.trim().is_empty()).then_some(prompt.clone()),
+                    // （add-local-usage-statistics 3.1）快照 usage 累计从零起步。
+                    session_usage: None,
                 },
             );
             // （fix-webui-qa-round8 2.1）首条 prompt 与 ACP `seed_card` 等价：
@@ -1013,9 +1090,17 @@ impl SessionBackend for NativeAgentBackend {
         let pending = self.pending_approvals.clone();
         let pump_key = key.clone();
         let pump_encoded = encoded.clone();
+        // （add-local-usage-statistics 3.2）落账 sink 在 pump 孵化时快照：
+        // 装配点先 set 再 serve，会话 spawn 必然晚于注入。
+        let pump_local_usage = self
+            .local_usage
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         tokio::spawn(async move {
             Self::pump(
                 rx, pump_key, pump_encoded, sessions, events, turn_events, notices, pending,
+                pump_local_usage,
             )
             .await;
         });
@@ -1334,6 +1419,11 @@ pub struct DualSessionBackend {
     /// 通道服务端的 usage 分支共用 `router_admin` 同一实现）。`None` =
     /// router 未随部署启用（usage 请求如实回不可达）。
     usage_listen: Option<String>,
+    /// （add-local-usage-statistics 2.1）本地用量库查询句柄：`source=local|all`
+    /// 聚合在本进程直接执行（core = 本进程），与通道服务端共用
+    /// `usage_local::usage_timeseries_outcome` 同一编排单点。`None` = 账本未
+    /// 装配（测试装配）——local/all 如实回全零窗口。
+    local_usage: Option<sebas_db::writer::StateHandle>,
 }
 
 impl DualSessionBackend {
@@ -1354,15 +1444,17 @@ impl DualSessionBackend {
     }
 
     pub fn new(acp: Arc<dyn SessionBackend>, native: Arc<NativeAgentBackend>) -> Arc<Self> {
-        Self::with_usage_listen(acp, native, None)
+        Self::with_usage_sources(acp, native, None, None)
     }
 
-    /// （add-usage-statistics 2.2）带 config `[router] listen` 的构造：run.rs
-    /// 装配内嵌 webui 时传入（usage 聚合直接在本进程取数）；`None` = router
-    /// 未随部署启用。
-    pub fn with_usage_listen(
+    /// （add-usage-statistics 2.2 / add-local-usage-statistics 4.1）带 usage
+    /// 双源取数面的构造：run.rs 装配内嵌 webui 时传入（core = 本进程，聚合
+    /// 直接在本进程执行）。`local_usage` = 本地账本查询句柄；`usage_listen` =
+    /// config `[router] listen`（`None` = router 未随部署启用）。
+    pub fn with_usage_sources(
         acp: Arc<dyn SessionBackend>,
         native: Arc<NativeAgentBackend>,
+        local_usage: Option<sebas_db::writer::StateHandle>,
         usage_listen: Option<String>,
     ) -> Arc<Self> {
         let (events, _) = broadcast::channel(256);
@@ -1469,6 +1561,7 @@ impl DualSessionBackend {
             turn_events,
             notices,
             usage_listen,
+            local_usage,
         })
     }
 
@@ -1571,26 +1664,40 @@ impl SessionBackend for DualSessionBackend {
         self.acp.fetch_provider_models(provider).await
     }
 
-    /// （add-usage-statistics 2.2）usage 聚合：本复合后端跑在 core 进程内，
-    /// 与通道服务端的 usage 分支共用 `router_admin` 同一 loopback 取数实现
-    /// （单一实现防两侧漂移）。router 未启用 → 结构化不可达 cause。
+    /// （add-usage-statistics 2.2 / add-local-usage-statistics 4.1）usage 聚合
+    /// 三口径：本复合后端跑在 core 进程内，与通道服务端的 usage 分支共用
+    /// `usage_local::usage_timeseries_outcome` 同一编排单点（单一实现防两侧
+    /// 漂移）。`source=router` 保持既有反代语义（不可达 → 结构化 cause）；
+    /// `local` 纯本地聚合；`all` 本地聚合 + 尽力反代合并，router 不可达仍
+    /// 200 且响应带 `router_cause`（`Ok` 半边，不是错误）。
     async fn usage_timeseries(
         &self,
+        source: &str,
         granularity: &str,
         days: u32,
         tz_offset: i32,
     ) -> Result<serde_json::Value, sebas_webui::session_backend::UsageQueryError> {
         use sebas_webui::session_backend::UsageQueryError;
-        let Some(listen) = self.usage_listen.as_deref() else {
-            return Err(UsageQueryError::RouterUnreachable {
-                cause: crate::router_admin::ROUTER_NOT_CONFIGURED_CAUSE.to_string(),
-            });
-        };
-        match crate::router_admin::fetch_usage_timeseries(listen, granularity, days, tz_offset)
-            .await
+        let params = sebas_router::usage_query::parse_params(
+            Some(granularity),
+            Some(&days.to_string()),
+            Some(&tz_offset.to_string()),
+        )
+        .map_err(|e| UsageQueryError::RouterError {
+            status: 400,
+            message: e.to_string(),
+        })?;
+        match crate::usage_local::usage_timeseries_outcome(
+            self.local_usage.as_ref(),
+            self.usage_listen.as_deref(),
+            source,
+            params,
+            chrono::Utc::now(),
+        )
+        .await
         {
-            Ok(payload) => Ok(payload),
-            Err(crate::router_admin::UsageProxyError::RouterError { status, body }) => {
+            crate::usage_local::UsageQueryOutcome::Ok(payload) => Ok(payload),
+            crate::usage_local::UsageQueryOutcome::RouterError { status, body } => {
                 Err(UsageQueryError::RouterError {
                     status,
                     message: body
@@ -1600,8 +1707,8 @@ impl SessionBackend for DualSessionBackend {
                         .unwrap_or_else(|| format!("router 应答状态 {status}")),
                 })
             }
-            Err(e @ crate::router_admin::UsageProxyError::Unreachable { .. }) => {
-                Err(UsageQueryError::RouterUnreachable { cause: e.cause() })
+            crate::usage_local::UsageQueryOutcome::RouterUnreachable { cause } => {
+                Err(UsageQueryError::RouterUnreachable { cause })
             }
         }
     }
@@ -2498,6 +2605,9 @@ mod tests {
                 },
             ],
             stop_reason: sebas_agent::llm::StopReason::EndTurn,
+            // （add-local-usage-statistics 3.1）脚本 turn 不上报 usage（全
+            // None = 只计请求数的诚实形态）。
+            usage: Default::default(),
         }
     }
 
@@ -2586,6 +2696,7 @@ mod tests {
                 },
             ],
             stop_reason: sebas_agent::llm::StopReason::EndTurn,
+            usage: Default::default(),
         }
     }
 
@@ -2620,6 +2731,84 @@ mod tests {
             SessionConfig::default(),
         );
         NativeAgentBackend::with_manager(manager)
+    }
+
+    /// （add-local-usage-statistics 3.1）快照 `usage` 如实携带：上报了 token
+    /// 的回合把 summary 累计折算进 `SessionInfo.usage`（芯片形状）；从未上报
+    /// 的会话保持 `None`（门控语义：不冒充全零）。
+    #[tokio::test]
+    async fn native_session_snapshot_carries_reported_usage_and_none_otherwise() {
+        let backend = backend_with(FakeLlmClient::scripted(vec![
+            FakeLlmClient::say_with_usage("done", 5, 8),
+        ]));
+        let mut turns = backend.subscribe_turn_events();
+        let ws = tempfile::tempdir().unwrap();
+        let key = backend
+            .spawn("go".into(), Some(ws.path().to_string_lossy().into()))
+            .await
+            .expect("spawn");
+        // 等回合收尾标记（🗒 summary 落账先于其 Updated 广播）。
+        let deadline = Duration::from_secs(10);
+        loop {
+            let event = tokio::time::timeout(deadline, turns.recv())
+                .await
+                .expect("event timeout")
+                .expect("turn stream open");
+            if event
+                .entries
+                .iter()
+                .any(|e| e.content.contains("turn summary"))
+            {
+                break;
+            }
+        }
+        let snapshotted = backend.snapshot().await;
+        let mine = snapshotted
+            .iter()
+            .find(|s| s.key == key.reference)
+            .expect("native session in snapshot");
+        let usage = mine
+            .usage
+            .as_ref()
+            .expect("reported usage rides the snapshot");
+        assert_eq!(
+            usage.model.as_deref(),
+            Some(SessionConfig::default().model.as_str())
+        );
+        assert_eq!(usage.total_input, 5);
+        assert_eq!(usage.total_output, 8);
+
+        // 对照组：无 usage 的回合，快照 usage 保持缺席。
+        let backend2 = backend_with(FakeLlmClient::scripted(vec![two_chunk_turn()]));
+        let mut turns2 = backend2.subscribe_turn_events();
+        let ws2 = tempfile::tempdir().unwrap();
+        let key2 = backend2
+            .spawn("go".into(), Some(ws2.path().to_string_lossy().into()))
+            .await
+            .expect("spawn");
+        loop {
+            let event = tokio::time::timeout(deadline, turns2.recv())
+                .await
+                .expect("event timeout")
+                .expect("turn stream open");
+            if event
+                .entries
+                .iter()
+                .any(|e| e.content.contains("turn summary"))
+            {
+                break;
+            }
+        }
+        let snapshotted = backend2.snapshot().await;
+        let mine = snapshotted
+            .iter()
+            .find(|s| s.key == key2.reference)
+            .expect("native session in snapshot");
+        assert!(
+            mine.usage.is_none(),
+            "unreported session must not fake zeros: {:?}",
+            mine.usage
+        );
     }
 
     #[tokio::test]
@@ -2671,6 +2860,7 @@ mod tests {
         let silent = sebas_agent::llm::LlmTurn {
             content: vec![],
             stop_reason: sebas_agent::llm::StopReason::EndTurn,
+            usage: Default::default(),
         };
         let backend = backend_with(FakeLlmClient::scripted(vec![silent]));
         let mut turns = backend.subscribe_turn_events();

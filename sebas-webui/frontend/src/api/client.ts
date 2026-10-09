@@ -680,7 +680,24 @@ export interface EnvVarEntry {
   set?: boolean
 }
 
-// ─── usage 时序聚合（add-usage-statistics；router 聚合端点的原样形状）──────
+// ─── usage 时序聚合（add-usage-statistics；add-local-usage-statistics 4.2
+// 起为双源聚合形状：桶内模型行带可选 per-source 小计，`source=all` 且
+// router 缺席时载荷带 `router_cause`）──────
+
+/** 一个来源的小计（五项数值；载荷缺省时按 0 补齐）。 */
+export interface UsageSourceSubtotal {
+  requests: number
+  input_tokens: number
+  output_tokens: number
+  cache_read_tokens: number
+  cache_creation_tokens: number
+}
+
+/** 桶内单模型行的 per-source 小计（仅合并口径 `source=all` 的载荷携带）。 */
+export interface UsageSourceSplit {
+  router: UsageSourceSubtotal
+  local: UsageSourceSubtotal
+}
 
 /** 一桶内单模型的四类 token 明细 + 请求数。 */
 export interface UsageModelUsage {
@@ -691,6 +708,8 @@ export interface UsageModelUsage {
   output_tokens: number
   cache_read_tokens: number
   cache_creation_tokens: number
+  /** per-source 小计（合并口径独有；单源载荷缺席）。 */
+  by_source?: UsageSourceSplit
 }
 
 /** 一个时间桶：天粒度 `bucket` = `YYYY-MM-DD`；小时粒度 = `00`–`23`。 */
@@ -706,6 +725,9 @@ export interface UsageTimeseries {
   tz_offset: number
   buckets: UsageBucket[]
   totals: UsageModelUsage
+  /** `source=all` 且 router 缺席时的结构化 cause（缺席源如实标注；
+   * 单源与 router 在场的合并响应不带此键）。 */
+  router_cause?: string
 }
 
 /**
@@ -1147,17 +1169,25 @@ export const api = {
    */
   nodes: () => get<NodesResponse>('/api/nodes'),
   /**
-   * （add-usage-statistics 3.1）usage 时序聚合：router 聚合端点经 core 反代
-   * 的原样载荷。router 未启用 / 不可达时服务端 503，`ApiError.code` 为
-   * `"router_unreachable"`（视图据此呈「router 不可达」空态，与「无数据」
-   * 空态分开）。
+   * （add-usage-statistics 3.1 / add-local-usage-statistics 4.1）usage 时序
+   * 聚合：`source` 选数据口径——`all`（缺省，本地 + router 尽力合并）、
+   * `router`（既有反代语义）、`local`（core 本地账本）。`source=router` 且
+   * router 不可达时服务端 503，`ApiError.code` 为 `"router_unreachable"`
+   * （视图呈「router 不可达」空态）；`source=all` 的 router 缺席是 200 且
+   * 载荷带 `router_cause`（局部警示，不是空态）。
    */
-  usageTimeseries: (params: { granularity: 'day' | 'hour'; days?: number; tzOffset?: number }) =>
+  usageTimeseries: (params: {
+    granularity: 'day' | 'hour'
+    days?: number
+    tzOffset?: number
+    source?: 'all' | 'router' | 'local'
+  }) =>
     get<UsageTimeseries>(
       withQuery('/api/usage/timeseries', {
         granularity: params.granularity,
         days: params.days === undefined ? undefined : String(params.days),
         tz_offset: params.tzOffset === undefined ? undefined : String(params.tzOffset),
+        source: params.source,
       }),
     ),
 

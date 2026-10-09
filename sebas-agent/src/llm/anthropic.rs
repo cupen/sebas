@@ -144,6 +144,10 @@ where
     let mut cur_text: Option<String> = None;
     let mut cur_think: Option<String> = None;
     let mut stop_reason: Option<StopReason> = None;
+    // （add-local-usage-statistics 3.1）上游 usage 解析：`message_start` 带输入
+    // 侧计数（`message.usage`），`message_delta` 带累计输出（`usage`）——同一
+    // 消息的累计读数按「后帧覆盖」合并（merge_latest），不是增量求和。
+    let mut usage = sebas_domain::usage::TurnTokenUsage::default();
 
     while let Some(ev) = es.next().await {
         let ev = ev.map_err(|e| LlmError::terminal(format!("sse stream error: {e}")))?;
@@ -153,7 +157,14 @@ where
         let v: serde_json::Value = serde_json::from_str(&ev.data)
             .map_err(|e| LlmError::terminal(format!("malformed sse json: {e}")))?;
         match v.get("type").and_then(|t| t.as_str()).unwrap_or("") {
-            "message_start" => {}
+            "message_start" => {
+                // message.usage（Anthropic 形状：input/cache 计数在此）。解析
+                // 面吃的是 **usage 对象本身**（`message.usage`），不是 message
+                // 外壳——外壳上没有 token 键，误传外壳会解析出全 None。
+                if let Some(u) = v.pointer("/message/usage") {
+                    usage.merge_latest(&sebas_domain::usage::TurnTokenUsage::from_response_json(u));
+                }
+            }
             "content_block_start" => {
                 let idx = v.get("index").and_then(|i| i.as_u64()).unwrap_or(0);
                 let block = v.get("content_block").cloned().unwrap_or_default();
@@ -252,6 +263,10 @@ where
                 {
                     stop_reason = Some(map_stop(sr));
                 }
+                // usage（累计输出；较新 API 也带累计输入——merge_latest 覆盖）。
+                if let Some(u) = v.get("usage") {
+                    usage.merge_latest(&sebas_domain::usage::TurnTokenUsage::from_response_json(u));
+                }
             }
             "message_stop" => break,
             "error" => {
@@ -269,6 +284,7 @@ where
     Ok(LlmTurn {
         content,
         stop_reason: stop_reason.unwrap_or(StopReason::EndTurn),
+        usage,
     })
 }
 
@@ -460,6 +476,78 @@ mod tests {
         let err = consume_sse(s, &|_| {}).await.unwrap_err();
         assert!(!err.terminal, "provider stream errors are retryable");
         assert!(err.message.contains("overloaded"));
+    }
+
+    // ---- add-local-usage-statistics 3.1：上游 usage 解析 ----
+
+    /// Anthropic 两帧形状：`message_start.message.usage`（输入侧）+ 
+    /// `message_delta.usage`（累计输出）→ 中立类型逐字段如实携带。
+    #[tokio::test]
+    async fn anthropic_usage_frames_are_parsed_into_the_neutral_type() {
+        let frames = [
+            frame(
+                "message_start",
+                serde_json::json!({"type":"message_start","message":{"id":"msg_1","usage":{
+                    "input_tokens": 5, "cache_read_input_tokens": 2, "cache_creation_input_tokens": 1
+                }}}),
+            ),
+            frame(
+                "content_block_delta",
+                serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}),
+            ),
+            frame(
+                "message_delta",
+                serde_json::json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens": 8}}),
+            ),
+            frame("message_stop", serde_json::json!({"type":"message_stop"})),
+        ];
+        let s = stream::iter(vec![Ok::<Bytes, std::convert::Infallible>(Bytes::from(
+            frames.join(""),
+        ))]);
+        let turn = consume_sse(s, &|_| {}).await.unwrap();
+        assert_eq!(turn.usage.input_tokens, Some(5));
+        assert_eq!(turn.usage.output_tokens, Some(8));
+        assert_eq!(turn.usage.cache_read_input_tokens, Some(2));
+        assert_eq!(turn.usage.cache_creation_input_tokens, Some(1));
+    }
+
+    /// OpenAI 形状（`prompt_tokens` / `completion_tokens` + 缓存命中明细）
+    /// 由同一解析面识别（域层 `from_response_json`）。
+    #[test]
+    fn openai_usage_shape_is_parsed_into_the_neutral_type() {
+        let u = sebas_domain::usage::TurnTokenUsage::from_response_json(&serde_json::json!({
+            "prompt_tokens": 12,
+            "completion_tokens": 34,
+            "prompt_tokens_details": {"cached_tokens": 6}
+        }));
+        assert_eq!(u.input_tokens, Some(12));
+        assert_eq!(u.output_tokens, Some(34));
+        assert_eq!(u.cache_read_input_tokens, Some(6), "cached_tokens → cache_read");
+        assert_eq!(u.cache_creation_input_tokens, None);
+    }
+
+    /// 无 usage 的响应：全 None（「只计请求数」，不冒充零）。
+    #[tokio::test]
+    async fn responses_without_usage_stay_all_none() {
+        let frames = [
+            frame("message_start", serde_json::json!({"type":"message_start"})),
+            frame(
+                "message_delta",
+                serde_json::json!({"type":"message_delta","delta":{"stop_reason":"end_turn"}}),
+            ),
+            frame("message_stop", serde_json::json!({"type":"message_stop"})),
+        ];
+        let s = stream::iter(vec![Ok::<Bytes, std::convert::Infallible>(Bytes::from(
+            frames.join(""),
+        ))]);
+        let turn = consume_sse(s, &|_| {}).await.unwrap();
+        assert_eq!(turn.usage, sebas_domain::usage::TurnTokenUsage::default());
+        assert!(!turn.usage.reports_any_tokens());
+        // 非 JSON 对象 / 缺 usage 键同样全 None。
+        assert_eq!(
+            sebas_domain::usage::TurnTokenUsage::from_response_json(&serde_json::json!(null)),
+            sebas_domain::usage::TurnTokenUsage::default()
+        );
     }
 
     #[tokio::test]

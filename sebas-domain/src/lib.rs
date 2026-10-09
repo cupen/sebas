@@ -37,6 +37,8 @@
 //!   增长到需要自己的依赖时拆出。
 //! - [`state_paths`]：状态路径映射表（single-state-dir）——逻辑名 → 所属库
 //!   → 文件名 → 覆盖变量的唯一规则表，全部落点从单一状态目录派生。
+//! - [`usage`]：回合用量记录与时序聚合形状（add-local-usage-statistics D3）
+//!   ——router 与 core 双侧共用的唯一定义处；各写入者的行 struct 不在这里。
 //!
 //! 历史：曾有 `project` 模块（原 `ProjectEntry` 线形状 + `LOCAL_NODE_ID` +
 //! id 派生）。`ProjectEntry` 由 migrate-project-registry 并入
@@ -57,6 +59,7 @@ pub mod prim;
 pub mod provider;
 pub mod session;
 pub mod state_paths;
+pub mod usage;
 pub mod vocabulary;
 
 #[cfg(test)]

@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 #[tokio::test]
-async fn one_prompt_yields_exactly_three_events() {
+async fn one_prompt_yields_text_pair_then_usage_then_finish() {
     let mgr = SessionManager::claude_only(Duration::from_secs(30));
     let fake = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -42,10 +42,10 @@ async fn one_prompt_yields_exactly_three_events() {
     // command table right after connect (session-slash-commands 1.2), and
     // the frame-observed ModelChanged (workbench-composer-input-polish 2.2:
     // init frame's model name) leads the turn — drain those first. The next
-    // three events must be, in order: TextDelta "hello ", TextDelta "world",
-    // Finished — and nothing else. If the prompt had been sent twice we
-    // would see four TextDelta events (two "hello " pairs) before the
-    // Finished.
+    // four events must be, in order: TextDelta "hello ", TextDelta "world",
+    // UsageUpdate, Finished — and nothing else. If the prompt had been sent
+    // twice we would see four TextDelta events (two "hello " pairs) before
+    // the Finished.
     loop {
         let evt = tokio::time::timeout(Duration::from_secs(2), mgr.next_event(&id))
             .await
@@ -77,14 +77,24 @@ async fn one_prompt_yields_exactly_three_events() {
         .await
         .expect("timeout on event 3")
         .expect("event 3");
+    let evt4 = tokio::time::timeout(Duration::from_secs(2), mgr.next_event(&id))
+        .await
+        .expect("timeout on event 4")
+        .expect("event 4");
 
     assert!(
         matches!(&evt2, AcpEvent::TextDelta { delta, .. } if delta == "world"),
         "second event must be TextDelta(\"world\") — a duplicate-prompt bug would surface as a second \"hello \" here, got {evt2:?}",
     );
+    // add-local-usage-statistics：usage 先于 Finished（引擎在 Finished 臂
+    // 结算本地账本行，后到的 usage 会被孤儿累计器丢弃）。
     assert!(
-        matches!(evt3, AcpEvent::Finished { .. }),
-        "third event must be Finished, got {evt3:?}",
+        matches!(evt3, AcpEvent::UsageUpdate { .. }),
+        "third event must be UsageUpdate, got {evt3:?}",
+    );
+    assert!(
+        matches!(evt4, AcpEvent::Finished { .. }),
+        "fourth event must be Finished, got {evt4:?}",
     );
 
     // The session is kept alive after Finished (so the caller can

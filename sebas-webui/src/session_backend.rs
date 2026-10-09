@@ -359,13 +359,16 @@ pub trait SessionBackend: Send + Sync {
         Err("模型列表抓取不可用：core providers 域未由此后端承载".into())
     }
 
-    /// （add-usage-statistics 3.1）usage 时序聚合读模型：granularity
-    /// （`day` | `hour`）、天窗口与分钟时区偏移透传给 core，成功返回 router
-    /// 的聚合载荷（原样 JSON）。默认诚实不可用——不承载 router 反代的后端
-    /// 没有这条取数路径；生产两侧（core channel 客户端与 core 进程内复合
-    /// 后端）都覆写本方法。
+    /// （add-usage-statistics 3.1 / add-local-usage-statistics 4.1）usage 时序
+    /// 聚合读模型：`source`（`router` | `local` | `all`，缺省 all 合计）、
+    /// granularity（`day` | `hour`）、天窗口与分钟时区偏移透传给 core，成功
+    /// 返回聚合载荷（原样 JSON；`all` 且 router 不可达时载荷带 `router_cause`
+    /// 仍走 `Ok`——降级不拖垮）。默认诚实不可用——不承载 core 聚合的后端没有
+    /// 这条取数路径；生产两侧（core channel 客户端与 core 进程内复合后端）
+    /// 都覆写本方法。
     async fn usage_timeseries(
         &self,
+        _source: &str,
         _granularity: &str,
         _days: u32,
         _tz_offset: i32,
@@ -1261,8 +1264,8 @@ pub struct FakeBackend {
     /// `None` = 走 trait 缺省（诚实不可达）。
     usage_result: std::sync::Mutex<Option<Result<serde_json::Value, UsageQueryError>>>,
     /// add-usage-statistics 3.1（route 层测试用）：最近一次 usage 查询的
-    /// `(granularity, days, tz_offset)`。`None` = 还没调用过。
-    last_usage_query: std::sync::Mutex<Option<(String, u32, i32)>>,
+    /// `(source, granularity, days, tz_offset)`。`None` = 还没调用过。
+    last_usage_query: std::sync::Mutex<Option<(String, String, u32, i32)>>,
 }
 
 #[derive(Default)]
@@ -1304,8 +1307,8 @@ impl FakeBackend {
     }
 
     /// add-usage-statistics 3.1：最近一次 usage 查询的入参（route 层断言
-    /// 参数透传）。
-    pub fn last_usage_query(&self) -> Option<(String, u32, i32)> {
+    /// 参数透传；add-local-usage-statistics 4.1 起含 `source`）。
+    pub fn last_usage_query(&self) -> Option<(String, String, u32, i32)> {
         self.last_usage_query
             .lock()
             .expect("last usage query lock")
@@ -1706,6 +1709,7 @@ impl SessionBackend for FakeBackend {
     /// add-usage-statistics 3.1：注入的结果；未注入 = trait 缺省（不可达）。
     async fn usage_timeseries(
         &self,
+        source: &str,
         granularity: &str,
         days: u32,
         tz_offset: i32,
@@ -1714,7 +1718,8 @@ impl SessionBackend for FakeBackend {
         *self
             .last_usage_query
             .lock()
-            .expect("last usage query lock") = Some((granularity.to_string(), days, tz_offset));
+            .expect("last usage query lock") =
+            Some((source.to_string(), granularity.to_string(), days, tz_offset));
         match self.usage_result.lock().expect("usage result lock").clone() {
             Some(result) => result,
             None => Err(UsageQueryError::RouterUnreachable {

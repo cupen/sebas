@@ -17,6 +17,10 @@ sebas-channels = { path = "../sebas-channels" }
 # 原位再导出，公开路径与线形状不变。
 # `prim::expand_tilde` 的 home 目录解析（Known Folder，不吃 HOME env）。
 dirs = "7"
+# usage 域类型的时序桶切分（add-local-usage-statistics 1.1）：tz 偏移按分钟
+# 精确切桶、窗口起点按当地午夜换算——RFC3339 解析与 FixedOffset 换算取自 chrono。
+# 第三方依赖不破坏叶子属性（角色 crate 禁见断言在 tests/domain_leaf_discipline_test.rs）。
+chrono = "0.4"
 
 [dev-dependencies]
 # 状态目录测试的一次性目录（state_paths 测试隔离进程级 env）。

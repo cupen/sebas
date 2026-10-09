@@ -1024,12 +1024,15 @@ impl SessionBackend for CoreChannelBackend {
         }
     }
 
-    /// （add-usage-statistics 2.2/3.1）usage 时序聚合经 core channel 反代：
-    /// `UsageTimeseries` 应答原样承载 router 的状态与载荷；不可达（含旧 core
-    /// 的 unknown-cmd 拒绝——它同样意味着这条取数路径不可用）归一为
-    /// `RouterUnreachable`，router 的非 200（参数 400 等）原样透传。
+    /// （add-usage-statistics 2.2/3.1 / add-local-usage-statistics 4.1）usage
+    /// 时序聚合经 core channel：`UsageTimeseries` 应答原样承载聚合的状态与
+    /// 载荷（`source=local|all` 由 core 合成；router 不可达且 `source=all`
+    /// 时 core 仍 200、载荷带 `router_cause`——都走 `Ok` 半边）；不可达
+    /// （含旧 core 的 unknown-cmd 拒绝——它同样意味着这条取数路径不可用）
+    /// 归一为 `RouterUnreachable`，非 200（参数 400 等）原样透传。
     async fn usage_timeseries(
         &self,
+        source: &str,
         granularity: &str,
         days: u32,
         tz_offset: i32,
@@ -1045,6 +1048,7 @@ impl SessionBackend for CoreChannelBackend {
         };
         match self
             .request(&CoreChannelRequest::UsageTimeseries {
+                source: source.to_string(),
                 granularity: granularity.to_string(),
                 days,
                 tz_offset,

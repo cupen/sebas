@@ -274,20 +274,26 @@ pub enum CoreChannelRequest {
         /// 待判定的路径（节点上的绝对路径）。
         path: String,
     },
-    /// （add-usage-statistics）usage 时序聚合查询：core 收到后经 loopback
-    /// HTTP 反代 router admin 的 `/admin/usage/timeseries`。参数校验与收界
-    /// 全部在 router 端——本帧只是透传载体。
+    /// （add-usage-statistics）usage 时序聚合查询：core 收到后按 `source`
+    /// 取数——`router` = loopback HTTP 反代 router admin 的
+    /// `/admin/usage/timeseries`；`local` = core 本地账本聚合；
+    /// `all` = 本地聚合 + 尽力反代合并（add-local-usage-statistics 4.1）。
+    /// 参数校验与收界全在取数端——本帧只是透传载体。
     ///
-    /// 三个字段全带 serde 默认值（协议演进规则 1：旧对端不发等价缺省
-    /// `day`/14/0，wire 兼容，无删改）。
+    /// 字段全带 serde 默认值（协议演进规则 1：旧对端不发等价缺省
+    /// `all`/`day`/14/0，wire 兼容，无删改）；`source` 取缺省 `all` 时不上
+    /// wire（老字节形状零变化）。
     UsageTimeseries {
-        /// 聚合粒度，`"day"`（缺省）| `"hour"`；非法拼写由 router 400。
+        /// 聚合来源：`"router"` | `"local"` | `"all"`（缺省 all 合计）。
+        #[serde(default = "default_usage_source", skip_serializing_if = "is_default_source")]
+        source: String,
+        /// 聚合粒度，`"day"`（缺省）| `"hour"`；非法拼写由取数端 400。
         #[serde(default = "default_usage_granularity")]
         granularity: String,
-        /// 天粒度窗口（缺省 14，clamp 1–30 在 router 端；hour 忽略）。
+        /// 天粒度窗口（缺省 14，clamp 1–30 在取数端；hour 忽略）。
         #[serde(default = "default_usage_days")]
         days: u32,
-        /// 分钟东偏（缺省 0 = UTC；clamp ±840 在 router 端）。
+        /// 分钟东偏（缺省 0 = UTC；clamp ±840 在取数端）。
         #[serde(default)]
         tz_offset: i32,
     },
@@ -308,6 +314,16 @@ fn default_usage_granularity() -> String {
 /// `CoreChannelRequest::UsageTimeseries::days` 的 serde 缺省。
 fn default_usage_days() -> u32 {
     14
+}
+
+/// `CoreChannelRequest::UsageTimeseries::source` 的 serde 缺省（all 合计）。
+fn default_usage_source() -> String {
+    "all".to_string()
+}
+
+/// `source` 缺省值不上 wire（老对端的字节形状零变化，演进规则 1）。
+fn is_default_source(s: &str) -> bool {
+    s == "all"
 }
 
 /// 节点链路管理操作。
@@ -730,6 +746,7 @@ mod tests {
     #[test]
     fn usage_timeseries_wire_round_trips_and_defaults() {
         let full = CoreChannelRequest::UsageTimeseries {
+            source: "local".into(),
             granularity: "hour".into(),
             days: 7,
             tz_offset: 480,
@@ -738,13 +755,25 @@ mod tests {
         let line = full.to_line().unwrap();
         assert_eq!(
             line,
+            "{\"cmd\":\"usage_timeseries\",\"source\":\"local\",\"granularity\":\"hour\",\"days\":7,\"tz_offset\":480}\n"
+        );
+        // 缺省 source（all）不上 wire：老对端的字节形状零变化。
+        let default_source = CoreChannelRequest::UsageTimeseries {
+            source: "all".into(),
+            granularity: "hour".into(),
+            days: 7,
+            tz_offset: 480,
+        };
+        assert_eq!(
+            default_source.to_line().unwrap(),
             "{\"cmd\":\"usage_timeseries\",\"granularity\":\"hour\",\"days\":7,\"tz_offset\":480}\n"
         );
-        // 旧对端不发字段：等价缺省 day/14/0。
+        // 旧对端不发字段：等价缺省 all/day/14/0。
         let legacy: CoreChannelRequest = decode_line("{\"cmd\":\"usage_timeseries\"}").unwrap();
         assert_eq!(
             legacy,
             CoreChannelRequest::UsageTimeseries {
+                source: "all".into(),
                 granularity: "day".into(),
                 days: 14,
                 tz_offset: 0,

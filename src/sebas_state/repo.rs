@@ -177,6 +177,37 @@ pub static PROJECTS_TABLES: &[TableSchema] = &[
     },
 ];
 
+/// usage_local.db 注册清单（add-local-usage-statistics D2）：core 独占写入的
+/// 本地回合用量账本（`local_usage_records`，写入者 = core，router 绝不打开
+/// 本库）。行 struct `LocalUsageRow` 在消费模块 `crate::usage_local`
+/// （归属按写入者）；约束只在这里表达：`id` 自增主键（id 升序 = 完成顺序），
+/// `ts` 上有索引（保留期时间闸按它过滤）。新库随 core 首启在 sebas home 内
+/// 原地补建，无破坏步骤。
+pub static USAGE_LOCAL_TABLES: &[TableSchema] = &[TableSchema {
+    name: "local_usage_records",
+    create_table_ddl: "CREATE TABLE IF NOT EXISTS local_usage_records (
+        id                    INTEGER PRIMARY KEY,
+        key                   TEXT NOT NULL,
+        protocol              TEXT NOT NULL,
+        model                 TEXT,
+        provider              TEXT NOT NULL,
+        upstream_model        TEXT,
+        status                INTEGER NOT NULL,
+        latency_ms            INTEGER NOT NULL,
+        ttft_ms               INTEGER,
+        input_tokens          INTEGER,
+        output_tokens         INTEGER,
+        cache_read_tokens     INTEGER,
+        cache_creation_tokens INTEGER,
+        error                 TEXT,
+        ts                    TEXT NOT NULL
+    );",
+    index_ddls: &[
+        "CREATE INDEX IF NOT EXISTS idx_local_usage_records_ts ON local_usage_records(ts);"
+    ],
+    columns: crate::usage_local::LocalUsageRow::schema_columns(),
+}];
+
 // ---- PersistedState 域的存储侧胶水（settings.db）----
 
 /// 从 settings.db 加载 provider 数据, 构造

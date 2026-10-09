@@ -343,7 +343,38 @@ pub async fn run(
         router.clone(),
         cfg.feishu.native_default,
     );
-    router.set_native_bridge(Some(native_bridge)).await;
+    router.set_native_bridge(Some(native_bridge.clone())).await;
+
+    // ── 本地回合用量账本（add-local-usage-statistics 2.1/2.2）──
+    // `usage_local.db`（sebas home 映射表派生，`SEBAS_USAGE_LOCAL_DB` 可覆盖）
+    // 由 core 独占写入：单写 actor + 有界通道 + 保留期双闸（`[usage_local]`
+    // 键族，默认与 router 侧同值）。打不开 = 启动失败拒绝（与 router 侧
+    // usage.db 的既有语义对齐——统计账本开不出来不静默降级）。
+    let local_usage_sink = crate::usage_local::LocalUsageSink::spawn(
+        crate::usage_local::default_db_path(),
+        cfg.usage_local.policy(),
+    )
+    .map_err(|e| crate::error::SebasError::Config(format!("本地用量库初始化失败: {e}")))?;
+    // ACP 回合结算的本地落账钩子（design D5）：逐回合一行交 sink（sink 侧
+    // 满载丢弃 + warn，绝不阻塞事件流）。ACP 会话的 agent 永不经过 router
+    // → 恒本地记（双算规避的 ACP 半边是结构性的，无需判定）。
+    router.set_usage_recorder({
+        let sink = local_usage_sink.clone();
+        std::sync::Arc::new(move |rec| sink.record(rec))
+    });
+    // native 直连回合的本地落账（design D1 双算规避的另一半）：注入了
+    // `SEBAS_AGENT_ROUTER_URL` 的装配经 router（router 已记）→ 不本地记。
+    let native_local_sink = if crate::usage_local::native_records_locally_from_env() {
+        Some(local_usage_sink.clone())
+    } else {
+        None
+    };
+    native_bridge.set_local_usage(native_local_sink.clone());
+    info!(
+        path = %crate::usage_local::default_db_path().display(),
+        native_local = native_local_sink.is_some(),
+        "local usage ledger ready"
+    );
     // ── 适配器注册表：`web` 常驻（webui 的入站面是 HTTP API →
     // SessionBackend，无传输循环）。core 不注册任何 IM 适配器。
     let mut registry = AdapterRegistry::new();
@@ -478,21 +509,28 @@ pub async fn run(
     // server 共享（design D1 of wire-webui-sebas-agent-e2e）：复用上方为飞书
     // 原生桥构建的同一个 `native_mgr`，detached 形态下经通道 spawn 的 native 会
     // 话与 in-process 看到的是同一个内核 manager。
-    let webui_backend: std::sync::Arc<dyn sebas_webui::SessionBackend> =
-        crate::agent_backend::DualSessionBackend::with_usage_listen(
+    let webui_backend: std::sync::Arc<dyn sebas_webui::SessionBackend> = {
+        let native_backend = crate::agent_backend::NativeAgentBackend::with_manager_arc(
+            native_mgr.clone(),
+            native_cause.clone(),
+            native_available_models,
+            native_default_model,
+        );
+        // （add-local-usage-statistics 3.2）webui 面原生会话与 feishu 桥同一
+        // 双算规避门控：直连装配才本地记。
+        native_backend.set_local_usage(native_local_sink.clone());
+        crate::agent_backend::DualSessionBackend::with_usage_sources(
             std::sync::Arc::new(sebas_webui::session_backend::InProcessBackend::new(
                 router.clone(),
             )),
-            crate::agent_backend::NativeAgentBackend::with_manager_arc(
-                native_mgr.clone(),
-                native_cause.clone(),
-                native_available_models,
-                native_default_model,
-            ),
-            // （add-usage-statistics 2.2）内嵌 webui 的 usage 聚合直接在本进程
-            // 取数（core = 本进程），与通道服务端的 usage 分支同源。
+            native_backend,
+            // （add-local-usage-statistics 4.1）内嵌 webui 的 usage 聚合直接
+            // 在本进程取数（core = 本进程），与通道服务端同一编排单点。
+            Some(local_usage_sink.query_handle().clone()),
+            // （add-usage-statistics 2.2）config `[router] listen`。
             usage_router_listen.clone(),
-        );
+        )
+    };
     if webui {
         // The core IS this process: serve the dashboard over the in-process
         // session backend (no SessionManager — spawn/close dispatch through
@@ -646,6 +684,9 @@ pub async fn run(
         // RouterConfig::parse 对缺段也给缺省 listen，parse 成败当信号会把
         // 未配置伪成可拨 8787。
         usage_router_listen,
+        // add-local-usage-statistics 2.1：本地用量库查询句柄（source=local|
+        // all 聚合的数据源；与写入共用单写线程）。
+        Some(local_usage_sink.query_handle().clone()),
     )
     .await?;
 
@@ -887,6 +928,7 @@ pub(crate) struct ArmedChannel {
     pub secret: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn arm_core_channel(
     cfg: &Config,
     config_path: &std::path::Path,
@@ -902,6 +944,9 @@ pub(crate) async fn arm_core_channel(
     // 反代的 loopback 目标。`None` = router 未随部署启用（usage 请求如实回
     // 不可达，不影响其余通道请求）。
     router_listen: Option<String>,
+    // （add-local-usage-statistics 2.1）本地用量库查询句柄：`source=local|all`
+    // 聚合的数据源。`None` = 账本未装配（测试装配）——如实回全零窗口。
+    local_usage: Option<sebas_db::writer::StateHandle>,
 ) -> Result<ArmedChannel> {
     let channel_path = crate::core_channel::socket_path(cfg);
     // bind 先行（1.3/D4）：路径被存活进程占用 → 硬错误，调用方在 ready 之前
@@ -928,6 +973,7 @@ pub(crate) async fn arm_core_channel(
     let serve_router = router.clone();
     let serve_secret = secret.clone();
     let serve_router_listen = router_listen.clone();
+    let serve_local_usage = local_usage.clone();
     tokio::spawn(async move {
         match crate::core_channel::server::serve_bound(
             backend,
@@ -938,6 +984,7 @@ pub(crate) async fn arm_core_channel(
             node_registry,
             projection,
             serve_router_listen,
+            serve_local_usage,
             close_rx,
         )
         .await

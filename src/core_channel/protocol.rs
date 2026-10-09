@@ -191,6 +191,7 @@ mod tests {
             // （add-usage-statistics）usage 聚合查询：字段全缺省的旧对端形态
             // 必须可读（wire 新增变体，serde 默认值兜底）。
             CoreChannelRequest::UsageTimeseries {
+                source: "all".into(),
                 granularity: "hour".into(),
                 days: 7,
                 tz_offset: 480,

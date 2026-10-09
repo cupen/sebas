@@ -522,21 +522,47 @@ pub async fn about(State(state): State<WebUiState>) -> Response {
     Json(data).into_response()
 }
 
-// ---- Usage timeseries（add-usage-statistics 3.1）----
+// ---- Usage timeseries（add-usage-statistics 3.1 / add-local-usage-statistics 4.1）----
 
-/// `GET /api/usage/timeseries`：usage 时序聚合的 webui 反代面。登录（四角色
+/// `GET /api/usage/timeseries`：usage 时序聚合的 webui 读面。登录（四角色
 /// 一致——`required_permission` 对它无额外权限词）即可见；参数经
 /// `SessionBackend::usage_timeseries` 缝透传 core，聚合载荷原样回传。
 ///
-/// 响应契约（design D7）：
-/// - 200 = router 聚合载荷（原样 JSON）；
-/// - 503 + `cause: "router_unreachable"` = router 未启用 / 拒绝 / 超时
-///   （结构化 cause，前端据此呈「router 不可达」空态；其余 API 不受影响）；
-/// - router 的非 200（如参数 400）按原状态透传 + `cause: "router_error"`。
+/// `source` 词表（`router` | `local` | `all`，缺省 all 合计）：`router` =
+/// 既有反代语义；`local` = core 本地账本聚合；`all` = 本地聚合 + 尽力反代
+/// 合并——router 不可达**仍 200**，载荷带 `router_cause` 如实标注缺席源
+/// （前端呈局部警示条，不是整页空态）。
+///
+/// 响应契约（design D7/D4）：
+/// - 200 = 聚合载荷（原样 JSON；`source=all` 降级态带 `router_cause`）；
+/// - 503 + `cause: "router_unreachable"` = router 不可达（仅显式
+///   `source=router` 走这条；结构化 cause，前端据此呈「router 不可达」空态，
+///   其余 API 不受影响）；
+/// - 非 200 的 `cause: "router_error"`（router 参数 400 透传等）与
+///   `cause: "invalid_param"`（本层的 days/tz_offset/source 参数校验）。
 pub async fn usage_timeseries(
     State(state): State<WebUiState>,
     Query(params): Query<std::collections::BTreeMap<String, String>>,
 ) -> Response {
+    // source：缺省 all（合并口径）；非法拼写本层 400（不劳 core）。
+    let source = params.get("source").filter(|s| !s.is_empty());
+    let source = match source {
+        None => "all".to_string(),
+        Some(s) => {
+            if sebas_domain::usage::usage_source::is_valid(s) {
+                s.clone()
+            } else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": format!("invalid source {s:?}: expected \"router\", \"local\" or \"all\""),
+                        "cause": "invalid_param"
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    };
     // 参数透传：granularity 缺省 day（与 router 端点同缺省；非 day/hour 的
     // 拼写由 core 校验并合成 router 同形 400）；days / tz_offset 缺省走 wire
     // 默认（14 / 0），非数字在本层 400（wire 类型是数值，走不到 core）。
@@ -572,7 +598,7 @@ pub async fn usage_timeseries(
     };
     match state
         .backend
-        .usage_timeseries(&granularity, days, tz_offset)
+        .usage_timeseries(&source, &granularity, days, tz_offset)
         .await
     {
         Ok(payload) => Json(payload).into_response(),

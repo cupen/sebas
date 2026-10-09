@@ -1363,10 +1363,10 @@ mod usage_timeseries_route {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, payload, "聚合载荷原样回传");
 
-        // 参数透传到 seam（granularity/days/tz_offset 逐字）。
+        // 参数透传到 seam（source 缺省 all；granularity/days/tz_offset 逐字）。
         assert_eq!(
             backend.last_usage_query(),
-            Some(("day".into(), 3, 480)),
+            Some(("all".into(), "day".into(), 3, 480)),
             "查询参数逐字透传到后端缝"
         );
     }
@@ -1410,11 +1410,11 @@ mod usage_timeseries_route {
         backend.set_usage_result(Ok(serde_json::json!({"granularity": "day"})));
         let (status, _) = get(&app, "/api/usage/timeseries", Some(&cookie)).await;
         assert_eq!(status, StatusCode::OK);
-        // 缺省参数逐字等于 router 端点口径：day / 14 / UTC（0）。
+        // 缺省参数逐字等于 router 端点口径：all / day / 14 / UTC（0）。
         assert_eq!(
             backend.last_usage_query(),
-            Some(("day".into(), 14, 0)),
-            "无参调用按 day/14/0 缺省透传"
+            Some(("all".into(), "day".into(), 14, 0)),
+            "无参调用按 all/day/14/0 缺省透传"
         );
     }
 
@@ -1424,6 +1424,73 @@ mod usage_timeseries_route {
         let (status, body) = get(&app, "/api/usage/timeseries?days=abc", Some(&cookie)).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["cause"], "invalid_param");
+    }
+
+    // ---- add-local-usage-statistics 4.1：source 三口径 ----
+
+    #[tokio::test]
+    async fn source_param_passes_through_to_the_seam() {
+        let (app, backend, cookie, _dir) = app_with_viewer().await;
+        backend.set_usage_result(Ok(serde_json::json!({"granularity": "day"})));
+        for source in ["router", "local", "all"] {
+            let (status, _) = get(
+                &app,
+                &format!("/api/usage/timeseries?source={source}"),
+                Some(&cookie),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "source={source}");
+            // 每个词表取值都逐字进缝（词表内不落地改写、原样透传）。
+            assert_eq!(
+                backend.last_usage_query(),
+                Some((source.into(), "day".into(), 14, 0)),
+                "source={source} 逐字透传"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_source_is_rejected_locally_with_400() {
+        let (app, backend, cookie, _dir) = app_with_viewer().await;
+        backend.set_usage_result(Ok(serde_json::json!({"granularity": "day"})));
+        let (status, body) = get(
+            &app,
+            "/api/usage/timeseries?source=everything",
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "非法 source 本层 400");
+        assert_eq!(body["cause"], "invalid_param");
+        assert!(
+            body["error"].as_str().unwrap().contains("source"),
+            "400 点名非法 source: {body}"
+        );
+        // 拒绝发生在本层：后端缝没有被调用。
+        assert_eq!(backend.last_usage_query(), None, "非法 source 不进缝");
+    }
+
+    /// `source=all` 且 router 不可达：core 合成的载荷带 `router_cause` 仍走
+    /// `Ok` 半边 → 路由层 200 原样回传（局部警示的数据源，不是整页空态）。
+    #[tokio::test]
+    async fn source_all_with_router_cause_is_a_200_payload() {
+        let (app, backend, cookie, _dir) = app_with_viewer().await;
+        let payload = serde_json::json!({
+            "granularity": "day", "days": 3, "tz_offset": 0,
+            "buckets": [
+                {"bucket": "2026-10-09", "models": [
+                    {"model": "m", "requests": 1, "input_tokens": 5,
+                     "output_tokens": 2, "cache_read_tokens": 0, "cache_creation_tokens": 0}
+                ]},
+                {"bucket": "2026-10-10", "models": []},
+                {"bucket": "2026-10-08", "models": []}
+            ],
+            "router_cause": "router_unreachable: connection refused"
+        });
+        backend.set_usage_result(Ok(payload.clone()));
+        let (status, body) =
+            get(&app, "/api/usage/timeseries?source=all", Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK, "all 降级态仍 200");
+        assert_eq!(body, payload, "载荷原样回传（router_cause 在场）");
     }
 }
 // ── fix-webui-qa-round10 3.1（C-DEF-02）：provider 变更面角色门禁 ───────────

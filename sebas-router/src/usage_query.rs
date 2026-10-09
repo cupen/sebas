@@ -4,358 +4,45 @@
 //! 时序统计——**纯查询**：零新表、零后台汇总任务、零写入路径改动。
 //! 「次日后小时数据汇总为一天的总量」是查询口径（历史小时明细不再单独提供）。
 //!
-//! # 分层（tasks 1.1–1.3）
+//! # 分层（add-local-usage-statistics 1.1/1.2）
 //!
-//! - [`parse_params`]：查询参数解析 + 合法域 clamp（非法 400，越界收界）；
-//! - [`window_start_utc`] / [`bucket_usage`] / [`timeseries`]：**桶切分纯函数**
-//!   （输入记录集 + 参数 + now，输出零填充窗口；不经任何 I/O，单测直接钉）；
-//! - [`query_timeseries`]：参数化 SQL（`ts` 窗口过滤走既有
-//!   `idx_usage_records_ts` 索引）+ 纯函数分桶。分桶**不在 SQL** 里做：
-//!   tz 偏移是分钟级（存在 +05:30 / +08:45 这类非整时区），SQL 侧
-//!   `substr(ts,1,10)` 只能给 UTC 日期——偏移切桶在应用层按 RFC3339 解析后
-//!   精确完成。
+//! 参数解析、桶切分**纯函数**与 wire 类型已下沉中立域层
+//! `sebas_domain::usage`（router 与 core 同一实现，同输入同桶形）；本模块
+//! 原位再导出保住既有公开路径，只剩 [`query_timeseries`] 这一个 IO 编排点：
+//! 参数化 SQL（`ts` 窗口过滤走既有 `idx_usage_records_ts` 索引）+ 行级取回
+//! 后交域层纯函数分桶。分桶**不在 SQL** 里做：tz 偏移是分钟级（存在
+//! +05:30 / +08:45 这类非整时区），SQL 侧 `substr(ts,1,10)` 只能给 UTC
+//! 日期——偏移切桶在应用层按 RFC3339 解析后精确完成（语义随域层实现）。
 //!
 //! # 口径（design D4）
 //!
 //! - 按 `model` 分组；`model` 为 NULL 计入 `(unknown)` 桶（总量诚实）；
 //! - 每桶每模型：四类 token 求和 + 请求数；token 为 NULL（上游错误、解析
-//!   失败）不计入 token 和、但计入请求数（SQL SUM 忽略 NULL 的同款语义在
-//!   [`ModelUsage::add_record`] 复刻）；
+//!   失败）不计入 token 和、但计入请求数；
 //! - 聚合不按 `status` 过滤：成功请求才有 token 计数，失败行自然为零；
 //! - 两粒度都**零填充**返回完整窗口（天 = 请求窗口的每个日期；小时 = 当天
 //!   0–23 全 24 桶），折线图无需补点逻辑。
 
-use std::fmt;
-
-use chrono::{DateTime, Days, Duration, FixedOffset, NaiveDate, Timelike, Utc};
-use serde::Serialize;
-
+use chrono::{DateTime, Utc};
 use sebas_db::record::Record;
 use sebas_db::writer::StateHandle;
 
-use crate::usage::UsageRow;
+use crate::usage::{UsageRecord, UsageRow};
 
-/// `model` 为 NULL 的记录计入的桶名（D4：不悄悄丢行，总量诚实）。
-pub const UNKNOWN_MODEL: &str = "(unknown)";
+// ---- wire 类型与纯函数的唯一定义在域层（add-local-usage-statistics 1.1）----
 
-/// 天粒度窗口缺省（design D2：默认近 14 天）。
-pub const DAYS_DEFAULT: u32 = 14;
-/// 天粒度窗口下界（task 1.3：clamp 1–30）。
-pub const DAYS_MIN: u32 = 1;
-/// 天粒度窗口上界（task 1.3：clamp 1–30；design D2「窗口上限 30 天封顶」）。
-pub const DAYS_MAX: u32 = 30;
-/// `tz_offset` 合法域边界：±14h（design D3「clamp 到 ±14h 合法域」）。
-pub const TZ_OFFSET_MAX_MIN: i32 = 14 * 60;
-
-/// 聚合粒度（wire 词表：`day` | `hour`）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Granularity {
-    /// 按天：请求窗口内每个日期一个桶（零填充）。
-    Day,
-    /// 按小时：仅当天（按请求偏移的「今天」）0–23 全 24 桶。
-    Hour,
-}
-
-impl Granularity {
-    /// wire 拼写。
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Granularity::Day => "day",
-            Granularity::Hour => "hour",
-        }
-    }
-
-    /// 解析 wire 取值；未知拼写返回 `None`（调用方 400）。
-    pub fn from_wire(s: &str) -> Option<Self> {
-        match s {
-            "day" => Some(Granularity::Day),
-            "hour" => Some(Granularity::Hour),
-            _ => None,
-        }
-    }
-}
-
-/// 参数解析错误（task 1.3：非法 400；越界数值 clamp 而非拒绝）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ParamError {
-    /// `granularity` 不是 `day`/`hour`。
-    UnknownGranularity(String),
-    /// `days` 不是非负整数。
-    BadDays(String),
-    /// `tz_offset` 不是整数。
-    BadTzOffset(String),
-}
-
-impl fmt::Display for ParamError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ParamError::UnknownGranularity(v) => {
-                write!(f, "invalid granularity {v:?}: expected \"day\" or \"hour\"")
-            }
-            ParamError::BadDays(v) => write!(f, "invalid days {v:?}: expected a number"),
-            ParamError::BadTzOffset(v) => write!(f, "invalid tz_offset {v:?}: expected minutes as a number"),
-        }
-    }
-}
-
-/// 已解析并收界的聚合参数。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TimeseriesParams {
-    /// 聚合粒度。
-    pub granularity: Granularity,
-    /// 天粒度窗口（1–30；hour 忽略）。缺省 [`DAYS_DEFAULT`]。
-    pub days: u32,
-    /// 分钟东偏（clamp ±[`TZ_OFFSET_MAX_MIN`]；缺省 0 = UTC）。
-    pub tz_offset_min: i32,
-}
-
-/// 解析查询参数（task 1.3）：
-///
-/// - `granularity`：缺省 `day`；非法拼写 → [`ParamError::UnknownGranularity`]；
-/// - `days`：缺省 14；非数字 → [`ParamError::BadDays`]；越界 clamp 1–30
-///   （hour 粒度忽略该参数——不解析不报错，只有当请求带了非法数字时仍 400，
-///   与 granularity 的处理对称且可预期）；
-/// - `tz_offset`：缺省 0；非数字 → [`ParamError::BadTzOffset`]；越界 clamp
-///   ±840 分钟。
-pub fn parse_params(
-    granularity: Option<&str>,
-    days: Option<&str>,
-    tz_offset: Option<&str>,
-) -> Result<TimeseriesParams, ParamError> {
-    let granularity = match granularity {
-        None | Some("") => Granularity::Day,
-        Some(g) => Granularity::from_wire(g)
-            .ok_or_else(|| ParamError::UnknownGranularity(g.to_string()))?,
-    };
-    let days = match days {
-        None | Some("") => DAYS_DEFAULT,
-        Some(d) => {
-            let n: i64 = d
-                .parse()
-                .map_err(|_| ParamError::BadDays(d.to_string()))?;
-            n.clamp(DAYS_MIN as i64, DAYS_MAX as i64) as u32
-        }
-    };
-    let tz_offset_min = match tz_offset {
-        None | Some("") => 0,
-        Some(t) => {
-            let n: i64 = t
-                .parse()
-                .map_err(|_| ParamError::BadTzOffset(t.to_string()))?;
-            n.clamp(-(TZ_OFFSET_MAX_MIN as i64), TZ_OFFSET_MAX_MIN as i64) as i32
-        }
-    };
-    Ok(TimeseriesParams {
-        granularity,
-        days,
-        tz_offset_min,
-    })
-}
-
-impl TimeseriesParams {
-    /// 请求下传的时区偏移（分钟东偏已 clamp，构造必不失败）。
-    fn offset(self) -> FixedOffset {
-        FixedOffset::east_opt(self.tz_offset_min * 60)
-            .expect("tz_offset clamp 到 ±840 分钟内，FixedOffset 必然合法")
-    }
-
-    /// 窗口起点（UTC，含）。天粒度 = 按偏移的「今天」回退 `days-1` 天的
-    /// 当地 00:00；小时粒度 = 当地今天 00:00。换算回 UTC 后交给 SQL 做
-    /// `ts >= ?` 索引过滤（`ts` 为 RFC3339 UTC 串，字典序 = 时间序）。
-    pub fn window_start_utc(self, now_utc: DateTime<Utc>) -> DateTime<Utc> {
-        let local_now = now_utc.with_timezone(&self.offset());
-        let today = local_now.date_naive();
-        let back = match self.granularity {
-            Granularity::Day => u64::from(self.days.max(1)) - 1,
-            Granularity::Hour => 0,
-        };
-        let start_local_date: NaiveDate =
-            today - Days::new(back);
-        let start_local = start_local_date
-            .and_hms_opt(0, 0, 0)
-            .expect("当地午夜必然存在");
-        // 当地时间 = UTC + 偏移 → UTC = 当地 - 偏移。
-        DateTime::from_naive_utc_and_offset(
-            start_local - Duration::minutes(i64::from(self.tz_offset_min)),
-            Utc,
-        )
-    }
-}
-
-/// 一桶内单模型的用量（D4：四类明细 + 请求数）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ModelUsage {
-    /// 操作员视角的路由模型名；NULL 记录为 `(unknown)`。
-    pub model: String,
-    /// 落在该桶该模型上的请求行数（token 未观测的行也计入）。
-    pub requests: u64,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub cache_read_tokens: u64,
-    pub cache_creation_tokens: u64,
-}
-
-impl ModelUsage {
-    fn empty(model: impl Into<String>) -> Self {
-        ModelUsage {
-            model: model.into(),
-            requests: 0,
-            input_tokens: 0,
-            output_tokens: 0,
-            cache_read_tokens: 0,
-            cache_creation_tokens: 0,
-        }
-    }
-
-    /// 累加一行记录。`None` token（未观测）不计入 token 和、但计入请求数
-    /// （D4 / spec 场景「unobserved tokens contribute nothing」）。
-    fn add_record(&mut self, row: &UsageRow) {
-        self.requests += 1;
-        self.input_tokens += nonneg(row.input_tokens);
-        self.output_tokens += nonneg(row.output_tokens);
-        self.cache_read_tokens += nonneg(row.cache_read_tokens);
-        self.cache_creation_tokens += nonneg(row.cache_creation_tokens);
-    }
-}
-
-/// token 列读数：NULL（未观测）计 0；防御性把负值也当 0（token 计数恒非负，
-/// 越界值不进统计面）。
-fn nonneg(v: Option<i64>) -> u64 {
-    v.unwrap_or(0).max(0) as u64
-}
-
-/// 一个时间桶：桶标签 + 按模型分列的用量（模型名字典序）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct TimeseriesBucket {
-    /// 天粒度 = `YYYY-MM-DD`（按请求偏移的当地日期）；小时粒度 = 当地小时
-    /// `00`–`23` 两位。
-    pub bucket: String,
-    /// 该桶内的分模型用量（按模型名字典序，输出确定）。
-    pub models: Vec<ModelUsage>,
-}
-
-/// 聚合结果：零填充完整窗口 + 全窗合计（前端汇总数字的直接来源）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Timeseries {
-    /// 回显粒度（`day` | `hour`）。
-    pub granularity: String,
-    /// 回显生效窗口（天粒度；hour 恒为 1——它只有今天）。
-    pub days: u32,
-    /// 回显生效偏移（clamp 后）。
-    pub tz_offset: i32,
-    /// 时间升序的完整桶窗口（无数据桶为空 models 数组，零填充）。
-    pub buckets: Vec<TimeseriesBucket>,
-    /// 全窗合计（各桶各模型之和；与 buckets 逐项一致，前端汇总不必重算）。
-    /// 复用 [`ModelUsage`] 形状，`model` 恒为 `"total"`。
-    pub totals: ModelUsage,
-}
-
-/// 窗口桶标签（时间升序）：天 = 最近 `days` 个当地日期；小时 = `00`–`23`。
-pub fn bucket_labels(params: TimeseriesParams, now_utc: DateTime<Utc>) -> Vec<String> {
-    let local_today = now_utc.with_timezone(&params.offset()).date_naive();
-    match params.granularity {
-        Granularity::Day => (0..params.days.max(1))
-            .map(|i| {
-                let date = local_today - Days::new(u64::from(params.days.max(1)) - 1 - i as u64);
-                date.format("%Y-%m-%d").to_string()
-            })
-            .collect(),
-        Granularity::Hour => (0..24).map(|h| format!("{h:02}")).collect(),
-    }
-}
-
-/// 单条记录的桶标签（按请求偏移切分；解析失败 → `None`，防御性跳过——
-/// `ts` 是 router 自己写的 RFC3339 串，正常路径不会失败）。
-pub fn bucket_of_ts(ts: &str, params: TimeseriesParams) -> Option<String> {
-    let t = DateTime::parse_from_rfc3339(ts).ok()?;
-    Some(bucket_of_instant(&t, params))
-}
-
-/// 已解析时刻的桶标签（`bucket_of_ts` 的解析一次复用形态）。
-fn bucket_of_instant(t: &DateTime<FixedOffset>, params: TimeseriesParams) -> String {
-    let local = t.with_timezone(&params.offset());
-    match params.granularity {
-        Granularity::Day => local.format("%Y-%m-%d").to_string(),
-        Granularity::Hour => format!("{:02}", local.hour()),
-    }
-}
-
-/// 桶切分纯函数（task 1.1）：输入记录集 + 参数 + now，输出零填充窗口的
-/// 桶结构。窗口外记录被丢弃（SQL 侧已按窗口过滤，这里是同一口径的兜底：
-/// 小时粒度只有小时标签，日期维度必须在这里真正按窗口起点剔除）。
-pub fn bucket_usage(
-    records: &[UsageRow],
-    params: TimeseriesParams,
-    now_utc: DateTime<Utc>,
-) -> Vec<TimeseriesBucket> {
-    let labels = bucket_labels(params, now_utc);
-    let start = params.window_start_utc(now_utc);
-    // (label, model) → 累加器；BTreeMap 保证模型输出字典序确定。
-    let mut acc: std::collections::BTreeMap<(String, String), ModelUsage> =
-        std::collections::BTreeMap::new();
-    for row in records {
-        let Ok(t) = DateTime::parse_from_rfc3339(&row.ts) else {
-            continue;
-        };
-        if t.to_utc() < start {
-            continue;
-        }
-        let label = bucket_of_instant(&t, params);
-        let model = row.model.clone().unwrap_or_else(|| UNKNOWN_MODEL.to_string());
-        acc.entry((label, model))
-            .or_insert_with(|| ModelUsage::empty(String::new()))
-            .add_record(row);
-    }
-    labels
-        .into_iter()
-        .map(|label| {
-            let models: Vec<ModelUsage> = acc
-                .iter()
-                .filter(|((l, _), _)| *l == label)
-                .map(|((_, m), usage)| ModelUsage {
-                    model: m.clone(),
-                    ..usage.clone()
-                })
-                .collect();
-            TimeseriesBucket { bucket: label, models }
-        })
-        .collect()
-}
-
-/// 聚合 + 全窗合计（admin 端点的响应体）。
-pub fn timeseries(
-    records: &[UsageRow],
-    params: TimeseriesParams,
-    now_utc: DateTime<Utc>,
-) -> Timeseries {
-    let buckets = bucket_usage(records, params, now_utc);
-    let mut totals = ModelUsage::empty("total");
-    for bucket in &buckets {
-        for usage in &bucket.models {
-            totals.requests += usage.requests;
-            totals.input_tokens += usage.input_tokens;
-            totals.output_tokens += usage.output_tokens;
-            totals.cache_read_tokens += usage.cache_read_tokens;
-            totals.cache_creation_tokens += usage.cache_creation_tokens;
-        }
-    }
-    Timeseries {
-        granularity: params.granularity.as_str().to_string(),
-        days: if params.granularity == Granularity::Hour {
-            1
-        } else {
-            params.days
-        },
-        tz_offset: params.tz_offset_min,
-        buckets,
-        totals,
-    }
-}
+pub use sebas_domain::usage::{
+    bucket_labels, bucket_of_ts, bucket_usage, merge_timeseries, parse_params, timeseries,
+    Granularity, ModelUsage, ParamError, SourceSplit, SourceSubtotal, Timeseries,
+    TimeseriesBucket, TimeseriesParams, UsageSource, DAYS_DEFAULT, DAYS_MAX, DAYS_MIN,
+    UNKNOWN_MODEL, TZ_OFFSET_MAX_MIN,
+};
 
 /// 聚合查询（task 1.2）：参数化 SQL 按 `ts` 窗口过滤（走既有
-/// `idx_usage_records_ts` 索引），行级取回后交给纯函数分桶。只读 SELECT
-/// 经 [`StateHandle::exec`] 在单写线程串行执行——与写入/清理共用一条命令
-/// 队列，毫秒级，绝不影响转发路径（D7）。
+/// `idx_usage_records_ts` 索引），行级取回后经**无损**行→记录转换交给域层
+/// 纯函数分桶（`UsageRow → UsageRecord` 逐字段搬运，聚合读数不漂移）。
+/// 只读 SELECT 经 [`StateHandle::exec`] 在单写线程串行执行——与写入/清理
+/// 共用一条命令队列，毫秒级，绝不影响转发路径（D7）。
 pub async fn query_timeseries(
     handle: &StateHandle,
     params: TimeseriesParams,
@@ -377,15 +64,18 @@ pub async fn query_timeseries(
             Ok(rows)
         })
         .await?;
-    Ok(timeseries(&rows, params, now_utc))
+    let records: Vec<UsageRecord> = rows.into_iter().map(UsageRecord::from).collect();
+    Ok(timeseries(&records, params, now_utc))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn row(ts: &str, model: Option<&str>, input: Option<i64>, output: Option<i64>) -> UsageRow {
-        UsageRow {
+    /// 测试行构造走**真实的行→记录转换**（`UsageRow → UsageRecord`）——
+    /// 聚合输入与生产路径同源，行侧字段与聚合读数的对齐由转换单点保证。
+    fn row(ts: &str, model: Option<&str>, input: Option<i64>, output: Option<i64>) -> UsageRecord {
+        UsageRecord::from(UsageRow {
             id: None,
             key: String::new(),
             protocol: "anthropic".into(),
@@ -401,7 +91,7 @@ mod tests {
             cache_creation_tokens: None,
             error: None,
             ts: ts.into(),
-        }
+        })
     }
 
     fn day_params(days: u32, tz: i32) -> TimeseriesParams {
@@ -624,5 +314,68 @@ mod tests {
             wide.window_start_utc(now()).to_rfc3339(),
             "2026-09-16T00:00:00+00:00"
         );
+    }
+
+    // ---------------- add-local-usage-statistics 1.2：同输入同桶形 ----------------
+
+    /// 行→记录转换无损 ⇒ 同一记录集经共享域层实现聚合，与迁移前 router 本地
+    /// 实现的结果**逐字段一致**（期望值即迁移前单测钉死的读数——本文件上文
+    /// 各用例同源）。这里再钉一次「行侧输入与记录侧输入聚合相等」的机械口径。
+    #[test]
+    fn row_and_record_inputs_aggregate_identically() {
+        let rows = [
+            UsageRow {
+                id: Some(1),
+                key: String::new(),
+                protocol: "anthropic".into(),
+                model: Some("claude-sonnet".into()),
+                provider: "anthropic".into(),
+                upstream_model: None,
+                status: 200,
+                latency_ms: 3,
+                ttft_ms: None,
+                input_tokens: Some(10),
+                output_tokens: Some(50),
+                cache_read_tokens: Some(5),
+                cache_creation_tokens: Some(2),
+                error: None,
+                ts: "2026-09-28T08:00:00+00:00".into(),
+            },
+            UsageRow {
+                id: Some(2),
+                key: String::new(),
+                protocol: "openai_chat".into(),
+                model: None,
+                provider: "openai".into(),
+                upstream_model: None,
+                status: 502,
+                latency_ms: 4,
+                ttft_ms: None,
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_tokens: None,
+                cache_creation_tokens: None,
+                error: Some("boom".into()),
+                ts: "2026-09-28T09:00:00+00:00".into(),
+            },
+        ];
+        let records: Vec<UsageRecord> = rows.iter().map(|r| UsageRecord::from(r.clone())).collect();
+        let params = day_params(2, 0);
+        let from_rows = {
+            let records: Vec<UsageRecord> = rows.iter().map(|r| UsageRecord::from(r.clone())).collect();
+            timeseries(&records, params, now())
+        };
+        let from_records = timeseries(&records, params, now());
+        assert_eq!(from_rows, from_records, "同输入同桶形（行侧 = 记录侧）");
+        let day28 = &from_rows.buckets[0];
+        assert_eq!(day28.models.len(), 2, "(unknown) 与 claude-sonnet 分列");
+        assert_eq!(day28.models[0].model, UNKNOWN_MODEL);
+        assert_eq!(day28.models[0].requests, 1, "None token 行只计请求数");
+        assert_eq!(day28.models[1].model, "claude-sonnet");
+        assert_eq!(day28.models[1].input_tokens, 10);
+        assert_eq!(day28.models[1].output_tokens, 50);
+        assert_eq!(day28.models[1].cache_read_tokens, 5);
+        assert_eq!(day28.models[1].cache_creation_tokens, 2);
+        assert_eq!(from_rows.totals.requests, 2);
     }
 }

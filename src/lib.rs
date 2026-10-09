@@ -69,6 +69,9 @@ pub mod spawn_env;
 pub mod startup_failure;
 pub mod update;
 pub mod upgrade;
+/// 本地回合用量账本（add-local-usage-statistics：usage_local.db 的行 struct、
+/// 单写 sink、双算规避门控与 source 三口径查询编排）。
+pub mod usage_local;
 pub mod watchdog;
 pub mod webui_cmd;
 mod ws_loop;

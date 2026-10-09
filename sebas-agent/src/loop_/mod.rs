@@ -157,11 +157,14 @@ struct TurnCounters {
 /// `SessionSummary`——终态（Finished / Error）必须先于 summary 落地（错误
 /// 回合的零输出判定在收尾时点求值，summary 先发会把「错误条目尚未落地」
 /// 误判成零输出）。会话层拿到这份值，在终态事件之后发射 summary。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct TurnSummary {
     pub model_calls: u32,
     pub tool_calls: u32,
     pub turn_ms: u64,
+    /// （add-local-usage-statistics 3.1）本回合全部模型调用的 usage 累计
+    /// （跨调用求和；逐字段 None 保 None——没有任何调用上报的回合不冒充零）。
+    pub usage: sebas_domain::usage::TurnTokenUsage,
 }
 
 /// turn 引擎：持有预算与并发配置；会话历史由调用方持有并传入（每会话一份）。
@@ -195,13 +198,18 @@ impl TurnEngine {
     ) -> (TurnOutcome, TurnSummary) {
         let started = std::time::Instant::now();
         let mut counters = TurnCounters::default();
+        let mut usage = sebas_domain::usage::TurnTokenUsage {
+            model: Some(model.to_string()),
+            ..Default::default()
+        };
         let outcome = self
-            .run_turn_inner(llm, registry, tool_ctx_base, history, user_text, system, model, cancel, emit, &mut counters)
+            .run_turn_inner(llm, registry, tool_ctx_base, history, user_text, system, model, cancel, emit, &mut counters, &mut usage)
             .await;
         let summary = TurnSummary {
             model_calls: counters.model_calls,
             tool_calls: counters.tool_calls,
             turn_ms: started.elapsed().as_millis() as u64,
+            usage,
         };
         (outcome, summary)
     }
@@ -221,6 +229,7 @@ impl TurnEngine {
         cancel: CancellationToken,
         emit: &TurnEmit<'_>,
         counters: &mut TurnCounters,
+        usage: &mut sebas_domain::usage::TurnTokenUsage,
     ) -> TurnOutcome {
         history.push(Message::user_text(user_text));
         let deadline = tokio::time::Instant::now() + self.budget.turn_timeout;
@@ -288,7 +297,12 @@ impl TurnEngine {
                     };
                 }
                 r = llm.stream_turn(&req, &sink) => match r {
-                    Ok(t) => t,
+                    Ok(t) => {
+                        // （add-local-usage-statistics 3.1）跨模型调用累计：
+                        // 逐字段求和（None 保 None）。
+                        usage.accumulate(&t.usage);
+                        t
+                    }
                     Err(e) => {
                         return TurnOutcome::Failed { terminal: e.terminal, message: e.message };
                     }

@@ -91,6 +91,12 @@ pub enum AgentEvent {
         model_calls: u32,
         tool_calls: u32,
         turn_ms: u64,
+        /// （add-local-usage-statistics 3.1）本回合的 usage（宿主据此落本地
+        /// 账本 + 快照 usage 芯片）。`None` = 本回合没有任何 token 上报
+        /// （「只计请求数」，不冒充零）。serde 缺省兼容旧报文/旧 fixture；
+        /// 缺省值不上 wire（老字节形状零变化）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<sebas_domain::usage::TurnTokenUsage>,
     },
     Finished {
         session_id: String,
@@ -369,6 +375,9 @@ impl SessionTask {
                     model_calls: summary.model_calls,
                     tool_calls: summary.tool_calls,
                     turn_ms: summary.turn_ms,
+                    // （add-local-usage-statistics 3.1）本回合 usage 随 summary
+                    // 上报：没有任何 token 上报的回合带 None（「只计请求数」）。
+                    usage: Some(summary.usage).filter(|u| u.reports_any_tokens()),
                 });
                 // turn 结束：应用 turn 期间收到的 SetModel（下一次 turn 起用）。
                 if let Some(m) = pending_model.take() {
@@ -612,6 +621,108 @@ mod tests {
             systems.iter().all(|s| s.contains("AGENTS-MARKER-CONTENT")),
             "every turn's request carries the memory injection"
         );
+    }
+
+    // ---- add-local-usage-statistics 3.1：usage 随 SessionSummary 上报 ----
+
+    /// 上报了 usage 的回合：summary 如实携带四类计数（跨模型调用累计）。
+    #[tokio::test]
+    async fn turn_usage_arrives_on_the_session_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        // 一个回合内的两次模型调用：首个响应带 tool_use（引擎继续循环），
+        // usage(5,8)；末次响应纯文本收尾，usage(7,2)。summary = 两次之和。
+        let client = FakeLlmClient::scripted(vec![
+            LlmTurn {
+                usage: sebas_domain::usage::TurnTokenUsage {
+                    input_tokens: Some(5),
+                    output_tokens: Some(8),
+                    ..Default::default()
+                },
+                ..FakeLlmClient::call_tools(vec![(
+                    "t1",
+                    "read",
+                    serde_json::json!({"path": "a.txt"}),
+                )])
+            },
+            FakeLlmClient::say_with_usage("part two", 7, 2),
+        ]);
+        let manager = SessionManager::new(
+            Arc::new(client),
+            ToolRegistry::new(Duration::from_secs(10)),
+            SessionConfig::default(),
+        );
+        let handle = manager.create_session(dir.path().to_path_buf());
+        let mut rx = handle.subscribe();
+        handle.prompt("go").await;
+        let evs = tokio::time::timeout(Duration::from_secs(30), wait_terminal_and_summary(&mut rx))
+            .await
+            .unwrap();
+        let summaries: Vec<_> = evs
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::SessionSummary { usage, .. } => Some(usage.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(summaries.len(), 1, "一个回合一条 summary");
+        let usage = summaries[0].clone().expect("reported turn carries usage");
+        assert_eq!(usage.input_tokens, Some(12), "两调用累计");
+        assert_eq!(usage.output_tokens, Some(10));
+        assert!(usage.reports_any_tokens());
+    }
+
+    /// 无 usage 的回合：summary 带 None（「只计请求数」，不冒充零）。
+    #[tokio::test]
+    async fn turn_without_usage_reports_none_on_the_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = FakeLlmClient::scripted(vec![FakeLlmClient::say("plain")]);
+        let manager = SessionManager::new(
+            Arc::new(client),
+            ToolRegistry::new(Duration::from_secs(10)),
+            SessionConfig::default(),
+        );
+        let handle = manager.create_session(dir.path().to_path_buf());
+        let mut rx = handle.subscribe();
+        handle.prompt("go").await;
+        let evs = tokio::time::timeout(Duration::from_secs(30), wait_terminal_and_summary(&mut rx))
+            .await
+            .unwrap();
+        let summaries: Vec<_> = evs
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::SessionSummary { usage, .. } => Some(usage.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0], None, "unreported turn must not fake zeros");
+    }
+
+    /// summary 的 `usage` 字段 serde 姿态：None 不上 wire、旧报文（无该键）
+    /// 反序列化为 None（协议演进规则 1）。
+    #[test]
+    fn session_summary_usage_field_is_additive() {
+        let none = AgentEvent::SessionSummary {
+            session_id: "s1".into(),
+            model_calls: 1,
+            tool_calls: 0,
+            turn_ms: 5,
+            usage: None,
+        };
+        let j = serde_json::to_value(&none).unwrap();
+        assert!(!j.as_object().unwrap().contains_key("usage"), "None 不上 wire");
+        let back: AgentEvent = serde_json::from_value(j).unwrap();
+        assert_eq!(back, none);
+        // 旧报文（无 usage 键）可读。
+        let old = serde_json::json!({
+            "type": "session_summary",
+            "session_id": "s1",
+            "model_calls": 1,
+            "tool_calls": 0,
+            "turn_ms": 5
+        });
+        let back: AgentEvent = serde_json::from_value(old).unwrap();
+        assert!(matches!(back, AgentEvent::SessionSummary { usage: None, .. }));
     }
 
     /// 记录每个 turn 请求的 model id 的 scripted client——验证「会话级模型

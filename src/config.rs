@@ -36,6 +36,59 @@ pub struct Config {
     /// per-backend 开关——目录缺失当空仓处理，投影面向「所有有落点的 backend」。
     #[serde(default)]
     pub skills: SkillsConfig,
+    /// 本地回合用量账本的保留期（add-local-usage-statistics D2，
+    /// `[usage_local]` 键族）。默认与 router 侧同值（30 天 / 20 万行 / 每小时），
+    /// 独立可配——与 `[router]` 的 usage_* 键互不引用。顶层无
+    /// `deny_unknown_fields`：旧二进制忽略本段、新二进制对段内未知键拒绝。
+    #[serde(default)]
+    pub usage_local: UsageLocalConfig,
+}
+
+/// `[usage_local]`：本地账本（usage_local.db）的保留期双闸 + 后台清理间隔。
+/// 三个键语义与 `[router]` 的 usage_* 同款；`0` 分别表示关闭对应闸/间隔。
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UsageLocalConfig {
+    /// 时间闸：早于该窗口（天）的本地记录被后台清理。`0` = 关闭时间闸。
+    #[serde(default = "default_usage_local_retention_days")]
+    pub retention_days: u64,
+    /// 行数闸：行数超过该上限时清理最旧记录。`0` = 关闭行数闸。
+    #[serde(default = "default_usage_local_max_rows")]
+    pub max_rows: u64,
+    /// 后台清理间隔（秒）。`0` = 关闭后台清理。
+    #[serde(default = "default_usage_local_prune_interval_secs")]
+    pub prune_interval_secs: u64,
+}
+
+impl Default for UsageLocalConfig {
+    fn default() -> Self {
+        Self {
+            retention_days: default_usage_local_retention_days(),
+            max_rows: default_usage_local_max_rows(),
+            prune_interval_secs: default_usage_local_prune_interval_secs(),
+        }
+    }
+}
+
+impl UsageLocalConfig {
+    /// 折算成 sink 的保留期策略（默认值与 router 侧 RetentionPolicy 同源）。
+    pub fn policy(&self) -> crate::usage_local::LocalRetentionPolicy {
+        crate::usage_local::LocalRetentionPolicy {
+            retention_days: self.retention_days,
+            max_rows: self.max_rows,
+            prune_interval_secs: self.prune_interval_secs,
+        }
+    }
+}
+
+fn default_usage_local_retention_days() -> u64 {
+    30
+}
+fn default_usage_local_max_rows() -> u64 {
+    200_000
+}
+fn default_usage_local_prune_interval_secs() -> u64 {
+    3600
 }
 
 /// 顶层 `[skills]` 段（add-agent-skills D5）：只有仓路径一个可选键。

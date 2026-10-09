@@ -1,11 +1,15 @@
 /**
- * Usage view（add-usage-statistics 4.2，design D5）：router 用量时序的独立
- * 看数面（`/usage`，可深链）。天/小时粒度切换、token 维度切换（总量/输入/
- * 输出/缓存）、窗口汇总数字、按模型多折线（`sebas-line-chart`，手写 SVG）。
+ * Usage view（add-usage-statistics 4.2；add-local-usage-statistics 5.1 双源化）：
+ * usage 时序的独立看数面（`/usage`，可深链）。天/小时粒度切换、token 维度
+ * 切换（总量/输入/输出/缓存）、**来源切换（全部/router/本地，默认全部）**、
+ * 窗口汇总数字、按模型多折线（`sebas-line-chart`，手写 SVG）。
  *
- * 两种空态**分开呈现**（spec 场景「router unreachable empty state」）：
- * - `ApiError.code === 'router_unreachable'` → 「router 不可达」通知（附
- *   cause，不是裸错误），提示与「没有数据」是两回事；
+ * 三种「缺数」形态**分开呈现**（spec 场景「router unreachable empty state」
+ * 「partial data notice under source=all」）：
+ * - `source=router` 且 `ApiError.code === 'router_unreachable'` → 「router
+ *   不可达」整页通知（附 cause，不是裸错误），与「没有数据」是两回事；
+ * - `source=all` 且载荷带 `router_cause`（router 缺席、本地照常出数）→
+ *   图表照常渲染本地数据 + 顶部**局部**警示条（不是整页空态）；
  * - 聚合成功但全零 → 「暂无用量数据」。
  *
  * 时区口径（design D3）：浏览器把本机偏移（分钟东偏）随请求下传，桶边界
@@ -22,6 +26,8 @@ import type { ChartSeries } from '../components/line-chart.js'
 
 type Granularity = 'day' | 'hour'
 type TokenDimension = 'total' | 'input' | 'output' | 'cache'
+/** 数据口径（add-local-usage-statistics D4/D6）：全部 = 本地 + router 合并。 */
+type UsageSource = 'all' | 'router' | 'local'
 
 const DIMENSIONS: { key: TokenDimension; label: string }[] = [
   { key: 'total', label: '总量' },
@@ -30,22 +36,32 @@ const DIMENSIONS: { key: TokenDimension; label: string }[] = [
   { key: 'cache', label: '缓存' },
 ]
 
+const SOURCES: { key: UsageSource; label: string }[] = [
+  { key: 'all', label: '全部' },
+  { key: 'router', label: 'router' },
+  { key: 'local', label: '本地' },
+]
+
 /** 浏览器本机的分钟东偏（design D3：`tz_offset` 随查询下传）。 */
 function localTzOffsetMinutes(): number {
   return -new Date().getTimezoneOffset()
 }
 
 /**
- * （fix-webui-qa-round13 4.1，观察-1）数据源口径说明（usage-statistics spec
- * 「数据源口径 SHALL 钉死为 router 用量记录」）：usage 页只呈现经 router
- * 的流量聚合（usage.db 单写者归 router，架构不动）；ACP 直连回合不经
- * router、不产生用量记录，其 token 计数呈现于会话头部，不入本视图。
- * 有数据与「无用量数据」空态同带此行——纯 ACP 窗口的空态读作**口径
- * 事实**（这里本来只看 router）而非故障或覆盖缺口。唯一出处在此常量，
- * 视图两处渲染同一份措辞。
+ * （add-local-usage-statistics 5.1）数据源口径说明（usage-statistics spec
+ * 「source selector」）：usage 页按来源出数——「全部」合并本地回合（不经
+ * router 的 ACP/native 直连回合）与经 router 的流量；「router」只计经
+ * router 的请求；「本地」只计不经 router 的回合。写入侧单源规则保证一条
+ * 请求只被一个源计数，全部口径不重算。唯一出处在此常量，视图两处渲染
+ * 同一份措辞。
  */
 export const USAGE_SOURCE_NOTE =
-  '用量统计来自 router 流量；ACP 直连会话不经 router、不产生用量记录，其 token 计数见各会话头部，不计入本页。'
+  '「全部」合并两类流量：不经 router 的回合（ACP/native 直连，记本地账）与经 router 的请求；「router」与「本地」各自单看一侧。一条请求只被一个源计数。'
+
+/** `source=all` 且 router 缺席时的局部警示条文案（cause 随行如实呈现）。 */
+export function partialNoticeText(routerCause: string): string {
+  return `router 部分不可达——当前「全部」口径只含本地数据（${routerCause}）`
+}
 
 /** 桶标签的人类可读形：天粒度原样（`YYYY-MM-DD`），小时粒度补成 `HH:00`。 */
 export function bucketLabel(bucket: string, granularity: Granularity): string {
@@ -145,9 +161,17 @@ export function detailRows(data: UsageTimeseries): string[][] {
 export class SebasUsage extends LitElement {
   @state() private granularity: Granularity = 'day'
   @state() private dimension: TokenDimension = 'total'
+  /** 数据口径（add-local-usage-statistics D6）：默认「全部」（合并）。 */
+  @state() private source: UsageSource = 'all'
   @state() private data: UsageTimeseries | null = null
   /** 「router 不可达」的结构化 cause；`null` = 可达。 */
   @state() private unreachableCause: string | null = null
+  /**
+   * （spec 场景「partial data notice under source=all」）`source=all` 且
+   * router 缺席时载荷携带的结构化 cause——**局部**警示条的数据源（本地
+   * 数据照常渲染），与整页不可达空态（`unreachableCause`）是两回事。
+   */
+  @state() private partialCause: string | null = null
   @state() private loading = true
   @state() private reloadSeq = 0
 
@@ -247,6 +271,28 @@ export class SebasUsage extends LitElement {
       .empty .source-note {
         margin: var(--sebas-space-2) 0 0;
       }
+      /* （add-local-usage-statistics 5.1）source=all 且 router 缺席的局部
+         警示条：醒目但非整页错误——本地数据照常在场。 */
+      .partial-notice {
+        display: flex;
+        gap: var(--sebas-space-2);
+        align-items: center;
+        background: var(--sebas-warn-soft, rgba(234, 179, 8, 0.12));
+        border: 1px solid var(--sebas-warn-border, rgba(234, 179, 8, 0.45));
+        border-radius: var(--sebas-radius-md);
+        color: var(--sebas-text, inherit);
+        font-size: 0.82rem;
+        padding: var(--sebas-space-2) var(--sebas-space-3);
+        margin: 0 0 var(--sebas-space-3);
+      }
+      .partial-notice .glyph {
+        color: var(--sebas-warn, #b45309);
+        display: inline-flex;
+        flex: none;
+      }
+      .empty .partial-notice {
+        margin: var(--sebas-space-2) 0 0;
+      }
       .reload {
         margin-left: auto;
       }
@@ -266,13 +312,19 @@ export class SebasUsage extends LitElement {
         granularity: this.granularity,
         days: this.granularity === 'day' ? 14 : undefined,
         tzOffset: localTzOffsetMinutes(),
+        source: this.source,
       })
       if (seq !== this.reloadSeq) return // 过期应答：已有更新的请求在途
       this.data = data
       this.unreachableCause = null
+      // （5.1）`source=all` 且 router 缺席：局部警示（本地数据照常渲染）；
+      // router 在场或单源响应不带该键。
+      this.partialCause =
+        this.source === 'all' ? (data.router_cause ?? null) : null
     } catch (e) {
       if (seq !== this.reloadSeq) return
       this.data = null
+      this.partialCause = null
       this.unreachableCause =
         e instanceof ApiError && e.code === 'router_unreachable'
           ? e.message
@@ -293,6 +345,13 @@ export class SebasUsage extends LitElement {
     void this.load()
   }
 
+  /** 来源切换 = 换参数重取（design D6：不换组件）。 */
+  private setSource(s: UsageSource): void {
+    if (this.source === s) return
+    this.source = s
+    void this.load()
+  }
+
   private setDimension(d: TokenDimension): void {
     // 维度切换零请求：API 一次给全四类明细（design D4）。
     this.dimension = d
@@ -301,6 +360,8 @@ export class SebasUsage extends LitElement {
   private renderUnreachable() {
     // 两种失败文案分开：结构化 router_unreachable cause = 「router 不可达」；
     // 其它失败（webui 自身不可达等）= 通用「加载失败」，不冒充 router 不可达。
+    // 显式 source=router 的整页空态点明「这一口径只看 router」；all 的降级
+    // 不走这里（载荷带 router_cause 走局部警示条）。
     const isRouter = (this.unreachableCause ?? '').startsWith('router_unreachable')
     return html`
       <section class="panel">
@@ -310,7 +371,9 @@ export class SebasUsage extends LitElement {
           <p class="hint">
             ${
               isRouter
-                ? '用量数据由 router 记录与聚合；当前 router 未在运行或无法连接，历史数据无从读取。'
+                ? this.source === 'router'
+                  ? '「router」口径的用量数据由 router 记录与聚合；当前 router 未在运行或无法连接，历史数据无从读取。可切换到「全部」或「本地」查看不经 router 的回合用量。'
+                  : 'router 未在运行或无法连接，聚合数据暂不可得。'
                 : ''
             }
             <br />
@@ -322,25 +385,45 @@ export class SebasUsage extends LitElement {
   }
 
   private renderNoData() {
+    const emptyHint: Record<UsageSource, string> = {
+      all: this.granularity === 'hour'
+        ? '今天（按本机时区）还没有任何用量记录（router 与本地账本都为空）。'
+        : '窗口内没有任何用量记录（router 与本地账本都为空）。',
+      router: this.granularity === 'hour'
+        ? '今天（按本机时区）还没有任何经 router 的请求。'
+        : '窗口内没有任何经 router 的请求。',
+      local: this.granularity === 'hour'
+        ? '今天（按本机时区）还没有任何本地（不经 router）回合。'
+        : '窗口内没有任何本地（不经 router）回合。',
+    }
     return html`
       <section class="panel">
         <div class="empty" role="status">
           <span class="glyph">${icon('usage', 20)}</span>
           <span class="title">暂无用量数据</span>
-          <p class="hint">
-            ${
-              this.granularity === 'hour'
-                ? '今天（按本机时区）还没有任何经 router 的请求。'
-                : '窗口内没有任何经 router 的请求。'
-            }
-          </p>
-          <!-- （fix-webui-qa-round13 4.1）口径说明随空态在场：纯 ACP 窗口
-               （router 用量记录为零）读作数据源口径事实，不伪装成 router
-               故障，也不渲染空图（spec 场景「纯 ACP 流量窗口呈现无数据
-               空态」）。 -->
+          <p class="hint">${emptyHint[this.source]}</p>
+          <!-- （5.1）source=all 且 router 缺席的空窗口：局部警示随行——
+               「为什么数字可能偏低」的缺席源事实，不是整页不可达。 -->
+          ${this.partialCause !== null ? this.renderPartialNotice() : ''}
+          <!-- 口径说明随空态在场：空窗口读作数据源口径事实，不伪装成
+               router 故障，也不渲染空图。 -->
           <p class="hint source-note" data-testid="usage-source-note">${USAGE_SOURCE_NOTE}</p>
         </div>
       </section>
+    `
+  }
+
+  /**
+   * （5.1，spec 场景「partial data notice under source=all」）`source=all`
+   * 且响应带 `router_cause` 的**局部**警示条：本地数据照常渲染，缺席的
+   * router 源如实点名——不是整页不可达空态。
+   */
+  private renderPartialNotice() {
+    return html`
+      <div class="partial-notice" role="status" data-testid="usage-partial-notice">
+        <span class="glyph">${icon('alert', 16)}</span>
+        <span>${partialNoticeText(this.partialCause ?? '')}</span>
+      </div>
     `
   }
 
@@ -357,6 +440,20 @@ export class SebasUsage extends LitElement {
       </header>
 
       <div class="controls">
+        <div class="seg" role="group" aria-label="数据来源">
+          <span class="dim-label">来源</span>
+          ${SOURCES.map(
+            (s) => html`
+              <button
+                aria-pressed=${this.source === s.key}
+                data-testid=${`source-${s.key}`}
+                @click=${() => this.setSource(s.key)}
+              >
+                ${s.label}
+              </button>
+            `,
+          )}
+        </div>
         <div class="seg" role="group" aria-label="粒度">
           <button
             aria-pressed=${this.granularity === 'day'}
@@ -404,9 +501,11 @@ export class SebasUsage extends LitElement {
           : isAllZero(this.data)
             ? this.renderNoData()
             : html`
-                <!-- （fix-webui-qa-round13 4.1，观察-1）数据源口径说明：
-                     摘要区上方一行，钉死「本页 = router 用量记录」。 -->
+                <!-- 数据源口径说明：摘要区上方一行，钉死来源口径语义。 -->
                 <p class="meta source-note" data-testid="usage-source-note">${USAGE_SOURCE_NOTE}</p>
+                <!-- （5.1）source=all 且 router 缺席：图表照常渲染本地数据
+                     + 局部警示条（区别于整页不可达空态）。 -->
+                ${this.partialCause !== null ? this.renderPartialNotice() : ''}
                 <div class="summary" data-testid="usage-summary">
                   <div class="stat">
                     <div class="num">${t!.requests}</div>

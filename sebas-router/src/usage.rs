@@ -40,33 +40,15 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
 use sebas_db::schema::TableSchema;
 use sebas_db::writer::{StateHandle, StateWriter};
 use sebas_schema_derive::{ActiveRecord, SchemaColumns};
 use tokio::sync::mpsc;
 
-/// 一次请求的用量记录。`key` 恒为空（无 per-key 身份；绝不记 token 本体）。
-/// `error` 留给路由侧失败（如 connect 502）；上游 4xx/5xx 不填 `error`（status
-/// 字段承载其错误语义）。token 字段为 `None` 表示本次未观测到该计数（如
-/// 解析失败、流被截断、或上游错误响应无 usage）。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct UsageRecord {
-    pub ts: String,
-    pub key: String,
-    pub protocol: String,
-    pub model: Option<String>,
-    pub provider: String,
-    pub upstream_model: Option<String>,
-    pub status: u16,
-    pub latency_ms: u64,
-    pub ttft_ms: Option<u64>,
-    pub input_tokens: Option<u64>,
-    pub output_tokens: Option<u64>,
-    pub cache_read_tokens: Option<u64>,
-    pub cache_creation_tokens: Option<u64>,
-    pub error: Option<String>,
-}
+/// 一次请求的用量记录（add-local-usage-statistics 1.1）：唯一定义已提升进
+/// 中立域层（design D3），此处原位再导出保住既有公开路径——wire 形状逐字
+/// 不变（ipc-protocol-home 兼容面不动）。
+pub use sebas_domain::usage::UsageRecord;
 
 /// `usage_records` 表的一行（一表一 struct，标准 CRUD 由 derive 生成）。
 ///

@@ -9,6 +9,7 @@ pub use anthropic::AnthropicMessagesClient;
 pub mod fake;
 
 use crate::message::{ContentBlock, Message};
+use sebas_domain::usage::TurnTokenUsage;
 
 /// 协议咨询常量（task 4.3，design N6 的「LlmConsult 常量组」）：注册面与
 /// 预算收尾的硬边界。常量必须被请求组装与预算逻辑真正消费，不做摆设。
@@ -74,6 +75,21 @@ pub enum StopReason {
 pub struct LlmTurn {
     pub content: Vec<ContentBlock>,
     pub stop_reason: StopReason,
+    /// 上游响应的 usage（add-local-usage-statistics 3.1）：Anthropic/OpenAI
+    /// 形状解析为中立类型（`sebas_domain::usage::TurnTokenUsage`）。全 `None`
+    /// = 上游未带 usage（调用方按「只计请求数」处理，不冒充零）。
+    pub usage: TurnTokenUsage,
+}
+
+impl LlmTurn {
+    /// 无 usage 的响应（fake 桩 / 未携带 usage 的上游）。
+    pub fn without_usage(content: Vec<ContentBlock>, stop_reason: StopReason) -> Self {
+        LlmTurn {
+            content,
+            stop_reason,
+            usage: TurnTokenUsage::default(),
+        }
+    }
 }
 
 /// LLM 错误。`terminal=true` 表示会话不可恢复（进程/协议层崩坏），

@@ -208,16 +208,15 @@ describe('sebas-usage view', () => {
     el.remove()
   })
 
-  // ── fix-webui-qa-round13 4.1（观察-1）：数据源口径钉死 ──
-  // usage 页 = router 用量记录呈现；页面 SHALL 以一行数据源说明交代口径
-  // （spec「数据源口径 SHALL 钉死为 router 用量记录」）。
+  // ── fix-webui-qa-round13 4.1（观察-1）→ add-local-usage-statistics 5.1 ──
+  // 数据源口径说明行：钉死来源切换语义（全部 = 本地 + router 合并）。
 
-  it('pins the data source with a router note line above the summary (round13 4.1)', async () => {
+  it('pins the data source with a note line above the summary (round13 4.1)', async () => {
     const el = await mount()
     const note = el.shadowRoot!.querySelector('[data-testid="usage-source-note"]')
     expect(note).toBeTruthy()
-    expect(note!.textContent).toContain('router', '说明行点名数据源 = router 流量')
-    expect(note!.textContent).toContain('ACP', '说明行交代 ACP 直连的去向（会话头部）')
+    expect(note!.textContent).toContain('router', '说明行点名 router 一侧')
+    expect(note!.textContent).toContain('ACP', '说明行交代 ACP 直连回合的口径（本地账）')
     el.remove()
   })
 
@@ -363,6 +362,123 @@ describe('sebas-usage view', () => {
     expect(text).toContain('4', '小时窗输入 tokens 重算')
     expect(text).not.toContain('14', '旧窗口数字不再驻留')
     expect(text).not.toContain('999', '漂移的顶层 totals 不上卡片')
+    el.remove()
+  })
+
+  // ── add-local-usage-statistics 5.1：来源切换与局部警示 ──────────────────
+
+  it('defaults to the all source and refetches with the switched source param', async () => {
+    const el = await mount()
+    // 缺省「全部」：首请求带 source=all，全部档处于按压态。
+    expect(apiMocks.usageTimeseries).toHaveBeenCalledWith(
+      expect.objectContaining({ source: 'all' }),
+    )
+    expect(
+      el.shadowRoot!
+        .querySelector<HTMLButtonElement>('[data-testid="source-all"]')!
+        .getAttribute('aria-pressed'),
+    ).toBe('true')
+
+    // 切「本地」→ 带新参数重取（spec 场景「source selector switches the
+    // aggregation」），按压态随行。
+    apiMocks.usageTimeseries.mockResolvedValue(fixture())
+    el.shadowRoot!.querySelector<HTMLButtonElement>('[data-testid="source-local"]')!.click()
+    await el.updateComplete
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(apiMocks.usageTimeseries).toHaveBeenCalledTimes(2)
+    expect(apiMocks.usageTimeseries).toHaveBeenLastCalledWith(
+      expect.objectContaining({ source: 'local' }),
+    )
+    expect(
+      el.shadowRoot!
+        .querySelector<HTMLButtonElement>('[data-testid="source-local"]')!
+        .getAttribute('aria-pressed'),
+    ).toBe('true')
+    expect(
+      el.shadowRoot!
+        .querySelector<HTMLButtonElement>('[data-testid="source-all"]')!
+        .getAttribute('aria-pressed'),
+    ).toBe('false')
+    el.remove()
+  })
+
+  it('shows a partial-data notice under source=all while local data still renders', async () => {
+    // spec 场景「partial data notice under source=all」：响应带 router_cause
+    // → 图表照常渲染本地数据 + 局部警示条（不是整页不可达空态）。
+    apiMocks.usageTimeseries.mockResolvedValue(
+      fixture({ router_cause: 'router_unreachable: connection refused' }),
+    )
+    const el = await mount()
+    const text = el.shadowRoot!.textContent ?? ''
+    expect(text).toContain('router 部分不可达', '局部警示条在场')
+    expect(text).toContain(
+      'router_unreachable: connection refused',
+      '缺席源 cause 如实随行',
+    )
+    expect(text).not.toContain('router 不可达', '不是整页不可达空态（「部分不可达」不算）')
+    expect(el.shadowRoot!.querySelector('[data-testid="usage-partial-notice"]')).toBeTruthy()
+    // 本地数据照常渲染：图表与汇总卡都在。
+    const chart = el.shadowRoot!.querySelector('sebas-line-chart')!
+    expect(chart.series).toHaveLength(2)
+    expect(el.shadowRoot!.querySelector('[data-testid="usage-summary"]')).toBeTruthy()
+    el.remove()
+  })
+
+  it('the partial notice is absent when the router is present (no router_cause)', async () => {
+    const el = await mount()
+    expect(
+      el.shadowRoot!.querySelector('[data-testid="usage-partial-notice"]'),
+    ).toBeNull()
+    expect(el.shadowRoot!.querySelector('sebas-line-chart')).toBeTruthy()
+    el.remove()
+  })
+
+  it('the all-source empty window with router_cause keeps no-data plus the partial notice', async () => {
+    // 本地也为零的「全部」窗口：无数据空态 + 局部警示随行（缺席源事实），
+    // 不伪装成整页不可达、不渲染空图。
+    apiMocks.usageTimeseries.mockResolvedValue(
+      fixture({
+        buckets: zeroBuckets(),
+        totals: {
+          model: 'total',
+          requests: 0,
+          input_tokens: 0,
+          output_tokens: 0,
+          cache_read_tokens: 0,
+          cache_creation_tokens: 0,
+        },
+        router_cause: 'router_unreachable: router not configured',
+      }),
+    )
+    const el = await mount()
+    const text = el.shadowRoot!.textContent ?? ''
+    expect(text).toContain('暂无用量数据')
+    expect(el.shadowRoot!.querySelector('[data-testid="usage-partial-notice"]')).toBeTruthy()
+    expect(text).toContain('router 部分不可达')
+    expect(el.shadowRoot!.querySelector('sebas-line-chart')).toBeNull('不渲染无刻度的空图')
+    el.remove()
+  })
+
+  it('source=router keeps the full-page unreachable empty state (distinct from partial)', async () => {
+    // spec 场景「router unreachable empty state」：显式 router 口径 + 不可达
+    // → 整页「router 不可达」通知（不是局部警示条）。
+    apiMocks.usageTimeseries.mockRejectedValue(
+      new ApiError(503, 'router_unreachable: connection refused', 'router_unreachable'),
+    )
+    const el = await mount()
+    el.shadowRoot!.querySelector<HTMLButtonElement>('[data-testid="source-router"]')!.click()
+    await el.updateComplete
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    const text = el.shadowRoot!.textContent ?? ''
+    expect(text).toContain('router 不可达')
+    expect(text).toContain('router_unreachable: connection refused', 'cause 如实呈现')
+    expect(text).not.toContain('暂无用量数据', '两种空态必须分开')
+    expect(
+      el.shadowRoot!.querySelector('[data-testid="usage-partial-notice"]'),
+    ).toBeNull('整页空态不走局部警示条')
+    expect(el.shadowRoot!.querySelector('sebas-line-chart')).toBeNull()
     el.remove()
   })
 })

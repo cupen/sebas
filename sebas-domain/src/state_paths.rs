@@ -39,8 +39,8 @@
 //! # 分层规则（两级，语义不变）
 //!
 //! ```text
-//! 第一级（写入进程）：core → settings.db / projects.db；webui → auth.db；
-//!                     router → usage.db；node → 无库
+//! 第一级（写入进程）：core → settings.db / projects.db / usage_local.db；
+//!                     webui → auth.db；router → usage.db；node → 无库
 //! 第二级（core 内，增长特征）：
 //!   settings.db  有界：providers / model_aliases / settings
 //!   projects.db  增长：projects / session_map（+ 后续会话与消息）
@@ -88,6 +88,9 @@ pub enum Database {
     Auth,
     /// router：用量库（存储形态归 `persist-router-usage`；本表只定落点）。
     Usage,
+    /// core：本地回合用量库（add-local-usage-statistics D2：不经 router 的
+    /// 回合落账；写入者是 core，router 绝不打开——与 `Usage` 平行同构）。
+    UsageLocal,
 }
 
 impl Database {
@@ -98,10 +101,11 @@ impl Database {
             Database::Projects => "projects.db",
             Database::Auth => "auth.db",
             Database::Usage => "usage.db",
+            Database::UsageLocal => "usage_local.db",
         }
     }
 
-    /// 逐库显式覆盖变量（single-state-dir D8：`SEBAS_STATE_DB` 由四个逐库
+    /// 逐库显式覆盖变量（single-state-dir D8：`SEBAS_STATE_DB` 由逐库
     /// 变量取代）。
     pub fn override_var(self) -> &'static str {
         match self {
@@ -110,6 +114,7 @@ impl Database {
             // 既有变量名原样保留（add-webui-multiuser-rbac 起就是它）。
             Database::Auth => "SEBAS_WEBUI_AUTH_DB",
             Database::Usage => "SEBAS_ROUTER_USAGE_DB",
+            Database::UsageLocal => "SEBAS_USAGE_LOCAL_DB",
         }
     }
 
@@ -131,6 +136,9 @@ pub enum StatePath {
     AuthDb,
     /// router 用量库。
     UsageDb,
+    /// core 本地回合用量库（add-local-usage-statistics：不经 router 的回合
+    /// 落账；写入者 = core，`SEBAS_USAGE_LOCAL_DB` 显式覆盖）。
+    UsageLocalDb,
     /// WebUI 会话归档登记册（含完整转录）。
     Archive,
     /// WebUI 项目注册表逻辑名。`migrate-project-registry` 后注册表落在
@@ -181,6 +189,7 @@ impl StatePath {
             StatePath::ProjectsDb => Some(Database::Projects),
             StatePath::AuthDb => Some(Database::Auth),
             StatePath::UsageDb => Some(Database::Usage),
+            StatePath::UsageLocalDb => Some(Database::UsageLocal),
             StatePath::Archive
             | StatePath::ProjectRegistry
             | StatePath::NodeRegistry
@@ -204,6 +213,7 @@ impl StatePath {
             StatePath::ProjectsDb => Database::Projects.file_name(),
             StatePath::AuthDb => Database::Auth.file_name(),
             StatePath::UsageDb => Database::Usage.file_name(),
+            StatePath::UsageLocalDb => Database::UsageLocal.file_name(),
             StatePath::Archive => "archive.json",
             StatePath::ProjectRegistry => "projects.json",
             StatePath::NodeRegistry => "nodes.json",
@@ -229,6 +239,7 @@ impl StatePath {
             StatePath::ProjectsDb => Some(Database::Projects.override_var()),
             StatePath::AuthDb => Some(Database::Auth.override_var()),
             StatePath::UsageDb => Some(Database::Usage.override_var()),
+            StatePath::UsageLocalDb => Some(Database::UsageLocal.override_var()),
             StatePath::Archive => Some("SEBAS_ARCHIVE_PATH"),
             // 退休：注册表落 projects.db，没有 projects.json 可覆盖。
             StatePath::ProjectRegistry => None,
@@ -338,6 +349,7 @@ mod tests {
                 "SEBAS_PROJECTS_DB",
                 "SEBAS_WEBUI_AUTH_DB",
                 "SEBAS_ROUTER_USAGE_DB",
+                "SEBAS_USAGE_LOCAL_DB",
                 "SEBAS_ARCHIVE_PATH",
                 RETIRED_PROJECTS_PATH_VAR,
                 "SEBAS_SERVICES_FILE",
@@ -373,6 +385,7 @@ mod tests {
         StatePath::ProjectsDb,
         StatePath::AuthDb,
         StatePath::UsageDb,
+        StatePath::UsageLocalDb,
         StatePath::Archive,
         StatePath::ProjectRegistry,
         StatePath::NodeRegistry,
@@ -416,6 +429,12 @@ mod tests {
                 "usage.db",
                 Some("SEBAS_ROUTER_USAGE_DB"),
             ),
+            (
+                StatePath::UsageLocalDb,
+                Some(Database::UsageLocal),
+                "usage_local.db",
+                Some("SEBAS_USAGE_LOCAL_DB"),
+            ),
             (StatePath::Archive, None, "archive.json", Some("SEBAS_ARCHIVE_PATH")),
             (StatePath::ProjectRegistry, None, "projects.json", None),
             // 节点注册表的显式覆盖是配置键 [node_link] registry_file，
@@ -451,12 +470,13 @@ mod tests {
             assert_eq!(path.rel_path(), *rel, "{path:?} 相对路径");
             assert_eq!(path.override_var(), *var, "{path:?} 覆盖变量");
         }
-        // 逐库覆盖变量两两不同（single-state-dir D8：四库各一个，互不串库）。
+        // 逐库覆盖变量两两不同（single-state-dir D8：逐库各一个，互不串库）。
         let vars = [
             Database::Settings,
             Database::Projects,
             Database::Auth,
             Database::Usage,
+            Database::UsageLocal,
         ]
         .map(|db| db.override_var());
         for (i, v) in vars.iter().enumerate() {
@@ -550,6 +570,42 @@ mod tests {
         let settings = Database::Settings.resolve();
         assert!(settings.starts_with(pin.path()), "{settings:?}");
         assert_eq!(settings, pin.path().join("settings.db"));
+    }
+
+    /// add-local-usage-statistics 2.1：本地用量库的落点派生与 env 覆盖——
+    /// `SEBAS_HOME` 钉住即落在 home 内（spec「store lands inside sebas
+    /// home」），`SEBAS_USAGE_LOCAL_DB` 只改自己那一行（与 router 的
+    /// usage.db 互不牵连）。
+    #[test]
+    fn usage_local_db_lands_in_home_and_env_override_redirects_it() {
+        let _g = EnvGuard::clean();
+        let pin = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(HOME_VAR, pin.path()) };
+        // 默认派生：<home>/usage_local.db；与 router 的 usage.db 是两个文件。
+        assert_eq!(
+            StatePath::UsageLocalDb.resolve(),
+            pin.path().join("usage_local.db")
+        );
+        assert_eq!(Database::UsageLocal.file_name(), "usage_local.db");
+        assert_ne!(
+            Database::UsageLocal.resolve(),
+            Database::Usage.resolve(),
+            "本地账本绝不与 router 的 usage.db 同文件"
+        );
+        // 显式覆盖重定向；其余落点留在钉住的 home 内。
+        unsafe {
+            std::env::set_var(
+                "SEBAS_USAGE_LOCAL_DB",
+                elsewhere.path().join("my-local-usage.db"),
+            )
+        };
+        assert_eq!(
+            StatePath::UsageLocalDb.resolve(),
+            elsewhere.path().join("my-local-usage.db")
+        );
+        let usage = StatePath::UsageDb.resolve();
+        assert!(usage.starts_with(pin.path()), "{usage:?}");
     }
 
     /// 收编落点的逐落点 env 覆盖（任务 1.1）：SEBAS_CORE_SOCKET /
@@ -796,6 +852,7 @@ mod tests {
             ("projects.db", "projects.db"),
             ("auth.db", "auth.db"),
             ("usage.db", "usage.db"),
+            ("usage_local.db", "usage_local.db"),
             ("archive.json", "archive.json"),
             ("projects.json", "projects.json"),
             ("nodes.json", "nodes.json"),

@@ -163,8 +163,9 @@ pub async fn serve(
     // 兼容入口不带节点管理面（测试与既有调用方）。生产路径（core）走带句柄的
     // `serve_bound`，让节点管理入口与监听共享同一份注册表写者。
     // router_listen = None：兼容入口不承载 usage 反代（add-usage-statistics）。
+    // local_usage = None：兼容入口不承载本地用量聚合（add-local-usage-statistics）。
     serve_bound(
-        backend, router, path, secret, listener, None, None, None, shutdown,
+        backend, router, path, secret, listener, None, None, None, None, shutdown,
     )
     .await
 }
@@ -187,6 +188,10 @@ pub async fn serve_bound(
     // （add-usage-statistics 2.2）config `[router] listen`（如 "127.0.0.1:8787"）：
     // `None` = router 未随部署启用——usage 反代请求如实回不可达。
     router_listen: Option<String>,
+    // （add-local-usage-statistics 2.1）本地用量库查询句柄：`source=local|all`
+    // 的聚合 SELECT 在其上执行（与写入共用单写线程）。`None` = 账本未装配
+    // （兼容入口/测试装配）——local/all 如实回全零窗口而不是报错。
+    local_usage: Option<sebas_db::writer::StateHandle>,
     shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
     info!(
@@ -211,10 +216,11 @@ pub async fn serve_bound(
                 let node_link = node_link.clone();
                 let projection = projection.clone();
                 let router_listen = router_listen.clone();
+                let local_usage = local_usage.clone();
                 let mut close_rx = close_rx.clone();
                 tokio::spawn(async move {
                     tokio::select! {
-                        r = handle_connection(stream, backend, router, secret, node_link, projection, router_listen) => {
+                        r = handle_connection(stream, backend, router, secret, node_link, projection, router_listen, local_usage) => {
                             if let Err(e) = r {
                                 warn!(?e, "core channel connection failed");
                             }
@@ -321,6 +327,8 @@ async fn handle_connection(
     projection: Option<Arc<crate::node_link::RemoteProjection>>,
     // （add-usage-statistics）config `[router] listen`；None = router 未启用。
     router_listen: Option<String>,
+    // （add-local-usage-statistics）本地用量库查询句柄；None = 账本未装配。
+    local_usage: Option<sebas_db::writer::StateHandle>,
 ) -> Result<()> {
     if !peer_uid_ok(&stream) {
         // 5.2: reject before reading anything.
@@ -387,9 +395,16 @@ async fn handle_connection(
                 return serve_state_subscription(router, writer).await;
             }
             other => {
-                let resp =
-                    dispatch(&backend, &router, &node_link, &projection, router_listen.as_deref(), other)
-                        .await;
+                let resp = dispatch(
+                    &backend,
+                    &router,
+                    &node_link,
+                    &projection,
+                    router_listen.as_deref(),
+                    local_usage.as_ref(),
+                    other,
+                )
+                .await;
                 write_response(&mut writer, &resp).await?;
             }
         }
@@ -902,6 +917,8 @@ async fn dispatch(
     projection: &Option<Arc<crate::node_link::RemoteProjection>>,
     // （add-usage-statistics）config `[router] listen`；None = router 未启用。
     router_listen: Option<&str>,
+    // （add-local-usage-statistics）本地用量库查询句柄；None = 账本未装配。
+    local_usage: Option<&sebas_db::writer::StateHandle>,
     req: CoreChannelRequest,
 ) -> CoreChannelResponse {
     match req {
@@ -1385,16 +1402,19 @@ async fn dispatch(
             }
         }
         CoreChannelRequest::UsageTimeseries {
+            source,
             granularity,
             days,
             tz_offset,
         } => {
-            // （add-usage-statistics 2.2）usage 聚合的 core 分支：loopback
-            // HTTP 反代 router admin（地址 = config `[router] listen`，Bearer
-            // 控制密钥，5s 短超时）。router 未启用 / 拒绝 / 超时 → 结构化
-            // cause（`router_unreachable` 前缀）；router 的非 200 应答按原
-            // 状态透传（参数 400 原样到达浏览器）。聚合查询是 router 侧只读
-            // SELECT，绝不影响本通道其余请求（D7）。
+            // （add-usage-statistics 2.2 / add-local-usage-statistics 4.1）usage
+            // 聚合的 core 分支：`source=router` 走既有 loopback 反代（地址 =
+            // config `[router] listen`，Bearer 控制密钥，5s 短超时；不可达 →
+            // 结构化 cause）；`source=local` 纯本地聚合；`source=all` 本地聚合
+            // + 尽力反代合并，router 不可达**仍 200**（响应带 `router_cause`
+            // 如实标注缺席源，本地数据照常返回——降级不拖垮，design D4）。
+            // 编排单点在 `usage_local::usage_timeseries_outcome`（与内嵌 webui
+            // 后端同源）；聚合查询是只读 SELECT，绝不影响本通道其余请求。
             if !sebas_router::usage_query::Granularity::from_wire(&granularity)
                 .is_some_and(|g| g.as_str() == granularity)
             {
@@ -1406,28 +1426,46 @@ async fn dispatch(
                     }),
                 };
             }
-            let Some(listen) = router_listen else {
-                return CoreChannelResponse::Rejected {
-                    rejection: SessionRejection::Unavailable {
-                        cause: crate::router_admin::ROUTER_NOT_CONFIGURED_CAUSE.to_string(),
-                    },
+            if !crate::usage_local::usage_source::is_valid(&source) {
+                // 非法 source 同形 400（spec：非法 source 400）。
+                return CoreChannelResponse::UsageTimeseries {
+                    status: 400,
+                    payload: serde_json::json!({
+                        "error": format!("invalid source {source:?}: expected \"router\", \"local\" or \"all\"")
+                    }),
                 };
+            }
+            let params = match sebas_router::usage_query::parse_params(
+                Some(&granularity),
+                Some(&days.to_string()),
+                Some(&tz_offset.to_string()),
+            ) {
+                Ok(p) => p,
+                Err(e) => {
+                    return CoreChannelResponse::UsageTimeseries {
+                        status: 400,
+                        payload: serde_json::json!({ "error": e.to_string() }),
+                    };
+                }
             };
-            match crate::router_admin::fetch_usage_timeseries(listen, &granularity, days, tz_offset)
-                .await
+            match crate::usage_local::usage_timeseries_outcome(
+                local_usage,
+                router_listen.as_deref(),
+                &source,
+                params,
+                chrono::Utc::now(),
+            )
+            .await
             {
-                Ok(payload) => CoreChannelResponse::UsageTimeseries {
-                    status: 200,
-                    payload,
-                },
-                Err(crate::router_admin::UsageProxyError::RouterError { status, body }) => {
+                crate::usage_local::UsageQueryOutcome::Ok(payload) => {
+                    CoreChannelResponse::UsageTimeseries { status: 200, payload }
+                }
+                crate::usage_local::UsageQueryOutcome::RouterError { status, body } => {
                     CoreChannelResponse::UsageTimeseries { status, payload: body }
                 }
-                Err(e @ crate::router_admin::UsageProxyError::Unreachable { .. }) => {
+                crate::usage_local::UsageQueryOutcome::RouterUnreachable { cause } => {
                     CoreChannelResponse::Rejected {
-                        rejection: SessionRejection::Unavailable {
-                            cause: e.cause(),
-                        },
+                        rejection: SessionRejection::Unavailable { cause },
                     }
                 }
             }
@@ -1654,7 +1692,9 @@ mod tests {
             &None,
             &None,
             None,
+            None,
             CoreChannelRequest::UsageTimeseries {
+                source: "router".into(),
                 granularity: "day".into(),
                 days: 14,
                 tz_offset: 0,
@@ -1679,7 +1719,9 @@ mod tests {
             &None,
             &None,
             Some("127.0.0.1:1"),
+            None,
             CoreChannelRequest::UsageTimeseries {
+                source: "router".into(),
                 granularity: "week".into(),
                 days: 14,
                 tz_offset: 0,
@@ -1697,6 +1739,34 @@ mod tests {
             other => panic!("expected UsageTimeseries 400, got {other:?}"),
         }
 
+        // （add-local-usage-statistics 4.1）非法 source 同形 400：词表封闭
+        // （router|local|all），不落到取数端（否则会被按 all 处理）。
+        let resp = dispatch(
+            &backend,
+            &router,
+            &None,
+            &None,
+            Some("127.0.0.1:1"),
+            None,
+            CoreChannelRequest::UsageTimeseries {
+                source: "everything".into(),
+                granularity: "day".into(),
+                days: 14,
+                tz_offset: 0,
+            },
+        )
+        .await;
+        match resp {
+            CoreChannelResponse::UsageTimeseries { status, payload } => {
+                assert_eq!(status, 400);
+                assert!(
+                    payload["error"].as_str().unwrap().contains("source"),
+                    "400 点名非法 source: {payload}"
+                );
+            }
+            other => panic!("expected UsageTimeseries 400, got {other:?}"),
+        }
+
         // 死端口（listen 在场但无人监听）→ promptly 返回不可达 cause。
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -1708,7 +1778,9 @@ mod tests {
             &None,
             &None,
             Some(&format!("127.0.0.1:{port}")),
+            None,
             CoreChannelRequest::UsageTimeseries {
+                source: "router".into(),
                 granularity: "day".into(),
                 days: 14,
                 tz_offset: 0,

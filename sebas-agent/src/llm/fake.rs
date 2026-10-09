@@ -52,12 +52,12 @@ impl FakeLlmClient {
     }
 
     fn text_turn(text: &str) -> LlmTurn {
-        LlmTurn {
-            content: vec![ContentBlock::Text {
+        LlmTurn::without_usage(
+            vec![ContentBlock::Text {
                 text: text.to_string(),
             }],
-            stop_reason: crate::llm::StopReason::EndTurn,
-        }
+            crate::llm::StopReason::EndTurn,
+        )
     }
 
     /// 便捷构造：一段文本 turn。
@@ -65,10 +65,23 @@ impl FakeLlmClient {
         Self::text_turn(text)
     }
 
+    /// 便捷构造：一段文本 turn + 上报的 usage（add-local-usage-statistics
+    /// 3.1 的会话级测试数据源）。
+    pub fn say_with_usage(text: &str, input: u64, output: u64) -> LlmTurn {
+        LlmTurn {
+            usage: sebas_domain::usage::TurnTokenUsage {
+                input_tokens: Some(input),
+                output_tokens: Some(output),
+                ..Default::default()
+            },
+            ..Self::text_turn(text)
+        }
+    }
+
     /// 便捷构造：一段文本 + 多个工具调用的 turn（stop_reason = ToolUse）。
     pub fn call_tools(calls: Vec<(&str, &str, serde_json::Value)>) -> LlmTurn {
-        LlmTurn {
-            content: calls
+        LlmTurn::without_usage(
+            calls
                 .into_iter()
                 .map(|(id, name, input)| ContentBlock::ToolUse {
                     id: id.to_string(),
@@ -76,8 +89,8 @@ impl FakeLlmClient {
                     input,
                 })
                 .collect(),
-            stop_reason: crate::llm::StopReason::ToolUse,
-        }
+            crate::llm::StopReason::ToolUse,
+        )
     }
 }
 
@@ -99,10 +112,9 @@ impl crate::llm::LlmClient for FakeLlmClient {
                         ))
                     })?
                 }
-                Mode::Stateful(f) => LlmTurn {
-                    content: f(&req.messages),
-                    stop_reason: crate::llm::StopReason::EndTurn,
-                },
+                Mode::Stateful(f) => {
+                    LlmTurn::without_usage(f(&req.messages), crate::llm::StopReason::EndTurn)
+                }
             }
         };
         if self.emit_deltas {
@@ -134,14 +146,14 @@ mod tests {
     async fn scripted_drives_a_two_round_conversation() {
         let client = FakeLlmClient::scripted(vec![
             FakeLlmClient::say("checking"),
-            LlmTurn {
-                content: vec![ContentBlock::ToolUse {
+            LlmTurn::without_usage(
+                vec![ContentBlock::ToolUse {
                     id: "t1".into(),
                     name: "bash".into(),
                     input: serde_json::json!({"command": "ls"}),
                 }],
-                stop_reason: StopReason::ToolUse,
-            },
+                StopReason::ToolUse,
+            ),
         ]);
         let events = Arc::new(std::sync::Mutex::new(Vec::new()));
         let e2 = events.clone();

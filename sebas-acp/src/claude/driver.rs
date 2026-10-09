@@ -1262,7 +1262,10 @@ pub(crate) fn map_message(
                     }]
                 }
             } else {
-                let mut events = vec![AcpEvent::Finished { session_id: sid() }];
+                // 结算点在引擎的 Finished 臂、消费回合累计器——usage 必须
+                // 先于 Finished 到达，否则累计随收尾清零，本回合 token 落
+                // 不进本地账本（add-local-usage-statistics 缺陷修复）。
+                let mut events = vec![];
                 if let Some(usage) = &r.usage {
                     let input = usage.get("input_tokens").and_then(|v| v.as_u64());
                     let output = usage.get("output_tokens").and_then(|v| v.as_u64());
@@ -1277,6 +1280,7 @@ pub(crate) fn map_message(
                         },
                     });
                 }
+                events.push(AcpEvent::Finished { session_id: sid() });
                 events
             }
         }
@@ -2400,8 +2404,9 @@ mod tests {
         let m: Message = serde_json::from_value(v).expect("result parses");
         let evts = map_message("s1", &mut names, &m);
         assert_eq!(evts.len(), 2);
-        assert!(matches!(&evts[0], AcpEvent::Finished { .. }));
-        match &evts[1] {
+        // usage 必须先于 Finished：引擎在 Finished 臂结算本地账本行，
+        // 后到的 usage 会落进孤儿累计器被丢弃。
+        match &evts[0] {
             AcpEvent::UsageUpdate { session_id, usage } => {
                 assert_eq!(session_id, "s1");
                 assert_eq!(usage.input_tokens, Some(200));
@@ -2410,6 +2415,7 @@ mod tests {
             }
             _ => panic!("expected UsageUpdate"),
         }
+        assert!(matches!(&evts[1], AcpEvent::Finished { .. }));
     }
 
     #[test]

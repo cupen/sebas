@@ -373,6 +373,29 @@ pub struct DispatchHandle {
     /// restore 链路（session_id 不变的场景），幸存者只覆盖同进程内的
     /// crash→resume 窗口。
     usage_survivors: Arc<tokio::sync::Mutex<HashMap<ChannelKey, (crate::card_state::CardUsage, bool)>>>,
+    /// （add-local-usage-statistics 2.3）**本回合** usage 累计器
+    /// （routing session_id → 累计）：`UsageUpdate` 逐帧累加（四类 token，
+    /// None 保 None——「从未上报」不冒充零），回合终态（Finished / 回合收尾
+    /// 的 Error）时结算为**恰好一行**经 [`Self::usage_recorder`]
+    /// 交本地账本。开轮（`seed_card`）重置并记起点（latency 数据源）。
+    /// 纯内存、随结算消费。
+    turn_usage: Arc<tokio::sync::Mutex<HashMap<String, TurnUsageAccum>>>,
+    /// （add-local-usage-statistics 2.3）本地落账钩子（core 装配时注入；
+    /// `None` = 未接线，结算零动作）。钩子必须非阻塞（core 侧实现是
+    /// 有界通道的 `try_send`——满载只丢统计，绝不阻塞事件流）。
+    usage_recorder: std::sync::RwLock<Option<UsageRecorderHook>>,
+}
+
+/// 本地落账钩子形状：回合结算时收到恰好一条记录（design D5）。
+pub type UsageRecorderHook = std::sync::Arc<dyn Fn(sebas_domain::usage::UsageRecord) + Send + Sync>;
+
+/// 一个回合的 usage 累计（`turn_usage` 的行）。
+#[derive(Debug, Default)]
+struct TurnUsageAccum {
+    /// 开轮时刻（`seed_card` 盖戳；结算时折算 latency_ms）。
+    started: Option<std::time::Instant>,
+    /// 四类 token + model 的中立累计（None 保 None）。
+    usage: sebas_domain::usage::TurnTokenUsage,
 }
 
 impl Clone for DispatchHandle {
@@ -401,6 +424,13 @@ impl Clone for DispatchHandle {
                 pending_model_switches: self.pending_model_switches.clone(),
                 checkpoints: self.checkpoints.clone(),
             usage_survivors: self.usage_survivors.clone(),
+            turn_usage: self.turn_usage.clone(),
+            usage_recorder: std::sync::RwLock::new(
+                self.usage_recorder
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone(),
+            ),
         }
     }
 }
@@ -482,6 +512,8 @@ impl DispatchHandle {
                 pending_model_switches: Arc::new(RwLock::new(HashMap::new())),
                 checkpoints: checkpoint::CheckpointRegistry::default(),
                 usage_survivors: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+                turn_usage: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+                usage_recorder: std::sync::RwLock::new(None),
             },
             rx,
         )
@@ -1341,6 +1373,16 @@ impl DispatchHandle {
                 // emit_turn_card 开轮都经此）——停滞时钟以本轮开轮时刻起算，
                 // 排队回合不继承上一回合的等待时长。
                 self.stall.touch(&session_id).await;
+                // （add-local-usage-statistics 2.3）本地落账的开轮盖戳：重置
+                // 本回合累计并记起点（结算行的 latency 数据源）。非空 prompt
+                // = 真实回合开轮（与停滞时钟同一判定）。
+                self.turn_usage.lock().await.insert(
+                    session_id.clone(),
+                    TurnUsageAccum {
+                        started: Some(std::time::Instant::now()),
+                        usage: Default::default(),
+                    },
+                );
                 // 幂等语义：只有真正新建（而非重入保留）才记录 prompt，防止
                 // 重入把同一条 prompt 重复追加进 transcript。
                 self.transcript_push(&session_id, TurnEntry::prompt(0, user_prompt.clone()))
@@ -1476,6 +1518,23 @@ impl DispatchHandle {
                         .with_failure_class(failure_class::GENERIC);
                     self.transcript_push(session_id, entry).await;
                 }
+                // （add-local-usage-statistics 2.3）回合收尾型 Error 的本地
+                // 落账：非终态 Error 收尾回合（SEED/WORKING → DONE 的同源
+                // 判定不变）、terminal Error 会话崩坏——都记 500。带「模式/
+                // 模型未变」标记的契约错误不是回合收尾，绝不结算（转录条目
+                // 语义与迁移前逐字一致：只跳过 MODE 标记）。结算消费累计器：
+                // pump 路径随后的 Finished 配对帧不再产第二行（Error+Finished
+                // 配对恰好一行）。
+                if !message.contains(MODE_UNCHANGED_MARKER)
+                    && !message.contains(sebas_acp::MODEL_UNCHANGED_MARKER)
+                {
+                    self.settle_turn_usage(
+                        session_id,
+                        sebas_domain::usage::TURN_STATUS_FAILED,
+                        Some(message.clone()),
+                    )
+                    .await;
+                }
             }
             AcpEvent::ThinkingDelta { delta, .. } => {
                 if cfg.thinking != crate::cards::ThinkingDisplay::Hide {
@@ -1563,6 +1622,16 @@ impl DispatchHandle {
                 // 要等 30s 周期拍，窗口内强杀丢上一回合的账（开轮 reseed 又
                 // 会先动卡态）。
                 self.checkpoint_spawn(session_id.to_string());
+                // （add-local-usage-statistics 2.3）本地落账：Finished = 回合
+                // 完成的结算点——被取消回合记 499（中性取消），正常完成记
+                // 200。结算消费累计器（收尾型 Error 已结算的配对帧在此空转，
+                // 恰好一行）。
+                let status = if stop_entry {
+                    sebas_domain::usage::TURN_STATUS_CANCELLED
+                } else {
+                    sebas_domain::usage::TURN_STATUS_FINISHED
+                };
+                self.settle_turn_usage(session_id, status, None).await;
             }
             _ => {}
         }
@@ -1573,6 +1642,12 @@ impl DispatchHandle {
         // 后的首次 usage 上报到达时，把 key 键幸存的历史累计并入卡态——新
         // 子进程的回合在保留值之上继续累计（`+=` 基线即历史值），单调不回
         // 退。幸存者取走即弃（一次性合并）。
+        // （add-local-usage-statistics 2.3）本回合 usage 累计：与卡片累计
+        // （usage_survivor / st.usage）并行——本地账本按「逐回合一行」在结算
+        // 时取这里。累计是纯内存旁路，绝不影响 FSM/卡片/事件流。
+        if let AcpEvent::UsageUpdate { usage, .. } = event {
+            self.accumulate_turn_usage(session_id, usage).await;
+        }
         let usage_survivor = if matches!(event, AcpEvent::UsageUpdate { .. }) {
             match self.map.lookup_key_by_session(session_id).await {
                 Some(key) => self
@@ -1876,6 +1951,10 @@ impl DispatchHandle {
     pub async fn drop_card(&self, session_id: &str) {
         self.stash_usage_survivor(session_id).await;
         self.card_states.drop(session_id).await;
+        // （add-local-usage-statistics 2.3）会话拆除 = 未结算回合的累计器
+        // 条目一并丢弃（卡态消失 → 无人再结算它；防复用 session_id 继承
+        // 陈旧累计）。已结算路径早已取走条目，此处多为空操作。
+        self.turn_usage.lock().await.remove(session_id);
     }
 
     /// （fix-webui-qa-round12 2.1）把会话累计 usage 登记进 key 键幸存者表
@@ -2878,6 +2957,54 @@ impl DispatchHandle {
     /// turn_stall_timeout`，秒；0 = 关闭）。
     pub fn set_turn_stall_timeout(&self, secs: u64) {
         self.stall.set_timeout_secs(secs);
+    }
+
+    /// （add-local-usage-statistics 2.3）本地落账钩子装配点：core 在 run.rs
+    /// 注入——ACP 回合结算路径（与 `UsageUpdate` 事件同源）逐回合把一行记录
+    /// 交给 core 的本地账本 sink。幂等覆盖（重复 set 以最后一次为准）。
+    pub fn set_usage_recorder(&self, hook: UsageRecorderHook) {
+        *self
+            .usage_recorder
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Some(hook);
+    }
+
+    /// `UsageUpdate` 帧的本回合累计（apply_event 单点调用）。逐字段 `None`
+    /// 保 `None`：本回合从未上报的计数在结算行里仍是 NULL。
+    async fn accumulate_turn_usage(&self, session_id: &str, usage: &sebas_acp::TurnUsage) {
+        let mut g = self.turn_usage.lock().await;
+        let acc = g.entry(session_id.to_string()).or_default();
+        acc.usage.accumulate(&sebas_domain::usage::TurnTokenUsage {
+            model: usage.model.clone(),
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cache_read_input_tokens: usage.cache_read_input_tokens,
+            cache_creation_input_tokens: usage.cache_creation_input_tokens,
+        });
+    }
+
+    /// 回合结算的本地落账（design D5：ts=完成时刻、逐回合恰好一行）。累计器
+    /// 条目被消费（不存在 = 无开轮记录或已结算 → 不产行，防 Error+Finished
+    /// 配对双计）。钩子未装配（im-only router / 单测）时同样只消费不产行。
+    async fn settle_turn_usage(&self, session_id: &str, status: u16, error: Option<String>) {
+        let acc = self.turn_usage.lock().await.remove(session_id);
+        let Some(acc) = acc else { return };
+        let hook = self
+            .usage_recorder
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let Some(hook) = hook else { return };
+        let latency_ms = acc
+            .started
+            .map(|s| s.elapsed().as_millis() as u64)
+            .unwrap_or(0);
+        hook(acc.usage.into_turn_record(
+            sebas_domain::usage::PROTOCOL_ACP,
+            status,
+            latency_ms,
+            error,
+        ));
     }
 
     /// 停滞看门狗事实登记表（仅测试：回拨时钟模拟长停滞）。
