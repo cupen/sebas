@@ -3211,4 +3211,50 @@ describe('agent edit path prefill fidelity (round14 4.8)', () => {
     expect(pathInput?.value).toBe('claude')
     el.remove()
   })
+
+  it('the pi shape submits driver=pi with its sessions dir', async () => {
+    apiMocks.agentsCreate.mockResolvedValue({ created: 'pi' })
+    const el = await mount()
+    await goto(el, "agents")
+    const newBtn = [...el.shadowRoot!.querySelectorAll<HTMLElement>('wa-button')].find((b) =>
+      b.textContent?.includes('新建 agent'),
+    )!
+    newBtn.click()
+    await settle(el)
+    const dlg = dialogByLabel(el, '新建 agent')
+    const idHost = dlg.querySelector<HTMLInputElement>('wa-input[data-testid="agent-form-id"]')!
+    idHost.value = 'pi'
+    const shapeSelect = dlg.querySelector(
+      '[data-testid="agent-form-shape"]',
+    ) as unknown as HTMLSelectElement
+    shapeSelect.value = 'pi'
+    shapeSelect.dispatchEvent(new Event('change', { bubbles: true, composed: true }))
+    await settle(el)
+    // pi 形态暴露二进制路径与会话目录（与 claude 同形态，缺省值不同）。
+    const pathHost = dlg.querySelector<HTMLInputElement>(
+      'wa-input[data-testid="agent-form-path"]',
+    )!
+    expect(pathHost).toBeTruthy()
+    pathHost.value = '/opt/pi/bin/pi'
+    const sessionsHost = dlg.querySelector<HTMLInputElement>(
+      'wa-input[data-testid="agent-form-sessions"]',
+    )!
+    expect(sessionsHost).toBeTruthy()
+    sessionsHost.value = '/srv/pi-sessions'
+    await el.updateComplete
+    const save = [...dlg.querySelectorAll<HTMLElement>('wa-button')].find(
+      (b) => b.textContent?.trim() === '保存',
+    )!
+    save.click()
+    await settle(el)
+    expect(apiMocks.agentsCreate).toHaveBeenCalledWith('pi', {
+      driver: 'pi',
+      path: '/opt/pi/bin/pi',
+      display: null,
+      args: null,
+      work_dir: null,
+      sessions_dir: '/srv/pi-sessions',
+    })
+    el.remove()
+  })
 })

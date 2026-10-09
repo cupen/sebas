@@ -102,6 +102,12 @@ fn default_idle_kill() -> u64 {
 /// 与根 crate `config.rs` 的缺省值同源（`default_claude_path`）。
 pub const DEFAULT_CLAUDE_PATH: &str = "claude";
 
+/// 与根 crate `config.rs` 的缺省值同源（`default_pi_path`）。
+pub const DEFAULT_PI_PATH: &str = "pi";
+
+/// 与根 crate `config.rs` 的缺省值同源（`default_pi_sessions_dir`）。
+pub const DEFAULT_PI_SESSIONS_DIR: &str = "~/.pi/agent/sessions";
+
 /// agents 表行上保留的内置内核 id（mutation 层拒绝 put/delete）。
 pub const RESERVED_NATIVE_ID: &str = "native";
 
@@ -122,9 +128,10 @@ impl Default for AgentDefinition {
 }
 
 /// 驱动标签的封闭集（决策 4：驱动实现仍封闭于 `claude` | `acp`；opencode
-/// 是表单预设，存储为 `driver=acp` + command argv）。
+/// 是表单预设，存储为 `driver=acp` + command argv。add-pi-driver 追加 `pi`
+/// ——pi 走自有 headless RPC，不是通用 ACP）。
 pub fn is_valid_driver(driver: &str) -> bool {
-    driver == "claude" || driver == "acp"
+    driver == "claude" || driver == "acp" || driver == "pi"
 }
 
 impl AgentDefinition {
@@ -141,6 +148,8 @@ impl AgentDefinition {
             .unwrap_or_else(|| {
                 if self.driver == "claude" {
                     DEFAULT_CLAUDE_PATH.to_string()
+                } else if self.driver == "pi" {
+                    DEFAULT_PI_PATH.to_string()
                 } else {
                     String::new()
                 }

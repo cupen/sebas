@@ -216,7 +216,8 @@ async fn subscription_delivers_every_mutation_after_the_snapshot() {
     let key = core
         .handle
         .web_spawn("racing prompt".into(), None, None, None, None)
-        .await;
+        .await
+        .expect("web_spawn succeeds");
     core.handle
         .activate(&key, "s-live".into(), None, None)
         .await;

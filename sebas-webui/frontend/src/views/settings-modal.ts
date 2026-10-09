@@ -369,7 +369,7 @@ export class SebasSettingsModal extends LitElement {
     mode: 'create' | 'edit'
     id: string
     display: string
-    shape: '' | 'claude' | 'opencode' | 'custom'
+    shape: '' | 'claude' | 'pi' | 'opencode' | 'custom'
     path: string
     commandText: string
     /** （fix-webui-qa-round2 2.4，M-A4）sessions 目录覆盖（claude 形态）。 */
@@ -2594,7 +2594,11 @@ export class SebasSettingsModal extends LitElement {
     // （fix-webui-qa-round14 4.8，D-4-4）path 预填保真：claude 形态的存量
     // store 行以 path_raw 回填（无记录回退内置缺省 `claude`）——操作者切
     // 「启动定义」到 claude 形态时不得被硬编码值覆盖存量。
-    const storedPath = a.driver_raw === 'claude' ? (a.path_raw ?? 'claude') : 'claude'
+    const storedPath = a.driver_raw === 'claude'
+      ? (a.path_raw ?? 'claude')
+      : a.driver_raw === 'pi'
+        ? (a.path_raw ?? 'pi')
+        : 'claude'
     this.agentForm = {
       mode: 'edit',
       id: a.id,
@@ -2625,17 +2629,28 @@ export class SebasSettingsModal extends LitElement {
     const sessionsDir = form.sessionsDir.trim() || null
     if (form.mode === 'edit' && form.shape === '') {
       // 不改 launch 定义形态：display + spawn 目录/参数改动面（spec「编辑
-      // 表单以存储值预填全部字段」的可写半边）。sessions_dir 是 claude 形态
-      // 的合法 launch 键——review P3：不改形态臂此前静默丢弃它。
-      const isClaude =
-        form.mode !== 'edit' ||
-        (this.agentsCatalog ?? []).find((x) => x.id === form.id)?.driver_raw === 'claude'
-      return isClaude ? { display, work_dir: workDir, sessions_dir: sessionsDir, args } : { display, work_dir: workDir, args }
+      // 表单以存储值预填全部字段」的可写半边）。sessions_dir 是 claude 与
+      // pi 形态的合法 launch 键——review P3：不改形态臂此前静默丢弃它。
+      const driverRaw = (this.agentsCatalog ?? []).find((x) => x.id === form.id)?.driver_raw
+      const carriesSessionsDir = driverRaw === 'claude' || driverRaw === 'pi'
+      return carriesSessionsDir
+        ? { display, work_dir: workDir, sessions_dir: sessionsDir, args }
+        : { display, work_dir: workDir, args }
     }
     if (form.shape === 'claude') {
       return {
         driver: 'claude',
         path: form.path.trim() || 'claude',
+        args,
+        display,
+        work_dir: workDir,
+        sessions_dir: sessionsDir,
+      }
+    }
+    if (form.shape === 'pi') {
+      return {
+        driver: 'pi',
+        path: form.path.trim() || 'pi',
         args,
         display,
         work_dir: workDir,
@@ -2835,6 +2850,7 @@ export class SebasSettingsModal extends LitElement {
                       >
                         <wa-option value="">不改（保留当前启动定义）</wa-option>
                         <wa-option value="claude">claude（二进制路径）</wa-option>
+                        <wa-option value="pi">pi（二进制路径）</wa-option>
                         <wa-option value="opencode">opencode（ACP 命令）</wa-option>
                         <wa-option value="custom">自定义 ACP（任意命令）</wa-option>
                       </wa-select>
@@ -2852,16 +2868,17 @@ export class SebasSettingsModal extends LitElement {
                           })}
                       >
                         <wa-option value="claude">claude（二进制路径）</wa-option>
+                        <wa-option value="pi">pi（二进制路径）</wa-option>
                         <wa-option value="opencode">opencode（ACP 命令）</wa-option>
                         <wa-option value="custom">自定义 ACP（任意命令）</wa-option>
                       </wa-select>
                     `}
-                ${form.shape === 'claude'
+                ${form.shape === 'claude' || form.shape === 'pi'
                   ? html`
                       <wa-input
                         label="二进制路径"
                         data-testid="agent-form-path"
-                        placeholder="claude"
+                        placeholder=${form.shape === 'pi' ? 'pi' : 'claude'}
                         .value=${form.path}
                         @input=${(ev: Event) =>
                           (this.agentForm = {
@@ -2890,15 +2907,16 @@ export class SebasSettingsModal extends LitElement {
                   ? html`<p class="prefs-placeholder">命令已预填：<code>opencode acp</code></p>`
                   : nothing}
                 <!-- （fix-webui-qa-round2 2.4，M-A4）spawn 关键字段：sessions
-                     目录（claude 形态独有——acp 驱动没有该概念）、工作目录与
-                     启动参数。留空 = 缺省（PUT 语义：null 清除存量）。自定义
-                     ACP 的参数就是命令行本身，args 只作追加。 -->
-                ${(form.shape === 'claude' || (form.mode === 'edit' && form.shape === '' && (this.agentsCatalog ?? []).find((x) => x.id === form.id)?.driver_raw === 'claude'))
+                     目录（claude 与 pi 形态独有——两者各有自己的会话落点；
+                     通用 acp 驱动没有该概念）、工作目录与启动参数。留空 =
+                     缺省（PUT 语义：null 清除存量）。自定义 ACP 的参数就是
+                     命令行本身，args 只作追加。 -->
+                ${form.shape === 'claude' || form.shape === 'pi' || (form.mode === 'edit' && form.shape === '' && ['claude', 'pi'].includes((this.agentsCatalog ?? []).find((x) => x.id === form.id)?.driver_raw ?? ''))
                   ? html`
                       <wa-input
                         label="会话目录（可选）"
                         data-testid="agent-form-sessions"
-                        placeholder="~/.claude/sessions"
+                        placeholder=${form.shape === 'pi' ? '~/.pi/agent/sessions' : '~/.claude/sessions'}
                         .value=${form.sessionsDir}
                         @input=${(ev: Event) =>
                           (this.agentForm = {

@@ -16,7 +16,7 @@
 //!    进 `SessionManager` 的 kind → driver 注册表（claude → 专属驱动 +
 //!    模型别名表，acp → 通用 ACP 驱动），spawn 路径据此拿驱动实例。
 
-use crate::config::{AgentConfig, AcpClaudeConfig, Config};
+use crate::config::{AcpClaudeConfig, AcpPiConfig, AgentConfig, Config};
 use sebas_acp::claude::manager::{AgentEntry, SessionManager};
 use sebas_models::agent::AgentDefinition;
 use std::collections::BTreeMap;
@@ -59,6 +59,17 @@ pub fn definition_of(agent: &AgentConfig) -> AgentDefinition {
                 sessions_dir: None,
             }
         }
+        AgentConfig::Pi(c) => AgentDefinition {
+            driver: "pi".to_string(),
+            path: Some(c.path.clone()),
+            args: c.args.clone(),
+            display: c.display.clone(),
+            models: None,
+            startup_timeout_secs: c.startup_timeout_secs,
+            idle_kill_secs: c.idle_kill_secs,
+            work_dir: c.work_dir.clone(),
+            sessions_dir: Some(c.sessions_dir.clone()),
+        },
     }
 }
 
@@ -81,6 +92,21 @@ pub fn config_of_definition(def: &AgentDefinition) -> AgentConfig {
             startup_timeout_secs: def.startup_timeout_secs,
             idle_kill_secs: def.idle_kill_secs,
             models: def.models.clone(),
+        }),
+        "pi" => AgentConfig::Pi(AcpPiConfig {
+            path: def
+                .path
+                .clone()
+                .unwrap_or_else(|| sebas_models::agent::DEFAULT_PI_PATH.to_string()),
+            args: def.args.clone(),
+            display: def.display.clone(),
+            sessions_dir: def
+                .sessions_dir
+                .clone()
+                .unwrap_or_else(|| sebas_models::agent::DEFAULT_PI_SESSIONS_DIR.to_string()),
+            work_dir: def.work_dir.clone(),
+            startup_timeout_secs: def.startup_timeout_secs,
+            idle_kill_secs: def.idle_kill_secs,
         }),
         _ => AgentConfig::Acp {
             command: def.command(),
@@ -179,6 +205,9 @@ pub fn ensure_registered(mgr: &Arc<SessionManager>, kind: &str, agent: &AgentCon
             Arc::new(sebas_acp::ClaudeDriver::with_models(c.resolved_models()))
         }
         AgentConfig::Acp { .. } => Arc::new(sebas_acp::AcpDriver),
+        AgentConfig::Pi(c) => Arc::new(sebas_acp::PiDriver::with_sessions_dir(Some(
+            c.sessions_dir.clone(),
+        ))),
     };
     let startup_timeout = agent.startup_timeout();
     mgr.upsert_agent(
@@ -261,6 +290,32 @@ mod tests {
                 assert_eq!(display.as_deref(), Some("Cursor"));
             }
             other => panic!("round trip must stay acp: {other:?}"),
+        }
+
+        // add-pi-driver：pi 行带 sessions_dir（镜像 claude 形态），往返保真。
+        let pi = AgentConfig::Pi(AcpPiConfig {
+            path: "/opt/pi/bin/pi".into(),
+            args: vec!["--provider".into(), "anthropic".into()],
+            display: Some("Pi".into()),
+            sessions_dir: "/srv/pi-sessions".into(),
+            work_dir: Some("/srv/work".into()),
+            startup_timeout_secs: 60,
+            idle_kill_secs: 0,
+        });
+        let def = definition_of(&pi);
+        assert_eq!(def.driver, "pi");
+        assert_eq!(def.path.as_deref(), Some("/opt/pi/bin/pi"));
+        assert_eq!(def.args, vec!["--provider".to_string(), "anthropic".into()]);
+        assert_eq!(def.sessions_dir.as_deref(), Some("/srv/pi-sessions"));
+        assert_eq!(def.work_dir.as_deref(), Some("/srv/work"));
+        match config_of_definition(&def) {
+            AgentConfig::Pi(c) => {
+                assert_eq!(c.path, "/opt/pi/bin/pi");
+                assert_eq!(c.sessions_dir, "/srv/pi-sessions");
+                assert_eq!(c.work_dir.as_deref(), Some("/srv/work"));
+                assert_eq!(c.startup_timeout_secs, 60);
+            }
+            other => panic!("round trip must stay pi: {other:?}"),
         }
     }
 

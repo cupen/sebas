@@ -148,6 +148,7 @@ async fn timeseries_endpoint_requires_the_admin_bearer_when_secret_is_set() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn two_models_aggregate_into_separate_day_buckets_and_zero_fill() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let router = start_router(CFG_TMPL).await;
     let db = router.dir.path().join("usage.db");
     let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
@@ -202,6 +203,7 @@ async fn two_models_aggregate_into_separate_day_buckets_and_zero_fill() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn unobserved_tokens_add_requests_only() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let router = start_router(CFG_TMPL).await;
     let db = router.dir.path().join("usage.db");
     let ts = today_noon();
@@ -229,6 +231,7 @@ async fn unobserved_tokens_add_requests_only() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn param_validation_is_enforced_at_the_endpoint() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let router = start_router(CFG_TMPL).await;
     let client = client();
     let base = format!("http://{}/admin/usage/timeseries", router.addr);
@@ -265,6 +268,7 @@ async fn param_validation_is_enforced_at_the_endpoint() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn hour_granularity_returns_24_buckets_of_today() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let router = start_router(CFG_TMPL).await;
     let db = router.dir.path().join("usage.db");
     // 今天 12:00 UTC 一条 + 两天前一条：小时面只应有今天那条（spec「hour

@@ -118,9 +118,35 @@ pub async fn discover_agent(source: &AgentKindSource) -> AgentKindInfo {
         id: slug.to_string(),
         display,
         reachable: true,
-        cause: None,
+        // pi 驱动在场时补一层凭据就绪探测（add-pi-driver D5 / spec
+        // `pi-agent`「reachability distinguishes installed-but-unauthenticated」）：
+        // 二进制在场即 reachable=true，但 `pi auth check` 非 ready 时把状态
+        // 作为 cause 呈现（不是「不可达」，是「装了没登录」）。
+        cause: pi_auth_cause(&source.driver, exe).await,
         version,
         display_raw,
+    }
+}
+
+/// pi 驱动专属的凭据就绪补充信号：`pi auth check` 打印 `ready` / `not_ready`
+/// / `invalid`（exit 0/1/2）。非 pi 驱动恒 `None`（不引入无关探测）。命令不
+/// 存在或探测失败也返回 `None`——二进制在场已由 version 探测证明，auth 只是
+/// 补充说明，不把探测失败升级为不可达。
+async fn pi_auth_cause(driver: &str, exe: &str) -> Option<String> {
+    if driver != "pi" {
+        return None;
+    }
+    let out = tokio::process::Command::new(resolved_binary(exe).unwrap_or_else(|| exe.into()))
+        .args(["auth", "check"])
+        .output()
+        .await
+        .ok()?;
+    let status = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    match status.as_str() {
+        "ready" => None,
+        "not_ready" => Some("pi 已安装但未登录（运行 `pi` 完成 provider 登录）".to_string()),
+        "invalid" => Some("pi 凭据无效（`pi auth check` 报 invalid）".to_string()),
+        other => Some(format!("pi auth check: {other}")),
     }
 }
 
@@ -354,6 +380,31 @@ mod tests {
         let info = discover_agent(&source("shell", &["sh"])).await;
         assert!(info.reachable, "sh should be on PATH: {info:?}");
         assert!(info.cause.is_none());
+    }
+
+    /// pi 驱动的凭据补充信号（add-pi-driver 3.3）：二进制在场的 pi 会把
+    /// `pi auth check` 的非 ready 状态作为 cause 呈现（reachable 仍 true）；
+    /// 非 pi 驱动不触发该探测。
+    #[tokio::test]
+    async fn pi_driver_surfaces_auth_check_status() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-pi");
+        std::fs::write(&script, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 1.1.0; exit 0; fi\nif [ \"$1\" = \"auth\" ]; then echo not_ready; exit 1; fi\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut src = source("pi", &[script.to_str().unwrap()]);
+        src.driver = "pi".to_string();
+        let info = discover_agent(&src).await;
+        assert!(info.reachable, "二进制在场即可达: {info:?}");
+        assert!(
+            info.cause.as_deref().is_some_and(|c| c.contains("未登录")),
+            "not_ready 应作为 cause 呈现: {info:?}"
+        );
+
+        // 非 pi 驱动不吃该探测（即便二进制同名脚本）。
+        let mut other = source("other", &[script.to_str().unwrap()]);
+        other.driver = "claude".to_string();
+        assert!(discover_agent(&other).await.cause.is_none());
     }
 
     /// store 快照条目 → 探测源：claude 缺 path 回退内置 `claude`；acp 组装

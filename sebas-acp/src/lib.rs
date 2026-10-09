@@ -1,6 +1,7 @@
 pub mod acp_driver;
 pub mod agent_driver;
 pub mod claude;
+pub mod pi;
 pub mod session;
 pub mod win_exe;
 
@@ -15,6 +16,7 @@ pub const MODEL_UNCHANGED_MARKER: &str = "模型未变";
 pub use acp_driver::AcpDriver;
 pub use agent_driver::{AgentDriver, DriverConfig, DriverError, DriverHandle};
 pub use claude::{ClaudeDriver, DEFAULT_CLAUDE_MODEL, builtin_claude_models};
+pub use pi::{DEFAULT_PI_SESSIONS_DIR, PiDriver};
 pub use win_exe::resolve_windows_executable;
 pub use session::{
     AcpCommand, AcpEvent, AcpModelInfo, AcpSessionHandle, AvailableCommand, Decision, SessionMeta,
