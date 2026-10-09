@@ -103,6 +103,7 @@ const apiMocks = vi.hoisted(() => ({
   agentsCreate: vi.fn(),
   agentsUpdate: vi.fn(),
   agentsDelete: vi.fn(),
+  agentInstall: vi.fn(),
   skillsList: vi.fn(),
   skillDetail: vi.fn(),
   skillsDelete: vi.fn(),
@@ -157,6 +158,7 @@ vi.mock('../api/client.js', () => ({
     agentsCreate: apiMocks.agentsCreate,
     agentsUpdate: apiMocks.agentsUpdate,
     agentsDelete: apiMocks.agentsDelete,
+    agentInstall: apiMocks.agentInstall,
     skillsList: apiMocks.skillsList,
     skillDetail: apiMocks.skillDetail,
     skillsDelete: apiMocks.skillsDelete,
@@ -1637,6 +1639,154 @@ describe('add-agent-settings-and-session-titles：Agents 分区（/api/agents*�
     expect(warn).toBeTruthy()
     expect(warn!.textContent).toContain('更新')
     expect(warn!.textContent).toContain('claude')
+    el.remove()
+  })
+})
+
+/**
+ * add-agent-auto-install 3.2/3.3：「可安装 agent」区 + 一键安装联动。
+ * 默认 beforeEach 的 catalog 桩里 claude 可达 → claude 配方显示「已安装」、
+ * opencode 未在 catalog → 显示「安装」按钮。导航序（默认 role=null）：
+ * agents(4)。
+ */
+describe('add-agent-auto-install：Agents 分区可安装区', () => {
+  function installRows(el: SebasSettingsModal): HTMLElement[] {
+    return [...el.shadowRoot!.querySelectorAll<HTMLElement>('[data-testid="install-recipe"]')]
+  }
+
+  function recipeRow(el: SebasSettingsModal, recipe: string): HTMLElement {
+    const row = installRows(el).find((r) => r.dataset['recipe'] === recipe)
+    expect(row, `recipe row ${recipe} must exist`).toBeTruthy()
+    return row!
+  }
+
+  it('lists the closed recipe set and marks already-reachable agents as installed', async () => {
+    const el = await mount()
+    await goto(el, 'agents')
+    expect(installRows(el).map((r) => r.dataset['recipe'])).toEqual(['claude', 'opencode'])
+
+    // claude 在 catalog 里可达 → 已安装、无安装按钮。
+    const claude = recipeRow(el, 'claude')
+    expect(claude.querySelector('[data-testid="install-status"]')!.textContent).toContain('已安装')
+    expect(claude.querySelector('[data-testid="install-button"]')).toBeNull()
+
+    // opencode 未在 catalog → 未安装 + 安装按钮。
+    const opencode = recipeRow(el, 'opencode')
+    expect(opencode.querySelector('[data-testid="install-status"]')!.textContent).toContain('未安装')
+    expect(opencode.querySelector('[data-testid="install-button"]')).toBeTruthy()
+    el.remove()
+  })
+
+  it('install calls the endpoint and refreshes the catalog on success', async () => {
+    apiMocks.agentInstall.mockResolvedValue({
+      installed: true,
+      path: '/tmp/sebas/agent-tools/opencode/bin/opencode',
+      version: '1.2.3',
+      agent_created: true,
+    })
+    const el = await mount()
+    await goto(el, 'agents')
+    recipeRow(el, 'opencode').querySelector<HTMLElement>('[data-testid="install-button"]')!.click()
+    await settle(el)
+
+    expect(apiMocks.agentInstall).toHaveBeenCalledWith('opencode')
+    // 成功通知含路径与版本 + 「已添加目录行」。
+    const action = el.shadowRoot!.querySelector('[data-testid="agent-action"]')!
+    expect(action.textContent).toContain('/tmp/sebas/agent-tools/opencode/bin/opencode')
+    expect(action.textContent).toContain('1.2.3')
+    expect(action.textContent).toContain('已添加目录行')
+    // 目录刷新（首访 1 次 + 安装后 1 次）。
+    expect(apiMocks.agents).toHaveBeenCalledTimes(2)
+    el.remove()
+  })
+
+  it('reports agent_created=false as "existing definition untouched" (3.3)', async () => {
+    apiMocks.agentInstall.mockResolvedValue({
+      installed: true,
+      path: '/tmp/sebas/agent-tools/opencode/bin/opencode',
+      agent_created: false,
+    })
+    const el = await mount()
+    await goto(el, 'agents')
+    recipeRow(el, 'opencode').querySelector<HTMLElement>('[data-testid="install-button"]')!.click()
+    await settle(el)
+    const action = el.shadowRoot!.querySelector('[data-testid="agent-action"]')!
+    expect(action.textContent).toContain('已存在定义未改动')
+    el.remove()
+  })
+
+  it('surfaces install failure text (npm guidance / stderr summary)', async () => {
+    apiMocks.agentInstall.mockRejectedValue(
+      new Error('本机 PATH 上找不到可用的 npm：请先安装 Node.js（随附 npm）后重试'),
+    )
+    const el = await mount()
+    await goto(el, 'agents')
+    recipeRow(el, 'opencode').querySelector<HTMLElement>('[data-testid="install-button"]')!.click()
+    await settle(el)
+    const action = el.shadowRoot!.querySelector('[data-testid="agent-action"]')!
+    expect(action.textContent).toContain('安装 opencode 失败')
+    expect(action.textContent).toContain('Node.js')
+    el.remove()
+  })
+
+  it('disables the button while an install is in flight', async () => {
+    let resolveInstall: (v: unknown) => void = () => {}
+    apiMocks.agentInstall.mockReturnValue(
+      new Promise((resolve) => {
+        resolveInstall = resolve
+      }),
+    )
+    const el = await mount()
+    await goto(el, 'agents')
+    const button = recipeRow(el, 'opencode').querySelector<HTMLElement>(
+      '[data-testid="install-button"]',
+    )!
+    button.click()
+    await el.updateComplete
+    const busyButton = recipeRow(el, 'opencode').querySelector<HTMLElement>(
+      '[data-testid="install-button"]',
+    )!
+    expect(busyButton.textContent).toContain('安装中')
+    expect(busyButton.hasAttribute('disabled')).toBe(true)
+    resolveInstall({ installed: true, path: '/p', agent_created: false })
+    await settle(el)
+    el.remove()
+  })
+
+  it('hides the install button for read-only roles (member/viewer)', async () => {
+    for (const role of ['member', 'viewer'] as const) {
+      const el = document.createElement('sebas-settings-modal') as SebasSettingsModal
+      el.role = role
+      el.open = true
+      document.body.appendChild(el)
+      await el.updateComplete
+      await settle(el)
+      await goto(el, 'agents')
+      // 配方行仍在（只读浏览），但无安装按钮。
+      expect(recipeRow(el, 'opencode').querySelector('[data-testid="install-button"]')).toBeNull()
+      expect(installRows(el).length).toBe(2)
+      el.remove()
+    }
+  })
+
+  it('treats a reachable row whose path points at the private prefix as installed', async () => {
+    // 已建 store 行的 path 指私有 bin，但 id 不叫 opencode —— 仍算已装。
+    apiMocks.agents.mockResolvedValue({
+      agents: [
+        { id: 'native', display: 'Native Kernel', reachable: true },
+        {
+          id: 'my-opencode',
+          display: 'my-opencode',
+          reachable: true,
+          path_raw: '/home/op/.sebas/agent-tools/opencode/bin/opencode',
+        },
+      ],
+    })
+    const el = await mount()
+    await goto(el, 'agents')
+    const opencode = recipeRow(el, 'opencode')
+    expect(opencode.querySelector('[data-testid="install-status"]')!.textContent).toContain('已安装')
+    expect(opencode.querySelector('[data-testid="install-button"]')).toBeNull()
     el.remove()
   })
 })

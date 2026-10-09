@@ -179,6 +179,27 @@ describe('api wire shapes', () => {
     expect((err as ApiError).code).toBeNull()
     expect((err as ApiError).count).toBeNull()
   })
+
+  it('agentInstall posts {recipe} to /api/agents/install (add-agent-auto-install 3.1)', async () => {
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValue(
+      okResponse({
+        installed: true,
+        path: '/tmp/sebas/agent-tools/claude/bin/claude',
+        version: '9.9.9',
+        agent_created: true,
+      }),
+    )
+
+    const res = await api.agentInstall('claude')
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/api/agents/install')
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(String(init.body))).toEqual({ recipe: 'claude' })
+    expect(res.agent_created).toBe(true)
+    expect(res.path).toContain('agent-tools/claude')
+  })
 })
 
 describe('withQuery (add-webui-picker-workdir-start)', () => {

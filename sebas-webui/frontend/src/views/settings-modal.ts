@@ -66,6 +66,7 @@ import {
   type AdminService,
   type AgentKindInfo,
   type AgentLaunchPayload,
+  type AgentInstallResult,
   type EnvVarEntry,
   type ProviderAdmin,
   type ConfigSeededProvider,
@@ -246,6 +247,16 @@ const THEME_OPTIONS: ReadonlyArray<{ mode: ThemeMode; label: string; sub: string
 ]
 
 /**
+ * 可安装 agent 的封闭配方清单（add-agent-auto-install D5）：与后端配方表同源
+ * 口径（只呈现名称与 npm 包名，安装动作由后端按 recipe 名解析）。前端**不接受
+ * 任意包名输入**——这里只是清单展示，不含安装参数。
+ */
+const INSTALL_RECIPES: ReadonlyArray<{ name: string; package: string }> = [
+  { name: 'claude', package: '@anthropic-ai/claude-code' },
+  { name: 'opencode', package: 'opencode-ai' },
+]
+
+/**
  * 环境变量「值」列的呈现（split-env-vars-settings-section D2）：plain 已
  * 设置显实际值、未设置显「未设置（用默认）」（默认值说明随 what 下发）；
  * set_unset（敏感）项绝不渲染 value——即便合同外的退化响应带了值也只按
@@ -349,6 +360,11 @@ export class SebasSettingsModal extends LitElement {
   @state() private agentsCatalog: AgentKindInfo[] | null = null
   @state() private agentsError = ''
   @state() private agentsBusy = false
+  /**
+   * （add-agent-auto-install 3.2）正在安装的配方名（null = 空闲）。安装是同步
+   * 长请求，按配方隔离 busy 态——按钮文案「安装中…」+ 禁用。
+   */
+  @state() private installBusy: string | null = null
   /**
    * （fix-webui-qa-round6 4.4）遮罩关闭的按下锚点：当前指针序列的
    * pointerdown 是否落在遮罩上。click 只在与该锚点同时成立时才关闭——
@@ -2512,7 +2528,94 @@ export class SebasSettingsModal extends LitElement {
                 : managed.map((a) => this.renderAgentRow(a))}
             </div>
           `}
+      ${this.renderInstallableAgents(canWrite)}
     `
+  }
+
+  /**
+   * 「可安装 agent」区（add-agent-auto-install 3.2）：封闭配方清单逐行呈现
+   * 安装状态，未装时给一键「安装」。状态判定复用目录探测口径——该配方 id 在
+   * catalog 里可达（PATH 里的 bin 或已建 store 行指私有 bin）即视为已装，不再
+   * 显示安装按钮；否则显示（仅 canManageAgents 档）。安装走
+   * `api.agentInstall`，成功刷新目录并按 `agent_created` 提示。
+   */
+  private renderInstallableAgents(canWrite: boolean) {
+    // 目录尚未加载（null）时不渲染——状态徽标依赖 catalog，加载中渲染会先
+    // 把已装配方闪成「未安装」。加载失败（[]）仍渲染（未装 → 给安装入口）。
+    if (this.agentsCatalog === null) return nothing
+    return html`
+      <div class="provider-toolbar" style="margin-top:1.25rem">
+        <span class="provider-row-name">可安装 agent</span>
+      </div>
+      <div class="provider-list" data-testid="installable-agents">
+        ${INSTALL_RECIPES.map((r) => {
+          // 状态判定复用目录探测口径（spec：探测对象含配方 bin 名与 sebas
+          // 私有安装前缀）：该配方 id 的可达行，或任一带私有前缀 path 的可达行
+          // （store 行登记了别的 id 但 path 指私有 bin）——两者任一即「已安装」。
+          const installed = (this.agentsCatalog ?? []).some(
+            (a) =>
+              a.reachable &&
+              (a.id === r.name ||
+                (a.path_raw ?? '').includes(`agent-tools/${r.name}`)),
+          )
+          const busy = this.agentsBusy || this.installBusy === r.name
+          return html`
+            <div class="provider-row" data-testid="install-recipe" data-recipe=${r.name}>
+              <div class="provider-row-main">
+                <span class="provider-row-name">${r.name}</span>
+                <span class="provider-badge preset">${r.package}</span>
+                <span
+                  class="provider-key ${installed ? 'on' : 'off'}"
+                  data-testid="install-status"
+                >
+                  ${installed ? '已安装' : '未安装'}
+                </span>
+                ${!installed && canWrite
+                  ? html`<span class="provider-row-actions">
+                      <wa-button
+                        size="small"
+                        variant="brand"
+                        appearance="filled"
+                        data-testid="install-button"
+                        ?disabled=${busy}
+                        @click=${() => this.installAgent(r.name)}
+                      >
+                        ${this.installBusy === r.name ? '安装中…' : '安装'}
+                      </wa-button>
+                    </span>`
+                  : nothing}
+              </div>
+            </div>
+          `
+        })}
+      </div>
+    `
+  }
+
+  /** 一键安装配方：成功 → 刷新目录 + 按 agent_created 提示；失败 → 就地提示。 */
+  private installAgent(recipe: string): void {
+    if (this.installBusy) return
+    this.agentAction = null
+    this.installBusy = recipe
+    api
+      .agentInstall(recipe)
+      .then((res: AgentInstallResult) => {
+        const version = res.version ? `，版本 ${res.version}` : ''
+        const created = res.agent_created
+          ? '，已添加目录行'
+          : '，已存在定义未改动'
+        this.agentAction = {
+          ok: true,
+          text: `已安装 ${recipe} 到 ${res.path}${version}${created}`,
+        }
+        this.loadAgentsCatalog()
+      })
+      .catch((e) => {
+        this.agentAction = { ok: false, text: `安装 ${recipe} 失败：${errorText(e)}` }
+      })
+      .finally(() => {
+        this.installBusy = null
+      })
   }
 
   /** 单个 agent 行：id + 展示名 + 可达性（不可达带 cause）+ 编辑/删除
