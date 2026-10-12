@@ -20,8 +20,8 @@
 
 ## 4. 进程级与浏览器验收
 
-- [ ] 4.1 进程级 e2e：扩 `tests/testsuite_e2e_test.rs` 的 `agent_auto_install` 模块——沙箱 + PATH 垫 fake npm/fake node，旅程 = 安装 pi → 响应 driver 正确、目录出现 pi 行、argv 证据；再加一条 node 版本不足 → typed 4xx 且无落盘。验证：`invoke testsuite-e2e --case <name>` 通过。
-- [ ] 4.2 浏览器 GUI 验收：`invoke testsuite-webui-sandbox`（auth 关）确认可安装区出现 pi 配方行、安装按钮与通知形态正确；确认真实 npm 未被触发（fake npm 日志为证）。验收清单 + 截图落 `verification/`。
+- [x] 4.1 进程级 e2e：扩 `tests/testsuite_e2e_test.rs` 的 `agent_auto_install` 模块——沙箱 + PATH 垫 fake npm/fake node，旅程 = 安装 pi → 响应 driver 正确、目录出现 pi 行、argv 证据；再加一条 node 版本不足 → typed 4xx 且无落盘。验证：`invoke testsuite-e2e --case <name>` 通过。
+- [x] 4.2 浏览器 GUI 验收：`invoke testsuite-webui-sandbox`（auth 关）确认可安装区出现 pi 配方行、安装按钮与通知形态正确；确认真实 npm 未被触发（fake npm 日志为证）。验收清单 + 截图落 `verification/`。
 
 ## 5. 回归与收口
 

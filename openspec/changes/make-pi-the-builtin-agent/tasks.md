@@ -40,14 +40,19 @@
 
 - [x] 5.1 `sebas-webui/tests/agent_kinds_test.rs`、`gateway_bff_test.rs`（native 400 族）、`api_endpoints_test.rs` 的 native 断言改写为新语义。验证：`rtk cargo test -p sebas-webui` 绿。
   - 改动：`agent_kinds_test.rs`（display `PI`、native 可用性/ cause 改 pi 安装面）；`src/agent_backend.rs` 单测（native 重指向、可达性）；`feishu_native_webui_test.rs`。`gateway_bff_test.rs`/`api_endpoints_test.rs` 的 native 断言是「保留 id 的目录/角色门禁」，语义未变（native 仍是保留 id），无需改。
-- [ ] 5.2 `tests/testsuite-webui/tests/first-paint.spec.ts` 的 native 置灰/env 文案断言改写为「pi 未装 → 置灰 + 安装指引」。验证：浏览器套件该 spec 绿。**（后续阶段）**
-- [ ] 5.3 `tests/testsuite_acceptance_test.rs` 的 native 内核旅程改写为 pi 旅程（fake pi 桩经 PATH 垫），legacy resume 旅程保留内核路径。验证：`invoke testsuite-acceptance` 绿。**（后续阶段）**
+- [x] 5.2 `tests/testsuite-webui/tests/first-paint.spec.ts` 的 native 置灰/env 文案断言改写为「pi 未装 → 置灰 + 安装指引」。验证：浏览器套件该 spec 绿。
+  - 结果（3c）：断言改写为「PI 未装 → 置灰 + 安装指引、不含 env 名」；`npx playwright test first-paint` → 2 passed。
+- [x] 5.3 `tests/testsuite_acceptance_test.rs` 的 native 内核旅程改写为 pi 旅程（fake pi 桩经 PATH 垫），legacy resume 旅程保留内核路径。验证：`invoke testsuite-acceptance` 绿。
+  - 结果（3c）：改写为 `builtin_pi_slot_completes_a_turn_journey`（fake pi 桩）；`invoke testsuite-acceptance` → 10 passed。COVERAGE.md 同步。
 - [x] 5.4 全量回归：`rtk cargo test`、`cd sebas-webui/frontend && rtk pnpm test`、clippy/fmt 无新告警。验证：退出码 0。
   - 结果：`rtk cargo test` = 832 passed / 104 ignored；`rtk cargo test -p sebas-webui` = 422 passed；`pnpm test` = 1012 passed。clippy/fmt 与改动前计数一致（仅既有告警/漂移，新代码零新增）。
+- [x] 5.5 e2e 既有 `native_*` / `test_model_*` 旅程迁移（3c 发现的活动账）：内置槽位改指 pi 后，11 条以旧内核装配（SEBAS_AGENT_ROUTER_URL + spawn_test_model_stack）建会话的进程级旅程失败（spawn 报 pi binary not found）。迁移 = 装配改 `[acp.agents.pi]` + fake pi 桩（按旅程所需形状扩展桩：空回合/长流 drip/thinking 块/工具环/错误），模型选择改经 pi 词表；其中**审批卡类旅程**（parallel_tool_permissions、tool_loop_runs_with_permission）为内核专属能力——以 legacy 内核会话（seed native key + resume）承载或如实标注退役理由，不得静默删除。验证：`rtk cargo test --test testsuite_e2e_test -- --ignored` 全绿。
+  - 结果：9 条迁移至内置 PI 槽位 + fake pi 场景桩（`spawn_pi_scenario_stack`；`scenario/<name>` 词表 + `drive_pi_turn` 以相位帧终态收尾）：`native_session_lifecycle_advances_*`、`native_turn_start_reannounces_*`、`native_turn_streams_deltas_to_the_webui`、`test_model_{switch,thinking_and_mixed_blocks,empty_turn,long_stream,error_surfaces}_*`。2 条**内核专属审批卡旅程**（`test_model_tool_loop_runs_with_permission_*`、`test_model_parallel_tool_permissions_*`）如实标注退役为 skip：pi 无权限系统（spec `pi-agent`），进程级无内核 seed 通路（裸 core 无飞书 dispatch；`EnsureMessage` 对 `agent-*` key 落 `UnknownSession`），等效覆盖见 `feishu_native_webui_test.rs`（进程内内核桥）与 fake-claude ACP 审批环。`rtk cargo test --test testsuite_e2e_test -- --ignored` → 94 passed / 0 failed；`rtk cargo test` → 832 passed；clippy 0 errors。
 
 ## 6. 收口
 
-- [ ] 6.1 进程级验收：沙箱（SEBAS_HOME 钉定 + PATH 垫 fake pi + fake node/npm）旅程 = 启动 → 新建会话选 native(PI) → composer 出现 pi 自广告模型面 → 切模型 set_model 生效 → provider env 注入断言（fake pi 记录 env）。验证：`invoke testsuite-e2e --case <name>` 通过。**（后续阶段）**
-- [ ] 6.2 浏览器 GUI 验收：`invoke testsuite-webui-sandbox` 手验「启动 → 内置 PI 可选 → 建会话 → 切模型」，截图与清单落 `verification/`。验证：沙箱会话记录。**（后续阶段）**
+- [x] 6.1 进程级验收：沙箱（SEBAS_HOME 钉定 + PATH 垫 fake pi + fake node/npm）旅程 = 启动 → 新建会话选 native(PI) → composer 出现 pi 自广告模型面 → 切模型 set_model 生效 → provider env 注入断言（fake pi 记录 env）。验证：`invoke testsuite-e2e --case <name>` 通过。
+  - 结果（3c）：`mod builtin_pi_agent`（tests/testsuite_e2e_test.rs:12133）——`native_slot_runs_pi_with_provider_env_and_model_switch`（env 注入 + set_model journal 断言）与 `native_slot_is_unavailable_when_pi_is_absent`；`invoke testsuite-e2e --case builtin_pi` → 2 passed。
+- [x] 6.2 浏览器 GUI 验收：`invoke testsuite-webui-sandbox` 手验「启动 → 内置 PI 可选 → 建会话 → 切模型」，截图与清单落 `verification/`。验证：沙箱会话记录。
 - [x] 6.3 `openspec validate make-pi-the-builtin-agent --strict` 通过；specs 逐场景对账（尤其「未装 pi 指引安装」「未登录仍可选」「凭据 spawn 期语义」「legacy resume 保留」）。
   - 结果：`openspec validate make-pi-the-builtin-agent --strict` → valid。逐场景：未装 pi 指引安装（1.2/4.1）、未登录仍可选（1.2 advisory cause）、凭据 spawn 期语义（2.1 env 注入 + 无热更新）、legacy resume 保留（1.1/1.3）均落地。
