@@ -1030,10 +1030,13 @@ pub async fn agent_delete(State(state): State<WebUiState>, Path(id): Path<String
 /// 1. 封闭配方表解析——未知 recipe = typed 400，**不 spawn 任何子进程**；
 /// 2. per-recipe in-flight 锁——并发同 recipe = 409；
 /// 3. `npm --version` 在场探测——缺失 = typed 400 + 最小指引，目录零变化；
-/// 4. 同步执行 `npm install --global --prefix <私有前缀> <包>`（300s 超时）；
+/// 4. 配方前置检查（add-pi-install-recipe D2）——声明了前置的配方（如 pi 的
+///    Node >= 22.19.0）在此解析，不满足 = typed 400 + 指引，**不发起 npm、
+///    不建行**；无前置配方完全跳过；
+/// 5. 同步执行 `npm install --global --prefix <私有前缀> <包>`（300s 超时）；
 ///    非零退出 = 400 携带 stderr 尾部摘要，不建行、不报成功；
-/// 5. 装后按目录探测同一口径复核私有 bin，返回绝对路径与版本；
-/// 6. 按 spawn 解析口径（store ∪ config，扣除墓碑）判缺失，无定义才建标准行
+/// 6. 装后按目录探测同一口径复核私有 bin，返回绝对路径与版本；
+/// 7. 按 spawn 解析口径（store ∪ config，扣除墓碑）判缺失，无定义才建标准行
 ///    （已有定义一律不动，`agent_created=false`）。
 pub async fn agent_install(
     State(state): State<WebUiState>,
@@ -1052,10 +1055,7 @@ pub async fn agent_install(
         return bad_request("缺少 recipe 字段").into_response();
     };
     let Some(recipe) = install::recipe(&name) else {
-        return bad_request(&format!(
-            "未知 recipe '{name}'：只支持内置配方 claude / opencode"
-        ))
-        .into_response();
+        return bad_request(&format!("未知 recipe '{name}'：仅支持内置安装配方")).into_response();
     };
 
     // 2. per-recipe in-flight 锁（并发同 recipe → 409）。
@@ -1066,6 +1066,13 @@ pub async fn agent_install(
     // 3. npm 在场探测（缺失即拒，不落任何文件）。
     if !install::npm_available().await {
         return bad_request(&install::InstallFailure::NpmMissing.message()).into_response();
+    }
+
+    // 3b. 配方前置检查（add-pi-install-recipe 2.1 / design D2）：在启动 npm 进程
+    //     之前解析；不满足即 typed 400，**不发起安装、不建行**。无前置（None）
+    //     完全跳过——claude / opencode 行为逐字不变。
+    if let Err(failure) = install::check_prereq(recipe.prereq).await {
+        return bad_request(&failure.message()).into_response();
     }
 
     // 4. 同步执行安装（超时/非零退出 → 诚实失败，不建行）。

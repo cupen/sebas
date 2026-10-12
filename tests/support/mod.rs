@@ -1088,6 +1088,24 @@ listen = "127.0.0.1:{router_port}"
         std::fs::write(&self.config_path, lines.join("\n") + "\n").expect("write config");
     }
 
+    /// （make-pi-the-builtin-agent 6.1）把 `[acp.agents.pi]` 段追加进沙箱 config
+    /// ——内置 `native`（PI）槽位的 launch 配置来源（`[acp.agents.pi]` seed）。
+    /// `path` 指 fake pi 桩；`sessions_dir` 钉进沙箱。必须在 spawn core 之前调用。
+    pub fn set_agent_pi(&self, path: &str, sessions_dir: &str) {
+        let toml = std::fs::read_to_string(&self.config_path)
+            .unwrap_or_else(|e| panic!("read config {}: {e}", self.config_path.display()));
+        let section = format!(
+            "\n[acp.agents.pi]\ndriver = \"pi\"\npath = \"{}\"\nsessions_dir = \"{}\"\n",
+            forward_slash(Path::new(path)),
+            forward_slash(Path::new(sessions_dir)),
+        );
+        assert!(
+            !toml.contains("[acp.agents.pi]"),
+            "sandbox config already carries [acp.agents.pi]"
+        );
+        std::fs::write(&self.config_path, toml + &section).expect("write config");
+    }
+
     /// fake-provider-upstream 3.1：spawn 一个**真 `sebas fake-provider` 子进程**
     /// （CARGO_BIN_EXE_sebas + 动词 + 随机端口 + journal 落在 sandbox 内），
     /// 解析 ready 行拿到实际地址；拆卸由 `kill_on_drop` + SandboxDir 的进程组

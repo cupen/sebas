@@ -69,10 +69,14 @@ pub(crate) fn abort_if_provider_error(extra_env: &[(String, String)]) {
 }
 
 /// Compute (extra_env, full command) from provider state + router config.
-/// Centralizes the spawn-time translation. The provider override only applies
-/// to the dedicated Claude driver (it injects `ANTHROPIC_BASE_URL` /
-/// `OPENAI_API_KEY`); native-ACP agents manage their own provider and get an
-/// untouched command. Pure: same input → same output.
+/// Centralizes the spawn-time translation.
+///
+/// - `claude`：走 [`resolve_spawn_overrides`]（`ANTHROPIC_BASE_URL` /
+///   `ANTHROPIC_AUTH_TOKEN` + 模型 cover env + `--model` argv）。
+/// - `pi`（make-pi-the-builtin-agent 2.1）：复用同一 provider 解析，翻成 pi
+///   认识的标准 env 对（`ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL` 或
+///   `OPENAI_API_KEY`/`OPENAI_BASE_URL`）；无 argv 追加。
+/// - 其它 ACP agent：自管 provider，command 原样（env 空）。
 ///
 /// Before returning, runs [`abort_if_provider_error`] — if `extra_env`
 /// carries the in-band error signal, the process exits here and never
@@ -82,6 +86,12 @@ fn spawn_overrides(
     command: Vec<String>,
     router_cfg: Option<&RouterConfig>,
 ) -> (Vec<(String, String)>, Vec<String>) {
+    if kind == "pi" {
+        // （2.1）pi 凭据注入：标准 env 对（spawn 期语义——启动后凭据变更不
+        // 影响在跑会话）。与 claude 的键名区分（见 spawn_env 文档）。
+        let (env, _diagnostics) = crate::spawn_env::resolve_pi_spawn_env(router_cfg);
+        return (env, command);
+    }
     if kind != "claude" {
         return (Vec::new(), command);
     }
@@ -518,5 +528,27 @@ mod tests {
             "not the real one".to_string(),
         )];
         assert_eq!(extract_provider_error(&env), None);
+    }
+
+    /// （make-pi-the-builtin-agent 2.1）kind=pi 走标准 env 注入：不落内核
+    /// `SEBAS_PROVIDER_ERROR` abort 信号，command 原样（无 argv 追加）。
+    #[test]
+    fn pi_kind_injects_standard_env_without_args() {
+        let (env, command) = spawn_overrides("pi", vec!["pi".to_string()], None);
+        // 无 provider 配置（测试环境 state store 不可用）→ 空 env，pi 用自身配置。
+        assert!(
+            !env.iter().any(|(k, _)| k == SEBAS_PROVIDER_ERROR_ENV),
+            "pi 不落内核 abort 信号: {env:?}"
+        );
+        assert_eq!(command, vec!["pi".to_string()], "pi 无 argv 追加");
+    }
+
+    /// （2.1）非 claude/pi 的 ACP agent：command 原样、env 空（自管 provider）。
+    #[test]
+    fn other_acp_kind_gets_untouched_command() {
+        let (env, command) =
+            spawn_overrides("opencode", vec!["opencode".into(), "acp".into()], None);
+        assert!(env.is_empty());
+        assert_eq!(command, vec!["opencode".to_string(), "acp".to_string()]);
     }
 }

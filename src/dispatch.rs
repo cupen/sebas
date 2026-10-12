@@ -125,7 +125,9 @@ async fn handle_web_spawn(
     // id：config 注册表优先，miss 读 agents 表构建等价定义，两处皆无 →
     // typed unknown-agent 拒绝（spawn-failed transcript 点名 id）。store-only
     // agent 据此免重启可 spawn。
-    let agent = match crate::agent_store::resolve_agent_config(cfg, &kind).await {
+    // （make-pi-the-builtin-agent 1.1）`pi` 是内置槽位执行体（native 已改指
+    // 它）：恒可解析（缺配置合成缺省），绝不因目录无 pi 行而报 unknown-agent。
+    let agent = match crate::agent_store::resolve_spawn_config(cfg, &kind).await {
         Some(a) => a,
         None => {
             let reason = format!(
@@ -257,7 +259,8 @@ async fn handle_spawn_resume_without_feishu(
     // （add-agent-settings-and-session-titles 3.1）resume 与 fresh spawn 同
     // 一解析链：config 注册表 miss → agents 表（默认 kind 也可能是 store-only
     // 条目）；两处皆无 → typed unknown-agent 拒绝。
-    let agent = match crate::agent_store::resolve_agent_config(cfg, &kind).await {
+    // （1.1）同 web_spawn：`pi` 恒可解析（内置槽位执行体）。
+    let agent = match crate::agent_store::resolve_spawn_config(cfg, &kind).await {
         Some(a) => a,
         None => {
             let reason = format!(

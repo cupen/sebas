@@ -182,7 +182,7 @@ const SECTION_DESC: Record<SettingsSection, string> = {
   models: '管理模型 provider。预设派生值跟随应用代码；API key 由你自己保管。',
   aliases: '管理模型别名：把一个短名映射到某个 provider（可选带上游模型），模型选择处可用短名。',
   agents:
-    '管理 agent 目录。内置 sebas 内核恒在不可删；其余条目全量增删改，保存后免重启生效。config.toml 的 [acp.agents.*] 只是首次启动的种子源——之后以这里为准。',
+    '管理 agent 目录。内置 PI agent 恒在不可删；其余条目全量增删改，保存后免重启生效。config.toml 的 [acp.agents.*] 只是首次启动的种子源——之后以这里为准。',
   skills:
     '本机存储的 agent 技能。可浏览与移除条目，然后点「同步」把技能仓投影到你的 agent。本页从不创建或编辑技能——请使用 CLI、git 或 npx，然后点「刷新」。',
   'env-vars':
@@ -254,6 +254,7 @@ const THEME_OPTIONS: ReadonlyArray<{ mode: ThemeMode; label: string; sub: string
 const INSTALL_RECIPES: ReadonlyArray<{ name: string; package: string }> = [
   { name: 'claude', package: '@anthropic-ai/claude-code' },
   { name: 'opencode', package: 'opencode-ai' },
+  { name: 'pi', package: '@earendil-works/pi-coding-agent' },
 ]
 
 /**
@@ -2505,14 +2506,14 @@ export class SebasSettingsModal extends LitElement {
                       <div class="provider-row-main">
                         <span class="provider-row-name">${builtin.id}</span>
                         <span class="provider-badge default" data-testid="agent-builtin-badge"
-                          >内置 · sebas</span
+                          >内置 · PI</span
                         >
                         <span class="provider-key ${builtin.reachable ? 'on' : 'off'}">
                           ${builtin.reachable
                             ? '可达'
                             : (builtin.cause ?? '不可达')}
                         </span>
-                        <span class="provider-row-url">内置 sebas 内核（不可删除）</span>
+                        <span class="provider-row-url">内置 PI agent（不可删除）</span>
                       </div>
                     </div>
                   `

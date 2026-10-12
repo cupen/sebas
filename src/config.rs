@@ -289,10 +289,12 @@ pub struct FeishuConfig {
     /// 空字符串 = 不检查 @（处理所有消息）。
     #[serde(default)]
     pub bot_name: String,
-    /// 飞书 **新**会话的默认执行体（make-feishu-optional-webui-primary）：
-    /// `true` = 走原生 sebas-agent 内核（`agent-*` 会话，输出在 webui 看，
-    /// 不出飞书卡片）；`false`（默认）= 走 acp 桥（Claude Code，飞书卡片
-    /// 渲染照旧）。既有原生会话不受影响。
+    /// 飞书**新**会话的默认执行体开关（make-feishu-optional-webui-primary）。
+///
+/// **退休（make-pi-the-builtin-agent 1.3，design D5）**：内置 `native` 槽位已
+/// 改指 pi driver（ACP 侧），飞书新会话不再进进程内内核——本键保留仅为配置
+/// 兼容（旧 config 不因未知键报错），但不再影响路由。内核仅服务 legacy
+/// `agent-*` 会话（既有会话的 resume/续聊读路径）。
     #[serde(default)]
     pub native_default: bool,
 }

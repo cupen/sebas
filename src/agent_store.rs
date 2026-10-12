@@ -163,6 +163,58 @@ pub async fn seed_agents_from_config(handle: &crate::sebas_state::writer::StateH
     }
 }
 
+/// （make-pi-the-builtin-agent 1.1，design D1/D6）内置 `native` 槽位的 pi launch
+/// 定义解析：优先运营者自定义的 `[acp.agents.pi]` seed / agents-store 行
+/// （tombstone 守卫照旧），两处皆缺时**合成缺省 `{driver:"pi"}`**——内置槽位
+/// 「恒在不可删」，绝不能因缺配置落 unknown-agent 拒绝（spec
+/// `agent-workbench`「built-in slot follows the pi agent definition」+「恒在」）。
+///
+/// 显式删除过的 `pi` store 行（墓碑）同样回退缺省——内置槽位不因目录删除而
+/// 消失（区别于普通 agent 的墓碑语义：那是「这个 id 不再提供新会话」，
+/// 而内置槽位是保留 id，不可删除）。
+pub async fn resolve_builtin_pi_config(cfg: &Config) -> AgentConfig {
+    // `resolve_agent_config` 的墓碑守卫会拦下已删除 id；内置槽位对 tombstone
+    // 也回退缺省，故这里直读 config∪store 的活跃定义、不看墓碑。
+    let store_rows = match sebas_dispatch::state_store::engine() {
+        Some(engine) => engine.load_agents().await.ok(),
+        None => None,
+    };
+    if let Some(configured) = cfg.acp.agents.get("pi") {
+        return configured.clone();
+    }
+    if let Some(row) = store_rows
+        .as_ref()
+        .and_then(|rows| rows.iter().find(|r| r.id == "pi" && !r.is_deleted()))
+    {
+        return config_of_definition(&row.to_definition());
+    }
+    AgentConfig::Pi(AcpPiConfig::default())
+}
+
+/// （1.2）内置槽位的 pi 可达性探测源：从 [`resolve_builtin_pi_config`] 的
+/// launch 定义取 argv[0] 与 driver 标签。缺省（无配置）时 command = `["pi"]`
+/// （`AcpPiConfig::default().path`），探测语义 = PATH 上的 pi 二进制。
+pub async fn builtin_pi_probe_source(cfg: &Config) -> sebas_webui::agent_kinds::AgentKindSource {
+    let agent = resolve_builtin_pi_config(cfg).await;
+    sebas_webui::agent_kinds::AgentKindSource {
+        slug: "pi".to_string(),
+        command: agent.command(),
+        driver: agent.driver_tag().to_string(),
+        display: agent.display(),
+    }
+}
+
+/// （1.1）spawn/resume 的 kind → launch 定义解析，含内置槽位特例：
+/// `pi` 是内置槽位的执行体（native 已在上层改指它，design D1/D6），**恒可解析**
+/// ——`[acp.agents.pi]` / store 行优先，缺则合成缺省 `{driver:"pi"}`；其余 kind
+/// 沿用 [`resolve_agent_config`]（缺 = None = 调用方 typed unknown-agent 拒绝）。
+pub async fn resolve_spawn_config(cfg: &Config, kind: &str) -> Option<AgentConfig> {
+    if kind == "pi" {
+        return Some(resolve_builtin_pi_config(cfg).await);
+    }
+    resolve_agent_config(cfg, kind).await
+}
+
 /// spawn 动态解析（决策 3）：config 注册表优先，miss 则读 agents 表构建
 /// 等价 `AgentConfig`。两处皆无 → `None`（调用方给 typed unknown-agent
 /// 拒绝）。每次 spawn 直读（本地 SQLite 单行查，微秒级）。墓碑守卫：id
@@ -532,5 +584,110 @@ mod tests {
         assert_eq!(rows.len(), 1, "不产生第二行");
         assert!(rows[0].is_deleted(), "墓碑行原样保留");
         assert_eq!(rows[0].source, "seed");
+    }
+
+    // ── make-pi-the-builtin-agent 1.1/1.2：内置 pi 槽位解析 ──
+
+    /// 无任何 pi 配置时合成缺省 `{driver:"pi"}`——内置槽位恒在，绝不 unknown。
+    #[tokio::test]
+    async fn builtin_pi_config_synthesizes_default_when_unconfigured() {
+        let _engine_guard = sebas_dispatch::test_engine::install_fresh();
+        let cfg: Config = toml::from_str(
+            r#"
+            [acp]
+            default = "claude"
+            [acp.agents.claude]
+            driver = "claude"
+            path = "claude"
+            "#,
+        )
+        .unwrap();
+        let agent = resolve_builtin_pi_config(&cfg).await;
+        match &agent {
+            AgentConfig::Pi(c) => {
+                assert_eq!(c.path, "pi", "缺省 pi 二进制名");
+            }
+            other => panic!("缺省须合成 pi 定义: {other:?}"),
+        }
+        assert_eq!(agent.driver_tag(), "pi");
+        // `resolve_spawn_config` 对 `pi` 同样恒可解析（spawn 路径入口）。
+        assert!(resolve_spawn_config(&cfg, "pi").await.is_some());
+        // 其它缺失 id 仍 None（unknown-agent 拒绝的前提）。
+        assert!(resolve_spawn_config(&cfg, "ghost").await.is_none());
+    }
+
+    /// 操作者自定义 `[acp.agents.pi]`（args/sessions_dir）对内置槽位生效。
+    #[tokio::test]
+    async fn builtin_pi_config_follows_operator_definition() {
+        let _engine_guard = sebas_dispatch::test_engine::install_fresh();
+        let cfg: Config = toml::from_str(
+            r#"
+            [acp]
+            default = "claude"
+            [acp.agents.pi]
+            driver = "pi"
+            path = "/opt/pi/bin/pi"
+            args = ["--provider", "anthropic"]
+            sessions_dir = "/srv/pi-sessions"
+            "#,
+        )
+        .unwrap();
+        let agent = resolve_builtin_pi_config(&cfg).await;
+        match agent {
+            AgentConfig::Pi(c) => {
+                assert_eq!(c.path, "/opt/pi/bin/pi");
+                assert_eq!(c.args, vec!["--provider".to_string(), "anthropic".into()]);
+                assert_eq!(c.sessions_dir, "/srv/pi-sessions");
+            }
+            other => panic!("须跟随操作者 pi 定义: {other:?}"),
+        }
+        // 探测源跟随同一 argv。
+        let probe = builtin_pi_probe_source(&cfg).await;
+        assert_eq!(probe.driver, "pi");
+        assert_eq!(probe.command[0], "/opt/pi/bin/pi");
+    }
+
+    /// pi 的 store 行也参与解析（config 缺、store 有）；墓碑行回退缺省
+    /// （内置槽位不因目录删除消失）。
+    #[tokio::test]
+    async fn builtin_pi_config_reads_store_row_and_ignores_tombstone() {
+        let _engine_guard = sebas_dispatch::test_engine::install_fresh();
+        let engine = sebas_dispatch::state_store::engine().unwrap();
+        let cfg: Config = toml::from_str(
+            r#"
+            [acp]
+            default = "claude"
+            [acp.agents.claude]
+            driver = "claude"
+            path = "claude"
+            "#,
+        )
+        .unwrap();
+        // store 行：自定义 pi path。
+        sebas_dispatch::state_store::agents_mutation(
+            engine,
+            &serde_json::json!({
+                "op": "put",
+                "id": "pi",
+                "agent": {"driver": "pi", "path": "/custom/pi"},
+            }),
+        )
+        .await
+        .unwrap();
+        match resolve_builtin_pi_config(&cfg).await {
+            AgentConfig::Pi(c) => assert_eq!(c.path, "/custom/pi"),
+            other => panic!("store 行须生效: {other:?}"),
+        }
+        // 删除（墓碑）→ 回退缺省 `pi`（内置槽位不消失）。
+        sebas_dispatch::state_store::agents_mutation(
+            engine,
+            &serde_json::json!({"op": "delete", "id": "pi"}),
+        )
+        .await
+        .unwrap();
+        match resolve_builtin_pi_config(&cfg).await {
+            AgentConfig::Pi(c) => assert_eq!(c.path, "pi", "墓碑回退缺省"),
+            other => panic!("墓碑须回退缺省: {other:?}"),
+        }
     }
 }

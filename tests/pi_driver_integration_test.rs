@@ -149,6 +149,69 @@ async fn recv(rx: &Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<AcpEvent>>
         .expect("channel open")
 }
 
+/// （make-pi-the-builtin-agent 2.3，spec `pi-agent`「models.json and auth
+/// stores stay untouched」）sebas 不写 pi 的 `models.json` / auth 存储：一次
+/// 完整的 pi 会话 spawn + 回合前后，pinned pi home（`$HOME/.pi`）内无任何
+/// sebas 写入的文件。pi 自管其配置；sebas 只经标准 env 注入凭据。
+#[tokio::test]
+async fn pi_spawn_never_writes_into_pi_home() {
+    drain_journal("no-write");
+    let exe = write_script("fake-pi.sh", FAKE_PI);
+
+    // pinned fake pi home：$HOME 指向一次性目录，pi 自有落点为 $HOME/.pi。
+    let home = tempfile::tempdir().unwrap();
+    let pi_home = home.path().join(".pi");
+
+    // 注入一条 pi 标准 provider env（模拟 spawn_overrides 的产物），验证它只
+    // 走子进程 env、不落盘。
+    let mgr = pi_manager();
+    let sid = mgr
+        .create_session(
+            "pi",
+            vec![exe.to_string()],
+            None,
+            vec![
+                ("FAKE_PI_SCENARIO".into(), "".into()),
+                ("FAKE_PI_JOURNAL".into(), journal_path("no-write")),
+                ("FAKE_PI_SESSION".into(), "pi-sess-N".into()),
+                ("HOME".into(), home.path().to_string_lossy().into_owned()),
+                ("ANTHROPIC_API_KEY".into(), "sk-injected".into()),
+                (
+                    "ANTHROPIC_BASE_URL".into(),
+                    "https://api.example/anthropic".into(),
+                ),
+            ],
+            "hi".to_string(),
+        )
+        .await
+        .expect("pi session spawns");
+    let rx = mgr.event_rx(&sid).await.expect("event rx present");
+    let _ = recv(&rx).await; // command panel
+    mgr.send(
+        &sid,
+        AcpCommand::ContinueSession {
+            session_id: sid.clone(),
+            prompt: "hello".into(),
+        },
+    )
+    .await
+    .expect("prompt accepted");
+    // 读一个事件推进回合（`while let … { break }` 等价于只读一次；改 `if let`
+    // 避免 clippy::never_loop——语义不变）。
+    if let AcpEvent::Finished { .. } = recv(&rx).await {
+        // 回合可能极快地一次性收尾；不等待更多事件。
+    }
+    mgr.kill(&sid).await;
+
+    // sebas 不写 pi home：`$HOME/.pi` 目录与其中文件皆不存在（fake pi 不落盘，
+    // sebas 亦不代写 models.json / auth）。
+    assert!(
+        !pi_home.exists(),
+        "sebas 不得在 pi home 落任何文件（models.json/auth 仍 pi 自管）: {:?}",
+        std::fs::read_dir(&pi_home).map(|d| d.count())
+    );
+}
+
 /// 6.1 建会话 + 完整回合：握手把会话 id、模型面与命令面板递出；一个 prompt
 /// 产出 thinking/text/tool 增量与**唯一** Finished，且 pi 会话从不产生
 /// PermissionRequest。
@@ -321,6 +384,26 @@ async fn pi_model_switch_round_trips() {
     match recv(&rx).await {
         AcpEvent::ModelChanged { model_id, .. } => assert_eq!(model_id, "anthropic/m-2"),
         other => panic!("expected ModelChanged, got {other:?}"),
+    }
+    mgr.kill(&sid).await;
+}
+
+/// （make-pi-the-builtin-agent 3.1）握手 `get_available_models` 应答装载进裸
+/// id 索引：会话建立后直接提交**裸模型 id** 即可解析（provider 从握手清单查
+/// 得）——不再落「需 provider/id 形式」的拒绝。
+#[tokio::test]
+async fn pi_bare_model_id_resolves_after_handshake() {
+    drain_journal("bare");
+    let exe = write_script("fake-pi.sh", FAKE_PI);
+    let mgr = pi_manager();
+    let (sid, rx) = spawn_pi(&mgr, &exe, "", "pi-sess-B", "bare").await;
+    let _ = recv(&rx).await; // command panel
+
+    // 握手清单里 g-5 的 provider = openai；裸 id 提交应解析并 ModelChanged。
+    mgr.set_model(&sid, "g-5").await.expect("send ok");
+    match recv(&rx).await {
+        AcpEvent::ModelChanged { model_id, .. } => assert_eq!(model_id, "g-5"),
+        other => panic!("bare id must resolve after handshake, got {other:?}"),
     }
     mgr.kill(&sid).await;
 }

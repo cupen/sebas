@@ -264,10 +264,22 @@ pub async fn discover_all(sources: &[AgentKindSource]) -> Vec<AgentKindInfo> {
     out
 }
 
+/// path 缺省时按 driver 取默认二进制名（add-pi-install-recipe D3）：
+/// claude → `DEFAULT_CLAUDE_PATH`、pi → `DEFAULT_PI_PATH`；其余（acp）→ 空串
+/// （ACP 无通用默认，维持现状）。常量复用 sebas-models，避免再写一份字面量。
+fn default_path_for_driver(driver: &str) -> String {
+    match driver {
+        "claude" => sebas_models::agent::DEFAULT_CLAUDE_PATH.to_string(),
+        "pi" => sebas_models::agent::DEFAULT_PI_PATH.to_string(),
+        _ => String::new(),
+    }
+}
+
 /// agents 域快照条目（`AgentRow::to_item` 投影）→ 探测源（
-/// add-agent-settings-and-session-titles 3.2）：claude → `[path]`（缺省
-/// `"claude"`）；acp → `[path, args..]`。`driver` 是配置层标签，只进探测
-/// 源、不上 catalog wire。
+/// add-agent-settings-and-session-titles 3.2）：path 缺省按 driver 取默认
+/// 二进制名——claude → `"claude"`、pi → `"pi"`（add-pi-install-recipe D3），
+/// acp → 空串（无通用默认，catalog 报 `empty command`）。`driver` 是配置层
+/// 标签，只进探测源、不上 catalog wire。
 pub fn source_from_store_item(item: &serde_json::Value) -> Option<AgentKindSource> {
     let id = item.get("id")?.as_str()?.to_string();
     let driver = item
@@ -281,13 +293,7 @@ pub fn source_from_store_item(item: &serde_json::Value) -> Option<AgentKindSourc
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
-        .unwrap_or_else(|| {
-            if driver == "claude" {
-                "claude".to_string()
-            } else {
-                String::new()
-            }
-        });
+        .unwrap_or_else(|| default_path_for_driver(&driver));
     let mut command = vec![path];
     if let Some(args) = item.get("args").and_then(serde_json::Value::as_array) {
         command.extend(
@@ -470,6 +476,42 @@ mod tests {
         assert!(src.command.is_empty(), "acp 无 argv[0] = 空 argv");
         assert!(source_from_store_item(&serde_json::json!({"driver": "acp"})).is_none(),
             "缺 id 的条目不成源");
+    }
+
+    /// add-pi-install-recipe 2.3：path 缺省按 driver 取默认二进制名——pi 无
+    /// path 时 command 为 `["pi"]`（此前落空串 → 误报 empty command）；acp 维持
+    /// 空串；claude 行为不变。
+    #[test]
+    fn store_item_path_fallback_follows_the_driver() {
+        let pi = serde_json::json!({"id": "pi", "driver": "pi"});
+        let src = source_from_store_item(&pi).unwrap();
+        assert_eq!(src.command, vec!["pi".to_string()], "pi 缺 path 走内置 pi");
+        assert_eq!(src.driver, "pi");
+
+        // pi 带 args 时回退头 + args 组装（探测 argv 完整）。
+        let pi_args = serde_json::json!({"id": "pi2", "driver": "pi", "args": ["--flag"]});
+        assert_eq!(
+            source_from_store_item(&pi_args).unwrap().command,
+            vec!["pi".to_string(), "--flag".to_string()]
+        );
+
+        // acp 维持空串回退（无通用默认）。
+        let acp = serde_json::json!({"id": "x", "driver": "acp"});
+        assert!(source_from_store_item(&acp).unwrap().command.is_empty());
+
+        // claude 行为不变。
+        let claude = serde_json::json!({"id": "c", "driver": "claude"});
+        assert_eq!(
+            source_from_store_item(&claude).unwrap().command,
+            vec!["claude".to_string()]
+        );
+
+        // 显式 path 优先于回退。
+        let explicit = serde_json::json!({"id": "p3", "driver": "pi", "path": "/opt/pi"});
+        assert_eq!(
+            source_from_store_item(&explicit).unwrap().command,
+            vec!["/opt/pi".to_string()]
+        );
     }
 
     /// opencode (`opencode acp`) 走现有 `discover_agent` 探测应兼容：二进制在

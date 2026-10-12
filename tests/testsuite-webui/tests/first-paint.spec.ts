@@ -7,8 +7,9 @@
  * renders its structural surface (project rail, composer, project header)
  * and that reachability shows the sandbox's REAL execution state: the core
  * is connected (no "core not connected" banner), acp is available, and the
- * native backend is honestly disabled with its cause — the sandbox has no
- * provider credentials, and the UI must not pretend otherwise.
+ * built-in slot (native/PI) is honestly disabled with its cause — the
+ * sandbox has no pi binary installed, and the UI must point at the pi
+ * install surface rather than pretend otherwise.
  */
 import { expect, test } from '@playwright/test'
 import {
@@ -80,21 +81,21 @@ test.describe('工作台首屏', () => {
 
       await rail.openNewSessionDialog(projectName)
 
-      // agent 必选：native 不可达时禁选并标注 cause（沙箱无 provider 凭据）。
+      // （make-pi-the-builtin-agent 5.2）内置槽位执行体已从自研内核改指 pi
+      // （display `PI`）；不可用的真实条件变为「pi 未安装」——沙箱 PATH 上无
+      // pi，故置灰并标注安装指引（不再提 core env 变量）。
       const nativeOption = rail
         .newSessionDialog()
         .locator('wa-option[value="native"]')
       await expect(nativeOption).toBeDisabled()
-      // fix-webui-qa-round13 3.1（webui spec「不可用 agent 的禁用提示如实」）：
-      // native 禁用提示如实改述真实启用条件——core 进程 env（QA round13 实证
-      // 设置页配 provider 不能点亮 native），提示点名 env、不再引导设置页；
-      // 原始 cause（同类 env 名）仍在 title tooltip。展示名走 catalog 的
-      // display（native = "Native Kernel"）。
-      await expect(nativeOption).toContainText('Native Kernel')
-      await expect(nativeOption).toContainText(
-        /SEBAS_AGENT_PROVIDER_API_KEY|SEBAS_AGENT_ROUTER_URL/,
-      )
-      await expect(nativeOption).not.toContainText('设置 → 模型')
+      // 展示名走 catalog 的 display（native = "PI"）。
+      await expect(nativeOption).toContainText('PI')
+      // spec「unavailable cause speaks operator language」：指引指向安装面，
+      // 且不含环境变量标识（SEBAS_AGENT_PROVIDER_API_KEY 维度已从内置槽位消失）。
+      await expect(nativeOption).toContainText('未安装 pi')
+      await expect(nativeOption).toContainText('设置 → Agent')
+      await expect(nativeOption).not.toContainText('SEBAS_AGENT_PROVIDER_API_KEY')
+      await expect(nativeOption).not.toContainText('SEBAS_AGENT_ROUTER_URL')
 
       // 目录不可得（沙箱无 provider 目录）→ 显式说明，不渲染空下拉。
       await expect(

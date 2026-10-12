@@ -519,7 +519,7 @@ pub async fn run(
         // （add-local-usage-statistics 3.2）webui 面原生会话与 feishu 桥同一
         // 双算规避门控：直连装配才本地记。
         native_backend.set_local_usage(native_local_sink.clone());
-        crate::agent_backend::DualSessionBackend::with_usage_sources(
+        let dual = crate::agent_backend::DualSessionBackend::with_usage_sources(
             std::sync::Arc::new(sebas_webui::session_backend::InProcessBackend::new(
                 router.clone(),
             )),
@@ -529,7 +529,16 @@ pub async fn run(
             Some(local_usage_sink.query_handle().clone()),
             // （add-usage-statistics 2.2）config `[router] listen`。
             usage_router_listen.clone(),
-        )
+        );
+        // （make-pi-the-builtin-agent 1.2）内置槽位（native/PI）可达性按 pi 二进制
+        // 在场判定：探测源**每次调用**从 pi 定义解析（`[acp.agents.pi]` / store
+        // 行 / 缺省 `pi`）——安装配方建出的 store 行即时生效，无需重启。
+        let probe_cfg = std::sync::Arc::new(cfg.clone());
+        let probe_resolve: crate::agent_backend::NativeProbeResolve = std::sync::Arc::new(move || {
+            let cfg = probe_cfg.clone();
+            Box::pin(async move { crate::agent_store::builtin_pi_probe_source(&cfg).await })
+        });
+        dual.with_native_probe(probe_resolve)
     };
     if webui {
         // The core IS this process: serve the dashboard over the in-process

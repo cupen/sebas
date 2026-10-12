@@ -57,13 +57,14 @@ import '@awesome.me/webawesome/dist/components/option/option.js'
  * （title 属性）——spec「unavailable cause speaks operator language」。
  *
  * （fix-webui-qa-round10 1.3，A-DEF-02）文案按成因分流：二进制/启动定义
- * 类缺失指引「设置 → Agent」（路径配置面）。native 行曾是「到「设置 →
- * 模型」配置」——QA round13 实证该指引失实：native 的真实启用条件是
- * **core 进程启动 env**（`SEBAS_AGENT_PROVIDER_API_KEY` 或
- * `SEBAS_AGENT_ROUTER_URL`，webui spec「不可用 agent 的禁用提示如实」），
- * 在设置页配全 provider 也不会点亮该选项（b09/b18/b20/b21/b22/b43），
- * 引导落空。故 native 提示如实改述 env 条件并明说 WebUI 内无法满足；
- * 悬浮 tooltip 仍带服务端 cause（同类 env 名），可见文案不再指向无效界面。
+ * 类缺失指引「设置 → Agent」（路径配置面）。
+ *
+ * （make-pi-the-builtin-agent 4.1）内置槽位执行体已从自研 sebas 内核改指 pi
+ * （display `PI`）；native 不可用的真实条件变为「pi 未安装」——文案改述为
+ * 「安装 pi」指引，不再提 core env（`SEBAS_AGENT_PROVIDER_API_KEY` /
+ * `SEBAS_AGENT_ROUTER_URL` 维度已从内置槽位消失，spec「unavailable cause
+ * speaks operator language」要求不含 env 变量标识）。悬浮 tooltip 仍带服务端
+ * cause（同类安装/认证状态）。
  * catalog wire 里 ACP 行的 cause 只会是 launch 定义面问题（`command not
  * found` / `empty command`）——按 id 分类即按成因分类，无需新增协议字段。
  */
@@ -73,7 +74,7 @@ export function agentUnavailableLabel(a: {
   cause?: string | null
 }): string {
   return a.id === 'native'
-    ? `${a.display}（native 内核需 core 进程以 SEBAS_AGENT_PROVIDER_API_KEY 或 SEBAS_AGENT_ROUTER_URL 环境变量启动——WebUI 内无法配置，请联系部署方启用）`
+    ? `${a.display}（未安装 pi——到「设置 → Agent」一键安装 pi 后即可选用）`
     : `${a.display}（不可用——到「设置 → Agent」检查启动定义）`
 }
 

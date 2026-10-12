@@ -34,8 +34,11 @@ pub struct DispatchNativeBridge {
     sessions: Arc<Mutex<HashMap<String, NativeSession>>>,
     /// 待决权限请求：request_id → 内核 session_id（供回填）。
     pending: Arc<Mutex<HashMap<String, String>>>,
-    /// 新会话的默认执行体：`true` = feishu 新会话走原生内核；`false` =
-    /// 走 acp 桥（现状）。既有原生会话不受此影响（按 sessions map 判定）。
+    /// （make-pi-the-builtin-agent 1.3）**退休的**「新会话默认执行体」开关。
+    /// 本 change 后内置 `native` 槽位改指 pi（ACP 侧），飞书新会话不再进内核
+    /// ——`[feishu] native_default` 键保留（配置兼容），但不再影响路由；内核
+    /// 仅服务 legacy `agent-*` 会话（D5）。字段保留仅为诊断日志回显。
+    #[allow(dead_code)]
     default_native: bool,
     /// （add-local-usage-statistics 3.2）native 直连回合的本地落账 sink：
     /// pump 在 `SessionSummary` 帧结算一行交它（满载丢弃语义在 sink 侧）。
@@ -235,8 +238,17 @@ impl DispatchNativeBridge {
 
 impl NativeSessionBridge for DispatchNativeBridge {
     fn is_native(&self, key: &ChannelKey) -> bool {
-        // 已登记的原生会话 → 走桥；新会话按默认执行体（default_native）。
-        self.is_registered(key) || self.default_native
+        // （make-pi-the-builtin-agent 1.3，design D5）桥只服务 **legacy** 原生
+        // 会话；新会话不再进内核——内置 `native` 槽位已改指 pi（ACP 侧），
+        // 飞书新会话按 `native_default` 路由的旧默认执行体语义**退休**
+        // （`default_native` 键保留兼容但不生效）。
+        //
+        // legacy 判定两条：①本进程内已登记的原生会话（bridge `prompt` 建过）；
+        // ②legacy `agent-*` 前缀 key（webui NativeAgentBackend 的历史内核会话，
+        // 跨重启后仅凭前缀可寻址）——二者是「恢复/续聊读路径」，与新建会话
+        // （web key 或普通 oc_* 飞书键）区分。
+        self.is_registered(key)
+            || (key.channel_str() == "feishu" && key.reference.starts_with("agent-"))
     }
 
     fn prompt(self: Arc<Self>, key: ChannelKey, text: String) {

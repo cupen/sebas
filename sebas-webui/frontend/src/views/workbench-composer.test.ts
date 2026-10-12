@@ -1693,3 +1693,46 @@ describe('model menu merges alias short names (round14 3.1, D-4-1)', () => {
     el.remove()
   })
 })
+
+// ── make-pi-the-builtin-agent 4.2：native(pi) 会话的模型 chip ─────────────
+
+describe('native (PI) session model chip (4.2)', () => {
+  it('an unselected native session shows no false selected marker', async () => {
+    // native(pi) 会话模型面来自 pi 自广告（provider/id 词表，既有管线）；
+    // 未锁定模型时 chip 如实显示「默认」，菜单里无 aria-selected/「当前」。
+    const el = await mount({
+      sessionKey: 'web%00web-pi',
+      agentKind: 'pi',
+      sessionModels: ['anthropic/sonnet', 'openai/gpt-x'],
+      currentModel: null,
+    })
+    const chip = el.shadowRoot!.querySelector('[data-testid="model-chip"]') as HTMLElement
+    expect(chip).toBeTruthy()
+    expect(chip.getAttribute('data-confirmed')).toBe('false')
+    expect(chip.textContent).toContain('默认')
+    chip.click()
+    await el.updateComplete
+    const items = [
+      ...(el.shadowRoot?.querySelectorAll('[data-testid="model-menu"] .menu-item') ?? []),
+    ]
+    expect(items).toHaveLength(2)
+    expect(items.every((i) => i.getAttribute('aria-selected') === 'false')).toBe(true)
+    expect(el.shadowRoot!.querySelector('[data-testid="model-current-tag"]')).toBeNull()
+    el.remove()
+  })
+
+  it('a pi session lists the provider/id vocabulary the child advertises', async () => {
+    // 模型面 = pi 自广告（provider/id），不来自 sebas 目录——chip 菜单逐项
+    // 呈现该词表，选中经既有 setSessionModel 往返。
+    const el = await mount({
+      sessionKey: 'web%00web-pi2',
+      agentKind: 'pi',
+      sessionModels: ['anthropic/sonnet'],
+      currentModel: 'anthropic/sonnet',
+    })
+    const chip = el.shadowRoot!.querySelector('[data-testid="model-chip"]') as HTMLElement
+    expect(chip.textContent).toContain('anthropic/sonnet')
+    expect(chip.getAttribute('data-confirmed')).toBe('true')
+    el.remove()
+  })
+})
