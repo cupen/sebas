@@ -5,7 +5,9 @@
 //! [`crate::routes::agent_install`]）：
 //! - **落点私有**（D2）：`<SEBAS_HOME>/agent-tools/<recipe>`，npm
 //!   `install --global --prefix <prefix> <pkg>`；零特权、不污染操作员全局。
-//! - **配方封闭**（D5）：静态表只认 claude / opencode，不接受任意包名输入。
+//! - **配方封闭**（D5）：静态表只认 claude / opencode / pi，不接受任意包名输入。
+//! - **可选前置**（add-pi-install-recipe D2）：配方可声明运行时前置（如 pi 的
+//!   Node >= 22.19.0），安装前解析，不满足即拒绝——非 pi 硬编码分支。
 //! - **同步执行 + 超时**（D3）：`tokio::time::timeout` 包 npm 子进程，
 //!   per-recipe in-flight 锁防重入。
 //! - **探测复用**：安装后用 [`crate::agent_kinds::discover_agent`] 同一口径
@@ -25,19 +27,35 @@ pub const INSTALL_TIMEOUT_SECS: u64 = 300;
 /// npm 在场探测的超时（`npm --version` 应瞬回；挂起即判不可用）。
 const NPM_PROBE_TIMEOUT_SECS: u64 = 10;
 
+/// Node 版本前置探测的超时（`node --version` 应瞬回；挂起即判不可用）。
+/// 与 npm 同口径：短超时，挂起不拖住安装请求。
+const NODE_PROBE_TIMEOUT_SECS: u64 = 5;
+
+/// 配方声明的运行时前置（design D2）：目前只有 Node 版本下限一种形态。
+///
+/// 前置是**配方数据**而非 handler 分支——加第二个带前置的配方即填表，不动流程
+/// 代码（design D2 明确否决 `if recipe.name == "pi"` 硬编码）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Prerequisite {
+    /// 要求 PATH 上的 node 版本不低于 `major.minor`。
+    NodeAtLeast { major: u32, minor: u32 },
+}
+
 /// 一条内置安装配方（design D5）：请求只认 `recipe` 名，包名/bin 名硬编码。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Recipe {
-    /// 配方名，也是 agents store 的 id（claude / opencode）。
+    /// 配方名，也是 agents store 的 id（claude / opencode / pi）。
     pub name: &'static str,
     /// 官方 npm 包名。
     pub package: &'static str,
     /// 包提供的可执行文件名（bin shim 基名）。
     pub bin: &'static str,
-    /// launch 驱动标签（封闭 `claude` | `acp`）。
+    /// launch 驱动标签（封闭 `claude` | `acp` | `pi`）。
     pub driver: &'static str,
-    /// ACP 形态的启动参数（claude 驱动为空）。
+    /// 启动参数（claude 驱动与 pi 为空；opencode 首词 `acp`）。
     pub args: &'static [&'static str],
+    /// 可选运行时前置（design D2）：`None` = 无前置、完全跳过检查。
+    pub prereq: Option<Prerequisite>,
 }
 
 /// 封闭配方表（design D5）：清单之外的 recipe 一律 typed 拒绝，不 spawn。
@@ -48,6 +66,7 @@ pub const RECIPES: &[Recipe] = &[
         bin: "claude",
         driver: "claude",
         args: &[],
+        prereq: None,
     },
     Recipe {
         name: "opencode",
@@ -56,6 +75,21 @@ pub const RECIPES: &[Recipe] = &[
         driver: "acp",
         // 与前端表单 opencode 形态同口径：args 首词 `acp`。
         args: &["acp"],
+        prereq: None,
+    },
+    Recipe {
+        name: "pi",
+        package: "@earendil-works/pi-coding-agent",
+        bin: "pi",
+        driver: "pi",
+        // pi 的 `--mode rpc` 由驱动层拼装（design D1），配方 args 为空。
+        args: &[],
+        // pi 的 `engines.node >= 22.19.0` 是硬约束（design D2）：只查在场会在
+        // 旧 Node 上装出跑不起来的 pi，故查准版本。
+        prereq: Some(Prerequisite::NodeAtLeast {
+            major: 22,
+            minor: 19,
+        }),
     },
 ];
 
@@ -265,6 +299,110 @@ async fn npm_available_at(npm: &Path, timeout: Duration) -> bool {
     )
 }
 
+// ── 配方前置（design D2）──────────────────────────────────────────────────────
+
+/// 前置不满足的诚实分类（design D2/D7）：错误形状决定文案。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrereqFailure {
+    /// PATH 上找不到 node（或 `node --version` 不可达/无输出）。
+    NodeMissing { major: u32, minor: u32 },
+    /// node 在场但版本低于配方下限（或输出无法解析——诚实优先，按不满足拒）。
+    NodeTooOld {
+        /// 探测到的原始版本串（解析失败时为原始输出）。
+        found: String,
+        major: u32,
+        minor: u32,
+    },
+}
+
+impl PrereqFailure {
+    /// 最小指引文案（design D2）：缺失 → 安装 Node.js；版本低 → 点明当前版本
+    /// 与下限并给升级指引。
+    pub fn message(&self) -> String {
+        match self {
+            PrereqFailure::NodeMissing { major, minor } => format!(
+                "本机 PATH 上找不到可用的 node：该配方要求 Node.js >= {major}.{minor}.0，\
+                 请先安装 Node.js（含 npm）后重试"
+            ),
+            PrereqFailure::NodeTooOld {
+                found,
+                major,
+                minor,
+            } => format!(
+                "Node.js 版本过低（探测到 {found}，需要 >= {major}.{minor}.0）：\
+                 请升级 Node.js 到 {major}.{minor}.0 或更高版本后重试"
+            ),
+        }
+    }
+}
+
+/// 解析 `node --version` 输出为 `(major, minor)`：容忍前导 `v`（`v22.19.0`），
+/// 需要至少 major.minor 两段十进制数字；解析失败返回 `None`（调用方按不满足拒，
+/// design D2「解析失败按不满足」）。
+fn parse_node_version(output: &str) -> Option<(u32, u32)> {
+    let first = output.lines().map(str::trim).find(|l| !l.is_empty())?;
+    let body = first.strip_prefix('v').unwrap_or(first);
+    let mut parts = body.split('.');
+    let major = parts.next()?.trim().parse::<u32>().ok()?;
+    let minor = parts.next()?.trim().parse::<u32>().ok()?;
+    Some((major, minor))
+}
+
+/// 检查配方前置（design D2）：`None` 完全跳过（`Ok(())`）；`NodeAtLeast` 则探测
+/// PATH 上的 node 版本，缺失 / 版本不足 / 解析失败一律 typed 拒绝。调用方在
+/// 启动 npm 进程**之前**调用，未过则不得发起安装、不得建行。
+pub async fn check_prereq(prereq: Option<Prerequisite>) -> Result<(), PrereqFailure> {
+    let Some(Prerequisite::NodeAtLeast { major, minor }) = prereq else {
+        return Ok(());
+    };
+    let node = match resolve_program("node") {
+        Some(p) => p,
+        None => return Err(PrereqFailure::NodeMissing { major, minor }),
+    };
+    check_node_at(
+        &node,
+        major,
+        minor,
+        Duration::from_secs(NODE_PROBE_TIMEOUT_SECS),
+    )
+    .await
+}
+
+/// [`check_prereq`] 的显式程序形态（单测注入 fake node，避免动全局 PATH）。
+async fn check_node_at(
+    node: &Path,
+    major: u32,
+    minor: u32,
+    timeout: Duration,
+) -> Result<(), PrereqFailure> {
+    // 探测走 ETXTBSY 重试的同一 exec 口径（多线程下刚写出的 fake node 脚本会
+    // 短暂 ETXTBSY——仓库既有 flake 修复点，见 agent_kinds）。
+    let fut = crate::agent_kinds::output_with_etxtbsy_retry(|| {
+        let mut cmd = tokio::process::Command::new(node);
+        cmd.arg("--version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        cmd
+    });
+    let out = match tokio::time::timeout(timeout, fut).await {
+        Ok(Ok(out)) if out.status.success() => out,
+        // spawn 失败 / 非零退出 / 超时：一律按 node 缺失拒（无法证明它可用）。
+        _ => return Err(PrereqFailure::NodeMissing { major, minor }),
+    };
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    match parse_node_version(&text) {
+        Some((maj, min)) if (maj, min) >= (major, minor) => Ok(()),
+        // 版本低或输出异常：按不满足拒（诚实优先），携带探测到的原始串。
+        _ => Err(PrereqFailure::NodeTooOld {
+            found: text,
+            major,
+            minor,
+        }),
+    }
+}
+
 /// 执行 npm 安装（design D2/D3）：`npm install --global --prefix <prefix> <pkg>`。
 pub async fn run_npm_install(prefix: &Path, package: &str) -> Result<(), InstallFailure> {
     run_npm_install_timeout(prefix, package, Duration::from_secs(INSTALL_TIMEOUT_SECS)).await
@@ -427,9 +565,45 @@ mod tests {
     fn unknown_recipe_is_rejected_without_a_match() {
         assert!(recipe("claude").is_some());
         assert!(recipe("opencode").is_some());
+        // 1.4：按名查存在性（不绑长度——加配方不破测试）。
+        assert!(recipe("pi").is_some(), "pi 配方已入表");
         assert!(recipe("malicious-pkg").is_none());
         assert!(recipe("").is_none());
-        assert_eq!(RECIPES.len(), 2, "封闭配方表只有两条");
+    }
+
+    /// 1.1：claude / opencode 无前置（`prereq.is_none()`）；pi 声明 Node 下限
+    /// 22.19（design D2）。
+    #[test]
+    fn recipe_prerequisites_are_declared_per_recipe() {
+        assert!(recipe("claude").unwrap().prereq.is_none(), "claude 无前置");
+        assert!(
+            recipe("opencode").unwrap().prereq.is_none(),
+            "opencode 无前置"
+        );
+        assert_eq!(
+            recipe("pi").unwrap().prereq,
+            Some(Prerequisite::NodeAtLeast {
+                major: 22,
+                minor: 19
+            }),
+            "pi 声明 node >= 22.19.0"
+        );
+    }
+
+    /// 1.2：pi 配方字段逐项正确 + 定义产出 `{driver:"pi", path}`（无 args 键）。
+    #[test]
+    fn pi_recipe_has_the_expected_shape() {
+        let pi = recipe("pi").expect("pi recipe exists");
+        assert_eq!(pi.package, "@earendil-works/pi-coding-agent");
+        assert_eq!(pi.bin, "pi");
+        assert_eq!(pi.driver, "pi");
+        assert!(pi.args.is_empty(), "pi args 空（--mode rpc 由驱动层拼）");
+
+        let bin = Path::new("/home/op/.sebas/agent-tools/pi/bin/pi");
+        let def = recipe_agent_definition(pi, bin);
+        assert_eq!(def["driver"], "pi");
+        assert_eq!(def["path"], bin.to_string_lossy().as_ref());
+        assert!(def.get("args").is_none(), "pi 定义无 args 键: {def}");
     }
 
     #[test]
@@ -646,6 +820,100 @@ exit 0
         );
         let msg = InstallFailure::NpmMissing.message();
         assert!(msg.contains("Node.js"), "最小指引点名 Node.js: {msg}");
+    }
+
+    // ── 1.3 Node 前置五剧本（fake node，显式路径注入）───────────────────────
+
+    /// 写一个 fake `node`（unix sh 脚本）打印给定版本串。返回脚本路径。
+    #[cfg(unix)]
+    fn fake_node(dir: &Path, version: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.join("node");
+        let body = format!("#!/bin/sh\necho {version}\n");
+        std::fs::write(&script, body).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    /// 1.3：`parse_node_version` 容忍前导 v、至少两段数字，异常输出 → None。
+    #[test]
+    fn node_version_parses_tolerantly_and_rejects_garbage() {
+        assert_eq!(parse_node_version("v22.19.0"), Some((22, 19)));
+        assert_eq!(parse_node_version("22.19.0"), Some((22, 19)));
+        assert_eq!(parse_node_version("v23.0.0\n"), Some((23, 0)));
+        assert_eq!(parse_node_version("  v22.18.9  "), Some((22, 18)));
+        assert_eq!(parse_node_version("foo"), None, "异常输出 → 解析失败");
+        assert_eq!(parse_node_version("v22"), None, "缺 minor → 失败");
+        assert_eq!(parse_node_version(""), None);
+    }
+
+    /// 1.3：无前置配方完全跳过（`None → Ok`），不 spawn 任何进程。
+    #[tokio::test]
+    async fn no_prerequisite_skips_the_check() {
+        assert!(check_prereq(None).await.is_ok());
+    }
+
+    /// 1.3：五剧本——缺失 / 不足 / 恰好 / 超过 / 异常输出。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn node_prerequisite_five_scenarios() {
+        let (major, minor) = (22, 19);
+        let t = Duration::from_secs(5);
+
+        // (1) node 缺失：显式指向不存在路径。
+        let missing = Path::new("/definitely/not/here/node-xyz-12345");
+        let e = check_node_at(missing, major, minor, t).await.unwrap_err();
+        assert_eq!(e, PrereqFailure::NodeMissing { major, minor });
+        assert!(e.message().contains("找不到") && e.message().contains("22.19.0"));
+
+        let tmp = tempfile::tempdir().unwrap();
+
+        // (2) v22.18.9 —— 版本不足。
+        let old = fake_node(tmp.path(), "v22.18.9");
+        let e = check_node_at(&old, major, minor, t).await.unwrap_err();
+        match &e {
+            PrereqFailure::NodeTooOld { found, .. } => assert_eq!(found, "v22.18.9"),
+            other => panic!("expected NodeTooOld, got {other:?}"),
+        }
+        assert!(
+            e.message().contains("v22.18.9") && e.message().contains("22.19.0"),
+            "点明当前版本与下限: {}",
+            e.message()
+        );
+
+        // (3) v22.19.0 —— 恰好满足。
+        let exact = fake_node(tmp.path(), "v22.19.0");
+        assert!(check_node_at(&exact, major, minor, t).await.is_ok());
+
+        // (4) v23.0.0 —— 超过。
+        let newer = fake_node(tmp.path(), "v23.0.0");
+        assert!(check_node_at(&newer, major, minor, t).await.is_ok());
+
+        // (5) 异常输出 —— 按不满足拒（诚实优先）。
+        let garbage = fake_node(tmp.path(), "foo");
+        match check_node_at(&garbage, major, minor, t).await.unwrap_err() {
+            PrereqFailure::NodeTooOld { found, .. } => assert_eq!(found, "foo"),
+            other => panic!("garbage output must be refused, got {other:?}"),
+        }
+    }
+
+    /// 1.3：`check_prereq` 端到端走 `resolve_program("node")`（本机无 node 时
+    /// 诚实拒绝；有 node 时按下限判定）。不钉具体结果——只断言不 panic 且
+    /// 失败携带指引。
+    #[tokio::test]
+    async fn check_prereq_resolves_node_from_path() {
+        let outcome = check_prereq(Some(Prerequisite::NodeAtLeast {
+            major: 22,
+            minor: 19,
+        }))
+        .await;
+        if let Err(e) = outcome {
+            let msg = e.message();
+            assert!(
+                msg.contains("node") && msg.contains("22.19.0"),
+                "指引点明 node 与下限: {msg}"
+            );
+        }
     }
 
     // ── 1.2 in-flight 锁 ────────────────────────────────────────────────────

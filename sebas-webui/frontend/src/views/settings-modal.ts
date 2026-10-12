@@ -254,6 +254,7 @@ const THEME_OPTIONS: ReadonlyArray<{ mode: ThemeMode; label: string; sub: string
 const INSTALL_RECIPES: ReadonlyArray<{ name: string; package: string }> = [
   { name: 'claude', package: '@anthropic-ai/claude-code' },
   { name: 'opencode', package: 'opencode-ai' },
+  { name: 'pi', package: '@earendil-works/pi-coding-agent' },
 ]
 
 /**

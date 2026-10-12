@@ -1663,7 +1663,11 @@ describe('add-agent-auto-install：Agents 分区可安装区', () => {
   it('lists the closed recipe set and marks already-reachable agents as installed', async () => {
     const el = await mount()
     await goto(el, 'agents')
-    expect(installRows(el).map((r) => r.dataset['recipe'])).toEqual(['claude', 'opencode'])
+    expect(installRows(el).map((r) => r.dataset['recipe'])).toEqual([
+      'claude',
+      'opencode',
+      'pi',
+    ])
 
     // claude 在 catalog 里可达 → 已安装、无安装按钮。
     const claude = recipeRow(el, 'claude')
@@ -1674,6 +1678,51 @@ describe('add-agent-auto-install：Agents 分区可安装区', () => {
     const opencode = recipeRow(el, 'opencode')
     expect(opencode.querySelector('[data-testid="install-status"]')!.textContent).toContain('未安装')
     expect(opencode.querySelector('[data-testid="install-button"]')).toBeTruthy()
+    el.remove()
+  })
+
+  // add-pi-install-recipe 3.1：pi 配方行渲染 + npm 包名徽标 + 未装给安装按钮。
+  it('lists the pi recipe with its npm package and install button when not installed', async () => {
+    const el = await mount()
+    await goto(el, 'agents')
+    const pi = recipeRow(el, 'pi')
+    expect(pi.querySelector('.provider-row-name')!.textContent).toContain('pi')
+    expect(pi.querySelector('.provider-badge')!.textContent).toContain(
+      '@earendil-works/pi-coding-agent',
+    )
+    expect(pi.querySelector('[data-testid="install-status"]')!.textContent).toContain('未安装')
+    expect(pi.querySelector('[data-testid="install-button"]')).toBeTruthy()
+    el.remove()
+  })
+
+  // 已装（可达 pi 行）→ 不显示安装按钮。
+  it('marks pi installed when a reachable pi row is in the catalog', async () => {
+    apiMocks.agents.mockResolvedValue({
+      agents: [
+        { id: 'native', display: 'Native Kernel', reachable: true },
+        { id: 'pi', display: 'pi', reachable: true },
+      ],
+    })
+    const el = await mount()
+    await goto(el, 'agents')
+    const pi = recipeRow(el, 'pi')
+    expect(pi.querySelector('[data-testid="install-status"]')!.textContent).toContain('已安装')
+    expect(pi.querySelector('[data-testid="install-button"]')).toBeNull()
+    el.remove()
+  })
+
+  // add-pi-install-recipe 3.2：前置失败（node 指引）经既有 errorText 通道如实呈现。
+  it('surfaces the node prerequisite guidance from the backend on pi install failure', async () => {
+    apiMocks.agentInstall.mockRejectedValue(
+      new Error('本机 PATH 上找不到可用的 node：该配方要求 Node.js >= 22.19.0，请先安装 Node.js（含 npm）后重试'),
+    )
+    const el = await mount()
+    await goto(el, 'agents')
+    recipeRow(el, 'pi').querySelector<HTMLElement>('[data-testid="install-button"]')!.click()
+    await settle(el)
+    const action = el.shadowRoot!.querySelector('[data-testid="agent-action"]')!
+    expect(action.textContent).toContain('安装 pi 失败')
+    expect(action.textContent).toContain('22.19.0')
     el.remove()
   })
 
@@ -1764,7 +1813,7 @@ describe('add-agent-auto-install：Agents 分区可安装区', () => {
       await goto(el, 'agents')
       // 配方行仍在（只读浏览），但无安装按钮。
       expect(recipeRow(el, 'opencode').querySelector('[data-testid="install-button"]')).toBeNull()
-      expect(installRows(el).length).toBe(2)
+      expect(installRows(el).length).toBe(3)
       el.remove()
     }
   })

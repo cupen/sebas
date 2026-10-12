@@ -44,6 +44,7 @@ struct Fixture {
     _engine: sebas_dispatch::test_engine::EngineGuard,
     home: tempfile::TempDir,
     npm_dir: tempfile::TempDir,
+    node_dir: tempfile::TempDir,
     npm_log: PathBuf,
     saved: Vec<(&'static str, Option<OsString>)>,
 }
@@ -55,6 +56,7 @@ impl Fixture {
         let engine = sebas_dispatch::test_engine::install_fresh();
         let home = tempfile::tempdir().unwrap();
         let npm_dir = tempfile::tempdir().unwrap();
+        let node_dir = tempfile::tempdir().unwrap();
         let npm_log = npm_dir.path().join("argv.log");
         let saved: Vec<(&'static str, Option<OsString>)> = ["SEBAS_HOME", "PATH"]
             .iter()
@@ -82,6 +84,7 @@ impl Fixture {
             _engine: engine,
             home,
             npm_dir,
+            node_dir,
             npm_log,
             saved,
         };
@@ -89,6 +92,30 @@ impl Fixture {
             fixture.write_fake_npm("ok", "9.9.9");
         }
         fixture
+    }
+
+    /// 把 fake npm 目录 + （可选）fake node 目录 + 真实 PATH 组装进进程 PATH。
+    /// `node_version=Some(v)` 写一个打印 `v` 的 fake node 并前置；`None` 则
+    /// PATH **不含**任何 node（也不含真实 PATH——否则机器上的真 node 会漏进来，
+    /// 破坏「node 缺失」的确定性）。
+    fn set_path(&self, node_version: Option<&str>) {
+        use std::os::unix::fs::PermissionsExt;
+        let mut p = OsString::new();
+        if let Some(v) = node_version {
+            let script = self.node_dir.path().join("node");
+            std::fs::write(&script, format!("#!/bin/sh\necho {v}\n")).unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            p.push(self.node_dir.path().as_os_str());
+            p.push(":");
+        }
+        p.push(self.npm_dir.path().as_os_str());
+        // fake node 剧本下仍接真实 PATH（脚本内 mkdir/chmod 可解析）；node 缺失
+        // 场景只留 npm_dir（安装根本不会被触发，npm 探测的 echo 是 shell 内建）。
+        if node_version.is_some() {
+            p.push(":");
+            p.push(std::env::var_os("PATH").unwrap_or_default());
+        }
+        unsafe { std::env::set_var("PATH", &p) };
     }
 
     /// 写/覆写 fake npm 脚本（剧本与日志路径烘焙进脚本，不读进程 env）。
@@ -111,6 +138,7 @@ case "{mode}" in
     case "$pkg" in
       "@anthropic-ai/claude-code") name=claude ;;
       "opencode-ai") name=opencode ;;
+      "@earendil-works/pi-coding-agent") name=pi ;;
       *) name=pkg ;;
     esac
     mkdir -p "$prefix/bin"
@@ -356,6 +384,122 @@ async fn install_opencode_seeds_a_reachable_catalog_row_under_the_private_prefix
     assert!(oc.work_dir.is_none(), "留空走默认: {oc:?}");
 }
 
+// ── spec「pi 一键安装到私有前缀」+「pi 安装后目录行以 pi 驱动就绪」─────────
+
+#[tokio::test]
+async fn install_pi_seeds_a_pi_driven_catalog_row_when_node_satisfies_prereq() {
+    let f = Fixture::new(true);
+    f.set_path(Some("v22.19.0"));
+    let (app, _rx) = test_app(empty_provider());
+
+    let (status, v) = post_install(&app, serde_json::json!({"recipe": "pi"})).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["installed"], true, "{v}");
+    assert_eq!(v["agent_created"], true, "{v}");
+    let expected_bin = f
+        .home()
+        .join("agent-tools")
+        .join("pi")
+        .join("bin")
+        .join("pi");
+    assert_eq!(
+        v["path"].as_str(),
+        Some(expected_bin.to_string_lossy().as_ref()),
+        "response carries the private-prefix pi bin: {v}"
+    );
+    assert_eq!(v["version"], "9.9.9", "{v}");
+
+    // fake npm 收到 pi 包名 argv（绝不真拨 registry）。
+    let argv = f.argv();
+    assert!(
+        argv.iter().any(|a| a == "@earendil-works/pi-coding-agent"),
+        "pi package rides argv: {argv:?}"
+    );
+
+    // 目录联动：pi 行以 pi 驱动就绪（driver tag `pi`、args 空）。
+    let (status, catalog) = get_json(&app, "/api/agents").await;
+    assert_eq!(status, StatusCode::OK, "{catalog}");
+    let row = agent_row(&catalog, "pi");
+    assert_eq!(row["reachable"], true, "{row}");
+    assert_eq!(
+        row["path_raw"].as_str(),
+        Some(expected_bin.to_string_lossy().as_ref())
+    );
+
+    let engine = sebas_dispatch::state_store::engine().expect("engine");
+    let rows = engine.load_agents().await.expect("agents load");
+    let pi = rows.iter().find(|r| r.id == "pi").expect("pi row landed");
+    assert_eq!(pi.driver, "pi");
+    assert!(pi.args.is_none(), "pi args 空: {pi:?}");
+}
+
+// ── spec「Recipe install prerequisites are declared and enforced」──────────
+
+#[tokio::test]
+async fn pi_install_without_node_is_a_typed_400_and_runs_no_npm() {
+    let f = Fixture::new(true);
+    f.set_path(None); // PATH 无 node
+    let (app, _rx) = test_app(empty_provider());
+
+    let (status, v) = post_install(&app, serde_json::json!({"recipe": "pi"})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+    let err = v["error"].as_str().unwrap_or_default();
+    assert!(err.contains("node"), "error names node: {err}");
+    assert!(
+        err.contains("22.19.0"),
+        "error carries the version floor: {err}"
+    );
+    // 未发起 npm 安装（argv 日志只有/没有 `npm --version`——绝不能有 install）。
+    assert!(
+        !f.argv().iter().any(|a| a == "install"),
+        "prereq failure must not run npm install: {:?}",
+        f.argv()
+    );
+    assert!(stored_ids().await.is_empty(), "no row on prereq failure");
+    assert!(
+        !f.home().join("agent-tools").exists(),
+        "no prefix dir on prereq failure"
+    );
+}
+
+#[tokio::test]
+async fn pi_install_with_old_node_is_a_typed_400_and_runs_no_npm() {
+    let f = Fixture::new(true);
+    f.set_path(Some("v22.18.9"));
+    let (app, _rx) = test_app(empty_provider());
+
+    let (status, v) = post_install(&app, serde_json::json!({"recipe": "pi"})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+    let err = v["error"].as_str().unwrap_or_default();
+    assert!(err.contains("v22.18.9"), "names the found version: {err}");
+    assert!(err.contains("22.19.0"), "names the floor: {err}");
+    assert!(
+        !f.argv().iter().any(|a| a == "install"),
+        "old node must not run npm install: {:?}",
+        f.argv()
+    );
+    assert!(stored_ids().await.is_empty(), "no row on prereq failure");
+}
+
+#[tokio::test]
+async fn recipes_without_prereq_ignore_node_version() {
+    // claude 无前置：即便 PATH 上的 node 版本偏低，安装照常进行（行为与
+    // change 前逐字一致——不做任何 Node 前置检查）。
+    let f = Fixture::new(true);
+    f.set_path(Some("v0.1.0"));
+    let (app, _rx) = test_app(empty_provider());
+
+    let (status, v) = post_install(&app, serde_json::json!({"recipe": "claude"})).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["installed"], true, "{v}");
+    assert_eq!(v["agent_created"], true, "{v}");
+    assert!(
+        f.argv().iter().any(|a| a == "install"),
+        "no-prereq recipe still installs: {:?}",
+        f.argv()
+    );
+}
+
 // ── spec「npm 缺失诚实报错」────────────────────────────────────────────────
 
 #[tokio::test]
@@ -411,12 +555,12 @@ async fn unknown_recipe_is_a_typed_400_and_spawns_no_subprocess() {
 
     let (status, v) = post_install(&app, serde_json::json!({"recipe": "left-pad"})).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+    let err = v["error"].as_str().unwrap_or_default();
+    assert!(err.contains("未知 recipe"), "{v}");
+    // 2.2：文案不再硬编码配方枚举（每加配方不必改文案）。
     assert!(
-        v["error"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("未知 recipe"),
-        "{v}"
+        !err.contains("claude") && !err.contains("opencode"),
+        "unknown-recipe text must not enumerate the recipe set: {err}"
     );
     // 未 spawn：fake npm 的 argv 日志从未出现。
     assert!(!f.argv_log().exists(), "unknown recipe must not run npm");
