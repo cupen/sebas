@@ -79,6 +79,11 @@ struct Spawned {
     buffered: Vec<PiFrame>,
     pi_session_id: String,
     model: Option<AcpModelInfo>,
+    /// 握手 `get_available_models` 应答的 `(provider, id)` 清单
+    /// （make-pi-the-builtin-agent 3.1）：装载进 run 循环的裸 id 索引，使
+    /// 裸模型 id 提交在握手后即可解析（此前索引为空，只有 set_model 成功的
+    /// 模型才进索引）。
+    models: Vec<(String, String)>,
     commands: Vec<AvailableCommand>,
 }
 
@@ -206,7 +211,7 @@ async fn try_spawn(
     }
 
     let handshake = collect_handshake(&mut frame_rx, &state_id, &models_id, &commands_id);
-    let (buffered, pi_session_id, model, commands) =
+    let (buffered, pi_session_id, model, models, commands) =
         match tokio::time::timeout(cfg.startup_timeout, handshake).await {
             Ok(Ok(v)) => v,
             Ok(Err(e)) => {
@@ -231,6 +236,7 @@ async fn try_spawn(
         buffered,
         pi_session_id,
         model,
+        models,
         commands,
     })
 }
@@ -242,7 +248,16 @@ async fn collect_handshake(
     state_id: &str,
     models_id: &str,
     commands_id: &str,
-) -> Result<(Vec<PiFrame>, String, Option<AcpModelInfo>, Vec<AvailableCommand>), HandshakeError> {
+) -> Result<
+    (
+        Vec<PiFrame>,
+        String,
+        Option<AcpModelInfo>,
+        Vec<(String, String)>,
+        Vec<AvailableCommand>,
+    ),
+    HandshakeError,
+> {
     let mut state: Option<PiResponse> = None;
     let mut models: Option<PiResponse> = None;
     let mut commands: Option<PiResponse> = None;
@@ -301,7 +316,7 @@ async fn collect_handshake(
         .and_then(|r| r.data)
         .map(|d| parse_commands_data(&d))
         .unwrap_or_default();
-    Ok((buffered, parsed.session_id, model, commands))
+    Ok((buffered, parsed.session_id, model, models_list, commands))
 }
 
 fn work_dir_or_cwd(work_dir: &Option<String>) -> std::path::PathBuf {
@@ -426,6 +441,7 @@ async fn build_handle(
         buffered,
         pi_session_id,
         model,
+        models,
         commands,
     } = spawned;
     let session_id = routing_id;
@@ -450,6 +466,7 @@ async fn build_handle(
         cfg.cmd_rx,
         cfg.cancel_rx,
         cfg.terminal_sent,
+        models,
     );
 
     DriverHandle {
@@ -491,6 +508,9 @@ async fn run_loop(
     mut cmd_rx: mpsc::Receiver<AcpCommand>,
     mut cancel_rx: tokio::sync::oneshot::Receiver<()>,
     terminal_sent: Arc<AtomicBool>,
+    // （make-pi-the-builtin-agent 3.1）握手期 `get_available_models` 的
+    // `(provider, id)` 清单——装载进裸 id 索引。
+    handshake_models: Vec<(String, String)>,
 ) {
     let mut translator = Translator::new();
     // 回合在飞（prompt 已受理，等 agent_settled）；disposition=handled 的
@@ -503,7 +523,15 @@ async fn run_loop(
     let mut set_model_pending: Option<(String, String)> = None;
     // 裸模型 id → provider 的已知表（set_model 需要 provider；`provider/id`
     // 词汇直接拆分，兜底查表）。
-    let mut model_index: HashMap<String, String> = HashMap::new();
+    //
+    // （make-pi-the-builtin-agent 3.1）装载握手 `get_available_models` 应答：
+    // 会话建立后裸 id 提交即可解析（此前索引为空，只有 set_model 成功过的
+    // 模型才进索引——裸 id 提交在握手后一律失败）。
+    // 握手清单是 `(provider, id)` 对，索引要的是 **id → provider**（反查）。
+    let mut model_index: HashMap<String, String> = handshake_models
+        .into_iter()
+        .map(|(provider, id)| (id, provider))
+        .collect();
     let mut req_seq = 0u64;
 
     let stdin_dead = |session_id: &str| {
@@ -1280,6 +1308,57 @@ done
             AcpEvent::ModelChanged { model_id, .. } => assert_eq!(model_id, "anthropic/m-2"),
             other => panic!("expected ModelChanged, got {other:?}"),
         }
+        drop(h.cmd_tx);
+        join_run(h.run_task).await;
+    }
+
+    /// （make-pi-the-builtin-agent 3.1）握手 `get_available_models` 应答装载进
+    /// 裸 id 索引：会话建立后直接提交**裸模型 id**（无 `provider/` 前缀）即可
+    /// 解析——provider 从握手清单查得，不再落「需 provider/id 形式」的拒绝。
+    #[tokio::test]
+    async fn bare_model_id_resolves_after_handshake() {
+        let f = fixture();
+        let mut h = harness(
+            &f.exe,
+            &f.journal,
+            "",
+            "pi-sess-1",
+            false,
+            None,
+            None,
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+
+        drain_command_panel(&mut h.evt_rx).await;
+
+        // 裸 id `m-1`（握手清单里 provider=anthropic）：应解析并下发 set_model。
+        h.cmd_tx
+            .send(AcpCommand::SetModel {
+                session_id: "routing-1".into(),
+                model_id: "m-1".into(),
+            })
+            .await
+            .unwrap();
+        match h.evt_rx.recv().await.unwrap() {
+            AcpEvent::ModelChanged { model_id, .. } => assert_eq!(model_id, "m-1"),
+            other => panic!("bare id must resolve after handshake, got {other:?}"),
+        }
+        // 下发的 set_model 请求带上了握手查得的 provider。
+        let sent = journal_lines(&f.journal)
+            .into_iter()
+            .find(|l| l.contains(r#""type":"set_model""#))
+            .expect("set_model request sent");
+        assert!(
+            sent.contains(r#""provider":"anthropic""#),
+            "provider 来自握手: {sent}"
+        );
+        assert!(
+            sent.contains(r#""modelId":"m-1""#),
+            "裸 id 原样下发: {sent}"
+        );
+
         drop(h.cmd_tx);
         join_run(h.run_task).await;
     }

@@ -818,7 +818,9 @@ pub async fn agent_kinds(State(state): State<WebUiState>) -> Response {
         .and_then(|bodies| bodies.into_iter().find(|b| b.name == "native"));
     agents.push(crate::agent_kinds::AgentKindInfo {
         id: "native".into(),
-        display: "Native Kernel".into(),
+        // （make-pi-the-builtin-agent D6）内置槽位 display 改 `PI`：槽位执行体
+        // 已从自研内核改指 pi driver，display 如实反映。
+        display: "PI".into(),
         reachable: native.as_ref().map(|n| n.ok).unwrap_or(false),
         cause: native.and_then(|n| n.cause),
         version: None,

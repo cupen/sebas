@@ -232,7 +232,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   apiMocks.agents.mockResolvedValue({
     agents: [
-      { id: 'native', display: 'Native Kernel', reachable: true },
+      { id: 'native', display: 'PI', reachable: true },
       { id: 'claude', display: 'claude', reachable: true },
     ],
   })
@@ -1699,7 +1699,7 @@ describe('add-agent-auto-install：Agents 分区可安装区', () => {
   it('marks pi installed when a reachable pi row is in the catalog', async () => {
     apiMocks.agents.mockResolvedValue({
       agents: [
-        { id: 'native', display: 'Native Kernel', reachable: true },
+        { id: 'native', display: 'PI', reachable: true },
         { id: 'pi', display: 'pi', reachable: true },
       ],
     })
@@ -1822,7 +1822,7 @@ describe('add-agent-auto-install：Agents 分区可安装区', () => {
     // 已建 store 行的 path 指私有 bin，但 id 不叫 opencode —— 仍算已装。
     apiMocks.agents.mockResolvedValue({
       agents: [
-        { id: 'native', display: 'Native Kernel', reachable: true },
+        { id: 'native', display: 'PI', reachable: true },
         {
           id: 'my-opencode',
           display: 'my-opencode',
@@ -1899,7 +1899,7 @@ describe('gate-agent-directory-writes 2.1：Agents 写入口随角色裁剪', ()
   })
 
   it('空目录的引导文案随角色收窄：只读档不再指向隐藏的 New agent 入口', async () => {
-    apiMocks.agents.mockResolvedValue({ agents: [{ id: 'native', display: 'Native Kernel', reachable: true }] })
+    apiMocks.agents.mockResolvedValue({ agents: [{ id: 'native', display: 'PI', reachable: true }] })
     const el = await mountAs('viewer')
     await gotoAgents(el)
     const empty = el.shadowRoot!.querySelector('[data-testid="agents-empty"]')

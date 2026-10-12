@@ -1406,6 +1406,12 @@ fn remote_node_of(node: Option<&str>) -> Option<&str> {
 pub struct DualSessionBackend {
     pub acp: Arc<dyn SessionBackend>,
     pub native: Arc<NativeAgentBackend>,
+    /// （make-pi-the-builtin-agent 1.2）内置槽位（`native`/PI）的可达性探测源：
+    /// pi 二进制按 `[acp.agents.pi]` 定义解析（缺省回退 `pi`）。装配点
+    /// （run.rs）从 config∪store 解析后注入；探测**每次调用直查**（PATH /
+    /// 可执行位），pi 装上后无需重启即可恢复可选（spec「availability recovers
+    /// without reload」）。`None` = 未注入（裸测试装配）→ 内置槽位如实不可达。
+    native_probe: Option<sebas_webui::agent_kinds::AgentKindSource>,
     events: broadcast::Sender<SessionEvent>,
     /// 实时回合内容的合流出口（fix-webui-streaming-liveness 2.1，D2）：
     /// acp 桥与 native pump 两路 turn 流在此合成一条，webui WS 只订阅本后端。
@@ -1445,6 +1451,18 @@ impl DualSessionBackend {
 
     pub fn new(acp: Arc<dyn SessionBackend>, native: Arc<NativeAgentBackend>) -> Arc<Self> {
         Self::with_usage_sources(acp, native, None, None)
+    }
+
+    /// （make-pi-the-builtin-agent 1.2）带内置槽位探测源的构造：装配点把 pi
+    /// 定义（`[acp.agents.pi]` seed / store 行 / 缺省 `pi`）解析成探测源传进来。
+    pub fn with_native_probe(
+        mut self: Arc<Self>,
+        probe: sebas_webui::agent_kinds::AgentKindSource,
+    ) -> Arc<Self> {
+        // `Arc<Self>` 无法就地改字段；改经 `Arc::get_mut`（构造即装配、无别名）。
+        let inner = Arc::get_mut(&mut self).expect("probe injected before clone");
+        inner.native_probe = Some(probe);
+        self
     }
 
     /// （add-usage-statistics 2.2 / add-local-usage-statistics 4.1）带 usage
@@ -1557,6 +1575,7 @@ impl DualSessionBackend {
         Arc::new(Self {
             acp,
             native,
+            native_probe: None,
             events,
             turn_events,
             notices,
@@ -1598,6 +1617,37 @@ impl DualSessionBackend {
             self.acp.as_ref()
         }
     }
+
+    /// （1.2）内置 `native`（PI）槽位的执行体状态：按 pi 二进制在场判定可达。
+    /// 探测源未注入（裸测试装配）→ 如实不可达（cause 指向安装面）。pi 在场但
+    /// 未登录 → ok=true + `pi auth check` 状态作 advisory cause（不阻塞可选）。
+    async fn native_body(&self) -> sebas_webui::session_backend::ExecutionBodyStatus {
+        let Some(src) = &self.native_probe else {
+            return sebas_webui::session_backend::ExecutionBodyStatus {
+                name: "native".into(),
+                ok: false,
+                cause: Some(pi_install_hint()),
+            };
+        };
+        let probe = sebas_webui::agent_kinds::discover_agent(src).await;
+        sebas_webui::session_backend::ExecutionBodyStatus {
+            name: "native".into(),
+            ok: probe.reachable,
+            cause: if probe.reachable {
+                // 在场但未登录：auth 状态作 advisory cause（ok 仍 true）。
+                probe.cause
+            } else {
+                // 未安装：如实报不可达，指引安装面（不泄漏实现标识）。
+                Some(pi_install_hint())
+            },
+        }
+    }
+}
+
+/// （1.2）内置槽位未安装时的操作者指引（与前端 `agentUnavailableLabel` 同口径）：
+/// 点名安装面（Settings → Agent 一键安装 pi），不含 env 变量标识。
+fn pi_install_hint() -> String {
+    "pi 未安装——到「设置 → Agent」一键安装 pi".to_string()
 }
 
 #[async_trait::async_trait]
@@ -1740,17 +1790,16 @@ impl SessionBackend for DualSessionBackend {
         }
         Self::validate_agent_id(agent)?;
         if agent == "native" {
-            let key = self.native.spawn(prompt, project_dir).await?;
-            // wire-webui-sebas-agent-e2e 4.2：创建时选定的模型对 native
-            // 会话同样生效——走会话级 override 缝（作用于后续 turn 并
-            // 反映在快照 current_model 上），不再被静默丢弃。会话刚由
-            // 本调用建成，set 理论不会失败；万一失败也不否定已建成的
-            // 会话。（fix-webui-qa-round12 4.2，D4）创建表单的模型选定走
-            // 静默 override——不是「切换」，不落 model_change 回执。
-            if let Some(m) = model {
-                let _ = self.native.apply_model_override(&key, &m).await;
-            }
-            Ok(key)
+            // （make-pi-the-builtin-agent 1.1，design D1/D6）内置槽位改指 pi：
+            // 不再走进程内内核，而是转发 ACP 侧 pi driver（session key 为
+            // web 形态）。launch 配置复用 `[acp.agents.pi]` seed / agents-store
+            // 行；两者皆缺时由 dispatch 侧合成缺省 `{driver:"pi"}`（内置槽位
+            // 「恒在」，绝不报 unknown-agent）。模型随 spawn 透传（pi 的
+            // `set_model` 管线，provider/id 词表）。
+            return self
+                .acp
+                .spawn_with(prompt, project_dir, "pi", model, mode, None)
+                .await;
         }
         // agent id 即 kind（D2）：ACP 侧按配置键名钉住 kind。模型 id
         // （add-acp-model-selection）随 spawn 透传。
@@ -1781,12 +1830,11 @@ impl SessionBackend for DualSessionBackend {
         }
         Self::validate_agent_id(agent)?;
         if agent == "native" {
-            let key = self.native.spawn(String::new(), project_dir).await?;
-            // 与 spawn_with 同缝：占位会话记住创建时选定的模型（4.2）。
-            if let Some(m) = model {
-                let _ = self.native.set_session_model(key.clone(), m).await;
-            }
-            Ok(key)
+            // （1.1）占位创建同样转发 ACP 侧 pi（0-turn，不 spawn 子进程）。
+            return self
+                .acp
+                .create_placeholder(project_dir, "pi", model, mode, None)
+                .await;
         } else {
             self.acp
                 .create_placeholder(project_dir, agent, model, mode, None)
@@ -1930,7 +1978,11 @@ impl SessionBackend for DualSessionBackend {
             }
         };
         let acp = to_body("acp", self.acp.reachability().await);
-        let native = to_body("native", self.native.reachability().await);
+        // （make-pi-the-builtin-agent 1.2，design D2）内置槽位可达性改按 pi 口径：
+        // pi 二进制在场（复用 `discover_agent` 探测）即可选；`pi auth check`
+        // 非 ready 作为 advisory cause（不阻塞可选），未安装时 cause 指向安装面。
+        // 不再读 `NativeAgentBackend::reachability`（内核凭据维度已从内置槽位消失）。
+        let native = self.native_body().await;
         Some(vec![acp, native])
     }
 
@@ -2282,8 +2334,8 @@ mod tests {
             sebas_webui::session_backend::InProcessBackend::new(make_router().await),
         );
         let dual = DualSessionBackend::new(acp, NativeAgentBackend::with_manager(manager()));
-        // backend hint = native → key 前缀 agent-；创建时选定的模型随 spawn
-        // 生效于会话级 override（4.2：选中生效于快照）。
+        // （make-pi-the-builtin-agent 1.1）agent=native 改指 ACP 侧 pi：新会话
+        // 走 **web key**（不再是 feishu/agent-* 内核形态）。
         let key = dual
             .spawn_with(
                 "go".into(),
@@ -2295,18 +2347,12 @@ mod tests {
             )
             .await
             .expect("spawn native");
-        assert!(DualSessionBackend::is_native(&key), "{:?}", key.reference);
-        let info = dual
-            .snapshot()
-            .await
-            .into_iter()
-            .find(|s| s.channel_key() == key)
-            .expect("native session in snapshot");
-        assert_eq!(
-            info.current_model.as_deref(),
-            Some("m-spawn"),
-            "spawn-time model must land in the session snapshot"
+        assert!(
+            !DualSessionBackend::is_native(&key),
+            "native 新会话必须是 web key（不再落 feishu/agent-*）: {:?}",
+            key.reference
         );
+        assert_eq!(key.channel_str(), "web", "native 新会话走 ACP 侧 web key");
         // 默认（无 hint）→ acp 路径：agent 前缀之外的 key。
         // D2：agent 必填——"claude" 在测试配置中不存在，但词汇合法；路由
         // 到 acp 侧（key 非 native 前缀即为断言点）。
@@ -2317,30 +2363,105 @@ mod tests {
         assert!(!DualSessionBackend::is_native(&acp_key));
     }
 
-    // wire-webui-sebas-agent-e2e 2.2：set_session_model 按 key 分发——native
-    // key 命中内核（override 反映在快照 current_model），unknown key 返回
-    // typed rejection，不再无条件转发 ACP。
+    /// （make-pi-the-builtin-agent 1.1，design D5）legacy `agent-*` key 仍按
+    /// 前缀路由到内核（resume/归档读路径保留）；新建 native 会话不再落该路径。
     #[tokio::test]
-    async fn dual_set_session_model_routes_native_key_and_rejects_unknown() {
+    async fn legacy_native_key_still_routes_to_kernel() {
         let acp: Arc<dyn SessionBackend> = Arc::new(
             sebas_webui::session_backend::InProcessBackend::new(make_router().await),
         );
-        let dual = DualSessionBackend::new(acp, NativeAgentBackend::with_manager(manager()));
-
-        // native key：spawn（隔离 workdir）→ 放行 gated 调用 → 等 turn 收尾，
-        // 让 set_model 走内核空闲期路径（turn 中收下、下一 turn 才生效）。
-        let ws = tempfile::tempdir().unwrap();
-        let key = dual
-            .spawn_with(
-                "go".into(),
-                Some(ws.path().to_string_lossy().into()),
-                "native",
-                None,
-                None,
-                None,
-            )
+        let native = NativeAgentBackend::with_manager(manager());
+        let dual = DualSessionBackend::new(acp, native.clone());
+        // legacy key：在 native 后端上真实建会话（模拟既有内核会话）。
+        let legacy = native
+            .spawn("legacy".into(), None)
             .await
-            .expect("spawn native");
+            .expect("legacy kernel session");
+        assert!(
+            DualSessionBackend::is_native(&legacy),
+            "legacy key 仍是 agent-*"
+        );
+        // 该 key 的 turns 从内核后端读（内核会话在双后端快照里可见）。
+        let turns = dual.turns(legacy.clone(), 0).await.expect("kernel turns");
+        assert!(
+            turns
+                .iter()
+                .any(|t| t.kind == sebas_domain::session::TurnKind::Prompt)
+        );
+        assert!(
+            dual.snapshot()
+                .await
+                .iter()
+                .any(|s| s.channel_key() == legacy),
+            "legacy 内核会话仍在快照"
+        );
+    }
+
+    /// （make-pi-the-builtin-agent 1.2）内置槽位可达性按 pi 二进制在场判定：
+    /// PATH 垫 fake pi 时 native 条目 ok=true；不在场时 ok=false 且 cause 指向
+    /// 安装面（不含 env 变量标识）。
+    #[tokio::test]
+    async fn native_body_follows_pi_binary_presence() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-pi");
+        std::fs::write(&script, "#!/bin/sh\necho 1.2.3\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let acp: Arc<dyn SessionBackend> = Arc::new(
+            sebas_webui::session_backend::InProcessBackend::new(make_router().await),
+        );
+        // 在场：探测源指向 fake pi。
+        let present =
+            DualSessionBackend::new(acp.clone(), NativeAgentBackend::with_manager(manager()))
+                .with_native_probe(sebas_webui::agent_kinds::AgentKindSource {
+                    slug: "pi".into(),
+                    command: vec![script.to_string_lossy().into()],
+                    driver: "pi".into(),
+                    display: None,
+                });
+        let bodies = present.execution_bodies().await.unwrap();
+        let native = bodies.iter().find(|b| b.name == "native").unwrap();
+        assert!(native.ok, "pi 在场 → native 可达: {native:?}");
+
+        // 不在场：探测源指向不存在的二进制。
+        let absent = DualSessionBackend::new(acp, NativeAgentBackend::with_manager(manager()))
+            .with_native_probe(sebas_webui::agent_kinds::AgentKindSource {
+                slug: "pi".into(),
+                command: vec!["sebas-definitely-not-a-pi-binary-xyz".into()],
+                driver: "pi".into(),
+                display: None,
+            });
+        let bodies = absent.execution_bodies().await.unwrap();
+        let native = bodies.iter().find(|b| b.name == "native").unwrap();
+        assert!(!native.ok, "pi 不在场 → native 不可达: {native:?}");
+        let cause = native.cause.as_deref().unwrap_or_default();
+        assert!(cause.contains("pi 未安装"), "cause 指向安装面: {cause}");
+        assert!(
+            !cause.contains("SEBAS_AGENT_PROVIDER_API_KEY"),
+            "cause 不含 env 标识: {cause}"
+        );
+    }
+
+    // wire-webui-sebas-agent-e2e 2.2 / make-pi-the-builtin-agent 1.1：
+    // set_session_model 按 key 分发——**legacy** native key（feishu/agent-*）
+    // 命中内核（override 反映在快照 current_model），unknown key 返回 typed
+    // rejection；新建 native 会话走 web key（ACP 侧 pi），不再进内核。
+    #[tokio::test]
+    async fn dual_set_session_model_routes_legacy_native_key_and_rejects_unknown() {
+        let acp: Arc<dyn SessionBackend> = Arc::new(
+            sebas_webui::session_backend::InProcessBackend::new(make_router().await),
+        );
+        let native = NativeAgentBackend::with_manager(manager());
+        let dual = DualSessionBackend::new(acp, native.clone());
+
+        // legacy native key：直接在内核后端建会话（模拟既有内核会话）。
+        let ws = tempfile::tempdir().unwrap();
+        let key = native
+            .spawn("go".into(), Some(ws.path().to_string_lossy().into()))
+            .await
+            .expect("legacy kernel session");
+        assert!(DualSessionBackend::is_native(&key));
         let mut notices = dual.permission_requests().expect("dual has notices");
         let notice = tokio::time::timeout(Duration::from_secs(10), notices.recv())
             .await
@@ -2365,7 +2486,7 @@ mod tests {
 
         dual.set_session_model(key.clone(), "m-kernel".into())
             .await
-            .expect("native set_model must reach the kernel");
+            .expect("legacy native set_model must reach the kernel");
         let info = dual
             .snapshot()
             .await
@@ -2485,13 +2606,17 @@ mod tests {
         }
     }
 
-    // fix-webui-detached-status 1.2：native 缺凭据的拒绝指名执行体，
-    // 不再复用"核心不可达"文案。
+    // （make-pi-the-builtin-agent 1.1）内置槽位改指 pi 后，**不再有**内核凭据
+    // 维度的拒绝：agent=native 转发 ACP 侧 pi，spawn 成败由 pi 二进制/驱动
+    // 决定（运行时诚实失败）。这里钉住「缺内核凭据不再拦 native」——旧拒绝
+    // 形态（BackendUnavailable with SEBAS_AGENT_PROVIDER_API_KEY）已随槽位
+    // 重指向消失。
     #[tokio::test]
-    async fn native_missing_credentials_rejection_names_the_backend() {
+    async fn native_slot_no_longer_gated_by_kernel_credentials() {
         let acp: Arc<dyn SessionBackend> = Arc::new(
             sebas_webui::session_backend::InProcessBackend::new(make_router().await),
         );
+        // 内核凭据缺失（旧形态会给 native 条目报不可达）。
         let native = NativeAgentBackend::with_manager_arc(
             Arc::new(manager()),
             Some(
@@ -2503,14 +2628,23 @@ mod tests {
         );
         let dual = DualSessionBackend::new(acp, native);
 
-        let err = dual
+        // agent=native 不再因内核凭据缺失而拒绝——转发到 ACP 侧（web key）。
+        let key = dual
             .spawn_with("hi".into(), None, "native", None, None, None)
             .await
-            .expect_err("native without credentials must reject");
-        let text = err.to_string();
-        assert!(text.contains("执行体不可用: native"), "{text}");
-        assert!(!text.contains("核心不可达"), "{text}");
-        assert!(dual.snapshot().await.is_empty());
+            .expect("native must route to the ACP-side pi slot, not reject on kernel credentials");
+        assert_eq!(key.channel_str(), "web", "native 新会话走 web key");
+        assert!(!DualSessionBackend::is_native(&key));
+
+        // execution_bodies 的 native 条目也不再读内核凭据（探测源未注入 →
+        // 如实不可达，cause 指向安装面，绝不含旧 env 标识）。
+        let bodies = dual.execution_bodies().await.unwrap();
+        let native_body = bodies.iter().find(|b| b.name == "native").unwrap();
+        let cause = native_body.cause.as_deref().unwrap_or_default();
+        assert!(
+            !cause.contains("SEBAS_AGENT_PROVIDER_API_KEY"),
+            "native 条目的 cause 不再提内核 env: {cause}"
+        );
     }
 
     /// 出站接收端必须保活：router 发送在通道关闭时会 panic。

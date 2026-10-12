@@ -126,7 +126,7 @@ beforeEach(() => {
     agents: [
       { id: 'claude', display: 'Claude Code', reachable: true, version: 'v1' },
       { id: 'codex', display: 'Codex', reachable: false, cause: 'command not found' },
-      { id: 'native', display: 'Native Kernel', reachable: true },
+      { id: 'native', display: 'PI', reachable: true },
     ],
   })
   ;(api.providers as ReturnType<typeof vi.fn>).mockResolvedValue({ providers: [] })
@@ -457,38 +457,36 @@ describe('sebas-new-session-dialog', () => {
     ).not.toContain('设置 → 模型')
   })
 
-  // ── fix-webui-qa-round13 3.1：native 禁用提示如实化 ──
-  // 「到「设置 → 模型」配置」的旧指引失实（QA round13 实证：设置页配全
-  // provider 也不点亮 native）——native 的真实启用条件是 core 进程启动 env
-  // （webui spec「不可用 agent 的禁用提示如实」）。提示 SHALL 提及 env 词
-  // 至少其一、如实说明 WebUI 内无法满足、SHALL NOT 再引导设置页。
+  // ── make-pi-the-builtin-agent 4.1：native 行改指 pi，禁用提示改安装指引 ──
+  // 内置槽位执行体已从自研 sebas 内核改指 pi（display `PI`）；native 不可用
+  // 的真实条件变为「pi 未安装」——提示指安装面（Settings → Agent），SHALL
+  // NOT 再提 core env 变量标识（spec「unavailable cause speaks operator
+  // language」）。
 
-  it('native disabled hint states the core env condition without the settings-page detour (round13 3.1)', async () => {
+  it('native disabled hint points at the pi install surface, without env identifiers (4.1)', async () => {
     const { agentUnavailableLabel } = await import('./new-session-dialog.js')
     const native = agentUnavailableLabel({
       id: 'native',
-      display: 'Native Kernel',
-      cause: 'native backend needs SEBAS_AGENT_PROVIDER_API_KEY (or SEBAS_AGENT_ROUTER_URL)',
+      display: 'PI',
+      cause: 'pi 未安装——到「设置 → Agent」一键安装 pi',
     })
-    // 真实启用条件：core env（两个变量至少点名其一）。
-    expect(native).toMatch(/SEBAS_AGENT_PROVIDER_API_KEY|SEBAS_AGENT_ROUTER_URL/)
-    // 如实说明该条件无法在 WebUI 内满足。
-    expect(native).toContain('WebUI')
-    // 失实引导移除：不出现「到「设置 → 模型」配置」字样；ACP 的
-    // 「设置 → Agent」口径不受影响（native 行也不再误指 Agent 页）。
+    // 引导安装：点名 pi 与安装面（Settings → Agent）。
+    expect(native).toContain('pi')
+    expect(native).toContain('设置 → Agent')
+    // 不再泄漏 core env 变量标识（该维度已从内置槽位消失）。
+    expect(native).not.toMatch(/SEBAS_AGENT_PROVIDER_API_KEY|SEBAS_AGENT_ROUTER_URL/)
     expect(native).not.toContain('设置 → 模型')
-    expect(native).not.toContain('设置 → Agent')
   })
 
-  it('a disabled native option in the dialog renders the env-condition hint (round13 3.1)', async () => {
+  it('a disabled native option in the dialog renders the install hint (4.1)', async () => {
     ;(api.agents as ReturnType<typeof vi.fn>).mockResolvedValue({
       agents: [
         { id: 'claude', display: 'Claude Code', reachable: true },
         {
           id: 'native',
-          display: 'Native Kernel',
+          display: 'PI',
           reachable: false,
-          cause: 'native backend needs SEBAS_AGENT_PROVIDER_API_KEY (or SEBAS_AGENT_ROUTER_URL)',
+          cause: 'pi 未安装——到「设置 → Agent」一键安装 pi',
         },
       ],
     })
@@ -499,11 +497,10 @@ describe('sebas-new-session-dialog', () => {
     expect(nativeOpt).toBeTruthy()
     expect(nativeOpt!.hasAttribute('disabled')).toBe(true)
     // 选项可见文案含 env 词、不含设置页引导；原始 cause 仍在 tooltip。
-    expect(nativeOpt!.textContent).toMatch(/SEBAS_AGENT_PROVIDER_API_KEY|SEBAS_AGENT_ROUTER_URL/)
+    expect(nativeOpt!.textContent).toContain('pi')
     expect(nativeOpt!.textContent).not.toContain('设置 → 模型')
-    expect((nativeOpt as unknown as { title: string }).title).toContain(
-      'SEBAS_AGENT_PROVIDER_API_KEY',
-    )
+    // 原始 cause 仍在 tooltip（安装指引）。
+    expect((nativeOpt as unknown as { title: string }).title).toContain('pi')
   })
 
   it('reopen resets the mode to the explicit ask default (D5b)', async () => {
