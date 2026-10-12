@@ -531,9 +531,14 @@ pub async fn run(
             usage_router_listen.clone(),
         );
         // （make-pi-the-builtin-agent 1.2）内置槽位（native/PI）可达性按 pi 二进制
-        // 在场判定：探测源从 pi 定义解析（`[acp.agents.pi]` / store 行 / 缺省 `pi`）。
-        let probe = crate::agent_store::builtin_pi_probe_source(&cfg).await;
-        dual.with_native_probe(probe)
+        // 在场判定：探测源**每次调用**从 pi 定义解析（`[acp.agents.pi]` / store
+        // 行 / 缺省 `pi`）——安装配方建出的 store 行即时生效，无需重启。
+        let probe_cfg = std::sync::Arc::new(cfg.clone());
+        let probe_resolve: crate::agent_backend::NativeProbeResolve = std::sync::Arc::new(move || {
+            let cfg = probe_cfg.clone();
+            Box::pin(async move { crate::agent_store::builtin_pi_probe_source(&cfg).await })
+        });
+        dual.with_native_probe(probe_resolve)
     };
     if webui {
         // The core IS this process: serve the dashboard over the in-process

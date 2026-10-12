@@ -1403,15 +1403,26 @@ fn remote_node_of(node: Option<&str>) -> Option<&str> {
         .filter(|n| !n.is_empty() && *n != sebas_webui::projects::LOCAL_NODE_ID)
 }
 
+/// （make-pi-the-builtin-agent 1.2）内置槽位探测源解析器：每次调用重新解析
+/// pi 定义（config ∪ store 行 ∪ 缺省）——安装/删除即时反映，见
+/// [`DualSessionBackend`] 的 `native_probe` 字段文档。
+pub type NativeProbeResolve = std::sync::Arc<
+    dyn Fn() -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = sebas_webui::agent_kinds::AgentKindSource> + Send>,
+        > + Send
+        + Sync,
+>;
+
 pub struct DualSessionBackend {
     pub acp: Arc<dyn SessionBackend>,
     pub native: Arc<NativeAgentBackend>,
-    /// （make-pi-the-builtin-agent 1.2）内置槽位（`native`/PI）的可达性探测源：
-    /// pi 二进制按 `[acp.agents.pi]` 定义解析（缺省回退 `pi`）。装配点
-    /// （run.rs）从 config∪store 解析后注入；探测**每次调用直查**（PATH /
-    /// 可执行位），pi 装上后无需重启即可恢复可选（spec「availability recovers
-    /// without reload」）。`None` = 未注入（裸测试装配）→ 内置槽位如实不可达。
-    native_probe: Option<sebas_webui::agent_kinds::AgentKindSource>,
+    /// （make-pi-the-builtin-agent 1.2）内置槽位（`native`/PI）的可达性探测源
+    /// 解析器：**每次调用重新解析** pi 定义（`[acp.agents.pi]` / store 行 /
+    /// 缺省 `pi`）——安装配方建出的 store 行（path 指私有 bin）随即生效，
+    /// 满足 spec「resolve from the agents-store row」与「availability recovers
+    /// without reload」。冻结源会在装配期钉死 PATH 探测，装完 pi 仍置灰。
+    /// `None` = 未注入（裸测试装配）→ 内置槽位如实不可达（cause 指向安装面）。
+    native_probe: Option<NativeProbeResolve>,
     events: broadcast::Sender<SessionEvent>,
     /// 实时回合内容的合流出口（fix-webui-streaming-liveness 2.1，D2）：
     /// acp 桥与 native pump 两路 turn 流在此合成一条，webui WS 只订阅本后端。
@@ -1453,15 +1464,12 @@ impl DualSessionBackend {
         Self::with_usage_sources(acp, native, None, None)
     }
 
-    /// （make-pi-the-builtin-agent 1.2）带内置槽位探测源的构造：装配点把 pi
-    /// 定义（`[acp.agents.pi]` seed / store 行 / 缺省 `pi`）解析成探测源传进来。
-    pub fn with_native_probe(
-        mut self: Arc<Self>,
-        probe: sebas_webui::agent_kinds::AgentKindSource,
-    ) -> Arc<Self> {
+    /// （make-pi-the-builtin-agent 1.2）带内置槽位探测源解析器的构造：装配点
+    /// 传入「每次调用重新解析 pi 定义」的闭包（config ∪ store 行 ∪ 缺省）。
+    pub fn with_native_probe(mut self: Arc<Self>, resolve: NativeProbeResolve) -> Arc<Self> {
         // `Arc<Self>` 无法就地改字段；改经 `Arc::get_mut`（构造即装配、无别名）。
         let inner = Arc::get_mut(&mut self).expect("probe injected before clone");
-        inner.native_probe = Some(probe);
+        inner.native_probe = Some(resolve);
         self
     }
 
@@ -1622,14 +1630,17 @@ impl DualSessionBackend {
     /// 探测源未注入（裸测试装配）→ 如实不可达（cause 指向安装面）。pi 在场但
     /// 未登录 → ok=true + `pi auth check` 状态作 advisory cause（不阻塞可选）。
     async fn native_body(&self) -> sebas_webui::session_backend::ExecutionBodyStatus {
-        let Some(src) = &self.native_probe else {
+        let Some(resolve) = &self.native_probe else {
             return sebas_webui::session_backend::ExecutionBodyStatus {
                 name: "native".into(),
                 ok: false,
                 cause: Some(pi_install_hint()),
             };
         };
-        let probe = sebas_webui::agent_kinds::discover_agent(src).await;
+        // 每次调用重新解析（config ∪ store 行 ∪ 缺省）：安装配方建出的行
+        // （path 指私有 bin）对下一次 catalog 查询即生效。
+        let src = resolve().await;
+        let probe = sebas_webui::agent_kinds::discover_agent(&src).await;
         sebas_webui::session_backend::ExecutionBodyStatus {
             name: "native".into(),
             ok: probe.reachable,
@@ -2412,26 +2423,36 @@ mod tests {
             sebas_webui::session_backend::InProcessBackend::new(make_router().await),
         );
         // 在场：探测源指向 fake pi。
-        let present =
-            DualSessionBackend::new(acp.clone(), NativeAgentBackend::with_manager(manager()))
-                .with_native_probe(sebas_webui::agent_kinds::AgentKindSource {
+        fn frozen_probe(command: Vec<String>) -> crate::agent_backend::NativeProbeResolve {
+            std::sync::Arc::new(move || {
+                let src = sebas_webui::agent_kinds::AgentKindSource {
                     slug: "pi".into(),
-                    command: vec![script.to_string_lossy().into()],
+                    command: command.clone(),
                     driver: "pi".into(),
                     display: None,
-                });
+                };
+                Box::pin(std::future::ready(src))
+                    as std::pin::Pin<
+                        Box<
+                            dyn std::future::Future<
+                                    Output = sebas_webui::agent_kinds::AgentKindSource,
+                                > + Send,
+                        >,
+                    >
+            })
+        }
+        let present =
+            DualSessionBackend::new(acp.clone(), NativeAgentBackend::with_manager(manager()))
+                .with_native_probe(frozen_probe(vec![script.to_string_lossy().into()]));
         let bodies = present.execution_bodies().await.unwrap();
         let native = bodies.iter().find(|b| b.name == "native").unwrap();
         assert!(native.ok, "pi 在场 → native 可达: {native:?}");
 
         // 不在场：探测源指向不存在的二进制。
         let absent = DualSessionBackend::new(acp, NativeAgentBackend::with_manager(manager()))
-            .with_native_probe(sebas_webui::agent_kinds::AgentKindSource {
-                slug: "pi".into(),
-                command: vec!["sebas-definitely-not-a-pi-binary-xyz".into()],
-                driver: "pi".into(),
-                display: None,
-            });
+            .with_native_probe(frozen_probe(vec![
+                "sebas-definitely-not-a-pi-binary-xyz".into()
+            ]));
         let bodies = absent.execution_bodies().await.unwrap();
         let native = bodies.iter().find(|b| b.name == "native").unwrap();
         assert!(!native.ok, "pi 不在场 → native 不可达: {native:?}");
