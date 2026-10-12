@@ -152,16 +152,21 @@ async fn handle_web_spawn(
         command.push("--permission-mode".into());
         command.push(flag.into());
     }
+    let mapping = crate::session_boot::agent_model_mapping(&agent);
     let (session_id, pending, rx, _model_info) = match acp_spawn_and_activate(
         mgr,
         router,
         &key,
         &prompt,
         &kind,
+        // env/argv 分派按 driver tag，不按 agent id（id ≠ "claude" 的
+        // claude-driver agent 同样拿到档位映射 env——review 修复）。
+        agent.driver_tag(),
         command,
         project_dir.or_else(|| agent.work_dir()),
         router_cfg,
         model,
+        mapping.as_ref(),
     )
     .await
     {
@@ -278,6 +283,7 @@ async fn handle_spawn_resume_without_feishu(
     // 会话回退到 CLI 默认（映射字段随 state.json 持久化）。
     let resume_mode = router.map.get(&key).await.map(|m| m.desired_mode);
     let command = resume_command_with_mode(&kind, command, resume_mode.as_ref().map(|m| m.as_str()));
+    let mapping = crate::session_boot::agent_model_mapping(&agent);
     let (session_id, pending, rx, resumed) = match acp_resume_and_activate(
         mgr,
         router,
@@ -285,11 +291,14 @@ async fn handle_spawn_resume_without_feishu(
         &old_sid,
         &prompt,
         &kind,
+        // 同 web_spawn：分派按 driver tag（review 修复）。
+        agent.driver_tag(),
         command,
         agent.work_dir(),
         router_cfg,
         // webui resume 路径暂无模型参数（创建/中程切换走 POST model）。
         None,
+        mapping.as_ref(),
     )
     .await
     {
@@ -433,7 +442,11 @@ mod tests {
     /// store-only agent 可 spawn：agents 库里注册的 claude 驱动条目（fake-claude
     /// 桩）经动态解析 → 注册表登记 → 完整 spawn；config 定义的 kind 在同一
     /// 注册表机制下解析行为不变。
-    #[tokio::test]
+    /// multi_thread flavor：修复 spawn 分派按 driver 后，store-only 的
+    /// claude-driver agent 真正走进 claude env 路径——`provider_state::load()`
+    /// 的同步桥接 `block_in_place` 只在多线程运行时可用（同
+    /// `spawn_env_store_authority_test` 的既有口径）。
+    #[tokio::test(flavor = "multi_thread")]
     async fn store_only_agent_spawns_without_config_entry() {
         use sebas_channels::ChannelKey;
         use sebas_dispatch::engine::{DispatchHandle, Out};

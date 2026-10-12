@@ -147,11 +147,15 @@ pub async fn seed_agents_from_config(handle: &crate::sebas_state::writer::StateH
             );
             continue;
         }
-        let row = sebas_models::agent::AgentRow::from_definition(
-            slug,
-            &definition_of(agent_cfg),
-            "seed",
-        );
+        let def = definition_of(agent_cfg);
+        // （add-claude-model-slots 1.3/D6）config 种子导入与 mutation 面共享
+        // 同一 models 校验口径——非法组合（如非 claude 携带映射）在此拒绝，
+        // 与 store 写入面一致，绝不两套口径。
+        if let Err(e) = sebas_models::agent::validate_models_for_driver(&def.driver, &def.models) {
+            tracing::warn!(agent = %slug, error = %e, "config agent 模型档位映射非法，跳过种子导入");
+            continue;
+        }
+        let row = sebas_models::agent::AgentRow::from_definition(slug, &def, "seed");
         if let Err(e) = handle
             .exec(move |conn| crate::sebas_state::repo::save_agent(conn, row))
             .await
@@ -215,11 +219,16 @@ pub async fn resolve_spawn_config(cfg: &Config, kind: &str) -> Option<AgentConfi
     resolve_agent_config(cfg, kind).await
 }
 
-/// spawn 动态解析（决策 3）：config 注册表优先，miss 则读 agents 表构建
-/// 等价 `AgentConfig`。两处皆无 → `None`（调用方给 typed unknown-agent
-/// 拒绝）。每次 spawn 直读（本地 SQLite 单行查，微秒级）。墓碑守卫：id
-/// 在 store 留有删除墓碑时 config 臂同样视为缺席——UI 删除的种子 agent
-/// 不经 config 复活（spec「delete removes the agent for new sessions」）。
+/// spawn 动态解析（add-claude-model-slots review 修正的三级优先级）：
+/// 1. store 行 `source == "ui"`（Settings 管理行）——UI 增改免重启生效，
+///    config 同 id 条目被遮蔽（spec「mapping saved via the form is live for
+///    the next spawn」；AGENTS.md「store 行赢」）；
+/// 2. config 注册表条目——operator 改 config 重启后对新 spawn 生效；
+/// 3. store 行 `source == "seed"`（启动种子的等价副本，config 未声明时兜底）。
+/// 三处皆无 → `None`（调用方给 typed unknown-agent 拒绝）。每次 spawn 直读
+/// （本地 SQLite 单行查，微秒级）。墓碑守卫：id 在 store 留有删除墓碑时
+/// config 与 seed 两臂都视为缺席——UI 删除的种子 agent 不经 config 复活
+/// （spec「delete removes the agent for new sessions」）。
 pub async fn resolve_agent_config(cfg: &Config, kind: &str) -> Option<AgentConfig> {
     if kind.is_empty() {
         let fallback = cfg.acp.default_kind().to_string();
@@ -230,21 +239,25 @@ pub async fn resolve_agent_config(cfg: &Config, kind: &str) -> Option<AgentConfi
         Some(engine) => engine.load_agents().await.ok(),
         None => None,
     };
-    let tombstoned = |id: &str| {
-        store_rows
-            .as_ref()
-            .is_some_and(|rows| rows.iter().any(|r| r.id == id && r.is_deleted()))
+    let live_row = |want_ui: bool| {
+        store_rows.as_ref().and_then(|rows| {
+            rows.iter()
+                .find(|r| r.id == kind && !r.is_deleted() && r.source == if want_ui { "ui" } else { "seed" })
+        })
     };
+    if let Some(row) = live_row(true) {
+        return Some(config_of_definition(&row.to_definition()));
+    }
     if let Some(configured) = cfg.acp.agents.get(kind) {
-        if tombstoned(kind) {
+        if store_rows
+            .as_ref()
+            .is_some_and(|rows| rows.iter().any(|r| r.id == kind && r.is_deleted()))
+        {
             return None;
         }
         return Some(configured.clone());
     }
-    let rows = store_rows?;
-    rows.iter()
-        .find(|r| r.id == kind && !r.is_deleted())
-        .map(|r| config_of_definition(&r.to_definition()))
+    live_row(false).map(|r| config_of_definition(&r.to_definition()))
 }
 
 /// 把解析出的 agent 定义 upsert 进 `SessionManager` 的注册表（store-only
@@ -432,8 +445,47 @@ mod tests {
         );
     }
 
-    /// spawn 动态解析：config 命中优先返回 config 形态；miss 读 store；
+    /// （add-claude-model-slots 1.3/D6）config 种子导入走与 mutation 面同一
+    /// 校验口径：合法的 claude 档位映射随种子行落库；非 claude 携带映射的
+    /// 条目被拒（跳过导入，不阻断其余条目）。
+    #[tokio::test]
+    async fn seeding_shares_the_model_mapping_validator() {
+        use crate::sebas_state::writer::StateWriter;
+        let dir = tempfile::tempdir().unwrap();
+        let writer = StateWriter::start_settings(dir.path().join("settings.db")).unwrap();
+        let cfg: Config = toml::from_str(
+            r#"
+            [acp]
+            default = "claude"
+
+            [acp.agents.claude]
+            driver = "claude"
+            path = "claude"
+
+            [acp.agents.claude.models]
+            opus = "opus-x"
+            sonnet = "sonnet-y"
+            default = "sonnet"
+            "#,
+        )
+        .unwrap();
+        seed_agents_from_config(writer.handle(), &cfg).await;
+        let rows = writer
+            .handle()
+            .exec(crate::sebas_state::repo::load_agents)
+            .await
+            .unwrap();
+        let claude = rows.iter().find(|r| r.id == "claude").unwrap();
+        let def = claude.to_definition();
+        let m = def.models.expect("mapping seeded");
+        assert_eq!(m.default_slot, sebas_models::agent::ModelSlot::Sonnet);
+        assert_eq!(m.default_model(), Some("sonnet-y"));
+    }
+
+    /// spawn 动态解析：config 命中返回 config 形态；miss 读 store；
     /// 两处皆无返回 None（typed unknown-agent 拒绝的调用方前提）。
+    /// 三级优先级（ui 行 > config > seed 行）由
+    /// `resolve_prefers_ui_row_over_config_over_seed_row` 单独钉。
     #[tokio::test]
     async fn resolve_prefers_config_then_store() {
         let _engine_guard = sebas_dispatch::test_engine::install_fresh();
@@ -470,6 +522,81 @@ mod tests {
                 assert_eq!(command, vec!["opencode".to_string(), "acp".into()])
             }
             other => panic!("store row resolves to acp config: {other:?}"),
+        }
+    }
+
+    /// （add-claude-model-slots review 修复）spawn 解析三级优先级：
+    /// **ui 行 > config 条目 > seed 行**。UI 行赢 config——Settings 增改免重启
+    /// 生效（spec「mapping saved via the form is live for the next spawn」，
+    /// 此前 config 臂无条件优先会把 UI 编辑整个遮蔽）；config 赢 seed 副本
+    /// ——operator 改 config 重启后对新 spawn 生效，两编辑面互不遮蔽。
+    #[tokio::test]
+    async fn resolve_prefers_ui_row_over_config_over_seed_row() {
+        use sebas_models::agent::{AgentDefinition, AgentRow};
+        let _engine_guard = sebas_dispatch::test_engine::install_fresh();
+        let engine = sebas_dispatch::state_store::engine().unwrap();
+        let cfg: Config = toml::from_str(
+            r#"
+            [acp.agents.claude]
+            driver = "claude"
+            path = "claude"
+            "#,
+        )
+        .unwrap();
+
+        // 基线：无 store 行 → config 条目。
+        match resolve_agent_config(&cfg, "claude").await.unwrap() {
+            AgentConfig::Claude(c) => assert_eq!(c.path, "claude"),
+            other => panic!("baseline resolves config entry: {other:?}"),
+        }
+
+        // seed 副本（启动种子的等价物）：config 臂赢它——config 编辑仍生效。
+        engine
+            .put_agent(AgentRow::from_definition(
+                "claude",
+                &AgentDefinition {
+                    driver: "claude".into(),
+                    path: Some("claude-stale".into()),
+                    ..Default::default()
+                },
+                "seed",
+            ))
+            .await
+            .unwrap();
+        match resolve_agent_config(&cfg, "claude").await.unwrap() {
+            AgentConfig::Claude(c) => assert_eq!(
+                c.path, "claude",
+                "config 条目赢 seed 副本（operator 改 config 生效）"
+            ),
+            other => panic!("{other:?}"),
+        }
+
+        // UI 行（Settings 管理行）：赢过 config 条目——UI 编辑免重启生效，
+        // 映射也随之落到 spawn 用的定义上。
+        sebas_dispatch::state_store::agents_mutation(
+            engine,
+            &serde_json::json!({
+                "op": "put",
+                "id": "claude",
+                "agent": {
+                    "driver": "claude",
+                    "path": "claude-ui",
+                    "models": {"opus": "opus-ui", "default": "opus"},
+                },
+            }),
+        )
+        .await
+        .unwrap();
+        match resolve_agent_config(&cfg, "claude").await.unwrap() {
+            AgentConfig::Claude(c) => {
+                assert_eq!(c.path, "claude-ui", "ui 行赢 config 条目");
+                assert_eq!(
+                    c.models.as_ref().and_then(|m| m.default_model()),
+                    Some("opus-ui"),
+                    "UI 保存的映射就是 spawn 用的映射"
+                );
+            }
+            other => panic!("{other:?}"),
         }
     }
 

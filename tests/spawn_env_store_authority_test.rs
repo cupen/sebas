@@ -129,26 +129,29 @@ fn write_conflicting_file(
     path
 }
 
-/// Direct 模式下 spawn 解析出的 `--model`（default_model 的投递路径）。
-fn direct_spawn_model(provider: &str) -> Option<String> {
+/// Direct 模式下 spawn 解析出的凭据端点（库权威的投递路径）。
+fn direct_spawn_endpoint(provider: &str) -> String {
     let state = ProviderRuntimeState {
         mode: ProviderMode::Direct {
             provider: provider.into(),
         },
         default_selection: Some(DefaultSelection::new(provider)),
     };
-    let (resolution, model) = sebas::spawn_env::compute_provider_resolution(&state, None);
-    assert!(
-        matches!(
-            resolution,
-            sebas_acp::claude::ProviderResolution::Direct { .. }
-        ),
-        "expected Direct resolution, got {resolution:?}"
-    );
-    model
+    let resolution = sebas::spawn_env::compute_provider_resolution(&state, None);
+    match resolution {
+        sebas_acp::claude::ProviderResolution::Direct {
+            base_url,
+            auth_token,
+            ..
+        } => {
+            assert_eq!(auth_token, "sk-store", "库里的 api_key 生效");
+            base_url
+        }
+        other => panic!("expected Direct resolution, got {other:?}"),
+    }
 }
 
-/// 文件与库不一致（同名 provider、不同 default_model）→ 以库为准。
+/// 文件与库不一致（同名 provider、不同 base_url）→ 以库为准。
 #[tokio::test(flavor = "multi_thread")]
 async fn store_beats_conflicting_legacy_file() {
     let _g = ENV_LOCK.lock().unwrap();
@@ -156,11 +159,11 @@ async fn store_beats_conflicting_legacy_file() {
     seed_store_provider("alpha", "store-model");
     let legacy = write_conflicting_file(dir.path(), "alpha", "file-model");
 
-    // read_overlay_item 经 compute_provider_resolution 投递 default_model：
-    // 必须是库里的 store-model，不是文件的 file-model。
+    // read_overlay_item 经 compute_provider_resolution 投递端点：必须是库里
+    // 的 store.example，不是文件的 file.example。
     assert_eq!(
-        direct_spawn_model("alpha"),
-        Some("store-model".into()),
+        direct_spawn_endpoint("alpha"),
+        "https://store.example/anthropic",
         "文件与库不一致时以库为准（4.1）"
     );
     // 而且文件根本没被碰过（不读、不改、不删、不搬）。
@@ -184,7 +187,7 @@ async fn store_tombstone_beats_legacy_file_entry() {
         },
         default_selection: Some(DefaultSelection::new("gone")),
     };
-    let (resolution, _model) = sebas::spawn_env::compute_provider_resolution(&state, None);
+    let resolution = sebas::spawn_env::compute_provider_resolution(&state, None);
     assert!(
         matches!(resolution, sebas_acp::claude::ProviderResolution::Off),
         "库墓碑必须压过文件条目，got {resolution:?}"
@@ -206,10 +209,9 @@ async fn file_only_entry_no_longer_shadows_missing_store_row() {
         },
         default_selection: Some(DefaultSelection::new("ghost")),
     };
-    let (resolution, model) = sebas::spawn_env::compute_provider_resolution(&state, None);
+    let resolution = sebas::spawn_env::compute_provider_resolution(&state, None);
     assert!(
         matches!(resolution, sebas_acp::claude::ProviderResolution::Off),
         "store 缺条目时文件不得再充当数据源，got {resolution:?}"
     );
-    assert_eq!(model, None);
 }

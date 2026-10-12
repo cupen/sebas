@@ -91,7 +91,9 @@ async fn restored_mapping_lazily_resumes_with_load_capable_agent() {
         &old,
         &prompt,
         "claude",
+        "claude", // driver tag
         vec![fake().to_str().unwrap().to_string()],
+        None,
         None,
         None,
         None,
@@ -163,10 +165,12 @@ async fn restored_mapping_resume_rejected_falls_back_to_fresh() {
             &old,
             &prompt,
             "claude",
+            "claude", // driver tag
             vec![
                 fake().to_str().unwrap().to_string(),
                 "--resume-fails".into(),
             ],
+            None,
             None,
             None,
             None,

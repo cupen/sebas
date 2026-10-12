@@ -51,6 +51,8 @@ if (typeof (globalThis as { ResizeObserver?: unknown }).ResizeObserver === 'unde
 
 vi.mock('../api/client.js', () => ({
   errorText: (err: unknown) => (err instanceof Error ? err.message : String(err)),
+  // （add-claude-model-slots）档位词表（渲染层常量）。
+  MODEL_SLOTS: ['fable', 'opus', 'sonnet', 'haiku'] as const,
   api: {
     agents: vi.fn(),
     providers: vi.fn(),
@@ -176,6 +178,92 @@ describe('sebas-new-session-dialog', () => {
     // （3.2，D5b）未选 mode = 显式缺省 ask：wire 无条件携带 mode 字段，
     // 不再有「省略字段 = agent 默认」的空路径。
     expect(detail.mode).toBe('ask')
+  })
+
+  // （add-claude-model-slots 4.3）claude agent → 单层档位下拉：映射存在时
+  // 选项 = default + 启用档、预选 = agent 默认档；无映射用内置五项。
+  it('claude agent switches to the slot dropdown, preselecting the default slot (4.3)', async () => {
+    ;(api.agents as ReturnType<typeof vi.fn>).mockResolvedValue({
+      agents: [
+        {
+          id: 'claude',
+          display: 'Claude',
+          reachable: true,
+          driver_raw: 'claude',
+          models: { opus: 'opus-x', sonnet: 'sonnet-y', default: 'sonnet' },
+        },
+      ],
+    })
+    const el = await mount({ open: true, defaultAgent: 'claude' })
+    // 档位下拉在场，provider 两级下拉缺席。
+    const slot = syncWaSelect(el, 'dialog-slot-select') as HTMLElement & { value: string }
+    expect(slot).toBeTruthy()
+    expect(el.shadowRoot!.querySelector('[data-testid="dialog-model-select"]')).toBeNull()
+    expect(slot.value).toBe('sonnet')
+    const opts = [...slot.querySelectorAll('wa-option')].map((o) => o.getAttribute('value'))
+    expect(opts).toEqual(['default', 'opus', 'sonnet'])
+
+    const confirmed = vi.fn()
+    el.addEventListener('dialog-confirm', confirmed)
+    confirmButton(el).click()
+    await new Promise((r) => setTimeout(r, 0))
+    const detail = (confirmed.mock.calls[0]![0] as CustomEvent).detail as Record<string, unknown>
+    expect(detail.model).toBe('sonnet')
+    // claude 档位选择不写 last-used 记忆。
+    expect(localStorage.getItem(LAST_USED_PAIR_KEY)).toBeNull()
+  })
+
+  it('claude agent without mapping offers the builtin fallback table (4.3)', async () => {
+    ;(api.agents as ReturnType<typeof vi.fn>).mockResolvedValue({
+      agents: [{ id: 'claude', display: 'Claude', reachable: true, driver_raw: 'claude' }],
+    })
+    const el = await mount({ open: true, defaultAgent: 'claude' })
+    const slot = syncWaSelect(el, 'dialog-slot-select') as HTMLElement & { value: string }
+    expect(slot.value).toBe('default')
+    const opts = [...slot.querySelectorAll('wa-option')].map((o) => o.getAttribute('value'))
+    expect(opts).toEqual(['default', 'fable', 'opus', 'sonnet', 'haiku'])
+  })
+
+  it('non-claude agent keeps the provider catalog dropdown (4.3)', async () => {
+    ;(api.providers as ReturnType<typeof vi.fn>).mockResolvedValue({
+      providers: [{ name: 'deepseek', models: [{ id: 'deepseek-chat', tags: [] }] }],
+    })
+    ;(api.agents as ReturnType<typeof vi.fn>).mockResolvedValue({
+      agents: [{ id: 'cursor', display: 'Cursor', reachable: true, driver_raw: 'acp' }],
+    })
+    const el = await mount({ open: true, defaultAgent: 'cursor' })
+    expect(el.shadowRoot!.querySelector('[data-testid="dialog-slot-select"]')).toBeNull()
+    expect(el.shadowRoot!.querySelector('[data-testid="dialog-model-select"]')).toBeTruthy()
+  })
+
+  // （add-claude-model-slots 4.3/spec「preselection ignores any previously
+  // remembered (provider, model) choice」）claude agent 的档位预选 = agent
+  // 默认档，即便全局 last-used 记忆在场也不吃它。
+  it('claude slot preselection ignores a remembered (provider, model) pair (4.3)', async () => {
+    ;(api.providers as ReturnType<typeof vi.fn>).mockResolvedValue({
+      providers: [{ name: 'alpha', models: [{ id: 'a1', tags: [] }] }],
+    })
+    ;(api.agents as ReturnType<typeof vi.fn>).mockResolvedValue({
+      agents: [
+        {
+          id: 'claude',
+          display: 'Claude',
+          reachable: true,
+          driver_raw: 'claude',
+          models: { fable: 'glm-5.3', sonnet: 'sonnet-y', default: 'sonnet' },
+        },
+      ],
+    })
+    // 全局记忆指向 provider 目录的一对——claude 档位下拉不得据此预选。
+    localStorage.setItem(LAST_USED_PAIR_KEY, JSON.stringify({ provider: 'alpha', model: 'a1' }))
+    const el = await mount({ open: true, defaultAgent: 'claude' })
+    const slot = syncWaSelect(el, 'dialog-slot-select') as HTMLElement & { value: string }
+    expect(slot.value).toBe('sonnet')
+    expect(el.shadowRoot!.querySelector('[data-testid="dialog-model-select"]')).toBeNull()
+    // 记忆对未被消费、也未被覆盖（claude 确认不写记忆）。
+    expect(localStorage.getItem(LAST_USED_PAIR_KEY)).toBe(
+      JSON.stringify({ provider: 'alpha', model: 'a1' }),
+    )
   })
 
   // （fix-webui-qa-round6 5.2）预选 agent 标注「上次使用」：标注锚定打开时

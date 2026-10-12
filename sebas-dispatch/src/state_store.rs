@@ -944,8 +944,9 @@ pub const AGENT_ITEM_KNOWN_FIELDS: &[&str] = &[
 
 /// 校验 agent 条目并归一化为 `AgentDefinition`。`driver` 只认封闭标签
 /// `claude` | `acp`；`path`/`display`/`work_dir` 是字符串槽位（null 归一为
-/// 未配置）；`args`/`models` 是字符串数组（缺省 = 空/未覆盖）；超时两槽位
-/// 是非负整数，下限压到 1（与 config 侧 `startup_timeout_for` 的 max(1)
+/// 未配置）；`args` 是字符串数组（缺省 = 空）；`models` 是结构化档位映射
+/// 对象（add-claude-model-slots 1.3——旧裸数组在此被 typed 拒绝）；超时两槽
+/// 位是非负整数，下限压到 1（与 config 侧 `startup_timeout_for` 的 max(1)
 /// 同语义——0 会让 spawn 立即超时）。
 pub fn validate_agent_definition(item: &Item) -> Result<sebas_models::agent::AgentDefinition, String> {
     use sebas_models::agent::AgentDefinition;
@@ -1002,16 +1003,32 @@ pub fn validate_agent_definition(item: &Item) -> Result<sebas_models::agent::Age
             }
         }
     };
+    // （add-claude-model-slots 1.3/D6）models 是结构化档位映射对象：空对象
+    // 等价 None（未配置）；其余形状（含旧裸数组）走 typed 拒绝，错误点名
+    // 越界档位 / 缺失 default / 期望形态。
+    let models_slot = |field: &str| -> Result<Option<sebas_models::agent::ModelSlotMapping>, String> {
+        match item.get(field) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::Object(map)) if map.is_empty() => Ok(None),
+            Some(v) => serde_json::from_value::<sebas_models::agent::ModelSlotMapping>(v.clone())
+                .map(Some)
+                .map_err(|e| format!("put: agent 字段 '{field}' 非法：{e}")),
+        }
+    };
     let path = string_slot("path")?;
     if driver == "acp" && path.as_deref().map(str::trim).filter(|s| !s.is_empty()).is_none() {
         return Err("put: acp agent 需要非空 path（command 的 argv[0]）".to_string());
     }
+    let models = models_slot("models")?;
+    // （1.3）models 仅 claude driver 可携带；config 种子导入共享同一校验。
+    sebas_models::agent::validate_models_for_driver(driver, &models)
+        .map_err(|e| format!("put: {e}"))?;
     Ok(AgentDefinition {
         driver: driver.to_string(),
         path,
         args: list_slot("args")?.unwrap_or_default(),
         display: string_slot("display")?,
-        models: list_slot("models")?,
+        models,
         startup_timeout_secs: uint_slot("startup_timeout_secs", 30)?,
         idle_kill_secs: uint_slot("idle_kill_secs", 172800)?,
         work_dir: string_slot("work_dir")?,
@@ -1058,7 +1075,9 @@ pub async fn agents_mutation(
                 .ok_or_else(|| "put: 缺少 agent 对象".to_string())?;
             let def = validate_agent_definition(&item)?;
             let mut row = sebas_models::agent::AgentRow::from_definition(id, &def, "ui");
-            // 同 id 覆盖保留首次创建时刻与原 source（更新不改来源账目）。
+            // 同 id 覆盖保留首次创建时刻；source 随 UI put 落 `ui`（add-claude
+            // -model-slots review 修复：source 是「最新写入者」而非首次来源账目
+            // ——spawn 解析靠它识别 Settings 管理行、让 UI 编辑免重启生效）。
             if let Some(existing) = engine
                 .load_agents()
                 .await?
@@ -1066,7 +1085,6 @@ pub async fn agents_mutation(
                 .find(|r| r.id == id)
             {
                 row.created_at = existing.created_at;
-                row.source = existing.source;
             }
             engine.put_agent(row).await?;
             Ok(())
@@ -1497,6 +1515,151 @@ mod tests {
             "未知字段拒绝"
         );
         assert!(engine.load_agents().await.unwrap().len() == 1, "拒绝不落行");
+    }
+
+    /// （add-claude-model-slots review 修复）UI put 把 source 落 `ui`（「最新
+    /// 写入者」语义，非首次来源账目）：对既有 seed 行的同 id 覆盖不再保留旧
+    /// source——spawn 解析靠它识别 Settings 管理行、让 UI 编辑免重启生效。
+    /// created_at 仍保留首次创建时刻。
+    #[tokio::test]
+    async fn ui_put_flips_seeded_row_source_to_ui() {
+        use sebas_models::agent::{AgentDefinition, AgentRow};
+        let engine = crate::test_engine::MemoryEngine::new();
+
+        // 造一行启动种子（source = "seed"）。
+        engine
+            .put_agent(AgentRow::from_definition(
+                "claude",
+                &AgentDefinition {
+                    driver: "claude".into(),
+                    path: Some("claude".into()),
+                    ..Default::default()
+                },
+                "seed",
+            ))
+            .await
+            .unwrap();
+        let seeded_at = engine.load_agents().await.unwrap()[0].created_at;
+
+        // UI 编辑同 id：source 翻 `ui`，created_at 保留。
+        agents_mutation(
+            &engine,
+            &serde_json::json!({
+                "op": "put",
+                "id": "claude",
+                "agent": agent_item("claude", "claude", &[]),
+            }),
+        )
+        .await
+        .unwrap();
+        let rows = engine.load_agents().await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].source, "ui", "UI put 即 UI 著作权（不再保留 seed）");
+        assert_eq!(rows[0].created_at, seeded_at, "首次创建时刻保留");
+    }
+
+    /// （add-claude-model-slots 1.3）models 档位映射 mutation 校验：合法映射
+    /// 落行；default 落在停用档 / 无 default / 旧裸数组 / 非 claude driver
+    /// 携带——全部 typed 拒绝且不落行。
+    #[tokio::test]
+    async fn agents_mutation_validates_model_slot_mapping() {
+        async fn put(
+            engine: &crate::test_engine::MemoryEngine,
+            id: &str,
+            item: serde_json::Value,
+        ) -> Result<(), String> {
+            agents_mutation(
+                engine,
+                &serde_json::json!({ "op": "put", "id": id, "agent": item }),
+            )
+            .await
+        }
+        let engine = crate::test_engine::MemoryEngine::new();
+
+        // 合法映射（fable/opus/sonnet，sonnet 默认）。
+        put(
+            &engine,
+            "claude",
+            serde_json::json!({
+                "driver": "claude",
+                "path": "claude",
+                "models": {"fable": "glm-5.3", "opus": "opus[1m]", "sonnet": "sonnet", "default": "sonnet"}
+            }),
+        )
+        .await
+        .expect("valid claude mapping");
+        let rows = engine.load_agents().await.unwrap();
+        let def = rows[0].to_definition();
+        let m = def.models.as_ref().expect("mapping persisted");
+        assert_eq!(m.default_model(), Some("sonnet"));
+        assert_eq!(m.weakest_model(), Some("sonnet"));
+
+        // default 落在停用档 → 拒绝，错误点名档位。
+        let err = put(
+            &engine,
+            "c2",
+            serde_json::json!({"driver": "claude", "path": "claude",
+                "models": {"opus": "o", "default": "haiku"}}),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("haiku"), "错误须点名越界档位：{err}");
+
+        // 无 default → 拒绝。
+        assert!(
+            put(
+                &engine,
+                "c3",
+                serde_json::json!({"driver": "claude", "path": "claude", "models": {"opus": "o"}}),
+            )
+            .await
+            .is_err(),
+            "缺 default 必须拒绝"
+        );
+
+        // 旧裸数组形态 → typed 拒绝（不静默降级）。
+        let err = put(
+            &engine,
+            "c4",
+            serde_json::json!({"driver": "claude", "path": "claude", "models": ["opus", "sonnet"]}),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("models"), "错误须点名 models 字段：{err}");
+
+        // 非 claude driver 携带 models → 拒绝。
+        let err = put(
+            &engine,
+            "oc",
+            serde_json::json!({"driver": "acp", "path": "opencode",
+                "models": {"opus": "o", "default": "opus"}}),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("claude"), "错误须说明仅 claude 可携带：{err}");
+
+        // 空对象等价未配置。
+        put(
+            &engine,
+            "c5",
+            serde_json::json!({"driver": "claude", "path": "claude", "models": {}}),
+        )
+        .await
+        .expect("empty mapping is None");
+        let c5 = engine
+            .load_agents()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|r| r.id == "c5")
+            .unwrap();
+        assert!(c5.to_definition().models.is_none());
+
+        assert_eq!(
+            engine.load_agents().await.unwrap().len(),
+            2,
+            "拒绝不落行（仅 claude 与 c5 两行）"
+        );
     }
 
     /// delete → 行消失，且引用该 id 的项目默认被清（删除守卫）；未知 id

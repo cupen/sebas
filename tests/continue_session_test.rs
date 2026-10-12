@@ -63,12 +63,14 @@ async fn second_text_flips_fsm_and_forwards_continue() {
         &key,
         &prompt,
         "claude",
+        "claude", // driver tag
         vec![
             fake.to_str().unwrap().to_string(),
             "--slow-ms".into(),
             "200".into(),
         ],
         Some(work_dir.path().to_string_lossy().into_owned()),
+        None,
         None,
         None,
     )

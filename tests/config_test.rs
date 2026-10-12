@@ -295,7 +295,7 @@ download_dir = "{}/sub"
 
 // ── workbench-composer-input-polish 2.1：[acp.agents.<name>] models 覆盖 ──
 
-/// 键缺省（`models` 不出现）= 内置别名表（default/opus/sonnet/haiku）。
+/// 键缺省（`models` 不出现）= 内置别名表（default/fable/opus/sonnet/haiku）。
 #[test]
 fn claude_models_key_absent_falls_back_to_builtin_aliases() {
     let toml = r#"
@@ -312,6 +312,7 @@ path = "/bin/cat"
         c.resolved_models(),
         vec![
             "default".to_string(),
+            "fable".to_string(),
             "opus".to_string(),
             "sonnet".to_string(),
             "haiku".to_string()
@@ -319,81 +320,80 @@ path = "/bin/cat"
     );
 }
 
-/// 非空 `models` 列表整体替换内置表（全名模型 id 亦可进入词汇）。
+/// （add-claude-model-slots 1.2）结构化 `models` table 解析为映射：resolved
+/// 词汇 = `default` + 启用档（强弱序，与 TOML 书写序无关）。
 #[test]
-fn claude_models_key_overrides_builtin_aliases() {
+fn claude_models_structured_table_parses_into_mapping() {
     let toml = r#"
 [acp.agents.claude]
 driver = "claude"
 path = "/bin/cat"
-models = ["sonnet[1m]", "claude-opus-4-20250514"]
+
+[acp.agents.claude.models]
+fable = "glm-5.3"
+opus = "opus[1m]"
+sonnet = "sonnet"
+default = "sonnet"
 "#;
     let cfg = Config::parse(toml).unwrap();
     let AgentConfig::Claude(c) = cfg.acp.agents.get("claude").unwrap() else {
         panic!("claude agent must parse as Claude config");
     };
+    let m = c.models.as_ref().expect("structured models must parse");
+    assert_eq!(m.default_slot, sebas_models::agent::ModelSlot::Sonnet);
+    assert_eq!(m.default_model(), Some("sonnet"));
+    assert_eq!(m.weakest_model(), Some("sonnet"));
     assert_eq!(
         c.resolved_models(),
-        vec![
-            "sonnet[1m]".to_string(),
-            "claude-opus-4-20250514".to_string()
-        ]
+        vec!["default", "fable", "opus", "sonnet"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
     );
 }
 
-/// 覆盖表逐字直传（spec：「exactly that list」）：重复项不去重、大小写不归
-/// 一、含 `default` 的自定义表不特殊化——别名表是操作员的原文词汇，归一
-/// 语义只存在于 SetModel 的 `"default"` 精确特判（driver 侧 sdk_model_arg）。
+/// （1.2/spec「legacy bare list in config is rejected at parse time」）旧裸
+/// 数组形态在解析期报错，且错误点名 `models` 键与期望形态。
 #[test]
-fn claude_models_override_is_verbatim_no_dedup_or_normalization() {
+fn claude_models_legacy_bare_list_is_rejected_naming_the_key() {
     let toml = r#"
 [acp.agents.claude]
 driver = "claude"
 path = "/bin/cat"
-models = ["default", "Opus", "opus", "opus", "sonnet[1m]"]
+models = ["opus", "sonnet"]
 "#;
-    let cfg = Config::parse(toml).unwrap();
-    let AgentConfig::Claude(c) = cfg.acp.agents.get("claude").unwrap() else {
-        panic!("claude agent must parse as Claude config");
-    };
-    assert_eq!(
-        c.resolved_models(),
-        vec![
-            "default".to_string(),
-            "Opus".to_string(),
-            "opus".to_string(),
-            "opus".to_string(),
-            "sonnet[1m]".to_string(),
-        ],
-        "override table must pass through verbatim (order, duplicates, case)"
+    let err = Config::parse(toml).expect_err("legacy bare list must be rejected");
+    let msg = format!("{err}");
+    assert!(msg.contains("models"), "错误必须点名 models 键：{msg}");
+    assert!(
+        msg.contains("结构化") || msg.contains("structured") || msg.contains("table"),
+        "错误必须说明期望形态：{msg}"
     );
 }
 
-/// 显式空表没有可选词汇，等效「未覆盖」——回退内置（任务 2.1）。
+/// （1.2）缺 `default` 键 / default 指向未启用档：解析期拒绝。
 #[test]
-fn claude_models_empty_list_falls_back_to_builtin_aliases() {
-    let toml = r#"
+fn claude_models_missing_or_invalid_default_is_rejected() {
+    let missing = r#"
 [acp.agents.claude]
 driver = "claude"
 path = "/bin/cat"
-models = []
+
+[acp.agents.claude.models]
+opus = "o"
+sonnet = "s"
 "#;
-    let cfg = Config::parse(toml).unwrap();
-    let AgentConfig::Claude(c) = cfg.acp.agents.get("claude").unwrap() else {
-        panic!("claude agent must parse as Claude config");
-    };
-    assert_eq!(
-        c.models.as_deref(),
-        Some(&[][..]),
-        "empty list deserializes to Some(empty)"
-    );
-    assert_eq!(
-        c.resolved_models(),
-        vec![
-            "default".to_string(),
-            "opus".to_string(),
-            "sonnet".to_string(),
-            "haiku".to_string()
-        ]
-    );
+    assert!(Config::parse(missing).is_err(), "缺 default 键必须被拒");
+
+    let dangling = r#"
+[acp.agents.claude]
+driver = "claude"
+path = "/bin/cat"
+
+[acp.agents.claude.models]
+opus = "o"
+default = "haiku"
+"#;
+    let err = Config::parse(dangling).expect_err("default 落在未启用档必须被拒");
+    assert!(format!("{err}").contains("haiku"), "{err}");
 }

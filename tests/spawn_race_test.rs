@@ -59,6 +59,7 @@ async fn racing_texts_yield_one_spawn_and_joined_pending() {
             &k,
             &prompt,
             "claude",
+            "claude", // driver tag
             vec![
                 fake().to_str().unwrap().to_string(),
                 "--journal".into(),
@@ -66,6 +67,7 @@ async fn racing_texts_yield_one_spawn_and_joined_pending() {
                 "--delay-new-ms".into(),
                 "500".into(),
             ],
+            None,
             None,
             None,
             None,
@@ -162,7 +164,9 @@ async fn crash_on_first_prompt_reaches_pump_despite_slow_sendcard() {
         &k,
         &prompt,
         "claude",
+        "claude", // driver tag
         vec![fake().to_str().unwrap().to_string()],
+        None,
         None,
         None,
         None,

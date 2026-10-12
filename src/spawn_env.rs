@@ -23,15 +23,17 @@
 
 use sebas_acp::claude::{ClaudeCodeDriver, ProviderResolution};
 use sebas_dispatch::provider_state::{ProviderMode, ProviderRuntimeState};
+use sebas_models::agent::ModelSlotMapping;
 use sebas_router::config::RouterConfig;
 use serde_json::{Map, Value};
 
 /// Claude Code 模型 env 覆盖集的 4 个 `ANTHROPIC_MODEL` 键 + 1 个
-/// `CLAUDE_CODE_SUBAGENT_MODEL` 键（openspec/changes/acp-claude-model-env-cover）。
+/// `CLAUDE_CODE_SUBAGENT_MODEL` 键（add-claude-model-slots 2.2）。
 ///
-/// 档位语义：provider 的 `models`（强→弱）经 `sebas_router::models::map_to_env`
-/// 映射成 OPUS/SONNET/HAIKU 三档；`CLAUDE_CODE_SUBAGENT_MODEL` 回退到最弱档
-/// （= HAIKU 值）。provider 未配 models → 不强制覆盖，claude 用自己发现。
+/// 档位语义：claude agent 的档位映射（`ModelSlotMapping`）逐档产
+/// `ANTHROPIC_DEFAULT_<SLOT>_MODEL`；`ANTHROPIC_MODEL` = 默认档值；
+/// `CLAUDE_CODE_SUBAGENT_MODEL` = 最弱启用档值。未配映射 → 一个模型键都不出
+/// （provider 解析只产凭据键）。
 const CLAUDE_SUBAGENT_MODEL_ENV: &str = "CLAUDE_CODE_SUBAGENT_MODEL";
 
 /// pi 认识的标准 provider env 对（make-pi-the-builtin-agent 2.1，design D3）。
@@ -139,7 +141,7 @@ pub fn compute_pi_provider_env(
         let Some(item) = persisted.providers.get(&name) else {
             continue;
         };
-        let (resolution, _model) = direct_resolution_from_overlay(&name, item);
+        let resolution = direct_resolution_from_overlay(&name, item);
         let (proto, base_url, api_key) = match resolution {
             ProviderResolution::Direct {
                 proto,
@@ -218,10 +220,7 @@ fn read_overlay_item(name: &str) -> Option<Map<String, Value>> {
 /// 密钥优先级：`api_key` 明文（debug 提示）> `api_key_env` 读 env（preset
 /// 派生条目缺省继承 preset 的默认 env 名）；env 缺失/空 → `Error` + warn。
 /// 和 `RouterConfig::resolve_api_keys` 走同一套优先级，行为一致。
-fn direct_resolution_from_overlay(
-    name: &str,
-    item: &Map<String, Value>,
-) -> (ProviderResolution, Option<String>) {
+fn direct_resolution_from_overlay(name: &str, item: &Map<String, Value>) -> ProviderResolution {
     // preset 物化源：条目带 `preset` 字段时从代码表取连接数据。
     let preset = item.get("preset").and_then(Value::as_str).and_then(|pn| {
         sebas_router::config::presets()
@@ -244,7 +243,6 @@ fn direct_resolution_from_overlay(
             .and_then(|p| p.base_url_openai_chat)
             .map(str::to_string)
     });
-    let default_model = item_url("default_model");
     // 协议选择：UI 在详情面板的 radio。缺省 = "auto" = anthropic 优先。
     let protocol = item
         .get("protocol")
@@ -263,7 +261,7 @@ fn direct_resolution_from_overlay(
                     provider = %name,
                     "direct provider sets protocol=anthropic but base_url_anthropic is missing, aborting spawn"
                 );
-                return (ProviderResolution::Error { reason }, default_model);
+                return ProviderResolution::Error { reason };
             }
         },
         "openai" => match base_url_openai_chat {
@@ -276,7 +274,7 @@ fn direct_resolution_from_overlay(
                     provider = %name,
                     "direct provider sets protocol=openai but base_url_openai_chat is missing, aborting spawn"
                 );
-                return (ProviderResolution::Error { reason }, default_model);
+                return ProviderResolution::Error { reason };
             }
         },
         // "auto" 或未知值：anthropic > openai chat。
@@ -293,7 +291,7 @@ fn direct_resolution_from_overlay(
                     provider = %name,
                     "Direct provider has no base_url_anthropic / base_url_openai_chat; aborting spawn"
                 );
-                return (ProviderResolution::Error { reason }, default_model);
+                return ProviderResolution::Error { reason };
             }
         }
     };
@@ -327,7 +325,7 @@ fn direct_resolution_from_overlay(
                     env_var = %env_var,
                     "Direct provider api_key_env unset/empty; aborting spawn"
                 );
-                return (ProviderResolution::Error { reason }, default_model);
+                return ProviderResolution::Error { reason };
             }
         }
     } else {
@@ -336,17 +334,14 @@ fn direct_resolution_from_overlay(
             provider = %name,
             "Direct provider missing both api_key and api_key_env; aborting spawn"
         );
-        return (ProviderResolution::Error { reason }, default_model);
+        return ProviderResolution::Error { reason };
     };
 
-    (
-        ProviderResolution::Direct {
-            proto,
-            base_url,
-            auth_token,
-        },
-        default_model,
-    )
+    ProviderResolution::Direct {
+        proto,
+        base_url,
+        auth_token,
+    }
 }
 
 /// 从 `RouterConfig` 派生 `ProviderResolution::Router`。
@@ -354,12 +349,12 @@ fn direct_resolution_from_overlay(
 /// URL 取 `router_cfg.listen`（如 `127.0.0.1:8787`），前面补 `http://`。
 /// Auth token 取 `auth_token[0]`（空数组或空字符串 → 不带 auth，但 warn）。
 /// 至少 `listen` 必须非空 —— 否则 `Off` + warn。
-fn router_resolution(cfg: &RouterConfig) -> (ProviderResolution, Option<String>) {
+fn router_resolution(cfg: &RouterConfig) -> ProviderResolution {
     let listen = cfg.listen.trim();
     if listen.is_empty() {
         let reason = "ProviderMode::Router but router.listen is empty in config".to_string();
         tracing::warn!("ProviderMode::Router but router.listen is empty; aborting spawn");
-        return (ProviderResolution::Error { reason }, None);
+        return ProviderResolution::Error { reason };
     }
     let url = format!("http://{listen}");
     let auth_token = cfg.auth_token.first().cloned().unwrap_or_default();
@@ -369,29 +364,21 @@ fn router_resolution(cfg: &RouterConfig) -> (ProviderResolution, Option<String>)
             "ProviderMode::Router but router.auth_token is empty; agent will call without Bearer/x-api-key"
         );
     }
-    (ProviderResolution::Router { url, auth_token }, None)
+    ProviderResolution::Router { url, auth_token }
 }
 
-/// 解析 `ProviderMode` + `DefaultSelection` → `ProviderResolution` + 可选的
-/// `default_model`（spawn 时追加 `--model <id>`，仅 Direct / Off-with-default
-/// 模式下生效；Router 一律 `None`）。
+/// 解析 `ProviderMode` + `DefaultSelection` → `ProviderResolution`（**仅凭据
+/// 半边**；add-claude-model-slots 2.1 起不再派生 `--model` 模型 id）。
 ///
 /// openspec/specs/provider-management/spec.md 三处决策点：
 ///
 /// 1. **Off + default_selection 已设** → 视为隐式 Direct，按
-///    `default_selection.provider` 解析（同 Direct{...} 路径）。这是
-///    openspec/specs/provider-management/spec.md 的新行为：用户没显式切 Direct 但已经「设为默认（DIRECT）」时
-///    也应该让默认 provider 生效。
+///    `default_selection.provider` 解析（同 Direct{...} 路径）。
 /// 2. **Off + default_selection 未设** → `ProviderResolution::Off`（保持
 ///    旧行为，claude 用自己的默认）。
-/// 3. **Direct / 隐式 Direct**：第二个 tuple 元素是 `--model` 用的 model
-///    id。来源优先级：
-///    - `state.default_selection.model`（如果 default_selection.provider 与
-///      本次 spawn 用的 provider 一致 —— 用户在「设为默认（DIRECT）」时已
-///      同步 overlay 的 default_model）；
-///    - overlay item 的 `default_model`（UI 源；「设为默认」前的 fallback，
-///      保证已编辑 default_model 但忘了「设为默认」的用户也不会丢偏好）；
-///    - `None`（两者都缺）。
+/// 3. **Direct / 隐式 Direct**：只解析端点/凭据；provider 的 `default_model`
+///    与 `default_selection.model` 不再钉扎 claude 子进程的模型（provider
+///    元数据仅作目录/探测用）。
 ///
 /// 失败语义（openspec/specs/provider-management/spec.md）：一律 `Error { reason }` + warn。绝不
 /// panic / 绝不静默回退 `Off` —— 旧 silent Off 让用户看到「claude 启动了
@@ -400,7 +387,7 @@ fn router_resolution(cfg: &RouterConfig) -> (ProviderResolution, Option<String>)
 pub fn compute_provider_resolution(
     state: &ProviderRuntimeState,
     router_cfg: Option<&RouterConfig>,
-) -> (ProviderResolution, Option<String>) {
+) -> ProviderResolution {
     // 把「Off 但 default_selection.provider 已设」归一为隐式 Direct。
     let effective_mode: ProviderMode = match &state.mode {
         ProviderMode::Off => state
@@ -413,26 +400,26 @@ pub fn compute_provider_resolution(
         other => other.clone(),
     };
     match &effective_mode {
-        ProviderMode::Off => (ProviderResolution::Off, None),
+        ProviderMode::Off => ProviderResolution::Off,
         ProviderMode::Router => match router_cfg {
             Some(cfg) => router_resolution(cfg),
             // 没有可用的 router（config.toml 没有 [router] 段）→ 回退 Off +
-            // 段）→ 回退 Off + warn，而不是拒绝启动。mode=router 但 router
-            // 没起来时，让 claude 走自己 env 配置（Off 的语义）比整 bot 卡死
-            // 在「refusing to launch」强。真把 router 配坏了（listen 空）仍
-            // 由 router_resolution 返回 Error（显式失败语义保留）。
+            // warn，而不是拒绝启动。mode=router 但 router 没起来时，让 claude
+            // 走自己 env 配置（Off 的语义）比整 bot 卡死在「refusing to
+            // launch」强。真把 router 配坏了（listen 空）仍由 router_resolution
+            // 返回 Error（显式失败语义保留）。
             None => {
                 tracing::warn!(
                     "ProviderMode::Router but no router config provided; falling back to Off"
                 );
-                (ProviderResolution::Off, None)
+                ProviderResolution::Off
             }
         },
         ProviderMode::Direct { provider } => {
             // 优先读 overlay（用户 bot 里改的）；overlay 缺则回退到
             // router_cfg 里的同名 provider（仅 config.toml 种子，没经过
             // /provider 编辑的 provider 走这条路径）。
-            let (resolution, overlay_model) = if let Some(item) = read_overlay_item(provider) {
+            if let Some(item) = read_overlay_item(provider) {
                 direct_resolution_from_overlay(provider, &item)
             } else if let Some(cfg) = router_cfg
                 && let Some(p) = cfg.providers.get(provider)
@@ -446,27 +433,13 @@ pub fn compute_provider_resolution(
                 // 两者都缺 → 这位 provider 名既不指向 overlay 项、也不指向
                 // router seed。按持久化层的约定（state_store.rs 的契约：「必须
                 // 存在于 providers 或 router_cfg，否则 spawn-time 兜底回退
-                // Off + warn」），回退 Off + warn，而不是拒绝启动：这条路径可能
-                // 来自泄漏进 state.json 的幽灵 provider（如测试字面量
-                // "env-override"），不该让用户连 claude 都拉不起来。真正把
-                // provider 名拼错 / 配置残缺的 case，下面 direct_resolution_*
-                // 各自的 URL / 密钥校验仍会喷 Error（显式失败语义保留）。
+                // Off + warn」），回退 Off + warn，而不是拒绝启动。
                 tracing::warn!(
                     provider = %provider,
                     "Direct provider not found in overlay or router config; falling back to Off"
                 );
-                (ProviderResolution::Off, None)
-            };
-            // 第二元素合并：state.default_selection.model（仅在 provider 名
-            // 匹配时采用）→ overlay_model → None。
-            let model = state
-                .default_selection
-                .as_ref()
-                .filter(|d| d.provider == *provider)
-                .and_then(|d| d.model.clone())
-                .filter(|s| !s.is_empty())
-                .or(overlay_model);
-            (resolution, model)
+                ProviderResolution::Off
+            }
         }
     }
 }
@@ -477,7 +450,7 @@ pub fn compute_provider_resolution(
 fn build_direct_from_router_config(
     name: &str,
     p: &sebas_router::config::ProviderConfig,
-) -> (ProviderResolution, Option<String>) {
+) -> ProviderResolution {
     // anthropic 槽优先，其次 chat 槽；responses-only provider 不可 spawn
     // （agent 不说 Responses 协议）。
     let (proto, base_url) = if let Some(u) = p.base_url_anthropic.as_deref() {
@@ -492,7 +465,7 @@ fn build_direct_from_router_config(
             provider = %name,
             "Direct provider missing spawnable URLs in router config; aborting spawn"
         );
-        return (ProviderResolution::Error { reason }, None);
+        return ProviderResolution::Error { reason };
     };
     let auth_token = if let Some(env_var) = &p.api_key_env {
         match std::env::var(env_var) {
@@ -505,7 +478,7 @@ fn build_direct_from_router_config(
                     env_var = %env_var,
                     "Direct provider api_key_env unset/empty; aborting spawn"
                 );
-                return (ProviderResolution::Error { reason }, None);
+                return ProviderResolution::Error { reason };
             }
         }
     } else if let Some(plain) = &p.api_key {
@@ -522,106 +495,50 @@ fn build_direct_from_router_config(
             provider = %name,
             "Direct provider has neither api_key_env nor api_key; aborting spawn"
         );
-        return (ProviderResolution::Error { reason }, None);
+        return ProviderResolution::Error { reason };
     };
 
-    (
-        ProviderResolution::Direct {
-            proto,
-            base_url,
-            auth_token,
-        },
-        None, // router ProviderConfig 不带 default_model（设计如此）
-    )
+    ProviderResolution::Direct {
+        proto,
+        base_url,
+        auth_token,
+    }
 }
 
-/// 给 claude code 子进程的模型 cover env（openspec/changes/acp-claude-model-env-cover）。
+/// 给 claude code 子进程的模型 env（add-claude-model-slots 2.2）。
 ///
-/// 由 provider 的 `models` 条目（强→弱）经 `sebas_router::models::map_to_env`
-/// 导出 4 个 `ANTHROPIC_MODEL`/`ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL`
-/// 值，再加 `CLAUDE_CODE_SUBAGENT_MODEL = 最弱档`（= HAIKU 值），总共 5 个键。
-/// `models` 为空 → 返回空 Vec，不强制覆盖（模式 Router 或裸 Off 也据此
-/// 不盖模型 env，语义见 spec 的 "Transparency across provider modes"）。
-/// env 映射按条目 id 解析——能力标记是纯元数据，不影响赋值（task 1.3）。
+/// 由 claude agent 的档位映射导出：
+/// - `ANTHROPIC_MODEL` = 默认档值；
+/// - `ANTHROPIC_DEFAULT_{FABLE,OPUS,SONNET,HAIKU}_MODEL` = 各**启用**档值
+///   （未启用档不出键）；
+/// - `CLAUDE_CODE_SUBAGENT_MODEL` = 最弱启用档值（档位强弱序
+///   fable > opus > sonnet > haiku）。
+///
+/// 无映射（`None`）→ 返回空 Vec：模型键一个都不出，child 用自身默认。
+/// 与 provider 模式正交（Direct/Router/Off 同构——映射值就是普通目录模型
+/// 条目，router 别名同权可选）。
 ///
 /// 覆盖语义：SDK 最终用 `Command::envs` 增量合并，同键时 extra_env 里的值
-/// 会压掉父进程残留（`claude/driver.rs:166-167,213` + cc-agent-sdk
-/// `build_env`），符合 spec 的 "Override beats inherited values"。
-fn model_cover_env(models: &[sebas_router::models::ModelEntry]) -> Vec<(String, String)> {
-    if models.is_empty() {
-        return Vec::new();
+/// 会压掉父进程残留（`claude/driver.rs` + cc-agent-sdk `build_env`），符合
+/// spec 的 "Override beats inherited values"。
+pub fn slot_mapping_env(mapping: &ModelSlotMapping) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::with_capacity(mapping.slots.len() + 2);
+    if let Some(default_model) = mapping.default_model() {
+        out.push(("ANTHROPIC_MODEL".to_string(), default_model.to_string()));
     }
-    let env = sebas_router::models::map_to_env(models);
-    let mut out: Vec<(String, String)> = env
-        .to_env_map()
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v))
-        .collect();
-    // SUBAGENT 档位目前回退到最弱模型（haiku 值）；T0/T1/T2 标注落地后
-    // 这里换成"按能力标注"的查询。
-    if let Some(haiku) = env.haiku {
-        out.push((CLAUDE_SUBAGENT_MODEL_ENV.to_string(), haiku));
+    for (slot, model) in &mapping.slots {
+        out.push((
+            format!("ANTHROPIC_DEFAULT_{}_MODEL", slot.env_suffix()),
+            model.clone(),
+        ));
+    }
+    if let Some(weakest) = mapping.weakest_model() {
+        out.push((
+            CLAUDE_SUBAGENT_MODEL_ENV.to_string(),
+            weakest.to_string(),
+        ));
     }
     out
-}
-
-/// 取本 spawn 用到的 provider 的模型列表（预设物化后的强→弱 `models`）。
-///
-/// `provider` 是调用方（`resolve_spawn_overrides`）依 mode/default_selection
-/// 折叠后的 `Direct` provider 名。与 `compute_provider_resolution` 读取同一处
-/// overlay / router_cfg，保持 cover 值和端点 env 的来源一致。
-///
-/// `None` 情形：模式非 Direct（Router/Off 空默认）或 `Direct`/`Off` 但无
-/// `default_selection`/`mode.provider`（precise: state 缺 provider）→不盖。
-fn effective_provider_models(
-    state: &ProviderRuntimeState,
-    router_cfg: Option<&RouterConfig>,
-) -> Option<Vec<sebas_router::models::ModelEntry>> {
-    use sebas_router::models::ModelEntry;
-    // 与 compute_provider_resolution 的「Off + default_selection → 隐式
-    // Direct」折叠保持同一选择；无 provider 则不盖。
-    let provider = match &state.mode {
-        ProviderMode::Direct { provider } => provider.clone(),
-        ProviderMode::Off => state
-            .default_selection
-            .as_ref()
-            .map(|d| d.provider.clone())?,
-        ProviderMode::Router => return None,
-    };
-    // 用户通过 bot / `/provider` 或 WebUI 编辑的条目带 `models`（custom，
-    // 条目对象或遗留裸字符串）或 `preset` 名（preset 派生缺省物化代码表）；
-    // overlay 缺项时回退到 router config seed 的 `ProviderConfig.models`。
-    // 两者都没有 → 不盖。
-    if let Some(item) = read_overlay_item(&provider) {
-        let preset_models: Option<Vec<ModelEntry>> =
-            item.get("preset").and_then(Value::as_str).and_then(|pn| {
-                sebas_router::config::presets()
-                    .iter()
-                    .find(|p| p.name == pn)
-                    .map(|p| p.models.iter().map(|m| m.to_entry()).collect())
-            });
-        // 条目对象（现行为）与裸字符串（遗留形态，task 1.1 兼容读取）都
-        // 接受；单个元素非法（含未知能力标记，task 1.4 拒绝语义）→ 整段
-        // 按无 models 处理，回落 preset 代码表 / router seed，绝不半渲染。
-        let custom_models: Vec<ModelEntry> = match item.get("models") {
-            Some(Value::Array(arr)) if !arr.is_empty() => arr
-                .iter()
-                .map(|el| serde_json::from_value::<ModelEntry>(el.clone()))
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap_or_default(),
-            _ => Vec::new(),
-        };
-        if !custom_models.is_empty() {
-            return Some(custom_models);
-        }
-        if let Some(models) = preset_models.filter(|m| !m.is_empty()) {
-            return Some(models);
-        }
-    }
-    router_cfg
-        .and_then(|cfg| cfg.providers.get(&provider))
-        .filter(|p| !p.models.is_empty())
-        .map(|p| p.models.clone())
 }
 
 /// 触发 abort 的 env var 名（openspec/specs/provider-management/spec.md）。
@@ -686,7 +603,10 @@ pub fn inherited_provider_env_posture(
     router_cfg: Option<&RouterConfig>,
 ) -> Vec<String> {
     let driver = ClaudeCodeDriver;
-    let (extra_env, _args) = resolve_spawn_overrides(&driver, state, router_cfg);
+    // 启动期 posture 无具体 spawn agent 的映射上下文（映射在 spawn 装配点
+    // 才可知）：按「无映射」检测——无映射时模型键确实一个都不出，继承的
+    // 模型变量会如实进入子进程，点名它们是真话。
+    let (extra_env, _args) = resolve_spawn_overrides(&driver, state, router_cfg, None);
     if extra_env
         .iter()
         .any(|(k, _)| k == SEBAS_PROVIDER_ERROR_ENV)
@@ -758,23 +678,23 @@ fn report_env_posture(router_cfg: Option<&RouterConfig>, state: &ProviderRuntime
 
 /// 给 agent 进程的额外 env vars + 额外 CLI args。
 ///
-/// 设计（openspec/specs/provider-management/spec.md + acp-claude-model-env-cover）：
-/// - `extra_env` 来自 driver 的 `resolve_env`（已按 `ProviderMode` 翻译），
-///   再追加 [`model_cover_env`] 生成的 5 个模型键（Direct/Off-with-default 时
-///   生效；Router 与裸 Off 不强制覆盖）。`Error` 变体下 driver 已经把
+/// 设计（openspec/specs/provider-management/spec.md + add-claude-model-slots）：
+/// - `extra_env` 来自 driver 的 `resolve_env`（已按 `ProviderMode` 翻译，只
+///   含凭据半边），再追加 [`slot_mapping_env`] 由 claude agent 档位映射导出
+///   的模型键（有映射才出；无映射零模型键）。`Error` 变体下 driver 已经把
 ///   `SEBAS_PROVIDER_ERROR=<reason>` 放进来——这是 in-band signal，spawn wrapper
 ///   看到就 abort。
-/// - `extra_args` 来自 driver 的 `resolve_args` ∪ `--model <name>`（仅在
-///   `default_model` 非空时附加）。`Error` 变体下两者都空，因为根本没
-///   解析出 provider 模型。
+/// - `extra_args` 来自 driver 的 `resolve_args`；**不再**追加 `--model`
+///   （provider 派生的 argv 钉扎通道随自动排位一并退役）。
 /// - 单条 warn log "spawn aborted: provider config error: <reason>"
 ///   在这里打（不是每个 fallback 分支都打），避免重复 / 漏打。
 pub fn resolve_spawn_overrides(
     driver: &ClaudeCodeDriver,
     state: &ProviderRuntimeState,
     router_cfg: Option<&RouterConfig>,
+    mapping: Option<&ModelSlotMapping>,
 ) -> (Vec<(String, String)>, Vec<String>) {
-    let (resolution, default_model) = compute_provider_resolution(state, router_cfg);
+    let resolution = compute_provider_resolution(state, router_cfg);
     if let ProviderResolution::Error { reason } = &resolution {
         tracing::warn!(
             reason = %reason,
@@ -782,14 +702,10 @@ pub fn resolve_spawn_overrides(
         );
     }
     let mut env = driver.resolve_env(&resolution);
-    if let Some(models) = effective_provider_models(state, router_cfg) {
-        env.extend(model_cover_env(&models));
+    if let Some(m) = mapping {
+        env.extend(slot_mapping_env(m));
     }
-    let mut args = driver.resolve_args(&resolution);
-    if let Some(model) = default_model {
-        args.push("--model".to_string());
-        args.push(model);
-    }
+    let args = driver.resolve_args(&resolution);
     (env, args)
 }
 
@@ -817,6 +733,7 @@ mod tests {
     use sebas_acp::claude::{AgentProtocol, ClaudeCodeDriver};
     use sebas_dispatch::provider_state::{ProviderMode, ProviderRuntimeState};
     use sebas_dispatch::state_store::DefaultSelection;
+    use sebas_models::agent::ModelSlot;
     use sebas_router::config::RouterConfig;
     use std::sync::Mutex;
 
@@ -904,10 +821,9 @@ auth_token = {auth_token:?}
         let _g = ENV_LOCK.lock().unwrap();
         clear_overlay_env();
         let state = off_state();
-        let (resolution, model) = compute_provider_resolution(&state, None);
+        let resolution = compute_provider_resolution(&state, None);
         assert!(matches!(resolution, ProviderResolution::Off));
-        assert!(model.is_none());
-        let (env, args) = resolve_spawn_overrides(&driver(), &state, None);
+        let (env, args) = resolve_spawn_overrides(&driver(), &state, None, None);
         assert!(env.is_empty());
         assert!(args.is_empty());
     }
@@ -935,7 +851,7 @@ auth_token = {auth_token:?}
             std::env::set_var("DEEPSEEK_API_KEY", "sk-ds-test");
         }
         let state = direct_state("deepseek");
-        let (resolution, model) = compute_provider_resolution(&state, None);
+        let resolution = compute_provider_resolution(&state, None);
         match resolution {
             ProviderResolution::Direct {
                 proto,
@@ -948,7 +864,6 @@ auth_token = {auth_token:?}
             }
             other => panic!("expected Direct, got {other:?}"),
         }
-        assert!(model.is_none());
         // SAFETY: ENV_LOCK held.
         unsafe {
             std::env::remove_var("DEEPSEEK_API_KEY");
@@ -975,7 +890,7 @@ auth_token = {auth_token:?}
             std::env::set_var("DASHSCOPE_API_KEY", "sk-dash");
         }
         let state = direct_state("dashscope");
-        let (resolution, _) = compute_provider_resolution(&state, None);
+        let resolution = compute_provider_resolution(&state, None);
         match resolution {
             ProviderResolution::Direct {
                 proto,
@@ -997,8 +912,10 @@ auth_token = {auth_token:?}
         }
     }
 
+    /// （add-claude-model-slots 2.1）provider 的 `default_model` 不再派生
+    /// `--model` argv——spawn 模型钉扎只经档位映射的 `ANTHROPIC_MODEL`。
     #[test]
-    fn direct_overlay_emits_model_arg_when_default_model_set() {
+    fn direct_overlay_default_model_no_longer_emits_model_arg() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let _store = write_overlay(
@@ -1017,16 +934,9 @@ auth_token = {auth_token:?}
         unsafe {
             std::env::set_var("DEEPSEEK_API_KEY", "sk-ds");
         }
-        // state.default_selection 没带 model → 回退到 overlay 的 default_model。
-        // openspec/specs/provider-management/spec.md 把这一行为锁死：用户在「设为默认（DIRECT）」前编辑
-        // default_model 也不会丢偏好。
         let state = direct_state("deepseek");
-        let (env, args) = resolve_spawn_overrides(&driver(), &state, None);
-        // 验证 --model 出现在 args 末尾（顺序：resolve_args 返回空 + 我们加 --model）。
-        assert_eq!(
-            args,
-            vec!["--model".to_string(), "deepseek-reasoner".to_string()]
-        );
+        let (env, args) = resolve_spawn_overrides(&driver(), &state, None, None);
+        assert!(args.is_empty(), "provider default_model 不再派生 --model：{args:?}");
         // env 仍包含 ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN，证明 driver 也跑了。
         assert!(env.iter().any(|(k, _)| k == "ANTHROPIC_BASE_URL"));
         // SAFETY: ENV_LOCK held.
@@ -1035,12 +945,10 @@ auth_token = {auth_token:?}
         }
     }
 
-    /// openspec/specs/provider-management/spec.md：当 `state.default_selection.model` 显式设置时，spawn 必须
-    /// 用它（而不是 overlay 的 `default_model`）生成 `--model <id>`。这是
-    /// 「设为默认（DIRECT）」动作的副效：`default_selection.model` 是用户
-    /// 当前的偏好，应该凌驾 overlay（catalog）上的任何值。
+    /// （add-claude-model-slots 2.1）`default_selection.model` 同样不再进
+    /// argv——provider 元数据不再钉扎 claude 模型。
     #[test]
-    fn direct_default_selection_model_overrides_overlay_default_model() {
+    fn direct_default_selection_model_no_longer_emits_model_arg() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let _store = write_overlay(
@@ -1059,15 +967,10 @@ auth_token = {auth_token:?}
         unsafe {
             std::env::set_var("DEEPSEEK_API_KEY", "sk-ds");
         }
-        // state.default_selection.model = "deepseek-chat" 显式覆盖 overlay 的
-        // "deepseek-reasoner"。
         let mut state = direct_state("deepseek");
         state.default_selection = Some(DefaultSelection::with_model("deepseek", "deepseek-chat"));
-        let (env, args) = resolve_spawn_overrides(&driver(), &state, None);
-        assert_eq!(
-            args,
-            vec!["--model".to_string(), "deepseek-chat".to_string()]
-        );
+        let (env, args) = resolve_spawn_overrides(&driver(), &state, None, None);
+        assert!(args.is_empty(), "default_selection.model 不再派生 --model：{args:?}");
         assert!(env.iter().any(|(k, _)| k == "ANTHROPIC_BASE_URL"));
         // SAFETY: ENV_LOCK held.
         unsafe {
@@ -1102,7 +1005,7 @@ auth_token = {auth_token:?}
             mode: ProviderMode::Off,                                    // 显式 Off
             default_selection: Some(DefaultSelection::new("deepseek")), // 但有默认
         };
-        let (resolution, model) = compute_provider_resolution(&state, None);
+        let resolution = compute_provider_resolution(&state, None);
         match resolution {
             ProviderResolution::Direct {
                 proto,
@@ -1115,17 +1018,16 @@ auth_token = {auth_token:?}
             }
             other => panic!("Off+default 应归一为隐式 Direct；got {other:?}"),
         }
-        assert!(model.is_none(), "overlay 没设 default_model → model=None");
         // SAFETY: ENV_LOCK held.
         unsafe {
             std::env::remove_var("DEEPSEEK_API_KEY");
         }
     }
 
-    /// openspec/specs/provider-management/spec.md：Off + default_selection 已设 + model 也设了 → 隐式 Direct
-    /// + `--model` 出现在 args。
+    /// （add-claude-model-slots 2.1）Off + default_selection 已设 → 隐式
+    /// Direct 的凭据 env 照旧，但不再派生 `--model` argv。
     #[test]
-    fn off_with_default_selection_emits_model_arg_via_implicit_direct() {
+    fn off_with_default_selection_implicit_direct_no_model_arg() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let _store = write_overlay(
@@ -1147,11 +1049,8 @@ auth_token = {auth_token:?}
             mode: ProviderMode::Off,
             default_selection: Some(DefaultSelection::with_model("deepseek", "deepseek-chat")),
         };
-        let (env, args) = resolve_spawn_overrides(&driver(), &state, None);
-        assert_eq!(
-            args,
-            vec!["--model".to_string(), "deepseek-chat".to_string()]
-        );
+        let (env, args) = resolve_spawn_overrides(&driver(), &state, None, None);
+        assert!(args.is_empty(), "隐式 Direct 不再派生 --model：{args:?}");
         assert!(env.iter().any(|(k, _)| k == "ANTHROPIC_BASE_URL"));
         // SAFETY: ENV_LOCK held.
         unsafe {
@@ -1194,7 +1093,7 @@ auth_token = {auth_token:?}
             },
             default_selection: Some(DefaultSelection::with_model("deepseek", "deepseek-chat")),
         };
-        let (resolution, model) = compute_provider_resolution(&state, None);
+        let resolution = compute_provider_resolution(&state, None);
         match resolution {
             ProviderResolution::Direct { base_url, .. } => {
                 assert_eq!(base_url, "https://api.anthropic.com");
@@ -1205,10 +1104,7 @@ auth_token = {auth_token:?}
         // 不一致 → default_selection.model 不被采用（避免「给 anthropic 加
         // deepseek 的 model」这种诡异行为）。overlay 没设 default_model →
         // 兜底 None。
-        assert_eq!(
-            model, None,
-            "provider 名不匹配时 default_selection.model 不用"
-        );
+        // （add-claude-model-slots 2.1）provider 元数据不再派生模型钉扎通道。
         // SAFETY: ENV_LOCK held.
         unsafe {
             std::env::remove_var("ANTHROPIC_API_KEY");
@@ -1231,7 +1127,7 @@ auth_token = {auth_token:?}
             }"#,
         );
         let state = direct_state("anthropic");
-        let (resolution, _) = compute_provider_resolution(&state, None);
+        let resolution = compute_provider_resolution(&state, None);
         match resolution {
             ProviderResolution::Direct { auth_token, .. } => {
                 assert_eq!(auth_token, "sk-anthropic-plain", "api_key 明文应优先");
@@ -1249,7 +1145,7 @@ auth_token = {auth_token:?}
             r#"{ "providers": { "deepseek": { "preset": "deepseek" } } }"#,
         );
         let state = direct_state("nonexistent");
-        let (resolution, _) = compute_provider_resolution(&state, None);
+        let resolution = compute_provider_resolution(&state, None);
         // 幽灵 / 拼错的 provider：overlay 与 router 都没有 → 兜底 Off + warn，
         // 不拒绝启动（持久化层约定的 backoff）。
         assert!(
@@ -1270,7 +1166,7 @@ auth_token = {auth_token:?}
             }"#,
         );
         let state = direct_state("openai");
-        let (resolution, _) = compute_provider_resolution(&state, None);
+        let resolution = compute_provider_resolution(&state, None);
         // 已 tombstone 的 provider 视同「找不到」→ 兜底 Off + warn。
         assert!(
             matches!(resolution, ProviderResolution::Off),
@@ -1298,7 +1194,7 @@ auth_token = {auth_token:?}
             std::env::remove_var("THIS_KEY_IS_NOT_SET_63F8");
         }
         let state = direct_state("deepseek");
-        let (resolution, _) = compute_provider_resolution(&state, None);
+        let resolution = compute_provider_resolution(&state, None);
         match &resolution {
             ProviderResolution::Error { reason } => {
                 assert!(
@@ -1331,7 +1227,7 @@ auth_token = {auth_token:?}
             }"#,
         );
         let state = direct_state("weird");
-        let (resolution, _) = compute_provider_resolution(&state, None);
+        let resolution = compute_provider_resolution(&state, None);
         match &resolution {
             ProviderResolution::Error { reason } => {
                 assert!(
@@ -1365,7 +1261,7 @@ auth_token = {auth_token:?}
             }"#,
         );
         let state = direct_state("deepseek");
-        let (resolution, _) = compute_provider_resolution(&state, None);
+        let resolution = compute_provider_resolution(&state, None);
         match &resolution {
             ProviderResolution::Error { reason } => {
                 assert!(
@@ -1403,7 +1299,7 @@ api_key_env = "ANTHROPIC_API_KEY"
 "#;
         let cfg = RouterConfig::parse(raw).expect("test router parses");
         let state = direct_state("anthropic");
-        let (resolution, _) = compute_provider_resolution(&state, Some(&cfg));
+        let resolution = compute_provider_resolution(&state, Some(&cfg));
         match resolution {
             ProviderResolution::Direct {
                 proto,
@@ -1429,7 +1325,7 @@ api_key_env = "ANTHROPIC_API_KEY"
         let _g = ENV_LOCK.lock().unwrap();
         let cfg = test_router("127.0.0.1:8787", vec!["sk-gw".to_string()]);
         let state = router_state();
-        let (resolution, model) = compute_provider_resolution(&state, Some(&cfg));
+        let resolution = compute_provider_resolution(&state, Some(&cfg));
         match resolution {
             ProviderResolution::Router { url, auth_token } => {
                 assert_eq!(url, "http://127.0.0.1:8787");
@@ -1437,14 +1333,13 @@ api_key_env = "ANTHROPIC_API_KEY"
             }
             other => panic!("expected Router, got {other:?}"),
         }
-        assert!(model.is_none());
     }
 
     #[test]
     fn router_mode_without_cfg_falls_back_to_off() {
         let _g = ENV_LOCK.lock().unwrap();
         let state = router_state();
-        let (resolution, _) = compute_provider_resolution(&state, None);
+        let resolution = compute_provider_resolution(&state, None);
         // mode=router 但没有任何可用 router → 兜底 Off，不拒绝启动（与
         // Phantom Direct provider 同理：runtime 状态与可解析配置脱节时，
         // 让 claude 走自己的配置，而不是整 bot 卡在 refusing to launch）。
@@ -1462,7 +1357,7 @@ api_key_env = "ANTHROPIC_API_KEY"
         let mut cfg = test_router("127.0.0.1:8787", vec!["sk-gw".to_string()]);
         cfg.listen = "".to_string();
         let state = router_state();
-        let (resolution, _) = compute_provider_resolution(&state, Some(&cfg));
+        let resolution = compute_provider_resolution(&state, Some(&cfg));
         match &resolution {
             ProviderResolution::Error { reason } => {
                 assert!(
@@ -1486,7 +1381,7 @@ api_key_env = "ANTHROPIC_API_KEY"
         // 产生 Error），所以这里走 empty-listen 分支拿 Error 变体。
         let state = router_state();
         let cfg = test_router("", vec!["sk-gw".to_string()]);
-        let (env, args) = resolve_spawn_overrides(&driver(), &state, Some(&cfg));
+        let (env, args) = resolve_spawn_overrides(&driver(), &state, Some(&cfg), None);
         assert!(
             env.iter().any(|(k, _)| k == "SEBAS_PROVIDER_ERROR"),
             "Error variant must inject SEBAS_PROVIDER_ERROR; got env = {env:?}"
@@ -1518,7 +1413,7 @@ api_key_env = "ANTHROPIC_API_KEY"
         let _g = ENV_LOCK.lock().unwrap();
         let cfg = test_router("127.0.0.1:8787", vec!["sk-gw".to_string()]);
         let state = router_state();
-        let (env, args) = resolve_spawn_overrides(&driver(), &state, Some(&cfg));
+        let (env, args) = resolve_spawn_overrides(&driver(), &state, Some(&cfg), None);
         assert!(
             env.iter()
                 .any(|(k, v)| k == "ANTHROPIC_BASE_URL" && v == "http://127.0.0.1:8787")
@@ -1537,7 +1432,7 @@ api_key_env = "ANTHROPIC_API_KEY"
         let _g = ENV_LOCK.lock().unwrap();
         clear_overlay_env();
         let state = off_state();
-        let (env, args) = resolve_spawn_overrides(&driver(), &state, None);
+        let (env, args) = resolve_spawn_overrides(&driver(), &state, None, None);
         assert!(env.is_empty());
         assert!(args.is_empty());
     }
@@ -1562,7 +1457,7 @@ api_key_env = "ANTHROPIC_API_KEY"
             std::env::set_var("DEEPSEEK_API_KEY", "sk-ds");
         }
         let state = direct_state("deepseek");
-        let (env, args) = resolve_spawn_overrides(&driver(), &state, None);
+        let (env, args) = resolve_spawn_overrides(&driver(), &state, None, None);
         assert!(args.is_empty(), "no default_model → no --model arg");
         assert!(env.iter().any(|(k, _)| k == "ANTHROPIC_BASE_URL"));
         assert!(env.iter().any(|(k, _)| k == "ANTHROPIC_AUTH_TOKEN"));
@@ -1619,9 +1514,9 @@ api_key_env = "ANTHROPIC_API_KEY"
             .unwrap(),
         );
         let st = sebas_dispatch::provider_state::load();
-        let (env, args) = resolve_spawn_overrides(&driver(), &st, None);
+        let (env, args) = resolve_spawn_overrides(&driver(), &st, None, None);
         assert!(matches!(
-            compute_provider_resolution(&st, None).0,
+            compute_provider_resolution(&st, None),
             ProviderResolution::Off
         ));
         assert!(env.is_empty(), "Off 不应给 driver 任何 env");
@@ -1638,8 +1533,8 @@ api_key_env = "ANTHROPIC_API_KEY"
             .unwrap(),
         );
         let st = sebas_dispatch::provider_state::load();
-        let (env, args) = resolve_spawn_overrides(&driver(), &st, None);
-        match compute_provider_resolution(&st, None).0 {
+        let (env, args) = resolve_spawn_overrides(&driver(), &st, None, None);
+        match compute_provider_resolution(&st, None) {
             ProviderResolution::Direct {
                 proto,
                 base_url,
@@ -1675,7 +1570,7 @@ api_key_env = "ANTHROPIC_API_KEY"
         );
         let st = sebas_dispatch::provider_state::load();
         let cfg = test_router("127.0.0.1:8888", vec!["sk-gw-test".to_string()]);
-        match compute_provider_resolution(&st, Some(&cfg)).0 {
+        match compute_provider_resolution(&st, Some(&cfg)) {
             ProviderResolution::Router { url, auth_token } => {
                 assert_eq!(url, "http://127.0.0.1:8888");
                 assert_eq!(auth_token, "sk-gw-test");
@@ -1698,8 +1593,8 @@ api_key_env = "ANTHROPIC_API_KEY"
             .unwrap(),
         );
         let st = sebas_dispatch::provider_state::load();
-        let (env, args) = resolve_spawn_overrides(&driver(), &st, None);
-        match compute_provider_resolution(&st, None).0 {
+        let (env, args) = resolve_spawn_overrides(&driver(), &st, None, None);
+        match compute_provider_resolution(&st, None) {
             ProviderResolution::Off => {}
             other => {
                 panic!(
@@ -1742,7 +1637,7 @@ api_key_env = "ANTHROPIC_API_KEY"
             }"#,
         );
         let state = direct_state("dual");
-        let (resolution, _) = compute_provider_resolution(&state, None);
+        let resolution = compute_provider_resolution(&state, None);
         match resolution {
             ProviderResolution::Direct {
                 proto, base_url, ..
@@ -1779,7 +1674,7 @@ api_key_env = "ANTHROPIC_API_KEY"
             }"#,
         );
         let state = direct_state("dual");
-        let (resolution, _) = compute_provider_resolution(&state, None);
+        let resolution = compute_provider_resolution(&state, None);
         match resolution {
             ProviderResolution::Direct {
                 proto, base_url, ..
@@ -1816,7 +1711,7 @@ api_key_env = "ANTHROPIC_API_KEY"
             }"#,
         );
         let state = direct_state("oai-only");
-        let (resolution, _) = compute_provider_resolution(&state, None);
+        let resolution = compute_provider_resolution(&state, None);
         match &resolution {
             ProviderResolution::Error { reason } => {
                 assert!(
@@ -1858,7 +1753,7 @@ api_key_env = "ANTHROPIC_API_KEY"
             }"#,
         );
         let state = direct_state("anth-only");
-        let (resolution, _) = compute_provider_resolution(&state, None);
+        let resolution = compute_provider_resolution(&state, None);
         match &resolution {
             ProviderResolution::Error { reason } => {
                 assert!(
@@ -1901,7 +1796,7 @@ api_key_env = "ANTHROPIC_API_KEY"
             }"#,
         );
         let state = direct_state("dual");
-        let (resolution, _) = compute_provider_resolution(&state, None);
+        let resolution = compute_provider_resolution(&state, None);
         match resolution {
             ProviderResolution::Direct {
                 proto, base_url, ..
@@ -1932,7 +1827,7 @@ base_url_anthropic = "https://api.anthropic.com"
             mode: ProviderMode::Router,
             default_selection: None,
         };
-        let (resolution, _) = compute_provider_resolution(&state, Some(&cfg));
+        let resolution = compute_provider_resolution(&state, Some(&cfg));
         match resolution {
             ProviderResolution::Router { url, auth_token } => {
                 assert_eq!(url, "http://127.0.0.1:8787");
@@ -1945,158 +1840,130 @@ base_url_anthropic = "https://api.anthropic.com"
         }
     }
 
-    // ---- acp-claude-model-env-cover: model cover env （openspec/changes/acp-claude-model-env-cover）----
+    // ---- add-claude-model-slots 2.2：slot_mapping_env ----
 
-    #[test]
-    fn model_cover_env_single_model_flattens_all_tiers() {
-        let env = model_cover_env(&[sebas_router::models::ModelEntry::text_only(
-            "deepseek-v4-pro[1m]",
-        )]);
-        let map: std::collections::HashMap<String, String> = env.into_iter().collect();
-        assert_eq!(map["ANTHROPIC_MODEL"], "deepseek-v4-pro[1m]");
-        assert_eq!(map["ANTHROPIC_DEFAULT_OPUS_MODEL"], "deepseek-v4-pro[1m]");
-        assert_eq!(map["ANTHROPIC_DEFAULT_SONNET_MODEL"], "deepseek-v4-pro[1m]");
-        assert_eq!(map["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "deepseek-v4-pro[1m]");
-        assert_eq!(map["CLAUDE_CODE_SUBAGENT_MODEL"], "deepseek-v4-pro[1m]");
-        assert_eq!(map.len(), 5);
+    fn slot_mapping(slots: &[(ModelSlot, &str)], default_slot: ModelSlot) -> ModelSlotMapping {
+        ModelSlotMapping::new(
+            slots.iter().map(|(s, m)| (*s, m.to_string())).collect(),
+            default_slot,
+        )
+        .expect("test mapping is valid")
     }
 
+    /// 全映射：ANTHROPIC_MODEL = 默认档值、四档 DEFAULT 键齐备、
+    /// SUBAGENT = 最弱启用档值。
     #[test]
-    fn model_cover_env_multi_model_maps_strong_to_weak_and_subagent() {
-        let env = model_cover_env(&[
-            sebas_router::models::ModelEntry::text_only("deepseek-v4-pro[1m]"),
-            sebas_router::models::ModelEntry::text_only("deepseek-v4-flash"),
-        ]);
-        let map: std::collections::HashMap<String, String> = env.into_iter().collect();
-        assert_eq!(map["ANTHROPIC_MODEL"], "deepseek-v4-pro[1m]");
-        assert_eq!(map["ANTHROPIC_DEFAULT_OPUS_MODEL"], "deepseek-v4-pro[1m]");
-        assert_eq!(map["ANTHROPIC_DEFAULT_SONNET_MODEL"], "deepseek-v4-flash");
-        assert_eq!(map["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "deepseek-v4-flash");
-        // 当前档位策略：SUBAGENT = 最弱档 = HAIKU 值。
-        assert_eq!(map["CLAUDE_CODE_SUBAGENT_MODEL"], "deepseek-v4-flash");
-        assert_eq!(map.len(), 5);
+    fn slot_mapping_env_full_mapping_injects_complete_set() {
+        let m = slot_mapping(
+            &[
+                (ModelSlot::Fable, "fable-x"),
+                (ModelSlot::Opus, "opus-y"),
+                (ModelSlot::Sonnet, "sonnet-z"),
+                (ModelSlot::Haiku, "haiku-w"),
+            ],
+            ModelSlot::Sonnet,
+        );
+        let map: std::collections::HashMap<String, String> =
+            slot_mapping_env(&m).into_iter().collect();
+        assert_eq!(map["ANTHROPIC_MODEL"], "sonnet-z");
+        assert_eq!(map["ANTHROPIC_DEFAULT_FABLE_MODEL"], "fable-x");
+        assert_eq!(map["ANTHROPIC_DEFAULT_OPUS_MODEL"], "opus-y");
+        assert_eq!(map["ANTHROPIC_DEFAULT_SONNET_MODEL"], "sonnet-z");
+        assert_eq!(map["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "haiku-w");
+        assert_eq!(map["CLAUDE_CODE_SUBAGENT_MODEL"], "haiku-w");
+        assert_eq!(map.len(), 6, "5 模型键 + ANTHROPIC_MODEL 之一 = 6");
     }
 
+    /// 停用档不出键；SUBAGENT = 最弱启用档（此例 sonnet，非停用的 haiku）。
     #[test]
-    fn model_cover_env_empty_yields_no_injection() {
-        let env = model_cover_env(&[]);
+    fn slot_mapping_env_disabled_slot_omits_variable() {
+        let m = slot_mapping(
+            &[
+                (ModelSlot::Fable, "fable-x"),
+                (ModelSlot::Opus, "opus-y"),
+                (ModelSlot::Sonnet, "sonnet-z"),
+            ],
+            ModelSlot::Opus,
+        );
+        let map: std::collections::HashMap<String, String> =
+            slot_mapping_env(&m).into_iter().collect();
+        assert_eq!(map["ANTHROPIC_MODEL"], "opus-y");
         assert!(
-            env.is_empty(),
-            "无 models 时不应强制覆盖，child 走自己的发现"
+            !map.contains_key("ANTHROPIC_DEFAULT_HAIKU_MODEL"),
+            "停用档不得出键：{map:?}"
         );
+        assert_eq!(map["CLAUDE_CODE_SUBAGENT_MODEL"], "sonnet-z", "最弱启用档");
     }
 
+    /// 覆盖语义：extra_env 里的值压掉 OS 继承残留（SDK .envs 合并）。
     #[test]
-    fn effective_provider_models_router_returns_none() {
+    fn slot_mapping_env_overrides_inherited_value_semantics() {
+        let m = slot_mapping(&[(ModelSlot::Opus, "glm-5.3")], ModelSlot::Opus);
+        let env = slot_mapping_env(&m);
+        let stale = ("ANTHROPIC_MODEL".to_string(), "stale".to_string());
+        assert!(env.iter().any(|(k, _)| *k == stale.0));
+        assert!(env.iter().any(|(k, v)| k == "ANTHROPIC_MODEL" && v == "glm-5.3"));
+        assert!(!env.iter().any(|(k, v)| k == "ANTHROPIC_MODEL" && v == &stale.1));
+    }
+
+    /// 无映射零模型键（任意 provider 模式一致）。
+    #[test]
+    fn resolve_spawn_overrides_no_mapping_injects_no_model_keys() {
         let _g = ENV_LOCK.lock().unwrap();
         clear_overlay_env();
-        let state = direct_state("deepseek"); // placeholder; Router mode is the real case
-        let state = ProviderRuntimeState {
-            mode: ProviderMode::Router,
-            default_selection: state.default_selection,
-        };
-        // Router 模式：模型 cover 不适用（透传是 router 的本分）。
-        assert_eq!(effective_provider_models(&state, None), None);
-    }
-
-    #[test]
-    fn effective_provider_models_bare_off_returns_none() {
-        let _g = ENV_LOCK.lock().unwrap();
-        clear_overlay_env();
-        let state = off_state();
-        assert_eq!(effective_provider_models(&state, None), None);
-    }
-
-    #[test]
-    fn effective_provider_models_direct_preset_reads_table() {
-        let _g = ENV_LOCK.lock().unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let _store = write_overlay(
-            dir.path(),
-            r#"{
-                "providers": {
-                    "deepseek": {
-                        "preset": "deepseek",
-                        "api_key_env": "DEEPSEEK_API_KEY"
-                    }
-                }
-            }"#,
-        );
-        unsafe {
-            std::env::set_var("DEEPSEEK_API_KEY", "sk-ds-test");
-        }
-        let state = direct_state("deepseek");
-        let models = effective_provider_models(&state, None);
-        unsafe {
-            std::env::remove_var("DEEPSEEK_API_KEY");
-        }
-        assert_eq!(
-            models.map(|m| m.iter().map(|e| e.id.clone()).collect::<Vec<_>>()),
-            Some(vec![
-                "deepseek-chat".to_string(),
-                "deepseek-reasoner".to_string()
-            ])
-        );
-    }
-
-    #[test]
-    fn effective_provider_models_direct_custom_reads_item_models() {
-        let _g = ENV_LOCK.lock().unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let _store = write_overlay(
-            dir.path(),
-            r#"{
-                "providers": {
-                    "weird": {
-                        "base_url_anthropic": "https://example.test/anthropic",
-                        "api_key": "sk-test",
-                        "models": ["fast", "slow"]
-                    }
-                }
-            }"#,
-        );
-        let state = direct_state("weird");
-        let models = effective_provider_models(&state, None);
-        assert_eq!(
-            models.map(|m| m.iter().map(|e| e.id.clone()).collect::<Vec<_>>()),
-            Some(vec!["fast".to_string(), "slow".to_string()])
-        );
-    }
-
-    #[test]
-    fn resolve_spawn_overrides_router_mode_injects_no_model_cover() {
-        let _g = ENV_LOCK.lock().unwrap();
-        clear_overlay_env();
+        // Off：无 env。
+        let (env, _args) = resolve_spawn_overrides(&driver(), &off_state(), None, None);
+        assert!(env.is_empty(), "裸 Off 无映射零键：{env:?}");
+        // Router：只有凭据键，无模型键。
         let cfg = test_router("127.0.0.1:8787", vec!["sk-gw".to_string()]);
-        let state = router_state();
-        let (env, _args) = resolve_spawn_overrides(&driver(), &state, Some(&cfg));
-        assert!(env.iter().any(|(k, _)| k == "ANTHROPIC_BASE_URL" && true));
+        let (env, _args) = resolve_spawn_overrides(&driver(), &router_state(), Some(&cfg), None);
+        assert!(env.iter().any(|(k, _)| k == "ANTHROPIC_BASE_URL"));
         assert!(
-            !env.iter().any(|(k, _)| k == "ANTHROPIC_MODEL"
-                || k == "ANTHROPIC_DEFAULT_OPUS_MODEL"
-                || k == "ANTHROPIC_DEFAULT_SONNET_MODEL"
-                || k == "ANTHROPIC_DEFAULT_HAIKU_MODEL"
+            !env.iter().any(|(k, _)| k.starts_with("ANTHROPIC_MODEL")
+                || k.starts_with("ANTHROPIC_DEFAULT_")
                 || k == "CLAUDE_CODE_SUBAGENT_MODEL"),
-            "Router 模式不应注入任何模型覆盖键；got env = {env:?}"
+            "无映射不得出任何模型键：{env:?}"
         );
     }
 
+    /// 映射注入与 provider 模式正交：Direct 与 Router 拿到同一组模型键
+    /// （Router 就是普通 provider）。
     #[test]
-    fn resolve_spawn_overrides_bare_off_injects_no_model_cover() {
+    fn slot_mapping_applies_identically_in_router_and_direct() {
         let _g = ENV_LOCK.lock().unwrap();
         clear_overlay_env();
-        let state = off_state();
-        let (env, _args) = resolve_spawn_overrides(&driver(), &state, None);
-        assert!(
-            env.is_empty(),
-            "裸 Off 不注入任何 env（含模型 cover）；got env = {env:?}"
+        let m = slot_mapping(&[(ModelSlot::Opus, "o"), (ModelSlot::Sonnet, "s")], ModelSlot::Sonnet);
+        // Router 模式。
+        let cfg = test_router("127.0.0.1:8787", vec!["sk-gw".to_string()]);
+        let (router_env, _) =
+            resolve_spawn_overrides(&driver(), &router_state(), Some(&cfg), Some(&m));
+        // 无 provider 的裸 Off 模式：凭据半边为空，但模型键照旧注入。
+        let (off_env, _) =
+            resolve_spawn_overrides(&driver(), &off_state(), None, Some(&m));
+        let model_keys = |env: &[(String, String)]| -> Vec<(String, String)> {
+            let mut v: Vec<(String, String)> = env
+                .iter()
+                .filter(|(k, _)| {
+                    k == "ANTHROPIC_MODEL"
+                        || k.starts_with("ANTHROPIC_DEFAULT_")
+                        || k == "CLAUDE_CODE_SUBAGENT_MODEL"
+                })
+                .cloned()
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(
+            model_keys(&router_env),
+            model_keys(&off_env),
+            "映射注入与 provider 模式正交"
         );
+        assert_eq!(model_keys(&router_env).len(), 4, "2 档 + MODEL + SUBAGENT");
     }
 
-    /// acp-claude-model-env-cover 端到端：Direct + overlay 含 preset →
-    /// spawn env 带全部 5 个模型键，且 extra_env 里的值优先（subprocess 覆盖）。
+    /// 端到端：Direct + 有映射 → 模型键 + 凭据键同现；无 `--model` argv。
     #[test]
-    fn resolve_spawn_overrides_direct_preset_injects_5_key_model_cover() {
+    fn resolve_spawn_overrides_direct_with_mapping_emits_model_env_no_argv() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let _store = write_overlay(
@@ -2104,7 +1971,7 @@ base_url_anthropic = "https://api.anthropic.com"
             r#"{
                 "providers": {
                     "deepseek": {
-                        "preset": "deepseek",
+                        "base_url_anthropic": "https://api.deepseek.com/anthropic",
                         "api_key_env": "DEEPSEEK_API_KEY",
                         "default_model": "deepseek-reasoner"
                     }
@@ -2114,56 +1981,26 @@ base_url_anthropic = "https://api.anthropic.com"
         unsafe {
             std::env::set_var("DEEPSEEK_API_KEY", "sk-ds-test");
         }
+        let m = slot_mapping(&[(ModelSlot::Sonnet, "sonnet-z")], ModelSlot::Sonnet);
         let state = direct_state("deepseek");
-        let (env, _args) = resolve_spawn_overrides(&driver(), &state, None);
+        let (env, args) = resolve_spawn_overrides(&driver(), &state, None, Some(&m));
         unsafe {
             std::env::remove_var("DEEPSEEK_API_KEY");
         }
-        // preset deepseek = ["deepseek-chat", "deepseek-reasoner"]
+        assert!(env.iter().any(|(k, v)| k == "ANTHROPIC_MODEL" && v == "sonnet-z"));
         assert!(
             env.iter()
-                .any(|(k, v)| k == "ANTHROPIC_MODEL" && v == "deepseek-chat")
+                .any(|(k, v)| k == "ANTHROPIC_DEFAULT_SONNET_MODEL" && v == "sonnet-z")
         );
         assert!(
             env.iter()
-                .any(|(k, v)| k == "ANTHROPIC_DEFAULT_OPUS_MODEL" && v == "deepseek-chat")
+                .any(|(k, v)| k == "CLAUDE_CODE_SUBAGENT_MODEL" && v == "sonnet-z")
         );
-        assert!(
-            env.iter()
-                .any(|(k, v)| k == "ANTHROPIC_DEFAULT_SONNET_MODEL" && v == "deepseek-reasoner")
-        );
-        assert!(
-            env.iter()
-                .any(|(k, v)| k == "ANTHROPIC_DEFAULT_HAIKU_MODEL" && v == "deepseek-reasoner")
-        );
-        assert!(
-            env.iter()
-                .any(|(k, v)| k == "CLAUDE_CODE_SUBAGENT_MODEL" && v == "deepseek-reasoner")
-        );
-        // 端点 env 不受影响。
+        // 凭据键仍在。
         assert!(env.iter().any(|(k, _)| k == "ANTHROPIC_BASE_URL"));
         assert!(env.iter().any(|(k, _)| k == "ANTHROPIC_AUTH_TOKEN"));
-    }
-
-    /// OS env 里有残留 `ANTHROPIC_MODEL` 时，extra_env 里值覆盖（SDK .envs 语义）。
-    #[test]
-    fn model_cover_overrides_inherited_value_semantics() {
-        let env = model_cover_env(&[sebas_router::models::ModelEntry::text_only(
-            "deepseek-v4-pro[1m]",
-        )]);
-        // 模拟 SDK `.envs(&env)` 在残留 env 之上合并：残留的 `ANTHROPIC_MODEL=stale`
-        // 必须由 extra_env 里的 `ANTHROPIC_MODEL=deepseek-v4-pro[1m]` 覆盖。这里
-        // 断言：extra_env 里至少存在一个 `ANTHROPIC_MODEL` 键且其值是推导值。
-        let stale = ("ANTHROPIC_MODEL".to_string(), "stale".to_string());
-        assert!(env.iter().any(|(k, _)| *k == stale.0));
-        assert!(
-            env.iter()
-                .any(|(k, v)| k == "ANTHROPIC_MODEL" && v == "deepseek-v4-pro[1m]")
-        );
-        assert!(
-            !env.iter()
-                .any(|(k, v)| k == "ANTHROPIC_MODEL" && v == &stale.1)
-        );
+        // provider default_model 不再派生 --model argv。
+        assert!(args.is_empty(), "不再有 --model argv：{args:?}");
     }
 
     // ---- env posture 启动检测（close-acceptance-blind-spots 盲区 2）----
@@ -2274,10 +2111,10 @@ base_url_anthropic = "https://api.anthropic.com"
             std::env::set_var("ANTHROPIC_BASE_URL", "https://corp-gw.internal");
         }
         let state = off_state();
-        let before = resolve_spawn_overrides(&driver(), &state, None);
+        let before = resolve_spawn_overrides(&driver(), &state, None, None);
         let first = inherited_provider_env_posture(&state, None);
         let second = inherited_provider_env_posture(&state, None);
-        let after = resolve_spawn_overrides(&driver(), &state, None);
+        let after = resolve_spawn_overrides(&driver(), &state, None, None);
         assert_eq!(first, second, "检测必须幂等：两次结果一致");
         assert_eq!(before, after, "检测不得改变 spawn env/args 产物");
         assert_eq!(
@@ -2304,10 +2141,11 @@ base_url_anthropic = "https://api.anthropic.com"
         }
     }
 
-    /// 接线层：全覆盖（Direct + 带 models 的 provider）时清单为空 → WARN
-    /// 分支不触发（spec 场景「全覆盖时保持安静」的接线侧判定）。
+    /// 接线层（add-claude-model-slots 2.2 后语义）：provider 凭据 env 被覆盖，
+    /// 但模型变量不再由 provider 派生——启动期 posture 无 agent 映射上下文，
+    /// 继承的模型变量如实点名（不再因 provider 有 models 而静默）。
     #[test]
-    fn posture_full_cover_wiring_yields_empty_list() {
+    fn posture_wiring_covers_credentials_but_lists_inherited_model_vars() {
         let _g = ENV_LOCK.lock().unwrap();
         // Direct 指向带 models 的 provider（预置进状态库）。
         let (_e, _store) = sebas_dispatch::test_engine::install_fresh_with(
@@ -2338,9 +2176,25 @@ base_url_anthropic = "https://api.anthropic.com"
         }
         let state = sebas_dispatch::provider_state::load();
         let listed = inherited_provider_env_posture(&state, None);
+        // 凭据键（BASE_URL / AUTH_TOKEN）被 Direct 解析覆盖，不入列；模型键
+        // 无 provider 派生来源，如实入列。
         assert!(
-            listed.is_empty(),
-            "六个被检变量全部被覆盖且 SMALL_FAST 未继承 → 必须静默；got {listed:?}"
+            !listed.contains(&"ANTHROPIC_BASE_URL".to_string()),
+            "凭据键被覆盖：{listed:?}"
+        );
+        assert!(
+            !listed.contains(&"ANTHROPIC_AUTH_TOKEN".to_string()),
+            "凭据键被覆盖：{listed:?}"
+        );
+        assert_eq!(
+            listed,
+            vec![
+                "ANTHROPIC_MODEL".to_string(),
+                "ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(),
+                "ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(),
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(),
+            ],
+            "provider models 不再覆盖模型变量，继承值如实点名"
         );
         // SAFETY: ENV_LOCK held。
         unsafe {

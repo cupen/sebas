@@ -33,7 +33,7 @@
 
 import { LitElement, css, html, nothing, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { api, type AgentKindInfo } from '../api/client.js'
+import { api, MODEL_SLOTS, type AgentKindInfo, type ModelSlot } from '../api/client.js'
 import { guardedHide } from '../components/wa-hide-guard.js'
 import {
   loadLastUsedPair,
@@ -142,6 +142,12 @@ export class SebasNewSessionDialog extends LitElement {
   @state() private sessionTitle = ''
   /** 选定的权限模式。（3.2，D5b）非空：打开即预填 'ask'（真源如此）。 */
   @state() private mode: string = 'ask'
+  /**
+   * （add-claude-model-slots 4.3）claude agent 的档位下拉选中值（`default`
+   * 或启用档名）。仅当选中 agent 是 claude 时使用；其他 agent 走
+   * provider→model 两级目录。
+   */
+  @state() private slotModel: string | null = null
 
   /**
    * 当前选中模式的中文解释（simplify-mode-menus）：绑定在 mode 下拉的
@@ -209,12 +215,18 @@ export class SebasNewSessionDialog extends LitElement {
       // （fix-webui-qa-round6 5.2）「上次使用」标注锚定**预选**（项目记住的
       // default_agent），不随操作者改选漂移。
       this.preselectedAgent = this.agent || null
-      this.applyCatalogPreselect()
+      // （4.3）claude agent → 档位下拉预选；非 claude → provider 目录预选。
+      if (this.agentIsClaude) {
+        this.applyClaudeSlotPreselect()
+      } else {
+        this.applyCatalogPreselect()
+      }
     }
     // 项目切换（rail 对不同项目的「+」复用同一对话框实例）。
     if (changed.has('defaultAgent') && this.open && this.defaultAgent) {
       this.agent = this.defaultAgent
       this.preselectedAgent = this.defaultAgent
+      if (this.agentIsClaude) this.applyClaudeSlotPreselect()
     }
     // （round3 1.2 第三轮）busy 一旦翻转（rail 异步置位/解除），「确认已发
     // 出但 busy 还没跟上」的同步双发窗口就已关闭：300ms 去重窗口归零——
@@ -240,6 +252,46 @@ export class SebasNewSessionDialog extends LitElement {
     this.model = pre.model
   }
 
+  /** （add-claude-model-slots 4.3）选中 agent 是否 claude 驱动（driver_raw）。 */
+  private get agentIsClaude(): boolean {
+    return (this.agents.find((a) => a.id === this.agent)?.driver_raw ?? '') === 'claude'
+  }
+
+  /**
+   * （4.3）claude agent 的档位列表：`default` + 启用档（映射存在时），无映射
+   * 用内置回退表 `default/fable/opus/sonnet/haiku`。
+   */
+  private slotOptions(): string[] {
+    const m = this.agents.find((a) => a.id === this.agent)?.models
+    if (!m) return ['default', 'fable', 'opus', 'sonnet', 'haiku']
+    const enabled = MODEL_SLOTS.filter((s) => (m[s] ?? '').trim() !== '')
+    return ['default', ...enabled]
+  }
+
+  /**
+   * （4.3）选中 claude agent 时的模型预选：agent 默认档（映射的 default），
+   * 无映射回退内置缺省 `default`；**跳过**「上次 (provider,model)」记忆规则。
+   */
+  private applyClaudeSlotPreselect(): void {
+    const m = this.agents.find((a) => a.id === this.agent)?.models
+    const defaultSlot: ModelSlot | undefined = m?.default
+    this.selectedProvider = null
+    this.model = null
+    this.slotModel =
+      defaultSlot && this.slotOptions().includes(defaultSlot) ? defaultSlot : 'default'
+  }
+
+  /** agent 选择变化：claude → 切档位下拉；非 claude → 回 provider 目录预选。 */
+  private onAgentChange(id: string): void {
+    this.agent = id
+    if (this.agentIsClaude) {
+      this.applyClaudeSlotPreselect()
+    } else {
+      this.slotModel = null
+      this.applyCatalogPreselect()
+    }
+  }
+
   private async loadAgents(): Promise<void> {
     try {
       const data = await api.agents()
@@ -248,6 +300,7 @@ export class SebasNewSessionDialog extends LitElement {
       if (!this.agent || !this.agents.some((a) => a.id === this.agent)) {
         this.agent = data.agents.find((a) => a.reachable)?.id ?? ''
       }
+      if (this.agentIsClaude) this.applyClaudeSlotPreselect()
     } catch {
       // catalog 不可达：下拉如实降级（禁用 + 提示），绝不伪造选项。
       this.agents = []
@@ -260,6 +313,8 @@ export class SebasNewSessionDialog extends LitElement {
     this.catalog = catalog
     this.aliases = aliases
     this.catalogUnavailable = unavailable
+    // （4.3）claude agent 的档位下拉不吃 provider 目录——目录加载不覆盖它。
+    if (this.agentIsClaude) return
     if (unavailable && aliases.length === 0) {
       this.selectedProvider = null
       this.model = null
@@ -312,9 +367,14 @@ export class SebasNewSessionDialog extends LitElement {
     // 动作——会话内模型 chip 的切换不经过这里，绝不写 last-used 记忆。
     // 目录不可得（未选模型）时无对可记，跳过。（3.2）选中的是别名短名时
     // 同样跳过——(provider, alias) 不是目录对，写进去会被预选判定淘汰。
-    if (this.selectedProvider && this.model && !this.selectionIsAlias(this.model)) {
+    // （4.3）claude agent 走档位下拉，其值不是 (provider,model) 对——跳过。
+    if (!this.agentIsClaude && this.selectedProvider && this.model && !this.selectionIsAlias(this.model)) {
       saveLastUsedPair({ provider: this.selectedProvider, model: this.model })
     }
+    // （4.3）claude agent 的确认模型 = 档位下拉值（`default` 或启用档名），
+    // 经既有 SetModel 链路应用（选 default 走 ANTHROPIC_MODEL，选档走
+    // 对应 ANTHROPIC_DEFAULT_*）。
+    const chosenModel = this.agentIsClaude ? this.slotModel : this.model
     // （fix-webui-qa-round14 4.7 / GUI 复验 D-14-1）标题以确认时刻的输入框
     // 实时值为准：`@input` 绑定依赖 composed input 事件穿出 wa-input 影子根
     // ——Chromium 里成立，WebKit（Safari/IAB）不穿透，`sessionTitle` 状态
@@ -325,7 +385,7 @@ export class SebasNewSessionDialog extends LitElement {
     const typedTitle = (titleInput?.value ?? this.sessionTitle ?? '').trim()
     this.dispatchEvent(
       new CustomEvent<NewSessionDialogConfirm>('dialog-confirm', {
-        detail: { agent: this.agent, model: this.model, mode: this.mode, title: typedTitle },
+        detail: { agent: this.agent, model: chosenModel, mode: this.mode, title: typedTitle },
         bubbles: true,
         composed: true,
       }),
@@ -399,7 +459,7 @@ export class SebasNewSessionDialog extends LitElement {
             ?disabled=${this.agents.length === 0}
             hoist
             @change=${(e: Event) => {
-              this.agent = (e.target as HTMLSelectElement).value || ''
+              this.onAgentChange((e.target as HTMLSelectElement).value || '')
             }}
           >
             ${this.agents.length === 0
@@ -416,63 +476,81 @@ export class SebasNewSessionDialog extends LitElement {
             )}
           </wa-select>
 
-          <!-- 两级模型选择（可选）：目录空/不可得且无别名时显式引导到
-               Settings → Models，绝不渲染空列表。（fix-webui-qa-round14 3.2，
-               D-4-1）模型下拉并入别名短名（来源徽标 + 同名别名优先）；目录
-               模型为空但别名在场时，仍渲染仅含别名的模型下拉（别名短名本身
-               是可用的模型取值），不再落入「尚未配置」引导。 -->
-          ${this.catalogUnavailable && this.aliases.length === 0
-            ? html`<p class="hint" data-testid="dialog-catalog-unavailable" role="status">
-                尚未配置 provider 模型——仍可创建会话，将使用 agent
-                内置的默认模型；需要指定模型时到「设置 → 模型」添加
-                provider。
-              </p>`
-            : html`
-                ${this.catalogProviders.length > 0
-                  ? html`
-                      <wa-select
-                        label="Provider"
-                        aria-label="Provider"
-                        data-testid="dialog-provider-select"
-                        value=${this.selectedProvider ?? ''}
-                        hoist
-                        @change=${(e: Event) => {
-                          const v = (e.target as HTMLSelectElement).value
-                          this.selectedProvider = v
-                          const models = this.modelsFor(v)
-                          this.model = models[0] ?? null
-                        }}
-                      >
-                        ${this.catalogProviders.map(
-                          (p) => html`<wa-option value=${p}>${p}</wa-option>`,
-                        )}
-                      </wa-select>
-                    `
-                  : nothing}
+          <!-- 模型选择（可选）。（add-claude-model-slots 4.3）claude agent →
+               单层档位下拉（default + 启用档，无映射用内置表；预选 agent
+               默认档，跳过 last-used 记忆）；非 claude agent → 既有两级
+               provider→model 目录（目录空/不可得且无别名时显式引导到
+               Settings → Models，绝不渲染空列表；（fix-webui-qa-round14
+               3.2，D-4-1）模型下拉并入别名短名，来源徽标 + 同名别名优先）。 -->
+          ${this.agentIsClaude
+            ? html`
                 <wa-select
-                  label="模型"
-                  aria-label="模型"
-                  data-testid="dialog-model-select"
-                  value=${this.model ?? ''}
-                  ?disabled=${this.modelOptions().length === 0}
+                  label="模型档位"
+                  aria-label="模型档位"
+                  data-testid="dialog-slot-select"
+                  value=${this.slotModel ?? 'default'}
                   hoist
                   @change=${(e: Event) => {
-                    this.model = (e.target as HTMLSelectElement).value || null
+                    this.slotModel = (e.target as HTMLSelectElement).value || 'default'
                   }}
                 >
-                  ${this.modelOptions().map((entry) =>
-                    entry.alias
-                      ? html`<wa-option
-                          value=${entry.value}
-                          title=${aliasEntryTitle(
-                            this.aliases.find((a) => a.alias === entry.value)!,
-                          )}
-                          >${ALIAS_GROUP_LABEL} · ${entry.value}</wa-option
-                        >`
-                      : html`<wa-option value=${entry.value}>${entry.value}</wa-option>`,
+                  ${this.slotOptions().map(
+                    (s) => html`<wa-option value=${s}>${s}</wa-option>`,
                   )}
                 </wa-select>
-              `}
+              `
+            : this.catalogUnavailable && this.aliases.length === 0
+              ? html`<p class="hint" data-testid="dialog-catalog-unavailable" role="status">
+                  尚未配置 provider 模型——仍可创建会话，将使用 agent
+                  内置的默认模型；需要指定模型时到「设置 → 模型」添加
+                  provider。
+                </p>`
+              : html`
+                  ${this.catalogProviders.length > 0
+                    ? html`
+                        <wa-select
+                          label="Provider"
+                          aria-label="Provider"
+                          data-testid="dialog-provider-select"
+                          value=${this.selectedProvider ?? ''}
+                          hoist
+                          @change=${(e: Event) => {
+                            const v = (e.target as HTMLSelectElement).value
+                            this.selectedProvider = v
+                            const models = this.modelsFor(v)
+                            this.model = models[0] ?? null
+                          }}
+                        >
+                          ${this.catalogProviders.map(
+                            (p) => html`<wa-option value=${p}>${p}</wa-option>`,
+                          )}
+                        </wa-select>
+                      `
+                    : nothing}
+                  <wa-select
+                    label="模型"
+                    aria-label="模型"
+                    data-testid="dialog-model-select"
+                    value=${this.model ?? ''}
+                    ?disabled=${this.modelOptions().length === 0}
+                    hoist
+                    @change=${(e: Event) => {
+                      this.model = (e.target as HTMLSelectElement).value || null
+                    }}
+                  >
+                    ${this.modelOptions().map((entry) =>
+                      entry.alias
+                        ? html`<wa-option
+                            value=${entry.value}
+                            title=${aliasEntryTitle(
+                              this.aliases.find((a) => a.alias === entry.value)!,
+                            )}
+                            >${ALIAS_GROUP_LABEL} · ${entry.value}</wa-option
+                          >`
+                        : html`<wa-option value=${entry.value}>${entry.value}</wa-option>`,
+                    )}
+                  </wa-select>
+                `}
 
           <!-- 权限 mode（3.2，D5b）：预填 Ask，wire 无条件发送——四个控制面
                词都是一等值。（4.1）选项词汇来自共享 MODE_OPTIONS，与 composer

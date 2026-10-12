@@ -5166,7 +5166,8 @@ async fn slash_commands_advertise_and_reach_stub() {
 }
 
 /// （workbench-composer-input-polish 2.2/2.3）claude 会话的模型面与切换链路：
-/// 内置别名表随快照可达（available_models 含 default/opus/sonnet/haiku），
+/// 内置回退表随快照可达（available_models 含 default/fable/opus/sonnet/haiku
+/// ——add-claude-model-slots D3 起内置表升级含 fable），
 /// current 从 spawn 缺省被帧观察覆盖为 fake 的真实模型；POST /model 把控制
 /// 请求送达 stub（journal 记 model_change），快照乐观跟随，后续回合帧确认
 /// 不回跳。全程零真模型调用。
@@ -5215,7 +5216,7 @@ async fn claude_model_surface_reaches_snapshot_and_switch_round_trips() {
                         .ok()?;
                     let done = v["status_slug"].as_str() == Some("done");
                     let models = v["available_models"].as_array()?;
-                    let aliased = ["default", "opus", "sonnet", "haiku"]
+                    let aliased = ["default", "fable", "opus", "sonnet", "haiku"]
                         .iter()
                         .all(|a| models.iter().any(|m| m.as_str() == Some(*a)));
                     let observed = v["current_model"].as_str() == Some("fake");
@@ -5306,12 +5307,240 @@ async fn claude_model_surface_reaches_snapshot_and_switch_round_trips() {
         after["current_model"], "opus",
         "confirmed switch must survive the confirming frames: {after}"
     );
+    // 无映射的 claude agent（沙箱 config 未配 models）→ 内置回退表恰好五项
+    // （add-claude-model-slots D3 起含 fable）。
+    let mut models: Vec<String> = after["available_models"]
+        .as_array()
+        .expect("model list survives")
+        .iter()
+        .map(|m| m.as_str().expect("model id string").to_string())
+        .collect();
+    models.sort();
     assert_eq!(
-        after["available_models"]
+        models,
+        vec!["default", "fable", "haiku", "opus", "sonnet"],
+        "an unmapped claude session exposes exactly the built-in fallback table: {after}"
+    );
+}
+
+/// （add-claude-model-slots 5.1）档位映射旅程：config `[acp.agents.claude.models]`
+/// 配好映射（opus/sonnet 启用、sonnet 默认）→ 会话模型菜单恰为 `default` +
+/// 启用档（强弱序）→ 切到启用档生效（控制请求送达 stub，journal 记 model_change）；
+/// 同沙箱里未配映射的 claude 会话菜单为内置五项。全程零真模型调用。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn claude_slot_mapping_drives_session_menu_and_switch() {
+    let sb = Sandbox::new("testsuite_e2e", "claude-slot-mapping");
+    // 映射会话的 config 种子：opus/sonnet 启用、sonnet 默认。
+    sb.set_agent_claude_models(&[("opus", "opus-x"), ("sonnet", "sonnet-y")], "sonnet");
+    // 未配映射的对照 claude agent（同 fake 桩路径，无 models 键）。
+    {
+        let toml = std::fs::read_to_string(&sb.config_path).expect("read config");
+        let plain = format!(
+            "\n[acp.agents.claude-plain]\ndriver = \"claude\"\npath = \"{}\"\nsessions_dir = \"{}\"\nwork_dir = \"{}\"\n",
+            forward_slash(Path::new(env!("CARGO_BIN_EXE_fake-claude"))),
+            forward_slash(&sb.path.join("claude-sessions")),
+            forward_slash(&sb.path.join("work")),
+        );
+        std::fs::write(&sb.config_path, toml + &plain).expect("write config");
+    }
+    let journal = sb.journal_fake_agent();
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    // 1) 映射会话：菜单恰为 default + 启用档（强弱序），current 被帧观察覆盖。
+    let project_id = scene_project_id(&cli, &sb).await;
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "hello", "agent": "claude" }),
+    )
+    .await
+    .expect("create mapped session");
+    assert_eq!(status, 201, "create mapped session: {body}");
+    let key = body["key"].as_str().expect("key").to_string();
+    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+    let detail = wait_for(
+        "the mapped session menu to reach the snapshot (default + enabled slots)",
+        Duration::from_secs(25),
+        &sb.path.clone(),
+        {
+            let cli = cli.clone();
+            let url = detail_url.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    let done = v["status_slug"].as_str() == Some("done");
+                    let models: Vec<String> = v["available_models"]
+                        .as_array()?
+                        .iter()
+                        .map(|m| m.as_str().unwrap_or_default().to_string())
+                        .collect();
+                    let mapped = models == vec!["default", "opus", "sonnet"];
+                    (done && mapped).then_some(v)
+                })
+            }
+        },
+    )
+    .await;
+    assert_eq!(
+        detail["available_models"],
+        serde_json::json!(["default", "opus", "sonnet"]),
+        "a mapped claude session exposes exactly `default` + enabled slots (strength order): {detail}"
+    );
+    // 停用档（fable/haiku）不得出现。
+    assert!(
+        !detail["available_models"]
             .as_array()
-            .expect("model list survives")
-            .len(),
-        4
+            .unwrap()
+            .iter()
+            .any(|m| m.as_str() == Some("fable") || m.as_str() == Some("haiku")),
+        "disabled slots must not be offered: {detail}"
+    );
+    // 映射派生的模型 env 真到达子进程（journal meta_env）——config 种子行
+    // （id = "claude"）的映射经 spawn 装配点注入。
+    {
+        let content = std::fs::read_to_string(&journal).expect("journal");
+        let line = content
+            .lines()
+            .find(|l| l.contains("\"dir\":\"meta_env\""))
+            .expect("a meta_env line must be journaled at child startup");
+        let meta: serde_json::Value = serde_json::from_str(line).expect("meta_env parses");
+        let env = &meta["msg"]["env"];
+        assert_eq!(
+            env["ANTHROPIC_MODEL"].as_str(),
+            Some("sonnet-y"),
+            "config-seeded mapping drives ANTHROPIC_MODEL: {meta}"
+        );
+        assert_eq!(env["ANTHROPIC_DEFAULT_OPUS_MODEL"].as_str(), Some("opus-x"));
+        assert_eq!(env["ANTHROPIC_DEFAULT_SONNET_MODEL"].as_str(), Some("sonnet-y"));
+        assert_eq!(
+            env["CLAUDE_CODE_SUBAGENT_MODEL"].as_str(),
+            Some("sonnet-y"),
+            "weakest enabled slot (sonnet) → SUBAGENT"
+        );
+        assert!(
+            env["ANTHROPIC_DEFAULT_HAIKU_MODEL"].is_null(),
+            "disabled slot must not be injected: {meta}"
+        );
+    }
+
+    // 2) 切档生效：POST /model 投递（200）→ 控制请求送达 stub（journal
+    //    model_change）→ 快照乐观跟随。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions/{key}/model", sb.webui_url()),
+        serde_json::json!({ "model_id": "opus" }),
+    )
+    .await
+    .expect("switch to an enabled slot");
+    assert_eq!(status, 200, "slot switch must be delivered: {body}");
+    wait_for(
+        "the set_model control request to reach the stub (journal model_change)",
+        Duration::from_secs(15),
+        &sb.path.clone(),
+        {
+            let journal = journal.clone();
+            move || {
+                let journal = journal.clone();
+                Box::pin(async move {
+                    let Ok(content) = std::fs::read_to_string(&journal) else {
+                        return None;
+                    };
+                    content
+                        .lines()
+                        .any(|l| l.contains("model_change") && l.contains("\"model\":\"opus\""))
+                        .then_some(())
+                })
+            }
+        },
+    )
+    .await;
+    let switched = wait_for(
+        "the snapshot to follow the optimistic slot switch",
+        Duration::from_secs(15),
+        &sb.path.clone(),
+        {
+            let cli = cli.clone();
+            let url = detail_url.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    (v["current_model"].as_str() == Some("opus")).then_some(v)
+                })
+            }
+        },
+    )
+    .await;
+    assert_eq!(switched["current_model"], "opus", "{switched}");
+
+    // 3) 未配映射的 claude agent：菜单为内置回退表五项。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "project_id": project_id, "prompt": "hello", "agent": "claude-plain" }),
+    )
+    .await
+    .expect("create unmapped session");
+    assert_eq!(status, 201, "create unmapped session: {body}");
+    let plain_key = body["key"].as_str().expect("key").to_string();
+    let plain_url = format!("{}/api/sessions/{plain_key}", sb.webui_url());
+    let plain = wait_for(
+        "the unmapped claude session to expose the built-in fallback table",
+        Duration::from_secs(25),
+        &sb.path.clone(),
+        {
+            let cli = cli.clone();
+            let url = plain_url.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    let done = v["status_slug"].as_str() == Some("done");
+                    let models: Vec<String> = v["available_models"]
+                        .as_array()?
+                        .iter()
+                        .map(|m| m.as_str().unwrap_or_default().to_string())
+                        .collect();
+                    let builtin = models == vec!["default", "fable", "opus", "sonnet", "haiku"];
+                    (done && builtin).then_some(v)
+                })
+            }
+        },
+    )
+    .await;
+    assert_eq!(
+        plain["available_models"],
+        serde_json::json!(["default", "fable", "opus", "sonnet", "haiku"]),
+        "an unmapped claude agent exposes the built-in fallback table: {plain}"
     );
 }
 

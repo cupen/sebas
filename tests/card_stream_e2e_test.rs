@@ -60,7 +60,9 @@ async fn fake_claude_stream_merges_five_chunks_then_done() {
         &k,
         &prompt,
         "claude",
+        "claude", // driver tag
         vec![fake().to_str().unwrap().to_string()],
+        None,
         None,
         None,
         None,

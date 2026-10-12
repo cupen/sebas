@@ -317,6 +317,16 @@ addr=127.0.0.1:<port>`，router 侧用自定义 provider（`[provider.fake]` 哑
    sessions_dir = "<SB>/claude-sessions"
    work_dir = "<SB>/work"
    # args = ["--scenario", "thinking"]            # 键值形式示例
+   # add-claude-model-slots：claude 模型档位映射（可选；旧裸数组
+   # `models = ["opus","sonnet"]` 形态解析期报错并点名 models 键）。四档
+   # fable/opus/sonnet/haiku 从模型目录（provider 模型 + router 别名同权）
+   # 各选一个 id，default 点名默认档；spawn 时注入 ANTHROPIC_MODEL +
+   # 各启用档 ANTHROPIC_DEFAULT_*_MODEL + CLAUDE_CODE_SUBAGENT_MODEL（最弱
+   # 启用档）。也可在 Settings → Agents 齿轮表单配置。
+   # [acp.agents.claude.models]
+   # opus = "deepseek-v4-pro"
+   # sonnet = "deepseek-v4-flash"
+   # default = "sonnet"
 
    # add-agent-settings-and-session-titles：`[acp.agents.*]` 只是**种子源**——
    # core 启动时把条目幂等导入状态库 agents 表（同 id 已存在则 Settings 管理的

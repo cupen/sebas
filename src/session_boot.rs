@@ -71,37 +71,55 @@ pub(crate) fn abort_if_provider_error(extra_env: &[(String, String)]) {
 /// Compute (extra_env, full command) from provider state + router config.
 /// Centralizes the spawn-time translation.
 ///
+/// 分派按 **driver tag**（add-claude-model-slots review 修复：按 agent id
+/// 分派会让任何 id ≠ `claude` 的 claude-driver agent 拿不到模型 env——
+/// 调用方把 `agent.driver_tag()` 传进来）：
+///
 /// - `claude`：走 [`resolve_spawn_overrides`]（`ANTHROPIC_BASE_URL` /
-///   `ANTHROPIC_AUTH_TOKEN` + 模型 cover env + `--model` argv）。
+///   `ANTHROPIC_AUTH_TOKEN` 凭据半边 + 由 `mapping` 档位映射派生的模型 env）。
 /// - `pi`（make-pi-the-builtin-agent 2.1）：复用同一 provider 解析，翻成 pi
 ///   认识的标准 env 对（`ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL` 或
 ///   `OPENAI_API_KEY`/`OPENAI_BASE_URL`）；无 argv 追加。
 /// - 其它 ACP agent：自管 provider，command 原样（env 空）。
 ///
+/// `mapping`（add-claude-model-slots 2.2）是 spawn 所用 claude agent 的档位
+/// 映射（装配点从解析出的 agent 定义传入）；`None` = 无映射，模型 env 零键。
+///
 /// Before returning, runs [`abort_if_provider_error`] — if `extra_env`
 /// carries the in-band error signal, the process exits here and never
 /// returns. The spawn call site therefore doesn't need to re-check.
 fn spawn_overrides(
-    kind: &str,
+    driver: &str,
     command: Vec<String>,
     router_cfg: Option<&RouterConfig>,
+    mapping: Option<&sebas_models::agent::ModelSlotMapping>,
 ) -> (Vec<(String, String)>, Vec<String>) {
-    if kind == "pi" {
+    if driver == "pi" {
         // （2.1）pi 凭据注入：标准 env 对（spawn 期语义——启动后凭据变更不
         // 影响在跑会话）。与 claude 的键名区分（见 spawn_env 文档）。
         let (env, _diagnostics) = crate::spawn_env::resolve_pi_spawn_env(router_cfg);
         return (env, command);
     }
-    if kind != "claude" {
+    if driver != "claude" {
         return (Vec::new(), command);
     }
     let state = sebas_dispatch::provider_state::load();
     let driver = ClaudeCodeDriver;
-    let (extra_env, extra_args) = resolve_spawn_overrides(&driver, &state, router_cfg);
+    let (extra_env, extra_args) = resolve_spawn_overrides(&driver, &state, router_cfg, mapping);
     abort_if_provider_error(&extra_env);
     let mut full = command;
     full.extend(extra_args);
     (extra_env, full)
+}
+
+/// 从解析出的 launch 定义取 claude 档位映射（非 claude / 无映射 → `None`）。
+pub fn agent_model_mapping(
+    agent: &crate::config::AgentConfig,
+) -> Option<sebas_models::agent::ModelSlotMapping> {
+    match agent {
+        crate::config::AgentConfig::Claude(c) => c.models.clone(),
+        _ => None,
+    }
 }
 
 /// Create the ACP session, send the initial prompt, and flip the router's
@@ -131,10 +149,12 @@ pub async fn acp_spawn_and_activate(
     key: &ChannelKey,
     prompt: &str,
     kind: &str,
+    driver: &str,
     command: Vec<String>,
     work_dir: Option<String>,
     router_cfg: Option<&RouterConfig>,
     model: Option<String>,
+    mapping: Option<&sebas_models::agent::ModelSlotMapping>,
 ) -> anyhow::Result<(
     String,
     Vec<String>,
@@ -143,7 +163,7 @@ pub async fn acp_spawn_and_activate(
     >,
     Option<sebas_acp::AcpModelInfo>,
 )> {
-    let (extra_env, full_command) = spawn_overrides(kind, command, router_cfg);
+    let (extra_env, full_command) = spawn_overrides(driver, command, router_cfg, mapping);
     let session_id = mgr
         .create_session(kind, full_command, work_dir, extra_env, prompt.to_string())
         .await?;
@@ -219,10 +239,12 @@ pub async fn acp_resume_and_activate(
     old_session_id: &str,
     prompt: &str,
     kind: &str,
+    driver: &str,
     command: Vec<String>,
     work_dir: Option<String>,
     router_cfg: Option<&RouterConfig>,
     model: Option<String>,
+    mapping: Option<&sebas_models::agent::ModelSlotMapping>,
 ) -> anyhow::Result<(
     String,
     Vec<String>,
@@ -231,7 +253,7 @@ pub async fn acp_resume_and_activate(
     >,
     bool,
 )> {
-    let (extra_env, full_command) = spawn_overrides(kind, command, router_cfg);
+    let (extra_env, full_command) = spawn_overrides(driver, command, router_cfg, mapping);
     // Resume by the agent's real ACP session id when the persisted mapping
     // for `key` has one (native-ACP agents like opencode address a
     // conversation by their OWN id, not sebas's routing uuid); `None` keeps
@@ -534,7 +556,7 @@ mod tests {
     /// `SEBAS_PROVIDER_ERROR` abort 信号，command 原样（无 argv 追加）。
     #[test]
     fn pi_kind_injects_standard_env_without_args() {
-        let (env, command) = spawn_overrides("pi", vec!["pi".to_string()], None);
+        let (env, command) = spawn_overrides("pi", vec!["pi".to_string()], None, None);
         // 无 provider 配置（测试环境 state store 不可用）→ 空 env，pi 用自身配置。
         assert!(
             !env.iter().any(|(k, _)| k == SEBAS_PROVIDER_ERROR_ENV),
@@ -544,11 +566,41 @@ mod tests {
     }
 
     /// （2.1）非 claude/pi 的 ACP agent：command 原样、env 空（自管 provider）。
+    /// （add-claude-model-slots review 修复后）首参是 **driver tag**——
+    /// opencode 表单预设的 driver 是 `acp`。
     #[test]
     fn other_acp_kind_gets_untouched_command() {
         let (env, command) =
-            spawn_overrides("opencode", vec!["opencode".into(), "acp".into()], None);
+            spawn_overrides("acp", vec!["opencode".into(), "acp".into()], None, None);
         assert!(env.is_empty());
         assert_eq!(command, vec!["opencode".to_string(), "acp".to_string()]);
+    }
+
+    /// add-claude-model-slots（review 修复的回归锚）：`spawn_overrides` 按
+    /// **driver tag** 分派，与 agent id 无关——id ≠ `claude` 的 claude-driver
+    /// agent（Settings 建的 store 行、config `[acp.agents.<other>]`）同样拿到
+    /// 档位映射 env。`dispatch.rs` 装配点负责传 `agent.driver_tag()`；本用例
+    /// 在函数契约层钉死「claude driver + 映射 ⇒ env 在场」，防止分派退回按
+    /// id 匹配。
+    #[test]
+    fn claude_driver_agent_with_other_id_gets_slot_mapping_env() {
+        use sebas_models::agent::{ModelSlot, ModelSlotMapping};
+        let mapping = ModelSlotMapping::new(
+            [(ModelSlot::Opus, "o".to_string())].into_iter().collect(),
+            ModelSlot::Opus,
+        )
+        .expect("valid mapping");
+        // 契约：driver = claude 的 agent（无论其 id 是不是 "claude"）都应拿到
+        // 模型 env——分派只认 driver tag。
+        let (env, _command) = spawn_overrides(
+            "claude", // driver tag；id 是 "my-claude" 也归这里（dispatch.rs 传 driver_tag）
+            vec!["claude".to_string()],
+            None,
+            Some(&mapping),
+        );
+        assert!(
+            env.iter().any(|(k, _)| k == "ANTHROPIC_MODEL"),
+            "a claude-driver agent must receive the slot-mapping env regardless of its id: {env:?}"
+        );
     }
 }

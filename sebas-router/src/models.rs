@@ -305,58 +305,6 @@ impl Serialize for ModelEntry {
     }
 }
 
-/// Claude Code 消费的 4 个 MODEL 环境变量的取值。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ClaudeModelEnv {
-    pub model: Option<String>,
-    pub opus: Option<String>,
-    pub sonnet: Option<String>,
-    pub haiku: Option<String>,
-}
-
-impl ClaudeModelEnv {
-    pub fn to_env_map(&self) -> Vec<(&'static str, String)> {
-        let mut v = Vec::new();
-        if let Some(m) = &self.model {
-            v.push(("ANTHROPIC_MODEL", m.clone()));
-        }
-        if let Some(o) = &self.opus {
-            v.push(("ANTHROPIC_DEFAULT_OPUS_MODEL", o.clone()));
-        }
-        if let Some(s) = &self.sonnet {
-            v.push(("ANTHROPIC_DEFAULT_SONNET_MODEL", s.clone()));
-        }
-        if let Some(h) = &self.haiku {
-            v.push(("ANTHROPIC_DEFAULT_HAIKU_MODEL", h.clone()));
-        }
-        v
-    }
-}
-
-/// 按强->弱把 provider 的模型条目映射到 4 个 MODEL 变量（env 映射按条目
-/// **id** 解析，task 1.3——能力标记不影响 env 赋值）。返回全 `None` 表示
-/// provider 没配 `models`（调用方跳过 env 注入）。
-pub fn map_to_env(models: &[ModelEntry]) -> ClaudeModelEnv {
-    match models {
-        [] => ClaudeModelEnv::default(),
-        [m] => ClaudeModelEnv {
-            model: Some(m.id.clone()),
-            opus: Some(m.id.clone()),
-            sonnet: Some(m.id.clone()),
-            haiku: Some(m.id.clone()),
-        },
-        [first, second, ..] => {
-            let last = models.last().expect("non-empty slice has last").clone();
-            ClaudeModelEnv {
-                model: Some(first.id.clone()),
-                opus: Some(first.id.clone()),
-                sonnet: Some(second.id.clone()),
-                haiku: Some(last.id),
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,63 +346,10 @@ mod tests {
         assert_eq!(caps.max_output_tokens, Some(64_000));
     }
 
-    #[test]
-    fn single_model_sets_all_vars() {
-        let env = map_to_env(&[ModelEntry::text_only("deepseek-v4-flash")]);
-        assert_eq!(env.model.as_deref(), Some("deepseek-v4-flash"));
-        assert_eq!(env.opus.as_deref(), Some("deepseek-v4-flash"));
-        assert_eq!(env.sonnet.as_deref(), Some("deepseek-v4-flash"));
-        assert_eq!(env.haiku.as_deref(), Some("deepseek-v4-flash"));
-    }
-
-    #[test]
-    fn multi_model_maps_strong_to_weak() {
-        let env = map_to_env(&[
-            ModelEntry::text_only("deepseek-v4-pro[1m]"),
-            ModelEntry::text_only("deepseek-v4-pro"),
-            ModelEntry::text_only("deepseek-v4-flash"),
-        ]);
-        assert_eq!(env.model.as_deref(), Some("deepseek-v4-pro[1m]"));
-        assert_eq!(env.opus.as_deref(), Some("deepseek-v4-pro[1m]"));
-        assert_eq!(env.sonnet.as_deref(), Some("deepseek-v4-pro"));
-        assert_eq!(env.haiku.as_deref(), Some("deepseek-v4-flash"));
-    }
-
-    #[test]
-    fn capability_tags_do_not_affect_env_mapping() {
-        // task 1.3：env 映射按条目 id 解析——标记是纯元数据。
-        let tagged = ModelEntry {
-            id: "vision-pro".into(),
-            tags: vec![ModelCapability::Video, ModelCapability::Vision],
-        };
-        let plain = ModelEntry::text_only("vision-pro");
-        assert_eq!(map_to_env(&[tagged]), map_to_env(&[plain]));
-    }
-
-    #[test]
-    fn two_models_second_is_sonnet_weakest_is_haiku() {
-        let env = map_to_env(&[ModelEntry::text_only("a"), ModelEntry::text_only("b")]);
-        assert_eq!(env.opus.as_deref(), Some("a"));
-        assert_eq!(env.sonnet.as_deref(), Some("b"));
-        assert_eq!(env.haiku.as_deref(), Some("b"));
-    }
-
-    #[test]
-    fn empty_models_yields_none() {
-        let env = map_to_env(&[]);
-        assert_eq!(env, ClaudeModelEnv::default());
-        assert!(env.to_env_map().is_empty());
-    }
-
-    #[test]
-    fn env_map_uses_expected_names() {
-        let env = map_to_env(&[ModelEntry::text_only("m")]);
-        let vars = env.to_env_map();
-        assert!(vars.contains(&("ANTHROPIC_MODEL", "m".to_string())));
-        assert!(vars.contains(&("ANTHROPIC_DEFAULT_OPUS_MODEL", "m".to_string())));
-        assert!(vars.contains(&("ANTHROPIC_DEFAULT_SONNET_MODEL", "m".to_string())));
-        assert!(vars.contains(&("ANTHROPIC_DEFAULT_HAIKU_MODEL", "m".to_string())));
-    }
+    // （add-claude-model-slots 2.1）provider 强→弱自动排位（`map_to_env` /
+    // `ClaudeModelEnv`）已整体退役——spawn 模型 env 的唯一来源改为 claude
+    // agent 的档位映射（见 `sebas::spawn_env::slot_mapping_env`），故此处
+    // 相关映射测试一并移除。
 
     // -------------------- ModelEntry 形状与兼容（task 1.1 / 1.4）--------------------
 

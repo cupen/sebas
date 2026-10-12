@@ -79,6 +79,7 @@ const apiMocks = vi.hoisted(() => ({
   about: vi.fn(),
   env: vi.fn(),
   providers: vi.fn(),
+  providerDefaults: vi.fn(),
   providerPresets: vi.fn(),
   providerCreate: vi.fn(),
   providerUpdate: vi.fn(),
@@ -134,6 +135,7 @@ vi.mock('../api/client.js', () => ({
     about: apiMocks.about,
     env: apiMocks.env,
     providers: apiMocks.providers,
+    providerDefaults: apiMocks.providerDefaults,
     providerPresets: apiMocks.providerPresets,
     providerCreate: apiMocks.providerCreate,
     providerUpdate: apiMocks.providerUpdate,
@@ -166,6 +168,8 @@ vi.mock('../api/client.js', () => ({
   },
   // 角色词表（渲染层常量，Users 分区的角色下拉数据源）与真模块同值。
   ROLES: ['root', 'admin', 'member', 'viewer'] as const,
+  // （add-claude-model-slots）档位词表（渲染层常量，模型档位段数据源）。
+  MODEL_SLOTS: ['fable', 'opus', 'sonnet', 'haiku'] as const,
   // 呈现用错误文本（webui-i18n-sweep 1.4）：与真实现同语义（Error → message）。
   errorText: (err: unknown) => (err instanceof Error ? err.message : String(err)),
 }))
@@ -272,6 +276,7 @@ beforeEach(() => {
       },
     ],
   })
+  apiMocks.providerDefaults.mockResolvedValue({ default_provider: null, default_model: null })
   apiMocks.adminServices.mockResolvedValue({ adapter_ok: true, services: [] })
   apiMocks.adminEvents.mockResolvedValue({ adapter_ok: true, events: [] })
   apiMocks.adminServicesSafe.mockResolvedValue({ adapter_ok: true, services: [] })
@@ -1343,6 +1348,8 @@ describe('add-agent-settings-and-session-titles：Agents 分区（/api/agents*�
       args: null,
       work_dir: null,
       sessions_dir: null,
+      // （add-claude-model-slots 4.2）档位段全空 = 无映射（null）。
+      models: null,
     })
     el.remove()
   })
@@ -1375,6 +1382,7 @@ describe('add-agent-settings-and-session-titles：Agents 分区（/api/agents*�
       args: null,
       work_dir: null,
       sessions_dir: null,
+      models: null,
     })
     el.remove()
   })
@@ -1572,7 +1580,207 @@ describe('add-agent-settings-and-session-titles：Agents 分区（/api/agents*�
       // （表单显示且可编辑的字段必须随保存上 wire，不再静默丢弃）。
       sessions_dir: 'D:/sb/sessions',
       args: ['--scenario', 'drip'],
+      // （add-claude-model-slots 4.2）claude 行还携带档位映射改动面（未配置
+      // = null）。
+      models: null,
     })
+    el.remove()
+  })
+
+  // ── add-claude-model-slots 4.2：claude 形态的模型档位映射段 ──
+
+  it('claude shape renders the slot section; opencode shape does not (4.2)', async () => {
+    const el = await mount()
+    await goto(el, "agents")
+    waButtons(el)
+      .find((b) => b.textContent?.includes('新建 agent'))!
+      .click()
+    await settle(el)
+    // 缺省 claude 形态：档位段在场。
+    expect(el.shadowRoot!.querySelector('[data-testid="agent-form-slots"]')).toBeTruthy()
+    // 切到 opencode 形态：段消失。
+    const shape = el.shadowRoot!.querySelector<HTMLSelectElement>(
+      'wa-select[data-testid="agent-form-shape"]',
+    )!
+    ;(shape as unknown as { value: string }).value = 'opencode'
+    shape.dispatchEvent(new Event('change', { bubbles: true, composed: true }))
+    await settle(el)
+    expect(el.shadowRoot!.querySelector('[data-testid="agent-form-slots"]')).toBeNull()
+    el.remove()
+  })
+
+  it('submits the slot mapping assembled from the claude form (4.2)', async () => {
+    apiMocks.agentsCreate.mockResolvedValue({ created: 'myclaude' })
+    const el = await mount()
+    await goto(el, "agents")
+    waButtons(el)
+      .find((b) => b.textContent?.includes('新建 agent'))!
+      .click()
+    await settle(el)
+    setWaInput(el, 'Agent id', 'myclaude')
+    await settle(el)
+    // 启用 opus 档并选模型、把默认档设为 opus。
+    const opusRow = el.shadowRoot!.querySelector<HTMLElement>(
+      '[data-testid="agent-slot-row"][data-slot="opus"]',
+    )!
+    const checkbox = opusRow.querySelector<HTMLInputElement>(
+      '[data-testid="agent-slot-enabled"]',
+    )!
+    ;(checkbox as unknown as { checked: boolean }).checked = true
+    checkbox.dispatchEvent(new Event('change', { bubbles: true, composed: true }))
+    await settle(el)
+    const modelSel = opusRow.querySelector<HTMLElement>('[data-testid="agent-slot-model"]')!
+    ;(modelSel as unknown as { processSlotChange?: () => void }).processSlotChange?.()
+    ;(modelSel as unknown as { value: string }).value = 'm1'
+    modelSel.dispatchEvent(new Event('change', { bubbles: true, composed: true }))
+    await settle(el)
+    const radio = opusRow.querySelector<HTMLInputElement>('[data-testid="agent-slot-default"]')!
+    radio.dispatchEvent(new Event('change', { bubbles: true, composed: true }))
+    await settle(el)
+    const dlg2 = dialogByLabel(el, '新建 agent')
+    const save = [...dlg2.querySelectorAll<HTMLElement>('wa-button')].find(
+      (b) => b.textContent?.trim() === '保存',
+    )!
+    save.click()
+    await settle(el)
+    expect(apiMocks.agentsCreate).toHaveBeenCalledWith(
+      'myclaude',
+      expect.objectContaining({ models: { opus: 'm1', default: 'opus' } }),
+    )
+    el.remove()
+  })
+
+  it('prefills the stored slot mapping on edit (4.2)', async () => {
+    apiMocks.agents.mockResolvedValue({
+      agents: [
+        {
+          id: 'myclaude',
+          display: 'myclaude',
+          reachable: true,
+          driver_raw: 'claude',
+          models: { opus: 'opus-x', sonnet: 'sonnet-y', default: 'sonnet' },
+        },
+      ],
+    })
+    const el = await mount()
+    await goto(el, "agents")
+    agentRows(el)
+      .find((r) => r.dataset['id'] === 'myclaude')!
+      .querySelector<HTMLElement>('button[title="编辑"]')!
+      .click()
+    await settle(el)
+    const dlg = dialogByLabel(el, '编辑 agent myclaude')
+    const opusRow = dlg.querySelector<HTMLElement>(
+      '[data-testid="agent-slot-row"][data-slot="opus"]',
+    )!
+    expect(
+      (opusRow.querySelector('[data-testid="agent-slot-enabled"]') as unknown as { checked: boolean })
+        .checked,
+    ).toBe(true)
+    // jsdom 不触发 slotchange，wa-select 的选项缓存为空——先 nudge 再读 value。
+    const opusModel = opusRow.querySelector<HTMLElement>('[data-testid="agent-slot-model"]') as unknown as {
+      processSlotChange?: () => void
+      value: string
+    }
+    opusModel.processSlotChange?.()
+    expect(opusModel.value).toBe('opus-x')
+    const sonnetRow = dlg.querySelector<HTMLElement>(
+      '[data-testid="agent-slot-row"][data-slot="sonnet"]',
+    )!
+    expect(
+      (sonnetRow.querySelector('[data-testid="agent-slot-default"]') as unknown as { checked: boolean })
+        .checked,
+    ).toBe(true)
+    el.remove()
+  })
+
+  // （add-claude-model-slots 4.2/spec「value picker offers the whole catalog」）
+  // 档位选择器选项 = provider 模型 + router 别名同权平铺，无 provider 模式
+  // 过滤；存量值已不在目录里时仍兜底呈现（回填不丢）。
+  it('slot value picker lists provider models and aliases side by side (4.2)', async () => {
+    apiMocks.providers.mockResolvedValue({
+      providers: [
+        {
+          name: 'alpha',
+          preset: null,
+          base_url_anthropic: 'https://a.example/anthropic',
+          base_url_openai_chat: null,
+          base_url_openai_responses: null,
+          api_key_env: null,
+          api_key_configured: true,
+          models: [{ id: 'alpha-model', tags: [] }],
+        },
+      ],
+      // router 别名随同一读面下发——与 provider 模型同权进入选择器。
+      model_aliases: { 'my-alias': { provider: 'alpha', upstream_model: 'alpha-model' } },
+    })
+    const el = await mount()
+    await goto(el, "agents")
+    waButtons(el)
+      .find((b) => b.textContent?.includes('新建 agent'))!
+      .click()
+    await settle(el)
+    const opusRow = el.shadowRoot!.querySelector<HTMLElement>(
+      '[data-testid="agent-slot-row"][data-slot="opus"]',
+    )!
+    const modelSel = opusRow.querySelector<HTMLElement>('[data-testid="agent-slot-model"]') as unknown as {
+      processSlotChange?: () => void
+    }
+    modelSel.processSlotChange?.()
+    await settle(el)
+    const opts = [...opusRow.querySelectorAll('wa-option')].map((o) => o.getAttribute('value'))
+    expect(opts).toContain('alpha-model')
+    expect(opts).toContain('my-alias')
+    el.remove()
+  })
+
+  it('slot value picker keeps a stored value that left the catalog (4.2)', async () => {
+    apiMocks.providers.mockResolvedValue({
+      providers: [
+        {
+          name: 'alpha',
+          preset: null,
+          base_url_anthropic: 'https://a.example/anthropic',
+          base_url_openai_chat: null,
+          base_url_openai_responses: null,
+          api_key_env: null,
+          api_key_configured: true,
+          models: [{ id: 'alpha-model', tags: [] }],
+        },
+      ],
+      model_aliases: {},
+    })
+    apiMocks.agents.mockResolvedValue({
+      agents: [
+        {
+          id: 'myclaude',
+          display: 'myclaude',
+          reachable: true,
+          driver_raw: 'claude',
+          // 存量档位值已不在目录里（provider 改过）。
+          models: { opus: 'retired-model', default: 'opus' },
+        },
+      ],
+    })
+    const el = await mount()
+    await goto(el, "agents")
+    agentRows(el)
+      .find((r) => r.dataset['id'] === 'myclaude')!
+      .querySelector<HTMLElement>('button[title="编辑"]')!
+      .click()
+    await settle(el)
+    const dlg = dialogByLabel(el, '编辑 agent myclaude')
+    const opusRow = dlg.querySelector<HTMLElement>(
+      '[data-testid="agent-slot-row"][data-slot="opus"]',
+    )!
+    const modelSel = opusRow.querySelector<HTMLElement>('[data-testid="agent-slot-model"]') as unknown as {
+      processSlotChange?: () => void
+      value: string
+    }
+    modelSel.processSlotChange?.()
+    const opts = [...opusRow.querySelectorAll('wa-option')].map((o) => o.getAttribute('value'))
+    expect(opts).toContain('retired-model')
+    expect(modelSel.value).toBe('retired-model')
     el.remove()
   })
 
@@ -1644,12 +1852,13 @@ describe('add-agent-settings-and-session-titles：Agents 分区（/api/agents*�
 })
 
 /**
- * add-agent-auto-install 3.2/3.3：「可安装 agent」区 + 一键安装联动。
- * 默认 beforeEach 的 catalog 桩里 claude 可达 → claude 配方显示「已安装」、
- * opencode 未在 catalog → 显示「安装」按钮。导航序（默认 role=null）：
+ * add-agent-auto-install 3.2/3.3 + add-claude-model-slots 4.1（统一目录）：
+ * 未装配方与已装 agent 同列一张表。默认 beforeEach 的 catalog 桩里 claude
+ * 可达 → claude 作为 catalog 行呈现（已装，带齿轮）；opencode/pi 未在
+ * catalog → 作为「未安装」配方行带安装按钮。导航序（默认 role=null）：
  * agents(4)。
  */
-describe('add-agent-auto-install：Agents 分区可安装区', () => {
+describe('add-agent-auto-install：Agents 分区可安装区（统一目录）', () => {
   function installRows(el: SebasSettingsModal): HTMLElement[] {
     return [...el.shadowRoot!.querySelectorAll<HTMLElement>('[data-testid="install-recipe"]')]
   }
@@ -1660,19 +1869,18 @@ describe('add-agent-auto-install：Agents 分区可安装区', () => {
     return row!
   }
 
-  it('lists the closed recipe set and marks already-reachable agents as installed', async () => {
+  it('uninstalled recipes appear once in the unified list; installed ones show as catalog rows', async () => {
     const el = await mount()
     await goto(el, 'agents')
-    expect(installRows(el).map((r) => r.dataset['recipe'])).toEqual([
-      'claude',
-      'opencode',
-      'pi',
-    ])
+    // claude 已装 → catalog 行（非配方行）；opencode/pi 未装 → 配方行。
+    expect(installRows(el).map((r) => r.dataset['recipe'])).toEqual(['opencode', 'pi'])
+    // 无独立配方区块（统一目录里没有 installable-agents 容器）。
+    expect(el.shadowRoot!.querySelector('[data-testid="installable-agents"]')).toBeNull()
 
-    // claude 在 catalog 里可达 → 已安装、无安装按钮。
-    const claude = recipeRow(el, 'claude')
-    expect(claude.querySelector('[data-testid="install-status"]')!.textContent).toContain('已安装')
-    expect(claude.querySelector('[data-testid="install-button"]')).toBeNull()
+    // claude 作为 catalog 行（data-id），不重复出现配方行。
+    expect(
+      el.shadowRoot!.querySelector('[data-testid="agent-row"][data-id="claude"]'),
+    ).toBeTruthy()
 
     // opencode 未在 catalog → 未安装 + 安装按钮。
     const opencode = recipeRow(el, 'opencode')
@@ -1695,8 +1903,8 @@ describe('add-agent-auto-install：Agents 分区可安装区', () => {
     el.remove()
   })
 
-  // 已装（可达 pi 行）→ 不显示安装按钮。
-  it('marks pi installed when a reachable pi row is in the catalog', async () => {
+  // 已装（可达 pi 行）→ 不再作为未装配方行出现。
+  it('does not list pi as uninstalled when a reachable pi row is in the catalog', async () => {
     apiMocks.agents.mockResolvedValue({
       agents: [
         { id: 'native', display: 'PI', reachable: true },
@@ -1705,9 +1913,10 @@ describe('add-agent-auto-install：Agents 分区可安装区', () => {
     })
     const el = await mount()
     await goto(el, 'agents')
-    const pi = recipeRow(el, 'pi')
-    expect(pi.querySelector('[data-testid="install-status"]')!.textContent).toContain('已安装')
-    expect(pi.querySelector('[data-testid="install-button"]')).toBeNull()
+    expect(installRows(el).map((r) => r.dataset['recipe'])).toEqual(['claude', 'opencode'])
+    expect(
+      el.shadowRoot!.querySelector('[data-testid="agent-row"][data-id="pi"]'),
+    ).toBeTruthy()
     el.remove()
   })
 
@@ -1813,7 +2022,7 @@ describe('add-agent-auto-install：Agents 分区可安装区', () => {
       await goto(el, 'agents')
       // 配方行仍在（只读浏览），但无安装按钮。
       expect(recipeRow(el, 'opencode').querySelector('[data-testid="install-button"]')).toBeNull()
-      expect(installRows(el).length).toBe(3)
+      expect(installRows(el).length).toBe(2)
       el.remove()
     }
   })
@@ -1833,9 +2042,8 @@ describe('add-agent-auto-install：Agents 分区可安装区', () => {
     })
     const el = await mount()
     await goto(el, 'agents')
-    const opencode = recipeRow(el, 'opencode')
-    expect(opencode.querySelector('[data-testid="install-status"]')!.textContent).toContain('已安装')
-    expect(opencode.querySelector('[data-testid="install-button"]')).toBeNull()
+    // opencode 经私有前缀判定为已装 → 不再作为未装配方行出现。
+    expect(installRows(el).map((r) => r.dataset['recipe'])).toEqual(['claude', 'pi'])
     el.remove()
   })
 })
@@ -1899,12 +2107,16 @@ describe('gate-agent-directory-writes 2.1：Agents 写入口随角色裁剪', ()
   })
 
   it('空目录的引导文案随角色收窄：只读档不再指向隐藏的 New agent 入口', async () => {
+    // （add-claude-model-slots 4.1）统一目录：库空时未装配方行照常同列，
+    // 只读档不得见任何安装/新建写入口。
     apiMocks.agents.mockResolvedValue({ agents: [{ id: 'native', display: 'PI', reachable: true }] })
     const el = await mountAs('viewer')
     await gotoAgents(el)
-    const empty = el.shadowRoot!.querySelector('[data-testid="agents-empty"]')
-    expect(empty).toBeTruthy()
-    expect(empty!.textContent).not.toContain('新建 agent')
+    // 配方行可见（浏览面保留），但安装按钮不呈现。
+    for (const row of el.shadowRoot!.querySelectorAll<HTMLElement>('[data-testid="install-recipe"]')) {
+      expect(row.querySelector('[data-testid="install-button"]')).toBeNull()
+    }
+    expect(newAgentButton(el)).toBeNull()
     el.remove()
   })
 })

@@ -1358,13 +1358,13 @@ pub(crate) fn map_stream_event(session_id: &str, se: &claude_agent_sdk::StreamEv
     }
 }
 
-/// （workbench-composer-input-polish D4）内置 claude 模型别名表：对齐 claude
-/// CLI 自身 `/model` 词汇。`default` 是显式条目（映射 SDK `set_model(None)` =
-/// 用 CLI 默认模型）。配置覆盖（`[acp.agents.<name>] models`）整体替换本表；
-/// 逐驱动知识由配置逃生口兜底（D4 决策：claude 专属驱动内含 claude 专属
-/// 词汇不违反 agent 自广告原则的实质，且给了覆盖口）。
+/// （add-claude-model-slots D3）内置 claude 模型别名表：对齐 2026 claude CLI
+/// 自身 `/model` 档位阵容。`default` 是显式条目（映射 SDK `set_model(None)` =
+/// 用 CLI 默认模型）；四档 fable/opus/sonnet/haiku 按强弱序。配置档位映射
+/// （`[acp.agents.<name>] models`）命中时整体替换本表（`default` + 启用档）；
+/// 无映射回退本表。
 pub fn builtin_claude_models() -> Vec<String> {
-    ["default", "opus", "sonnet", "haiku"]
+    ["default", "fable", "opus", "sonnet", "haiku"]
         .into_iter()
         .map(str::to_string)
         .collect()
@@ -2459,6 +2459,7 @@ mod tests {
             builtin_claude_models(),
             vec![
                 "default".to_string(),
+                "fable".to_string(),
                 "opus".to_string(),
                 "sonnet".to_string(),
                 "haiku".to_string()

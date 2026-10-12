@@ -879,6 +879,11 @@ pub(crate) fn enrich_agent_catalog_rows(
                 if let Some(sd) = launch.get("sessions_dir") {
                     obj.insert("sessions_dir".into(), sd.clone());
                 }
+                // （add-claude-model-slots 3.1）模型档位映射原样回填（含
+                // default）——前端编辑表单预填与 new-session 联动据此。
+                if let Some(m) = launch.get("models") {
+                    obj.insert("models".into(), m.clone());
+                }
             }
             v
         })
@@ -3538,6 +3543,30 @@ mod agent_catalog_enrichment_tests {
         let enriched = enrich_agent_catalog_rows(agents, &store_rows);
         assert!(enriched[0].get("path_raw").is_none());
         assert!(enriched[0].get("driver_raw").is_some());
+    }
+
+    /// （add-claude-model-slots 3.1）档位映射原样回填到 catalog 行——前端
+    /// 编辑表单预填与 new-session 联动据此；未配置的行不产键。
+    #[test]
+    fn store_model_slot_mapping_is_passed_through() {
+        let agents = vec![kind("myclaude"), kind("plain")];
+        let store_rows = vec![
+            serde_json::json!({
+                "id": "myclaude",
+                "driver": "claude",
+                "models": {"opus": "opus[1m]", "sonnet": "sonnet", "default": "sonnet"},
+            }),
+            serde_json::json!({ "id": "plain", "driver": "claude" }),
+        ];
+        let enriched = enrich_agent_catalog_rows(agents, &store_rows);
+        assert_eq!(
+            enriched[0].get("models"),
+            Some(&serde_json::json!({
+                "opus": "opus[1m]", "sonnet": "sonnet", "default": "sonnet"
+            })),
+            "存量档位映射必须随 catalog 行下发"
+        );
+        assert!(enriched[1].get("models").is_none(), "未配置不产键");
     }
 }
 

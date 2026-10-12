@@ -1470,14 +1470,14 @@ exit 0
     }
 
     /// configured_kinds：`[acp.agents.*]` 键按 kind 排序；一个都没配时回退
-    /// default kind（出厂配置也有明确可投影对象，tasks 4.4 语义）。
+    /// default kind（make-pi-the-builtin-agent 后出厂默认 = `pi`）。
     #[test]
     fn configured_kinds_sorted_with_default_fallback() {
         let none = crate::config::Config::parse("").unwrap();
         assert_eq!(
             configured_kinds(&none),
-            vec!["claude".to_string()],
-            "无 agent 配置回退 default kind（隐式 claude）"
+            vec!["pi".to_string()],
+            "无 agent 配置回退 default kind（出厂默认 pi）"
         );
 
         let both = crate::config::Config::parse(

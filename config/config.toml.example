@@ -32,6 +32,19 @@ driver = "claude"
 # 位置参数（如 "thinking"）无法表达进子进程 argv——解析期直接报错，不再
 # 静默丢弃。
 # args = ["--scenario", "thinking"]
+#
+# 模型档位映射（add-claude-model-slots，可选）：固定四档 fable/opus/sonnet/
+# haiku（序即强弱），各档从模型目录（provider 模型 + router 别名同权）选一个
+# 模型 id，`default` 点名默认档。spawn 时按映射注入 ANTHROPIC_MODEL（默认档）
+# 与各启用档的 ANTHROPIC_DEFAULT_{FABLE,OPUS,SONNET,HAIKU}_MODEL、
+# CLAUDE_CODE_SUBAGENT_MODEL（最弱启用档）；未启用档不注入；未配映射则一个
+# 模型键都不注入。**旧裸数组形态（`models = ["opus","sonnet"]`）已不再支持，
+# 解析期以点名 models 键的错误拒绝。** 也可在 WebUI Settings → Agents 齿轮
+# 表单里配置（免重启生效）。
+# [acp.agents.claude.models]
+# opus = "glm-5.3"
+# sonnet = "glm-4.7"
+# default = "sonnet"
 
 # [acp.agents.opencode]
 # driver = "acp"

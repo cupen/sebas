@@ -1,18 +1,18 @@
 //! End-to-end coverage of the Claude model-setting feature.
 //!
-//! Two layers, one journey (workbench-composer-input-polish 2.x +
-//! acp-claude-model-env-cover):
+//! Two layers, one journey（add-claude-model-slots 2.2：模型 env 的来源改为
+//! claude agent 的档位映射）:
 //!
 //! 1. **env 注入层**：`sebas::spawn_env::resolve_spawn_overrides` 算出来的
 //!    `extra_env`（endpoint 键 `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN`
-//!    + 5 键 cover env `ANTHROPIC_MODEL` / `ANTHROPIC_DEFAULT_OPUS_MODEL` /
-//!    `ANTHROPIC_DEFAULT_SONNET_MODEL` / `ANTHROPIC_DEFAULT_HAIKU_MODEL` /
+//!    + 由 agent 档位映射派生的模型键 `ANTHROPIC_MODEL` /
+//!    `ANTHROPIC_DEFAULT_{FABLE,OPUS,SONNET,HAIKU}_MODEL` /
 //!    `CLAUDE_CODE_SUBAGENT_MODEL`）真的进了 fake-claude 子进程，由
 //!    fake-claude 启动期 journal `meta.env` 行回读断言。
-//! 2. **SetModel 控制协议层**：环境里钉了默认模型（cover env 把 opus/sonnet
-//!    都覆盖成 deepseek-v4）后，`mgr.set_model(...)` 走 cc-agent-sdk 的
-//!    set_model 控制协议依然把 assistant 帧 model 字段从默认值切到请求值；
-//!    切回 "default" 后 fake 的 init 帧观察值 "fake" 覆盖乐观值（D5 自愈）。
+//! 2. **SetModel 控制协议层**：环境里钉了默认模型后，`mgr.set_model(...)`
+//!    走 cc-agent-sdk 的 set_model 控制协议依然把 assistant 帧 model 字段
+//!    从默认值切到请求值；切回 "default" 后 fake 的 init 帧观察值 "fake"
+//!    覆盖乐观值（D5 自愈）。
 //!
 //! 整个测试与既有 `sebas-acp/tests/claude_model_selection.rs` 的形态
 //! 对齐：fake-claude binary 通过 `--journal PATH` 把 argv/env/frame 写盘，
@@ -25,9 +25,20 @@ use sebas_acp::claude::ClaudeCodeDriver;
 use sebas_dispatch::provider_state::{ProviderMode, ProviderRuntimeState};
 use sebas_dispatch::state_store::{DefaultSelection, PersistedState};
 use sebas_dispatch::test_engine;
+use sebas_models::agent::{ModelSlot, ModelSlotMapping};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
+
+/// （add-claude-model-slots）测试用档位映射。
+fn mapping(slots: &[(ModelSlot, &str)], default_slot: ModelSlot) -> ModelSlotMapping {
+    ModelSlotMapping::new(
+        slots.iter().map(|(s, m)| (*s, m.to_string())).collect::<BTreeMap<_, _>>(),
+        default_slot,
+    )
+    .expect("test mapping is valid")
+}
 
 /// 串行化所有 env 读写（api key 变量跨进程可见，并发跑会让别的测试误读
 /// 错的值；与 `src/spawn_env.rs` 测试同惯例）。状态库隔离由 test_engine
@@ -135,21 +146,19 @@ async fn drain_until<F: Fn(&AcpEvent) -> bool>(
     panic!("no matching event within 20 reads");
 }
 
-/// 第一关：Direct 模式 + deepseek provider，resolve_spawn_overrides 输出
-/// 的 (extra_env, extra_args) 完整到达 claude 子进程。
+/// 第一关：Direct 模式 + deepseek provider + agent 档位映射，
+/// resolve_spawn_overrides 输出的 (extra_env, extra_args) 完整到达 claude
+/// 子进程。
 ///
-/// fake-claude 的 `meta.env` journal 行把这 7 个键原样记下：
+/// fake-claude 的 `meta.env` journal 行把这些键原样记下：
 ///   - ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN（来自 driver.resolve_env 的
 ///     Direct+Anthropic 分支——preset "deepseek" 给出 base_url_anthropic）
-///   - ANTHROPIC_MODEL, ANTHROPIC_DEFAULT_OPUS_MODEL, ANTHROPIC_DEFAULT_SONNET_MODEL,
-///     ANTHROPIC_DEFAULT_HAIKU_MODEL, CLAUDE_CODE_SUBAGENT_MODEL（5 键 cover env）
-///
-/// 不存在「env 算对了但 child 没拿到」的失败模式（SDK 把 extra_env 拼进
-/// Command::envs，理论上必到）——但理论上的事情就是要拿真进程验证一次。
+///   - 档位映射派生的模型键：ANTHROPIC_MODEL = 默认档值、各启用档
+///     ANTHROPIC_DEFAULT_*_MODEL、CLAUDE_CODE_SUBAGENT_MODEL = 最弱启用档值
 #[tokio::test(flavor = "multi_thread")]
-async fn direct_provider_injects_endpoint_and_5_key_cover_env_into_claude_child() {
+async fn direct_provider_injects_endpoint_and_slot_mapping_env_into_claude_child() {
     let _g = ENV_LOCK.lock().unwrap();
-    let journal_path = journal("cover_env");
+    let journal_path = journal("slot_env");
     let _ = std::fs::remove_file(&journal_path);
 
     let state = ProviderRuntimeState {
@@ -158,33 +167,30 @@ async fn direct_provider_injects_endpoint_and_5_key_cover_env_into_claude_child(
         },
         default_selection: Some(DefaultSelection::new("deepseek")),
     };
-    // preset = "deepseek" 让 compute_provider_resolution 从内置预设拿
-    // base_url_anthropic；models 自定义覆盖（preset 默认 models 也行，
-    // 这里用自定义短列表保证映射稳定）。
-    // 条目按状态库 provider 表形状（一 provider 一 Item），由
-    // install_fresh_with 预置进内存引擎。
     let _env_guard = FixtureGuard::new(
         "deepseek",
         "DEEPSEEK_API_KEY",
         "sk-test-deepseek",
         r#"{
             "preset": "deepseek",
-            "api_key_env": "DEEPSEEK_API_KEY",
-            "models": [
-                {"id": "deepseek-v4-pro"},
-                {"id": "deepseek-v4-flash"}
-            ]
+            "api_key_env": "DEEPSEEK_API_KEY"
         }"#,
+    );
+
+    // 档位映射：opus/sonnet 启用，sonnet 默认；haiku/fable 停用。
+    let m = mapping(
+        &[
+            (ModelSlot::Opus, "deepseek-v4-pro"),
+            (ModelSlot::Sonnet, "deepseek-v4-flash"),
+        ],
+        ModelSlot::Sonnet,
     );
 
     // 走真实调用链：resolve_spawn_overrides 是 session_boot::spawn_overrides
     // 的核心，被 acp_spawn_and_activate / acp_resume_and_activate 用。
     let (extra_env, extra_args) =
-        resolve_spawn_overrides(&ClaudeCodeDriver, &state, None);
+        resolve_spawn_overrides(&ClaudeCodeDriver, &state, None, Some(&m));
 
-    // extra_env 至少 6 个键：2 endpoint + 5 cover = 7。ModelEntry 解析
-    // 失败会让 cover 段为空（compute_provider_resolution 的 fallback），
-    // 故先 assert 再 spawn。
     let keys: std::collections::HashSet<&str> =
         extra_env.iter().map(|(k, _)| k.as_str()).collect();
     for required in [
@@ -193,7 +199,6 @@ async fn direct_provider_injects_endpoint_and_5_key_cover_env_into_claude_child(
         "ANTHROPIC_MODEL",
         "ANTHROPIC_DEFAULT_OPUS_MODEL",
         "ANTHROPIC_DEFAULT_SONNET_MODEL",
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
         "CLAUDE_CODE_SUBAGENT_MODEL",
     ] {
         assert!(
@@ -201,6 +206,10 @@ async fn direct_provider_injects_endpoint_and_5_key_cover_env_into_claude_child(
             "resolve_spawn_overrides must produce {required}, got keys={keys:?}"
         );
     }
+    assert!(
+        !keys.contains("ANTHROPIC_DEFAULT_HAIKU_MODEL"),
+        "停用档不得出键：{keys:?}"
+    );
     let auth = extra_env
         .iter()
         .find(|(k, _)| k == "ANTHROPIC_AUTH_TOKEN")
@@ -246,31 +255,23 @@ async fn direct_provider_injects_endpoint_and_5_key_cover_env_into_claude_child(
         "AUTH_TOKEN must match the api_key_env value"
     );
 
-    // 5-key cover env: strong→weak ordering with two models
+    // Slot-mapping-derived model env.
     assert_eq!(
         s("ANTHROPIC_MODEL"),
-        "deepseek-v4-pro",
-        "strongest model → ANTHROPIC_MODEL"
-    );
-    assert_eq!(
-        s("ANTHROPIC_DEFAULT_OPUS_MODEL"),
-        "deepseek-v4-pro",
-        "strongest → OPUS"
-    );
-    assert_eq!(
-        s("ANTHROPIC_DEFAULT_SONNET_MODEL"),
         "deepseek-v4-flash",
-        "weakest → SONNET when only 2 models"
+        "default slot (sonnet) → ANTHROPIC_MODEL"
     );
-    assert_eq!(
-        s("ANTHROPIC_DEFAULT_HAIKU_MODEL"),
-        "deepseek-v4-flash",
-        "weakest → HAIKU"
-    );
+    assert_eq!(s("ANTHROPIC_DEFAULT_OPUS_MODEL"), "deepseek-v4-pro");
+    assert_eq!(s("ANTHROPIC_DEFAULT_SONNET_MODEL"), "deepseek-v4-flash");
     assert_eq!(
         s("CLAUDE_CODE_SUBAGENT_MODEL"),
         "deepseek-v4-flash",
-        "subagent reuses weakest tier"
+        "weakest enabled slot (sonnet)"
+    );
+    assert!(
+        env_dump["ANTHROPIC_DEFAULT_HAIKU_MODEL"].is_null(),
+        "disabled slot must not be injected; got {:?}",
+        env_dump["ANTHROPIC_DEFAULT_HAIKU_MODEL"]
     );
 
     // ANTHROPIC_API_KEY is not injected by sebas; null is correct.
@@ -283,16 +284,103 @@ async fn direct_provider_injects_endpoint_and_5_key_cover_env_into_claude_child(
     let _ = std::fs::remove_file(&journal_path);
 }
 
-/// 第二关：cover env 注入之后，set_model 控制协议仍把帧 model 切到请求值。
+/// 第三关（add-claude-model-slots 2.2/spec claude-env-cover「Mapping applies
+/// identically in Router mode」）：provider 模式 Router 时，档位映射派生的
+/// 模型 env 与 Direct 同构——真实子进程回读，证明模式特判确实消亡（旧
+/// 实现 Router 模式从不注入模型 env）。
 ///
-/// 验证「env 钉默认模型」与「运行时切模型」不冲突：cover env 给的是
-/// "deepseek-v4-pro"，但 fake-claude 跑 hello 场景时 set_model("opus")
+/// Router 模式没有 provider 凭据解析（凭据半边 = router 端点），故只断言
+/// 模型键到达子进程：ANTHROPIC_MODEL = 默认档值、启用档 DEFAULT 键、
+/// SUBAGENT = 最弱启用档；停用档不出键。
+#[tokio::test(flavor = "multi_thread")]
+async fn router_mode_injects_slot_mapping_env_into_claude_child() {
+    let _g = ENV_LOCK.lock().unwrap();
+    let journal_path = journal("router_slot_env");
+    let _ = std::fs::remove_file(&journal_path);
+
+    // Router 模式的端点 env 来自 router config（listen + auth_token），与
+    // 模型 env 的来源（档位映射）彼此独立——正是本关要钉的正交性。
+    let router_cfg = sebas_router::config::RouterConfig::parse(
+        r#"
+[router]
+listen = "127.0.0.1:18787"
+auth_token = ["sk-router-test"]
+[provider.anthropic]
+api_key = "sk-dummy"
+"#,
+    )
+    .expect("router config parses");
+
+    let state = ProviderRuntimeState {
+        mode: ProviderMode::Router,
+        default_selection: None,
+    };
+    // 映射：opus/sonnet 启用，opus 默认；fable/haiku 停用。
+    let m = mapping(
+        &[
+            (ModelSlot::Opus, "router-opus"),
+            (ModelSlot::Sonnet, "router-sonnet"),
+        ],
+        ModelSlot::Opus,
+    );
+    let (extra_env, extra_args) =
+        resolve_spawn_overrides(&ClaudeCodeDriver, &state, Some(&router_cfg), Some(&m));
+    assert!(
+        extra_env.iter().any(|(k, _)| k == "ANTHROPIC_BASE_URL"),
+        "Router mode still injects the endpoint credential env: {extra_env:?}"
+    );
+    assert!(
+        extra_args.is_empty(),
+        "no --model argv in any provider mode: {extra_args:?}"
+    );
+
+    let mut command = vec![fake().to_str().unwrap().to_string()];
+    command.push("--journal".into());
+    command.push(journal_path.to_str().unwrap().into());
+    command.extend(extra_args);
+
+    let mgr = SessionManager::claude_only(Duration::from_secs(15));
+    mgr.create_claude_session(
+        command[0].as_str(),
+        command[1..].to_vec(),
+        None,
+        extra_env,
+        "".into(),
+    )
+    .await
+    .expect("spawn under Router mode");
+
+    let env_dump = wait_meta_env(&journal_path);
+    let s = |k: &str| env_dump[k].as_str().unwrap_or("<missing>").to_string();
+    assert_eq!(
+        s("ANTHROPIC_MODEL"),
+        "router-opus",
+        "default slot → ANTHROPIC_MODEL under Router mode"
+    );
+    assert_eq!(s("ANTHROPIC_DEFAULT_OPUS_MODEL"), "router-opus");
+    assert_eq!(s("ANTHROPIC_DEFAULT_SONNET_MODEL"), "router-sonnet");
+    assert_eq!(
+        s("CLAUDE_CODE_SUBAGENT_MODEL"),
+        "router-sonnet",
+        "weakest enabled slot → SUBAGENT"
+    );
+    assert!(
+        env_dump["ANTHROPIC_DEFAULT_HAIKU_MODEL"].is_null(),
+        "disabled slot must not be injected under Router mode; got {:?}",
+        env_dump["ANTHROPIC_DEFAULT_HAIKU_MODEL"]
+    );
+
+    let _ = std::fs::remove_file(&journal_path);
+}
+///
+/// 验证「env 钉默认模型」与「运行时切模型」不冲突：映射给的是
+/// "deepseek-v4-flash"，但 fake-claude 跑 hello 场景时 set_model("opus")
 /// 切完下一回合报 "opus"；切回 "default" 时 fake 的 init 帧 "fake" 覆盖
 /// 乐观值（D5 自愈）。
 #[tokio::test(flavor = "multi_thread")]
-async fn set_model_after_cover_env_takes_effect_from_next_turn() {
+async fn set_model_after_slot_env_takes_effect_from_next_turn() {
     let _g = ENV_LOCK.lock().unwrap();
-    let journal_path = journal("set_model_under_cover");
+    let journal_path = journal("set_model_under_slots");
     let _ = std::fs::remove_file(&journal_path);
 
     let _env_guard = FixtureGuard::new(
@@ -301,11 +389,7 @@ async fn set_model_after_cover_env_takes_effect_from_next_turn() {
         "sk-test-deepseek",
         r#"{
             "preset": "deepseek",
-            "api_key_env": "DEEPSEEK_API_KEY",
-            "models": [
-                {"id": "deepseek-v4-pro"},
-                {"id": "deepseek-v4-flash"}
-            ]
+            "api_key_env": "DEEPSEEK_API_KEY"
         }"#,
     );
 
@@ -315,8 +399,15 @@ async fn set_model_after_cover_env_takes_effect_from_next_turn() {
         },
         default_selection: Some(DefaultSelection::new("deepseek")),
     };
+    let m = mapping(
+        &[
+            (ModelSlot::Opus, "deepseek-v4-pro"),
+            (ModelSlot::Sonnet, "deepseek-v4-flash"),
+        ],
+        ModelSlot::Sonnet,
+    );
     let (extra_env, extra_args) =
-        resolve_spawn_overrides(&ClaudeCodeDriver, &state, None);
+        resolve_spawn_overrides(&ClaudeCodeDriver, &state, None, Some(&m));
 
     let mut command = vec![fake().to_str().unwrap().to_string()];
     command.push("--journal".into());

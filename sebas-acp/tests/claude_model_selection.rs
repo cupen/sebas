@@ -1,11 +1,12 @@
 //! workbench-composer-input-polish 2.2/2.3：claude 驱动的模型面。
 //!
-//! 覆盖（openspec/changes/workbench-composer-input-polish/specs/
+//! 覆盖（openspec/changes/add-claude-model-slots/specs/
 //! acp-model-selection/spec.md 的 claude 场景）：
-//! - 握手成功即拼装 `AcpModelInfo { current, options }` 上报（别名表内置
-//!   default/opus/sonnet/haiku，current 缺省 "default"）；
-//! - `[acp.agents.<name>] models` 覆盖值经 `ClaudeDriver::with_models` 替换
-//!   内置表（进程级形态：config 解析单测在 tests/config_test.rs）；
+//! - 握手成功即拼装 `AcpModelInfo { current, options }` 上报（内置回退表
+//!   default/fable/opus/sonnet/haiku，current 缺省 "default"）；
+//! - 档位映射的生效词汇（`default` + 启用档）经 `ClaudeDriver::with_models`
+//!   替换内置表（进程级形态：映射派生在 config/store 层，单测在
+//!   tests/config_test.rs 与 sebas-models）；
 //! - wire 帧观察（system init 帧 model 名）发 `ModelChanged`——快照的
 //!   current 从 "default" 覆盖为观察值（D5 自愈语义）；
 //! - `AcpCommand::SetModel` 走 SDK `set_model` 控制协议（"default" → None）：
@@ -70,10 +71,10 @@ fn wait_model_change(journal: &PathBuf, needle: &str) -> String {
     panic!("no model_change line matching {needle:?} in {}", journal.display());
 }
 
-/// spawn outcome 携带内置别名表 + "default" current（spec 场景「Claude
-/// session exposes the alias table」的拼装半边）。
+/// spawn outcome 携带内置回退表 + "default" current（spec 场景「Claude
+/// agent without mapping exposes the fallback table」的拼装半边）。
 #[tokio::test]
-async fn spawn_outcome_carries_builtin_alias_table_and_default_current() {
+async fn spawn_outcome_carries_builtin_fallback_table_and_default_current() {
     let mgr = SessionManager::claude_only(Duration::from_secs(30));
     let outcome = mgr
         .resume_session(
@@ -97,6 +98,7 @@ async fn spawn_outcome_carries_builtin_alias_table_and_default_current() {
             current: "default".into(),
             options: vec![
                 "default".into(),
+                "fable".into(),
                 "opus".into(),
                 "sonnet".into(),
                 "haiku".into()
@@ -105,18 +107,22 @@ async fn spawn_outcome_carries_builtin_alias_table_and_default_current() {
     );
     // manager 快照通道（get_model_info）零改动复用（D6）。
     let snap = mgr.get_model_info(&outcome.session_id).await.expect("live session");
-    assert_eq!(snap.options.len(), 4);
+    assert_eq!(snap.options.len(), 5);
 }
 
-/// 配置覆盖（`ClaudeDriver::with_models`）整体替换内置表（spec 场景
-/// 「configuration overrides the alias table」的驱动半边）。
+/// 映射派生的词汇（`default` + 启用档）经 `ClaudeDriver::with_models` 整体
+/// 替换内置表（spec 场景「configuration overrides the alias table」）。
 #[tokio::test]
 async fn driver_models_override_replaces_builtin_table() {
     let mut agents = HashMap::new();
     agents.insert(
         "claude".to_string(),
         AgentEntry {
-            driver: Arc::new(ClaudeDriver::with_models(vec!["sonnet[1m]".to_string()])),
+            driver: Arc::new(ClaudeDriver::with_models(vec![
+                "default".to_string(),
+                "opus".to_string(),
+                "sonnet".to_string(),
+            ])),
             startup_timeout: Duration::from_secs(30),
         },
     );
@@ -135,7 +141,11 @@ async fn driver_models_override_replaces_builtin_table() {
     let model = outcome.model.expect("override must still surface a model");
     assert_eq!(
         model.options,
-        vec!["sonnet[1m]".to_string()],
+        vec![
+            "default".to_string(),
+            "opus".to_string(),
+            "sonnet".to_string()
+        ],
         "non-empty override replaces the builtin table wholesale"
     );
     assert_eq!(model.current, "default");

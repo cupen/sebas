@@ -88,7 +88,9 @@ async fn spawn_fresh(
         &key(),
         "hi",
         "acp",
+        "acp", // driver tag
         vec![fake_acp().to_string_lossy().into_owned(), scenario.into()],
+        None,
         None,
         None,
         None,
@@ -118,7 +120,9 @@ async fn resume(
         old_sid,
         "hi",
         "acp",
+        "acp", // driver tag
         vec![fake_acp().to_string_lossy().into_owned(), scenario.into()],
+        None,
         None,
         None,
         None,
@@ -246,7 +250,9 @@ async fn acp_resume_uses_mapped_real_id_after_restart() {
         &old,
         &prompt,
         "acp",
+        "acp", // driver tag
         vec![fake_acp().to_string_lossy().into_owned(), "load-ok".into()],
+        None,
         None,
         None,
         None,

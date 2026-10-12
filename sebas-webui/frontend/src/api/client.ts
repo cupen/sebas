@@ -567,6 +567,27 @@ export interface About {
  * (`[acp.agents.*]` config key or the reserved `"native"`); `display` is
  * presentation only. Driver concepts never appear here.
  */
+/**
+ * （add-claude-model-slots）claude 模型档位名（封闭四档，序即强弱）。
+ */
+export type ModelSlot = 'fable' | 'opus' | 'sonnet' | 'haiku'
+
+/** 四档位全清单（强弱序）——表单渲染与校验的单一出处。 */
+export const MODEL_SLOTS: readonly ModelSlot[] = ['fable', 'opus', 'sonnet', 'haiku'] as const
+
+/**
+ * （add-claude-model-slots 3.1）claude agent 的模型档位映射 wire 形状：扁平
+ * 对象 `{ <slot>: <modelId>, ..., default: <slot> }`。至少启用一档，且
+ * `default` 必须落在启用档上（服务端校验；前端组装时同样保证）。
+ */
+export interface ModelSlotMapping {
+  fable?: string
+  opus?: string
+  sonnet?: string
+  haiku?: string
+  default: ModelSlot
+}
+
 export interface AgentKindInfo {
   id: string
   display: string
@@ -592,6 +613,11 @@ export interface AgentKindInfo {
   args?: string[]
   work_dir?: string | null
   sessions_dir?: string | null
+  /**
+   * （add-claude-model-slots 3.1）store 行的存量模型档位映射（含 default）：
+   * 编辑表单预填与 new-session 联动据此；键缺省 = 未配置（回退内置表）。
+   */
+  models?: ModelSlotMapping
 }
 
 /**
@@ -605,7 +631,12 @@ export interface AgentLaunchPayload {
   path?: string | null
   args?: string[] | null
   display?: string | null
-  models?: string[] | null
+  /**
+   * （add-claude-model-slots 3.1）claude 模型档位映射（仅 claude driver 可
+   * 携带）；`null` = 清除存量（未配置）。旧 `string[]` 形状已被服务端
+   * typed 拒绝。
+   */
+  models?: ModelSlotMapping | null
   startup_timeout_secs?: number | null
   idle_kill_secs?: number | null
   work_dir?: string | null

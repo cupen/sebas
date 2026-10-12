@@ -23,6 +23,223 @@
 use sebas_schema_derive::{ActiveRecord, SchemaColumns};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
+use std::str::FromStr;
+
+/// claude 模型档位（add-claude-model-slots D1）：固定四档，声明序即强弱序
+/// （`fable` > `opus` > `sonnet` > `haiku`）。档位是封闭枚举——claude CLI 只
+/// 认内置别名，自定义档名选了解析不了（proposal Non-goals）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ModelSlot {
+    Fable,
+    Opus,
+    Sonnet,
+    Haiku,
+}
+
+impl ModelSlot {
+    /// 全部档位，按强弱序（BTreeMap 迭代序同此）。
+    pub const ALL: [ModelSlot; 4] = [
+        ModelSlot::Fable,
+        ModelSlot::Opus,
+        ModelSlot::Sonnet,
+        ModelSlot::Haiku,
+    ];
+
+    /// wire / 存储词。
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ModelSlot::Fable => "fable",
+            ModelSlot::Opus => "opus",
+            ModelSlot::Sonnet => "sonnet",
+            ModelSlot::Haiku => "haiku",
+        }
+    }
+
+    /// `ANTHROPIC_DEFAULT_<SUFFIX>_MODEL` 的 `<SUFFIX>`。
+    pub const fn env_suffix(self) -> &'static str {
+        match self {
+            ModelSlot::Fable => "FABLE",
+            ModelSlot::Opus => "OPUS",
+            ModelSlot::Sonnet => "SONNET",
+            ModelSlot::Haiku => "HAIKU",
+        }
+    }
+}
+
+impl std::fmt::Display for ModelSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// wire 词 → 档位。未知档名拒绝（typed error 含原词）。
+impl FromStr for ModelSlot {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "fable" => Ok(ModelSlot::Fable),
+            "opus" => Ok(ModelSlot::Opus),
+            "sonnet" => Ok(ModelSlot::Sonnet),
+            "haiku" => Ok(ModelSlot::Haiku),
+            other => Err(format!(
+                "未知模型档位 '{other}'（只认 fable / opus / sonnet / haiku）"
+            )),
+        }
+    }
+}
+
+impl Serialize for ModelSlot {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ModelSlot {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+        let s = String::deserialize(deserializer)?;
+        ModelSlot::from_str(&s).map_err(D::Error::custom)
+    }
+}
+
+/// claude agent 的模型档位映射（add-claude-model-slots D1）：启用档位 → 目录
+/// 模型 id（provider 模型与 router 别名同权），外加一个默认档标记。
+///
+/// wire / 存储形状是一个扁平对象：`{"opus": "<id>", ..., "default": "<slot>"}`。
+/// 不变量（构造即校验，反序列化同样强制）：至少启用一个档位；`default_slot`
+/// 必须落在启用档集内。空映射在 mutation 面归一为 `None`（等价未配置）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelSlotMapping {
+    /// 启用档位 → 目录模型 id（BTreeMap 迭代序 = 强弱序）。
+    pub slots: BTreeMap<ModelSlot, String>,
+    /// 默认档（校验保证 ∈ `slots` 键集）。
+    pub default_slot: ModelSlot,
+}
+
+impl ModelSlotMapping {
+    /// 构造 + 校验（供程序化装配与测试用；wire 反序列化走同一不变量）。
+    pub fn new(
+        slots: BTreeMap<ModelSlot, String>,
+        default_slot: ModelSlot,
+    ) -> Result<Self, String> {
+        if slots.is_empty() {
+            return Err("模型档位映射至少启用一个档位".to_string());
+        }
+        if !slots.contains_key(&default_slot) {
+            return Err(format!(
+                "默认档 '{}' 未启用（default 必须落在启用档集内）",
+                default_slot
+            ));
+        }
+        Ok(Self {
+            slots,
+            default_slot,
+        })
+    }
+
+    /// 默认档的模型 id（spawn 时 `ANTHROPIC_MODEL` 的取值）。
+    pub fn default_model(&self) -> Option<&str> {
+        self.slots.get(&self.default_slot).map(String::as_str)
+    }
+
+    /// 最弱启用档的模型 id（`CLAUDE_CODE_SUBAGENT_MODEL` 的取值）。
+    pub fn weakest_model(&self) -> Option<&str> {
+        self.slots.values().next_back().map(String::as_str)
+    }
+
+    /// 会话模型词汇（add-claude-model-slots D3）：`default` + 启用档（强弱序）。
+    pub fn resolved_aliases(&self) -> Vec<String> {
+        let mut out = Vec::with_capacity(self.slots.len() + 1);
+        out.push(DEFAULT_CLAUDE_MODEL_ALIAS.to_string());
+        out.extend(self.slots.keys().map(|s| s.as_str().to_string()));
+        out
+    }
+}
+
+/// 会话模型词汇里的显式缺省条目（与 `sebas_acp::claude::DEFAULT_CLAUDE_MODEL`
+/// 同词——两处都是「回到 CLI 默认模型」的语义，此处避免 sebas-models 依赖
+/// sebas-acp 而本地镜像一份常量）。
+pub const DEFAULT_CLAUDE_MODEL_ALIAS: &str = "default";
+
+impl Serialize for ModelSlotMapping {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap as _;
+        let mut map = serializer.serialize_map(Some(self.slots.len() + 1))?;
+        for (slot, model) in &self.slots {
+            map.serialize_entry(slot.as_str(), model)?;
+        }
+        map.serialize_entry("default", self.default_slot.as_str())?;
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for ModelSlotMapping {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+        let v = Value::deserialize(deserializer)?;
+        let obj = match v {
+            Value::Object(map) => map,
+            _ => {
+                return Err(D::Error::custom(
+                    "models 期望结构化映射对象（档位名 fable/opus/sonnet/haiku + default 键），\
+                     旧裸数组形态已不再支持",
+                ));
+            }
+        };
+        let mut slots: BTreeMap<ModelSlot, String> = BTreeMap::new();
+        let mut default_slot: Option<ModelSlot> = None;
+        for (key, val) in obj {
+            if key == "default" {
+                let s = val.as_str().ok_or_else(|| {
+                    D::Error::custom("models.default 必须是档位名字符串")
+                })?;
+                default_slot = Some(ModelSlot::from_str(s).map_err(D::Error::custom)?);
+                continue;
+            }
+            let slot = ModelSlot::from_str(&key).map_err(D::Error::custom)?;
+            let model = val
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    D::Error::custom(format!("models.{key} 必须是非空模型 id 字符串"))
+                })?;
+            slots.insert(slot, model.to_string());
+        }
+        let default_slot = default_slot.ok_or_else(|| {
+            D::Error::custom("models 缺少 default 键（须点名一个启用档为默认）")
+        })?;
+        ModelSlotMapping::new(slots, default_slot).map_err(D::Error::custom)
+    }
+}
+
+/// 校验 driver 与模型的组合（add-claude-model-slots D6）：`models` 仅 claude
+/// driver 可携带，其余 driver 携带即拒。config 种子导入与 mutation 面共用本
+/// 函数，避免两套口径。
+pub fn validate_models_for_driver(
+    driver: &str,
+    models: &Option<ModelSlotMapping>,
+) -> Result<(), String> {
+    if models.is_some() && driver != "claude" {
+        return Err(format!(
+            "driver '{driver}' 不支持模型档位映射（仅 claude 可携带 models）"
+        ));
+    }
+    Ok(())
+}
 
 /// agents 行。读取路径可能只取部分列，其余字段仅为 schema 声明存在，
 /// 故整体 allow(dead_code)。
@@ -42,7 +259,9 @@ pub struct AgentRow {
     pub args: Option<String>,
     /// 产品展示名（可空 = 缺省回退 id 本身）。
     pub display: Option<String>,
-    /// claude 驱动的模型别名表覆盖（JSON 数组文本；可空 = 内置表）。
+    /// claude 驱动的模型档位映射（JSON 对象文本；可空 = 未配置 = 内置表）。
+    /// （add-claude-model-slots D1）列名与 DDL 不变，形状从 `Vec<String>`
+    /// 换成结构化映射；旧 `Vec` 值读取时宽容降级为 `None`（视为未配置）。
     pub models: Option<String>,
     #[column(default = "30")]
     pub startup_timeout_secs: i64,
@@ -79,8 +298,10 @@ pub struct AgentDefinition {
     pub args: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<String>,
+    /// （add-claude-model-slots D1）claude 驱动的模型档位映射；`None` =
+    /// 未配置（回退内置别名表）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub models: Option<Vec<String>>,
+    pub models: Option<ModelSlotMapping>,
     #[serde(default = "default_startup_timeout")]
     pub startup_timeout_secs: u64,
     #[serde(default = "default_idle_kill")]
@@ -162,13 +383,10 @@ impl AgentDefinition {
         v
     }
 
-    /// claude 驱动的生效模型别名表：非空覆盖优先，空/缺省 = `None`（调用
-    /// 方回退内置表——与 config `resolved_models` 同语义）。
+    /// （add-claude-model-slots D3）claude 驱动的生效模型词汇：有映射 →
+    /// `default` + 启用档（强弱序）；无映射 → `None`（调用方回退内置表）。
     pub fn resolved_models(&self) -> Option<Vec<String>> {
-        match self.models.as_deref() {
-            Some(list) if !list.is_empty() => Some(list.to_vec()),
-            _ => None,
-        }
+        self.models.as_ref().map(ModelSlotMapping::resolved_aliases)
     }
 }
 
@@ -206,7 +424,10 @@ impl AgentRow {
             path: def.path.clone(),
             args: json_text(&def.args),
             display: def.display.clone(),
-            models: def.models.as_ref().and_then(|m| json_text(m)),
+            models: def
+                .models
+                .as_ref()
+                .and_then(|m| serde_json::to_string(m).ok()),
             startup_timeout_secs: def.startup_timeout_secs as i64,
             idle_kill_secs: def.idle_kill_secs as i64,
             work_dir: def.work_dir.clone(),
@@ -225,7 +446,7 @@ impl AgentRow {
             path: self.path.clone(),
             args: parse_json_list(self.args.as_deref()).unwrap_or_default(),
             display: self.display.clone(),
-            models: parse_json_list(self.models.as_deref()),
+            models: parse_models(self.models.as_deref()),
             startup_timeout_secs: self.startup_timeout_secs.max(0) as u64,
             idle_kill_secs: self.idle_kill_secs.max(0) as u64,
             work_dir: self.work_dir.clone(),
@@ -254,13 +475,10 @@ impl AgentRow {
         if let Some(d) = &self.display {
             item.insert("display".into(), Value::String(d.clone()));
         }
-        if let Some(models) = parse_json_list(self.models.as_deref())
-            && !models.is_empty()
+        if let Some(mapping) = parse_models(self.models.as_deref())
+            && let Ok(v) = serde_json::to_value(&mapping)
         {
-            item.insert(
-                "models".into(),
-                Value::Array(models.into_iter().map(Value::String).collect()),
-            );
+            item.insert("models".into(), v);
         }
         item.insert(
             "startup_timeout_secs".into(),
@@ -304,6 +522,24 @@ fn parse_json_list(text: Option<&str>) -> Option<Vec<String>> {
     )
 }
 
+/// `models` 列 JSON 文本 → 档位映射（add-claude-model-slots D1）。旧
+/// `Vec<String>` 形态（历史别名表）宽容降级为 `None`——它从未驱动 env，
+/// 降级只丢「词汇表」而非配置；形状非法同样降级为 `None`（warn 一条）。
+fn parse_models(text: Option<&str>) -> Option<ModelSlotMapping> {
+    let text = text?;
+    match serde_json::from_str::<ModelSlotMapping>(text) {
+        Ok(m) => Some(m),
+        Err(e) => {
+            tracing::warn!(
+                stored = %text,
+                error = %e,
+                "agents.models 存量值不是结构化档位映射（旧裸数组形态？）：视为未配置"
+            );
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,6 +559,14 @@ mod tests {
         }
     }
 
+    fn mapping(slots: &[(ModelSlot, &str)], default_slot: ModelSlot) -> ModelSlotMapping {
+        ModelSlotMapping::new(
+            slots.iter().map(|(s, m)| (*s, m.to_string())).collect(),
+            default_slot,
+        )
+        .expect("test mapping is valid")
+    }
+
     /// row ↔ 载荷往返：launch 定义（path/args/display/models/work_dir）逐
     /// 字段保真。
     #[test]
@@ -330,9 +574,12 @@ mod tests {
         let def = AgentDefinition {
             driver: "claude".into(),
             path: Some("/usr/local/bin/claude".into()),
-            args: vec!["--model".into(), "sonnet".into()],
+            args: vec!["--scenario".into(), "thinking".into()],
             display: Some("My Claude".into()),
-            models: Some(vec!["sonnet".into(), "opus[1m]".into()]),
+            models: Some(mapping(
+                &[(ModelSlot::Sonnet, "sonnet"), (ModelSlot::Opus, "opus[1m]")],
+                ModelSlot::Sonnet,
+            )),
             startup_timeout_secs: 45,
             idle_kill_secs: 0,
             work_dir: Some("/tmp/work".into()),
@@ -422,15 +669,93 @@ mod tests {
         assert!(item.get("created_at").is_some() && item.get("updated_at").is_some());
     }
 
-    /// 生效模型别名表：非空覆盖优先；空表/缺省 = None（回退内置）。
+    /// （add-claude-model-slots 1.1）生效模型词汇新语义：有映射 → `default`
+    /// + 启用档（强弱序）；无映射 → None（回退内置表）。
     #[test]
-    fn resolved_models_follows_override_semantics() {
+    fn resolved_models_follows_mapping_semantics() {
         let mut def = definition("claude", Some("claude"), &[]);
-        assert_eq!(def.resolved_models(), None, "缺省回退内置");
-        def.models = Some(vec![]);
-        assert_eq!(def.resolved_models(), None, "空表同缺省");
-        def.models = Some(vec!["sonnet".into()]);
-        assert_eq!(def.resolved_models(), Some(vec!["sonnet".to_string()]));
+        assert_eq!(def.resolved_models(), None, "无映射回退内置");
+        def.models = Some(mapping(
+            &[(ModelSlot::Sonnet, "sonnet-x"), (ModelSlot::Opus, "opus-y")],
+            ModelSlot::Sonnet,
+        ));
+        assert_eq!(
+            def.resolved_models(),
+            Some(vec![
+                "default".to_string(),
+                "opus".to_string(),
+                "sonnet".to_string(),
+            ]),
+            "有映射 = default + 启用档（强弱序，与插入序无关）"
+        );
+    }
+
+    /// （1.1）档位映射不变量：default 必须落在启用档集内；空映射被拒。
+    #[test]
+    fn mapping_rejects_default_outside_enabled_slots() {
+        let err = ModelSlotMapping::new(
+            [(ModelSlot::Sonnet, "s".to_string())].into_iter().collect(),
+            ModelSlot::Haiku,
+        )
+        .expect_err("default 落在停用档必须被拒");
+        assert!(err.contains("haiku"), "错误须点名越界档位：{err}");
+        let err = ModelSlotMapping::new(BTreeMap::new(), ModelSlot::Opus)
+            .expect_err("空映射必须被拒");
+        assert!(err.contains("至少启用"), "{err}");
+    }
+
+    /// （1.1）wire 形状：扁平对象 `{slot: id, default: slot}` 往返；未知档名
+    /// 与缺 default 键被拒。
+    #[test]
+    fn mapping_serializes_as_flat_object_and_rejects_bad_shape() {
+        let m = mapping(
+            &[(ModelSlot::Fable, "f"), (ModelSlot::Haiku, "h")],
+            ModelSlot::Haiku,
+        );
+        let v = serde_json::to_value(&m).unwrap();
+        assert_eq!(v, serde_json::json!({"fable": "f", "haiku": "h", "default": "haiku"}));
+        let back: ModelSlotMapping = serde_json::from_value(v).unwrap();
+        assert_eq!(back, m);
+
+        // 旧裸数组形态在结构化反序列化下被拒（mutation/wire 面）。
+        assert!(serde_json::from_str::<ModelSlotMapping>(r#"["opus","sonnet"]"#).is_err());
+        // 未知档名。
+        let err = serde_json::from_str::<ModelSlotMapping>(r#"{"bogus":"m","default":"bogus"}"#)
+            .expect_err("未知档名必须被拒");
+        assert!(err.to_string().contains("bogus"), "{err}");
+        // 缺 default 键。
+        assert!(serde_json::from_str::<ModelSlotMapping>(r#"{"opus":"m"}"#).is_err());
+        // default 指向未启用档。
+        assert!(
+            serde_json::from_str::<ModelSlotMapping>(r#"{"opus":"m","default":"haiku"}"#).is_err()
+        );
+    }
+
+    /// （1.1）旧 `Vec<String>` 存量值宽容降级为 None（视为未配置，不炸读
+    /// 路径）；写入只写新形状。
+    #[test]
+    fn legacy_vec_value_degrades_to_none_on_read() {
+        let mut row = AgentRow::from_definition("c", &definition("claude", Some("claude"), &[]), "seed");
+        row.models = Some(r#"["opus","sonnet"]"#.to_string());
+        assert_eq!(row.to_definition().models, None, "旧裸数组读为未配置");
+        assert!(row.to_item().get("models").is_none(), "降级后不产 models 键");
+
+        // 新形状写入是对象文本。
+        let mut def = definition("claude", Some("claude"), &[]);
+        def.models = Some(mapping(&[(ModelSlot::Opus, "opus-x")], ModelSlot::Opus));
+        let row = AgentRow::from_definition("c2", &def, "ui");
+        assert_eq!(row.models.as_deref(), Some(r#"{"opus":"opus-x","default":"opus"}"#));
+        assert_eq!(row.to_definition().models, def.models);
+    }
+
+    /// （1.3/D6）models 仅 claude driver 可携带。
+    #[test]
+    fn models_are_claude_only() {
+        let m = mapping(&[(ModelSlot::Opus, "o")], ModelSlot::Opus);
+        assert!(validate_models_for_driver("claude", &Some(m.clone())).is_ok());
+        assert!(validate_models_for_driver("acp", &Some(m.clone())).is_err());
+        assert!(validate_models_for_driver("pi", &Some(m)).is_err());
+        assert!(validate_models_for_driver("acp", &None).is_ok());
     }
 
     /// 存储契约：列清单钉死（列名与根 crate SETTINGS_TABLES 的 DDL 一致）；

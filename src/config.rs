@@ -357,11 +357,12 @@ pub struct AcpClaudeConfig {
     pub startup_timeout_secs: u64,
     #[serde(default = "default_idle_kill")]
     pub idle_kill_secs: u64,
-    /// （workbench-composer-input-polish 2.1）模型别名表覆盖：`None`（键缺
-    /// 省）与空表都回退内置别名表（default/opus/sonnet/haiku）；非空列表
-    /// 整体替换内置表。全名模型 id（如 `sonnet[1m]`）亦可写进来。
-    #[serde(default)]
-    pub models: Option<Vec<String>>,
+    /// （add-claude-model-slots 1.2）claude 模型档位映射：结构化 TOML table
+    /// ——键为档位名（`fable`/`opus`/`sonnet`/`haiku`）+ `default` 键。`None`
+    /// （键缺省）= 未配置（回退内置别名表）。旧裸数组形态（`models = [...]`）
+    /// 在解析期以点名 `models` 键的错误拒绝（不静默容忍）。
+    #[serde(default, deserialize_with = "deserialize_claude_models")]
+    pub models: Option<sebas_models::agent::ModelSlotMapping>,
 }
 
 impl Default for AcpClaudeConfig {
@@ -380,14 +381,39 @@ impl Default for AcpClaudeConfig {
 }
 
 impl AcpClaudeConfig {
-    /// （workbench-composer-input-polish 2.1）本 agent 实例生效的模型别名
-    /// 表，单一归一出处：键缺省（`None`）与显式空表都回退内置——空表没有
-    /// 可选词汇，等效「未覆盖」（任务 2.1「空表回退内置」）。
+    /// （add-claude-model-slots 1.2/D3）本 agent 实例生效的模型词汇，单一
+    /// 归一出处：有映射 → `default` + 启用档（强弱序）；无映射 → 内置别名表。
     pub fn resolved_models(&self) -> Vec<String> {
-        match self.models.as_deref() {
-            Some(list) if !list.is_empty() => list.to_vec(),
-            _ => sebas_acp::claude::builtin_claude_models(),
+        match &self.models {
+            Some(m) => m.resolved_aliases(),
+            None => sebas_acp::claude::builtin_claude_models(),
         }
+    }
+}
+
+/// （add-claude-model-slots 1.2）`[acp.agents.<id>]` 的 `models` 键反序列化：
+/// 只接受结构化映射 table；旧裸数组在解析期以点名 `models` 键的错误拒绝。
+fn deserialize_claude_models<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<sebas_models::agent::ModelSlotMapping>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    let raw = toml::Value::deserialize(deserializer)?;
+    let json = serde_json::to_value(&raw).map_err(D::Error::custom)?;
+    match json {
+        serde_json::Value::Object(_) => serde_json::from_value::<sebas_models::agent::ModelSlotMapping>(json)
+            .map(Some)
+            .map_err(|e| {
+                D::Error::custom(format!(
+                    "`models` 键形态非法：{e}（期望档位名 fable/opus/sonnet/haiku + default 键）"
+                ))
+            }),
+        other => Err(D::Error::custom(format!(
+            "`models` 键期望结构化映射 table（档位名 fable/opus/sonnet/haiku + default 键），\
+             得到 {other}；旧裸数组形态已不再支持"
+        ))),
     }
 }
 

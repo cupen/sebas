@@ -1106,6 +1106,32 @@ listen = "127.0.0.1:{router_port}"
         std::fs::write(&self.config_path, toml + &section).expect("write config");
     }
 
+    /// （add-claude-model-slots 5.1）给沙箱 config 的 `[acp.agents.claude]` 段
+    /// 追加**结构化模型档位映射**（`[acp.agents.claude.models]` 子表）——config
+    /// 种子导入的进程级数据源。`entries` 是 `(档位名, 模型 id)` 对；`default`
+    /// 点名一个启用档。必须在 spawn core 之前调用（种子只在启动时导入一次）。
+    ///
+    /// 旧裸数组形态（`models = [...]`）已被解析器拒绝（add-claude-model-slots
+    /// 1.2），故这里只写新形态。
+    pub fn set_agent_claude_models(&self, entries: &[(&str, &str)], default_slot: &str) {
+        let toml = std::fs::read_to_string(&self.config_path)
+            .unwrap_or_else(|e| panic!("read config {}: {e}", self.config_path.display()));
+        assert!(
+            toml.contains("[acp.agents.claude]"),
+            "sandbox config must carry [acp.agents.claude] before adding a slot mapping"
+        );
+        assert!(
+            !toml.contains("[acp.agents.claude.models]"),
+            "sandbox config already carries a claude slot mapping"
+        );
+        let mut section = String::from("\n[acp.agents.claude.models]\n");
+        for (slot, model) in entries {
+            section.push_str(&format!("{slot} = \"{model}\"\n"));
+        }
+        section.push_str(&format!("default = \"{default_slot}\"\n"));
+        std::fs::write(&self.config_path, toml + &section).expect("write config");
+    }
+
     /// fake-provider-upstream 3.1：spawn 一个**真 `sebas fake-provider` 子进程**
     /// （CARGO_BIN_EXE_sebas + 动词 + 随机端口 + journal 落在 sandbox 内），
     /// 解析 ready 行拿到实际地址；拆卸由 `kill_on_drop` + SandboxDir 的进程组

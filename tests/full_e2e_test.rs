@@ -66,8 +66,10 @@ async fn dispatch_text_drives_bridge_to_finished_emoji() {
         &key,
         &prompt,
         "claude",
+        "claude", // driver tag
         vec![fake.to_str().unwrap().to_string()],
         Some(work_dir_a.path().to_string_lossy().into_owned()),
+        None,
         None,
         None,
     )
@@ -171,6 +173,7 @@ async fn slow_stream_exposes_full_fsm_via_debounced_pump() {
         &key,
         &prompt,
         "claude",
+        "claude", // driver tag
         // 800ms of mid-turn silence: pump startup (two process spawns) +
         // the 150ms debounce tick must both land before the result frame,
         // or the transient 🚧 flush is preempted by Finished.
@@ -180,6 +183,7 @@ async fn slow_stream_exposes_full_fsm_via_debounced_pump() {
             "800".into(),
         ],
         Some(work_dir_b.path().to_string_lossy().into_owned()),
+        None,
         None,
         None,
     )
@@ -270,8 +274,10 @@ async fn second_perm_turn_parks_in_the_engine_read_model() {
         &key,
         &prompt,
         "claude",
+        "claude", // driver tag
         vec![fake.to_str().unwrap().to_string()],
         Some(work.path().to_string_lossy().into_owned()),
+        None,
         None,
         None,
     )

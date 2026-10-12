@@ -61,6 +61,7 @@ import { unsafeHTML } from 'lit/directives/unsafe-html.js'
 import {
   api,
   ROLES,
+  MODEL_SLOTS,
   type About,
   type AdminEvent,
   type AdminService,
@@ -74,6 +75,8 @@ import {
   type ProviderPayload,
   type ProviderModelEntry,
   type ModelCapability,
+  type ModelSlot,
+  type ModelSlotMapping,
   type Role,
   type SkillDetail,
   type SkillEntry,
@@ -82,6 +85,7 @@ import {
   ApiError,
   errorText,
 } from '../api/client.js'
+import { loadModelCatalog } from '../api/model-catalog.js'
 import { icon } from '../components/icons.js'
 import { guardedHide } from '../components/wa-hide-guard.js'
 import { renderMarkdown } from '../components/markdown.js'
@@ -106,6 +110,7 @@ import './settings-aliases.js'
 import '@awesome.me/webawesome/dist/components/dialog/dialog.js'
 import '@awesome.me/webawesome/dist/components/button/button.js'
 import '@awesome.me/webawesome/dist/components/input/input.js'
+import '@awesome.me/webawesome/dist/components/checkbox/checkbox.js'
 import '@awesome.me/webawesome/dist/components/select/select.js'
 import '@awesome.me/webawesome/dist/components/option/option.js'
 
@@ -399,8 +404,20 @@ export class SebasSettingsModal extends LitElement {
      * 存量数组按空格 join）。
      */
     argsText: string
+    /**
+     * （add-claude-model-slots 4.2）claude 形态的模型档位映射草稿：每档的
+     * 目录模型 id（空串 = 该档停用），外加 `defaultSlot` 标记（必须落在启用
+     * 档上）。非 claude 形态不渲染该段、提交时也不携带。
+     */
+    slotValues: Record<ModelSlot, string>
+    defaultSlot: ModelSlot
     error: string
   } | null = null
+  /**
+   * （add-claude-model-slots 4.2）模型目录平铺（provider 模型 + router 别名
+   * 同权，无模式过滤）——档位选择器选项来源；`null` = 尚未加载。
+   */
+  @state() private agentModelCatalog: string[] | null = null
   /** agent 删除二次确认对话框（error 就地承载拒绝文案）。 */
   @state() private agentDelete: { id: string; error: string } | null = null
   /**
@@ -796,6 +813,40 @@ export class SebasSettingsModal extends LitElement {
       gap: var(--sebas-space-3);
       min-width: 0;
       max-width: 420px;
+    }
+    /* （add-claude-model-slots 4.2）模型档位映射段。 */
+    .agent-slot-section {
+      display: flex;
+      flex-direction: column;
+      gap: var(--sebas-space-2);
+      padding: var(--sebas-space-3);
+      border: 1px solid var(--sebas-border);
+      border-radius: var(--sebas-radius-lg);
+    }
+    .agent-slot-title {
+      font-weight: 600;
+      color: var(--sebas-text-dim);
+      font-size: 0.8rem;
+    }
+    .agent-slot-row {
+      display: flex;
+      align-items: center;
+      gap: var(--sebas-space-2);
+    }
+    .agent-slot-row wa-checkbox {
+      flex: 0 0 5rem;
+    }
+    .agent-slot-row wa-select {
+      flex: 1 1 auto;
+      min-width: 0;
+    }
+    .agent-slot-default {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      font-size: 0.78rem;
+      color: var(--sebas-text-dim);
+      white-space: nowrap;
     }
     .readonly-urls {
       padding: var(--sebas-space-2) var(--sebas-space-3);
@@ -2450,12 +2501,12 @@ export class SebasSettingsModal extends LitElement {
     `
   }
   /**
-   * Agents 分区（add-agent-settings-and-session-titles 5.1）：agent 目录
-   * 管理。builtIn `native` 行只读恒在（spec「built-in `native` kernel …
-   * without being stored or deletable」）；其余条目可编辑/删除（删除二次
-   * 确认，且不影响已建会话）；「＋ 新建 agent」打开三形态新建表单（claude /
-   * opencode 预填 / 自定义 ACP argv）。保存后免重启生效——创建会话下拉在
-   * 下次打开/`sebas:refetch` 时即见新目录。
+   * Agents 分区（add-claude-model-slots 4.1/D4）：**统一目录**——一行一
+   * agent，内置 `native` 行、agents 库行（含 config 种子行）与未装的安装配方
+   * 条目同列一张表（独立配方区块消失）。行内显示安装状态徽标（`内置` /
+   * `已安装`+可达性 / `未安装`）：未装配方行给「安装」按钮（沿用 install
+   * API）；已装行给齿轮（打开编辑对话框）与删除（native 不可编辑/删除）。
+   * 保存后免重启生效。
    */
   private renderAgents() {
     const rows = this.agentsCatalog
@@ -2465,6 +2516,13 @@ export class SebasSettingsModal extends LitElement {
     // settings.manage 档（root/admin）；member/viewer 只读浏览，防线在服务
     // 端 403 执法。role 为 null（鉴权关闭宿主）保持既有可用。
     const canWrite = canManageAgents(this.role)
+    // 未装的配方条目（add-claude-model-slots D4）：配方 id 已在 catalog 行里
+    // 呈现（无论是否可达）即不再单列——避免同 id 两行。
+    const catalogIds = new Set(managed.map((a) => a.id))
+    const uninstalledRecipes = INSTALL_RECIPES.filter(
+      (r) => !catalogIds.has(r.name) && !this.recipeInstalled(r.name),
+    )
+    const empty = managed.length === 0 && uninstalledRecipes.length === 0 && builtin
     return html`
       <div class="provider-toolbar">
         <wa-button appearance="outlined" @click=${() => this.loadAgentsCatalog()}>刷新</wa-button>
@@ -2518,7 +2576,7 @@ export class SebasSettingsModal extends LitElement {
                     </div>
                   `
                 : nothing}
-              ${managed.length === 0 && builtin
+              ${empty
                 ? html`<div class="provider-row-empty" data-testid="agents-empty">
                     ${canWrite
                       ? html`目录里还没有其它 agent——用「＋ 新建 agent」添加，或在 config.toml
@@ -2526,69 +2584,54 @@ export class SebasSettingsModal extends LitElement {
                       : html`目录里还没有其它 agent。可在 config.toml 的 [acp.agents.*]
                           里声明（首次启动作为种子导入）；新增需要 admin 以上角色。`}
                   </div>`
-                : managed.map((a) => this.renderAgentRow(a))}
+                : html`
+                    ${managed.map((a) => this.renderAgentRow(a))}
+                    ${uninstalledRecipes.map((r) => this.renderRecipeRow(r, canWrite))}
+                  `}
             </div>
           `}
-      ${this.renderInstallableAgents(canWrite)}
     `
   }
 
-  /**
-   * 「可安装 agent」区（add-agent-auto-install 3.2）：封闭配方清单逐行呈现
-   * 安装状态，未装时给一键「安装」。状态判定复用目录探测口径——该配方 id 在
-   * catalog 里可达（PATH 里的 bin 或已建 store 行指私有 bin）即视为已装，不再
-   * 显示安装按钮；否则显示（仅 canManageAgents 档）。安装走
-   * `api.agentInstall`，成功刷新目录并按 `agent_created` 提示。
-   */
-  private renderInstallableAgents(canWrite: boolean) {
-    // 目录尚未加载（null）时不渲染——状态徽标依赖 catalog，加载中渲染会先
-    // 把已装配方闪成「未安装」。加载失败（[]）仍渲染（未装 → 给安装入口）。
-    if (this.agentsCatalog === null) return nothing
+  /** 配方是否已安装（复用目录探测口径：可达行同 id，或任一可达行的 path 指
+   * sebas 私有安装前缀）。 */
+  private recipeInstalled(recipe: string): boolean {
+    return (this.agentsCatalog ?? []).some(
+      (a) =>
+        a.reachable &&
+        (a.id === recipe || (a.path_raw ?? '').includes(`agent-tools/${recipe}`)),
+    )
+  }
+
+  /** 未装配方行（统一目录里的安装入口，沿用 install API）。 */
+  private renderRecipeRow(r: { name: string; package: string }, canWrite: boolean) {
+    const busy = this.agentsBusy || this.installBusy === r.name
     return html`
-      <div class="provider-toolbar" style="margin-top:1.25rem">
-        <span class="provider-row-name">可安装 agent</span>
-      </div>
-      <div class="provider-list" data-testid="installable-agents">
-        ${INSTALL_RECIPES.map((r) => {
-          // 状态判定复用目录探测口径（spec：探测对象含配方 bin 名与 sebas
-          // 私有安装前缀）：该配方 id 的可达行，或任一带私有前缀 path 的可达行
-          // （store 行登记了别的 id 但 path 指私有 bin）——两者任一即「已安装」。
-          const installed = (this.agentsCatalog ?? []).some(
-            (a) =>
-              a.reachable &&
-              (a.id === r.name ||
-                (a.path_raw ?? '').includes(`agent-tools/${r.name}`)),
-          )
-          const busy = this.agentsBusy || this.installBusy === r.name
-          return html`
-            <div class="provider-row" data-testid="install-recipe" data-recipe=${r.name}>
-              <div class="provider-row-main">
-                <span class="provider-row-name">${r.name}</span>
-                <span class="provider-badge preset">${r.package}</span>
-                <span
-                  class="provider-key ${installed ? 'on' : 'off'}"
-                  data-testid="install-status"
+      <div
+        class="provider-row"
+        data-testid="install-recipe"
+        data-recipe=${r.name}
+        data-id=${r.name}
+      >
+        <div class="provider-row-main">
+          <span class="provider-row-name">${r.name}</span>
+          <span class="provider-badge preset">${r.package}</span>
+          <span class="provider-key off" data-testid="install-status">未安装</span>
+          ${canWrite
+            ? html`<span class="provider-row-actions">
+                <wa-button
+                  size="small"
+                  variant="brand"
+                  appearance="filled"
+                  data-testid="install-button"
+                  ?disabled=${busy}
+                  @click=${() => this.installAgent(r.name)}
                 >
-                  ${installed ? '已安装' : '未安装'}
-                </span>
-                ${!installed && canWrite
-                  ? html`<span class="provider-row-actions">
-                      <wa-button
-                        size="small"
-                        variant="brand"
-                        appearance="filled"
-                        data-testid="install-button"
-                        ?disabled=${busy}
-                        @click=${() => this.installAgent(r.name)}
-                      >
-                        ${this.installBusy === r.name ? '安装中…' : '安装'}
-                      </wa-button>
-                    </span>`
-                  : nothing}
-              </div>
-            </div>
-          `
-        })}
+                  ${this.installBusy === r.name ? '安装中…' : '安装'}
+                </wa-button>
+              </span>`
+            : nothing}
+        </div>
       </div>
     `
   }
@@ -2619,7 +2662,8 @@ export class SebasSettingsModal extends LitElement {
       })
   }
 
-  /** 单个 agent 行：id + 展示名 + 可达性（不可达带 cause）+ 编辑/删除
+  /** 单个 agent 行（统一目录，add-claude-model-slots 4.1/D4）：id + 展示名
+   * + 安装状态徽标（`已安装`，诚实可达性细节）+ 齿轮定制/删除
    * （gate-agent-directory-writes 2.1：行内写按钮仅 agents.manage 档呈现）。 */
   private renderAgentRow(a: AgentKindInfo) {
     return html`
@@ -2629,6 +2673,7 @@ export class SebasSettingsModal extends LitElement {
           ${a.display && a.display !== a.id
             ? html`<span class="provider-badge preset">${a.display}</span>`
             : nothing}
+          <span class="provider-key on" data-testid="install-status">已安装</span>
           <span
             class="provider-key ${a.reachable ? 'on' : 'off'}"
             title=${a.cause ?? ''}
@@ -2640,6 +2685,7 @@ export class SebasSettingsModal extends LitElement {
                 <button
                   class="row-action"
                   title="编辑"
+                  data-testid="agent-gear"
                   ?disabled=${this.agentsBusy}
                   @click=${() => this.openAgentEdit(a)}
                 >
@@ -2675,6 +2721,7 @@ export class SebasSettingsModal extends LitElement {
 
   private openAgentCreate(): void {
     this.agentAction = null
+    void this.loadAgentModelCatalog()
     this.agentForm = {
       mode: 'create',
       id: '',
@@ -2685,8 +2732,27 @@ export class SebasSettingsModal extends LitElement {
       sessionsDir: '',
       workDir: '',
       argsText: '',
+      slotValues: { fable: '', opus: '', sonnet: '', haiku: '' },
+      defaultSlot: 'sonnet',
       error: '',
     }
+  }
+
+  /**
+   * （add-claude-model-slots 4.2）模型目录平铺：provider 模型与 router 别名
+   * 同权、按出现序去重（无 provider 模式过滤）。读取失败 → 空表（表单段
+   * 显示引导文案，允许保存无映射）。
+   */
+  private async loadAgentModelCatalog(): Promise<void> {
+    const { catalog, aliases } = await loadModelCatalog()
+    const out: string[] = []
+    for (const p of catalog?.pairs ?? []) {
+      if (!out.includes(p.model)) out.push(p.model)
+    }
+    for (const a of aliases) {
+      if (!out.includes(a.alias)) out.push(a.alias)
+    }
+    this.agentModelCatalog = out
   }
 
   private openAgentEdit(a: AgentKindInfo): void {
@@ -2703,6 +2769,10 @@ export class SebasSettingsModal extends LitElement {
       : a.driver_raw === 'pi'
         ? (a.path_raw ?? 'pi')
         : 'claude'
+    void this.loadAgentModelCatalog()
+    // （add-claude-model-slots 4.2）存量档位映射预填：catalog 行的 `models`
+    // 原样回填（含 default）；缺省 = 全档停用 + sonnet 默认（合法空映射）。
+    const mapping = a.models
     this.agentForm = {
       mode: 'edit',
       id: a.id,
@@ -2713,14 +2783,127 @@ export class SebasSettingsModal extends LitElement {
       sessionsDir: a.sessions_dir ?? '',
       workDir: a.work_dir ?? '',
       argsText: (a.args ?? []).join(' '),
+      slotValues: {
+        fable: mapping?.fable ?? '',
+        opus: mapping?.opus ?? '',
+        sonnet: mapping?.sonnet ?? '',
+        haiku: mapping?.haiku ?? '',
+      },
+      defaultSlot: mapping?.default ?? 'sonnet',
       error: '',
     }
+  }
+
+  /** 表单是否处于 claude 形态（含「不改」形态的存量 claude 行）。 */
+  private formIsClaude(form: NonNullable<typeof this.agentForm>): boolean {
+    if (form.shape === 'claude') return true
+    if (form.mode === 'edit' && form.shape === '') {
+      return (this.agentsCatalog ?? []).find((x) => x.id === form.id)?.driver_raw === 'claude'
+    }
+    return false
+  }
+
+  /**
+   * （add-claude-model-slots 4.2）模型档位映射段（仅 claude 形态）：四档位
+   * 行（启用 checkbox + 目录模型选择器 + default radio）。选择器选项 =
+   * `loadModelCatalog` 平铺（provider 模型 + router 别名同权，无模式过滤）；
+   * 目录空时显示引导文案（去 Settings → Models 配 provider），允许保存无
+   * 映射状态。非 claude 形态不渲染该段（spec「model slot section renders
+   * per shape」）。
+   */
+  private renderSlotMappingSection(form: NonNullable<typeof this.agentForm>) {
+    if (!this.formIsClaude(form)) return nothing
+    const catalog = this.agentModelCatalog
+    const empty = catalog !== null && catalog.length === 0
+    return html`
+      <div class="agent-slot-section" data-testid="agent-form-slots">
+        <div class="agent-slot-title">模型档位（可选）</div>
+        ${empty
+          ? html`<p class="prefs-placeholder" data-testid="agent-slots-empty">
+              尚未配置 provider 模型——到「设置 → 模型」添加 provider 后可选档位；留空 = 不注入任何模型 env。
+            </p>`
+          : nothing}
+        ${MODEL_SLOTS.map((slot) => {
+          const value = form.slotValues[slot] ?? ''
+          const enabled = value.trim() !== ''
+          return html`
+            <div class="agent-slot-row" data-testid="agent-slot-row" data-slot=${slot}>
+              <wa-checkbox
+                data-testid="agent-slot-enabled"
+                ?checked=${enabled}
+                @change=${(ev: Event) => {
+                  const on = (ev.target as HTMLInputElement).checked
+                  this.agentForm = {
+                    ...form,
+                    slotValues: { ...form.slotValues, [slot]: on ? (value || catalog?.[0] || '') : '' },
+                  }
+                }}
+              >
+                ${slot}
+              </wa-checkbox>
+              <wa-select
+                data-testid="agent-slot-model"
+                aria-label="${slot} 模型"
+                value=${value}
+                hoist
+                ?disabled=${!enabled}
+                @change=${(ev: Event) => {
+                  const v = (ev.target as HTMLSelectElement).value
+                  this.agentForm = {
+                    ...form,
+                    slotValues: { ...form.slotValues, [slot]: v },
+                  }
+                }}
+              >
+                <wa-option value="">（未选）</wa-option>
+                ${(() => {
+                  // 目录平铺 + 存量值兜底（存量 id 可能已不在目录里——不得
+                  // 让回填丢失）。
+                  const opts = [...(catalog ?? [])]
+                  if (value && !opts.includes(value)) opts.unshift(value)
+                  return opts.map((m) => html`<wa-option value=${m}>${m}</wa-option>`)
+                })()}
+              </wa-select>
+              <label class="agent-slot-default" title="默认档（ANTHROPIC_MODEL）">
+                <input
+                  type="radio"
+                  name="agent-slot-default"
+                  data-testid="agent-slot-default"
+                  value=${slot}
+                  ?disabled=${!enabled}
+                  ?checked=${form.defaultSlot === slot}
+                  @change=${() => (this.agentForm = { ...form, defaultSlot: slot })}
+                />
+                默认
+              </label>
+            </div>
+          `
+        })}
+      </div>
+    `
   }
 
   /** 启动参数输入 → argv 数组（空格分隔词元；空白 = null = 清除/缺省）。 */
   private parseArgsText(text: string): string[] | null {
     const argv = text.trim().split(/\s+/).filter((s) => s.length > 0)
     return argv.length > 0 ? argv : null
+  }
+
+  /**
+   * （add-claude-model-slots 4.2）表单档位草稿 → wire 映射：启用档 = 选择器
+   * 非空的档；全空 = `null`（未配置，清除存量）。`default` 必须落在启用档
+   * 上——表单 radio 只在启用档间可选；若草稿不一致（如默认档被停用），回退
+   * 到最弱启用档，保证提交恒为合法映射。
+   */
+  private buildSlotMapping(
+    form: NonNullable<typeof this.agentForm>,
+  ): ModelSlotMapping | null {
+    const enabled = MODEL_SLOTS.filter((s) => (form.slotValues[s] ?? '').trim() !== '')
+    if (enabled.length === 0) return null
+    const defaultSlot = enabled.includes(form.defaultSlot) ? form.defaultSlot : enabled[enabled.length - 1]!
+    const mapping: ModelSlotMapping = { default: defaultSlot }
+    for (const s of enabled) mapping[s] = form.slotValues[s]!.trim()
+    return mapping
   }
 
   /** 表单形态 → 提交载荷（create 全量 launch 定义；edit 只交改动面——
@@ -2735,11 +2918,13 @@ export class SebasSettingsModal extends LitElement {
       // 不改 launch 定义形态：display + spawn 目录/参数改动面（spec「编辑
       // 表单以存储值预填全部字段」的可写半边）。sessions_dir 是 claude 与
       // pi 形态的合法 launch 键——review P3：不改形态臂此前静默丢弃它。
+      // （add-claude-model-slots 4.2）claude 行还携带档位映射改动面。
       const driverRaw = (this.agentsCatalog ?? []).find((x) => x.id === form.id)?.driver_raw
       const carriesSessionsDir = driverRaw === 'claude' || driverRaw === 'pi'
-      return carriesSessionsDir
+      const base = carriesSessionsDir
         ? { display, work_dir: workDir, sessions_dir: sessionsDir, args }
         : { display, work_dir: workDir, args }
+      return driverRaw === 'claude' ? { ...base, models: this.buildSlotMapping(form) } : base
     }
     if (form.shape === 'claude') {
       return {
@@ -2749,6 +2934,7 @@ export class SebasSettingsModal extends LitElement {
         display,
         work_dir: workDir,
         sessions_dir: sessionsDir,
+        models: this.buildSlotMapping(form),
       }
     }
     if (form.shape === 'pi') {
@@ -3052,6 +3238,7 @@ export class SebasSettingsModal extends LitElement {
                       argsText: (ev.target as HTMLInputElement).value,
                     })}
                 ></wa-input>
+                ${this.renderSlotMappingSection(form)}
                 ${this.duplicateAgentWarning(form)
                   ? html`<div
                       class="callout callout-warning"

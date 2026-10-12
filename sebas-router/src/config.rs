@@ -218,10 +218,12 @@ pub struct ProviderConfig {
     pub model_map: HashMap<String, String>,
     /// 按从强到弱排列的模型**条目**列表（手写或 preset 物化；条目 = id +
     /// 能力标记，见 `crate::models::ModelEntry`）。`[n]` 后缀（如 `[1m]`）
-    /// 既是模型名一部分，也表示上下文长度。见 `crate::models::map_to_env`。
-    /// `models` 顺序 = 强→弱，用于 Claude Code
-    /// 4 个 MODEL 环境变量（OPUS/SONNET/HAIKU）的赋值；与 `model_map`
-    /// 不重复，前者定 model 列表的强弱档位，后者定上游 id 重命名。
+    /// 既是模型名一部分，也表示上下文长度。`models` 顺序 = 强→弱，作为
+    /// 目录/探测元数据（首条即默认模型）；与 `model_map` 不重复，前者定
+    /// model 列表的强弱档位，后者定上游 id 重命名。
+    ///
+    /// （add-claude-model-slots 2.1）provider 模型清单**不再**派生子进程
+    /// 模型 env——spawn 模型 env 的唯一来源是 claude agent 的档位映射。
     ///
     /// 兼容读取：遗留的裸字符串条目反序列化为仅隐含 `text` 的条目，写入
     /// 一律是条目对象（redesign-provider-models-settings task 1.1）。
@@ -237,12 +239,6 @@ impl ProviderConfig {
             WireProtocol::OpenAiChat => self.base_url_openai_chat.as_deref(),
             WireProtocol::OpenAiResponses => self.base_url_openai_responses.as_deref(),
         }
-    }
-
-    /// 把本 provider 手写的 `models`（从强到弱）映射成 Claude Code 的 4 个
-    /// MODEL 环境变量。`models` 为空 → 全 `None`（调用方跳过注入，用系统默认）。
-    pub fn model_env(&self) -> crate::models::ClaudeModelEnv {
-        crate::models::map_to_env(&self.models)
     }
 
     /// 解析某个模型的静态能力（上下文 / 输出上限）。`[n]` 后缀自动覆盖上下文。
@@ -1604,7 +1600,7 @@ auth_token = "sk-test"
     }
 
     #[test]
-    fn provider_models_map_to_env_and_caps() {
+    fn provider_models_metadata_and_caps() {
         let _g = LOCK.lock().unwrap();
         unsafe {
             std::env::remove_var("SEBAS_ROUTER_LISTEN");
@@ -1626,12 +1622,8 @@ models = ["deepseek-v4-pro[1m]", "deepseek-v4-flash"]
         assert!(ds.models.iter().all(|m| m.tags.is_empty()));
         // 最强 = 默认 = 首条条目的 id（task 1.3「首条即默认」）。
         assert_eq!(ds.default_model(), Some("deepseek-v4-pro[1m]"));
-        // env 映射：MODEL=OPUS=最强、SONNET=次强、HAIKU=最弱（按条目 id 解析）。
-        let env = ds.model_env();
-        assert_eq!(env.model.as_deref(), Some("deepseek-v4-pro[1m]"));
-        assert_eq!(env.opus.as_deref(), Some("deepseek-v4-pro[1m]"));
-        assert_eq!(env.sonnet.as_deref(), Some("deepseek-v4-flash"));
-        assert_eq!(env.haiku.as_deref(), Some("deepseek-v4-flash"));
+        // （add-claude-model-slots 2.1）provider 模型清单不再派生模型 env
+        // ——模型 env 的唯一来源是 claude agent 的档位映射。
         // 能力：无名 model 的 [1m] 后缀推导上下文，flash 查静态注册表
         let pro = ds.model_caps("deepseek-v4-pro[1m]");
         assert_eq!(pro.context_window, Some(1_000_000));
