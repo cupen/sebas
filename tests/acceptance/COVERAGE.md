@@ -59,7 +59,7 @@ system-dir 三条）。
 | 核心簇 | requirement 数（计分分母） | 命中 | 命中率 | 豁免 | 套件内旅程 |
 |---|---|---|---|---|---|
 | ① 会话管理 | 18 | 18 | 100% | 0 | `session_lifecycle_journey`、`zero_output_turn_notice_journey` |
-| ② models 管理 | 22 | 22 | 100% | 1 | `provider_governance_journey`、`native_agent_turn_via_router_journey` |
+| ② models 管理 | 22 | 22 | 100% | 1 | `provider_governance_journey`、`builtin_pi_slot_completes_a_turn_journey` |
 | ③ agent workbench 相关 | 55 | 55 | 100% | 0 | `workbench_aggregate_journey`、`projects_session_journey`、`creation_dialog_journey` |
 | ④ 项目管理 | 21 | 21 | 100% | 0 | `projects_session_journey`；browser `projects.spec.ts`、`deployment.spec.ts`（降级注册） |
 | ⑤ 通道与监督 | 33 | 33 | 100% | 0 | E: `no_secret_assembly_end_to_end`、`secret_rotation_self_heal_across_core_restart`、`watchdog_supervised_core_recovery` |
@@ -176,7 +176,7 @@ CLI、真实模型跑分、watchdog spawn-fail 进程级注入等）不变。
 | | composer 只承诺进程能力 | ✅ | sebas-webui `agent_kinds_test`；J: workbench（agent-kinds）|
 | | 会话来源可见 | ✅ | sebas-webui 内联测试 |
 | | 项目视图真实工作副本上下文 | ✅ | browser `projects.spec.ts` 1.2（rail-declutter-unread D8 改写：分支探测链路 + 30s TTL 过期后 API 刷新仍断言；rail 不再显示分支名，可达性标记仍由探测驱动）|
-| | 原生内核会话执行 | ✅ | J: `native_agent_turn_via_router_journey`（E 级）|
+| | 原生内核会话执行 | ✅ | J: `builtin_pi_slot_completes_a_turn_journey`（E 级；make-pi-the-builtin-agent 5.3 后内置槽位改跑 pi driver——`agent: "native"` 的会话经 fake pi 桩完成回合，web 形态 key）|
 | | 原生内核 gated call 审批 | ✅ | src `core_channel/tests.rs`（审批往返/fail-closed）|
 | | 目录浏览器加项目 | ✅ | sebas-webui `api_endpoints_test`（browse-dirs）|
 | | 无 prompt 新会话（interaction-polish 修订：创建收拢进项目行「+」对话框）| ✅ | J: `workbench_aggregate_journey`（占位会话）、`creation_dialog_journey`（对话框确认 wire 面：agent+mode 落表、确认即激活、首条消息 spawn、未知 agent 4xx）；前端 `project-rail.test.ts`（+ 打开对话框/确认创建/失败留盒/取消不创建）、`new-session-dialog.test.ts`（agent 必选禁用/预选/目录两级/诚实降级）；browser `first-paint.spec.ts`、`session-roundtrip.spec.ts`（对话框旅程）|
@@ -645,7 +645,7 @@ requirement 级残留：**0 条**（五簇复核 2026-09-11 收口）。本期�
 
 ## 实施期发现（只记录不顺手修，见 design Non-goals）
 
-1. **native 会话状态卡在 Queued**：native 回合完成（turn summary 已写、模型调用已完成），但 `src/native_router_bridge.rs` 从不设置 phase=DONE，workbench 状态恒为 "Queued"（models.rs derive：active+"" → Queued）。建议立项修复后，`native_agent_turn_via_router_journey` 的断言可升级为 status_slug=done。
+1. **native 会话状态卡在 Queued**：native 回合完成（turn summary 已写、模型调用已完成），但 `src/native_router_bridge.rs` 从不设置 phase=DONE，workbench 状态恒为 "Queued"（models.rs derive：active+"" → Queued）。建议立项修复后，native 回合旅程的断言可升级为 status_slug=done。（make-pi-the-builtin-agent 后内置槽位改跑 pi driver，workbench 相位由 pi 回合帧推进；旧内核路径仅留 legacy `agent-*` resume。）
 2. **（unify-router-process-shape 后已消解）~~`run --router` 忽略 `SEBAS_ROUTER_LISTEN`~~**：内嵌形态删除，router 只以独立进程运行（`[router] listen` 是唯一地址来源，进程级可预注入 `SEBAS_AGENT_ROUTER_URL`）。native 仍走 `SEBAS_AGENT_PROVIDER_BASE_URL` 直连路径（本套件已覆盖）。
 3. **（persist-session-map 后已消解）~~会话状态落盘仅在优雅退出~~**：硬杀丢映射的根因是「持久化只发生在关停快照」；映射改为**按变更落库**（projects.db）后，非优雅退出不再丢已提交映射——E `sigkill_committed_session_map_survives_restart` 钉住（杀后库中行完整 + 重启恢复）；Windows 无便携优雅信号不再是恢复正确性的前提。
 4. **路由状态已入 SQLite**：`[router] state_file`（sessions.json）不再是重启恢复的活性来源，state store DB（sebas.db）承担持久化——矩阵断言已按此更新。

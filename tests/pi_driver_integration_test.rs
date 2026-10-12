@@ -196,8 +196,10 @@ async fn pi_spawn_never_writes_into_pi_home() {
     )
     .await
     .expect("prompt accepted");
-    while let AcpEvent::Finished { .. } = recv(&rx).await {
-        break;
+    // 读一个事件推进回合（`while let … { break }` 等价于只读一次；改 `if let`
+    // 避免 clippy::never_loop——语义不变）。
+    if let AcpEvent::Finished { .. } = recv(&rx).await {
+        // 回合可能极快地一次性收尾；不等待更多事件。
     }
     mgr.kill(&sid).await;
 

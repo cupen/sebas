@@ -21,6 +21,26 @@ const TURN: Duration = Duration::from_secs(30);
 
 const STARTUP: Duration = Duration::from_secs(30);
 
+/// （make-pi-the-builtin-agent 5.3）fake pi 桩：握手三连 + 一轮剧本回合
+/// （POSIX sh，讲 JSONL RPC）。protocol 形状与 `sebas_acp::PiDriver` 的解析器
+/// 一致（多余字段忽略）。模块级常量（fn 内嵌裸串会打乱 rustfmt 的解析）。
+const FAKE_PI_ACCEPTANCE: &str = r#"#!/bin/sh
+rid() { printf '%s' "$1" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p'; }
+while IFS= read -r line; do
+  id=$(rid "$line")
+  case "$line" in
+    *'"type":"get_state"'*) printf '{"id":"%s","type":"response","command":"get_state","success":true,"data":{"sessionId":"pi-acc","model":{"id":"m-1","provider":"anthropic"}}}\n' "$id" ;;
+    *'"type":"get_available_models"'*) printf '{"id":"%s","type":"response","command":"get_available_models","success":true,"data":{"models":[{"id":"m-1","provider":"anthropic"}]}}\n' "$id" ;;
+    *'"type":"get_commands"'*) printf '{"id":"%s","type":"response","command":"get_commands","success":true,"data":{"commands":[]}}\n' "$id" ;;
+    *'"type":"prompt"'*)
+      printf '{"id":"%s","type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}\n' "$id"
+      printf '{"type":"message_update","usage":{"input":1,"output":1},"assistantMessageEvent":{"type":"text_delta","delta":"pi says hello"}}\n'
+      printf '{"type":"agent_end","messages":[],"willRetry":false}\n'
+      printf '{"type":"agent_settled","aborted":false}\n' ;;
+  esac
+done
+"#;
+
 /// 建会话（`body` 里不用自带 project_id：会话必须从属于项目，这里统一注入
 /// 沙箱场景项目）。
 async fn create_session(cli: &reqwest::Client, sb: &Sandbox, body: serde_json::Value) -> String {
@@ -552,28 +572,35 @@ async fn provider_governance_journey() {
     assert_eq!(stats.status().as_u16(), 200, "admin stats must serve");
 }
 
-/// Native-kernel journey (spike 1.2): `SEBAS_AGENT_PROVIDER_BASE_URL` pointed
-/// at a local stub provider; an `agent: "native"` spawn completes a full
-/// turn with no real credentials. (The `SEBAS_AGENT_ROUTER_URL` variant is
-/// the watchdog's production wiring — 走独立 router 进程与 core 状态库里的
-/// provider 数据，由 e2e 的 core_owned_provider_reaches_router_without_restart
-/// 进程级覆盖；本旅程只钉 native 直连 provider 面。see COVERAGE.md notes.)
+/// Built-in-slot (native/PI) journey（make-pi-the-builtin-agent 5.3）：
+/// `agent: "native"` 的会话现在跑 **pi driver**（`pi --mode rpc` 子进程），
+/// 不再是自研内核。本旅程用 fake pi 桩（POSIX sh 脚本，讲握手 + 一轮回合）
+/// 经 `[acp.agents.pi]` seed 接线——零真实凭据、零 Node/pi 依赖，确定性复现。
+/// 断言：native 槽位的会话 key 为 web 形态、pi 回合产出其正文与自广告模型面。
+/// （legacy 内核 `agent-*` 会话的 resume 路径由 e2e / feishu 套件覆盖；本
+/// 套件不再直连内核 provider。）
+#[cfg(unix)]
 #[tokio::test]
 #[ignore = "acceptance journey; run with -- --ignored or invoke testsuite-acceptance"]
-async fn native_agent_turn_via_router_journey() {
-    let sb = Sandbox::new("acceptance", "native");
+async fn builtin_pi_slot_completes_a_turn_journey() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let sb = Sandbox::new("acceptance", "builtin-pi");
     let cli = http_client();
 
-    let asked_model: Arc<tokio::sync::Mutex<Option<String>>> = Arc::default();
-    let stub = spawn_stub_upstream(asked_model.clone()).await;
+    // fake pi 桩 + `[acp.agents.pi]` seed（内置槽位的 launch 配置来源）。
+    let pi_script = sb.path.join("fake-pi.sh");
+    std::fs::write(&pi_script, FAKE_PI_ACCEPTANCE).expect("write fake pi");
+    std::fs::set_permissions(&pi_script, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod fake pi");
+    let pi_sessions = sb.path.join("pi-sessions");
+    std::fs::create_dir_all(&pi_sessions).expect("mkdir pi-sessions");
+    sb.set_agent_pi(
+        &support::forward_slash(&pi_script),
+        &support::forward_slash(&pi_sessions),
+    );
 
-    let base_url = format!("http://127.0.0.1:{stub}");
-    let (mut core, dashboard) = sb.spawn_core_inprocess_webui(&[
-        ("SEBAS_AGENT_PROVIDER_BASE_URL", base_url.as_str()),
-        ("SEBAS_AGENT_PROVIDER_API_KEY", "sk-stub"),
-        ("SEBAS_AGENT_MODEL", "stub-model"),
-        ("SEBAS_AGENT_MODELS", "stub-model"),
-    ]);
+    let (mut core, dashboard) = sb.spawn_core_inprocess_webui(&[]);
     let dashboard_url = format!("http://127.0.0.1:{dashboard}");
     let hint = sb.path.clone();
     let health_cli = cli.clone();
@@ -595,10 +622,8 @@ async fn native_agent_turn_via_router_journey() {
     })
     .await;
 
-    let create_url = format!("{dashboard_url}/api/sessions");
-    // 会话必须从属于项目：先注册沙箱场景项目并带上。本用例的 webui 是
-    // **进程内**（core --webui，端口与 $sb.webui_url() 不同），故注册走
-    // dashboard_url；workspace root 已钉在沙箱目录，注册必定界内。
+    // 会话必须从属于项目：先注册沙箱场景项目并带上（进程内 webui 的端口与
+    // `$sb.webui_url()` 不同，注册走 dashboard_url）。
     let (pstatus, pbody) = post_json(
         &cli,
         &format!("{dashboard_url}/api/projects"),
@@ -608,9 +633,10 @@ async fn native_agent_turn_via_router_journey() {
     .expect("register scene project");
     assert_eq!(pstatus, 201, "register scene project: {pbody}");
     let project_id = pbody["id"].as_str().expect("project id").to_string();
+
     let (status, resp) = post_json(
         &cli,
-        &create_url,
+        &format!("{dashboard_url}/api/sessions"),
         serde_json::json!({
             "prompt": "hello",
             "agent": "native",
@@ -618,17 +644,17 @@ async fn native_agent_turn_via_router_journey() {
         }),
     )
     .await
-    .expect("create native session");
+    .expect("create native(PI) session");
     assert_eq!(status, 201, "native spawn must not be rejected: {resp}");
     let key = resp["key"].as_str().expect("session key").to_string();
+    assert!(
+        key.starts_with("web") && !key.contains("agent-"),
+        "the native slot runs on pi under a web-form key: {key}"
+    );
 
     let url = format!("{dashboard_url}/api/sessions/{key}");
-    // NOTE: a native turn ends with a "turn summary" element, but the native
-    // bridge never sets phase=DONE, so the workbench status stays "Queued"
-    // (product finding, see COVERAGE.md). The journey asserts the turn itself
-    // completed: summary artifact + the stub was dialed with the configured
-    // model.
-    let detail = wait_for("native turn to complete", TURN, &hint, move || {
+    // pi 回合完成：fake pi 的正文出现，且模式面来自其 get_available_models。
+    let detail = wait_for("the pi turn to complete", TURN, &hint, move || {
         let cli = cli.clone();
         let url = url.clone();
         Box::pin(async move {
@@ -646,19 +672,16 @@ async fn native_agent_turn_via_router_journey() {
                     .collect::<Vec<_>>()
                     .join("")
             })?;
-            body_text.contains("turn summary").then_some(v)
+            body_text.contains("pi says hello").then_some(v)
         })
     })
     .await;
-    assert_eq!(
-        detail["current_model"].as_str(),
-        Some("stub-model"),
-        "native session must carry the configured model: {detail}"
-    );
-    assert_eq!(
-        asked_model.lock().await.clone().as_deref(),
-        Some("stub-model"),
-        "native agent must have dialed the stub with the configured model"
+    assert!(
+        detail["available_models"]
+            .as_array()
+            .map(|m| m.iter().any(|x| x.as_str() == Some("anthropic/m-1")))
+            .unwrap_or(false),
+        "the model surface comes from pi's get_available_models: {detail}"
     );
 
     let _ = &mut core;
