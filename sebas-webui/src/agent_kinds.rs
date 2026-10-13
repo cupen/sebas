@@ -135,6 +135,13 @@ pub async fn discover_agent(source: &AgentKindSource) -> AgentKindInfo {
 /// / `invalid`（exit 0/1/2）。非 pi 驱动恒 `None`（不引入无关探测）。命令不
 /// 存在或探测失败也返回 `None`——二进制在场已由 version 探测证明，auth 只是
 /// 补充说明，不把探测失败升级为不可达。
+///
+/// （make-pi-ride-sebas-provider 3.3，design D8）**补 `--provider`/`--model`**：
+/// pi 1.1.0 的 `pi auth check` 不带二者必报错（stdout 出现
+/// `Error: Auth checks require --provider <provider> or --model <model>`），
+/// 旧代码把整行当 status 塞进 cause，落成半截「pi auth check: 」文案。补齐后
+/// 正常返回三态之一；不再需要「任何非三态行 → 兜底」分支。cause 净化（去 env
+/// 变量名）保留——操作者可见文案不得含实现标识。
 async fn pi_auth_cause(driver: &str, exe: &str) -> Option<String> {
     if driver != "pi" {
         return None;
@@ -142,7 +149,16 @@ async fn pi_auth_cause(driver: &str, exe: &str) -> Option<String> {
     let out = output_with_etxtbsy_retry(|| {
         let mut cmd =
             tokio::process::Command::new(resolved_binary(exe).unwrap_or_else(|| exe.into()));
-        cmd.args(["auth", "check"]);
+        // （D8）pi auth check 需要 provider 或 model 其一：pi 的内置 provider
+        // 名固定为 anthropic，model 取 pi 内置默认档。
+        cmd.args([
+            "auth",
+            "check",
+            "--provider",
+            PI_AUTH_PROBE_PROVIDER,
+            "--model",
+            PI_AUTH_PROBE_MODEL,
+        ]);
         cmd
     })
     .await
@@ -152,7 +168,35 @@ async fn pi_auth_cause(driver: &str, exe: &str) -> Option<String> {
         "ready" => None,
         "not_ready" => Some("pi 已安装但未登录（运行 `pi` 完成 provider 登录）".to_string()),
         "invalid" => Some("pi 凭据无效（`pi auth check` 报 invalid）".to_string()),
-        other => Some(format!("pi auth check: {other}")),
+        // 补齐参数后 pi 必返三态之一；此处仅防「二进制在场但应答异常」的
+        // 极端情形——如实呈现且经 env 名净化（不泄漏实现标识）。
+        other => Some(sanitize_pi_auth_cause(other)),
+    }
+}
+
+/// pi auth 探测用的内置 provider 名（pi 内置 anthropic provider）。
+const PI_AUTH_PROBE_PROVIDER: &str = "anthropic";
+/// pi auth 探测用的内置模型档（pi 内置默认 claude 模型）。
+const PI_AUTH_PROBE_MODEL: &str = "claude-opus-4-8";
+
+/// 净化 pi auth 探测的异常应答：去掉 env 变量名等实现标识（spec「unavailable
+/// cause speaks operator language」），空串回落为一句可读说明。
+fn sanitize_pi_auth_cause(raw: &str) -> String {
+    // 逐词剔除含 env 变量名形态的 token（大写+下划线、≥3 字符，含下划线）。
+    let cleaned: Vec<&str> = raw
+        .split_whitespace()
+        .filter(|tok| {
+            let bare = tok.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+            !(bare.len() >= 3
+                && bare.contains('_')
+                && bare.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))
+        })
+        .collect();
+    let joined = cleaned.join(" ");
+    if joined.trim().is_empty() {
+        "pi 凭据状态异常（`pi auth check` 应答不可读）".to_string()
+    } else {
+        joined
     }
 }
 
@@ -429,12 +473,24 @@ mod tests {
     /// pi 驱动的凭据补充信号（add-pi-driver 3.3）：二进制在场的 pi 会把
     /// `pi auth check` 的非 ready 状态作为 cause 呈现（reachable 仍 true）；
     /// 非 pi 驱动不触发该探测。
+    ///
+    /// （make-pi-ride-sebas-provider 3.3）补 `--provider`/`--model` 后三态
+    /// 齐全——桩据此断言参数确实带上（缺参数时 pi 必报错）。
     #[tokio::test]
     async fn pi_driver_surfaces_auth_check_status() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("fake-pi");
-        std::fs::write(&script, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 1.1.0; exit 0; fi\nif [ \"$1\" = \"auth\" ]; then echo not_ready; exit 1; fi\n").unwrap();
+        // 桩记录 argv（写进同级文件），据此断言 --provider/--model 在场。
+        let argv_log = dir.path().join("argv.log");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho \"$@\" >> {log}\nif [ \"$1\" = \"--version\" ]; then echo 1.1.0; exit 0; fi\nif [ \"$1\" = \"auth\" ]; then echo not_ready; exit 1; fi\n",
+                log = argv_log.display()
+            ),
+        )
+        .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let mut src = source("pi", &[script.to_str().unwrap()]);
         src.driver = "pi".to_string();
@@ -444,11 +500,56 @@ mod tests {
             info.cause.as_deref().is_some_and(|c| c.contains("未登录")),
             "not_ready 应作为 cause 呈现: {info:?}"
         );
+        // 参数断言：auth check 调用必须带 --provider anthropic --model <id>。
+        let argv = std::fs::read_to_string(&argv_log).unwrap_or_default();
+        assert!(
+            argv.contains("--provider") && argv.contains("anthropic"),
+            "auth check 必须带 --provider: {argv}"
+        );
+        assert!(
+            argv.contains("--model"),
+            "auth check 必须带 --model: {argv}"
+        );
 
         // 非 pi 驱动不吃该探测（即便二进制同名脚本）。
         let mut other = source("other", &[script.to_str().unwrap()]);
         other.driver = "claude".to_string();
         assert!(discover_agent(&other).await.cause.is_none());
+    }
+
+    /// （make-pi-ride-sebas-provider 3.3）三态齐全：ready → None；invalid →
+    /// 可读 cause；异常应答 → 经 env 名净化、不泄漏实现标识。
+    #[tokio::test]
+    async fn pi_auth_cause_covers_three_states_and_sanitizes() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let make = |name: &str, body: &str| {
+            let p = dir.path().join(name);
+            std::fs::write(&p, body).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            p.to_str().unwrap().to_string()
+        };
+
+        // ready → 无 cause。
+        let ready = make("ready-pi", "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 1.1.0; exit 0; fi\necho ready\n");
+        assert!(pi_auth_cause("pi", &ready).await.is_none(), "ready → None");
+
+        // invalid → 可读 cause。
+        let invalid = make("invalid-pi", "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 1.1.0; exit 0; fi\necho invalid\n");
+        let cause = pi_auth_cause("pi", &invalid).await.expect("invalid → cause");
+        assert!(cause.contains("无效"), "invalid cause: {cause}");
+
+        // 异常应答带 env 变量名 → 净化剔除，不泄漏实现标识。
+        let weird = make(
+            "weird-pi",
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 1.1.0; exit 0; fi\necho 'SEBAS_AGENT_PROVIDER_API_KEY missing'\n",
+        );
+        let cause = pi_auth_cause("pi", &weird).await.expect("weird → cause");
+        assert!(
+            !cause.contains("SEBAS_AGENT_PROVIDER_API_KEY"),
+            "env 变量名必须被净化: {cause}"
+        );
+        assert!(cause.contains("missing"), "可读部分保留: {cause}");
     }
 
     /// store 快照条目 → 探测源：claude 缺 path 回退内置 `claude`；acp 组装

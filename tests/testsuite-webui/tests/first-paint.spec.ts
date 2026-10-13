@@ -81,19 +81,22 @@ test.describe('工作台首屏', () => {
 
       await rail.openNewSessionDialog(projectName)
 
-      // （make-pi-the-builtin-agent 5.2）内置槽位执行体已从自研内核改指 pi
-      // （display `PI`）；不可用的真实条件变为「pi 未安装」——沙箱 PATH 上无
-      // pi，故置灰并标注安装指引（不再提 core env 变量）。
+      // （make-pi-the-builtin-agent 5.2；make-pi-ride-sebas-provider 3.1 修订）
+      // 内置槽位执行体已从自研内核改指 pi（display `PI`）；沙箱 PATH 上无 pi
+      // → 置灰并按**服务端 cause** 标注安装指引（不再有「未安装 pi」硬编码，
+      // 文案按 cause 归类渲染）。
       const nativeOption = rail
         .newSessionDialog()
         .locator('wa-option[value="native"]')
       await expect(nativeOption).toBeDisabled()
       // 展示名走 catalog 的 display（native = "PI"）。
       await expect(nativeOption).toContainText('PI')
-      // spec「unavailable cause speaks operator language」：指引指向安装面，
-      // 且不含环境变量标识（SEBAS_AGENT_PROVIDER_API_KEY 维度已从内置槽位消失）。
-      await expect(nativeOption).toContainText('未安装 pi')
+      // spec `webui`「Agent-select dropdown unavailable label reflects the
+      // catalog cause」：可见文案按 cause 归类到补救入口（安装面），且不含
+      // 环境变量标识。**不再**断言固定字面量「未安装 pi」——服务端 cause 是
+      // 唯一事实源（pi 在场而 provider 未配时文案会指 Settings → Models）。
       await expect(nativeOption).toContainText('设置 → Agent')
+      await expect(nativeOption).not.toContainText('未配 provider')
       await expect(nativeOption).not.toContainText('SEBAS_AGENT_PROVIDER_API_KEY')
       await expect(nativeOption).not.toContainText('SEBAS_AGENT_ROUTER_URL')
 

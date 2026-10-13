@@ -392,7 +392,7 @@ async fn handle_connection(
             CoreChannelRequest::StateSubscribe => {
                 // State subscription: persistent stream — full snapshot first,
                 // then merged change notifications (4.2).
-                return serve_state_subscription(router, writer).await;
+                return serve_state_subscription(router, backend, writer).await;
             }
             other => {
                 let resp = dispatch(
@@ -662,7 +662,16 @@ async fn write_frame(writer: &mut WriteHalf, frame: &SessionStreamFrame) -> Resu
 
 /// 取单个域的快照 payload。与 `CoreChannelResponse::StateSnapshot` 共用，
 /// 也供状态订阅流的全域快照复用。
-async fn snapshot_domain(router: &DispatchHandle, domain: &str) -> serde_json::Value {
+///
+/// `backend` 只为 `agents` 域而传：该域的载荷除 agents 注册表外，还带
+/// `execution_bodies`（逐体可达性，make-pi-ride-sebas-provider 2.2）——
+/// detached 拓扑下独立 webui 靠它拿到 native 行的真值，而非 trait 默认
+/// `None`。
+async fn snapshot_domain(
+    router: &DispatchHandle,
+    backend: &Arc<dyn SessionBackend>,
+    domain: &str,
+) -> serde_json::Value {
     // preset 表是只读代码数据（1.3），不依赖 state store——无论引擎是否
     // 初始化都可读。
     if domain == "presets" {
@@ -695,12 +704,39 @@ async fn snapshot_domain(router: &DispatchHandle, domain: &str) -> serde_json::V
             Ok(projects) => serde_json::json!({ "projects": projects }),
             Err(e) => serde_json::json!({"error": e}),
         },
-        "agents" => match engine.load_agents().await {
-            // 快照形状（活跃行 + 墓碑 id 清单）由 AgentRow::snapshot_value
-            // 统一供给——与 webui InProcessBackend 同一处定义，防止漂移。
-            Ok(rows) => sebas_models::agent::AgentRow::snapshot_value(&rows),
-            Err(e) => serde_json::json!({"error": e}),
-        },
+        "agents" => {
+            let mut value = match engine.load_agents().await {
+                // 快照形状（活跃行 + 墓碑 id 清单）由 AgentRow::snapshot_value
+                // 统一供给——与 webui InProcessBackend 同一处定义，防止漂移。
+                Ok(rows) => sebas_models::agent::AgentRow::snapshot_value(&rows),
+                Err(e) => serde_json::json!({"error": e}),
+            };
+            // （2.2）逐体可达性：读复合后端的当前上报，作为 agents 域载荷的
+            // `execution_bodies` 段。独立 webui 的 CoreChannelBackend 据此覆写
+            // `execution_bodies()`（D6）。
+            if let Some(bodies) = backend.execution_bodies().await {
+                let map: serde_json::Map<String, serde_json::Value> = bodies
+                    .into_iter()
+                    .map(|b| {
+                        (
+                            b.name.clone(),
+                            serde_json::to_value(sebas_ipc::protocol::ExecutionBodyStatus {
+                                ok: b.ok,
+                                cause: b.cause.clone(),
+                            })
+                            .unwrap_or_default(),
+                        )
+                    })
+                    .collect();
+                if let Some(obj) = value.as_object_mut() {
+                    obj.insert(
+                        "execution_bodies".to_string(),
+                        serde_json::Value::Object(map),
+                    );
+                }
+            }
+            value
+        }
         other => serde_json::json!({"error": format!("unknown domain: {other}")}),
     }
 }
@@ -728,7 +764,10 @@ fn preset_table_value() -> serde_json::Value {
 
 /// 全域快照：providers / settings / projects / agents / presets / sessions /
 /// router_activity。
-async fn state_snapshot_all(router: &DispatchHandle) -> serde_json::Value {
+async fn state_snapshot_all(
+    router: &DispatchHandle,
+    backend: &Arc<dyn SessionBackend>,
+) -> serde_json::Value {
     let mut domains = serde_json::Map::new();
     for domain in [
         "providers",
@@ -739,7 +778,10 @@ async fn state_snapshot_all(router: &DispatchHandle) -> serde_json::Value {
         "sessions",
         "router_activity",
     ] {
-        domains.insert(domain.to_string(), snapshot_domain(router, domain).await);
+        domains.insert(
+            domain.to_string(),
+            snapshot_domain(router, backend, domain).await,
+        );
     }
     serde_json::Value::Object(domains)
 }
@@ -790,12 +832,16 @@ fn is_active_routed_session(s: &SessionInfo) -> bool {
 
 /// 4.2 状态订阅：先发全域快照，再持续转发变更通知（合并窗口 100ms，
 /// 一串提交合并为一帧）。广播无人订阅/关闭时，快照后保持连接等待。
-async fn serve_state_subscription(router: DispatchHandle, mut writer: WriteHalf) -> Result<()> {
+async fn serve_state_subscription(
+    router: DispatchHandle,
+    backend: Arc<dyn SessionBackend>,
+    mut writer: WriteHalf,
+) -> Result<()> {
     use sebas_dispatch::state_store::StateChange;
     const MERGE_WINDOW: std::time::Duration = std::time::Duration::from_millis(100);
 
     // Frame 1: the full snapshot.
-    let domains = state_snapshot_all(&router).await;
+    let domains = state_snapshot_all(&router, &backend).await;
     let snapshot = StateStreamFrame::Snapshot { domains };
     write_state_frame(&mut writer, &snapshot).await?;
 
@@ -821,7 +867,7 @@ async fn serve_state_subscription(router: DispatchHandle, mut writer: WriteHalf)
                         // 全域重置：输出一帧后重发快照。
                         let reset = StateStreamFrame::Changed { scope: "*".into() };
                         write_state_frame(&mut writer, &reset).await?;
-                        let domains = state_snapshot_all(&router).await;
+                        let domains = state_snapshot_all(&router, &backend).await;
                         write_state_frame(&mut writer, &StateStreamFrame::Snapshot { domains })
                             .await?;
                         continue;
@@ -831,7 +877,7 @@ async fn serve_state_subscription(router: DispatchHandle, mut writer: WriteHalf)
             Err(broadcast::error::RecvError::Lagged(_)) => {
                 // 落后于 64 帧：语义等价于全域变更，重发快照。
                 warn!("state subscriber lagged; resending snapshot");
-                let domains = state_snapshot_all(&router).await;
+                let domains = state_snapshot_all(&router, &backend).await;
                 write_state_frame(&mut writer, &StateStreamFrame::Snapshot { domains }).await?;
                 continue;
             }
@@ -856,7 +902,7 @@ async fn serve_state_subscription(router: DispatchHandle, mut writer: WriteHalf)
                         flush_pending(&mut writer, &mut pending).await?;
                         let reset = StateStreamFrame::Changed { scope: "*".into() };
                         write_state_frame(&mut writer, &reset).await?;
-                        let domains = state_snapshot_all(&router).await;
+                        let domains = state_snapshot_all(&router, &backend).await;
                         write_state_frame(&mut writer, &StateStreamFrame::Snapshot { domains })
                             .await?;
                         return Ok(());
@@ -864,7 +910,7 @@ async fn serve_state_subscription(router: DispatchHandle, mut writer: WriteHalf)
                     Err(broadcast::error::RecvError::Lagged(_)) => {
                         warn!("state subscriber lagged; resending snapshot");
                         flush_pending(&mut writer, &mut pending).await?;
-                        let domains = state_snapshot_all(&router).await;
+                        let domains = state_snapshot_all(&router, &backend).await;
                         write_state_frame(&mut writer, &StateStreamFrame::Snapshot { domains })
                             .await?;
                         return Ok(());
@@ -1304,7 +1350,7 @@ async fn dispatch(
         CoreChannelRequest::StateSnapshot { domain } => {
             match sebas_dispatch::state_store::engine() {
                 Some(_) => {
-                    let payload = snapshot_domain(router, &domain).await;
+                    let payload = snapshot_domain(router, backend, &domain).await;
                     CoreChannelResponse::StateSnapshot { domain, payload }
                 }
                 None => CoreChannelResponse::Rejected {
@@ -1925,6 +1971,12 @@ mod tests {
 
     use sebas_dispatch::provider_state::ProviderMode;
 
+    /// 快照域测试用的无操作后端（`execution_bodies` 落 trait 默认 `None`——
+    /// 这些用例只关心 agents 注册表段，不关心逐体可达性）。
+    fn noop_backend() -> Arc<dyn SessionBackend> {
+        Arc::new(sebas_webui::session_backend::FakeBackend::new())
+    }
+
     /// 计数口径的最小 SessionInfo 行（其余字段与计数无关，取默认）。
     fn info(status: &str, phase: Option<&str>) -> SessionInfo {
         SessionInfo {
@@ -2079,7 +2131,7 @@ mod tests {
         let _no_engine = sebas_dispatch::test_engine::install_none();
         let (router, _rx) =
             sebas_dispatch::DispatchHandle::new(sebas_dispatch::state::SessionMap::new());
-        let payload = snapshot_domain(&router, "presets").await;
+        let payload = snapshot_domain(&router, &noop_backend(), "presets").await;
         let served = payload
             .get("presets")
             .and_then(serde_json::Value::as_array)
@@ -2129,7 +2181,7 @@ mod tests {
             );
         }
         // 未设置 state store 时其余域报错，presets 域不受影响（纯代码表）。
-        let missing = snapshot_domain(&router, "providers").await;
+        let missing = snapshot_domain(&router, &noop_backend(), "providers").await;
         assert!(missing.get("error").is_some());
     }
 
@@ -2146,7 +2198,7 @@ mod tests {
             sebas_dispatch::DispatchHandle::new(sebas_dispatch::state::SessionMap::new());
 
         // 空表快照（catalog 只余 native 的前提）。
-        let empty = snapshot_domain(&router, "agents").await;
+        let empty = snapshot_domain(&router, &noop_backend(), "agents").await;
         assert_eq!(
             empty
                 .get("agents")
@@ -2167,7 +2219,7 @@ mod tests {
         .await
         .expect("agents put");
 
-        let snap = snapshot_domain(&router, "agents").await;
+        let snap = snapshot_domain(&router, &noop_backend(), "agents").await;
         let rows = snap
             .get("agents")
             .and_then(serde_json::Value::as_array)
@@ -2185,7 +2237,7 @@ mod tests {
         )
         .await
         .expect("agents delete");
-        let snap = snapshot_domain(&router, "agents").await;
+        let snap = snapshot_domain(&router, &noop_backend(), "agents").await;
         assert_eq!(
             snap.get("agents")
                 .and_then(serde_json::Value::as_array)
@@ -2212,7 +2264,7 @@ mod tests {
         )
         .await
         .expect("agents put (resurrect)");
-        let snap = snapshot_domain(&router, "agents").await;
+        let snap = snapshot_domain(&router, &noop_backend(), "agents").await;
         assert_eq!(
             snap.get("agents")
                 .and_then(serde_json::Value::as_array)

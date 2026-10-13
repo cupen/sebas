@@ -76,6 +76,11 @@ pub struct CoreChannelBackend {
     /// 映射（含 startup summary 富化），不另造第二份。
     reachability_tx: broadcast::Sender<Reachability>,
     status: std::sync::Mutex<ConnStatus>,
+    /// （make-pi-ride-sebas-provider 2.3，design D6）逐执行体可达性缓存：
+    /// detached 拓扑下独立 webui 的 `execution_bodies()` 覆写从 core 的
+    /// `StateSnapshot { domain: "agents" }` 载荷取值，本字段承载最近一次
+    /// 成功读取（RPC 失败时保留上次已知值，避免瞬时抖动让 native 行闪灰）。
+    execution_bodies: std::sync::Mutex<Option<Vec<sebas_webui::session_backend::ExecutionBodyStatus>>>,
 }
 
 impl CoreChannelBackend {
@@ -123,6 +128,7 @@ impl CoreChannelBackend {
                 kind: FailKind::StartupFailed,
                 cause: "尚未连接 core".into(),
             }),
+            execution_bodies: std::sync::Mutex::new(None),
         });
         // Subscription forwarder: reconnects with backoff for the lifetime
         // of the process (6.2). Started eagerly so the SSE stream comes up
@@ -282,6 +288,40 @@ impl CoreChannelBackend {
                 Err(unavailable(cause))
             }
         }
+    }
+
+    /// （make-pi-ride-sebas-provider 2.3，design D6）拉一次 core 的
+    /// `StateSnapshot { domain: "agents" }`，从载荷的 `execution_bodies` 段
+    /// 翻成 webui 面的 `ExecutionBodyStatus` 列表。
+    ///
+    /// 返回 `None` = RPC 失败 / 载荷缺该段（调用方保留上次已知值）。
+    async fn refresh_execution_bodies(
+        &self,
+    ) -> Option<Vec<sebas_webui::session_backend::ExecutionBodyStatus>> {
+        let payload = match self
+            .request(&CoreChannelRequest::StateSnapshot {
+                domain: "agents".to_string(),
+            })
+            .await
+        {
+            Ok(CoreChannelResponse::StateSnapshot { payload, .. }) => payload,
+            _ => return None,
+        };
+        let map = payload.get("execution_bodies")?.as_object()?;
+        let mut out: Vec<sebas_webui::session_backend::ExecutionBodyStatus> = map
+            .iter()
+            .map(|(name, v)| sebas_webui::session_backend::ExecutionBodyStatus {
+                name: name.clone(),
+                ok: v.get("ok").and_then(serde_json::Value::as_bool).unwrap_or(false),
+                cause: v
+                    .get("cause")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+            })
+            .collect();
+        // 确定性：native 优先，其余按名排序。
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        Some(out)
     }
 
     /// The streaming connection loop (6.2): connect, subscribe, forward
@@ -977,6 +1017,24 @@ impl SessionBackend for CoreChannelBackend {
 
     async fn reachability(&self) -> Reachability {
         status_to_reachability(&self.status.lock().unwrap())
+    }
+
+    /// （make-pi-ride-sebas-provider 2.3，design D6）覆写 trait 默认 `None`：
+    /// 从 core 的 `StateSnapshot { domain: "agents" }` 载荷里取
+    /// `execution_bodies` 段，翻成 webui 面的 `ExecutionBodyStatus` 列表。
+    ///
+    /// detached 拓扑下独立 webui 的 `GET /api/agents` 靠它拿到 native 行的
+    /// 真值（否则落 trait 默认 `None` → `reachable=false` 恒置灰）。
+    ///
+    /// 缓存策略：RPC 失败 / 载荷缺该段时**保留上次已知值**（瞬时抖动不闪灰）；
+    /// 载荷显式给出 `execution_bodies` 时覆盖缓存。首次调用即拉取。
+    async fn execution_bodies(
+        &self,
+    ) -> Option<Vec<sebas_webui::session_backend::ExecutionBodyStatus>> {
+        if let Some(bodies) = self.refresh_execution_bodies().await {
+            *self.execution_bodies.lock().unwrap() = Some(bodies);
+        }
+        self.execution_bodies.lock().unwrap().clone()
     }
 
     async fn state_snapshot(&self, domain: &str) -> Option<serde_json::Value> {

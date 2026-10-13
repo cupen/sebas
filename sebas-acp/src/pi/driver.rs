@@ -827,6 +827,9 @@ rid() { printf '%s' "$1" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p'; }
 
 journal "argv: $*"
 
+# env 注入面（make-pi-ride-sebas-provider 1.3）：按需把子进程 env 落盘。
+if [ -n "$FAKE_PI_ENV_DUMP" ]; then env >"$FAKE_PI_ENV_DUMP"; fi
+
 case "$FAKE_PI_SCENARIO" in
   hang) sleep 60; exit 0 ;;
 esac
@@ -1004,6 +1007,65 @@ done
             .lines()
             .map(str::to_string)
             .collect()
+    }
+
+    /// （make-pi-ride-sebas-provider 1.3）`DriverConfig.extra_env` 原样进子进程
+    /// env：注入 `PI_CODING_AGENT_DIR` 后 fake pi 桩能经 `env` 读到它。
+    ///
+    /// 桥路径的 env 注入在 `session_boot::spawn_overrides` 装配（指向 sebas
+    /// 私有 `pi-agent/` 目录）；驱动这层只负责「extra_env → 子进程」的透传，
+    /// 本用例钉死这层契约。
+    #[tokio::test]
+    async fn extra_env_reaches_the_child_process() {
+        let f = fixture();
+        let (evt_tx, _evt_rx) = mpsc::channel(256);
+        let (cmd_tx, cmd_rx) = mpsc::channel(64);
+        let (_cancel_tx, cancel_rx) = oneshot::channel();
+        let env_dump = f.dir.path().join("env-dump.log").display().to_string();
+        let cfg = DriverConfig {
+            kind_slug: "pi".into(),
+            command: vec![f.exe.clone()],
+            work_dir: None,
+            extra_env: vec![
+                ("FAKE_PI_SCENARIO".into(), "".into()),
+                ("FAKE_PI_JOURNAL".into(), f.journal.clone()),
+                ("FAKE_PI_SESSION".into(), "pi-env".into()),
+                // 桥路径注入的标记变量：桩脚本据此把 env 落盘。
+                ("FAKE_PI_ENV_DUMP".into(), env_dump.clone()),
+                ("PI_CODING_AGENT_DIR".into(), "/tmp/sebas-pi-agent".into()),
+                ("SEBAS_PI_KEY_0".into(), "sk-bridge".into()),
+            ],
+            session_id: "routing-env".into(),
+            load_session_id: None,
+            resume: false,
+            startup_timeout: Duration::from_secs(10),
+            evt_tx,
+            cmd_rx,
+            cancel_rx,
+            pending_perms: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            terminal_sent: Arc::new(AtomicBool::new(false)),
+        };
+        let mut handle = PiDriver::with_sessions_dir(None).spawn(cfg).await.expect("spawn");
+        let run = std::mem::replace(&mut handle.run, Box::pin(async {}));
+        let run_task = tokio::spawn(handle_run(run));
+        // 等桩把 env 落盘（握手期即写）。
+        for _ in 0..100 {
+            if std::path::Path::new(&env_dump).exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let dump = std::fs::read_to_string(&env_dump).unwrap_or_default();
+        assert!(
+            dump.contains("PI_CODING_AGENT_DIR=/tmp/sebas-pi-agent"),
+            "PI_CODING_AGENT_DIR 必须进子进程 env: {dump}"
+        );
+        assert!(
+            dump.contains("SEBAS_PI_KEY_0=sk-bridge"),
+            "SEBAS_PI_KEY_0 必须进子进程 env: {dump}"
+        );
+        drop(cmd_tx);
+        join_run(run_task).await;
     }
 
     /// 消费会话建立时广播的命令面板事件（`build_handle` 在 spawn 返回前就

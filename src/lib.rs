@@ -48,6 +48,9 @@ pub mod ipc;
 pub mod native_dispatch_bridge;
 pub mod node_link;
 pub mod node_link_cmd;
+/// pi provider 桥（make-pi-ride-sebas-provider）：把 sebas provider 注册表
+/// 映射成 pi 的 `models.json`，写在 sebas 私有 `<SEBAS_HOME>/pi-agent/`。
+pub mod pi_provider_bridge;
 pub mod provider;
 /// core→router admin 的 loopback HTTP 反代取数（add-usage-statistics D1/D7）。
 pub mod router_admin;

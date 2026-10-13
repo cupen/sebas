@@ -36,60 +36,48 @@ use serde_json::{Map, Value};
 /// （provider 解析只产凭据键）。
 const CLAUDE_SUBAGENT_MODEL_ENV: &str = "CLAUDE_CODE_SUBAGENT_MODEL";
 
-/// pi 认识的标准 provider env 对（make-pi-the-builtin-agent 2.1，design D3）。
+/// （make-pi-ride-sebas-provider 1.4）已退役：旧的「把 provider 注册表翻成
+/// pi 标准 env 对（`ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL`）」路径。
 ///
-/// pi 自读标准 env 名（`ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL`、
-/// `OPENAI_API_KEY`/`OPENAI_BASE_URL`），与 claude 的 `ANTHROPIC_AUTH_TOKEN`
-/// 名**不同**——两条通路各自的键名必须分清，绝不混用。
-fn pi_protocol_env(
-    proto: sebas_acp::claude::AgentProtocol,
-    base_url: &str,
-    api_key: &str,
-) -> Vec<(&'static str, String)> {
-    match proto {
-        sebas_acp::claude::AgentProtocol::Anthropic => vec![
-            ("ANTHROPIC_API_KEY", api_key.to_string()),
-            ("ANTHROPIC_BASE_URL", base_url.to_string()),
-        ],
-        sebas_acp::claude::AgentProtocol::OpenAi => vec![
-            ("OPENAI_API_KEY", api_key.to_string()),
-            ("OPENAI_BASE_URL", base_url.to_string()),
-        ],
-    }
+/// 实测证明这条路径对 pi **无效**——pi 的内置 Anthropic 模型把 `baseUrl`
+/// 写死，`createClient` 显式传 `baseURL: model.baseUrl` 压掉 env 默认值；
+/// 且用 claude 的 env 名字空间给 pi 传凭据是错配。现行路径是
+/// [`resolve_pi_bridge_spawn_env`]（`models.json` 桥 + `PI_CODING_AGENT_DIR`
+/// + `${SEBAS_PI_KEY_n}` 插值）。保留此名仅为不破坏旧引用路径，恒返回空。
+#[deprecated(
+    since = "make-pi-ride-sebas-provider",
+    note = "use resolve_pi_bridge_spawn_env (models.json bridge) instead"
+)]
+pub fn resolve_pi_spawn_env(
+    _router_cfg: Option<&RouterConfig>,
+) -> (Vec<(String, String)>, Vec<String>) {
+    (Vec::new(), Vec::new())
 }
 
-/// 协议家族键（同名 env 冲突判定用）：anthropic / openai，各占一组标准 env 名。
-fn pi_protocol_family(proto: sebas_acp::claude::AgentProtocol) -> &'static str {
-    match proto {
-        sebas_acp::claude::AgentProtocol::Anthropic => "anthropic",
-        sebas_acp::claude::AgentProtocol::OpenAi => "openai",
-    }
+/// （make-pi-ride-sebas-provider 1.5）回滚开关：`SEBAS_LEGACY_PI_ENV=1` 时
+/// [`resolve_pi_bridge_spawn_env`] 退回旧的 `ANTHROPIC_*` env 喷洒路径。
+///
+/// **默认关**——桥文件是现行路径；本开关仅供 e2e 在桥路径出问题时对照，
+/// 不参与正常 spawn。取值 `1` / `true`（大小写不敏感）为开。
+pub fn legacy_pi_env_shim_enabled() -> bool {
+    matches!(
+        std::env::var("SEBAS_LEGACY_PI_ENV").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE") | Ok("True")
+    )
 }
 
-/// （make-pi-the-builtin-agent 2.1/2.2，design D3）把 sebas 侧 provider 注册表
-/// 解析成 pi 子进程认识的标准 provider env。
+/// （1.4/1.5）旧路径的保留体：把 provider 注册表翻成 pi 标准 env 对
+/// （`ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL` 或 `OPENAI_*`）。
 ///
-/// 语义：
-/// - **来源与 claude 同源**：读 settings.db 的 providers 域（`state_store::load`
-///   → `direct_resolution_from_overlay` 复用同一解析：preset 物化、协议选择、
-///   api_key 明文 > api_key_env）。
-/// - **冲突规则（2.2）**：多个 provider 映射到同一组标准 env 名时，
-///   **operator 默认 provider（default_selection.provider）优先占用**；其余
-///   同族 provider 跳过，跳过事实记录进 `diagnostics`。
-/// - **无法映射的协议**（responses-only / 解析 Error）跳过 + 诊断。
-/// - **Router 模式**：pi 经 router 走 anthropic 协议（`ANTHROPIC_BASE_URL` =
-///   router listen，key = 首个 auth_token），与 claude 的 Router 解析同目标。
-/// - `Off`（无默认）→ 空 env（pi 用自身 models.json/auth，如实不注入）。
-///
-/// 返回 `(env, diagnostics)`：env 追加进子进程 extra_env（增量合并，
-/// 同键覆盖父进程残留）；diagnostics 是逐条跳过原因（spawn 诊断面）。
-pub fn compute_pi_provider_env(
+/// 实测证明对 pi **无效**（内置模型 baseUrl 写死、env 被压掉），故默认路径
+/// 已切到 [`resolve_pi_bridge_spawn_env`]；本函数只在
+/// [`legacy_pi_env_shim_enabled`] 打开时经回滚开关触达（e2e 对照用）。
+fn legacy_pi_provider_env(
     state: &ProviderRuntimeState,
     router_cfg: Option<&RouterConfig>,
 ) -> (Vec<(String, String)>, Vec<String>) {
     let mut diagnostics: Vec<String> = Vec::new();
 
-    // Router 模式：单一目标（router），不枚举 provider。
     if matches!(state.mode, ProviderMode::Router) {
         let Some(cfg) = router_cfg else {
             diagnostics.push("router 模式但无 router 配置，pi provider env 未注入".into());
@@ -100,7 +88,6 @@ pub fn compute_pi_provider_env(
             diagnostics.push("router 模式但 router.listen 为空，pi provider env 未注入".into());
             return (Vec::new(), diagnostics);
         }
-        let url = format!("http://{listen}");
         let key = cfg.auth_token.first().cloned().unwrap_or_default();
         if key.is_empty() {
             diagnostics.push("router 模式但 router.auth_token 为空，pi 将以无凭据调用".into());
@@ -108,25 +95,22 @@ pub fn compute_pi_provider_env(
         return (
             vec![
                 ("ANTHROPIC_API_KEY".to_string(), key),
-                ("ANTHROPIC_BASE_URL".to_string(), url),
+                ("ANTHROPIC_BASE_URL".to_string(), format!("http://{listen}")),
             ],
             diagnostics,
         );
     }
 
-    // Direct / 隐式 Direct：枚举注册表；默认 provider 优先占名。
     let default_provider = match &state.mode {
         ProviderMode::Direct { provider } => Some(provider.clone()),
         ProviderMode::Off => state.default_selection.as_ref().map(|d| d.provider.clone()),
         ProviderMode::Router => unreachable!("handled above"),
     };
     let Some(default_provider) = default_provider else {
-        // Off 且无默认：pi 用自身配置，如实不注入。
         return (Vec::new(), diagnostics);
     };
 
     let persisted = sebas_dispatch::state_store::load();
-    // 枚举顺序：默认 provider 第一（占名），其余按名字典序（确定性）。
     let mut names: Vec<String> = persisted.providers.keys().cloned().collect();
     names.sort();
     names.retain(|n| n != &default_provider);
@@ -141,8 +125,7 @@ pub fn compute_pi_provider_env(
         let Some(item) = persisted.providers.get(&name) else {
             continue;
         };
-        let resolution = direct_resolution_from_overlay(&name, item);
-        let (proto, base_url, api_key) = match resolution {
+        let (proto, base_url, api_key) = match direct_resolution_from_overlay(&name, item) {
             ProviderResolution::Direct {
                 proto,
                 base_url,
@@ -154,10 +137,12 @@ pub fn compute_pi_provider_env(
                 ));
                 continue;
             }
-            // Router/Off 由本函数前半段处理；Direct 枚举里不该出现。
             _ => continue,
         };
-        let family = pi_protocol_family(proto);
+        let family = match proto {
+            sebas_acp::claude::AgentProtocol::Anthropic => "anthropic",
+            sebas_acp::claude::AgentProtocol::OpenAi => "openai",
+        };
         if occupied.contains(family) {
             diagnostics.push(format!(
                 "provider '{name}' 与已占用的 {family} 标准 env 同名，默认 provider 优先，已跳过"
@@ -165,13 +150,150 @@ pub fn compute_pi_provider_env(
             continue;
         }
         occupied.insert(family);
-        env.extend(
-            pi_protocol_env(proto, &base_url, &api_key)
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), v)),
-        );
+        let pair = match proto {
+            sebas_acp::claude::AgentProtocol::Anthropic => {
+                vec![("ANTHROPIC_API_KEY", api_key), ("ANTHROPIC_BASE_URL", base_url)]
+            }
+            sebas_acp::claude::AgentProtocol::OpenAi => {
+                vec![("OPENAI_API_KEY", api_key), ("OPENAI_BASE_URL", base_url)]
+            }
+        };
+        env.extend(pair.into_iter().map(|(k, v)| (k.to_string(), v)));
     }
     (env, diagnostics)
+}
+
+/// （make-pi-ride-sebas-provider 1.1/1.2，design D1–D4）pi 会话的 spawn 环境：
+/// **桥文件路径**（取代已退役的 env 喷洒路径）。
+///
+/// 语义：
+/// - 读 settings.db providers 注册表 → 按 protocol 家族解析成
+///   [`ResolvedProvider`] 列表（preset 物化、api_key 明文 > api_key_env，
+///   与 claude 的 `direct_resolution_from_overlay` 同源）；
+/// - [`bridge_entries`] 同族默认赢 → 写
+///   `<SEBAS_HOME>/pi-agent/models.json`（[`StatePath::PiAgentDir`]）；
+/// - 返回 spawn env：`PI_CODING_AGENT_DIR` + `SEBAS_PI_KEY_n`（密钥真值只在
+///   env，**不落盘**）。
+///
+/// Router 模式：单一 anthropic 条目指向 router listen（key = 首个
+/// auth_token），与 claude 的 Router 解析同目标。Off（无默认）→ 空条目 =
+/// 不写桥 = pi 无凭据（如实报「未配 provider」）。
+///
+/// 本函数**不**产任何 `ANTHROPIC_*` / `OPENAI_*` env（spec「sebas does not
+/// spray ANTHROPIC_* env」）——除非 [`legacy_pi_env_shim_enabled`] 打开
+/// （回滚开关，1.5）。
+///
+/// [`StatePath::PiAgentDir`]: sebas_domain::state_paths::StatePath::PiAgentDir
+pub fn resolve_pi_bridge_spawn_env(
+    router_cfg: Option<&RouterConfig>,
+) -> (Vec<(String, String)>, Vec<String>) {
+    let state = sebas_dispatch::provider_state::load();
+    if legacy_pi_env_shim_enabled() {
+        // 回滚开关（1.5）：退回旧的 env 喷洒路径。
+        tracing::warn!("SEBAS_LEGACY_PI_ENV 已启用：pi 走旧 ANTHROPIC_* env 喷洒（回滚对照）");
+        return legacy_pi_provider_env(&state, router_cfg);
+    }
+    let (entries, diagnostics) = pi_bridge_entries(&state, router_cfg);
+    let dir = crate::pi_provider_bridge::pi_agent_dir();
+    if let Err(e) = crate::pi_provider_bridge::write_bridge(&dir, &entries) {
+        tracing::warn!(error = %e, dir = %dir.display(), "pi bridge 写入失败");
+    }
+    for d in &diagnostics {
+        tracing::warn!(detail = %d, "pi bridge: provider 跳过");
+    }
+    let env = crate::pi_provider_bridge::spawn_env(&dir, &entries);
+    (env, diagnostics)
+}
+
+/// （1.2）provider 注册表 → pi 桥条目。见 [`resolve_pi_bridge_spawn_env`] 的
+/// 语义说明。返回 `(entries, diagnostics)`。
+fn pi_bridge_entries(
+    state: &ProviderRuntimeState,
+    router_cfg: Option<&RouterConfig>,
+) -> (Vec<crate::pi_provider_bridge::BridgeEntry>, Vec<String>) {
+    use crate::pi_provider_bridge::{bridge_entries, ProviderFamily, ResolvedProvider};
+
+    let mut diagnostics: Vec<String> = Vec::new();
+
+    // Router 模式：单一 anthropic 目标（不枚举 provider）。
+    if matches!(state.mode, ProviderMode::Router) {
+        let Some(cfg) = router_cfg else {
+            diagnostics.push("router 模式但无 router 配置，pi 桥未生成".into());
+            return (Vec::new(), diagnostics);
+        };
+        let listen = cfg.listen.trim();
+        if listen.is_empty() {
+            diagnostics.push("router 模式但 router.listen 为空，pi 桥未生成".into());
+            return (Vec::new(), diagnostics);
+        }
+        let key = cfg.auth_token.first().cloned().unwrap_or_default();
+        if key.is_empty() {
+            diagnostics.push("router 模式但 router.auth_token 为空，pi 将以无凭据调用".into());
+        }
+        let provider = ResolvedProvider {
+            name: "router".into(),
+            family: ProviderFamily::Anthropic,
+            base_url: format!("http://{listen}"),
+            api_key: key,
+        };
+        let (entries, skipped) = bridge_entries(&[provider], Some("router"));
+        diagnostics.extend(skipped);
+        return (entries, diagnostics);
+    }
+
+    // Direct / 隐式 Direct：枚举注册表；默认 provider 优先占名。
+    let default_provider = match &state.mode {
+        ProviderMode::Direct { provider } => Some(provider.clone()),
+        ProviderMode::Off => state.default_selection.as_ref().map(|d| d.provider.clone()),
+        ProviderMode::Router => unreachable!("handled above"),
+    };
+    let Some(default_provider) = default_provider else {
+        // Off 且无默认：pi 无凭据，如实不生成桥。
+        return (Vec::new(), diagnostics);
+    };
+
+    let persisted = sebas_dispatch::state_store::load();
+    // 枚举顺序：默认 provider 第一（占名），其余按名字典序（确定性）。
+    let mut names: Vec<String> = persisted.providers.keys().cloned().collect();
+    names.sort();
+    names.retain(|n| n != &default_provider);
+    names.insert(0, default_provider.clone());
+
+    let mut resolved: Vec<ResolvedProvider> = Vec::new();
+    for name in names {
+        if persisted.deleted.iter().any(|d| d == &name) {
+            continue;
+        }
+        let Some(item) = persisted.providers.get(&name) else {
+            continue;
+        };
+        match direct_resolution_from_overlay(&name, item) {
+            ProviderResolution::Direct {
+                proto,
+                base_url,
+                auth_token,
+            } => {
+                let family = match proto {
+                    sebas_acp::claude::AgentProtocol::Anthropic => ProviderFamily::Anthropic,
+                    sebas_acp::claude::AgentProtocol::OpenAi => ProviderFamily::OpenAi,
+                };
+                resolved.push(ResolvedProvider {
+                    name,
+                    family,
+                    base_url,
+                    api_key: auth_token,
+                });
+            }
+            ProviderResolution::Error { reason } => {
+                diagnostics.push(format!("provider '{name}' 无法映射为 pi 桥（{reason}），已跳过"));
+            }
+            // Router/Off 由本函数前半段处理；Direct 枚举里不该出现。
+            _ => continue,
+        }
+    }
+    let (entries, skipped) = bridge_entries(&resolved, Some(&default_provider));
+    diagnostics.extend(skipped);
+    (entries, diagnostics)
 }
 
 /// 读单个 provider 的原始 Item（含 `default_model`）。
@@ -707,24 +829,6 @@ pub fn resolve_spawn_overrides(
     }
     let args = driver.resolve_args(&resolution);
     (env, args)
-}
-
-/// （make-pi-the-builtin-agent 2.1）pi 会话的 spawn env 翻译：读同一份
-/// provider 运行时状态（settings.db），翻成 pi 认识的标准 env 对。
-///
-/// 与 claude 的 [`resolve_spawn_overrides`] 是**两个**入口而非一个分支——两
-/// 条通路键名不同（claude 用 `ANTHROPIC_AUTH_TOKEN`，pi 用 `ANTHROPIC_API_KEY`），
-/// 硬合会制造静默错配。返回 `(extra_env, diagnostics)`；无可映射 provider 时
-/// env 为空（pi 用自身 models.json/auth，如实不注入），diagnostics 逐条记跳过。
-pub fn resolve_pi_spawn_env(
-    router_cfg: Option<&RouterConfig>,
-) -> (Vec<(String, String)>, Vec<String>) {
-    let state = sebas_dispatch::provider_state::load();
-    let (env, diagnostics) = compute_pi_provider_env(&state, router_cfg);
-    for d in &diagnostics {
-        tracing::warn!(detail = %d, "pi spawn: provider env 跳过");
-    }
-    (env, diagnostics)
 }
 
 #[cfg(test)]
@@ -2207,12 +2311,13 @@ base_url_anthropic = "https://api.anthropic.com"
         }
     }
 
-    // ── make-pi-the-builtin-agent 2.1/2.2：pi 标准 env 注入 ──
+    // ── make-pi-ride-sebas-provider 1.1/1.2：pi 桥文件路径 ──
 
-    /// 2.1 Anthropic 协议 provider → `ANTHROPIC_API_KEY` + `ANTHROPIC_BASE_URL`
-    /// （与 claude 的 `ANTHROPIC_AUTH_TOKEN` 名区分）。
+    /// 1.1 Anthropic 协议 provider → `models.json` 的 anthropic 块（baseUrl +
+    /// `${SEBAS_PI_KEY_0}` 占位）；spawn env 含 `PI_CODING_AGENT_DIR` 与密钥
+    /// 真值 env；**不**喷 `ANTHROPIC_*`。
     #[test]
-    fn pi_anthropic_provider_emits_standard_env() {
+    fn pi_anthropic_provider_emits_bridge_entry() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let _store = write_overlay(
@@ -2227,27 +2332,38 @@ base_url_anthropic = "https://api.anthropic.com"
             }"#,
         );
         let state = direct_state("deepseek");
-        let (env, diags) = compute_pi_provider_env(&state, None);
+        let (entries, diags) = pi_bridge_entries(&state, None);
         assert!(diags.is_empty(), "单 provider 无跳过: {diags:?}");
-        assert!(
-            env.iter()
-                .any(|(k, v)| k == "ANTHROPIC_API_KEY" && v == "sk-ds-plain")
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].provider, "anthropic");
+        assert_eq!(entries[0].base_url, "https://api.deepseek.com/anthropic");
+        assert_eq!(entries[0].api_key_placeholder, "${SEBAS_PI_KEY_0}");
+        assert_eq!(entries[0].key_value, "sk-ds-plain");
+
+        let value = crate::pi_provider_bridge::render_models_json(&entries);
+        assert_eq!(
+            value["providers"]["anthropic"]["baseUrl"],
+            "https://api.deepseek.com/anthropic"
         );
+        // 真值不落盘。
+        let bytes = serde_json::to_string(&value).unwrap();
+        assert!(!bytes.contains("sk-ds-plain"), "密钥不得进桥: {bytes}");
+
+        let env = crate::pi_provider_bridge::spawn_env(std::path::Path::new("/tmp/pi-agent"), &entries);
+        assert!(env.iter().any(|(k, _)| k == "PI_CODING_AGENT_DIR"));
+        assert!(env
+            .iter()
+            .any(|(k, v)| k == "SEBAS_PI_KEY_0" && v == "sk-ds-plain"));
         assert!(
-            env.iter().any(
-                |(k, v)| k == "ANTHROPIC_BASE_URL" && v == "https://api.deepseek.com/anthropic"
-            )
-        );
-        assert!(
-            !env.iter().any(|(k, _)| k == "ANTHROPIC_AUTH_TOKEN"),
-            "pi 不用 claude 的 AUTH_TOKEN 键名: {env:?}"
+            !env.iter().any(|(k, _)| k.starts_with("ANTHROPIC_")),
+            "桥路径不喷 claude 家族 env: {env:?}"
         );
     }
 
-    /// 2.1 OpenAI-chat 协议 provider → `OPENAI_API_KEY` + `OPENAI_BASE_URL`；
-    /// `api_key_env` 来源（env 读值）同样生效。
+    /// 1.1 OpenAI-chat 协议 provider → openai 块；`api_key_env` 来源（env 读值）
+    /// 同样生效。
     #[test]
-    fn pi_openai_provider_emits_standard_env_from_api_key_env() {
+    fn pi_openai_provider_emits_bridge_entry_from_api_key_env() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let _store = write_overlay(
@@ -2266,22 +2382,21 @@ base_url_anthropic = "https://api.anthropic.com"
             std::env::set_var("DASHSCOPE_PI_KEY", "sk-dash");
         }
         let state = direct_state("dashscope");
-        let (env, _diags) = compute_pi_provider_env(&state, None);
+        let (entries, _diags) = pi_bridge_entries(&state, None);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].provider, "openai");
         assert!(
-            env.iter()
-                .any(|(k, v)| k == "OPENAI_API_KEY" && v == "sk-dash")
+            entries[0].base_url.contains("dashscope"),
+            "端点来自 base_url_openai_chat: {entries:?}"
         );
-        assert!(
-            env.iter()
-                .any(|(k, v)| k == "OPENAI_BASE_URL" && v.contains("dashscope"))
-        );
+        assert_eq!(entries[0].key_value, "sk-dash");
         // SAFETY: ENV_LOCK held。
         unsafe {
             std::env::remove_var("DASHSCOPE_PI_KEY");
         }
     }
 
-    /// 2.1 无法映射的协议（无 base_url）跳过 + 诊断记录。
+    /// 1.1 无法映射的协议（无 base_url）跳过 + 诊断记录，不产条目。
     #[test]
     fn pi_unmappable_provider_is_skipped_with_diagnostic() {
         let _g = ENV_LOCK.lock().unwrap();
@@ -2295,18 +2410,17 @@ base_url_anthropic = "https://api.anthropic.com"
             }"#,
         );
         let state = direct_state("weird");
-        let (env, diags) = compute_pi_provider_env(&state, None);
-        assert!(env.is_empty(), "无 base_url 的 provider 不注入: {env:?}");
+        let (entries, diags) = pi_bridge_entries(&state, None);
+        assert!(entries.is_empty(), "无 base_url 的 provider 不进桥: {entries:?}");
         assert!(
             diags.iter().any(|d| d.contains("weird")),
             "跳过事实进诊断: {diags:?}"
         );
     }
 
-    /// 2.2 同名 env 冲突：默认 provider 优先占名，其余同协议 provider 跳过 +
-    /// 诊断。
+    /// 1.2 同族冲突：默认 provider 优先占名，其余同协议 provider 跳过 + 诊断。
     #[test]
-    fn pi_default_provider_wins_standard_env_collision() {
+    fn pi_default_provider_wins_bridge_family_collision() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let _store = write_overlay(
@@ -2324,20 +2438,13 @@ base_url_anthropic = "https://api.anthropic.com"
                 }
             }"#,
         );
-        // 默认 = beta（default_selection）；beta 应占 ANTHROPIC_* 名。
+        // 默认 = beta（default_selection）；beta 应占 anthropic 块。
         let state = direct_state("beta");
-        let (env, diags) = compute_pi_provider_env(&state, None);
-        assert!(
-            env.iter()
-                .any(|(k, v)| k == "ANTHROPIC_API_KEY" && v == "sk-beta")
-        );
-        assert!(
-            env.iter()
-                .any(|(k, v)| k == "ANTHROPIC_BASE_URL" && v.contains("beta")),
-            "默认 provider 占名: {env:?}"
-        );
-        // alpha 不注入。
-        assert!(!env.iter().any(|(_, v)| v == "sk-alpha"));
+        let (entries, diags) = pi_bridge_entries(&state, None);
+        assert_eq!(entries.len(), 1, "同族只留一条: {entries:?}");
+        assert_eq!(entries[0].source_provider, "beta");
+        assert!(entries[0].base_url.contains("beta"));
+        assert_eq!(entries[0].key_value, "sk-beta");
         assert!(
             diags
                 .iter()
@@ -2346,32 +2453,91 @@ base_url_anthropic = "https://api.anthropic.com"
         );
     }
 
-    /// 2.1 Router 模式：pi 经 router 走 anthopic 协议（base_url = listen）。
+    /// 1.2 Router 模式：pi 经 router 走 anthropic 协议（base_url = listen）。
     #[test]
-    fn pi_router_mode_emits_router_anthropic_env() {
+    fn pi_router_mode_emits_router_bridge_entry() {
         let _g = ENV_LOCK.lock().unwrap();
         let cfg = test_router("127.0.0.1:8787", vec!["sk-gw-pi".to_string()]);
         let state = router_state();
-        let (env, diags) = compute_pi_provider_env(&state, Some(&cfg));
+        let (entries, diags) = pi_bridge_entries(&state, Some(&cfg));
         assert!(diags.is_empty(), "{diags:?}");
-        assert!(
-            env.iter()
-                .any(|(k, v)| k == "ANTHROPIC_BASE_URL" && v == "http://127.0.0.1:8787")
-        );
-        assert!(
-            env.iter()
-                .any(|(k, v)| k == "ANTHROPIC_API_KEY" && v == "sk-gw-pi")
-        );
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].provider, "anthropic");
+        assert_eq!(entries[0].base_url, "http://127.0.0.1:8787");
+        assert_eq!(entries[0].key_value, "sk-gw-pi");
     }
 
-    /// 2.1 Off（无默认）→ 空 env（pi 用自身配置，如实不注入）。
+    /// 1.2 Off（无默认）→ 空条目（pi 无凭据，如实不生成桥）。
     #[test]
-    fn pi_off_mode_emits_no_env() {
+    fn pi_off_mode_emits_no_bridge_entry() {
         let _g = ENV_LOCK.lock().unwrap();
         let state = off_state();
-        let (env, diags) = compute_pi_provider_env(&state, None);
-        assert!(env.is_empty());
+        let (entries, diags) = pi_bridge_entries(&state, None);
+        assert!(entries.is_empty());
         assert!(diags.is_empty());
+    }
+
+    /// 1.4 退役 shim：`resolve_pi_spawn_env` 恒空（不再喷 env）。
+    #[test]
+    fn retired_pi_spawn_env_is_empty() {
+        #[allow(deprecated)]
+        let (env, diags) = resolve_pi_spawn_env(None);
+        assert!(env.is_empty(), "退役路径恒空: {env:?}");
+        assert!(diags.is_empty());
+    }
+
+    /// 1.5 回滚开关：`SEBAS_LEGACY_PI_ENV=1` 时旧 env 喷洒路径仍可达（e2e 对照）。
+    #[test]
+    fn legacy_pi_env_shim_restores_env_spray() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let _store = write_overlay(
+            dir.path(),
+            r#"{
+                "providers": {
+                    "deepseek": {
+                        "base_url_anthropic": "https://api.deepseek.com/anthropic",
+                        "api_key": "sk-ds-plain"
+                    }
+                }
+            }"#,
+        );
+        // SAFETY: ENV_LOCK held。默认关。
+        unsafe { std::env::remove_var("SEBAS_LEGACY_PI_ENV") };
+        assert!(!legacy_pi_env_shim_enabled(), "缺省关");
+
+        // 旧路径本体（回滚开关打开时由 resolve_pi_bridge_spawn_env 触达）：
+        // 构造的 Direct 状态 → 喷 ANTHROPIC_* env。
+        let state = direct_state("deepseek");
+        let (env, _) = legacy_pi_provider_env(&state, None);
+        assert!(
+            env.iter().any(|(k, v)| k == "ANTHROPIC_API_KEY" && v == "sk-ds-plain"),
+            "旧路径喷 ANTHROPIC_API_KEY: {env:?}"
+        );
+        assert!(
+            env.iter().any(|(k, v)| k == "ANTHROPIC_BASE_URL" && v.contains("deepseek")),
+            "旧路径喷 ANTHROPIC_BASE_URL: {env:?}"
+        );
+
+        // 开关打开：resolve_pi_bridge_spawn_env 走旧路径。全局状态经
+        // write_overlay 装载（mode 仍为 Off 且无 default → 空），故用
+        // provider_state 显式置 Direct 后再验。
+        unsafe { std::env::set_var("SEBAS_LEGACY_PI_ENV", "1") };
+        assert!(legacy_pi_env_shim_enabled(), "开关打开");
+        sebas_dispatch::provider_state::update(|rs| {
+            rs.mode = ProviderMode::Direct {
+                provider: "deepseek".into(),
+            };
+            rs.default_selection = Some(DefaultSelection::new("deepseek"));
+        })
+        .expect("install direct provider state");
+        let (env, _) = resolve_pi_bridge_spawn_env(None);
+        assert!(
+            env.iter().any(|(k, _)| k == "ANTHROPIC_BASE_URL"),
+            "回滚开关打开 → 旧 env 路径: {env:?}"
+        );
+        // SAFETY: ENV_LOCK held。
+        unsafe { std::env::remove_var("SEBAS_LEGACY_PI_ENV") };
     }
 
     /// 接线层：解析为 `Error` 时即使有继承变量也保持静默——spawn 会以

@@ -212,6 +212,79 @@ async fn pi_spawn_never_writes_into_pi_home() {
     );
 }
 
+/// （make-pi-ride-sebas-provider 4.3，spec `pi-agent`「sebas does not spray
+/// ANTHROPIC_* env」）桥路径下 spawn 的 pi 子进程 env 里**不含** sebas 注入的
+/// `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` / `ANTHROPIC_MODEL`。
+///
+/// 手法：spawn 一个会把自身 env（**只记变量名，不记值**）落盘的桩，dump
+/// 子进程 `/proc/<pid>/environ` 的变量名清单；sebas 只经 `PI_CODING_AGENT_DIR`
+/// + `SEBAS_PI_KEY_n` 喂凭据，`ANTHROPIC_*` 一律不得由 sebas 注入。
+#[tokio::test]
+async fn spawn_overrides_no_longer_sets_anthropic_env() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let env_names = dir.path().join("env-names.txt");
+    let script = dir.path().join("fake-pi-envdump.sh");
+    // 桩：启动即把自身 env 的**变量名**（截到 = 之前）落盘，然后讲握手。
+    std::fs::write(
+        &script,
+        format!(
+            r#"#!/bin/sh
+env | sed 's/=.*//' | sort > {dump}
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+  case "$line" in
+    *'"type":"get_state"'*) printf '{{"id":"%s","type":"response","command":"get_state","success":true,"data":{{"sessionId":"s","model":{{"id":"m-1","provider":"anthropic"}}}}}}\n' "$id" ;;
+    *'"type":"get_available_models"'*) printf '{{"id":"%s","type":"response","command":"get_available_models","success":true,"data":{{"models":[]}}}}\n' "$id" ;;
+    *'"type":"get_commands"'*) printf '{{"id":"%s","type":"response","command":"get_commands","success":true,"data":{{"commands":[]}}}}\n' "$id" ;;
+  esac
+done
+"#,
+            dump = env_names.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mgr = pi_manager();
+    // 桥路径注入面：PI_CODING_AGENT_DIR + SEBAS_PI_KEY_0（**无** ANTHROPIC_*）。
+    let sid = mgr
+        .create_session(
+            "pi",
+            vec![script.to_string_lossy().into_owned()],
+            None,
+            vec![
+                ("FAKE_PI_SCENARIO".into(), "".into()),
+                (
+                    "PI_CODING_AGENT_DIR".into(),
+                    dir.path().join("pi-agent").to_string_lossy().into_owned(),
+                ),
+                ("SEBAS_PI_KEY_0".into(), "sk-bridge".into()),
+            ],
+            "hi".to_string(),
+        )
+        .await
+        .expect("pi session spawns");
+    // 等桩把 env 名清单落盘。
+    for _ in 0..100 {
+        if env_names.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let names = std::fs::read_to_string(&env_names).unwrap_or_default();
+    let has = |v: &str| names.lines().any(|l| l == v);
+    assert!(has("PI_CODING_AGENT_DIR"), "桥目录 env 应在场: {names}");
+    assert!(has("SEBAS_PI_KEY_0"), "桥密钥 env 应在场: {names}");
+    for forbidden in ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL"] {
+        assert!(
+            !has(forbidden),
+            "sebas 不得向 pi 子进程注入 {forbidden}: {names}"
+        );
+    }
+    mgr.kill(&sid).await;
+}
+
 /// 6.1 建会话 + 完整回合：握手把会话 id、模型面与命令面板递出；一个 prompt
 /// 产出 thinking/text/tool 增量与**唯一** Finished，且 pi 会话从不产生
 /// PermissionRequest。

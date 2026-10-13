@@ -114,6 +114,15 @@
       "name": "response.state_snapshot"
     },
     {
+      "name": "response.state_snapshot_agents",
+      "bytes": "{\"cmd\":\"state_snapshot\",\"domain\":\"agents\",\"payload\":{\"agents\":[],\"deleted_ids\":[],\"execution_bodies\":{\"native\":{\"ok\":true},\"acp\":{\"ok\":false,\"cause\":\"core 不可达\"}}}}",
+      "fields": [
+        "cmd",
+        "domain",
+        "payload"
+      ]
+    },
+    {
       "bytes": "{\"cmd\":\"node_link\",\"result\":\"nodes\",\"nodes\":[{\"id\":\"node-a\",\"status\":\"online\",\"last_seen_unix\":1700000000,\"created_unix\":1600000000}]}",
       "fields": [
         "cmd",

@@ -285,15 +285,26 @@ addr=127.0.0.1:<port>`，router 侧用自定义 provider（`[provider.fake]` 哑
   建会话/回合/恢复/切模型/取消/看门狗探针七条旅程——不需要 Node 或 pi 在场。
 - **真实二进制端到端（skip-if-absent）**：装 pi（`npm i -g
   @earendil-works/pi-coding-agent`，Node ≥22.19）后，把 pi 的自定义 provider
-  指向 `sebas fake-provider`：写 pi 的 `models.json`（pi 自有配置，sebas 不代写）
-  把 base URL 指到 fake-provider 的 `addr`，再在 pi 侧 `/login` 或配 api key。
+  指向 `sebas fake-provider`：sebas **自己**在 `<SEBAS_HOME>/pi-agent/` 生成
+  `models.json` 桥（见下），把 base URL 指到 fake-provider 的 `addr`。
   **pi 的自有状态落 `~/.pi`**——沙箱必须把 `HOME` 或 `PI_CODING_AGENT_SESSION_DIR`
   钉进 `<SB>`，否则扫到操作员真实 pi 会话；`[acp.agents.pi] sessions_dir` 经
   `--session-dir` 钉在 `<SB>` 内（sebas 侧半边）。
-- **凭据边界**：sebas **不翻译也不代写** pi 的凭据/`models.json`（design D5，
-  一个文件一个写入者）；pi 子进程继承 sebas 进程 env（标准 API key env 表由 pi
-  自读）。reachability 用二进制在场探测 + `pi auth check`（ready/not_ready/
-  invalid）区分「装了没登录」。
+- **凭据边界（make-pi-ride-sebas-provider 修订）**：sebas 在**自己的**目录
+  `<SEBAS_HOME>/pi-agent/` 生成 `models.json` 桥喂 pi（provider 级 `baseUrl`
+  覆盖 + 保留 pi 内置模型），spawn 时把 `PI_CODING_AGENT_DIR` 指向它。**绝不
+  触碰操作员 `~/.pi/agent`**——「一个文件一个写入者」在桥文件这条路径上由
+  「sebas 写自己目录」承担。密钥经 `${SEBAS_PI_KEY_n}` 占位在 `models.json` 里
+  插值，真值只在 spawn 期 env（`SEBAS_PI_KEY_0=<key>`），**不落盘**；sebas
+  **不喷** `ANTHROPIC_*` / `OPENAI_*`（pi 的内置模型把 `baseUrl` 写死、env
+  重定向无效，且那是 claude 家族 env 名）。`pi-agent/` 随 `SEBAS_HOME` 派生
+  （[state_paths] 的 `PiAgentDir` 落点）——沙箱钉 `SEBAS_HOME` 即钉住它，目录
+  缺失时 core 启动/下次 spawn 重建。reachability 用二进制在场探测 + `pi auth
+  check --provider anthropic --model <id>`（ready/not_ready/invalid）区分「装了
+  没登录」。
+- **detached 可达性**：`sebas run` 的独立 webui 经 core 会话通道的
+  `StateSnapshot { domain: "agents" }` 载荷读 `execution_bodies`（逐体可达性），
+  native 行据此如实呈现——不再落 trait 默认 `None` 而恒置灰。
 - **v1 无权限**：pi 无内置权限系统，工具以子进程权限直跑；`SetMode` 返回非终态
   「不支持」（不产生审批卡）——看门狗周期探针因此被容忍，GUI 验收勿记为缺陷。
 

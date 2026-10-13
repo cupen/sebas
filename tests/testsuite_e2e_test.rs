@@ -12034,9 +12034,10 @@ mod builtin_pi_agent {
     /// 日志。协议形状与 `sebas_acp::PiDriver` 的解析器一致（多余字段忽略）。
     const FAKE_PI: &str = r#"#!/bin/sh
 journal() { if [ -n "$FAKE_PI_JOURNAL" ]; then printf '%s\n' "$1" >>"$FAKE_PI_JOURNAL"; fi; }
-# provider env 注入面：sebas 注入的标准 env 对落盘（进程级证据）。
+# 凭据/env 注入面：sebas 注入的 env 落盘（进程级证据）。桥路径下是
+# PI_CODING_AGENT_DIR + SEBAS_PI_KEY_n；ANTHROPIC_* 一并记录，供「不喷」断言。
 if [ -n "$FAKE_PI_ENV" ]; then
-  env | grep -E '^(ANTHROPIC|OPENAI)_' | sort >>"$FAKE_PI_ENV"
+  env | grep -E '^(ANTHROPIC|OPENAI|SEBAS_PI_KEY|PI_CODING_AGENT)' | sort >>"$FAKE_PI_ENV"
 fi
 rid() { printf '%s' "$1" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p'; }
 journal "argv: $*"
@@ -12119,16 +12120,18 @@ done
         body["id"].as_str().expect("project id").to_string()
     }
 
-    /// task 6.1 主旅程：沙箱装配 `[acp.agents.pi]`（path 指 fake pi 桩）+ PATH
-    /// 垫 fake node/npm → 启动 core+webui → catalog 含 native 行（display=PI、
-    /// reachable=true）→ `POST /api/sessions {agent:"native"}` → 会话 key 为 web
-    /// 形态 → 发消息走 fake pi 回合 → composer 模型面来自 fake pi 自广告 →
-    /// `POST .../model` 切模型 set_model 生效 → **env 注入断言**（fake pi 桩把
-    /// 自己的 env 落日志，含 sebas 注入的 ANTHROPIC_API_KEY/BASE_URL）。
+    /// task 6.1 主旅程（make-pi-ride-sebas-provider 4.1 迁移）：沙箱装配
+    /// `[acp.agents.pi]`（path 指 fake pi 桩）+ PATH 垫 fake node/npm → 启动
+    /// core+webui → catalog 含 native 行（display=PI、reachable=true）→
+    /// `POST /api/sessions {agent:"native"}` → 会话 key 为 web 形态 → 发消息走
+    /// fake pi 回合 → composer 模型面来自 fake pi 自广告 → `POST .../model` 切
+    /// 模型 set_model 生效 → **桥文件断言**（`<SEBAS_HOME>/pi-agent/models.json`
+    /// 的 anthropic.baseUrl 等于注册表端点 + `PI_CODING_AGENT_DIR` 指向该目录 +
+    /// `SEBAS_PI_KEY_0` 真值在子进程 env，且 **不** 喷 `ANTHROPIC_*`）。
     #[cfg(unix)]
     #[tokio::test]
     #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-    async fn native_slot_runs_pi_with_provider_env_and_model_switch() {
+    async fn native_slot_runs_pi_via_sebas_bridge() {
         let sb = Sandbox::new("testsuite_e2e", "builtin-pi");
         let pi_bin = write_fake_pi(&sb);
         let pi_sessions = sb.path.join("pi-sessions");
@@ -12136,7 +12139,7 @@ done
         sb.set_agent_pi(&pi_bin, &forward_slash(&pi_sessions));
 
         // provider 默认 selection 经 legacy `defaults.json` 一次性导入（沙箱
-        // 首启通道）——pi spawn 期 provider env 注入的数据源。
+        // 首启通道）——pi 桥文件生成的数据源。
         std::fs::write(
             sb.path.join("defaults.json"),
             r#"{"provider": "pistub", "model": "m-1"}"#,
@@ -12157,7 +12160,7 @@ done
         let dashboard = format!("http://127.0.0.1:{dashboard_port}");
         wait_dashboard_health(&cli, &dashboard, &sb.path).await;
 
-        // 经 BFF 建 provider（pi 注入的解析源），指向一个哑上游。
+        // 经 BFF 建 provider（pi 桥的解析源），指向一个哑上游。
         let (status, body) = post_json(
             &cli,
             &format!("{dashboard}/api/providers"),
@@ -12326,23 +12329,44 @@ done
             "the set_model command must reach the pi child: {journal:?}"
         );
 
-        // env 注入断言：fake pi 桩的 env 日志含 sebas 注入的标准 provider env。
+        // 桥文件断言（4.1）：sebas 在自己目录生成 models.json，端点来自注册表。
+        let bridge_path = sb.path.join("pi-agent").join("models.json");
+        let bridge: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&bridge_path)
+                .unwrap_or_else(|e| panic!("read bridge {}: {e}", bridge_path.display())),
+        )
+        .expect("bridge is valid JSON");
+        assert_eq!(
+            bridge["providers"]["anthropic"]["baseUrl"],
+            "https://pi-stub.example/anthropic",
+            "桥的 anthropic.baseUrl 等于注册表端点: {bridge}"
+        );
+        assert_eq!(
+            bridge["providers"]["anthropic"]["apiKey"], "${SEBAS_PI_KEY_0}",
+            "密钥经占位插值、真值不落盘: {bridge}"
+        );
+        let bridge_bytes = std::fs::read_to_string(&bridge_path).unwrap_or_default();
+        assert!(
+            !bridge_bytes.contains("sk-pi-injected"),
+            "密钥真值绝不进桥文件: {bridge_bytes}"
+        );
+
+        // 子进程 env 断言（4.1）：PI_CODING_AGENT_DIR 指向 sebas 私有目录、
+        // SEBAS_PI_KEY_0 真值在场；**不** 喷 ANTHROPIC_*（spec「sebas does not
+        // spray ANTHROPIC_* env」）。
         let injected: Vec<String> = std::fs::read_to_string(&pi_env_log)
             .unwrap_or_default()
             .lines()
             .map(str::to_string)
             .collect();
         assert!(
-            injected
-                .iter()
-                .any(|l| l == "ANTHROPIC_API_KEY=sk-pi-injected"),
-            "sebas-injected ANTHROPIC_API_KEY must reach the pi child: {injected:?}"
+            injected.iter().any(|l| l == "SEBAS_PI_KEY_0=sk-pi-injected"),
+            "SEBAS_PI_KEY_0 真值必须进 pi 子进程 env: {injected:?}"
         );
         assert!(
-            injected
-                .iter()
-                .any(|l| l == "ANTHROPIC_BASE_URL=https://pi-stub.example/anthropic"),
-            "sebas-injected ANTHROPIC_BASE_URL must reach the pi child: {injected:?}"
+            !injected.iter().any(|l| l.starts_with("ANTHROPIC_API_KEY=")
+                || l.starts_with("ANTHROPIC_BASE_URL=")),
+            "sebas 不得喷 ANTHROPIC_* env 给 pi: {injected:?}"
         );
 
         let _ = &mut core;
@@ -12409,5 +12433,117 @@ done
                 && !cause.contains("SEBAS_AGENT_ROUTER_URL"),
             "the cause must not name the retired kernel env vars: {native}"
         );
+    }
+
+    /// task 4.2（make-pi-ride-sebas-provider）：detached 拓扑（core + webui 两
+    /// 独立进程）下，独立 webui 的 `GET /api/agents` 经 core 会话通道的
+    /// `StateSnapshot { domain: "agents" }.execution_bodies` 拿到 native 行的
+    /// 真值——不再落 trait 默认 `None` 而恒置灰（这是本 change 修的 detached
+    /// bug）。
+    ///
+    /// native 可达性口径 = pi **二进制在场**（make-pi-the-builtin-agent 1.2；
+    /// provider 配置不翻转它，见 `provider_config_does_not_flip_native_availability`）。
+    /// 故两态：① pi 在场 → `reachable: true`；② pi 不在场 → `reachable: false`
+    /// 且 cause 指安装面。
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn detached_topology_native_reachability_transmitted() {
+        // ① pi 在场：detached webui 的 native 行可达（修复前恒 false）。
+        {
+            let sb = Sandbox::new("testsuite_e2e", "detached-native-reach");
+            let pi_bin = write_fake_pi(&sb);
+            let pi_sessions = sb.path.join("pi-sessions");
+            std::fs::create_dir_all(&pi_sessions).expect("mkdir pi-sessions");
+            sb.set_agent_pi(&pi_bin, &forward_slash(&pi_sessions));
+
+            let cli = http_client();
+            let _core = sb.spawn_core();
+            let _webui = sb.spawn_webui(&sb.core_secret);
+            wait_reachable(&cli, &sb).await;
+
+            let agents_url = format!("{}/api/agents", sb.webui_url());
+            let native = wait_for(
+                "detached webui reports the native row reachable via the core channel",
+                Duration::from_secs(25),
+                &sb.path.clone(),
+                {
+                    let cli = cli.clone();
+                    let url = agents_url.clone();
+                    move || {
+                        let cli = cli.clone();
+                        let url = url.clone();
+                        Box::pin(async move {
+                            let v = cli
+                                .get(&url)
+                                .send()
+                                .await
+                                .ok()?
+                                .json::<serde_json::Value>()
+                                .await
+                                .ok()?;
+                            let row = v["agents"]
+                                .as_array()?
+                                .iter()
+                                .find(|a| a["id"] == "native")?
+                                .clone();
+                            (row["reachable"] == true).then_some(row)
+                        })
+                    }
+                },
+            )
+            .await;
+            assert_eq!(native["display"], "PI", "detached native row: {native}");
+        }
+
+        // ② pi 不在场：detached webui 的 native 行如实不可达，cause 指安装面。
+        {
+            let sb = Sandbox::new("testsuite_e2e", "detached-native-absent");
+            let empty_bin = sb.path.join("empty-bin");
+            std::fs::create_dir_all(&empty_bin).expect("mkdir empty-bin");
+            let path_env = forward_slash(&empty_bin);
+
+            let cli = http_client();
+            let _core = sb.spawn_core_extra(&[("PATH", path_env.as_str())]);
+            let _webui = sb.spawn_webui_extra(&sb.core_secret, &[("PATH", path_env.as_str())]);
+            wait_reachable(&cli, &sb).await;
+
+            let agents_url = format!("{}/api/agents", sb.webui_url());
+            let native = wait_for(
+                "detached webui reports the native row unavailable when pi is absent",
+                Duration::from_secs(25),
+                &sb.path.clone(),
+                {
+                    let cli = cli.clone();
+                    let url = agents_url.clone();
+                    move || {
+                        let cli = cli.clone();
+                        let url = url.clone();
+                        Box::pin(async move {
+                            let v = cli
+                                .get(&url)
+                                .send()
+                                .await
+                                .ok()?
+                                .json::<serde_json::Value>()
+                                .await
+                                .ok()?;
+                            let row = v["agents"]
+                                .as_array()?
+                                .iter()
+                                .find(|a| a["id"] == "native")?
+                                .clone();
+                            (row["reachable"] == false).then_some(row)
+                        })
+                    }
+                },
+            )
+            .await;
+            let cause = native["cause"].as_str().unwrap_or_default();
+            assert!(
+                cause.contains("pi") && cause.contains("安装"),
+                "the cause must point at the pi install surface: {native}"
+            );
+        }
     }
 }

@@ -179,6 +179,12 @@ pub enum StatePath {
     /// watchdog 升级数据目录（`<home>/upgrade/`，内部布局原样）。
     /// `[watchdog.storage] data_dir` 键照旧优先。
     UpgradeDataDir,
+    /// pi 驱动的**私有** agent 目录（`<home>/pi-agent/`）：sebas 在此生成
+    /// `models.json` 桥（provider 级 baseUrl 覆盖 + 内置模型），spawn pi 时把
+    /// `PI_CODING_AGENT_DIR` 指向它。与操作员 `~/.pi/agent` 互不触碰——
+    /// 「一个文件一个写入者」在桥文件这条路径上由「sebas 写自己目录」承担
+    /// （make-pi-ride-sebas-provider D1/D2）。无覆盖变量。
+    PiAgentDir,
 }
 
 impl StatePath {
@@ -200,7 +206,8 @@ impl StatePath {
             | StatePath::ControlSocket
             | StatePath::MediaDownloads
             | StatePath::NodeStateDir
-            | StatePath::UpgradeDataDir => None,
+            | StatePath::UpgradeDataDir
+            | StatePath::PiAgentDir => None,
         }
     }
 
@@ -225,6 +232,7 @@ impl StatePath {
             StatePath::MediaDownloads => "cache/downloads",
             StatePath::NodeStateDir => "node",
             StatePath::UpgradeDataDir => "upgrade",
+            StatePath::PiAgentDir => "pi-agent",
         }
     }
 
@@ -253,7 +261,8 @@ impl StatePath {
             StatePath::ConfigDefault
             | StatePath::CoreSecretDefault
             | StatePath::MediaDownloads
-            | StatePath::UpgradeDataDir => None,
+            | StatePath::UpgradeDataDir
+            | StatePath::PiAgentDir => None,
         }
     }
 
@@ -397,6 +406,7 @@ mod tests {
         StatePath::MediaDownloads,
         StatePath::NodeStateDir,
         StatePath::UpgradeDataDir,
+        StatePath::PiAgentDir,
     ];
 
     // ---- 任务 1.1：全部逻辑名的相对路径、所属库与覆盖变量名 ----
@@ -464,6 +474,8 @@ mod tests {
             (StatePath::MediaDownloads, None, "cache/downloads", None),
             (StatePath::NodeStateDir, None, "node", Some("SEBAS_NODE_DIR")),
             (StatePath::UpgradeDataDir, None, "upgrade", None),
+            // make-pi-ride-sebas-provider：pi 私有 agent 目录（桥文件落点）。
+            (StatePath::PiAgentDir, None, "pi-agent", None),
         ];
         for (path, db, rel, var) in want {
             assert_eq!(path.database(), *db, "{path:?} 所属库");
@@ -864,6 +876,7 @@ mod tests {
             ("downloads", "cache/downloads"),
             ("node", "node"),
             ("upgrade", "upgrade"),
+            ("pi-agent", "pi-agent"),
         ];
         assert_eq!(want.len(), ALL.len(), "期望清单与枚举必须一一对应");
         for (label, rel) in want {

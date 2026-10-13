@@ -443,6 +443,27 @@ pub enum CoreChannelResponse {
     Unknown,
 }
 
+/// （make-pi-ride-sebas-provider 2.1）执行体逐体可达性：`StateSnapshot
+/// { domain: "agents" }` 响应 payload 的 `execution_bodies` 映射值。
+///
+/// 形状 `{ ok: bool, cause: Option<String> }`——body 名是映射的**键**
+/// （`"native"` / 未来 `"acp"`），故本类型不含 name 字段。`cause` 是不可用
+/// 时的可读原因（如实透传，供 webui 的 catalog 行渲染）。
+///
+/// 定义在协议之家（而非 webui 的 `session_backend::ExecutionBodyStatus`，后者
+/// 带 name 字段、是 webui 面形状）：detached 拓扑下独立 webui 经通道读这份
+/// 载荷，两侧必须共用同一 wire 形状。字段全带 serde 默认值（演进规则 1）——
+/// 旧对端不发 `cause` 也能读。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionBodyStatus {
+    /// 该执行体当前是否可用。
+    #[serde(default)]
+    pub ok: bool,
+    /// 不可用时的可读原因（可用时为 `None`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<String>,
+}
+
 /// `CoreChannelResponse::UsageTimeseries::status` 的 serde 缺省。
 fn default_usage_status() -> u16 {
     200

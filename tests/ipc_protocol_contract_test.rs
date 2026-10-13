@@ -229,6 +229,23 @@ fn core_channel_payloads() -> Vec<(String, String)> {
             }),
         ),
         (
+            // make-pi-ride-sebas-provider 5.1：agents 域快照带 execution_bodies
+            // 段（逐体可达性）。新字段是 **additive**（payload 是 Value，旧对端
+            // 忽略未知键），本行钉住其线形状。
+            "response.state_snapshot_agents".into(),
+            bytes_of(&CoreChannelResponse::StateSnapshot {
+                domain: "agents".into(),
+                payload: serde_json::json!({
+                    "agents": [],
+                    "deleted_ids": [],
+                    "execution_bodies": {
+                        "native": {"ok": true},
+                        "acp": {"ok": false, "cause": "core 不可达"}
+                    }
+                }),
+            }),
+        ),
+        (
             "response.node_link_nodes".into(),
             bytes_of(&CoreChannelResponse::NodeLink(NodeLinkOutcome::Nodes {
                 nodes: vec![NodeView {

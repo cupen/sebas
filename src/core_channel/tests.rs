@@ -78,6 +78,29 @@ async fn start_core_with_map(dir: &StdPath, map: SessionMap) -> TestCore {
     }
 }
 
+/// 以**显式后端**起 core（make-pi-ride-sebas-provider 2.3：`execution_bodies`
+/// 覆写测试需要注入逐体状态的 FakeBackend）。
+async fn start_core_with_backend(
+    dir: &StdPath,
+    backend: Arc<dyn sebas_webui::SessionBackend>,
+) -> TestCore {
+    let (router, out_rx) = DispatchHandle::new(SessionMap::new());
+    let path = dir.join("core.sock");
+    let (close_tx, close_rx) = tokio::sync::watch::channel(false);
+    let serve_path = path.clone();
+    let serve_router = router.clone();
+    tokio::spawn(async move {
+        let _ = server::serve(backend, serve_router, serve_path, SECRET.into(), close_rx).await;
+    });
+    wait_channel_ready(&path).await;
+    TestCore {
+        path,
+        close_tx,
+        handle: router,
+        _out_rx: out_rx,
+    }
+}
+
 /// 等待通道下线（unix：socket 文件消失；Windows：连接失败即视为消失）。
 async fn wait_channel_gone(path: &StdPath) {
     #[cfg(unix)]
@@ -718,8 +741,67 @@ async fn state_subscription_serves_snapshot_frame_without_engine() {
     drop(w);
 }
 
-// ── wire-webui-sebas-agent-e2e 1.3: ApprovalAnswer typed rejection ──────────
+// ── make-pi-ride-sebas-provider 2.3: detached execution_bodies ──────────────
 
+/// 2.3 验收（design D6）：core 的 `StateSnapshot { domain: "agents" }` 载荷带
+/// `execution_bodies` 段，独立 webui 的 `CoreChannelBackend::execution_bodies()`
+/// 覆写从它取值——native 行的可达性与 core 上报一致，不再落 trait 默认
+/// `None`（那会让 detached 下 native 恒 `reachable=false`）。
+#[tokio::test]
+async fn webui_execution_bodies_resolves_from_state_snapshot() {
+    use sebas_webui::session_backend::{ExecutionBodyStatus, FakeBackend};
+
+    // 装引擎：agents 域快照需要 state store（本用例只关心 execution_bodies
+    // 段，故用空引擎）。
+    let (_engine, _guard) = sebas_dispatch::test_engine::install_fresh_with(
+        sebas_dispatch::state_store::PersistedState::default(),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    // core 侧：注入逐体上报（native 可达 + acp 不可达）。
+    let fake = Arc::new(FakeBackend::new());
+    fake.set_execution_bodies(Some(vec![
+        ExecutionBodyStatus {
+            name: "native".into(),
+            ok: true,
+            cause: None,
+        },
+        ExecutionBodyStatus {
+            name: "acp".into(),
+            ok: false,
+            cause: Some("core 不可达".into()),
+        },
+    ]));
+    let core = start_core_with_backend(dir.path(), fake.clone()).await;
+
+    // 独立 webui 侧：CoreChannelBackend 覆写从 StateSnapshot 拉取。
+    let backend = CoreChannelBackend::new(core.path.clone(), SECRET.into());
+    let bodies = backend
+        .execution_bodies()
+        .await
+        .expect("core reports execution_bodies");
+    let native = bodies
+        .iter()
+        .find(|b| b.name == "native")
+        .expect("native entry present");
+    assert!(native.ok, "native 可达性来自 core 上报: {bodies:?}");
+    assert!(native.cause.is_none(), "可达时无 cause: {native:?}");
+    let acp = bodies.iter().find(|b| b.name == "acp").unwrap();
+    assert!(!acp.ok);
+    assert_eq!(acp.cause.as_deref(), Some("core 不可达"));
+
+    // 缓存：core 侧翻转为不可达后再读，覆写值随之更新（每读一次拉一次）。
+    fake.set_execution_bodies(Some(vec![ExecutionBodyStatus {
+        name: "native".into(),
+        ok: false,
+        cause: Some("未配 provider".into()),
+    }]));
+    let bodies = backend.execution_bodies().await.expect("bodies");
+    let native = bodies.iter().find(|b| b.name == "native").unwrap();
+    assert!(!native.ok, "翻转后可读新状态: {bodies:?}");
+    assert_eq!(native.cause.as_deref(), Some("未配 provider"));
+}
+
+// ── wire-webui-sebas-agent-e2e 1.3: ApprovalAnswer typed rejection ──────────
 /// 1.3 验收：对未知 request_id 的 `ApprovalAnswer`，服务端返回 typed
 /// rejection —— fail-closed 语义（拒绝而非默默丢弃/伪装成功）；client 侧
 /// `answer_permission` 相应返回 false。

@@ -545,11 +545,48 @@ describe('sebas-new-session-dialog', () => {
     ).not.toContain('设置 → 模型')
   })
 
-  // ── make-pi-the-builtin-agent 4.1：native 行改指 pi，禁用提示改安装指引 ──
-  // 内置槽位执行体已从自研 sebas 内核改指 pi（display `PI`）；native 不可用
-  // 的真实条件变为「pi 未安装」——提示指安装面（Settings → Agent），SHALL
-  // NOT 再提 core env 变量标识（spec「unavailable cause speaks operator
-  // language」）。
+  // ── make-pi-ride-sebas-provider 3.1：不可用文案按服务端 cause 渲染 ──
+  // 删除 native 硬编码「未安装 pi」分支：provider 未配时服务端 cause 是
+  // 「未配 provider」——label 与 cause 必须一致（spec `webui`）。
+
+  it('native unavailable label uses catalog cause, not a hardcoded literal (3.1)', async () => {
+    const { agentUnavailableLabel } = await import('./new-session-dialog.js')
+    // 场景一：pi 二进制不可达 → cause 指向安装面。
+    const binaryAbsent = agentUnavailableLabel({
+      id: 'native',
+      display: 'PI',
+      cause: 'pi 二进制不可达 — 到 Settings → Agent 一键安装 pi',
+    })
+    expect(binaryAbsent).toContain('pi')
+    expect(binaryAbsent).toContain('设置 → Agent')
+    expect(binaryAbsent).not.toMatch(/SEBAS_AGENT_PROVIDER_API_KEY|SEBAS_AGENT_ROUTER_URL/)
+
+    // 场景二：pi 在场但 provider 未配 → cause 指 Settings → Models，
+    // **不得**落回硬编码「未安装 pi」（否则与真因矛盾）。
+    const providerMissing = agentUnavailableLabel({
+      id: 'native',
+      display: 'PI',
+      cause: '未配 provider，请到 Settings → Models 配置',
+    })
+    expect(providerMissing).toContain('未配 provider')
+    expect(providerMissing).toContain('设置 → Models')
+    expect(providerMissing).not.toContain('未安装 pi')
+    expect(providerMissing).not.toContain('一键安装 pi')
+  })
+
+  it('non-native unavailable label uses catalog cause (3.1)', async () => {
+    const { agentUnavailableLabel } = await import('./new-session-dialog.js')
+    const claude = agentUnavailableLabel({
+      id: 'claude',
+      display: 'claude',
+      cause: '未配 provider，请到 Settings → Models 配置 claude',
+    })
+    expect(claude).toContain('未配 provider')
+    expect(claude).toContain('设置 → Models')
+  })
+
+  // ── make-pi-the-builtin-agent 4.1（make-pi-ride-sebas-provider 3.1 修订）：
+  // native 行不可用文案指 pi 安装面，SHALL NOT 泄漏 env 变量标识。 ──
 
   it('native disabled hint points at the pi install surface, without env identifiers (4.1)', async () => {
     const { agentUnavailableLabel } = await import('./new-session-dialog.js')
@@ -584,10 +621,10 @@ describe('sebas-new-session-dialog', () => {
     ) as HTMLElement | null
     expect(nativeOpt).toBeTruthy()
     expect(nativeOpt!.hasAttribute('disabled')).toBe(true)
-    // 选项可见文案含 env 词、不含设置页引导；原始 cause 仍在 tooltip。
+    // 选项可见文案按 cause 指向安装面；原始 cause 仍在 tooltip。
     expect(nativeOpt!.textContent).toContain('pi')
+    expect(nativeOpt!.textContent).toContain('设置 → Agent')
     expect(nativeOpt!.textContent).not.toContain('设置 → 模型')
-    // 原始 cause 仍在 tooltip（安装指引）。
     expect((nativeOpt as unknown as { title: string }).title).toContain('pi')
   })
 

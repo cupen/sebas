@@ -95,9 +95,12 @@ fn spawn_overrides(
     mapping: Option<&sebas_models::agent::ModelSlotMapping>,
 ) -> (Vec<(String, String)>, Vec<String>) {
     if driver == "pi" {
-        // （2.1）pi 凭据注入：标准 env 对（spawn 期语义——启动后凭据变更不
-        // 影响在跑会话）。与 claude 的键名区分（见 spawn_env 文档）。
-        let (env, _diagnostics) = crate::spawn_env::resolve_pi_spawn_env(router_cfg);
+        // （make-pi-ride-sebas-provider 1.2/1.4）pi 凭据经 `models.json` 桥：
+        // 写 sebas 私有 `<SEBAS_HOME>/pi-agent/models.json` + 注入
+        // `PI_CODING_AGENT_DIR` / `SEBAS_PI_KEY_n`（spawn 期语义——启动后
+        // 凭据变更不影响在跑会话）。不再喷 `ANTHROPIC_*` env（旧路径已退役，
+        // 实测对 pi 端点重定向无效且属 claude env 名字空间错配）。
+        let (env, _diagnostics) = crate::spawn_env::resolve_pi_bridge_spawn_env(router_cfg);
         return (env, command);
     }
     if driver != "claude" {
