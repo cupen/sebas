@@ -2,6 +2,11 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
+  /* 蓝图 §3：正文最大可读宽度 760px、1440 下居中两侧留白；窄视口自适应
+   *（768 档主区 764px 仍可容纳，375 单列不受影响）。 */
+  width: 100%;
+  max-width: 760px;
+  margin-inline: auto;
 }
 
 .empty {

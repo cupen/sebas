@@ -103,6 +103,7 @@ function outsideMedia(source: string): string {
 
 const shell = read('shell.module.css')
 const rail = read('rail.module.css')
+const composer = read('../conversation/composer.module.css')
 
 describe('Drawer touch budget (≤600px)', () => {
   it('grows the drawer navigation rows to 44px', () => {
@@ -139,5 +140,18 @@ describe('Drawer touch budget (≤600px)', () => {
     ] as const) {
       expect(exactBody(outsideMedia(source), selector)).not.toMatch(/min-height/)
     }
+  })
+})
+
+describe('Composer touch budget (≤600px)', () => {
+  it('grows the mode/model selects to 44px', () => {
+    const block = narrowBlock(composer)
+    expect(bodyFor(block, '.ant-select-single')).toMatch(/min-height:\s*44px/)
+    expect(bodyFor(block, '.ant-select-selector')).toMatch(/min-height:\s*44px/)
+    expect(bodyFor(block, '.ant-select-selection-item')).toMatch(/line-height:\s*42px/)
+  })
+
+  it('keeps the desktop composer bar compact: base rules carry no 44px floor', () => {
+    expect(exactBody(outsideMedia(composer), '.bar')).not.toMatch(/min-height/)
   })
 })

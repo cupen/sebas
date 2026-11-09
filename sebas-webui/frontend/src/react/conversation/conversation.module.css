@@ -73,6 +73,14 @@
   box-shadow: 0 2px 8px rgb(0 0 0 / 18%);
 }
 
+/* 手机宽度下浮标上移出 composer 芯片行（模式/模型选择是主操作，
+ * 视觉验收 DEF-7：浮层不遮挡关键操作）。 */
+@media (max-width: 600px) {
+  .jump {
+    bottom: 132px;
+  }
+}
+
 /* Stage|composer divider: rest transparent, hover/focus reveals the handle. */
 .vsplit {
   flex: none;

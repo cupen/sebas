@@ -180,6 +180,10 @@ export function ConversationPane({
   }, [sessionKey])
 
   const waiting = state.detail?.status_slug === 'waiting'
+  // 审批决策只在 waiting 相位可投递（与上方轮询 gate 同源）。其它相位里的
+  // 滞留卡片——回合已取消/结束——操作一律禁用（视觉验收 DEF-2）；真正的
+  // 迟到竞态仍会走 answer() 的错误 Alert 路径，404 如实呈现不受影响。
+  const approvalsStale = !waiting
   useEffect(() => {
     if (!waiting) return
     let cancelled = false
@@ -449,6 +453,10 @@ export function ConversationPane({
 
       {approvals.length > 0 ? (
         <div className={styles.approvals} aria-label="待审批工具调用">
+          {/* 回合不再占用（已取消/已结束）时，滞留的审批请求已无处投递——
+           * 决策会得到 404「no pending permission request」。操作保持可见但
+           * 禁用，如实呈现「已失效」而不是误导可点（视觉验收 DEF-2）；真正
+           * 的迟到竞态仍走 answer() 的错误 Alert 路径。 */}
           {orderedApprovals(approvals).map((approval) => (
             <div
               key={approval.request_id}
@@ -471,12 +479,14 @@ export function ConversationPane({
                 <Button
                   type="primary"
                   loading={approvalBusy.has(approval.request_id)}
+                  disabled={approvalsStale}
                   onClick={() => void answer(approval.request_id, { decision: 'allow_once' })}
                 >
                   允许一次
                 </Button>
                 <Button
                   loading={approvalBusy.has(approval.request_id)}
+                  disabled={approvalsStale}
                   onClick={() => void answer(approval.request_id, { decision: 'allow_session' })}
                 >
                   本会话允许
@@ -484,6 +494,7 @@ export function ConversationPane({
                 <Button
                   danger
                   loading={approvalBusy.has(approval.request_id)}
+                  disabled={approvalsStale}
                   onClick={() => void answer(approval.request_id, { decision: 'deny' })}
                 >
                   拒绝
@@ -494,11 +505,12 @@ export function ConversationPane({
                   placeholder="上抛原因"
                   value={escalateReason}
                   onChange={(event) => setEscalateReason(event.target.value)}
+                  disabled={approvalsStale}
                   className={styles.escalateReason}
                 />
                 <Button
                   loading={approvalBusy.has(approval.request_id)}
-                  disabled={escalateReason.trim() === ''}
+                  disabled={approvalsStale || escalateReason.trim() === ''}
                   onClick={() =>
                     void answer(approval.request_id, {
                       decision: 'escalate',

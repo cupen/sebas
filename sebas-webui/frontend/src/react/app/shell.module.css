@@ -120,6 +120,23 @@
   width: 100%;
 }
 
+/* Compact icon rail foot: the theme segmented and the user button's text
+ * would clip against the 56px track (视觉验收 DEF-5). They resurface in the
+ * hover/focus flyout below, matching the nav-label pattern; the user button
+ * keeps its ◍ glyph and aria-label while collapsed. */
+:global([data-rail-compact='true']) .railFoot :global(.ant-segmented) {
+  display: none;
+}
+
+:global([data-rail-compact='true']) .userName,
+:global([data-rail-compact='true']) .role {
+  display: none;
+}
+
+:global([data-rail-compact='true']) .user {
+  justify-content: center;
+}
+
 :global([data-rail-compact='true']) .navItem {
   justify-content: center;
   padding-inline: 2px;
@@ -372,6 +389,23 @@
   .rail:focus-within :global([data-rail-compact='true']) .navItem {
     justify-content: flex-start;
     padding-inline: 7px;
+  }
+
+  .rail:hover :global([data-rail-compact='true']) .railFoot :global(.ant-segmented),
+  .rail:focus-within :global([data-rail-compact='true']) .railFoot :global(.ant-segmented) {
+    display: inline-flex;
+  }
+
+  .rail:hover :global([data-rail-compact='true']) .userName,
+  .rail:focus-within :global([data-rail-compact='true']) .userName,
+  .rail:hover :global([data-rail-compact='true']) .role,
+  .rail:focus-within :global([data-rail-compact='true']) .role {
+    display: inline;
+  }
+
+  .rail:hover :global([data-rail-compact='true']) .user,
+  .rail:focus-within :global([data-rail-compact='true']) .user {
+    justify-content: space-between;
   }
 
   .main {

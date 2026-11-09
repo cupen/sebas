@@ -90,6 +90,15 @@ export function Shell({ auth, sessions, role, username }: ShellProps) {
   const { mode, resolved, setMode } = useThemeMode()
   const summary = useStore(sessions.store, (state) => state.summary)
   const list = useStore(sessions.store, (state) => state.list)
+  // 横幅聚焦标签与 rail 行同源（recent_sessions 的 WS 实时 status_slug）：
+  // summary 投影刷新滞后，曾出现「横幅=运行中 / 转录=完成」长窗口失同步
+  //（视觉验收 DEF-1）。summary 仅在会话不在 recent 窗口时回退。
+  const focusedRow =
+    route.kind === 'session'
+      ? (list?.recent_sessions ?? []).find((row) => row.encoded_key === route.key)
+      : null
+  const focusStatusSlug =
+    focusedRow?.status_slug ?? summary?.active_session?.status_slug ?? null
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null)
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -459,6 +468,7 @@ export function Shell({ auth, sessions, role, username }: ShellProps) {
           }}
         >
           <Button className={styles.user} aria-label="用户菜单">
+            <span className={styles.navIcon} data-icon="◍" aria-hidden="true" />
             <span className={styles.userName}>{username ?? '未登录'}</span>
             <span className={styles.role}>{role ? ROLE_LABEL[role] : '免登录'}</span>
           </Button>
@@ -554,9 +564,9 @@ export function Shell({ auth, sessions, role, username }: ShellProps) {
           <span className={styles.projectName}>{project?.name ?? '工作台'}</span>
           {project ? <span className={styles.projectPath}>{project.path}</span> : null}
           <span className={styles.spacer} />
-          {summary?.active_session ? (
+          {focusStatusSlug !== null ? (
             <Tag className={styles.focusTag} title="聚焦会话">
-              {statusLabel(summary.active_session.status_slug)}
+              {statusLabel(focusStatusSlug)}
             </Tag>
           ) : null}
           <span

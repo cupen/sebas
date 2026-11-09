@@ -105,3 +105,29 @@
   gap: 10px;
   flex-wrap: wrap;
 }
+
+/* 4.6 touch budget (performance-budget 2.4): on phone widths the composer's
+ * primary controls — mode/model selects — reach 44px. The action button is
+ * covered by the global `.ant-btn` rule in app.css; AntD Select needs its own
+ * selector/line-height growth. `!important` is the project's established way
+ * to win over AntD's CSS-in-JS (see shell.module.css narrow block). */
+@media (max-width: 600px) {
+  .bar :global(.ant-select-single) {
+    min-height: 44px;
+  }
+
+  .bar :global(.ant-select-single) :global(.ant-select-selector) {
+    min-height: 44px !important;
+    height: 44px !important;
+    border-radius: 8px;
+  }
+
+  .bar
+    :global(.ant-select-single)
+    :global(.ant-select-selection-item),
+  .bar
+    :global(.ant-select-single)
+    :global(.ant-select-selection-placeholder) {
+    line-height: 42px !important;
+  }
+}
