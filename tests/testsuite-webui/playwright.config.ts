@@ -10,6 +10,7 @@ export const REPO_ROOT = path.resolve(import.meta.dirname, '../..')
 process.env.TESTSUITE_SCENE_FILE ||= path.join(os.tmpdir(), 'sebas-testsuite-webui-scene-9899')
 
 export const WEBUI_PORT = 9899
+const VITE_PORT = 5294
 
 export default defineConfig({
   testDir: './tests',
@@ -57,6 +58,15 @@ export default defineConfig({
     // 2.3：native 转录/影子队列旅程只在 TESTSUITE_NATIVE=1 姿态成立，主
     // 沙箱 native 不可用，createSession(agent:'native') 409）。
     /qa-round8-native\.spec\.ts/,
+    // tool-call-fold 的确定性基座是 native 场景模型（test/tool-use /
+    // test/tools-parallel，见 playwright.native.config.ts）；主沙箱切模型
+    // 即 409，旅程会在第一行 setModel 就红，归 native config。
+    /tool-call-fold\.spec\.ts/,
+    // react-setup / react-auth 的形态前提（零用户首启 / auth-on 登录页）只在
+    // 各自装配成立；主沙箱 auth=off 且已有用户，归 playwright.react-setup /
+    // react-auth config。react-workbench 与 react-responsive-a11y 在 React
+    // 入口上可独立跑，仍留在主配置里做回归。
+    /react-(auth|setup)\.spec\.ts/,
   ],
   timeout: 30_000,
   retries: 1,
@@ -65,17 +75,30 @@ export default defineConfig({
   // 沙箱 keep/clean 的唯一权威，两者并列互不干扰。
   reporter: [['list'], ['./tests/reporters/keep-on-fail.ts'], ['./tests/reporters/collect-json.ts']],
   use: {
-    baseURL: `http://127.0.0.1:${WEBUI_PORT}`,
+    baseURL: `http://127.0.0.1:${VITE_PORT}`,
     headless: true,
     trace: 'on-first-retry',
   },
-  webServer: {
-    command: 'invoke testsuite-webui-server',
-    url: `http://127.0.0.1:${WEBUI_PORT}/health`,
-    cwd: REPO_ROOT,
-    timeout: 120_000,
-    // TESTSUITE_REUSE=1 lets a kept scene (TESTSUITE_KEEP=1 debugging flow) be reused.
-    reuseExistingServer: process.env.TESTSUITE_REUSE === '1',
-  },
+  webServer: [
+    {
+      command: 'invoke testsuite-webui-server',
+      url: `http://127.0.0.1:${WEBUI_PORT}/health`,
+      cwd: REPO_ROOT,
+      timeout: 120_000,
+      // TESTSUITE_REUSE=1 lets a kept scene (TESTSUITE_KEEP=1 debugging flow) be reused.
+      reuseExistingServer: process.env.TESTSUITE_REUSE === '1',
+    },
+    {
+      command: `pnpm --dir sebas-webui/frontend exec vite --host 127.0.0.1 --port ${VITE_PORT} --strictPort`,
+      env: {
+        ...process.env,
+        SEBAS_WEBUI_BACKEND: `http://127.0.0.1:${WEBUI_PORT}`,
+      },
+      url: `http://127.0.0.1:${VITE_PORT}/`,
+      cwd: REPO_ROOT,
+      timeout: 120_000,
+      reuseExistingServer: process.env.TESTSUITE_REUSE === '1',
+    },
+  ],
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
 })

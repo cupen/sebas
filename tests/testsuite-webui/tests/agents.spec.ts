@@ -101,38 +101,34 @@ test.describe.serial('Settings → Agents 目录 webui 全链路', () => {
     const settings = new SettingsModal(page)
     await settings.openViaSidebar()
     await settings.openSection('Agent')
-    await expect(settings.panel.locator('[data-testid="agent-row-native"]')).toBeVisible()
+    await expect(settings.panel.getByText('native', { exact: true })).toBeVisible()
 
-    await settings.panel.locator('wa-button').filter({ hasText: '新建 agent' }).click()
-    const dialog = page.locator('sebas-settings-modal wa-dialog[label="新建 agent"]')
-    // wa-dialog 宿主在 top layer 读作 hidden——可见性断言落在渲染出的内部
+    await settings.panel.getByRole('button', { name: '新建 agent' }).click()
+    const dialog = page.getByRole('dialog', { name: '新建 agent' })
+    // [role="dialog"] 宿主在 top layer 读作 hidden——可见性断言落在渲染出的内部
     // 元素上（users-admin.spec 同款纪律）。
-    await expect(dialog.locator('wa-button').filter({ hasText: '保存' })).toBeVisible()
+    await expect(dialog.getByRole('button', { name: /创\s*建/ })).toBeVisible()
 
-    // wa-input 内层 input 逐字键入——`.fill` 会绕过 wa-input 的 input 事件
+    // input 内层 input 逐字键入——`.fill` 会绕过 input 的 input 事件
     // （addProjectByPath / users-admin 同款约束）。
-    const idInput = dialog.locator('wa-input[label="Agent id"] input')
+    const idInput = dialog.getByLabel('agent id')
     await idInput.click()
     await idInput.pressSequentially(AGENT_ID)
-    const displayInput = dialog.locator('wa-input[label="显示名（可选）"] input')
+    const displayInput = dialog.getByLabel('agent 显示名')
     await displayInput.click()
     await displayInput.pressSequentially(DISPLAY)
     // Binary path 有预填 'claude'——全选后覆盖输入，换成 fake-claude 绝对路径。
-    const pathInput = dialog.locator('wa-input[label="二进制路径"] input')
+    const pathInput = dialog.getByLabel('claude 路径')
     await pathInput.click()
     await pathInput.press('ControlOrMeta+a')
     await pathInput.pressSequentially(fakeClaudeBin())
 
-    await dialog.locator('wa-button').filter({ hasText: '保存' }).click()
-    await expect(
-      page.locator('sebas-settings-modal [data-testid="agent-action"]'),
-    ).toHaveText(`已创建 ${AGENT_ID}（免重启，创建会话下拉立即可选）`)
-    const row = page.locator(
-      `sebas-settings-modal [data-testid="agent-row"][data-id="${AGENT_ID}"]`,
-    )
+    await dialog.getByRole('button', { name: /创\s*建/ }).click()
+    await expect(settings.panel.getByRole('alert')).toContainText(`已创建 ${AGENT_ID}`)
+    const row = settings.panel.getByText(AGENT_ID, { exact: true }).locator('xpath=../..')
     await expect(row).toBeVisible()
-    await expect(row.locator('.provider-badge')).toHaveText(DISPLAY)
-    await expect(row.locator('.provider-key')).toHaveText('可达')
+    await expect(row).toContainText(DISPLAY)
+    await expect(row).toContainText('可达')
 
     // 2) API 同框：catalog 已含条目（同一 state snapshot 的读面）。
     const catalog = (await (await request.get('/api/agents')).json()) as {
@@ -148,24 +144,27 @@ test.describe.serial('Settings → Agents 目录 webui 全链路', () => {
     await settings.openViaSidebar()
     await settings.openSection('Agent')
     await expect(
-      page.locator(`sebas-settings-modal [data-testid="agent-row"][data-id="${AGENT_ID}"]`),
+      settings.panel.getByText(AGENT_ID, { exact: true }).locator('xpath=../..'),
     ).toBeVisible()
     await settings.close()
 
     // 4) 创建对话框即时可选（免重启生效的可观察面；reachable → 可选不禁用）。
     await rail.openNewSessionDialog(projectName)
-    const agentSelect = rail.newSessionDialog().locator('[data-testid="dialog-agent-select"]')
-    // 目录随弹窗打开异步拉取（占位 wa-option value="" 先在场）——轮询等
-    // ui-fake 进清单，不与 loadAgents 竞速。
-    await expect
-      .poll(async () =>
-        agentSelect.locator('wa-option').evaluateAll((els) => els.map((el) => el.getAttribute('value'))),
-      )
-      .toContain(AGENT_ID)
-    await expect(agentSelect.locator(`wa-option[value="${AGENT_ID}"]`)).not.toHaveAttribute(
-      'disabled',
-    )
-    await rail.pickDialogAgent(AGENT_ID)
+    const agentSelect = rail.newSessionDialog().getByRole('combobox', { name: 'Agent' })
+    // 目录随弹窗打开异步拉取——展开后等新 agent 进清单，不与 loadAgents 竞速。
+    // React 的选项标签是显示名（value 才是 id），按显示名定位；绑定的 agent id
+    // 由第 5 步的会话 detail 反证。
+    await agentSelect.click()
+    const option = page
+      .locator('.ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option')
+      .filter({ hasText: new RegExp(`^${DISPLAY}$`) })
+    await expect(option).toBeVisible({ timeout: 15_000 })
+    await option.click()
+    // 选择已落到控件上（显示名回显）——避免「点了但未选中」时被默认
+    // agent 回退掩盖。AntD 6 把选中标签渲染为 .ant-select-content 的文本。
+    await expect(
+      rail.newSessionDialog().locator('.ant-select-content').filter({ hasText: DISPLAY }),
+    ).toBeVisible()
     await rail.confirmNewSessionDialog()
     await expect(rail.newSessionDialog()).toBeHidden()
 
@@ -190,27 +189,27 @@ test.describe.serial('Settings → Agents 目录 webui 全链路', () => {
     await settings.openViaSidebar()
     await settings.openSection('Agent')
 
-    await settings.panel.locator('wa-button').filter({ hasText: '新建 agent' }).click()
-    const dialog = page.locator('sebas-settings-modal wa-dialog[label="新建 agent"]')
-    const save = dialog.locator('wa-button').filter({ hasText: '保存' })
+    await settings.panel.getByRole('button', { name: '新建 agent' }).click()
+    const dialog = page.getByRole('dialog', { name: '新建 agent' })
+    const save = dialog.getByRole('button', { name: /创\s*建/ })
     await expect(save).toBeVisible()
 
     // 保留 id：前端内联拒绝（不发请求——spec「内置 native kernel 不落表、
     // 不可写」，提交前就拦住）。
-    const idInput = dialog.locator('wa-input[label="Agent id"] input')
+    const idInput = dialog.getByLabel('agent id')
     await idInput.click()
     await idInput.pressSequentially('native')
     await save.click()
-    await expect(dialog.locator('[data-testid="agent-form-error"]')).toHaveText(
-      '"native" 是内置内核保留 id，不可占用',
+    await expect(dialog.getByRole('alert')).toHaveText(
+      '"native" 是内置 agent 保留 id，不可占用',
     )
 
     // 重复 id：服务端 409 → ApiError 文案就地呈现在同一表单内。
     await idInput.press('ControlOrMeta+a')
     await idInput.pressSequentially(AGENT_ID)
     await save.click()
-    await expect(dialog.locator('[data-testid="agent-form-error"]')).toContainText('已存在')
-    await dialog.locator('wa-button').filter({ hasText: '取消' }).click()
+    await expect(dialog.getByRole('alert')).toContainText('已存在')
+    await dialog.getByRole('button', { name: /取\s*消/ }).click()
     await expect(dialog).toBeHidden()
   })
 
@@ -223,26 +222,25 @@ test.describe.serial('Settings → Agents 目录 webui 全链路', () => {
     const settings = new SettingsModal(page)
     await settings.openViaSidebar()
     await settings.openSection('Agent')
-    const row = page.locator(
-      `sebas-settings-modal [data-testid="agent-row"][data-id="${AGENT_ID}"]`,
-    )
-    await row.locator('button[title="删除"]').click()
-    const confirm = page.locator('sebas-settings-modal wa-dialog[label="删除 agent"]')
-    await expect(confirm.locator('wa-button').filter({ hasText: '删除' })).toBeVisible()
-    await confirm.locator('wa-button').filter({ hasText: '删除' }).click()
-    await expect(
-      page.locator('sebas-settings-modal [data-testid="agent-action"]'),
-    ).toHaveText(`已删除 ${AGENT_ID}（已建会话继续到自然结束）`)
+    const row = settings.panel.getByText(AGENT_ID, { exact: true }).locator('xpath=../..')
+    // React 行内直接删除（无二次确认对话框）；服务端清理后行随 reload 消失。
+    await row.getByRole('button', { name: /删\s*除/ }).click()
+    await expect(settings.panel.getByRole('alert')).toContainText('Agent 已删除')
     await expect(row).toHaveCount(0)
     await settings.close()
 
     // 消费面即时收场：创建对话框的 catalog 即取即用，不再提供已删 id。
     await rail.openNewSessionDialog(projectName)
-    const optionValues = await rail
-      .newSessionDialog()
-      .locator('[data-testid="dialog-agent-select"] wa-option')
-      .evaluateAll((els) => els.map((el) => el.getAttribute('value')))
-    expect(optionValues).not.toContain(AGENT_ID)
+    const agentSelect = rail.newSessionDialog().getByRole('combobox', { name: 'Agent' })
+    await agentSelect.click()
+    const options = page.locator(
+      '.ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option',
+    )
+    // 目录非空（内置 claude 在列）——「被删项缺席」的断言不是空清单上的假绿。
+    await expect(options.filter({ hasText: /^claude$/ })).toBeVisible()
+    // 选项标签是显示名；已删 agent 的显示名不再出现。
+    await expect(options.filter({ hasText: new RegExp(`^${DISPLAY}$`) })).toHaveCount(0)
+    await page.keyboard.press('Escape')
     await rail.cancelNewSessionDialog()
   })
 })

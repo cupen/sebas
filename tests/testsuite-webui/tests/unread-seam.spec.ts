@@ -42,32 +42,32 @@ test.describe('未读分界线', () => {
     await rail.ensureProjectExpanded(projectName)
     // 先聚焦 A（立锚）再切到 B——A 变离焦会话。
     await rail.sessionItem(tagA).click()
-    await expect(rail.sessionItem(tagA)).toHaveAttribute('aria-current', 'true', { timeout: 10_000 })
+    await expect(page.getByTestId('workbench-session')).toContainText(tagA, { timeout: 10_000 })
     await rail.sessionItem(tagB).click()
-    await expect(rail.sessionItem(tagB)).toHaveAttribute('aria-current', 'true', { timeout: 10_000 })
+    await expect(page.getByTestId('workbench-session')).toContainText(tagB, { timeout: 10_000 })
 
     // A 在离焦状态收到新回复：徽标亮起。
     await sendMessage(page.request, keyA, 'drip')
     await waitListStatus(page.request, keyA, ['done'])
-    const badgeRow = rail.host.locator('li.session-item', { has: page.locator('[data-testid="session-unread"]') })
+    const badgeRow = rail.host.locator('button', { has: page.locator('.ant-tag') })
     await expect(badgeRow).toHaveCount(1, { timeout: 15_000 })
 
     // 重聚焦 A：分界线必现（review 问题 3 的主路径回归——此前被 loadFocused
     // 的二次臂覆盖吃掉）。
     await badgeRow.click()
     await expect(badgeRow).toHaveCount(0, { timeout: 10_000 })
-    const seam = page.locator('sebas-dashboard sebas-transcript-view div.seam:not([hidden])')
+    const seam = page.getByTestId('react-transcript').getByRole('separator', { name: /未读分界/ })
     await expect(seam).toBeVisible({ timeout: 15_000 })
-    expect(await seam.getAttribute('data-count')).toBe('1')
+    await expect(seam).toHaveAccessibleName(/1 段未读/)
 
     // 已读清账：滚读到底（mark-all-seen 出口或贴底推进）后离开再回——不再重现。
-    await seam.locator('wa-button, button').first().click()
-    await expect(page.locator('sebas-dashboard sebas-transcript-view div.seam:not([hidden])')).toHaveCount(0, { timeout: 10_000 })
+    await page.getByTestId('conversation-pane').evaluate((el) => { el.scrollTop = el.scrollHeight })
+    await expect(page.getByTestId('react-transcript').getByRole('separator', { name: /未读分界/ })).toHaveCount(0, { timeout: 10_000 })
     await rail.sessionItem(tagB).click()
-    await expect(rail.sessionItem(tagB)).toHaveAttribute('aria-current', 'true', { timeout: 10_000 })
+    await expect(page.getByTestId('workbench-session')).toContainText(tagB, { timeout: 10_000 })
     await rail.sessionItem(tagA).click()
-    await expect(rail.sessionItem(tagA)).toHaveAttribute('aria-current', 'true', { timeout: 10_000 })
-    await expect(page.locator('sebas-dashboard sebas-transcript-view div.seam:not([hidden])')).toHaveCount(0)
+    await expect(page.getByTestId('workbench-session')).toContainText(tagA, { timeout: 10_000 })
+    await expect(page.getByTestId('react-transcript').getByRole('separator', { name: /未读分界/ })).toHaveCount(0)
 
     expect(collector.clean()).toEqual([])
   })

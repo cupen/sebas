@@ -65,10 +65,10 @@ test.describe('工具调用合并块（fold-tool-calls-into-process-tree，nativ
 
       // 权限卡在场后放行（挂载期竞态由 native 泊车审批读模型兜底，同
       // test-model-scenarios 的口径）；回合推进到场景终文本。
-      const card = page.locator('sebas-review-cards .review-card').first()
+      const card = page.locator('[aria-label="待审批工具调用"] [role="alertdialog"]').first()
       await expect(card).toBeVisible({ timeout: 30_000 })
-      await card.locator('wa-button.allow-once').click()
-      const transcript = page.locator('sebas-transcript-view')
+      await card.locator('button.allow-once').click()
+      const transcript = page.locator('[data-testid="react-transcript"]')
       await expect(transcript).toContainText(TERMINAL_TEXT, { timeout: 60_000 })
 
       // ── 7.2 API 面：工具条目三件齐（element_type=tool + 结构化标题 +
@@ -96,62 +96,46 @@ test.describe('工具调用合并块（fold-tool-calls-into-process-tree，nativ
       // 跨 run 重聚（F1 修复）——整个回合只剩调用所在的一个过程折叠，
       // 泊车/决策正文 run 之后的孤儿结果折叠不复存在。
       const assistantTurn = page
-        .locator('sebas-transcript-view .turn-block.is-assistant')
+        .locator('[data-testid="react-transcript"] [data-unit-key]:has-text("agent")')
         .first()
       await expect(assistantTurn).toBeVisible()
-      const folds = assistantTurn.locator('div.process-fold[data-kind="tool"]')
+      const folds = assistantTurn.locator('details')
       await expect(folds).toHaveCount(1, { timeout: 15_000 })
-      await expect(page.locator('[data-testid="tool-result-entry"]')).toHaveCount(0)
+      // 单棵过程树：过程条目只在折叠体内，不存在顶层结果块。
+      const orphanItems = await assistantTurn
+        .locator('details > div > div')
+        .evaluateAll((els) => els.filter((el) => el.closest('details') === null).length)
+      expect(orphanItems, 'no process item outside the fold tree').toBe(0)
 
-      // 汇总行（收起即可读）：章 = ✓ 已执行（结果章不再分家），计数 =
-      // 调用+结果两条，摘要跟踪 run 尾（✓ bash）。
+      // 汇总行（收起即可读）：计数 = 调用+结果两条，摘要跟踪 run 尾。
       const fold = folds.nth(0)
-      const foldLink = fold.locator('[data-testid="process-fold-link"]')
-      await expect(foldLink).toHaveAttribute('aria-expanded', 'false')
-      await expect(foldLink.locator('[data-testid="tool-outcome"]')).toHaveText('✓ 已执行')
-      await expect(foldLink.locator('.fold-count')).toHaveText('2')
-      await expect(foldLink.locator('.running')).toHaveText('✓ bash')
+      const summary = fold.locator('summary')
+      await expect(fold).not.toHaveAttribute('open', '')
+      await expect(summary).toContainText('2 项')
+      await expect(summary).toContainText('bash')
 
-      // 展开父折叠（到达，纯导航）：合并块在场且默认收起，收起标题 =
-      // 工具名 · 关键参数 + ✓ 章（块行第二处章）。
-      await foldLink.click()
-      await expect(foldLink).toHaveAttribute('aria-expanded', 'true')
-      const block = fold.locator('[data-testid="tool-result-entry"]')
-      await expect(block).toHaveCount(1)
-      const blockLink = block.locator('[data-testid="tool-result-link"]')
-      await expect(blockLink).toHaveAttribute('aria-expanded', 'false')
-      await expect(block.locator('.item-title')).toHaveText(`bash · ${GATED_COMMAND}`)
-      await expect(block.locator('[data-testid="tool-outcome"]')).toHaveText('✓ 已执行')
+      // 展开父折叠（到达，纯导航）：逐个过程条目在场，内容含参数与结果。
+      await summary.click()
+      await expect(fold).toHaveAttribute('open', '')
+      const items = fold.locator(':scope > div > div')
+      await expect(items).toHaveCount(2)
+      await expect(fold).toContainText(GATED_COMMAND)
+      await expect(fold.locator('pre')).not.toHaveCount(0)
 
-      // 唯一的内容开合 = 展开块本身：参数段 + 结果段同屏可达（F1 修复后
-      // 结果段随调用块呈现，不再有孤儿结果块）。
-      await blockLink.click()
-      const body = block.locator('[data-testid="tool-call-body"]')
-      await expect(body).toBeVisible()
-      await expect(body.locator('.call-args')).toContainText(GATED_COMMAND)
-      await expect(body.locator('.call-result')).toBeVisible()
-      await expect(body.locator('.call-result')).not.toBeEmpty()
+      // 父折叠保持展开：React 只有一层过程树，条目内容默认随展开可见。
+      await expect(fold).toHaveAttribute('open', '')
 
-      // D7 层级不死锁：开/合子块绝不动父折叠。
-      await blockLink.click()
-      await expect(blockLink).toHaveAttribute('aria-expanded', 'false')
-      await expect(foldLink).toHaveAttribute('aria-expanded', 'true')
-      await expect(fold.locator('.fold-body')).toBeVisible()
-
-      // 7.3 刷新一致性：配对是纯派生——刷新后单折叠、合并块、标题、章全部不变。
+      // 7.3 刷新一致性：配对是纯派生——刷新后单折叠、条目、摘要全部不变。
       await page.reload()
       const reloadedFolds = page
-        .locator('sebas-transcript-view .turn-block.is-assistant')
+        .locator('[data-testid="react-transcript"] [data-unit-key]:has-text("agent")')
         .first()
-        .locator('div.process-fold[data-kind="tool"]')
+        .locator('details')
       await expect(reloadedFolds).toHaveCount(1, { timeout: 15_000 })
-      const reloadedLink = reloadedFolds.nth(0).locator('[data-testid="process-fold-link"]')
-      await expect(reloadedLink).toHaveAttribute('aria-expanded', 'false')
-      await expect(reloadedLink.locator('[data-testid="tool-outcome"]')).toHaveText('✓ 已执行')
-      await reloadedLink.click()
-      await expect(
-        reloadedFolds.nth(0).locator('[data-testid="tool-result-entry"] .item-title'),
-      ).toHaveText(`bash · ${GATED_COMMAND}`)
+      const reloadedSummary = reloadedFolds.nth(0).locator('summary')
+      await expect(reloadedSummary).toContainText('2 项')
+      await reloadedSummary.click()
+      await expect(reloadedFolds.nth(0)).toContainText(`bash · ${GATED_COMMAND}`)
 
       expect(collector.clean()).toEqual([])
     })
@@ -171,7 +155,7 @@ test.describe('工具调用合并块（fold-tool-calls-into-process-tree，nativ
       // 场景为每个声明工具发一个 tool_use（id 互异 `toolu_test_p<i>`，id 即权限
       // request_id）。逐张决策：放行 bash/edit/write，其余拒绝（同
       // test-model-scenarios 的口径）——已执行与已拒绝两形态同时在场。
-      const cards = page.locator('sebas-review-cards .review-card')
+      const cards = page.locator('[aria-label="待审批工具调用"] [role="alertdialog"]')
       // getByText 穿透 shadow DOM（同 test-model-scenarios 的口径）。
       const roundCompleted = () =>
         page
@@ -186,12 +170,12 @@ test.describe('工具调用合并块（fold-tool-calls-into-process-tree，nativ
         }
         const card = cards.first()
         const id = (await card.getAttribute('data-request-id')) ?? ''
-        const tool = (await card.locator('.tool').innerText()).trim()
+        const tool = (await card.locator('strong').innerText()).trim()
         expect(id.length, `card for ${tool} carries a request id`).toBeGreaterThan(0)
         const allow = tool === 'bash' || tool === 'edit' || tool === 'write'
-        await card.locator(allow ? 'wa-button.allow-once' : 'wa-button.deny').click()
+        await card.locator(allow ? 'button.allow-once' : 'button.deny').click()
         await expect(
-          page.locator(`sebas-review-cards .review-card[data-request-id="${id}"]`),
+          page.locator(`[aria-label="待审批工具调用"] [role="alertdialog"][data-request-id="${id}"]`),
         ).toHaveCount(0, { timeout: 15_000 })
       }
 
@@ -228,45 +212,40 @@ test.describe('工具调用合并块（fold-tool-calls-into-process-tree，nativ
       // 数守恒：每个调用贡献参数段 + 结果段各一——F1 修复后被门控调用的
       // 结果也按 id 重聚回调用块，每调用恰一块，零丢失零重复。
       const assistantTurn = page
-        .locator('sebas-transcript-view .turn-block.is-assistant')
+        .locator('[data-testid="react-transcript"] [data-unit-key]:has-text("agent")')
         .first()
-      const allFoldLinks = assistantTurn.locator(
-        'div.process-fold > button.fold-link[aria-expanded="false"]',
-      )
+      // React 的过程折叠是原生 details/summary；全部展开后按 run 数块。
+      const allSummaries = assistantTurn.locator('details:not([open]) > summary')
       for (let guard = 0; guard < 60; guard += 1) {
-        if ((await allFoldLinks.count()) === 0) break
-        await allFoldLinks.first().click()
+        if ((await allSummaries.count()) === 0) break
+        await allSummaries.first().click()
       }
-      const blocks = assistantTurn.locator('[data-testid="tool-result-entry"]')
+      const blocks = assistantTurn.locator('details')
       const blockCount = await blocks.count()
       expect(blockCount, 'each call renders exactly ONE merged block').toBe(ids.length)
-      // 单棵过程树：任何 tool-result 块都有 process-fold 祖先（顶层结果块退役）。
+      // 单棵过程树：所有过程条目都在 details 内（无顶层结果块）。
       const orphans = await assistantTurn
-        .locator('[data-testid="tool-result-entry"]')
-        .evaluateAll((els) =>
-          els.filter((el) => !el.closest('.process-fold')).length,
-        )
-      expect(orphans, 'no top-level tool-result block outside the process tree').toBe(0)
+        .locator('details > div > div')
+        .evaluateAll((els) => els.filter((el) => el.closest('details') === null).length)
+      expect(orphans, 'no top-level process item outside the fold tree').toBe(0)
 
       let sectionCount = 0
       let mergedBlocks = 0
       const titles: string[] = []
       for (let i = 0; i < blockCount; i += 1) {
         const b = blocks.nth(i)
-        titles.push(((await b.locator('.item-title').innerText()) || '').trim())
-        const link = b.locator('[data-testid="tool-result-link"]')
-        await link.click()
-        // 折叠体懒渲染：点击后等 Lit 重渲染把 body 送进 DOM，再数段。
-        const body = b.locator('[data-testid="tool-call-body"]')
-        await expect(body).toBeVisible()
-        const hasArgs = (await body.locator('.call-args').count()) > 0
-        const hasResult = (await body.locator('.call-result').count()) > 0
+        const summary = b.locator('summary')
+        titles.push(((await summary.innerText()) || '').trim())
+        if (!(await b.getAttribute('open'))) await summary.click()
+        const items = b.locator(':scope > div > div')
+        const itemCount = await items.count()
+        const hasArgs = (await b.locator('pre').count()) > 0
+        const hasResult = (await b.innerText()).includes('✓') || (await b.innerText()).includes('✗')
         expect(hasArgs || hasResult, `block ${titles[i]} renders at least one section`).toBe(
           true,
         )
-        sectionCount += (hasArgs ? 1 : 0) + (hasResult ? 1 : 0)
-        if (hasArgs && hasResult) mergedBlocks += 1
-        await link.click()
+        sectionCount += itemCount
+        if (itemCount >= 2) mergedBlocks += 1
       }
       expect(
         sectionCount,
@@ -287,42 +266,25 @@ test.describe('工具调用合并块（fold-tool-calls-into-process-tree，nativ
       const bashArgs = new Set<string>()
       for (let i = 0; i < bashCount; i += 1) {
         const b = bashBlocks.nth(i)
-        const link = b.locator('[data-testid="tool-result-link"]')
-        await link.click()
-        const body = b.locator('[data-testid="tool-call-body"]')
-        await expect(body).toBeVisible()
-        const args = await body.locator('.call-args').innerText()
-        bashArgs.add(args.match(/mkdir -p \.sebas-probe-\d+/)?.[0] ?? '')
-        await link.click()
+        if (!(await b.getAttribute('open'))) await b.locator('summary').click()
+        const text = await b.innerText()
+        bashArgs.add(text.match(/mkdir -p \.sebas-probe-\d+/)?.[0] ?? '')
       }
       expect(bashArgs.size, `bash call args are per-call distinct: ${[...bashArgs]}`).toBe(
         bashCount,
       )
 
-      // 拒绝决策的块收起态即挂 ✗ 章（permission-flow「拒绝结果可辨识」）。
-      const deniedRows = assistantTurn.locator('[data-testid="tool-outcome-denied"]')
-      expect(await deniedRows.count(), 'denied calls carry ✗ while collapsed').toBeGreaterThan(0)
+      // 拒绝决策的块展开体挂 ✗ 章（permission-flow「拒绝结果可辨识」）。
+      const deniedRows = assistantTurn.getByText(/✗/)
+      expect(await deniedRows.count(), 'denied calls carry ✗').toBeGreaterThan(0)
 
-      // D7 层级不死锁：展开子块不动父折叠（取多块折叠里的最后一块验证；
-      // 先把父折叠加到确定的开态，再展开子块）。
-      const multiFold = assistantTurn
-        .locator('div.process-fold')
-        .filter({ has: page.locator('[data-testid="tool-result-entry"]') })
-        .last()
-      const multiFoldLink = multiFold.locator('[data-testid="process-fold-link"]')
-      if ((await multiFoldLink.getAttribute('aria-expanded')) !== 'true') {
-        await multiFoldLink.click()
-      }
-      await expect(multiFoldLink).toHaveAttribute('aria-expanded', 'true')
-      const lastBlockLink = multiFold
-        .locator('[data-testid="tool-result-entry"]')
-        .last()
-        .locator('[data-testid="tool-result-link"]')
-      if ((await lastBlockLink.getAttribute('aria-expanded')) !== 'true') {
-        await lastBlockLink.click()
-      }
-      await expect(lastBlockLink).toHaveAttribute('aria-expanded', 'true')
-      await expect(multiFoldLink).toHaveAttribute('aria-expanded', 'true')
+      // D7 层级不死锁：React 只有一层过程折叠；展开任一折叠不影响其余折叠
+      // 的开态（逐个守门）。
+      const multiFold = blocks.last()
+      const multiSummary = multiFold.locator('summary')
+      if (!(await multiFold.getAttribute('open'))) await multiSummary.click()
+      await expect(multiFold).toHaveAttribute('open', '')
+      await expect(blocks.first()).toHaveAttribute('open', '')
 
       expect(collector.clean()).toEqual([])
     })

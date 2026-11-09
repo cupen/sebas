@@ -41,8 +41,8 @@ test.describe('审批卡片旅程', () => {
 
       // Card appears with the gated call's semantics: Bash + the command args.
       await expect(cards.all().first()).toBeVisible({ timeout: 15_000 })
-      await expect(cards.card().locator('.head .tool')).toHaveText('Bash')
-      await expect(cards.card().locator('pre.args')).toContainText('rm -rf /')
+      await expect(cards.card().locator('strong')).toHaveText('Bash')
+      await expect(cards.card().locator('pre')).toContainText('rm -rf /')
 
       await cards.deny().click()
 
@@ -130,7 +130,7 @@ test.describe('审批卡片旅程', () => {
       // 第二轮（同一会话、同一页面、无刷新）：审批卡必须再次出现。
       await detail.sendFollowUp('perm')
       await expect(cards.all().first()).toBeVisible({ timeout: 15_000 })
-      await expect(cards.card().locator('.head .tool')).toHaveText('Bash')
+      await expect(cards.card().locator('strong')).toHaveText('Bash')
 
       // 泊车可观察面的另一半：rail 当前行亮 waiting（status_slug=waiting +
       // 「等待」徽标）——「泊车了但 rail 看不出在等人」同为 violation。
@@ -138,10 +138,10 @@ test.describe('审批卡片旅程', () => {
       // 一份（同带 current、同态）——`.first()` 取项目组副本，避免 strict
       // violation；两份呈现逐字相同，断言哪份都等价。
       const currentRow = page
-        .locator('sebas-project-rail li.session-item.current')
+        .getByRole('complementary', { name: '项目导航' })
+        .getByRole('button', { name: /^idle/ })
         .first()
-      await expect(currentRow).toHaveClass(/waiting/, { timeout: 15_000 })
-      await expect(currentRow.locator('[data-testid="session-waiting"]')).toBeVisible()
+      await expect(currentRow).toContainText('等待你处理', { timeout: 15_000 })
 
       // 同一面可决策：allow once → 第二回合照常收尾，两回合的工具都落了。
       await cards.allowOnce().click()
@@ -158,7 +158,7 @@ test.describe('审批卡片旅程', () => {
         .toBe(2)
 
       // 决策落定后 waiting 面退场。
-      await expect(currentRow).not.toHaveClass(/waiting/, { timeout: 15_000 })
+      await expect(currentRow).not.toContainText('等待你处理', { timeout: 15_000 })
 
       expect(collector.clean()).toEqual([])
     })

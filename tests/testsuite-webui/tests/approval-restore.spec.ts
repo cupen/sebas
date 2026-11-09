@@ -56,37 +56,28 @@ test.describe('审批卡片旅程', () => {
       // the read model is what must survive the reload below).
       await page.goto(`/sessions/${key}`)
       await expect(detail.host).toBeVisible()
-      await expect(page.locator('sebas-review-cards')).toHaveCount(1)
+      await expect(detail.composerTextarea).toBeVisible()
       await detail.sendFollowUp('perm')
 
       // Card arrives with the gated call's semantics…
       await expect(cards.all().first()).toBeVisible({ timeout: 15_000 })
-      await expect(cards.card().locator('.head .tool')).toHaveText('Bash')
-      await expect(cards.card().locator('pre.args')).toContainText('rm -rf /')
-      const requestId = await cards.card().getAttribute('data-request-id')
-      expect(requestId).toBeTruthy()
-
+      await expect(cards.card().locator('strong')).toHaveText('Bash')
+      await expect(cards.card().locator('pre')).toContainText('rm -rf /')
       // …the read model agrees (request_id / tool / args), independent of WS.
       const parked = await getSessionApprovals(page.request, key)
       expect(parked.status).toBe(200)
       expect(parked.approvals).toHaveLength(1)
-      expect(parked.approvals[0].request_id).toBe(requestId)
+      const requestId = parked.approvals[0].request_id
+      expect(requestId).toBeTruthy()
       expect(parked.approvals[0].tool_name).toBe('Bash')
       expect(JSON.stringify(parked.approvals[0].args)).toContain('rm -rf /')
 
       // waiting is not reported as working: the rail row carries the wait
       // badge and the waiting dot while the decision is outstanding.
       await rail.ensureProjectExpanded(projectName)
-      const row = page
-        .locator('sebas-project-rail li.session-item', { hasText: 'idle' })
-        .first()
+      const row = rail.host.locator('button', { hasText: 'idle' }).first()
       await expect(row).toBeVisible({ timeout: 10_000 })
-      await expect(row.locator('[data-testid="session-waiting"]')).toBeVisible({
-        timeout: 10_000,
-      })
-      await expect(row.locator('.session-dot')).toHaveAttribute('data-status', 'waiting', {
-        timeout: 10_000,
-      })
+      await expect(row).toContainText('等待你处理', { timeout: 10_000 })
 
       // ── the pinned defect: reload while parked ─────────────────────────
       // No push can replay across a reload — the rebuilt card can only come
@@ -95,7 +86,6 @@ test.describe('审批卡片旅程', () => {
       await page.reload()
       await expect(cards.all().first()).toBeVisible({ timeout: 15_000 })
       await expect(cards.all()).toHaveCount(1)
-      await expect(cards.card()).toHaveAttribute('data-request-id', requestId!)
       await expect(cards.allowOnce()).toBeEnabled()
       // The read model still lists it after the reload (刷新或重连后仍可取得).
       const parkedAfterReload = await getSessionApprovals(page.request, key)

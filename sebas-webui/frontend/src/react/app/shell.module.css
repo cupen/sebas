@@ -1,0 +1,417 @@
+.app {
+  display: flex;
+  min-height: 100vh;
+  background: var(--sebas-canvas);
+  color: var(--sebas-text);
+}
+
+.rail {
+  position: relative;
+  width: var(--rail-width, 280px);
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  max-height: 100vh;
+  padding: 12px 10px;
+  background: var(--sebas-surface);
+  border-right: 1px solid var(--sebas-border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+/* Blueprint 1440: explicit collapse to a 56px icon rail. */
+.railCollapsed {
+  width: 56px;
+  padding-inline: 6px;
+}
+
+.railResizing {
+  user-select: none;
+}
+
+.railResize {
+  position: absolute;
+  inset-block: 0;
+  right: 0;
+  width: 6px;
+  cursor: col-resize;
+  touch-action: none;
+  z-index: 5;
+}
+
+.railResize:hover,
+.railResize:focus-visible {
+  background: var(--sebas-accent-soft);
+}
+
+.railHead {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.railHead .brand {
+  flex: 1;
+  min-width: 0;
+}
+
+.railToggle {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--sebas-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--sebas-text-dim);
+  cursor: pointer;
+  font: inherit;
+  line-height: 1;
+}
+
+.railToggle:hover {
+  color: var(--sebas-text);
+  background: var(--sebas-surface-2);
+}
+
+.navIcon {
+  display: none;
+  flex: none;
+  width: 16px;
+  text-align: center;
+}
+
+.navIcon::before {
+  content: attr(data-icon);
+}
+
+.navLabel {
+  display: inline;
+}
+
+.railCollapsed .brandText,
+.railCollapsed .navLabel {
+  display: none;
+}
+
+.railCollapsed .navIcon {
+  display: inline-flex;
+  justify-content: center;
+  width: 100%;
+}
+
+.railCollapsed .navItem {
+  text-align: center;
+  padding-inline: 2px;
+}
+
+/* Compact applies to the desktop icon rail only; the 375px Drawer keeps
+ * full labels so its navigation stays readable and name-addressable. */
+:global([data-rail-compact='true']) .brandText,
+:global([data-rail-compact='true']) .navLabel,
+:global([data-rail-compact='true']) .railToggle {
+  display: none;
+}
+
+:global([data-rail-compact='true']) .navIcon {
+  display: inline-flex;
+  justify-content: center;
+  width: 100%;
+}
+
+:global([data-rail-compact='true']) .navItem {
+  justify-content: center;
+  padding-inline: 2px;
+}
+
+.railInner {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  flex: 1;
+  padding: 4px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  background: transparent;
+  color: var(--sebas-text);
+  font: inherit;
+  text-align: left;
+  padding: 2px 4px 8px;
+  cursor: pointer;
+}
+
+.mark {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  display: grid;
+  place-items: center;
+  background: var(--sebas-accent-strong);
+  color: var(--sebas-accent-ink);
+  font-family: ui-monospace, monospace;
+  font-size: 13px;
+}
+
+.brandText {
+  display: flex;
+  flex-direction: column;
+}
+
+.brandName {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.brandSub {
+  font-size: 10px;
+  color: var(--sebas-text-faint);
+  letter-spacing: 0.04em;
+}
+
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  border-bottom: 1px solid var(--sebas-border);
+  padding-bottom: 8px;
+}
+
+.navItem {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  background: transparent;
+  color: var(--sebas-text-dim);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  padding: 5px 7px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.navItem:hover {
+  background: var(--sebas-surface-2);
+  color: var(--sebas-text);
+}
+
+.navItem[aria-current='page'] {
+  background: var(--sebas-well);
+  color: var(--sebas-text);
+  box-shadow: inset 2px 0 0 var(--sebas-accent);
+}
+
+.railFoot {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid var(--sebas-border);
+  padding-top: 8px;
+}
+
+.user {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.userName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.role {
+  margin-inline-end: 0 !important;
+  padding: 0 6px;
+  border: 1px solid var(--sebas-border, #303030);
+  border-radius: 999px;
+  color: var(--sebas-muted, #8c8c8c);
+  font-size: 10px;
+  line-height: 16px;
+}
+
+.main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  max-height: 100vh;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 46px;
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--sebas-border);
+  background: var(--sebas-surface);
+}
+
+.projectName {
+  font-weight: 500;
+  font-size: 13px;
+}
+
+.projectPath {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--sebas-text-faint);
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.focusTag {
+  margin-inline-end: 0 !important;
+}
+
+.conn {
+  font-size: 11px;
+  color: var(--sebas-text-faint);
+  border: 1px solid var(--sebas-border);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+
+.connOk {
+  color: var(--sebas-ok);
+  border-color: var(--sebas-ok);
+}
+
+.connBad {
+  color: var(--sebas-err);
+  border-color: var(--sebas-err);
+}
+
+.content {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* Blueprint: 1024 stays resident at 260px; 768 becomes a 56px icon rail. */
+@media (max-width: 1024px) {
+  .rail {
+    width: 260px;
+  }
+
+  .railResize {
+    display: none;
+  }
+}
+
+@media (max-width: 768px) {
+  .rail {
+    width: 56px;
+    padding-inline: 6px;
+  }
+
+}
+
+/* Blueprint 768: a resident 56px icon rail whose labels surface as a
+ * temporary floating overlay on hover or keyboard focus. The overlay must not
+ * reflow the transcript, so the rail leaves the flex flow and the main column
+ * keeps the 56px gutter. */
+@media (min-width: 601px) and (max-width: 768px) {
+  .rail {
+    position: fixed;
+    inset-block: 0;
+    inset-inline-start: 0;
+    z-index: 20;
+    min-width: 0;
+    overflow: hidden;
+    transition:
+      width 160ms ease,
+      box-shadow 160ms ease;
+  }
+
+  .rail:hover,
+  .rail:focus-within {
+    width: var(--rail-width, 280px);
+    box-shadow: 0 12px 32px rgb(0 0 0 / 0.18);
+  }
+
+  .rail:hover :global([data-rail-compact='true']) .brandText,
+  .rail:focus-within :global([data-rail-compact='true']) .brandText {
+    display: flex;
+  }
+
+  .rail:hover :global([data-rail-compact='true']) .navLabel,
+  .rail:focus-within :global([data-rail-compact='true']) .navLabel {
+    display: inline;
+  }
+
+  .rail:hover :global([data-rail-compact='true']) .railToggle,
+  .rail:focus-within :global([data-rail-compact='true']) .railToggle {
+    display: inline-block;
+  }
+
+  .rail:hover :global([data-rail-compact='true']) .navIcon,
+  .rail:focus-within :global([data-rail-compact='true']) .navIcon {
+    display: none;
+  }
+
+  .rail:hover :global([data-rail-compact='true']) .navItem,
+  .rail:focus-within :global([data-rail-compact='true']) .navItem {
+    justify-content: flex-start;
+    padding-inline: 7px;
+  }
+
+  .main {
+    margin-inline-start: 56px;
+  }
+}
+
+@media (max-width: 900px) {
+  .projectPath {
+    max-width: 220px;
+  }
+}
+
+/* Touch budget (blueprint ≥44px). ≤600px is exactly where the shell swaps its
+ * resident rail for the navigation Drawer (Shell.tsx `narrow`), so these rules
+ * grow the drawer's hit areas only; the desktop rail keeps its 28–32px rows. */
+@media (max-width: 600px) {
+  .navItem {
+    min-height: 44px;
+    padding-block: 0;
+  }
+
+  /* Theme switch: AntD sizes the small track from controlHeightSM (labelHeight
+   * comes from a token at `.ant-segmented .ant-segmented-item
+   * .ant-segmented-item-label` specificity), so the segments land around 28px.
+   * `!important` is the project's established way to let a Sebas rule win over
+   * AntD's CSS-in-JS, matching app.css. */
+  .railFoot :global(.ant-segmented-item-label) {
+    display: flex !important;
+    align-items: center;
+    justify-content: center;
+    min-width: 44px;
+    min-height: 44px !important;
+    line-height: 1.2;
+  }
+
+  /* AntD's drawer close control is a plain <button>, so the global `.ant-btn`
+   * touch rule in app.css does not reach it. */
+  :global(.ant-drawer-close) {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}

@@ -56,13 +56,12 @@ test.describe('会话管理', () => {
       await waitStatus(page.request, keyA, ['done'])
       await waitStatus(page.request, keyB, ['done'])
 
-      // A 聚焦：deep-link puts A on the workbench…
-      await page.goto(`/sessions/${keyA}`)
-      await expect(detail.userTurn(promptA)).toBeVisible({ timeout: 15_000 })
-      // …and navigating back to the workbench keeps A focused (server
-      // pointer still A) — the starting state of this journey.
+      // A 聚焦：start from the home shell and focus A through the rail (the
+      // React shell routes explicitly; it does not auto-focus on `/`).
       await page.goto('/')
       await expect(rail.host).toBeVisible()
+      await rail.ensureProjectExpanded(projectName)
+      await rail.sessionItem(promptA).click()
       await expect(detail.userTurn(promptA)).toBeVisible({ timeout: 15_000 })
 
       // 点 rail 会话 B，然后什么都不做：不发消息、不产生任何会话事件。
@@ -86,7 +85,7 @@ test.describe('会话管理', () => {
 
       // The rail's current-session marker follows the focus pointer to B…
       await expect(
-        rail.host.locator('li.session-item.current', { hasText: promptB }).first(),
+        rail.host.locator('button', { hasText: promptB }).first(),
       ).toBeVisible({ timeout: 5_000 })
       // …and A's conversation is not crosstalk-rendered: B's bubble is the
       // visible subject while A's prompt stays out of the main area.

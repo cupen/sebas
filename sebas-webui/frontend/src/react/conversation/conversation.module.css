@@ -1,0 +1,102 @@
+.pane {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  height: calc(100vh - 190px);
+}
+
+.scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.approvals {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.approval {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--sebas-warn, #faad14);
+  border-radius: 8px;
+  background: rgba(250, 173, 20, 0.08);
+}
+
+.approvalHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.approvalReason {
+  margin: 0 !important;
+}
+
+.approvalArgs {
+  max-height: 140px;
+  margin: 0;
+  padding: 8px;
+  overflow: auto;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.3);
+  font-size: 12px;
+}
+
+.approvalActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.escalateReason {
+  min-width: 140px;
+  flex: 1;
+}
+
+
+/* Detached reader escape hatch (performance budget 2.2/2.3). */
+.jump {
+  position: absolute;
+  right: 18px;
+  bottom: 92px;
+  z-index: 3;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 18%);
+}
+
+/* Stage|composer divider: rest transparent, hover/focus reveals the handle. */
+.vsplit {
+  flex: none;
+  height: 8px;
+  margin-block: 2px;
+  cursor: row-resize;
+  touch-action: none;
+  background: transparent;
+  border-radius: 999px;
+  transition: background 150ms ease;
+}
+
+.vsplit:hover,
+.vsplit:focus-visible {
+  background: var(--sebas-accent-soft, rgba(64, 150, 255, 0.24));
+}
+
+.composerArea {
+  flex: none;
+  min-height: 120px;
+  overflow: auto;
+}
+
+/* Viewer read-only stand-in for the composer (sessions.write absent). */
+.readonlyNote {
+  width: 100%;
+}

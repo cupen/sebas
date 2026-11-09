@@ -15,6 +15,7 @@ import { REPO_ROOT } from './playwright.config'
 process.env.TESTSUITE_SCENE_FILE ||= path.join(os.tmpdir(), 'sebas-testsuite-webui-scene-9897')
 
 export const WEBUI_PORT = 9897
+const VITE_PORT = 5291
 
 export default defineConfig({
   testDir: './tests',
@@ -34,19 +35,32 @@ export default defineConfig({
   // 沙箱 keep/clean 的唯一权威，两者并列互不干扰。
   reporter: [['list'], ['./tests/reporters/keep-on-fail.ts'], ['./tests/reporters/collect-json.ts']],
   use: {
-    baseURL: `http://127.0.0.1:${WEBUI_PORT}`,
+    baseURL: `http://127.0.0.1:${VITE_PORT}`,
     headless: true,
     trace: 'on-first-retry',
   },
-  webServer: {
-    // env 经 Playwright 注入而非 shell 前缀——`TESTSUITE_MODE=… cmd` 的
-    // 前缀形式在 Windows cmd 上不是合法命令。
-    command: 'invoke testsuite-webui-server',
-    env: { ...process.env, TESTSUITE_MODE: 'detached' },
-    url: `http://127.0.0.1:${WEBUI_PORT}/health`,
-    cwd: REPO_ROOT,
-    timeout: 120_000,
-    reuseExistingServer: process.env.TESTSUITE_REUSE === '1',
-  },
+  webServer: [
+    {
+      // env 经 Playwright 注入而非 shell 前缀——`TESTSUITE_MODE=… cmd` 的
+      // 前缀形式在 Windows cmd 上不是合法命令。
+      command: 'invoke testsuite-webui-server',
+      env: { ...process.env, TESTSUITE_MODE: 'detached' },
+      url: `http://127.0.0.1:${WEBUI_PORT}/health`,
+      cwd: REPO_ROOT,
+      timeout: 120_000,
+      reuseExistingServer: process.env.TESTSUITE_REUSE === '1',
+    },
+    {
+      command: `pnpm --dir sebas-webui/frontend exec vite --host 127.0.0.1 --port ${VITE_PORT} --strictPort`,
+      env: {
+        ...process.env,
+        SEBAS_WEBUI_BACKEND: `http://127.0.0.1:${WEBUI_PORT}`,
+      },
+      url: `http://127.0.0.1:${VITE_PORT}/`,
+      cwd: REPO_ROOT,
+      timeout: 120_000,
+      reuseExistingServer: process.env.TESTSUITE_REUSE === '1',
+    },
+  ],
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
 })

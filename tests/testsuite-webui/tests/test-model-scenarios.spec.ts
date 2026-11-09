@@ -65,7 +65,7 @@ test.describe('场景模型（native）呈现（extend-test-model-scenarios）',
       await page.goto(`/sessions/${key}`)
       await sendMessage(page.request, key, 'parallel please')
 
-      const cards = page.locator('sebas-review-cards .review-card')
+      const cards = page.locator('[aria-label="待审批工具调用"] [role="alertdialog"]')
       await expect(cards.first()).toBeVisible({ timeout: 30_000 })
 
       // native 内核按响应序执行 tool_use（写类串行门控，只读段并行批量）：
@@ -74,7 +74,7 @@ test.describe('场景模型（native）呈现（extend-test-model-scenarios）',
       // 决策互不串扰。
       const seenIds = new Set<string>()
       const seenTools = new Set<string>()
-      const transcript = page.locator('sebas-transcript-view')
+      const transcript = page.locator('[data-testid="react-transcript"]')
       const terminalText = 'test provider: tool loop complete.'
       // getByText 穿透 shadow DOM（宿主元素的 textContent 只含 light DOM），
       // 折叠块的内容在 DOM 里即算在场——与 toContainText 同口径。
@@ -88,18 +88,18 @@ test.describe('场景模型（native）呈现（extend-test-model-scenarios）',
         }
         const card = cards.first()
         const id = (await card.getAttribute('data-request-id')) ?? ''
-        const tool = (await card.locator('.tool').innerText()).trim()
+        const tool = (await card.locator('strong').innerText()).trim()
         expect(id.length, `card for ${tool} carries a request id`).toBeGreaterThan(0)
         expect(seenIds.has(id), `request id ${id} must be unique across the round`).toBe(false)
         seenIds.add(id)
         seenTools.add(tool)
         const allow = tool === 'bash' || tool === 'edit'
         // 决策按钮是 Web Awesome 自定义元素（与 permission.spec.ts 的
-        // page-object 选择器同款：wa-button.allow-once / wa-button.deny）。
-        await card.locator(allow ? 'wa-button.allow-once' : 'wa-button.deny').click()
+        // page-object 选择器同款：button.allow-once / button.deny）。
+        await card.locator(allow ? 'button.allow-once' : 'button.deny').click()
         // 决策已投递：这张卡退场（墓碑），不阻塞下一张卡的出现。
         await expect(
-          page.locator(`sebas-review-cards .review-card[data-request-id="${id}"]`),
+          page.locator(`[aria-label="待审批工具调用"] [role="alertdialog"][data-request-id="${id}"]`),
         ).toHaveCount(0, { timeout: 15_000 })
       }
 
@@ -132,16 +132,20 @@ test.describe('场景模型（native）呈现（extend-test-model-scenarios）',
 
       // native 会话的状态投影恒为 `queued`（无 mode/turn_engaged 事实），不能等
       // `done`——直接等被测面：notice 条目出现。
-      const notice = page.locator('sebas-transcript-view [data-testid="notice-entry"]')
+      const notice = page
+        .getByTestId('react-transcript')
+        .locator('[data-unit-key]')
+        .filter({ hasText: '回合已结束且无输出' })
       await expect(notice).toBeVisible({ timeout: 30_000 })
       await expect(notice).toContainText('回合已结束且无输出')
+      await expect(notice.getByText('提示', { exact: true })).toBeVisible()
 
       // 零输出回合不再不可见地消失：notice 条目在场 + 助手回合照常收尾（收尾标记
       // 落在 notice 之后，与进程级 journey 的落点序一致）。native 的转录**不投影
       // 操作者 prompt**（无 prompt 条目），所以这里不断言提交原文——ACP 载体的
       // empty-turn-notice.spec.ts 才断言 prompt 块。
-      const transcript = page.locator('sebas-transcript-view')
-      await expect(transcript.locator('.turn-block.is-assistant').last()).toContainText(
+      const transcript = page.locator('[data-testid="react-transcript"]')
+      await expect(transcript.locator('[data-unit-key]:has-text("agent")').last()).toContainText(
         'turn summary',
       )
       // native 泊车审批读模型补齐后，挂载期的 `/api/sessions/{key}/approvals`

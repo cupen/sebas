@@ -8,7 +8,7 @@
  * （fail-closed）」的「停止回复清空未决审批」。
  *
  * The defect this pins（round6 GUI 验收活体复现）: the parked review card
- * squeezes the composer column; the wa-textarea's `min-height: 36px` made its
+ * squeezes the composer column; the textarea's `min-height: 36px` made its
  * host box overflow the shrinking `.input-wrap` (min-height: 0) and cover
  * `.composer-bottom` — the stop control stayed VISIBLE but every click
  * (real or Playwright) landed on the textarea (`intercepts pointer events`,
@@ -72,9 +72,7 @@ test.describe('停止收尾', () => {
           return { left: r.left, right: r.right, top: r.top, bottom: r.bottom }
         })
       const stop = await boxOf(workbench.submitControl)
-      const input = await boxOf(
-        page.locator('sebas-workbench-composer [data-testid="composer-input"]'),
-      )
+      const input = await boxOf(workbench.composerTextarea)
       const intersects =
         stop.left < input.right &&
         input.left < stop.right &&
@@ -93,7 +91,7 @@ test.describe('停止收尾', () => {
         timeout: 10_000,
       })
       await expect(
-        page.locator('sebas-dashboard sebas-transcript-view').getByText('回合已取消'),
+        page.getByTestId('react-transcript').getByText('回合已取消'),
       ).toBeVisible({ timeout: 15_000 })
 
       expect(collector.clean()).toEqual([])

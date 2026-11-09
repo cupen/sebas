@@ -1,0 +1,160 @@
+.page {
+  padding: 18px 22px 32px;
+  max-width: 1120px;
+  margin: 0 auto;
+}
+
+.head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.title {
+  margin: 0 0 4px !important;
+  color: var(--sebas-text) !important;
+}
+
+.sub {
+  margin: 0 !important;
+  font-size: 12px;
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: center;
+  margin: 10px 0 6px;
+}
+
+.seg {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.segLabel {
+  font-size: 12px;
+  color: var(--sebas-text-dim);
+}
+
+.sourceNote {
+  font-size: 11px !important;
+  color: var(--sebas-text-faint) !important;
+  max-width: 760px;
+}
+
+.notice {
+  margin: 10px 0;
+}
+
+.loading {
+  display: grid;
+  place-items: center;
+  min-height: 180px;
+}
+
+.card {
+  background: var(--sebas-surface);
+  border: 1px solid var(--sebas-border);
+}
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin: 14px 0;
+}
+
+.chartCard {
+  margin-bottom: 14px;
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.legendItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--sebas-border);
+  border-radius: 999px;
+  background: var(--sebas-well);
+  color: var(--sebas-text);
+  padding: 2px 9px;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.legendItem[aria-pressed='false'] {
+  opacity: 0.45;
+}
+
+.swatch {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+}
+
+.chart {
+  width: 100%;
+  height: auto;
+  min-height: 220px;
+}
+
+.axis {
+  stroke: var(--sebas-border-strong);
+}
+
+.grid {
+  stroke: var(--sebas-border);
+  stroke-dasharray: 2 4;
+}
+
+.tick {
+  fill: var(--sebas-text-faint);
+  font-size: 10px;
+  font-family: ui-monospace, monospace;
+}
+
+.readings {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.readings ul {
+  margin: 4px 0 0;
+  padding-left: 16px;
+  color: var(--sebas-text-dim);
+}
+
+.readingBucket {
+  font-family: ui-monospace, monospace;
+  color: var(--sebas-text);
+}
+
+.readingEmpty {
+  margin-left: 8px;
+  color: var(--sebas-text-faint);
+}
+
+@media (max-width: 900px) {
+  .stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .page {
+    padding: 14px 12px 24px;
+  }
+}

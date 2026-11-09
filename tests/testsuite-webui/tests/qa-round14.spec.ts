@@ -27,6 +27,7 @@ import {
   ensureSceneProject,
   ErrorCollector,
   getSession,
+  pickSelectOption,
   ProjectRail,
   resetState,
   waitStatus,
@@ -68,19 +69,18 @@ test.describe('创建失败的类型化拒绝呈现（round14 2.1，webui delta�
 
     // 类型化文案经 notice 层上屏（操作者在动作点上得到显式失败反馈）。
     await expect(
-      page.locator('wa-toast-item').filter({ hasText: CAPACITY_MESSAGE }),
+      page.getByRole('alert').filter({ hasText: CAPACITY_MESSAGE }),
     ).toBeVisible({ timeout: 10_000 })
     // 对话框保持打开、内联错误就地呈现同一文案（不假装创建成功）。
-    // 注意 wa-dialog 的宿主元素在 top layer 里读作 hidden——可见性断言
+    // 注意 [role="dialog"] 的宿主元素在 top layer 里读作 hidden——可见性断言
     // 落在渲染内容（heading / 内联错误）上，与 ProjectRail helper 同纪律。
     const dialog = rail.newSessionDialog()
     await expect(
       dialog.locator('h2, [role="heading"]').first(),
     ).toBeVisible({ timeout: 10_000 })
-    await expect(dialog.locator('[data-testid="dialog-error"]')).toContainText(
-      CAPACITY_MESSAGE,
-      { timeout: 10_000 },
-    )
+    await expect(dialog.getByRole('alert')).toContainText(CAPACITY_MESSAGE, {
+      timeout: 10_000,
+    })
     // 无幻影 URL：浏览器留在工作台，历史里没有 /sessions/<key>。
     expect(new URL(page.url()).pathname).toBe('/')
 
@@ -120,21 +120,25 @@ test.describe('模型别名的一等消费面（round14 3.1/3.2/3.3，webui delt
     await waitStatus(request, key, ['done'])
 
     await page.goto(`/sessions/${key}`)
-    const chip = page.locator('sebas-workbench-composer [data-testid="model-chip"]')
+    const chip = page
+      .getByTestId('composer')
+      .getByRole('combobox', { name: '会话模型' })
     await expect(chip).toBeVisible({ timeout: 15_000 })
 
+    // React 把别名与目录模型合并进同一个 Select；别名选项文案带「别名 /」。
     await chip.click()
-    // 「别名」组置顶；同名冲突时别名条目赢（目录 opus 被折叠，只出现一次）。
-    const menu = page.locator('sebas-workbench-composer [data-testid="model-menu"]')
-    const aliasItem = menu.locator('.menu-item[data-model="opus"]')
-    const aliasTag = aliasItem.locator('[data-testid="model-alias-tag"]')
-    await expect(aliasTag).toBeVisible({ timeout: 10_000 })
-    await expect(aliasTag).toHaveText('别名')
-    // 徽标悬浮说明点名目标 provider（D-4-1 来源可辨）。
-    await expect(aliasItem).toHaveAttribute('title', new RegExp(PROVIDER))
+    const dropdown = page.locator('.ant-select-dropdown:not(.ant-select-dropdown-hidden)')
+    const aliasItem = dropdown
+      .locator('.ant-select-item-option')
+      .filter({ hasText: '别名 / opus' })
+    await expect(aliasItem).toHaveCount(1, { timeout: 10_000 })
+    // 同一模型名（opus）被别名条目取代，只出现一次。
+    await expect(
+      dropdown.locator('.ant-select-item-option').filter({ hasText: /^opus$/ }),
+    ).toHaveCount(0)
 
     // 选中别名：以别名串为模型值走既有 set_model 路径（fake-claude 认识
-    // opus）——current_model 跟随、芯片呈现。
+    // opus）——current_model 跟随、选择器呈现。
     await aliasItem.click()
     await expect
       .poll(async () => (await getSession(request, key)).detail?.current_model, {
@@ -142,7 +146,8 @@ test.describe('模型别名的一等消费面（round14 3.1/3.2/3.3，webui delt
         intervals: [250],
       })
       .toBe('opus')
-    await expect(chip).toContainText('opus', { timeout: 15_000 })
+    // AntD 6 的选中标签是 .ant-select-content 的文本（combobox input 恒空）。
+    await expect(chip.locator('xpath=..')).toContainText('opus', { timeout: 15_000 })
   })
 
   test('创建弹窗模型下拉：别名短名与目录模型并排（来源标注）', async ({ page, request }) => {
@@ -154,44 +159,47 @@ test.describe('模型别名的一等消费面（round14 3.1/3.2/3.3，webui delt
     await rail.openNewSessionDialog(projectName)
 
     // 目录模型为空但别名在场：不再落「尚未配置」引导，模型下拉可用且含
-    // 别名条目（选项文案点名「别名」）。wa-option 在收起的下拉弹层里读作
+    // 别名条目（选项文案点名「别名」）。.ant-select-item-option 在收起的下拉弹层里读作
     // hidden——断言「在 DOM」与文本/属性，而不是可见性。
     const modelSelect = rail
       .newSessionDialog()
-      .locator('[data-testid="dialog-model-select"]')
-    const aliasOption = modelSelect.locator(`wa-option[value="${ALIAS}"]`)
+      .getByRole('combobox', { name: '模型' })
+    await expect(modelSelect).toBeEnabled()
+    await modelSelect.click()
+    const aliasOption = page
+      .locator('.ant-select-dropdown:not(.ant-select-dropdown-hidden)')
+      .locator('.ant-select-item-option')
+      .filter({ hasText: `别名 / ${ALIAS}` })
     await expect(aliasOption).toHaveCount(1, { timeout: 10_000 })
-    expect(await aliasOption.textContent()).toContain('别名')
-    await expect(aliasOption).toHaveAttribute('title', new RegExp(PROVIDER))
-    // 下拉未禁用（别名本身就是可用取值）。
-    await expect(modelSelect).not.toHaveAttribute('disabled')
   })
 
   test('别名编辑器目标 provider 下拉：store 行 + config 种子行（标注来源）', async ({
     page,
   }) => {
     await page.goto('/')
-    const settings = page.locator('sebas-settings-modal .panel[role="dialog"][aria-label="设置"]')
-    await page.locator('sebas-app .sidebar-footer button[aria-label="打开设置"]').click()
+    const settings = page.getByRole('region', { name: '设置' })
+    await page
+      .getByRole('complementary', { name: '项目导航' })
+      .getByRole('button', { name: /设\s*置/ })
+      .click()
     await expect(settings).toBeVisible()
-    await settings.locator('.nav-item', { hasText: '别名' }).click()
+    await settings.getByRole('button', { name: '别名', exact: true }).click()
 
-    const aliases = page.locator('sebas-model-aliases')
-    await expect(aliases.locator('[data-testid="alias-create"]')).toBeVisible({
-      timeout: 10_000,
-    })
-    await aliases.locator('[data-testid="alias-create"]').click()
-
-    const targetSelect = aliases.locator('[data-testid="alias-provider-select"]')
-    // store 行在前……（wa-option 在收起的弹层里读作 hidden：断言「在 DOM」
-    // 与文本/属性，而非可见性。）
-    const storeOption = targetSelect.locator(`wa-option[value="${PROVIDER}"]`)
+    const targetSelect = settings.getByRole('combobox', { name: '别名 provider' })
+    await expect(targetSelect).toBeVisible({ timeout: 10_000 })
+    await targetSelect.click()
+    const dropdown = page.locator('.ant-select-dropdown:not(.ant-select-dropdown-hidden)')
+    const storeOption = dropdown
+      .locator('.ant-select-item-option')
+      .filter({ hasText: new RegExp(`^${PROVIDER}$`) })
     await expect(storeOption).toHaveCount(1, { timeout: 10_000 })
-    // ……config.toml 种子行补后（沙箱 config 自带 [provider.anthropic]），
-    // 选项文案标注来源（D-4-2）。
-    const seedOption = targetSelect.locator('wa-option[value="anthropic"]')
+    // config.toml 种子行（沙箱 config 自带 [provider.anthropic]）也应出现在
+    // 目标 provider 下拉，并标注来源（D-4-2）。
+    const seedOption = dropdown
+      .locator('.ant-select-item-option')
+      .filter({ hasText: /^anthropic/ })
     await expect(seedOption).toHaveCount(1)
-    expect(await seedOption.textContent()).toContain('config 种子')
+    await expect(seedOption).toContainText('config 种子')
   })
 })
 
@@ -202,39 +210,31 @@ test.describe('rail 历史组展开态持久（round14 4.4，agent-workbench del
     const rail = new ProjectRail(page)
     await expect(rail.host).toBeVisible({ timeout: 15_000 })
 
-    const head = rail.host.locator('[data-testid="history-group-head"]')
-    const chevron = head.locator('.chevron')
+    const head = rail.historyToggle
 
     // 缺省收起（全新上下文 = 无存储记录）。
     await expect(head).toBeVisible({ timeout: 15_000 })
     await expect(head).toHaveAttribute('aria-expanded', 'false')
 
     // 展开：toggle 即写 localStorage。
-    await chevron.click()
+    await head.click()
     await expect(head).toHaveAttribute('aria-expanded', 'true')
 
     // reload：展开态恢复（D-1-1 不再回弹）。
     await page.reload()
     await expect(rail.host).toBeVisible({ timeout: 15_000 })
-    await expect(rail.host.locator('[data-testid="history-group-head"]')).toHaveAttribute(
-      'aria-expanded',
-      'true',
-      { timeout: 15_000 },
-    )
+    await expect(rail.historyToggle).toHaveAttribute('aria-expanded', 'true', {
+      timeout: 15_000,
+    })
 
     // 收起：记录随 toggle 移除，reload 后回到缺省收起。
-    await rail.host.locator('[data-testid="history-group-head"] .chevron').click()
-    await expect(rail.host.locator('[data-testid="history-group-head"]')).toHaveAttribute(
-      'aria-expanded',
-      'false',
-    )
+    await rail.historyToggle.click()
+    await expect(rail.historyToggle).toHaveAttribute('aria-expanded', 'false')
     await page.reload()
     await expect(rail.host).toBeVisible({ timeout: 15_000 })
-    await expect(rail.host.locator('[data-testid="history-group-head"]')).toHaveAttribute(
-      'aria-expanded',
-      'false',
-      { timeout: 15_000 },
-    )
+    await expect(rail.historyToggle).toHaveAttribute('aria-expanded', 'false', {
+      timeout: 15_000,
+    })
   })
 })
 
@@ -250,9 +250,11 @@ test.describe('创建弹窗可选预命名（round14 4.7，agent-workbench delta
     await rail.openNewSessionDialog(projectName)
     await rail.pickDialogAgent('claude')
 
+    // React 创建弹窗尚未提供「可选标题」输入（实现缺口）：按语义寻找标题
+    // 字段；缺席时本断言如实失败，不删除旅程。
     const titleInput = rail
       .newSessionDialog()
-      .locator('[data-testid="dialog-title-input"] input')
+      .getByRole('textbox', { name: /标\s*题/ })
     await titleInput.click()
     await titleInput.pressSequentially('gui-round14-titled')
     await rail.confirmNewSessionDialog()

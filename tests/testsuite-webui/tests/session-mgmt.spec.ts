@@ -46,14 +46,14 @@ test.describe('会话管理', () => {
       await waitStatus(page.request, key, ['done'])
 
       await page.goto('/sessions')
-      await expect(sessions.pageTitle).toHaveText('会话')
-      const card = sessions.cardFor(key)
+      await expect(sessions.pageTitle).toHaveText('会话总览')
+      const card = sessions.cardFor('close me')
       await expect(card).toBeVisible()
 
-      await sessions.closeCard(key)
+      await sessions.closeCard('close me')
 
       // Row leaves the active list (refetch after close).
-      await expect(sessions.cardFor(key)).toHaveCount(0, { timeout: 10_000 })
+      await expect(sessions.cardFor('close me')).toHaveCount(0, { timeout: 10_000 })
 
       expect(collector.clean()).toEqual([])
     })
@@ -84,12 +84,12 @@ test.describe('会话管理', () => {
       // ...and the History group holds the archived entry (label = prompt).
       await rail.expandHistory()
       await expect(
-        rail.host.locator('li.session-item.archived', { hasText: tag }).first(),
+        rail.host.locator('button:has-text("归档于")', { hasText: tag }).first(),
       ).toBeVisible({ timeout: 10_000 })
 
       // Active list no longer shows it.
       await page.goto('/sessions')
-      await expect(sessions.cardFor(key)).toHaveCount(0, { timeout: 10_000 })
+      await expect(sessions.cardFor(tag)).toHaveCount(0, { timeout: 10_000 })
 
       expect(collector.clean()).toEqual([])
     })
@@ -128,8 +128,13 @@ test.describe('会话管理', () => {
       // earlier one (leftover archives from other journeys may exist between
       // them — only the relative order of our own two rows is pinned).
       await rail.expandHistory()
+      // Wait for the archive list refetch triggered by the second archive
+      // before reading the whole list.
+      await expect(
+        rail.host.locator('button:has-text("归档于")', { hasText: newTag }).first(),
+      ).toBeVisible({ timeout: 10_000 })
       const labels = await rail.host
-        .locator('li.session-item.archived .session-name')
+        .locator('button:has-text("归档于") span')
         .allTextContents()
       const oldIdx = labels.findIndex((l) => l.includes(oldTag))
       const newIdx = labels.findIndex((l) => l.includes(newTag))
@@ -168,7 +173,7 @@ test.describe('会话管理', () => {
       // Retired /settings route canonically lands on the dashboard.
       await page.goto('/settings')
       await expect(page).toHaveURL(/\/$/)
-      await expect(page.locator('sebas-dashboard')).toBeVisible()
+      await expect(page.locator(':is([data-testid="workbench-session"],[data-testid="workbench-home"])')).toBeVisible()
 
       expect(collector.clean()).toEqual([])
     })
@@ -193,22 +198,18 @@ test.describe('会话管理', () => {
 
       await page.goto(`/sessions/${key}`)
       await expect(detail.host).toBeVisible()
-      // 会话头的 model 选择器仍缺席（选择器语义归创建对话框/composer 芯片）。
-      await expect(page.locator('sebas-workbench-composer wa-select[aria-label="会话模型"]')).toHaveCount(
-        0,
-      )
-      // 芯片在场（别名表随快照可达），且不是「无可用模型」占位、不是启动
-      // 中态、无错误横幅。
-      await expect(detail.modelPick).toBeVisible()
-      await expect(
-        page.locator('sebas-workbench-composer [data-testid="model-chip-unavailable"]'),
-      ).toHaveCount(0)
-      await expect(
-        page.locator('sebas-workbench-composer [data-testid="model-chip-starting"]'),
-      ).toHaveCount(0)
-      await expect(
-        page.locator('sebas-workbench-composer [data-testid="composer-error"]'),
-      ).toHaveCount(0)
+      // claude 自报别名模型面：composer 的模型选择器在场并呈现服务端观察值
+      // （fake-claude init 帧上报 fake）。不再有「无可用模型」占位。
+      const modelSelect = page
+        .getByTestId('composer')
+        .getByRole('combobox', { name: '会话模型' })
+      await expect(modelSelect).toBeVisible({ timeout: 15_000 })
+      // AntD 6 把选中标签渲染在 combobox 的父级 .ant-select-content 的
+      // 文本里（input value 恒为空），断可见选择文本而非 input。
+      await expect(modelSelect.locator('xpath=..')).toContainText('fake')
+      const composer = page.getByTestId('composer')
+      await expect(composer.getByText('模型未上报')).toHaveCount(0)
+      await expect(composer.getByRole('alert')).toHaveCount(0)
       // API 真源：观察值与别名表都已落地（具体值/切换链路归 models.spec）。
       const after = await getSession(page.request, key)
       expect(after.detail).not.toBeNull()

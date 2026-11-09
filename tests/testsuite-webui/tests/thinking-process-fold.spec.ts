@@ -53,107 +53,75 @@ test.describe('agent 对话覆盖', () => {
       await detail.expectStatus('done', 30_000)
 
       const assistantTurn = page
-        .locator('sebas-dashboard sebas-transcript-view .turn-block.is-assistant')
+        .locator(':is([data-testid="workbench-session"],[data-testid="workbench-home"]) [data-testid="react-transcript"] [data-unit-key]:has-text("agent")')
         .first()
       await expect(assistantTurn).toBeVisible()
 
-      // 1) 两段 thinking 各成一个过程折叠，且**默认收起**（折叠体懒渲染，不在 DOM）。
-      const foldLinks = assistantTurn.locator('div.process-fold button.fold-link')
-      await expect(foldLinks).toHaveCount(2, { timeout: 15_000 })
+      // 1) 两段 thinking 各成一个原生 <details> 过程折叠，且**默认收起**。
+      const folds = assistantTurn.locator('details')
+      await expect(folds).toHaveCount(2, { timeout: 15_000 })
       for (let i = 0; i < 2; i += 1) {
-        await expect(foldLinks.nth(i)).toHaveAttribute('aria-expanded', 'false')
+        await expect(folds.nth(i)).not.toHaveAttribute('open', '')
         // 折叠行的可读标签点名这是 thinking（不是正文；也不是工具）。
-        await expect(foldLinks.nth(i)).toContainText('thinking')
+        await expect(folds.nth(i).locator('summary')).toContainText('thinking')
       }
-      await expect(assistantTurn.locator('div.process-fold .fold-body')).toHaveCount(0)
 
-      // 2) 正文独立于折叠之外，run 序 fold → text → fold → text（顺序保持）。
-      const runKinds = await assistantTurn.locator('.flow').evaluate((flow) =>
-        Array.from(flow.children)
-          .filter((el) => !el.classList.contains('meta'))
-          .map((el) =>
-            el.classList.contains('process-fold')
-              ? 'fold'
-              : el.classList.contains('body')
-                ? 'text'
-                : `other:${el.className}`,
-          ),
+      // 2) 正文独立于折叠之外，run 序 text → fold → text → fold（顺序保持）。
+      const runKinds = await assistantTurn.locator('article').evaluate((article) =>
+        Array.from(article.children)
+          .slice(1)
+          .map((el) => (el.tagName.toLowerCase() === 'details' ? 'fold' : 'text')),
       )
       expect(runKinds).toEqual(['fold', 'text', 'fold', 'text'])
 
       // 3) 两段正文在折叠之外按序可见（不需要展开任何折叠）。
-      const textBodies = assistantTurn.locator('.body:not(.fold-body):not(.item-body)')
-      await expect(textBodies).toHaveCount(2)
-      expect((await textBodies.allInnerTexts()).map((t) => t.trim())).toEqual([
-        'thought out loud',
-        'and the answer',
-      ])
+      const firstBody = assistantTurn.getByText('thought out loud', { exact: true })
+      const secondBody = assistantTurn.getByText('and the answer', { exact: true })
+      await expect(firstBody).toBeVisible()
+      await expect(secondBody).toBeVisible()
+      const firstBox = await firstBody.boundingBox()
+      const secondBox = await secondBody.boundingBox()
+      expect(firstBox!.y).toBeLessThan(secondBox!.y)
 
-      // 3.5)（fix-webui-qa-round6 3.1）**只点外层折叠**（不点任何二级条目）：
-      // thinking 内容即在场——占位词不再顶替内容（spec「the expanded (default)
-      // view SHALL show the thinking text」）。先收起全部折叠回到缺省态。
-      const allFoldLinks = assistantTurn.locator('div.process-fold button.fold-link')
-      for (let i = 0; i < (await allFoldLinks.count()); i += 1) {
-        const link = allFoldLinks.nth(i)
-        if ((await link.getAttribute('aria-expanded')) === 'true') {
-          const body = link.locator('xpath=following-sibling::div[contains(@class,"fold-body")]')
-          if ((await body.count()) > 0) await link.click()
-        }
+      // 3.5) 展开两段折叠：thinking 内容即在场（默认收起的折叠体同样携带
+      // 完整内容，不存在占位词顶替）。
+      for (let i = 0; i < 2; i += 1) {
+        await folds.nth(i).locator('summary').click()
+        await expect(folds.nth(i)).toHaveAttribute('open', '')
       }
-      await expect(assistantTurn.locator('div.process-fold .fold-body')).toHaveCount(0)
-      for (let i = 0; i < (await allFoldLinks.count()); i += 1) {
-        await allFoldLinks.nth(i).click()
-      }
-      const oneClickText = (
-        await assistantTurn.locator('div.process-fold .fold-body').allInnerTexts()
-      ).join(' | ')
+      const oneClickText = (await folds.allInnerTexts()).join(' | ')
       expect(oneClickText).toContain('hmm')
       expect(oneClickText).toContain('hmm again')
 
-      // 4) 结算后展开折叠：thinking 内容不丢失（两段都在，且顺序保持）。
+      // 4) 结算后折叠内容不丢失（两段都在，且顺序保持）。
       let foldText = ''
       await expect
         .poll(
           async () => {
             await detail.expandAllFolds()
-            foldText = (await assistantTurn.locator('div.process-fold .fold-body').allInnerTexts())
-              .join(' | ')
-              .trim()
+            foldText = (await folds.allInnerTexts()).join(' | ').trim()
             return foldText
           },
           { timeout: 20_000 },
         )
         .toContain('hmm again')
       expect(foldText).toContain('hmm')
-      // 展开只影响折叠体，正文 run 序不变（fold → text → fold → text 仍在）。
-      const runKindsAfterExpand = await assistantTurn.locator('.flow').evaluate((flow) =>
-        Array.from(flow.children)
-          .filter((el) => !el.classList.contains('meta'))
-          .map((el) =>
-            el.classList.contains('process-fold')
-              ? 'fold'
-              : el.classList.contains('body')
-                ? 'text'
-                : `other:${el.className}`,
-          ),
+      // 展开只影响折叠体，正文 run 序不变。
+      const runKindsAfterExpand = await assistantTurn.locator('article').evaluate((article) =>
+        Array.from(article.children)
+          .slice(1)
+          .map((el) => (el.tagName.toLowerCase() === 'details' ? 'fold' : 'text')),
       )
       expect(runKindsAfterExpand).toEqual(['fold', 'text', 'fold', 'text'])
 
-      // 5)（fix-webui-qa-round6 3.1 review 补口）展开体里的 thinking 文本
-      // **就是会话详情 API 里同条目的 content**（spec「matching the session
-      // detail API for the same entries」）——上面对 'hmm' 的断言若只是恰好
-      // 撞上占位词变化或 fixture 漂移，这里当场爆；「条目 content 完好、
-      // GUI 只出占位词」的原缺陷形态（API 有 'hmm'、DOM 无）也会在这里被
-      // 逐条比对钉死。
+      // 5) 展开体里的 thinking 文本**就是会话详情 API 里同条目的 content**。
       const { detail: apiDetail } = await getSession(request, key)
       const apiThinking = (apiDetail?.entries ?? [])
         .filter((e) => e.element_type === 'thinking')
         .map((e) => (e.content ?? '').trim())
         .filter((t) => t.length > 0)
       expect(apiThinking.length).toBeGreaterThan(0)
-      const renderedThinking = await assistantTurn
-        .locator('.process-item[data-element-type="thinking"] .item-body')
-        .allInnerTexts()
+      const renderedThinking = await folds.locator('pre').allInnerTexts()
       for (const content of apiThinking) {
         expect(
           renderedThinking.some((t) => t.includes(content)),

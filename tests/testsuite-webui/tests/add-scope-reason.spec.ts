@@ -45,12 +45,11 @@ test.describe('项目管理覆盖', () => {
 
       await page.goto('/')
       await rail.openAddDialog()
-      const input = rail.addDialog().locator('wa-input[label="项目路径"] input')
-      const hint = rail.addDialog().locator('[data-testid="add-project-scope-hint"]')
-      const submit = rail
-        .addDialog()
-        .locator('wa-button')
-        .filter({ hasText: '添加项目' })
+      const input = rail.addDialog().locator('[aria-label="项目路径"]')
+      // React states the precheck cause through an inline role=alert under the
+      // input; submission is the dialog's own 使用此路径 action.
+      const hint = rail.addDialog().getByRole('alert')
+      const submit = rail.addDialog().getByRole('button', { name: '使用此路径' })
 
       // An EXISTING directory outside the workspace root → the boundary
       // reason, submit stays disabled. (browse-dirs resolves the candidate
@@ -61,7 +60,7 @@ test.describe('项目管理覆盖', () => {
       await input.pressSequentially(outside)
       await expect(hint).toBeVisible({ timeout: 10_000 })
       await expect(hint).toContainText('workspace root 之外')
-      // wa-button does not reflect disabled to a host attribute — assert the
+      // button does not reflect disabled to a host attribute — assert the
       // property (Playwright can't see WA's internal disabled semantics).
       await expect(submit).toHaveJSProperty('disabled', true)
 
@@ -80,12 +79,12 @@ test.describe('项目管理覆盖', () => {
       await input.pressSequentially(legit)
       await expect(hint).toHaveCount(0, { timeout: 10_000 })
       await expect(submit).toHaveJSProperty('disabled', false)
+      // 预检期间按钮带 AntD loading 态会吞掉点击；等预检落定再提交。
+      await expect(submit).not.toHaveClass(/ant-btn-loading/)
       await submit.click()
       const added = (await listProjects(page.request)).find((p) => p.path === legit)
       expect(added, 'the in-root project must register').toBeTruthy()
-      await expect(
-        rail.host.locator('.row', { hasText: added!.name }).first(),
-      ).toBeVisible({ timeout: 10_000 })
+      await expect(rail.projectRow(added!.name)).toBeVisible({ timeout: 10_000 })
 
       // Polite cleanup: deregister the scratch project.
       await removeProject(page.request, added!.id)

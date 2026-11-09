@@ -265,9 +265,6 @@ fn build_router_full(
     let core = Router::new()
         .route("/", get(assets::index))
         .route("/assets/{*path}", get(assets::asset))
-        // （fix-webui-approval-restore-and-session-identity 5.4）本地图标
-        // 子集（`<wa-icon>` 经 setIconPath('/icons') 同源取 SVG）。
-        .route("/icons/{*path}", get(assets::icons_file))
         .route("/health", get(routes::health))
         .route(
             "/api/sessions",

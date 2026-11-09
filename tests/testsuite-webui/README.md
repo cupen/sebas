@@ -11,8 +11,17 @@
 invoke testsuite-webui                 # 构建（dist 自动重建）→ 全量旅程 → 清理
 invoke testsuite-webui --case auth     # 仅鉴权旅程（auth-on 形态，端口 9898）
 invoke testsuite-webui --case auth-setup  # 仅首启建户旅程（auth 开、零用户，端口 9896）
+invoke testsuite-webui --case react    # React 入口：工作台 + 响应式（沙箱 9893 + Vite 5290）
+invoke testsuite-webui --case react-auth  # React 入口：鉴权/RBAC（沙箱 9892 + Vite 5289）
+invoke testsuite-webui --case react-setup  # React 入口：首启建户（沙箱 9891 + Vite 5288）
 invoke testsuite-webui --case first-paint  # 仅单个旅程 spec
 ```
+
+React 就是生产的唯一入口（5.3 切换完成）：三套 `react*` 装配同样是「Vite dev
+server + 代理到一次性沙箱」，但页面是生产文档 `/`（`index.html` → `src/react/main.tsx`），
+含 `/sessions/{key}` 深链，不存在任何专用预览文档或 `SEBAS_REACT_ENTRY` 开关。
+页面对象在 `tests/helpers/pages/react.ts`，只用角色/可访问名称/稳定 `data-testid`；
+AntD Select 的离屏 `role=option` 镜像与两字中文按钮的访问名空格由该文件集中适配。
 
 直接跑（仓库根）：
 
@@ -214,7 +223,7 @@ pnpm --dir tests/testsuite-webui exec playwright test
 |---|---|
 | `TESTSUITE_KEEP=1 invoke testsuite-webui` | 通过后也保留沙箱现场（排障）|
 | `TESTSUITE_REUSE=1` | 复用上一次保留的沙箱（配合 TESTSUITE_KEEP）|
-| `TESTSUITE_PORT=<port>` | 覆盖沙箱端口（默认 9899；`TESTSUITE_AUTH=1` 时 9898；`TESTSUITE_AUTH_SETUP=1` 时 9896；dead-core 配置显式传 9895）|
+| `TESTSUITE_PORT=<port>` | 覆盖沙箱端口（默认 9899；`TESTSUITE_AUTH=1` 时 9898；`TESTSUITE_AUTH_SETUP=1` 时 9896；dead-core 配置显式传 9895；React 装配用 9891/9892/9893）|
 
 任一用例失败时，keep-on-fail reporter 会把沙箱目录保留下来并在输出里打印路径
 （含后端日志 `core.log`），供复现。

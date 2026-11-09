@@ -97,6 +97,11 @@ export class ErrorCollector {
       // answers 400 and chromium logs it; the journey asserts the inline
       // dialog error and the untouched registry.
       if (text.includes('400') && /\/api\/projects$/.test(url)) return
+      // Intentional typed-rejection probe (projects journey): removing a
+      // project that still has live sessions answers 409 BY DESIGN — the
+      // journey asserts the inline count Alert and the typed rejection, not
+      // network silence.
+      if (text.includes('409') && /\/api\/projects\/[^/]+\/remove$/.test(url)) return
       // Intentional rejection probe (status-driven-service-rows SV5): the
       // router force-stop journey depends on a first disable being rejected
       // with 400 + active_routed_sessions; the journey asserts the force

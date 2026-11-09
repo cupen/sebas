@@ -66,11 +66,15 @@ test.describe('slash 命令面板（session-slash-commands）', () => {
       // hover path shares the same rendering and is unit-covered — the
       // vertical workbench overlay intercepts pointer events here, see the
       // finding below).
-      const palette = page.locator('sebas-workbench-composer [data-testid="command-palette"]')
-      const bubble = page.locator('sebas-workbench-composer [data-testid="command-bubble"]')
+      const palette = workbench.composer.getByRole('listbox', { name: '斜杠命令' })
+      // React exposes the highlighted row's description through a bounded
+      // detail bubble rendered right after the palette. Anchor on that
+      // container (not on its changing text) so one locator follows the
+      // highlight from /goal to /compact.
+      const bubble = palette.locator('xpath=following-sibling::div[1]')
       await workbench.composerTextarea.fill('/')
       await expect(palette).toBeVisible()
-      const goal = palette.locator('[data-command="goal"]')
+      const goal = palette.getByRole('option', { name: /\/goal/ })
       await expect(goal).toContainText('/goal')
       await expect(goal).toContainText('<condition>')
       // Row collapse (3.1): the description is no longer inline in the row.
@@ -79,15 +83,15 @@ test.describe('slash 命令面板（session-slash-commands）', () => {
       // markdown inside the bounded bubble anchored to that row.
       await expect(bubble).toBeVisible()
       await expect(bubble).toContainText('Track a goal across turns')
-      const compact = palette.locator('[data-command="compact"]')
+      const compact = palette.getByRole('option', { name: /\/compact/ })
       await expect(compact).toContainText('/compact')
       await expect(compact).not.toContainText('Clear conversation context')
 
       // Incremental filter (3.2): `c` narrows to compact; goal drops out and
       // the bubble follows the (reset) highlight onto compact's description.
       await workbench.composerTextarea.pressSequentially('c')
-      await expect(palette.locator('[data-command="goal"]')).toHaveCount(0)
-      await expect(palette.locator('[data-command="compact"]')).toBeVisible()
+      await expect(palette.getByRole('option', { name: /\/goal/ })).toHaveCount(0)
+      await expect(palette.getByRole('option', { name: /\/compact/ })).toBeVisible()
       await expect(bubble).toContainText('Clear conversation context')
       await expect(bubble).not.toContainText('Track a goal across turns')
 
@@ -95,7 +99,7 @@ test.describe('slash 命令面板（session-slash-commands）', () => {
       // `compact ` (name + space), closes the palette, focus stays in the
       // textarea for the arguments.
       // （Finding: the palette items are NOT mouse-clickable in the vertical
-      // workbench layout — the transcript's wa-split-panel pane visually
+      // workbench layout — the transcript's [role="separator"] pane visually
       // overlays the popup and intercepts pointer events. Keyboard works;
       // reported, not fixed here.）
       await expect(compact).toHaveAttribute('aria-selected', 'true')
@@ -114,7 +118,9 @@ test.describe('slash 命令面板（session-slash-commands）', () => {
       // trailing agent bubble (the old contract asserted the merged
       // 「hello worldhello world」 text — retired with D-B218).
       await workbench.composerTextarea.press('Enter')
-      const notice = page.locator('sebas-workbench-composer [data-testid="slash-unsupported"]')
+      // React surfaces the unsupported-command notice as an inline warning;
+      // an accepted /compact leaves no such text.
+      const notice = workbench.composer.getByText(/不支持此命令/)
       await expect(notice).toHaveCount(0)
       await expect(workbench.composerTextarea).toHaveValue('')
       await expect(detail.userTurn('/compact')).toBeVisible({ timeout: 20_000 })
@@ -167,6 +173,7 @@ test.describe('slash 命令面板（session-slash-commands）', () => {
       page,
     }) => {
       const detail = new FocusedSession(page)
+      const workbench = new Workbench(page)
 
       await resetState(page.request)
       const key = await createSession(page.request, { prompt: 'hello' })
@@ -178,7 +185,7 @@ test.describe('slash 命令面板（session-slash-commands）', () => {
       // inline warning names the offender, nothing reaches the transcript.
       const turnsBefore = await detail.bubbles().count()
       await detail.sendFollowUp('/nosuchcmd')
-      const notice = page.locator('sebas-workbench-composer [data-testid="slash-unsupported"]')
+      const notice = workbench.composer.getByText(/不支持此命令/)
       await expect(notice).toBeVisible()
       await expect(notice).toContainText('/nosuchcmd')
       await expect(detail.bubbles()).toHaveCount(turnsBefore)

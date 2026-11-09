@@ -55,14 +55,17 @@ test.describe('提交反馈时限（5s 内可见反馈）', () => {
 
     // 提交面 5 秒内出现可见排队指示——实际与点击同帧（本地乐观呈现，
     // 不等后端往返）。2s 上限远小于 spec 预算，断言的是「即时」而非「碰巧快」。
-    const indicator = page.locator(
-      'sebas-workbench-composer [data-testid="submit-queued-indicator"]',
-    )
-    await expect(indicator).toBeVisible({ timeout: 2_000 })
+    // React's local optimistic acknowledgement is the submit control's own
+    // state machine: it flips to `sending` (发送中…) synchronously with the
+    // click, long before the delayed POST resolves.
+    const indicator = workbench.submitControl
+    await expect(indicator).toHaveAttribute('data-state', 'sending', { timeout: 2_000 })
 
     // 确认放行后指示退场（慢确认窗口内持续可见，确认后交给转录回执对齐），
     // 回合正常完成。
-    await expect(indicator).toBeHidden({ timeout: 15_000 })
+    await expect(indicator).not.toHaveAttribute('data-state', 'sending', {
+      timeout: 15_000,
+    })
     await waitStatus(page.request, key, ['done'])
     expect(collector.clean()).toEqual([])
   })

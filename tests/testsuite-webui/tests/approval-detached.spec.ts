@@ -5,26 +5,11 @@
  * 功能：审批卡片旅程 / 子功能：detached 双进程审批闭环 + 未知 rid 拒绝
  *
  * Same "perm" trigger as permission.spec.ts (single-process), but the whole
- * approval loop crosses the core session channel: the standalone webui and
- * the core are separate PROCESSES, so the gated tool call has to travel
- * fake-claude → core channel server → ApprovalRequested frame → standalone
- * webui review card → POST /api/permissions/{rid}/answer → ApprovalAnswer
- * frame → core → ACP child. The two topologies do not substitute for each
- * other (design D4); the single-process journeys stay green untouched.
+ * approval loop crosses the core session channel. React 入口的审批面是
+ * role=alertdialog「待审批 <tool>」，动作是允许一次 / 本会话允许 / 拒绝；
+ * 折叠体用 details 承载，断言前展开。
  *
- * Cold-scene note: the approval feed is fire-and-forget — ApprovalRequested
- * frames are NOT replayed to a subscriber that was not attached when the
- * frame fired (documented fail-closed contract: a gate with no reachable
- * client is denied by the kernel, never faked). On a freshly assembled scene
- * the first browser page can therefore miss the first frame while the
- * standalone webui's channel client is still converging; the journeys wait
- * for the composer gate and the review-cards subscription before triggering,
- * and Playwright's retry absorbs any residual cold-window loss.
- *
- * Runs under playwright.detached.config.ts (port 9897) — stopping the core
- * here would be lethal to the shared single-process sandbox, so this file is
- * ignored by the main config (and vice versa: only the detached topology
- * runs it).
+ * Runs under playwright.detached.config.ts (React port 5288).
  */
 import { expect, test } from '@playwright/test'
 import {
@@ -33,12 +18,11 @@ import {
   ErrorCollector,
   isCoreAlive,
   reachabilityOk,
-  ReviewCards,
-  FocusedSession,
   startCore,
   waitForCoreReachability,
   waitStatus,
 } from './helpers/index'
+import { ReactWorkbench } from './helpers/pages/react'
 
 test.describe('审批卡片旅程', () => {
   let collector: ErrorCollector
@@ -61,64 +45,60 @@ test.describe('审批卡片旅程', () => {
   /** Idle session whose detail page holds a live WS, then trigger "perm". */
   async function openDetachedIdleAndTriggerPerm(
     page: import('@playwright/test').Page,
-  ) {
+  ): Promise<ReactWorkbench> {
     await ensureCoreUp(page.request)
 
-    const detail = new FocusedSession(page)
-    const cards = new ReviewCards(page)
+    const workbench = new ReactWorkbench(page)
     const key = await createSession(page.request, { prompt: 'idle' })
     await waitStatus(page.request, key, ['done'])
     await page.goto(`/sessions/${key}`)
-    await expect(detail.host).toBeVisible()
+    await expect(workbench.sessionPage).toBeVisible()
     // Cold webui start: the composer is gated on the standalone backend's
-    // first reachability sample (5s poll cadence) — wait for it to enable
-    // before sending, otherwise the follow-up silently never lands. (The
-    // parked gate does NOT flip the status slug off 'done' — the review
-    // card is the only start-of-turn signal, in either topology.)
-    await expect(detail.composerTextarea).toBeEnabled({ timeout: 30_000 })
-    // The approval feed is fire-and-forget: make sure the review-cards
-    // element is attached — i.e. its ws subscription is live — BEFORE the
-    // gate fires.
-    await expect(page.locator('sebas-review-cards')).toHaveCount(1)
-    await detail.sendFollowUp('perm')
-    return { detail, cards }
+    // first reachability sample — wait for it to enable before sending.
+    await expect(workbench.composerTextarea).toBeEnabled({ timeout: 30_000 })
+    await workbench.send('perm')
+    return workbench
+  }
+
+  async function expectStatus(page: import('@playwright/test').Page, slug: string): Promise<void> {
+    const workbench = new ReactWorkbench(page)
+    await expect
+      .poll(async () => workbench.statusText(), { timeout: 20_000 })
+      .toBe(slug === 'done' ? '完成' : slug)
   }
 
   test.describe('detached 审批闭环', () => {
     test('allow path — ApprovalRequested 跨进程到达 review-card，allow 后 transcript 记录允许语义', async ({
       page,
     }) => {
-      const { detail, cards } = await openDetachedIdleAndTriggerPerm(page)
+      const workbench = await openDetachedIdleAndTriggerPerm(page)
 
       // Card appears with the gated call's semantics: Bash + the command args.
-      await expect(cards.all().first()).toBeVisible({ timeout: 30_000 })
-      await expect(cards.card().locator('.head .tool')).toHaveText('Bash')
-      await expect(cards.card().locator('pre.args')).toContainText('rm -rf /')
+      const card = workbench.approvalCard('Bash')
+      await expect(card).toBeVisible({ timeout: 30_000 })
+      await expect(card).toContainText('rm -rf /')
 
-      await cards.allowOnce().click()
+      await card.getByRole('button', { name: /允\s*许\s*一\s*次/ }).click()
 
       // Card resolved; the transcript records the ALLOWED tool result and
       // the turn completes — all the way through the ACP child on the core.
-      await expect(cards.all()).toHaveCount(0, { timeout: 20_000 })
-      // 工具结果文本住在 process 折叠里（默认收起 + 展开体懒渲染 + 定稿会
-      // 重分组）——轮询式展开到文本出现。
-      await detail.expectFoldedText('perm done')
-      await detail.expectStatus('done', 20000)
+      await expect(workbench.approvalCards()).toHaveCount(0, { timeout: 20_000 })
+      await workbench.expectFoldedText('perm done')
+      await expectStatus(page, 'done')
 
       expect(collector.clean()).toEqual([])
     })
 
-    test('deny path — deny 后 transcript 记录拒绝语义，回合完成', async ({
-      page,
-    }) => {
-      const { detail, cards } = await openDetachedIdleAndTriggerPerm(page)
+    test('deny path — deny 后 transcript 记录拒绝语义，回合完成', async ({ page }) => {
+      const workbench = await openDetachedIdleAndTriggerPerm(page)
 
-      await expect(cards.all().first()).toBeVisible({ timeout: 30_000 })
-      await cards.deny().click()
+      const card = workbench.approvalCard('Bash')
+      await expect(card).toBeVisible({ timeout: 30_000 })
+      await card.getByRole('button', { name: /拒\s*绝/ }).click()
 
-      await expect(cards.all()).toHaveCount(0, { timeout: 20_000 })
-      await detail.expectFoldedText('denied by fake')
-      await detail.expectStatus('done', 20000)
+      await expect(workbench.approvalCards()).toHaveCount(0, { timeout: 20_000 })
+      await workbench.expectFoldedText('denied by fake')
+      await expectStatus(page, 'done')
 
       expect(collector.clean()).toEqual([])
     })

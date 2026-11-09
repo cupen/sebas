@@ -74,10 +74,10 @@ test.describe('会话管理', () => {
       })
       await waitStatus(page.request, keyB, ['done'])
 
-      // Baseline: the focus pointer (B's session) drives the header.
-      await page.goto('/')
+      // Baseline: B's session deep link drives the header.
+      await page.goto(`/sessions/${keyB}`)
       await expect(detail.userTurn('follow-b')).toBeVisible({ timeout: 15_000 })
-      await expect(workbench.projectHeader.locator('.path:not(.muted)')).toHaveText(projectB, {
+      await expect(workbench.projectHeader.getByText(projectB, { exact: true })).toBeVisible({
         timeout: 10_000,
       })
 
@@ -87,7 +87,7 @@ test.describe('会话管理', () => {
       await rail.expandProject(projectA)
       await rail.sessionItem('follow-a').click()
       await expect(detail.userTurn('follow-a')).toBeVisible({ timeout: 15_000 })
-      await expect(workbench.projectHeader.locator('.path:not(.muted)')).toHaveText(projectA, {
+      await expect(workbench.projectHeader.getByText(projectA, { exact: true })).toBeVisible({
         timeout: 10_000,
       })
 
@@ -95,7 +95,7 @@ test.describe('会话管理', () => {
       // still selects that project as before.
       await rail.ensureProjectExpanded(projectB)
       await rail.projectRow(projectB).click()
-      await expect(workbench.projectHeader.locator('.path:not(.muted)')).toHaveText(projectB, {
+      await expect(workbench.projectHeader.getByText(projectB, { exact: true })).toBeVisible({
         timeout: 10_000,
       })
 
@@ -104,11 +104,13 @@ test.describe('会话管理', () => {
       await rail.openNewSessionDialog(projectA)
       await rail.pickDialogAgent('claude')
       await rail.confirmNewSessionDialog()
-      await expect(workbench.projectHeader.locator('.path:not(.muted)')).toHaveText(projectA, {
+      await expect(workbench.projectHeader.getByText(projectA, { exact: true })).toBeVisible({
         timeout: 15_000,
       })
       // （fix-webui-qa-round3 D10）聚焦即投影深链地址：rail 选择后 URL 反映 /sessions/<key>。
-      expect(page.url()).toContain('/sessions/')
+      // 创建请求仍在途时标题已由 selectedProject 投影命中，不能就此断定落地——
+      // 等 URL 真正切换到深链（有超时的正向等待，不放宽断言）。
+      await expect(page).toHaveURL(/\/sessions\//, { timeout: 15_000 })
 
       expect(collector.clean()).toEqual([])
     })
@@ -188,24 +190,22 @@ test.describe('会话管理', () => {
       // 冷加载（无任何先前的 shell 状态）：主区项目标题从会话归属项目绑定。
       await page.goto(`/sessions/${key}`)
       await expect(workbench.projectHeader).toBeVisible({ timeout: 15_000 })
-      await expect(workbench.projectHeader.locator('.path:not(.muted)')).toHaveText(
-        projectName,
-        { timeout: 10_000 },
-      )
+      await expect(
+        workbench.projectHeader.getByText(projectName, { exact: true }),
+      ).toBeVisible({ timeout: 10_000 })
       await expect(workbench.noProjectSelected).toHaveCount(0)
       // 会话本体照常渲染（深链渲染语义不被标题对账干扰）。
       await expect(
-        page.locator('sebas-dashboard sebas-transcript-view .turn-block', {
+        page.locator(':is([data-testid="workbench-session"],[data-testid="workbench-home"]) [data-testid="react-transcript"] [data-unit-key]', {
           hasText: 'deeplink-title',
         }),
       ).toBeVisible({ timeout: 15_000 })
 
       // 刷新同形：再走一次直达路径，标题不回退。
       await page.reload()
-      await expect(workbench.projectHeader.locator('.path:not(.muted)')).toHaveText(
-        projectName,
-        { timeout: 10_000 },
-      )
+      await expect(
+        workbench.projectHeader.getByText(projectName, { exact: true }),
+      ).toBeVisible({ timeout: 10_000 })
       await expect(workbench.noProjectSelected).toHaveCount(0)
 
       expect(collector.clean()).toEqual([])

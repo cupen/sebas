@@ -49,19 +49,17 @@ test.describe('分级通知层', () => {
       await expect(rail.host).toBeVisible()
       await rail.expandHistory()
       const archivedRow = rail.host
-        .locator('li.session-item.archived', { hasText: tag })
+        .locator('button:has-text("归档于")', { hasText: tag })
         .first()
       await expect(archivedRow).toBeVisible({ timeout: 10_000 })
 
       // 打开恢复确认框，然后让 restore POST 诚实失败（沙箱注入 404 类型化
       // 拒绝——条目指向的会话已不在；失败面与 5xx 同一条 notify 通道）。
       await archivedRow.click()
-      const archivedView = page.locator('sebas-dashboard [data-testid="archived-view"]')
-      await expect(archivedView).toBeVisible({ timeout: 10_000 })
-      await archivedView.locator('[data-testid="archived-restore"]').click()
-      await expect(
-        page.locator('sebas-dashboard [data-testid="restore-confirm"]'),
-      ).toBeVisible({ timeout: 10_000 })
+      // React opens the archive snapshot dialog and restores from its own
+      // action with no intermediate confirmation view.
+      const dialog = page.getByRole('dialog', { name: /归档会话：/ })
+      await expect(dialog).toBeVisible({ timeout: 10_000 })
       await page.route(/\/api\/sessions\/[^/]+\/restore$/, (route) =>
         route.fulfill({
           status: 404,
@@ -69,10 +67,10 @@ test.describe('分级通知层', () => {
           body: JSON.stringify({ error: '归档条目指向的会话不存在' }),
         }),
       )
-      await page.locator('sebas-dashboard [data-testid="restore-confirm"]').click()
+      await dialog.getByRole('button', { name: '恢复会话' }).click()
 
       // error toast 在场（视图显式上报的文案点名条目与失败）。
-      const toast = page.locator('wa-toast-item').filter({ hasText: '恢复会话' })
+      const toast = page.getByRole('alert').filter({ hasText: '恢复会话' })
       const t0 = Date.now()
       await expect(toast).toBeVisible({ timeout: 10_000 })
       await expect(toast).toContainText('失败')

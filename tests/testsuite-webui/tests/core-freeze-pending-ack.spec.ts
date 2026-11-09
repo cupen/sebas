@@ -39,9 +39,9 @@ test.describe('core 挂起窗口（SIGSTOP）', () => {
 
   test('挂起期间提交：等待回执即时可见；解冻后免刷新落账', async ({ page }) => {
     const workbench = new Workbench(page)
-    const indicator = page.locator(
-      'sebas-workbench-composer [data-testid="submit-queued-indicator"]',
-    )
+    // React's local pending-acknowledgement is the submit control's
+    // `sending` state (发送中…), set synchronously with the click.
+    const indicator = workbench.submitControl
 
     await resetState(page.request)
     const key = await createSession(page.request, { prompt: 'warmup' })
@@ -56,25 +56,23 @@ test.describe('core 挂起窗口（SIGSTOP）', () => {
 
       // 本地回执与点击同帧级到达（2s 上限远小于 5s spec 预算）——挂起的
       // 后端不吞反馈。
-      await expect(indicator).toBeVisible({ timeout: 2_000 })
+      await expect(indicator).toHaveAttribute('data-state', 'sending', { timeout: 2_000 })
 
       // 挂起 ≠ 断连：TCP 仍在，客户端不虚假宣告 ws-down，也不内显
       // NetworkError；草稿保留（回执未到不丢字）。
-      await expect(page.locator('[data-testid="ws-down-banner"]')).toHaveCount(0)
-      await expect(
-        page.locator('sebas-workbench-composer [data-testid="composer-error"]'),
-      ).toHaveCount(0)
+      await expect(page.getByText('连接已断开')).toHaveCount(0)
+      await expect(page.getByTestId('composer').getByRole('alert')).toHaveCount(0)
       await expect(workbench.composerTextarea).toHaveValue('while core frozen')
     } finally {
       thawCore()
     }
 
     // 解冻后免刷新闭环：回执到达指示退场，回合照常完成并追加进转录。
-    await expect(indicator).toBeHidden({ timeout: 20_000 })
+    await expect(indicator).not.toHaveAttribute('data-state', 'sending', { timeout: 20_000 })
     await waitStatus(page.request, key, ['done'])
     // 时间线序 = warmup 回合（prompt + 回复）+ 挂起回合（prompt + 回复），
     // 恰 4 块；尾两块是挂起回合的落账。
-    const blocks = page.locator('sebas-transcript-view .turn-block')
+    const blocks = page.locator('[data-testid="react-transcript"] [data-unit-key]')
     await expect(blocks).toHaveCount(4)
     await expect(blocks.nth(-2)).toContainText('while core frozen')
     await expect(blocks.last()).toContainText('hello world')

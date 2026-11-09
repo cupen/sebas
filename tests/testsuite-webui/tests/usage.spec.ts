@@ -157,33 +157,33 @@ test.describe('用量视图 /usage', () => {
       await page.goto('/')
       await expect(shell.brand).toBeVisible()
       // 侧栏「用量」入口（spec：reachable from the sidebar）→ SPA 导航。
-      await page.locator('sebas-app .usage-link', { hasText: '用量' }).click()
+      await shell.nav.getByRole('button', { name: '用量' }).click()
       await expect(page).toHaveURL(/\/usage$/)
-      const view = page.locator('sebas-usage')
+      const view = page.getByTestId('usage-page')
       await expect(view).toBeVisible()
 
-      // 请求口径：day 粒度 + 14 天窗口 + 本机时区偏移（分钟东偏）。
+      // 请求口径：day 粒度 + 30 天窗口 + 本机时区偏移（分钟东偏）。
       expect(requests).toHaveLength(1)
       const params = new URL(requests[0]!).searchParams
       expect(params.get('granularity')).toBe('day')
-      expect(params.get('days')).toBe('14')
+      expect(params.get('days')).toBe('30')
       const tz = Number(params.get('tz_offset'))
       expect(Number.isFinite(tz)).toBe(true)
 
-      // 窗口汇总数字（totals 原样呈现）。
-      const summary = view.locator('[data-testid="usage-summary"]')
-      await expect(summary.locator('.stat', { hasText: '请求数' })).toContainText('3')
-      await expect(summary.locator('.stat', { hasText: '输入 tokens' })).toContainText('14')
-      await expect(summary.locator('.stat', { hasText: '输出 tokens' })).toContainText('58')
-      await expect(summary.locator('.stat', { hasText: '缓存 tokens' })).toContainText('7')
+      // 窗口汇总数字（AntD Statistic 卡片：标题 + 数值同卡）。
+      const stat = (title: string) => view.locator('.ant-statistic').filter({ hasText: title })
+      await expect(stat('请求数')).toContainText('3')
+      await expect(stat('输入 tokens')).toContainText('14')
+      await expect(stat('输出 tokens')).toContainText('58')
+      await expect(stat('缓存 tokens')).toContainText('7')
 
-      // 双模型折线（每系列一条 polyline，3 桶 > 1 画线不画 marker）+ 图例点名。
-      const chart = view.locator('sebas-line-chart')
-      await expect(chart.locator('svg polyline')).toHaveCount(2)
-      const legend = chart.locator('.legend .item')
-      await expect(legend).toHaveCount(2)
-      await expect(legend.filter({ hasText: 'claude-sonnet' })).toHaveCount(1)
-      await expect(legend.filter({ hasText: 'gpt-4o-mini' })).toHaveCount(1)
+      // 双模型折线（每系列一条 path）+ 图例点名。
+      const chart = view.locator('svg[role="img"]')
+      await expect(chart.locator('path')).toHaveCount(2)
+      const legend = view.getByRole('group', { name: '模型图例' })
+      await expect(legend.getByRole('button')).toHaveCount(2)
+      await expect(legend.getByRole('button', { name: 'claude-sonnet' })).toHaveCount(1)
+      await expect(legend.getByRole('button', { name: 'gpt-4o-mini' })).toHaveCount(1)
 
       expect(collector.clean()).toEqual([])
     })
@@ -196,38 +196,30 @@ test.describe('用量视图 /usage', () => {
 
       await page.goto('/')
       await expect(shell.brand).toBeVisible()
-      await page.locator('sebas-app .usage-link', { hasText: '用量' }).click()
-      const view = page.locator('sebas-usage')
+      await shell.nav.getByRole('button', { name: '用量' }).click()
+      const view = page.getByTestId('usage-page')
       await expect(view).toBeVisible()
-      const chart = view.locator('sebas-line-chart')
+      const chart = view.locator('svg[role="img"]')
       await expect(chart).toBeVisible()
 
-      // 切到「按小时」：重新请求（granularity=hour，hour 忽略 days → 无 days 参）。
-      await view.locator('[data-testid="granularity-hour"]').click()
+      // 切到「按小时」：重新请求（granularity=hour，窗口固定为 1 天）。
+      await view.getByRole('radiogroup', { name: '粒度' }).getByText('小时', { exact: true }).click()
       await expect
         .poll(() => requests.length, '粒度切换必须重发请求')
         .toBe(2)
       const hourUrl = new URL(requests[1]!)
       expect(hourUrl.searchParams.get('granularity')).toBe('hour')
-      expect(hourUrl.searchParams.get('days')).toBeNull()
+      expect(hourUrl.searchParams.get('days')).toBe('1')
 
-      // 24 小时桶重渲染：polyline 顶点数 = 24（零填充全窗口）。
-      const points = await chart.locator('svg polyline').first().getAttribute('points')
-      expect(points!.trim().split(/\s+/)).toHaveLength(24)
-      // 副标题点明小时面口径。（fix-webui-qa-round13 4.1 后 `.meta` 有两行：
-      // 数据源说明 + 本副标题——用副标题独有的时区措辞过滤锁定，再断言文本。）
-      await expect(view.locator('.meta', { hasText: '桶边界按本机时区' })).toContainText(
-        '今天 0–23 时',
-      )
-      // 按下态翻转。
-      await expect(view.locator('[data-testid="granularity-hour"]')).toHaveAttribute(
-        'aria-pressed',
-        'true',
-      )
-      await expect(view.locator('[data-testid="granularity-day"]')).toHaveAttribute(
-        'aria-pressed',
-        'false',
-      )
+      // 24 小时桶重渲染：折线 path 覆盖 24 个零填充桶（用圆点 title 计数）。
+      await expect(chart.locator('circle')).toHaveCount(48)
+      // 副标题点明小时面口径（图表 title 点名 24 小时粒度）。
+      await expect(chart.locator('title').first()).toContainText('小时粒度')
+      // 选态翻转（AntD Segmented 的可见 label 反映当前项）。
+      const hourLabel = view
+        .getByRole('radiogroup', { name: '粒度' })
+        .locator('.ant-segmented-item-selected')
+      await expect(hourLabel).toContainText('小时')
 
       expect(collector.clean()).toEqual([])
     })
@@ -238,30 +230,19 @@ test.describe('用量视图 /usage', () => {
 
       await page.goto('/')
       await expect(shell.brand).toBeVisible()
-      await page.locator('sebas-app .usage-link', { hasText: '用量' }).click()
-      const view = page.locator('sebas-usage')
-      await expect(view.locator('sebas-line-chart')).toBeVisible()
+      await shell.nav.getByRole('button', { name: '用量' }).click()
+      const view = page.getByTestId('usage-page')
+      await expect(view.locator('svg[role="img"]')).toBeVisible()
       expect(requests).toHaveLength(1)
 
-      // 切到「输出」维度：零请求（design D4），第一系列变为输出序列 [0, 50, 0]。
-      await view.locator('[data-testid="dimension-output"]').click()
-      await expect(view.locator('[data-testid="dimension-output"]')).toHaveAttribute(
-        'aria-pressed',
-        'true',
-      )
+      // 切到「输出」维度：零请求（design D4），图表改用输出序列 [0, 50, 0]。
+      const dimension = view.getByRole('radiogroup', { name: '维度' })
+      await dimension.getByText('输出', { exact: true }).click()
+      await expect(dimension.locator('.ant-segmented-item-selected')).toContainText('输出')
       expect(requests).toHaveLength(1)
-      const values = await page.evaluate(() => {
-        // 原生 DOM API 不穿 shadow root：sebas-usage 挂在 sebas-app 的
-        // shadowRoot 里，逐层下探（Playwright 定位器才自动穿透）。
-        const view = document.querySelector('sebas-app')?.shadowRoot?.querySelector(
-          'sebas-usage',
-        ) as undefined | { shadowRoot?: ShadowRoot | null }
-        const chart = view?.shadowRoot?.querySelector(
-          'sebas-line-chart',
-        ) as undefined | { series?: { values: number[] }[] }
-        return chart?.series?.[0]?.values
-      })
-      expect(values).toEqual([0, 50, 0])
+      const chart = view.locator('svg[role="img"]')
+      // gpt 的输出序列在 09-28 桶 = 50；切维度后点值随数据重算。
+      await expect(chart.locator('circle title', { hasText: '· 50' })).toHaveCount(1)
 
       expect(collector.clean()).toEqual([])
     })
@@ -277,13 +258,14 @@ test.describe('用量视图 /usage', () => {
       // 深链直入（路由可深链，design D5）。
       await page.goto('/usage')
       await expect(shell.brand).toBeVisible()
-      const view = page.locator('sebas-usage')
+      const view = page.getByTestId('usage-page')
       await expect(view).toBeVisible()
 
       // 「router 不可达」通知（非裸错误）+ cause 如实呈现；无图表。
-      await expect(view.getByText('router 不可达')).toBeVisible()
-      await expect(view.locator('.mono', { hasText: 'router_unreachable: connection refused' })).toBeVisible()
-      await expect(view.locator('sebas-line-chart')).toHaveCount(0)
+      const alert = view.getByRole('alert')
+      await expect(alert).toContainText('router 不可达')
+      await expect(alert).toContainText('router_unreachable: connection refused')
+      await expect(view.locator('svg[role="img"]')).toHaveCount(0)
       await expect(view.getByText('暂无用量数据')).toHaveCount(0)
 
       expect(collector.clean()).toEqual([])
@@ -297,12 +279,12 @@ test.describe('用量视图 /usage', () => {
 
       await page.goto('/usage')
       await expect(shell.brand).toBeVisible()
-      const view = page.locator('sebas-usage')
+      const view = page.getByTestId('usage-page')
       await expect(view).toBeVisible()
 
       await expect(view.getByText('暂无用量数据')).toBeVisible()
       await expect(view.getByText('router 不可达')).toHaveCount(0)
-      await expect(view.locator('sebas-line-chart')).toHaveCount(0)
+      await expect(view.locator('svg[role="img"]')).toHaveCount(0)
 
       expect(collector.clean()).toEqual([])
     })

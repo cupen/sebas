@@ -29,8 +29,9 @@
  *     刷新自持焦点、后退到 / 不白屏不重挂、未知键如实降级。
  *   - D1 thinking 折叠缺省形态可区分（agent-workbench「Workbench renders the
  *     focused session」场景「thinking fold is titled and distinguishable」
- *     +「text never wears a process chip」）的**真实渲染**面：data-kind、
- *     胶囊底色（计算样式非透明）、二级 thinking glyph、正文段零 PROCESS 词。
+ *     +「text never wears a process chip」）的**真实渲染**面：折叠摘要带
+ *     thinking 词、胶囊底色（计算样式非透明）、二级「思考」语义词、正文段零
+ *     PROCESS 词。
  *
  * 与既有 journey 的分工：thinking-process-fold / mode / session-label /
  * archive-identity / projects / usage 各自钉旧的合同不动；本文件只钉 round3
@@ -76,11 +77,16 @@ test.describe('fix-webui-qa-round3 review 补层', () => {
       await waitStatus(request, key, ['done'])
 
       await page.goto(`/sessions/${key}`)
-      const modeSwitch = page.locator(
-        'sebas-workbench-composer wa-select[data-testid="mode-switch"]',
-      )
+      const modeSwitch = page
+        .getByTestId('composer')
+        .getByRole('combobox', { name: '权限模式' })
       await expect(modeSwitch).toBeVisible()
-      const allowOption = modeSwitch.locator('wa-option[value="allow"]')
+      // AntD 的可点击选项行在浮层里（.ant-select-item-option 是组件库自身的
+      // 公共呈现面；标签沿用产品词汇「Allow · 放行」）。
+      const allowOption = page
+        .locator('.ant-select-dropdown:not(.ant-select-dropdown-hidden)')
+        .locator('.ant-select-item-option', { hasText: '放行' })
+        .first()
 
       // 第一次真实鼠标展开 + 真实鼠标选中一项（此前套件只走过程序化置值）。
       await modeSwitch.click()
@@ -96,30 +102,12 @@ test.describe('fix-webui-qa-round3 review 补层', () => {
 
       // 选择后列表收起，展开布尔与渲染面一致（false ↔ 选项不可见）。
       await expect(allowOption).toBeHidden()
-      expect(
-        await modeSwitch.evaluate((el) => (el as unknown as { open: boolean }).open),
-      ).toBe(false)
+      await expect(modeSwitch).toHaveAttribute('aria-expanded', 'false')
 
       // ── D2 核心：再次以鼠标点击 → 选项列表重新展开 ─────────────────────
       await modeSwitch.click()
       await expect(allowOption).toBeVisible({ timeout: 10_000 })
-      // 展开布尔与实际渲染一致（场景「下拉的展开指示与列表实际显隐一致」的
-      // 行为面：open=true 且浮层真实渲染——wa-popup active、listbox 未隐藏）。
-      const rendered = await modeSwitch.evaluate((el) => {
-        const sel = el as unknown as { open: boolean; shadowRoot: ShadowRoot | null }
-        const popup = sel.shadowRoot?.querySelector('wa-popup') as
-          | (Element & { active?: boolean })
-          | null
-        const listbox = sel.shadowRoot?.querySelector('.listbox') as HTMLElement | null
-        return {
-          open: sel.open,
-          popupActive: popup?.active === true,
-          listboxRendered: !!listbox && !listbox.hidden,
-        }
-      })
-      expect(rendered.open).toBe(true)
-      expect(rendered.popupActive).toBe(true)
-      expect(rendered.listboxRendered).toBe(true)
+      await expect(modeSwitch).toHaveAttribute('aria-expanded', 'true')
 
       expect(collector.clean()).toEqual([])
     })
@@ -136,9 +124,16 @@ test.describe('fix-webui-qa-round3 review 补层', () => {
 
       const modeSelect = rail
         .newSessionDialog()
-        .locator('[data-testid="dialog-mode-select"]')
+        .getByRole('combobox', { name: '权限模式' })
       await expect(modeSelect).toBeVisible()
-      const editOption = modeSelect.locator('wa-option[value="edit"]')
+      // AntD 6 的单选标签是 .ant-select-content 的文本（combobox input 恒空）；
+      // 选中后按该控件自身的内容行断言（对话框里还有 provider 目录选择器，
+      // 它的选中文案同样含 "edit"，按文案全局过滤会命中两处）。
+      const modeContent = modeSelect.locator('xpath=..')
+      const editOption = page
+        .locator('.ant-select-dropdown:not(.ant-select-dropdown-hidden)')
+        .locator('.ant-select-item-option', { hasText: 'Edit' })
+        .first()
 
       // 真实鼠标展开 + 选中（对话框侧同样从未走过真实指针选择）。
       await modeSelect.click({ timeout: 8_000 })
@@ -147,12 +142,7 @@ test.describe('fix-webui-qa-round3 review 补层', () => {
       log('options visible (1st)')
       await editOption.click({ timeout: 8_000 })
       log('option clicked')
-      await expect
-        .poll(
-          async () =>
-            await modeSelect.evaluate((el) => (el as unknown as { value: string }).value),
-        )
-        .toBe('edit')
+      await expect(modeContent).toContainText('Edit')
       log('value=edit')
 
       // 选择后收起；再次鼠标点击必须重新展开（QA 实锤的第二次展开失败点）。
@@ -188,20 +178,19 @@ test.describe('fix-webui-qa-round3 review 补层', () => {
       }
 
       await page.goto('/sessions')
-      await expect(page.locator('sebas-sessions .page-title')).toBeVisible()
+      await expect(page.getByTestId('sessions-page').getByRole('heading', { name: '会话总览' })).toBeVisible()
       // 栅格至少三卡（spec 场景前提「卡片不少于三张」；此前用例遗留的已关闭
       // 会话也按 known session 上列表，故断言下限而非恰数）。
-      const cards = page.locator('sebas-sessions article.scard')
+      const cards = page.locator('[data-testid="sessions-page"] .ant-card')
       await expect
         .poll(async () => await cards.count(), { timeout: 15_000 })
         .toBeGreaterThanOrEqual(3)
 
-      // 溢出断言：outlet 不得宽出宿主 main（根因修复前 outlet 按内容盒多出
-      // 64px、被宿主裁掉不可回收），main 自身不得出现横向滚动量。
+      // 溢出断言：内容区不得宽出宿主 main，main 自身不得出现横向滚动量。
       const geo = await page.evaluate(() => {
-        const app = document.querySelector('sebas-app')
-        const main = app?.shadowRoot?.querySelector('main')
-        const outlet = main?.querySelector('.outlet')
+        const app = document.querySelector('[data-testid="react-shell"]')
+        const main = app?.querySelector('main')
+        const outlet = document.querySelector('[data-testid="sessions-page"]')
         if (!(main instanceof HTMLElement) || !(outlet instanceof HTMLElement)) return null
         return {
           outletRight: outlet.getBoundingClientRect().right,
@@ -214,12 +203,13 @@ test.describe('fix-webui-qa-round3 review 补层', () => {
       expect(geo!.outletRight).toBeLessThanOrEqual(geo!.mainRight + 1)
       expect(geo!.mainScrollWidth).toBeLessThanOrEqual(geo!.mainClientWidth + 1)
 
-      // 任一卡片的操作入口（Close）完整落在视口内（不被右缘裁剪）。
-      const closeButtons = cards.locator('wa-button[aria-label^="关闭会话"]')
+      // 任一卡片的操作入口（React 卡片最右的操作 = 归档）完整落在视口内
+      // （不被右缘裁剪）。
+      const closeButtons = cards.getByRole('button', { name: /归\s*档/ })
       await expect(closeButtons.first()).toBeVisible()
       for (let i = 0; i < (await closeButtons.count()); i += 1) {
         const box = await closeButtons.nth(i).boundingBox()
-        expect(box, `card ${i} close button box`).not.toBeNull()
+        expect(box, `card ${i} action button box`).not.toBeNull()
         expect(box!.x).toBeGreaterThanOrEqual(-0.5)
         expect(box!.x + box!.width).toBeLessThanOrEqual(1280.5)
       }
@@ -293,11 +283,11 @@ test.describe('fix-webui-qa-round3 review 补层', () => {
       })
 
       await page.goto('/usage')
-      const view = page.locator('sebas-usage')
+      const view = page.locator('[data-testid="usage-page"]')
       await expect(view).toBeVisible()
 
       // D4：刷新按钮等控件完整落在 1280 视口内（右缘不溢出）。
-      const reload = view.locator('[data-testid="usage-reload"]')
+      const reload = view.getByRole('button', { name: /刷\s*新/ })
       await expect(reload).toBeVisible()
       const box = await reload.boundingBox()
       expect(box, 'usage reload button box').not.toBeNull()
@@ -307,25 +297,20 @@ test.describe('fix-webui-qa-round3 review 补层', () => {
       expect(box!.y + box!.height).toBeLessThanOrEqual(720.5)
 
       // D8：卡片数字 = 桶现场累加（3/14/58/7），不是漂移的 totals（99…）。
-      const summary = view.locator('[data-testid="usage-summary"]')
-      await expect(summary.locator('.stat', { hasText: '请求数' }).locator('.num')).toHaveText(
-        '3',
-      )
-      await expect(
-        summary.locator('.stat', { hasText: '输入 tokens' }).locator('.num'),
-      ).toHaveText('14')
-      await expect(
-        summary.locator('.stat', { hasText: '输出 tokens' }).locator('.num'),
-      ).toHaveText('58')
-      await expect(
-        summary.locator('.stat', { hasText: '缓存 tokens' }).locator('.num'),
-      ).toHaveText('7')
+      const stat = (title: string) => view.locator('.ant-statistic').filter({ hasText: title })
+      await expect(stat('请求数').locator('.ant-statistic-content-value')).toHaveText('3')
+      await expect(stat('输入 tokens').locator('.ant-statistic-content-value')).toHaveText('14')
+      await expect(stat('输出 tokens').locator('.ant-statistic-content-value')).toHaveText('58')
+      await expect(stat('缓存 tokens').locator('.ant-statistic-content-value')).toHaveText('7')
 
       // 切到全零小时窗：卡片与空态随**窗口**翻转（totals 仍漂移 99 也不上屏）。
-      await view.locator('[data-testid="granularity-hour"]').click()
+      await view
+        .getByRole('radiogroup', { name: '粒度' })
+        .getByText('小时', { exact: true })
+        .click()
       await expect(view.getByText('暂无用量数据')).toBeVisible({ timeout: 10_000 })
-      await expect(summary).toHaveCount(0)
-      await expect(view.locator('sebas-line-chart')).toHaveCount(0)
+      await expect(view.locator('.ant-statistic')).toHaveCount(0)
+      await expect(view.locator('svg[role="img"]')).toHaveCount(0)
 
       expect(collector.clean()).toEqual([])
     })
@@ -346,51 +331,41 @@ test.describe('fix-webui-qa-round3 review 补层', () => {
       await page.goto(`/sessions/${key}`)
       const rail = new ProjectRail(page)
       await rail.ensureProjectExpanded(projectName)
-      // 聚焦头部先呈现首条 prompt 预览（头部命名链 = session-head-name，
+      // 聚焦头部先呈现首条 prompt 预览（头部命名链 = 会话页 h3，
       // fullSessionLabel：label → preview → 短 id；.chat 是 chat_id 不是名）。
-      const headName = page.locator('sebas-dashboard [data-testid="session-head-name"]')
+      const headName = page
+        .getByTestId('workbench-session')
+        .locator('header')
+        .first()
+        .getByRole('heading', { level: 3 })
       await expect(headName).toBeVisible({ timeout: 15_000 })
       await expect(headName).toContainText(tag)
 
       // rail … 菜单改名（与 session-label.spec 同款驱动）。
-      const row = rail.host
-        .locator('li.session-item:not(.archived)', { hasText: tag })
-        .first()
-      await row.hover()
-      await row.locator('wa-dropdown button[title="会话操作"]').click()
-      await row.locator('wa-dropdown-item[value="rename"]').click()
-      const dialog = page.locator('sebas-project-rail wa-dialog[label="重命名会话"]')
-      await expect(
-        dialog.locator('h2, [role="heading"]', { hasText: '重命名会话' }).first(),
-      ).toBeVisible()
-      const input = dialog.locator('wa-input[data-testid="rename-input"] input')
+      await rail.sessionMenu(tag).click()
+      await page.getByRole('menuitem', { name: '重命名会话', exact: true }).click()
+      const dialog = page.getByRole('dialog', { name: '重命名会话' })
+      await expect(dialog).toBeVisible()
+      const input = dialog.getByRole('textbox', { name: '会话名' })
       await input.click()
       await input.pressSequentially('聚焦名A')
-      await dialog.locator('wa-button').filter({ hasText: '保存' }).click()
+      await dialog.getByRole('button', { name: /保\s*存/ }).click()
 
       // 免刷新探针：头部更新必须发生在同一文档里。
       await page.evaluate(() => {
-        const dash = document.querySelector('sebas-app')?.shadowRoot?.querySelector(
-          'sebas-dashboard',
-        )
-        if (dash) (dash as unknown as { __qaNoReload?: boolean }).__qaNoReload = true
+        ;(window as unknown as { __qaNoReload?: boolean }).__qaNoReload = true
       })
       // 头部就地翻新（事件直改共享行，不等 WS 相位帧/节流刷新）；rail 行同值。
       await expect(headName).toContainText('聚焦名A', { timeout: 3_000 })
       await expect(
         rail.host
-          .locator('li.session-item:not(.archived)', { hasText: '聚焦名A' })
+          .locator('button:not(:has-text("归档于"))', { hasText: '聚焦名A' })
           .first()
-          .locator('.session-name'),
-      ).toHaveText('聚焦名A', { timeout: 3_000 })
+          .getByText('聚焦名A', { exact: true }),
+      ).toBeVisible({ timeout: 3_000 })
       expect(
         await page.evaluate(
-          () =>
-            (
-              document.querySelector('sebas-app')?.shadowRoot?.querySelector(
-                'sebas-dashboard',
-              ) as unknown as { __qaNoReload?: boolean } | null
-            )?.__qaNoReload === true,
+          () => (window as unknown as { __qaNoReload?: boolean }).__qaNoReload === true,
         ),
       ).toBe(true)
 
@@ -420,30 +395,29 @@ test.describe('fix-webui-qa-round3 review 补层', () => {
 
       // History 行呈现归档时刻现用标签，不回退旧自动标题（首条 prompt 预览）。
       const archivedRow = rail.host
-        .locator('li.session-item.archived', { hasText: label })
+        .locator('button:has-text("归档于")', { hasText: label })
         .first()
       await expect(archivedRow).toBeVisible({ timeout: 10_000 })
-      await expect(archivedRow.locator('.session-name')).toHaveText(label)
+      await expect(archivedRow.getByText(label, { exact: true })).toBeVisible()
       expect(
-        await rail.host.locator('li.session-item.archived', { hasText: tag }).count(),
+        await rail.host.locator('button:has-text("归档于")', { hasText: tag }).count(),
       ).toBe(0)
 
-      // 归档只读视图头同源取数。
+      // 归档只读视图（React 以对话框呈现快照）同源取数。
       await archivedRow.click()
-      const archivedView = page.locator('sebas-dashboard [data-testid="archived-view"]')
+      const archivedView = page.getByRole('dialog', { name: `归档会话：${label}` })
       await expect(archivedView).toBeVisible({ timeout: 10_000 })
-      await expect(archivedView.locator('.ident .chat')).toContainText(label)
+      await expect(archivedView).toContainText(label)
 
       // 恢复保留标签：回到 rail 时行名仍是归档时刻的现用标签。
-      await archivedView.locator('[data-testid="archived-restore"]').click()
-      await page.locator('sebas-dashboard [data-testid="restore-confirm"]').click()
-      await expect(archivedView).toHaveCount(0, { timeout: 15_000 })
+      await archivedView.getByRole('button', { name: '恢复会话' }).click()
+      await expect(archivedView).toBeHidden({ timeout: 15_000 })
       await expect(
         rail.host
-          .locator('li.session-item:not(.archived)', { hasText: label })
+          .locator('button:not(:has-text("归档于"))', { hasText: label })
           .first()
-          .locator('.session-name'),
-      ).toHaveText(label, { timeout: 15_000 })
+          .getByText(label, { exact: true }),
+      ).toBeVisible({ timeout: 15_000 })
 
       expect(collector.clean()).toEqual([])
     })
@@ -470,22 +444,24 @@ test.describe('fix-webui-qa-round3 review 补层', () => {
       const rail = new ProjectRail(page)
       await page.goto('/')
       await expect(rail.host).toBeVisible()
+      // Project rows are the buttons carrying aria-expanded; the name is the
+      // first span inside (the count is the second).
       const railNames = () =>
-        rail.host
-          .locator('.row .name > span:first-child')
-          .allTextContents()
-          .then((ts) => ts.map((s) => s.trim()))
+        rail.host.locator('button[aria-expanded]').evaluateAll((els) =>
+          els
+            .map((el) => el.getAttribute('aria-label') ?? '')
+            .filter((label) => label !== '' && !label.startsWith('历史 '))
+            .map((label) => label.replace(/\s+\d+$/, '')),
+        )
       await expect
         .poll(async () => (await railNames()).length, { timeout: 10_000 })
         .toBeGreaterThanOrEqual(3)
 
       /** 打开某项目行的 … 菜单（触发钮 hover 显现，同 session 菜单纪律）。 */
+      const visibleMenu = () => page.locator('[role="menu"]:visible').first()
       const openProjectMenu = async (name: string) => {
-        const row = rail.projectRow(name)
-        await row.hover()
-        await row.locator('button[aria-label^="项目操作"]').click()
-        await expect(row.locator('wa-dropdown-item[data-testid="project-move-down"]')).toBeVisible()
-        return row
+        await rail.openProjectMenu(name)
+        await expect(visibleMenu().getByRole('menuitem', { name: '下移项目' })).toBeVisible()
       }
 
       // 相对断言：r3-up- 下移一格 = 与其后继互换（不依赖初始全序——同秒
@@ -497,8 +473,8 @@ test.describe('fix-webui-qa-round3 review 补层', () => {
       const swapped = [...before]
       ;[swapped[idx], swapped[idx + 1]] = [swapped[idx + 1]!, swapped[idx]!]
 
-      const row = await openProjectMenu(`r3-up-${t}`)
-      await row.locator('wa-dropdown-item[data-testid="project-move-down"]').click()
+      await openProjectMenu(`r3-up-${t}`)
+      await rail.clickMenuItem('下移项目')
       await expect.poll(railNames, { timeout: 10_000 }).toEqual(swapped)
 
       // 跨刷新保持（POST /api/projects/reorder 落盘）。
@@ -506,25 +482,18 @@ test.describe('fix-webui-qa-round3 review 补层', () => {
       await expect(rail.host).toBeVisible()
       await expect.poll(railNames, { timeout: 10_000 }).toEqual(swapped)
 
-      // 边界位：首行「上移」禁用、末行「下移」禁用（属性或反射属性任一为真）。
-      const isDisabled = (loc: ReturnType<ProjectRail['projectRow']>) =>
-        loc.evaluate((el) => {
-          const item = el as unknown as { disabled?: boolean }
-          return el.hasAttribute('disabled') || item.disabled === true
-        })
-      const first = await openProjectMenu(swapped[0]!)
-      await expect
-        .poll(() => isDisabled(first.locator('wa-dropdown-item[data-testid="project-move-up"]')), {
-          timeout: 5_000,
-        })
-        .toBe(true)
+      // 边界位：首行「上移」禁用、末行「下移」禁用。
+      await openProjectMenu(swapped[0]!)
+      await expect(visibleMenu().getByRole('menuitem', { name: '上移项目' })).toHaveAttribute(
+        'aria-disabled',
+        'true',
+      )
       await page.keyboard.press('Escape')
-      const last = await openProjectMenu(swapped[swapped.length - 1]!)
-      await expect
-        .poll(() => isDisabled(last.locator('wa-dropdown-item[data-testid="project-move-down"]')), {
-          timeout: 5_000,
-        })
-        .toBe(true)
+      await openProjectMenu(swapped[swapped.length - 1]!)
+      await expect(visibleMenu().getByRole('menuitem', { name: '下移项目' })).toHaveAttribute(
+        'aria-disabled',
+        'true',
+      )
       await page.keyboard.press('Escape')
 
       expect(collector.clean()).toEqual([])
@@ -554,22 +523,21 @@ test.describe('fix-webui-qa-round3 review 补层', () => {
       // rail 选择 → 地址写深链（pushState），页面不重载（探针随后在同一元素
       // 上存活验证），会话就地渲染。
       await rail
-        .host.locator('li.session-item:not(.archived)', { hasText: tagA })
+        .host.locator('button:not(:has-text("归档于"))', { hasText: tagA })
         .first()
         .click()
       await expect(page).toHaveURL(new RegExp(`/sessions/${escapeRegExp(keyA)}$`))
       await expect(detail.userTurn(tagA)).toBeVisible({ timeout: 15_000 })
       await page.evaluate(() => {
-        const dash = document.querySelector('sebas-app')?.shadowRoot?.querySelector(
-          'sebas-dashboard',
-        )
-        if (dash) (dash as unknown as { __qaSameInstance?: boolean }).__qaSameInstance = true
+        document
+          .querySelector('[data-testid="workbench-session"]')
+          ?.setAttribute('data-qa-same', '1')
       })
 
       // 同文档 SPA 段：再点 B → 地址写 B 的深链，dashboard 实例不被拆毁
       // 重建（三态同一模板字面量——探针存活即证据）。
       await rail
-        .host.locator('li.session-item:not(.archived)', { hasText: tagB })
+        .host.locator('button:not(:has-text("归档于"))', { hasText: tagB })
         .first()
         .click()
       await expect(page).toHaveURL(new RegExp(`/sessions/${escapeRegExp(keyB)}$`))
@@ -578,15 +546,11 @@ test.describe('fix-webui-qa-round3 review 补层', () => {
       } catch (err) {
         // 诊断快照：URL 已写 B，但工作台到底呈现了什么？
         const diag = await page.evaluate(() => {
-          const app = document.querySelector('sebas-app')
-          const dash = app?.shadowRoot?.querySelector('sebas-dashboard')
-          const tv = dash?.shadowRoot?.querySelector('sebas-transcript-view')
-          const stream = dash?.shadowRoot?.querySelector('.turn-stream-area')
+          const dash = document.querySelector('[data-testid="workbench-session"]')
+          const tv = document.querySelector('[data-testid="react-transcript"]')
           return {
             dashFound: !!dash,
-            deepLinkKey:
-              (dash as unknown as { deepLinkKey?: string | null } | null)?.deepLinkKey ?? null,
-            transcriptText: (tv?.shadowRoot?.textContent ?? stream?.textContent ?? '').slice(0, 400),
+            transcriptText: (tv?.textContent ?? '').slice(0, 400),
           }
         })
         console.log(`[qa-round3 D10] B-turn missing; url=${page.url()} diag=${JSON.stringify(diag)}`)
@@ -595,11 +559,9 @@ test.describe('fix-webui-qa-round3 review 补层', () => {
       expect(
         await page.evaluate(
           () =>
-            (
-              document.querySelector('sebas-app')?.shadowRoot?.querySelector(
-                'sebas-dashboard',
-              ) as unknown as { __qaSameInstance?: boolean } | null
-            )?.__qaSameInstance === true,
+            document
+              .querySelector('[data-testid="workbench-session"]')
+              ?.getAttribute('data-qa-same') === '1',
         ),
       ).toBe(true)
 
@@ -607,28 +569,21 @@ test.describe('fix-webui-qa-round3 review 补层', () => {
       // 后退语义优先，不被工作台抢写；实例仍在、无白屏、无 pageerror。
       await page.goBack()
       await expect(page).toHaveURL(new RegExp(`/sessions/${escapeRegExp(keyA)}$`))
-      await expect(page.locator('sebas-dashboard')).toBeVisible()
+      await expect(page.getByTestId('workbench-session')).toBeVisible()
       expect(
         await page.evaluate(
           () =>
-            (
-              document.querySelector('sebas-app')?.shadowRoot?.querySelector(
-                'sebas-dashboard',
-              ) as unknown as { __qaSameInstance?: boolean } | null
-            )?.__qaSameInstance === true,
+            document
+              .querySelector('[data-testid="workbench-session"]')
+              ?.getAttribute('data-qa-same') === '1',
         ),
       ).toBe(true)
       await page.goBack()
       await expect(page).toHaveURL(/\/$/)
-      await expect(page.locator('sebas-dashboard')).toBeVisible()
+      await expect(page.getByTestId('workbench-home')).toBeVisible()
       expect(
         await page.evaluate(
-          () =>
-            (
-              document.querySelector('sebas-app')?.shadowRoot?.querySelector(
-                'sebas-dashboard',
-              ) as unknown as { __qaSameInstance?: boolean } | null
-            )?.__qaSameInstance === true,
+          () => document.querySelector('[data-testid="workbench-session"]') === null,
         ),
       ).toBe(true)
       expect(collector.pageErrors).toEqual([])
@@ -637,12 +592,13 @@ test.describe('fix-webui-qa-round3 review 补层', () => {
       await page.goto(`/sessions/${keyA}`)
       await expect(detail.userTurn(tagA)).toBeVisible({ timeout: 15_000 })
 
-      // 未知键深链：如实降级（「会话不可得」），不白屏。
+      // 未知键深链：如实降级（「会话加载失败」），不白屏。
       await page.goto('/sessions/ghost%00session')
-      await expect(
-        page.locator('sebas-dashboard .empty-stream', { hasText: '会话不可得' }),
-      ).toBeVisible({ timeout: 15_000 })
-      await expect(page.locator('sebas-dashboard')).toBeVisible()
+      await expect(page.getByTestId('workbench-session')).toBeVisible()
+      await expect(page.getByTestId('conversation-pane').getByRole('alert')).toContainText(
+        '会话加载失败',
+        { timeout: 15_000 },
+      )
 
       expect(collector.clean()).toEqual([])
     })
@@ -688,21 +644,40 @@ test.describe('fix-webui-qa-round3 review 补层', () => {
       await page.goto('/')
       await settings.openViaSidebar()
       await settings.openSection('模型')
-      const row = settings.panel.locator('.provider-row', { hasText: providerName })
+      const row = settings.panel.getByText(providerName, { exact: true }).locator('xpath=../..')
       await expect(row).toBeVisible({ timeout: 10_000 })
-      await row.locator('button[title="编辑"]').click()
-      const editor = page.locator('sebas-settings-modal wa-dialog.provider-editor')
-      await expect(editor.locator('button[data-testid="fetch-models"]')).toBeVisible({
-        timeout: 10_000,
-      })
-      await editor.locator('button[data-testid="fetch-models"]').click()
+      await row.getByRole('button', { name: /编\s*辑/ }).click()
+      const editor = page.getByRole('dialog', { name: `编辑 provider：${providerName}` })
+      const probe = editor.getByRole('button', { name: '抓取模型列表' })
+      await expect(probe).toBeVisible({ timeout: 10_000 })
+      await probe.click()
 
       // 错误完整呈现（含尾段——单行裁切下 tail 不可见）。
-      const err = editor.locator('.fetch-error')
+      const err = editor.getByRole('alert')
       await expect(err).toBeVisible({ timeout: 10_000 })
       await expect(err).toContainText(longCause.slice(-60))
 
       // 浏览器层换行合同：任意点可断 + 非单行（换行铺开）+ 盒宽不出容器。
+      // AntD 的 Modal 有 zoom-in 进入动画；动画首帧的盒宽/行高都还不是终值
+      // （实测 94×23），直接取样会把「动画中」误判成「单行裁切」。先等盒
+      // 尺寸稳定（轮询，不用固定 sleep），再对稳定态断言换行合同。
+      const rectOf = async (): Promise<[number, number]> =>
+        err.evaluate((el) => {
+          const box = el.getBoundingClientRect()
+          return [box.width, box.height]
+        })
+      await expect
+        .poll(
+          async () => {
+            const first = await rectOf()
+            await page.waitForTimeout(50)
+            const second = await rectOf()
+            return first[0] === second[0] && first[1] === second[1]
+          },
+          { timeout: 5_000, intervals: [50] },
+        )
+        .toBe(true)
+
       const geo = await err.evaluate((el) => {
         const cs = getComputedStyle(el)
         const box = el.getBoundingClientRect()
@@ -723,7 +698,8 @@ test.describe('fix-webui-qa-round3 review 补层', () => {
       expect(geo.right).toBeLessThanOrEqual(geo.headRight + 1)
 
       // 收尾：先关 provider 编辑器（开着会盖住设置面板的关闭钮）。
-      await editor.locator('wa-button').filter({ hasText: '取消' }).click()
+      // AntD 的中文双字按钮带字间空格（「取 消」）——按可访问名宽松匹配。
+      await editor.getByRole('button', { name: /取\s*消/ }).click()
       await expect(editor).toBeHidden({ timeout: 10_000 })
       await settings.close()
       expect(collector.clean()).toEqual([])
@@ -731,7 +707,7 @@ test.describe('fix-webui-qa-round3 review 补层', () => {
   })
 
   test.describe('D1 thinking 折叠缺省形态可区分（真实渲染）', () => {
-    test('收起行带胶囊底色与 data-kind=thinking；二级条目挂 glyph；正文零 PROCESS 词', async ({
+    test('收起行带胶囊底色与 thinking 词；二级条目带「思考」语义；正文零 PROCESS 词', async ({
       page,
       request,
     }) => {
@@ -748,23 +724,23 @@ test.describe('fix-webui-qa-round3 review 补层', () => {
       await detail.expectStatus('done', 30_000)
 
       const assistantTurn = page
-        .locator('sebas-dashboard sebas-transcript-view .turn-block.is-assistant')
+        .locator('[data-testid="react-transcript"] [data-unit-key]:has-text("agent")')
         .first()
       await expect(assistantTurn).toBeVisible()
 
-      // 两个 thinking 过程折叠，收起行 data-kind=thinking（run 成员构成词）。
-      const folds = assistantTurn.locator('div.process-fold')
+      // 两个 thinking 过程折叠：每折 summary 标着思考 run 的词「thinking」。
+      const folds = assistantTurn.locator('details')
       await expect(folds).toHaveCount(2, { timeout: 15_000 })
       for (let i = 0; i < 2; i += 1) {
-        await expect(folds.nth(i)).toHaveAttribute('data-kind', 'thinking')
+        await expect(folds.nth(i).locator('summary')).toContainText('thinking')
       }
 
-      // 缺省（收起）形态与正文可区分：折叠行的计算样式带**非透明**胶囊底色
-      // 与圆角（surface-2 胶囊真实上屏，不只是样式表文本存在）。
+      // 缺省（收起）形态与正文可区分：折叠摘要的标签胶囊带宽**非透明**底色
+      // 与圆角（AntD Tag 真实上屏，不只是样式表文本存在）。
       for (let i = 0; i < 2; i += 1) {
         const linkStyle = await folds
           .nth(i)
-          .locator('button.fold-link')
+          .locator('summary .ant-tag')
           .evaluate((el) => {
             const cs = getComputedStyle(el)
             return { background: cs.backgroundColor, radius: parseFloat(cs.borderRadius) }
@@ -774,30 +750,26 @@ test.describe('fix-webui-qa-round3 review 补层', () => {
         expect(linkStyle.radius).toBeGreaterThan(0)
       }
 
-      // 正文段零过程词：「PROCESS」只出现在折叠行（.fold-link .label）。
-      const bodies = assistantTurn.locator('.body:not(.fold-body):not(.item-body)')
-      await expect(bodies).toHaveCount(2)
-      for (const text of await bodies.allInnerTexts()) {
-        expect(text.toLowerCase()).not.toContain('process')
-      }
+      // 正文段零过程词：「PROCESS」只出现在折叠行（summary 内）。
+      const bodyText = await assistantTurn.evaluate((el) => {
+        const clone = el.cloneNode(true) as HTMLElement
+        clone.querySelectorAll('details').forEach((fold) => fold.remove())
+        return clone.innerText
+      })
+      expect(bodyText.toLowerCase()).not.toContain('process')
 
-      // 二级 thinking 条目收起行挂 thinking glyph（与工具条目视觉分开）。
+      // 二级 thinking 条目带可区分的「思考」语义词（与工具条目分开）。
       // 结算重分组会把折叠收回收起态——展开与断言同轮询。
-      const thinkingItems = assistantTurn.locator(
-        'div.process-item[data-element-type="thinking"]',
-      )
       await expect
         .poll(
           async () => {
             await detail.expandAllFolds()
-            return thinkingItems.count()
+            return assistantTurn.getByText('思考', { exact: true }).count()
           },
           { timeout: 20_000 },
         )
         .toBe(2)
-      // （fix-webui-qa-round6 3.1）thinking 条目不再是二级折叠（内容默认
-      // 在场），glyph 直接挂在条目标题行上——可区分性合同不变。
-      await expect(thinkingItems.first().locator('.item-kind-icon')).toBeVisible()
+      await expect(assistantTurn.getByText('思考', { exact: true }).first()).toBeVisible()
 
       expect(collector.clean()).toEqual([])
     })

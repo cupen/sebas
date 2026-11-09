@@ -370,6 +370,63 @@ requirement），子功能 = 二层 `test.describe`，一行 = 一条用例；�
 `<requirement>「<scenario>」`，与 `openspec/specs/testsuite-webui-browser/spec.md`
 的 scenario 名逐字对应。
 
+#### React 入口装配（redesign-webui-with-react-antd 5.1/5.2）
+
+> React 自 5.3 起是生产的唯一入口（`index.html` → `src/react/main.tsx`）。以下
+> 旅程对着这份生产文档跑（Vite 5290/5289/5288 代理到同一套一次性沙箱
+> 9893/9892/9891），含 `/sessions/{key}` 深链，无专用预览文档；
+> 选择器只用角色、可访问名称与稳定 `data-testid`（`tests/helpers/pages/react.ts`）。
+> `invoke testsuite-webui` 默认链已加入这三套装配，也可 `--case react` /
+> `--case react-auth` / `--case react-setup` 单跑。
+
+| 大功能 | 子功能 | 用例名 | spec 文件 | 锚点 |
+|---|---|---|---|---|
+| React 工作台旅程 | 首屏与信息架构 | renders the shell, rail and honest empty states (desktop) | `react-workbench.spec.ts` | agent-workbench（delta）「桌面完成项目与会话切换」 |
+| React 工作台旅程 | 会话创建与深链 | creates a session from the project context and keeps it across reload | `react-workbench.spec.ts` | agent-workbench（delta）「桌面完成项目与会话切换」 |
+| React 工作台旅程 | 会话创建与深链 | deep-link switching never leaks model, transcript or draft across sessions | `react-workbench.spec.ts` | agent-workbench（delta）「深链不是另一套详情页」 |
+| React 工作台旅程 | 归档与历史 | archives from the row menu, shows the read-only snapshot and restores | `react-workbench.spec.ts` | agent-workbench（delta）「归档保持安全语义」 |
+| React 工作台旅程 | 归档与历史 | archive confirmation names the pending submissions it will discard | `react-workbench.spec.ts` | agent-workbench（delta）「归档保持安全语义」 |
+| React 工作台旅程 | 审批与待办 | allow-once resolves only the current request and the turn completes | `react-workbench.spec.ts` | agent-workbench（delta）「并行审批逐一完成」（单请求半边） |
+| React 工作台旅程 | 长转录与设置工作区 | rich markdown stays readable and never overflows the page | `react-workbench.spec.ts` | agent-workbench（delta）「长转录阅读与输入」 |
+| React 工作台旅程 | 长转录与设置工作区 | settings is a workspace without a URL and preserves inputs and focus context | `react-workbench.spec.ts` | agent-workbench（delta）「设置中往返不丢工作上下文」 |
+| React 工作台旅程 | 设置关于与项目路径边界 | about renders instance and build truth from /api/about | `react-workbench.spec.ts` | 蓝图 §4.4「关于」、add-about-build-info |
+| React 工作台旅程 | 设置关于与项目路径边界 | manual project path outside the workspace states its reason and blocks submit | `react-workbench.spec.ts` | workspace-root「手填越界路径给出禁用原因」 |
+| React 工作台旅程 | 总览与用量 | sessions overview focuses a conversation; usage page keeps its controls | `react-workbench.spec.ts` | 会话管理覆盖「多会话切换」、usage-statistics「/usage」（语义等价迁移） |
+| React 响应式与可访问性旅程 | 375px 窄屏关键旅程 | drawer navigation switches sessions and preserves unsent input | `react-responsive-a11y.spec.ts` | agent-workbench（delta）「窄屏切换会话后回到对话」、testsuite-webui-browser（delta）「窄屏关键旅程」 |
+| React 响应式与可访问性旅程 | 375px 窄屏关键旅程 | composer and approval stay operable at 375px | `react-responsive-a11y.spec.ts` | testsuite-webui-browser（delta）「窄屏关键旅程」 |
+| React 响应式与可访问性旅程 | 375px 窄屏关键旅程 | settings opened from the narrow drawer keeps the context | `react-responsive-a11y.spec.ts` | testsuite-webui-browser（delta）「窄屏关键旅程」、agent-workbench（delta）「设置中往返不丢工作上下文」 |
+| React 响应式与可访问性旅程 | 深浅主题与键盘 | theme choice flips tokens, persists and keeps text contrast | `react-responsive-a11y.spec.ts` | testsuite-webui-browser（delta）「主题与键盘关键旅程」 |
+| React 响应式与可访问性旅程 | 深浅主题与键盘 | keyboard focus is visible and opens and closes settings | `react-responsive-a11y.spec.ts` | testsuite-webui-browser（delta）「主题与键盘关键旅程」 |
+| React 响应式与可访问性旅程 | 深浅主题与键盘 | closing settings returns focus to the settings trigger | `react-responsive-a11y.spec.ts` | testsuite-webui-browser（delta）「主题与键盘关键旅程」 |
+| React 响应式与可访问性旅程 | 减少动态效果 | reduced motion suppresses drawer animation | `react-responsive-a11y.spec.ts` | testsuite-webui-browser（delta）「主题与键盘关键旅程」 |
+| React 响应式与可访问性旅程 | 导航轨尺寸与浮层 | rail resize by keyboard persists across reload | `react-responsive-a11y.spec.ts` | 蓝图 §3 导航轨 240–360px 可调、split-persist |
+| React 响应式与可访问性旅程 | 导航轨尺寸与浮层 | 768 rail is a 56px icon gutter whose labels fly out without reflow | `react-responsive-a11y.spec.ts` | 蓝图 §3 768 图标轨 + hover/focus 浮层 |
+| React 响应式与可访问性旅程 | 横向溢出矩阵 | key pages never scroll horizontally at 375/768/1024/1440 | `react-responsive-a11y.spec.ts` | testsuite-webui-browser（delta）「窄屏关键旅程」 |
+| React 鉴权与 RBAC 旅程 | 深链重定向 | deep link under auth renders the login gate, not the session | `react-auth.spec.ts` | 鉴权与访问旅程「登录闭环」 |
+| React 鉴权与 RBAC 旅程 | 登录闭环 | wrong credentials are rejected in place with the honest reason | `react-auth.spec.ts` | 鉴权与访问旅程「登录闭环」 |
+| React 鉴权与 RBAC 旅程 | 登录闭环 | login from a deep link lands on that session | `react-auth.spec.ts` | 鉴权与访问旅程「登录闭环」 |
+| React 鉴权与 RBAC 旅程 | 登录闭环 | session cookie survives reload until logout, then the gate returns | `react-auth.spec.ts` | 鉴权与访问旅程「登录闭环」 |
+| React 鉴权与 RBAC 旅程 | RBAC 入口裁剪 | viewer sees no create entries and no privileged settings sections | `react-auth.spec.ts` | webui-user-management「RBAC 角色与权限执法」 |
+| React 鉴权与 RBAC 旅程 | RBAC 入口裁剪 | viewer services section explains read-only access instead of a load error | `react-auth.spec.ts` | webui-user-management「RBAC 角色与权限执法」 |
+| React 首启 root 引导旅程 | 首启门禁与校验 | shows the setup card, not the login gate, and validates in place | `react-setup.spec.ts` | 鉴权与访问旅程「首启 root 引导」 |
+| React 首启 root 引导旅程 | 建户与重载 | creating root enters the workbench and the session survives reload | `react-setup.spec.ts` | 鉴权与访问旅程「首启 root 引导」 |
+| React 首启 root 引导旅程 | 建户与重载 | a second setup POST is refused after root exists (409) | `react-setup.spec.ts` | 鉴权与访问旅程「首启 root 引导」 |
+
+本轮实测：`react-workbench` 11/11、`react-responsive-a11y` 10/10、
+`react-auth` 6/6、`react-setup` 3/3 按断言执行（30 条全绿，无 `test.fail()`
+残留；上轮 3 条缺陷与第 2 轮 viewer 服务只读说明均修复后保留原断言）。日志
+`/tmp/sebas-react-antd-review3/`。实现偏差与收敛记录见
+`journey-migration-matrix.md` §6。
+
+**账本已知滞后（如实登记，不是本轮缩面）**：本表仍缺 20 个基线 spec 的树形
+行——`agents-gate`、`agents-slots`、`core-freeze-pending-ack`、`empty-turn-notice`、
+`parallel-approval-routing`、`project-focus-reconcile`、`qa-round14-rbac`、
+`qa-round14`、`qa-round6-row-name`、`qa-round8-native`、`qa-round8-transcript-scroll`、
+`qa-round8`、`services`、`singleprocess-dead-core`、`skills`、`slash-commands`、
+`tool-call-fold`、`unread-seam`、`usage`、`users-admin`。这些 spec 仍在旧装配中
+运行；把全部 71 条旧旅程重指到 React 入口并回填本表，是 5.3 删除旧栈断言
+前的未完成项（矩阵 §4/§7 同源记录）。
+
 | 大功能 | 子功能 | 用例名 | spec 文件 | 锚点 |
 |---|---|---|---|---|
 | 工作台首屏 | 首屏结构与 reachability | renders rail, composer and honest reachability | `first-paint.spec.ts` | 工作台、项目与会话管理面旅程「首屏与 reachability」 |

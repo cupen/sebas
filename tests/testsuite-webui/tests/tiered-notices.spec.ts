@@ -79,31 +79,25 @@ test.describe('分级通知层', () => {
       const key = await createSession(page.request, { prompt: 'tiered-notices-probe' })
       await waitStatus(page.request, key, ['done'], 30_000)
       await page.goto(`/sessions/${key}`)
-      // 基线健康：无 fatal 横幅、无锁定遮罩、composer 可交互。
-      await expect(page.locator('[data-testid="core-fatal-banner"]')).toHaveCount(0)
-      await expect(page.locator('[data-testid="core-lock-overlay"]')).toHaveCount(0)
+      // 基线健康：无 fatal 锁定面、composer 可交互。
+      const lock = page.getByRole('alertdialog', { name: '核心不可达' })
+      await expect(lock).toHaveCount(0)
       await expect(workbench.composerTextarea).toBeEnabled()
 
       // ── core 停止：翻转推送驱动 fatal（无需刷新、无轮询等待）────────────
       await stopCore(scene)
 
-      const banner = page.locator('[data-testid="core-fatal-banner"]')
-      await expect(banner).toBeVisible({ timeout: 15_000 })
+      await expect(lock).toBeVisible({ timeout: 15_000 })
       // kind 分档（通道断开 = disconnected 档；无 kind 的旧核退化为通用文案）
-      // + cause 原文随行（内文由 banner 的 cause 小字承载，断言不钉死具体值）。
-      // 「核心启动失败」档同样在场：优雅退出的 core 会摘除 channel socket，
-      // webui 的重连探测先于本断言观察到「socket 不存在」时横幅即翻该档
       // ——分档是重连竞态的函数，致命语义（锁定 + 解锁恢复）完全一致。
-      await expect(banner).toContainText(/与核心的连接已断开|核心不可达|核心启动失败/)
-      // 锁定：遮罩 + 原因卡 + 恢复提示在场。
-      const overlay = page.locator('[data-testid="core-lock-overlay"]')
-      await expect(overlay).toBeVisible()
-      await expect(overlay).toContainText('会话与操作已锁定')
-      await expect(overlay).toContainText('核心恢复后将自动解锁并刷新工作台')
+      await expect(lock).toContainText(/与核心的连接已断开|核心不可达|核心启动失败/)
+      // 锁定：原因卡 + 恢复提示在场。
+      await expect(lock).toContainText('锁定')
+      await expect(lock).toContainText(/自动解除|自动解锁/)
       // 工作台整体 inert（rail + main 共同祖先）：交互与浏览一并锁住。
       const inert = await page
-        .locator('wa-split-panel.frame')
-        .evaluate((el) => el.hasAttribute('inert'))
+        .getByTestId('react-shell')
+        .evaluate((el) => el.hasAttribute('inert') || el.closest('[inert]') !== null)
       expect(inert).toBe(true)
       // 锁定面证据：composer 不可交互（inert 的语义在 Chromium 命中即禁）。
       await expect(workbench.composerTextarea).toBeDisabled()
@@ -112,14 +106,13 @@ test.describe('分级通知层', () => {
       startCore(scene)
       await waitForCoreReachability(page.request, true, 45_000)
 
-      await expect(banner).toHaveCount(0, { timeout: 15_000 })
-      await expect(overlay).toHaveCount(0)
+      await expect(lock).toHaveCount(0, { timeout: 15_000 })
       const inertAfter = await page
-        .locator('wa-split-panel.frame')
-        .evaluate((el) => el.hasAttribute('inert'))
+        .getByTestId('react-shell')
+        .evaluate((el) => el.hasAttribute('inert') || el.closest('[inert]') !== null)
       expect(inertAfter).toBe(false)
       await expect(
-        page.locator('wa-toast-item').filter({ hasText: '核心已恢复' }),
+        page.getByRole('alert').filter({ hasText: '核心已恢复' }),
       ).toBeVisible({ timeout: 15_000 })
 
       // 解锁后的工作台真正可用：新会话可建、composer 可提交（恢复面收敛）。
@@ -153,14 +146,14 @@ test.describe('分级通知层', () => {
       // 推到本页，通知是 5s 瞬时条，先起轮再等toast才不竞速。
       const created = createSession(page.request, { prompt: 'turn-notify-probe' })
       await expect(
-        page.locator('wa-toast-item').filter({ hasText: '的回合已完成' }),
+        page.getByRole('alert').filter({ hasText: '的回合已完成' }),
       ).toBeVisible({ timeout: 20_000 })
 
       // 终点通知不驻留：等它按瞬时语义消失（info 默认 5s），证明没有产生
       // 驻留条。
       await created.catch(() => {}) // 会话创建本体失败会让上面断言先红，这里只收敛 promise
       await expect(
-        page.locator('wa-toast-item').filter({ hasText: '的回合已完成' }),
+        page.getByRole('alert').filter({ hasText: '的回合已完成' }),
       ).toHaveCount(0, { timeout: 10_000 })
 
       expect(collector.clean()).toEqual([])

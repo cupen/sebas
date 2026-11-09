@@ -30,22 +30,22 @@ test.describe('鉴权与访问旅程', () => {
       expect(info.enabled).toBe(false)
 
       await page.goto('/')
-      await expect(page.locator('sebas-dashboard')).toBeVisible({ timeout: 15_000 })
-      await expect(page.locator('sebas-login')).toHaveCount(0)
-      await expect(page.locator('sebas-setup')).toHaveCount(0)
+      await expect(page.locator(':is([data-testid="workbench-session"],[data-testid="workbench-home"])')).toBeVisible({ timeout: 15_000 })
+      await expect(page.getByRole('heading', { name: '登录以继续' })).toHaveCount(0)
+      await expect(page.getByRole('heading', { name: '创建管理员账户' })).toHaveCount(0)
 
       // Outlive two reachability-poll intervals (5s each): auth-off answers
       // every poll with 200, so the workbench must stay put — no gate may
       // spring up.
       await page.waitForTimeout(11_000)
-      await expect(page.locator('sebas-dashboard')).toBeVisible()
-      await expect(page.locator('sebas-login')).toHaveCount(0)
-      await expect(page.locator('sebas-setup')).toHaveCount(0)
+      await expect(page.locator(':is([data-testid="workbench-session"],[data-testid="workbench-home"])')).toBeVisible()
+      await expect(page.getByRole('heading', { name: '登录以继续' })).toHaveCount(0)
+      await expect(page.getByRole('heading', { name: '创建管理员账户' })).toHaveCount(0)
 
       // Reload: still the workbench, no gate re-prompt.
       await page.reload()
-      await expect(page.locator('sebas-dashboard')).toBeVisible({ timeout: 15_000 })
-      await expect(page.locator('sebas-login')).toHaveCount(0)
+      await expect(page.locator(':is([data-testid="workbench-session"],[data-testid="workbench-home"])')).toBeVisible({ timeout: 15_000 })
+      await expect(page.getByRole('heading', { name: '登录以继续' })).toHaveCount(0)
 
       // No gated request ever 401s in this posture, so the full console +
       // pageerror clean-slate assertion holds.

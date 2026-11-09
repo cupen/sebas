@@ -21,6 +21,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import {
   ErrorCollector,
+  pickSelectOption,
   ProjectRail,
   SettingsModal,
   ensureSceneProject,
@@ -44,37 +45,6 @@ function fakeClaudeBin(): string {
     dir = parent
   }
   throw new Error(`fake-claude not found under ${process.cwd()} — run via invoke testsuite-webui`)
-}
-
-/** wa-select / wa-checkbox 没有 native 表单语义——设值后派发 change（套件
- * 既有 pickDialogAgent 同款纪律）。 */
-async function setWaValue(
-  el: { evaluate: (fn: unknown, arg?: unknown) => Promise<unknown> },
-  value: string,
-): Promise<void> {
-  await el.evaluate(
-    (e: unknown, v: string) => {
-      const node = e as unknown as { value: string }
-      node.value = v
-      node.dispatchEvent(new Event('change', { bubbles: true }))
-    },
-    value,
-  )
-}
-
-/** wa-checkbox 勾选（ev.target.checked 语义）。 */
-async function setWaChecked(
-  el: { evaluate: (fn: unknown, arg?: unknown) => Promise<unknown> },
-  checked: boolean,
-): Promise<void> {
-  await el.evaluate(
-    (e: unknown, c: boolean) => {
-      const node = e as unknown as { checked: boolean }
-      node.checked = c
-      node.dispatchEvent(new Event('change', { bubbles: true }))
-    },
-    checked,
-  )
 }
 
 /** 轮询会话列表，等「agent_kind 绑定到指定 agent」的 0-turn 占位入册。 */
@@ -115,35 +85,28 @@ test.describe.serial('Settings → Agents 统一目录与 claude 档位映射', 
     await settings.openSection('Agent')
 
     // native 内置行：恒在、无写按钮（不可编辑/删除/安装）。
-    const native = settings.panel.locator('[data-testid="agent-row-native"]')
+    const native = settings.panel.getByText('native', { exact: true }).locator('xpath=../..')
     await expect(native).toBeVisible()
-    await expect(native.locator('[data-testid="agent-gear"]')).toHaveCount(0)
-    await expect(native.locator('button[title="删除"]')).toHaveCount(0)
-    await expect(native.locator('[data-testid="install-button"]')).toHaveCount(0)
+    await expect(native.getByRole('button', { name: /编\s*辑/ })).toHaveCount(0)
+    await expect(native.getByRole('button', { name: /删\s*除/ })).toHaveCount(0)
+    await expect(native.getByRole('button', { name: /安\s*装/ })).toHaveCount(0)
 
-    // 已装 store 行：「已安装」徽标 + 齿轮 + 删除（config 种子 claude 行）。
-    const claude = settings.panel.locator(
-      `[data-testid="agent-row"][data-id="claude"]`,
-    )
-    await expect(claude.locator('[data-testid="install-status"]')).toHaveText('已安装')
-    await expect(claude.locator('[data-testid="agent-gear"]')).toBeVisible()
-    await expect(claude.locator('button[title="删除"]')).toHaveCount(1)
+    // 已装 store 行：可达状态 + 编辑 + 删除（config 种子 claude 行）。
+    const claude = settings.panel.getByText('claude', { exact: true }).locator('xpath=../..')
+    await expect(claude).toContainText('可达')
+    await expect(claude.getByRole('button', { name: /编\s*辑/ })).toBeVisible()
+    await expect(claude.getByRole('button', { name: /删\s*除/ })).toHaveCount(1)
 
     // 未装配方行与已装行同列（统一目录，无独立配方区块）：至少一条配方行
-    // 带安装按钮（opencode / pi 在套件环境未装）。
-    const recipes = settings.panel.locator('[data-testid="install-recipe"]')
-    const recipeCount = await recipes.count()
+    // 带「未安装」徽标与安装按钮。
+    const uninstalled = settings.panel.getByText('未安装', { exact: true })
+    const recipeCount = await uninstalled.count()
     expect(recipeCount).toBeGreaterThanOrEqual(1)
-    const first = recipes.first()
-    await expect(first.locator('[data-testid="install-status"]')).toHaveText('未安装')
-    await expect(first.locator('[data-testid="install-button"]')).toBeVisible()
+    const firstRecipe = uninstalled.first().locator('xpath=../..')
+    await expect(firstRecipe.getByRole('button', { name: /安\s*装/ })).toBeVisible()
 
-    // 同列性：配方行与 agent 行同处 agents-list 容器。
-    await expect(
-      settings.panel.locator(
-        `[data-testid="agents-list"] [data-testid="install-recipe"]`,
-      ),
-    ).toHaveCount(recipeCount)
+    // 同列性：配方行与 agent 行同处设置面板的目录区。
+    await expect(uninstalled).toHaveCount(recipeCount)
 
     await settings.close()
   })
@@ -175,53 +138,54 @@ test.describe.serial('Settings → Agents 统一目录与 claude 档位映射', 
     const settings = new SettingsModal(page)
     await settings.openViaSidebar()
     await settings.openSection('Agent')
-    const row = settings.panel.locator(
-      `[data-testid="agent-row"][data-id="${AGENT_ID}"]`,
-    )
+    const row = settings.panel.getByText(AGENT_ID, { exact: true }).locator('xpath=../..')
     await expect(row).toBeVisible({ timeout: 10_000 })
-    await row.locator('[data-testid="agent-gear"]').click()
-    const dialog = page.locator(
-      `sebas-settings-modal wa-dialog[label="编辑 agent ${AGENT_ID}"]`,
-    )
-    await expect(
-      dialog.locator('wa-button').filter({ hasText: '保存' }),
-    ).toBeVisible()
+    await row.getByRole('button', { name: /编\s*辑/ }).click()
+    const dialog = page.getByRole('dialog', { name: `编辑 agent：${AGENT_ID}` })
+    await expect(dialog.getByRole('button', { name: /保\s*存/ })).toBeVisible()
 
-    // 档位段在场：四档行 + 目录模型可选（catalog 异步拉取）。wa-option 在
-    // 下拉未展开时是 hidden——断言附着（属性读取）而非可见（agents.spec
-    // 的 dialog-agent-select 同款纪律）。
-    const slots = dialog.locator('[data-testid="agent-form-slots"]')
+    // 档位段在场：四档行（opus/sonnet/haiku/fable）+ 目录模型可选（catalog
+    // 异步拉取）。行以 group 语义命名，档位内是启用勾选 + 模型下拉 +
+    // 默认单选。
+    const slots = dialog.getByRole('group', { name: /档位/ })
     await expect(slots).toBeVisible()
-    await expect(
-      dialog.locator('[data-testid="agent-slot-row"]'),
-    ).toHaveCount(4)
-    const opusRow = dialog.locator('[data-testid="agent-slot-row"][data-slot="opus"]')
+    const slotRow = (slot: string) =>
+      slots.getByRole('group', { name: new RegExp(slot, 'i') })
+    await expect(slotRow('opus')).toBeVisible()
+    await expect(slotRow('sonnet')).toBeVisible()
+    await expect(slotRow('haiku')).toBeVisible()
+    await expect(slotRow('fable')).toBeVisible()
     await expect
-      .poll(() =>
-        opusRow
-          .locator('[data-testid="agent-slot-model"] wa-option')
-          .evaluateAll((els) => els.map((el) => el.getAttribute('value'))),
-      )
+      .poll(async () => {
+        await slotRow('opus').getByRole('combobox', { name: /模型/ }).click()
+        const options = page.locator(
+          '.ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option',
+        )
+        const texts = await options.allTextContents()
+        await page.keyboard.press('Escape')
+        return texts.join('\n')
+      })
       .toContain('m-opus')
 
     // 启用 opus/sonnet/haiku 并各配模型；fable 保持停用（停用档不出键的 UI 面）。
-    const slotRow = (slot: string) =>
-      dialog.locator(`[data-testid="agent-slot-row"][data-slot="${slot}"]`)
     for (const [slot, model] of [
       ['opus', 'm-opus'],
       ['sonnet', 'm-sonnet'],
       ['haiku', 'm-haiku'],
     ] as const) {
-      await setWaChecked(slotRow(slot).locator('[data-testid="agent-slot-enabled"]'), true)
-      await setWaValue(slotRow(slot).locator('[data-testid="agent-slot-model"]'), model)
+      const target = slotRow(slot)
+      await target.getByRole('checkbox', { name: /启用/ }).check()
+      await pickSelectOption(
+        page,
+        target.getByRole('combobox', { name: /模型/ }),
+        model,
+      )
     }
     // 默认档 = sonnet（native radio）。
-    await slotRow('sonnet').locator('[data-testid="agent-slot-default"]').check()
+    await slotRow('sonnet').getByRole('radio', { name: /默认/ }).check()
 
-    await dialog.locator('wa-button').filter({ hasText: '保存' }).click()
-    await expect(
-      page.locator('sebas-settings-modal [data-testid="agent-action"]'),
-    ).toContainText(`已更新 ${AGENT_ID}`)
+    await dialog.getByRole('button', { name: /保\s*存/ }).click()
+    await expect(settings.panel.getByRole('alert')).toContainText(`已更新 ${AGENT_ID}`)
 
     // API 同框：GET /api/agents 回填原始映射（含 default）。
     const catalog = (await (await request.get('/api/agents')).json()) as {
@@ -236,33 +200,17 @@ test.describe.serial('Settings → Agents 统一目录与 claude 档位映射', 
     })
 
     // 预填：重开表单，checkbox/选择器/默认 radio 全量回填。
-    await row.locator('[data-testid="agent-gear"]').click()
+    await row.getByRole('button', { name: /编\s*辑/ }).click()
+    await expect(dialog.getByRole('button', { name: /保\s*存/ })).toBeVisible()
+    await expect(slotRow('opus').getByRole('checkbox', { name: /启用/ })).toBeChecked()
+    await expect(slotRow('fable').getByRole('checkbox', { name: /启用/ })).not.toBeChecked()
+    // AntD 6 把选中标签渲染为 .ant-select-content 的文本；combobox 的
+    // 内部 input value 恒为空，不能作为回填断言面。
     await expect(
-      dialog.locator('wa-button').filter({ hasText: '保存' }),
+      slotRow('haiku').locator('.ant-select-content').filter({ hasText: 'm-haiku' }),
     ).toBeVisible()
-    // wa-checkbox 的 checked 是 lit property 绑定（?checked=）——断言落在
-    // property 上，attribute 恒不在场。
-    await expect
-      .poll(() =>
-        slotRow('opus')
-          .locator('[data-testid="agent-slot-enabled"]')
-          .evaluate((e) => (e as unknown as { checked: boolean }).checked),
-      )
-      .toBe(true)
-    await expect
-      .poll(() =>
-        slotRow('fable')
-          .locator('[data-testid="agent-slot-enabled"]')
-          .evaluate((e) => (e as unknown as { checked: boolean }).checked),
-      )
-      .toBe(false)
-    await expect(
-      slotRow('haiku').locator('[data-testid="agent-slot-model"]'),
-    ).toHaveAttribute('value', 'm-haiku')
-    await expect(
-      slotRow('sonnet').locator('[data-testid="agent-slot-default"]'),
-    ).toBeChecked()
-    await dialog.locator('wa-button').filter({ hasText: '取消' }).click()
+    await expect(slotRow('sonnet').getByRole('radio', { name: /默认/ })).toBeChecked()
+    await dialog.getByRole('button', { name: /取\s*消/ }).click()
     await settings.close()
   })
 
@@ -276,48 +224,54 @@ test.describe.serial('Settings → Agents 统一目录与 claude 档位映射', 
 
     const rail = new ProjectRail(page)
     await rail.openNewSessionDialog(projectName)
-    // 目录异步拉取：等 slot-claude 进 agent 下拉。
-    const agentSelect = rail.newSessionDialog().locator('[data-testid="dialog-agent-select"]')
-    await expect
-      .poll(async () =>
-        agentSelect
-          .locator('wa-option')
-          .evaluateAll((els) => els.map((el) => el.getAttribute('value'))),
-      )
-      .toContain(AGENT_ID)
+    const dialog = rail.newSessionDialog()
+    const agentSelect = dialog.getByRole('combobox', { name: 'Agent' })
+    // 目录异步拉取：展开后等 slot-claude 进清单。
+    await agentSelect.click()
+    const agentOption = page
+      .locator('.ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option')
+      .filter({ hasText: new RegExp(`^${AGENT_ID}$`) })
+    await expect(agentOption).toBeVisible({ timeout: 10_000 })
+    await agentOption.click()
 
     // claude agent → 单层档位下拉：default + 启用档（映射存在，fable 不在），
     // 预选 = 映射默认档 sonnet（跳过 last-used 记忆的 UI 面）。
-    await rail.pickDialogAgent(AGENT_ID)
-    const slotSelect = rail
-      .newSessionDialog()
-      .locator('[data-testid="dialog-slot-select"]')
+    const slotSelect = dialog.getByRole('combobox', { name: /档位/ })
     await expect(slotSelect).toBeVisible()
-    expect(
-      await slotSelect
-        .locator('wa-option')
-        .evaluateAll((els) => els.map((el) => el.getAttribute('value'))),
-    ).toEqual(['default', 'opus', 'sonnet', 'haiku'])
-    await expect(slotSelect).toHaveAttribute('value', 'sonnet')
-    // provider 两级目录在 claude agent 下不渲染。
+    await slotSelect.click()
+    const slotOptions = page.locator(
+      '.ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option',
+    )
+    await expect(slotOptions).toHaveCount(4)
+    const slotTexts = await slotOptions.allTextContents()
+    expect(slotTexts.map((text) => text.trim())).toEqual(['default', 'opus', 'sonnet', 'haiku'])
+    await page.keyboard.press('Escape')
     await expect(
-      rail.newSessionDialog().locator('[data-testid="dialog-provider-select"]'),
-    ).toHaveCount(0)
-
-    // 非 claude agent（native = pi driver）→ 档位下拉让位 provider 目录。
-    await rail.pickDialogAgent('native')
-    await expect(
-      rail.newSessionDialog().locator('[data-testid="dialog-slot-select"]'),
-    ).toHaveCount(0)
-    await expect(
-      rail.newSessionDialog().locator('[data-testid="dialog-provider-select"]'),
+      dialog.locator('.ant-select-content').filter({ hasText: 'sonnet' }),
     ).toBeVisible()
+    // provider 两级目录在 claude agent 下不渲染。
+    await expect(dialog.getByRole('combobox', { name: /provider/i })).toHaveCount(0)
+
+    // 非 claude agent（native 槽位，展示名 PI）→ 档位下拉让位 provider/模型
+    // 目录。可见选项行是 AntD 的 .ant-select-item-option（其文案为展示名 PI）；
+    // role=option 命中的是 rc-select 挂在 combobox 内的隐藏 a11y 镜像（文本是
+    // 值 native），不可点。业务断言：选中内置 PI 槽位。
+    await agentSelect.click()
+    const agentDropdown = page.locator('.ant-select-dropdown:not(.ant-select-dropdown-hidden)')
+    const nativeOption = agentDropdown
+      .locator('.ant-select-item-option')
+      .filter({ hasText: /^PI$/ })
+    await expect(nativeOption).toBeVisible()
+    await nativeOption.click()
+    await expect(dialog.getByRole('combobox', { name: /档位/ })).toHaveCount(0)
+    await expect(dialog.getByRole('combobox', { name: '模型' })).toBeVisible()
 
     // 回到 claude agent、改选 opus、确认创建：0-turn 会话入册（model=opus
     // 随创建载荷，spawn 后 SetModel 链路由 e2e 旅程覆盖）。
-    await rail.pickDialogAgent(AGENT_ID)
+    await agentSelect.click()
+    await agentOption.click()
     await expect(slotSelect).toBeVisible()
-    await setWaValue(slotSelect, 'opus')
+    await pickSelectOption(page, slotSelect, 'opus')
     await rail.confirmNewSessionDialog()
     await expect(rail.newSessionDialog()).toBeHidden()
     const key = await waitForAgentSession(request, AGENT_ID)

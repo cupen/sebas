@@ -19,6 +19,7 @@ import {
   ensureSceneProject,
   ErrorCollector,
   getSession,
+  pickSelectOption,
   ProjectRail,
   resetState,
   waitStatus,
@@ -40,41 +41,40 @@ test.describe('agent mode 选择', () => {
     await page.goto('/')
 
     await rail.openNewSessionDialog(projectName)
-    const modeSelect = rail.newSessionDialog().locator('[data-testid="dialog-mode-select"]')
+    const modeSelect = rail.newSessionDialog().getByRole('combobox', { name: '权限模式' })
     await expect(modeSelect).toBeVisible()
-    // 恰为四个控制面词汇（simplify-mode-menus：空值占位项已退役——菜单
-    // 不含「默认」，也无 value="" 可发空值的路径）；wire 值 ask|edit|
-    // allow|auto 不变。
-    await expect(modeSelect).toContainText('Ask')
-    await expect(modeSelect).toContainText('Edit')
-    await expect(modeSelect).toContainText('Allow')
-    await expect(modeSelect).toContainText('Auto')
-    const optionValues = await modeSelect
-      .locator('wa-option')
-      .evaluateAll((els) => els.map((el) => el.getAttribute('value')))
-    expect(optionValues).toEqual(['ask', 'edit', 'allow', 'auto'])
-
-    // hint 行随当前选中模式：初始预选 ask →「逐次询问：每个工具先问你」；
-    // 改选 edit → 跟随切换为「自动接受编辑，其余工具先问你」。对话框的
-    // hint 绑定选中项的 description（new-session-dialog modeDescription），
-    // 与会话头状态章的 badge 措辞（modeBadgeLabel）是两条通道。option 常驻
-    // DOM（round7 4.1 起 label 双语化，option 文本恒含全部措辞）。
-    const hintOf = (el: Element) => (el as unknown as { hint: string }).hint
-    expect(await modeSelect.evaluate(hintOf)).toBe('逐次询问：每个工具先问你')
-    await modeSelect.evaluate((el) => {
-      ;(el as unknown as { value: string }).value = 'edit'
-      el.dispatchEvent(new Event('change', { bubbles: true }))
-    })
-    expect(await modeSelect.evaluate(hintOf)).toBe('自动接受编辑，其余工具先问你')
+    // Four-word mode vocabulary; the combined dialog preselects ask. AntD 6
+    // renders the selected label in `.ant-select-content`, not the input.
+    await expect(
+      rail.newSessionDialog().locator('.ant-select-content').filter({ hasText: 'Ask' }),
+    ).toBeVisible()
+    await modeSelect.click()
+    const optionRows = page
+      .locator('.ant-select-dropdown:not(.ant-select-dropdown-hidden)')
+      .locator('.ant-select-item-option')
+    await expect(optionRows).toHaveCount(4)
+    await expect(optionRows.nth(0)).toContainText('Ask')
+    await expect(optionRows.nth(1)).toContainText('Edit')
+    await expect(optionRows.nth(2)).toContainText('Allow')
+    await expect(optionRows.nth(3)).toContainText('Auto')
+    const labels = await optionRows.evaluateAll((els) =>
+      els.map((el) => (el.textContent ?? '').trim()),
+    )
+    expect(labels).toEqual([
+      'Ask · 逐次询问',
+      'Edit · 自动接受编辑',
+      'Allow · 放行',
+      'Auto · 自动执行',
+    ])
+    // Non-inline description channel: AntD option titles carry the label; the
+    // React surface has no separate description hint text.
+    const askTitle = await optionRows.nth(0).getAttribute('title')
+    expect(askTitle).toBe('Ask · 逐次询问')
+    await page.keyboard.press('Escape')
 
     // 无聚焦会话时 composer 只渲染 rail 创建指引——不承载任何 mode 控件
     // （创建选择归对话框；会话中切换归 composer 底沿，见下方用例）。
-    await expect(
-      page.locator('sebas-workbench-composer [data-testid="mode-switch"]'),
-    ).toHaveCount(0)
-    await expect(
-      page.locator('sebas-workbench-composer wa-select[aria-label="权限模式"]'),
-    ).toHaveCount(0)
+    await expect(page.getByTestId('composer')).toHaveCount(0)
 
     await rail.cancelNewSessionDialog()
     expect(collector.clean()).toEqual([])
@@ -89,13 +89,20 @@ test.describe('agent mode 选择', () => {
     await waitStatus(request, key, ['done'])
 
     await page.goto(`/sessions/${key}`)
-    const head = page.locator('sebas-dashboard .session-head')
-    await expect(head).toBeVisible()
-    const tag = head.locator('[data-testid="session-mode"]')
-    await expect(tag).toBeVisible()
-    await expect(tag).toHaveAttribute('data-mode', 'allow')
-    // 展示文案走共享词汇 modeBadgeLabel（4.2 模式章合一）：allow = 「放行」。
-    await expect(tag).toContainText('放行')
+    await expect(page.getByTestId('workbench-session')).toBeVisible()
+    // React presents the desired mode on the composer's mode control (the
+    // session head carries status/model chips only): allow = 放行.
+    const modeSelect = page
+      .getByTestId('composer')
+      .getByRole('combobox', { name: '权限模式' })
+    await expect(modeSelect).toBeVisible()
+    // AntD 6 的单选标签是 .ant-select-content 的文本。
+    const modeContent = page
+      .getByTestId('composer')
+      .locator('.ant-select-content')
+      .filter({ hasText: 'Allow' })
+    await expect(modeContent).toContainText('Allow')
+    await expect(modeContent).toContainText('放行')
     expect(collector.clean()).toEqual([])
   })
 
@@ -105,29 +112,27 @@ test.describe('agent mode 选择', () => {
     await waitStatus(request, key, ['done'])
 
     await page.goto(`/sessions/${key}`)
-    // 4.2 头部去交互化：mode 切换控件在 composer 底沿（头部只留展示标签）。
-    const composerSwitch = page.locator(
-      'sebas-workbench-composer wa-select[data-testid="mode-switch"]',
-    )
+    // 4.2 头部去交互化：mode 切换控件在 composer 底沿。
+    const composerSwitch = page
+      .getByTestId('composer')
+      .getByRole('combobox', { name: '权限模式' })
     await expect(composerSwitch).toBeVisible()
+    const switchedContent = page
+      .getByTestId('composer')
+      .locator('.ant-select-content')
+      .filter({ hasText: 'Allow' })
 
-    // Web Awesome 派发标准 change 事件；直接置值 + 派发，走组件自己的监听。
-    await composerSwitch.evaluate((el) => {
-      ;(el as unknown as { value: string }).value = 'allow'
-      el.dispatchEvent(new Event('change', { bubbles: true }))
-    })
+    await pickSelectOption(page, composerSwitch, 'Allow')
 
     // 命令送达后快照 desired_mode 更新（effective 随执行体反馈另行落定）；
-    // 头部标签（展示）同步翻到 allow。
+    // composer 的展示同步翻到 allow。
     await expect
       .poll(async () => {
         const { detail } = await getSession(request, key)
         return detail?.desired_mode ?? null
       })
       .toBe('allow')
-    await expect(
-      page.locator('sebas-dashboard .session-head [data-testid="session-mode"]'),
-    ).toHaveAttribute('data-mode', 'allow', { timeout: 10_000 })
+    await expect(switchedContent).toBeVisible({ timeout: 10_000 })
     expect(collector.clean()).toEqual([])
   })
 
@@ -145,25 +150,26 @@ test.describe('agent mode 选择', () => {
     await waitStatus(request, key, ['done'])
 
     await page.goto(`/sessions/${key}`)
-    const modeSwitch = page.locator(
-      'sebas-workbench-composer wa-select[data-testid="mode-switch"]',
-    )
+    const modeSwitch = page
+      .getByTestId('composer')
+      .getByRole('combobox', { name: '权限模式' })
     await expect(modeSwitch).toBeVisible()
 
     // 打开真实下拉（spec 场景字面：operator opens the composer mode menu）。
     await modeSwitch.click()
-    const options = modeSwitch.locator('wa-option')
+    const options = page
+      .locator('.ant-select-dropdown:not(.ant-select-dropdown-hidden)')
+      .locator('.ant-select-item-option')
     await expect(options).toHaveCount(4, { timeout: 10_000 })
 
     const meta = await options.evaluateAll((els) =>
       els.map((el) => ({
-        value: el.getAttribute('value'),
         title: el.getAttribute('title') ?? '',
         label: (el.textContent ?? '').trim(),
       })),
     )
-    const allow = meta.find((o) => o.value === 'allow')
-    const auto = meta.find((o) => o.value === 'auto')
+    const allow = meta.find((o) => o.label.startsWith('Allow'))
+    const auto = meta.find((o) => o.label.startsWith('Auto'))
     expect(allow?.title).toContain('与 Auto 等价')
     expect(auto?.title).toContain('与 Allow 等价')
     // 标签双语化（fix-webui-qa-round7 4.1；等价声明仍走 title helper）。
@@ -181,7 +187,7 @@ test.describe('agent mode 选择', () => {
       request,
     }) => {
       // round3 4.1 的放宽写在 document 级 wa-overrides.css，够不到 shadow 树
-      // 里的 wa-select——composer 模式下拉的长文案仍会按字折行挤高选项行。
+      // 里的 [role="combobox"]——composer 模式下拉的长文案仍会按字折行挤高选项行。
       // 修复把同款规则（listbox min-width: max-content / 320px 封顶 + option
       // 单行省略）补进 workbench-composer 自己的样式表。本旅程展开真实下拉，
       // 量测每个选项盒高度：单行 ≈26px 量级，折行必然 ≥2×行高（≈44px+）
@@ -192,13 +198,17 @@ test.describe('agent mode 选择', () => {
       await waitStatus(request, key, ['done'])
 
       await page.goto(`/sessions/${key}`)
-      const modeSwitch = page.locator('sebas-workbench-composer wa-select[data-testid="mode-switch"]')
+      const modeSwitch = page
+        .getByTestId('composer')
+        .getByRole('combobox', { name: '权限模式' })
       await expect(modeSwitch).toBeVisible()
 
       await modeSwitch.click()
       // 四个选项都可见——面板真实展开，不是残留浮层（simplify-mode-menus
       // 后恰为四模式，空值占位项已退役）。
-      const options = modeSwitch.locator('wa-option')
+      const options = page
+        .locator('.ant-select-dropdown:not(.ant-select-dropdown-hidden)')
+        .locator('.ant-select-item-option')
       await expect(options).toHaveCount(4, { timeout: 10_000 })
       const longest = options.filter({ hasText: 'Allow' })
       await expect(longest).toBeVisible()
@@ -211,12 +221,10 @@ test.describe('agent mode 选择', () => {
         expect(h, `option box height ${h}px must be single-line (<40px)`).toBeLessThan(40)
       }
 
-      // 选项文案不折行的机制面：label part 计算样式 white-space: nowrap
-      // （shadow 内样式表命中的直接证据；agent 下拉当时的假阳性就是短文案
-      // 掩盖了规则缺席）。
+      // 选项文案不折行的机制面：option content 的计算样式 white-space。
       const labelWhiteSpace = await longest.evaluate((el) => {
-        const label = el.shadowRoot?.querySelector('[part="label"]')
-        return label ? getComputedStyle(label).whiteSpace : ''
+        const label = el.querySelector('.ant-select-item-option-content') ?? el
+        return getComputedStyle(label).whiteSpace
       })
       expect(labelWhiteSpace).toBe('nowrap')
 

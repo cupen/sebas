@@ -1,9 +1,10 @@
+import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vitest/config'
 
 // Dev workflow: two processes. The Rust backend (axum) serves the JSON API,
-// WebSocket, and health check; Vite serves the SPA here with hot reload and
-// proxies the backend surfaces so the app is deployed and developed against
-// identical paths.
+// WebSocket, and health check; Vite serves the React SPA here with hot reload
+// and proxies the backend surfaces so the app is deployed and developed
+// against identical paths.
 //
 // Backend target resolution (highest priority first):
 //   1. `SEBAS_WEBUI_BACKEND` env var — full origin, e.g.
@@ -18,6 +19,7 @@ export default defineConfig(({ mode }) => {
   const backend = process.env.SEBAS_WEBUI_BACKEND || backendForMode(mode)
   const wsBackend = backend.replace(/^http/, 'ws')
   return {
+    plugins: [react()],
     server: {
       // Dedicated port: other projects on this machine run their own Vite on
       // the default 5173 — a fixed, non-default port avoids cross-project
@@ -48,12 +50,18 @@ export default defineConfig(({ mode }) => {
     build: {
       outDir: 'dist',
       sourcemap: false,
+      // Single production entry (5.3): the React document is `index.html`.
+      // `perf.html` stays a dev-only performance fixture and is deliberately
+      // absent from the build inputs, so no harness code reaches `dist`.
+      rollupOptions: {
+        input: {
+          index: 'index.html',
+        },
+      },
     },
     test: {
       environment: 'happy-dom',
-      include: ['src/**/*.test.ts'],
-      // 全局安装 WA 渲染垫片：jsdom/happy-dom 缺 WA 依赖的 DOM API 时组件
-      // 会抛未处理 rejection（用例过但整轮退 1）。不再依赖各测试文件自觉导入。
+      include: ['src/**/*.test.{ts,tsx}'],
       setupFiles: ['src/test-support/setup.ts'],
     },
   }

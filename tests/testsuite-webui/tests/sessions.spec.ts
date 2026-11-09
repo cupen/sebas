@@ -141,11 +141,11 @@ test.describe('会话管理', () => {
       // History group holds the entry; active list hides it.
       await rail.expandHistory()
       const archivedRow = rail.host
-        .locator('li.session-item.archived', { hasText: tag })
+        .locator('button:has-text("归档于")', { hasText: tag })
         .first()
       await expect(archivedRow).toBeVisible({ timeout: 10_000 })
       await page.goto('/sessions')
-      await expect(sessions.cardFor(key)).toHaveCount(0, { timeout: 10_000 })
+      await expect(sessions.cardFor(tag)).toHaveCount(0, { timeout: 10_000 })
 
       // Write protection: message to the archived session is rejected.
       const refused = await page.request.post(`/api/sessions/${key}/message`, {
@@ -167,23 +167,18 @@ test.describe('会话管理', () => {
       await expect(rail.host).toBeVisible()
       await rail.expandHistory()
       await rail.host
-        .locator('li.session-item.archived', { hasText: tag })
+        .locator('button:has-text("归档于")', { hasText: tag })
         .first()
         .click()
-      // The operator is never navigated to a dead session view: the
-      // workbench stays up (workbench-conversation-view 3.1/3.4).
+      // The archive snapshot is a dialog over the still-live workbench; the
+      // operator is never navigated to a dead session URL.
       await expect(rail.host).toBeVisible({ timeout: 10_000 })
       expect(page.url()).not.toContain('/sessions/')
-      const archivedView = page.locator('sebas-dashboard [data-testid="archived-view"]')
-      await expect(archivedView).toBeVisible({ timeout: 10_000 })
-      await archivedView.locator('[data-testid="archived-restore"]').click()
-      // wa-dialog 宿主在 top layer 读作 hidden——断言弹窗内的实际控件
-      // （与 pending-stack.spec 同款写法）。
-      const restoreConfirm = page.locator('sebas-dashboard [data-testid="restore-confirm"]')
-      await expect(restoreConfirm).toBeVisible({ timeout: 10_000 })
-      await restoreConfirm.click()
-      // 恢复后只读视图退场（archive-view-close）。
-      await expect(archivedView).toHaveCount(0, { timeout: 10_000 })
+      const archiveDialog = page.getByRole('dialog', { name: /归档会话：/ })
+      await expect(archiveDialog).toBeVisible({ timeout: 10_000 })
+      await archiveDialog.getByRole('button', { name: '恢复会话' }).click()
+      // Restore closes the snapshot and rebuilds the row.
+      await expect(archiveDialog).toBeHidden({ timeout: 10_000 })
 
       // Archive list no longer carries the entry; the session is REBUILT and
       // writable again — the refetched list holds it (fix-webui-qa-defects

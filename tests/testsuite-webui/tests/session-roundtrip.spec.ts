@@ -53,7 +53,7 @@ test.describe('agent 对话覆盖', () => {
       // before touching the composer (typing during the animation is lost).
       await rail.confirmNewSessionDialog()
       await expect(rail.newSessionDialog()).toBeHidden({ timeout: 10_000 })
-      // wa-dialog 的关闭动画后还有一个异步的焦点归还簿记（restore 到触发
+      // [role="dialog"] 的关闭动画后还有一个异步的焦点归还簿记（restore 到触发
       // 钮）；不等它，紧跟其后的 fill/键入会被抢走的焦点吃掉。给一拍让
       // 焦点簿记落定——人类从对话框挪到输入框本就更慢。
       await page.waitForTimeout(400)

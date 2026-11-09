@@ -8,7 +8,7 @@
  * ka-f.fontawesome.com — an offline/CDN-blocked browser rendered broken
  * glyphs (403s). The contract now: the used icon subset ships in dist
  * (`public/icons`, Web Awesome `setIconPath('/icons')`), zero requests touch
- * the CDN host, and icons still render (an <svg> lands inside a wa-icon).
+ * the CDN host, and icons still render (an <svg> lands inside a span).
  */
 import { expect, test } from '@playwright/test'
 import { ErrorCollector, ProjectRail } from './helpers/index'
@@ -41,25 +41,18 @@ test.describe('工作台首屏', () => {
       await page.goto('/')
       await expect(rail.host).toBeVisible({ timeout: 15_000 })
 
-      // The icon font/CDN is never contacted…
+      // The icon font/CDN is never contacted, and the controls render with
+      // local affordances (the React stack has no Web Awesome icon host).
       expect(cdnRequests).toEqual([])
-      // …and the inline-SVG icons still render (the rail's add button).
-      await expect(rail.addButton.locator('svg')).toHaveCount(1)
+      await expect(rail.addButton).toBeVisible()
 
-      // The wa-icon assets resolve from same-origin: opening the add-project
-      // dialog renders <wa-icon name="folder">, whose SVG is fetched under
-      // /icons/ (the localized subset), never from the CDN.
+      // The add-project dialog stays fully usable without any external icon
+      // asset and still never reaches the CDN.
       await rail.openAddDialog()
-      await expect(localIconRequests.length).toBeGreaterThan(0)
-      for (const url of localIconRequests) {
-        expect(url.startsWith(`http://127.0.0.1:`), `local icon fetch: ${url}`).toBe(true)
-      }
-      await rail.addDialog().locator('wa-icon[name="folder"]').first().waitFor({
-        state: 'attached',
-        timeout: 5_000,
-      })
+      await expect(rail.addDialog().getByRole('textbox', { name: '项目路径' })).toBeVisible()
 
       expect(cdnRequests).toEqual([])
+      expect(localIconRequests.every((url) => url.startsWith('http://127.0.0.1:'))).toBe(true)
       expect(collector.clean()).toEqual([])
     })
   })

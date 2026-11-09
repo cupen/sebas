@@ -427,7 +427,7 @@ describe('WsClient', () => {
     // 第 4 次未打开 → 疑似凭据失效：收敛到静默等待，怎么推时钟都不再尝试。
     FakeSocket.instances[4]!.drop()
     vi.advanceTimersByTime(120_000)
-    expect(FakeSocket.instances).toHaveLength(5, '升级持续被拒后不再急连')
+    expect(FakeSocket.instances, '升级持续被拒后不再急连').toHaveLength(5)
     // 静默等待仍可被鉴权闸解除路径救活。
     client.setAuthGated(false)
     expect(FakeSocket.instances).toHaveLength(6)
@@ -461,7 +461,7 @@ describe('WsClient', () => {
     client.setAuthGated(true) // 会话失效跳登录
     FakeSocket.instances[0]!.drop()
     vi.advanceTimersByTime(120_000)
-    expect(FakeSocket.instances).toHaveLength(1, '未认证态不重连')
+    expect(FakeSocket.instances, '未认证态不重连').toHaveLength(1)
   })
 })
 

@@ -1,6 +1,8 @@
 /**
- * Single-connection WebSocket client for `/ws`, implemented as a Lit
- * reactive controller so any view can subscribe to live events.
+ * Single-connection WebSocket client for `/ws`, usable from any view. It can
+ * bind to a structural host (Lit's `addController` contract) or be
+ * constructed with options only; React owns the same client through the
+ * options form, so this module has no Lit import.
  *
  * Contract (add-ws-rpc-protocol — three-frame envelope, JSON codec first):
  * - every application-level frame is one of Request{id, method, params} /
@@ -25,7 +27,6 @@
  *   visible view's data afterwards (the `onReconnect` hook).
  */
 
-import type { ReactiveController, ReactiveControllerHost } from 'lit'
 import type { PendingSubmission, SessionUsage } from './client.js'
 
 /**
@@ -291,7 +292,28 @@ export interface WsClientOptions {
   socketFactory?: (url: string) => WebSocket
 }
 
-export class WsClient implements ReactiveController {
+/**
+ * Structural host seam (2.5): the client no longer imports Lit. Any host that
+ * exposes `addController` can still drive it (Lit's reactive controller host
+ * is structurally compatible); React callers just construct with options and
+ * call `hostConnected()` themselves.
+ */
+export interface WsControllerHost {
+  addController(controller: {
+    hostConnected?: () => void
+    hostDisconnected?: () => void
+  }): void
+}
+
+function isWsHost(value: unknown): value is WsControllerHost {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as { addController?: unknown }).addController === 'function'
+  )
+}
+
+export class WsClient {
   private handlers = new Set<WsEventHandler>()
   private socket: WebSocket | null = null
   private attempts = 0
@@ -325,7 +347,17 @@ export class WsClient implements ReactiveController {
   private pending = new Map<number, PendingRequest>()
   private nextId = 1
 
-  constructor(host: ReactiveControllerHost, options: WsClientOptions = {}) {
+  constructor(host: WsControllerHost, options?: WsClientOptions)
+  constructor(options?: WsClientOptions)
+  constructor(hostOrOptions: WsControllerHost | WsClientOptions = {}, maybeOptions?: WsClientOptions) {
+    let host: WsControllerHost | null = null
+    let options: WsClientOptions
+    if (isWsHost(hostOrOptions)) {
+      host = hostOrOptions
+      options = maybeOptions ?? {}
+    } else {
+      options = hostOrOptions
+    }
     this.backoffMs = options.backoffMs ?? 500
     this.maxBackoffMs = options.maxBackoffMs ?? 15_000
     this.onReconnect = options.onReconnect
@@ -333,7 +365,9 @@ export class WsClient implements ReactiveController {
     this.socketFactory = options.socketFactory ?? ((url) => new WebSocket(url))
     this.codec = options.codec ?? jsonFrameCodec
     this.requestTimeoutMs = options.requestTimeoutMs ?? 10_000
-    host.addController(this)
+    // Register only after every field above is initialised: a host may invoke
+    // `hostConnected()` synchronously from `addController`, which connects.
+    host?.addController(this)
   }
 
   hostConnected(): void {

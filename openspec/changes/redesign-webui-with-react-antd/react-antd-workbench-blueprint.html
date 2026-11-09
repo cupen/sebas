@@ -1,0 +1,1309 @@
+<div id="sebas-blueprint">
+<style>
+#sebas-blueprint {
+  --sb-canvas: #06080c;
+  --sb-surface: #10141c;
+  --sb-surface2: #161b26;
+  --sb-surface3: #1d2432;
+  --sb-well: #0b0e15;
+  --sb-border: #212a3a;
+  --sb-border-strong: #313d52;
+  --sb-text: #dde3ee;
+  --sb-bright: #f3f6fb;
+  --sb-dim: #939db1;
+  --sb-faint: #5f6a80;
+  --sb-accent: #8b93ff;
+  --sb-accent-strong: #5b64f2;
+  --sb-accent-soft: rgba(139, 147, 255, 0.13);
+  --sb-accent-border: rgba(139, 147, 255, 0.38);
+  --sb-signal: #ff9457;
+  --sb-ok: #46d189;
+  --sb-warn: #f2b04e;
+  --sb-err: #f47174;
+  --sb-info: #6ea8fe;
+  --sb-wait: #c08cff;
+  --sb-dormant: #94a0b4;
+  --sb-shadow: 0 12px 32px rgba(0, 0, 0, 0.42);
+  --sb-font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", sans-serif;
+  --sb-mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+  color: var(--sb-text);
+  font-family: var(--sb-font);
+  font-size: 13px;
+  line-height: 1.55;
+  background: transparent;
+  width: 100%;
+  min-width: 0;
+}
+.sb-window[data-theme="light"] {
+  --sb-canvas: #e7e9f1;
+  --sb-surface: #ffffff;
+  --sb-surface2: #f3f5f9;
+  --sb-surface3: #e9edf5;
+  --sb-well: #f6f8fa;
+  --sb-border: #dfe3ec;
+  --sb-border-strong: #c6cedd;
+  --sb-text: #1b2230;
+  --sb-bright: #0b1220;
+  --sb-dim: #5b6577;
+  --sb-faint: #7a8496;
+  --sb-accent: #4f5bd5;
+  --sb-accent-strong: #4350c9;
+  --sb-accent-soft: rgba(79, 91, 213, 0.1);
+  --sb-accent-border: rgba(79, 91, 213, 0.38);
+  --sb-signal: #b45309;
+  --sb-ok: #177a4b;
+  --sb-warn: #9a6206;
+  --sb-err: #b4232a;
+  --sb-info: #1f5fa8;
+  --sb-wait: #7a3fb8;
+  --sb-dormant: #6b7688;
+  --sb-shadow: 0 12px 32px rgba(20, 28, 45, 0.16);
+}
+#sebas-blueprint *, #sebas-blueprint *::before, #sebas-blueprint *::after { box-sizing: border-box; }
+#sebas-blueprint button { font: inherit; }
+#sebas-blueprint input, #sebas-blueprint textarea, #sebas-blueprint select {
+  font: inherit; color: inherit;
+}
+#sebas-blueprint button { cursor: pointer; }
+#sebas-blueprint button:focus-visible,
+#sebas-blueprint a:focus-visible,
+#sebas-blueprint input:focus-visible,
+#sebas-blueprint textarea:focus-visible,
+#sebas-blueprint select:focus-visible,
+#sebas-blueprint [tabindex]:focus-visible {
+  outline: 2px solid var(--sb-accent);
+  outline-offset: 2px;
+}
+#sebas-blueprint a { color: var(--sb-accent); }
+
+/* ---------- blueprint chrome ---------- */
+.sb-chrome {
+  display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center;
+  padding: 10px 12px; margin-bottom: 10px;
+  background: var(--sb-surface); border: 1px solid var(--sb-border);
+  border-radius: 10px;
+}
+.sb-chrome-group { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.sb-chrome-label { font-size: 11px; color: var(--sb-dim); letter-spacing: .04em; margin-right: 4px; }
+.sb-titlebar { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: baseline; margin-bottom: 8px; }
+.sb-titlebar h2 { margin: 0; font-size: 16px; font-weight: 500; color: var(--sb-bright); }
+.sb-draft-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid var(--sb-signal); color: var(--sb-signal);
+  border-radius: 999px; padding: 2px 9px; font-size: 11px; font-weight: 500;
+}
+.sb-draft-badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.sb-note { color: var(--sb-dim); font-size: 12px; }
+
+.sb-seg { display: inline-flex; border: 1px solid var(--sb-border); border-radius: 7px; overflow: hidden; }
+.sb-seg button {
+  border: 0; background: transparent; color: var(--sb-dim);
+  padding: 4px 9px; font-size: 12px; line-height: 1.4; white-space: nowrap;
+}
+.sb-seg button + button { border-left: 1px solid var(--sb-border); }
+.sb-seg button[aria-pressed="true"] { background: var(--sb-accent-soft); color: var(--sb-bright); box-shadow: inset 0 -2px 0 var(--sb-accent); }
+.sb-switch { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--sb-dim); }
+.sb-switch input { accent-color: var(--sb-accent); width: 15px; height: 15px; }
+.sb-select {
+  background: var(--sb-surface2); border: 1px solid var(--sb-border); color: var(--sb-text);
+  border-radius: 7px; padding: 4px 8px; font-size: 12px;
+}
+.sb-demo {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  padding: 8px 10px; margin-bottom: 10px;
+  border: 1px dashed var(--sb-border-strong); border-radius: 9px;
+  background: color-mix(in srgb, var(--sb-surface) 65%, transparent);
+}
+.sb-demo-label { font-size: 11px; color: var(--sb-dim); letter-spacing: .04em; }
+
+/* ---------- generic product controls ---------- */
+.sb-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+  border: 1px solid var(--sb-border); background: var(--sb-surface2); color: var(--sb-text);
+  border-radius: 7px; padding: 4px 10px; font-size: 12px; min-height: 28px;
+}
+.sb-btn:hover { border-color: var(--sb-border-strong); background: var(--sb-surface3); }
+.sb-btn-primary { background: var(--sb-accent-strong); border-color: var(--sb-accent-strong); color: #fff; }
+.sb-btn-primary:hover { background: var(--sb-accent); border-color: var(--sb-accent); }
+.sb-btn-danger { color: var(--sb-err); border-color: color-mix(in srgb, var(--sb-err) 45%, var(--sb-border)); }
+.sb-btn-ghost { background: transparent; border-color: transparent; color: var(--sb-dim); }
+.sb-btn-ghost:hover { color: var(--sb-text); background: var(--sb-surface2); }
+.sb-btn:disabled { opacity: .45; cursor: not-allowed; }
+.sb-btn-sm { min-height: 24px; padding: 2px 7px; font-size: 11px; }
+.sb-icon-btn {
+  width: 28px; height: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid transparent; background: transparent; color: var(--sb-dim); border-radius: 6px;
+}
+.sb-icon-btn:hover { background: var(--sb-surface2); color: var(--sb-text); }
+.sb-glyph { font-family: var(--sb-mono); font-size: 13px; line-height: 1; }
+.sb-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  border: 1px solid var(--sb-border); background: var(--sb-surface2);
+  border-radius: 999px; padding: 1px 8px; font-size: 11px; color: var(--sb-dim); white-space: nowrap;
+}
+.sb-chip-ok { color: var(--sb-ok); border-color: color-mix(in srgb, var(--sb-ok) 35%, var(--sb-border)); }
+.sb-chip-warn { color: var(--sb-warn); border-color: color-mix(in srgb, var(--sb-warn) 35%, var(--sb-border)); }
+.sb-chip-err { color: var(--sb-err); border-color: color-mix(in srgb, var(--sb-err) 40%, var(--sb-border)); }
+.sb-chip-signal { color: var(--sb-signal); border-color: color-mix(in srgb, var(--sb-signal) 40%, var(--sb-border)); }
+.sb-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
+.sb-dot-square { border-radius: 2px; }
+.sb-dot-ring { background: transparent; border: 1.5px solid currentColor; }
+
+/* ---------- app window ---------- */
+.sb-window {
+  position: relative; display: flex; width: 100%; max-width: 1440px; margin: 0 auto;
+  min-height: 620px; height: 640px;
+  background: var(--sb-canvas); color: var(--sb-text);
+  border: 1px solid var(--sb-border);
+  border-radius: 12px; overflow: hidden; box-shadow: var(--sb-shadow);
+}
+.sb-window.bp-1024 { max-width: 1024px; }
+.sb-window.bp-768 { max-width: 768px; }
+.sb-window.bp-375 { max-width: 375px; }
+.sb-window.bp-375, .sb-window.bp-768 { height: 720px; }
+.sb-window.auth-mode .sb-rail,
+.sb-window.auth-mode .sb-topbar,
+.sb-window.auth-mode .sb-scrim { display: none; }
+.sb-window.auth-mode .sb-stage { min-height: 0; }
+
+.sb-rail {
+  display: flex; flex-direction: column; gap: 6px; flex: none;
+  width: var(--sb-rail-width, 280px); min-width: 0;
+  background: var(--sb-surface); border-right: 1px solid var(--sb-border);
+  padding: 10px 9px; z-index: 4;
+}
+.sb-rail-head { display: flex; align-items: center; gap: 8px; padding: 2px 4px 8px; }
+.sb-brand { display: flex; align-items: center; gap: 8px; min-width: 0; text-decoration: none; color: var(--sb-bright); }
+.sb-brand-mark {
+  width: 24px; height: 24px; border-radius: 7px; flex: none;
+  display: grid; place-items: center; font-family: var(--sb-mono); font-size: 13px;
+  color: #fff; background: var(--sb-accent-strong);
+}
+.sb-brand-name { font-weight: 500; font-size: 14px; line-height: 1.15; }
+.sb-brand-sub { display: block; font-size: 10px; color: var(--sb-faint); font-weight: 400; letter-spacing: .04em; }
+.sb-rail-actions { display: flex; flex-direction: column; gap: 2px; }
+.sb-rail-link {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  border: 0; background: transparent; color: var(--sb-dim); border-radius: 7px;
+  padding: 6px 8px; text-align: left; font-size: 12px;
+}
+.sb-rail-link:hover { background: var(--sb-surface2); color: var(--sb-text); }
+.sb-rail-link.active { background: var(--sb-surface3); color: var(--sb-bright); }
+.sb-rail-section { margin-top: 8px; min-height: 0; display: flex; flex-direction: column; flex: 1; }
+.sb-rail-label {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 10px; letter-spacing: .12em; color: var(--sb-faint);
+  padding: 4px 6px; text-transform: uppercase;
+}
+.sb-rail-scroll { overflow: auto; min-height: 0; }
+.sb-project-row {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  border: 0; background: transparent; color: var(--sb-text); text-align: left;
+  padding: 5px 6px; border-radius: 6px; font-size: 12px;
+}
+.sb-project-row:hover { background: var(--sb-surface2); }
+.sb-project-row.current { background: var(--sb-accent-soft); color: var(--sb-bright); }
+.sb-project-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sb-count { font-size: 10px; color: var(--sb-faint); }
+.sb-session-list { list-style: none; margin: 1px 0 3px; padding: 0 0 0 14px; border-left: 1px solid var(--sb-border); }
+.sb-session-row {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  border: 0; background: transparent; color: var(--sb-dim); text-align: left;
+  padding: 4px 5px; border-radius: 5px; font-size: 11.5px;
+}
+.sb-session-row:hover { background: var(--sb-surface2); color: var(--sb-text); }
+.sb-session-row.focused { background: var(--sb-accent-soft); color: var(--sb-bright); }
+.sb-session-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sb-badge { min-width: 16px; height: 16px; padding: 0 4px; border-radius: 999px; background: var(--sb-accent-strong); color: #fff; font-size: 10px; display: inline-flex; align-items: center; justify-content: center; }
+.sb-rail-foot { display: flex; flex-direction: column; gap: 2px; border-top: 1px solid var(--sb-border); padding-top: 6px; }
+.sb-rail-collapsed .sb-rail-text { display: none; }
+.sb-rail-collapsed { --sb-rail-width: 60px; }
+.sb-rail-collapsed .sb-brand-name, .sb-rail-collapsed .sb-brand-sub, .sb-rail-collapsed .sb-rail-label span:first-child { display: none; }
+.sb-rail-collapsed .sb-rail-label { justify-content: center; }
+.sb-rail-collapsed .sb-project-row, .sb-rail-collapsed .sb-session-row { justify-content: center; }
+.sb-rail-collapsed .sb-project-name, .sb-rail-collapsed .sb-session-name, .sb-rail-collapsed .sb-count, .sb-rail-collapsed .sb-badge { display: none; }
+
+.sb-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.sb-topbar {
+  display: flex; align-items: center; gap: 10px; min-height: 46px;
+  padding: 6px 12px; border-bottom: 1px solid var(--sb-border);
+  background: color-mix(in srgb, var(--sb-surface) 80%, transparent);
+}
+.sb-topbar-main { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; }
+.sb-topbar-title { font-weight: 500; color: var(--sb-bright); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sb-topbar-sub { color: var(--sb-dim); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sb-topbar-tools { display: flex; align-items: center; gap: 6px; flex: none; }
+.sb-menu-btn { display: none; }
+.sb-url { font-family: var(--sb-mono); font-size: 10.5px; color: var(--sb-faint); border: 1px solid var(--sb-border); border-radius: 5px; padding: 1px 6px; white-space: nowrap; }
+
+.sb-stage { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; }
+.sb-stage-scroll { flex: 1; min-height: 0; overflow: auto; padding: 12px 16px 8px; }
+.sb-content { width: 100%; max-width: 800px; margin: 0 auto; }
+
+/* todo region */
+.sb-todo { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; max-height: 240px; overflow: auto; padding-right: 2px; }
+.sb-todo-head { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--sb-dim); }
+.sb-todo-head strong { color: var(--sb-text); font-weight: 500; }
+.sb-todo-count { color: var(--sb-signal); }
+.sb-card {
+  border: 1px solid var(--sb-border); background: var(--sb-surface);
+  border-radius: 9px; padding: 9px 10px;
+}
+.sb-approval { border-color: color-mix(in srgb, var(--sb-signal) 42%, var(--sb-border)); }
+.sb-approval-head { display: flex; align-items: center; gap: 7px; margin-bottom: 5px; }
+.sb-approval-title { font-weight: 500; color: var(--sb-bright); font-size: 12px; }
+.sb-approval-tool { font-family: var(--sb-mono); font-size: 11px; color: var(--sb-signal); }
+.sb-args {
+  font-family: var(--sb-mono); font-size: 11px; color: var(--sb-dim);
+  background: var(--sb-well); border: 1px solid var(--sb-border);
+  border-radius: 6px; padding: 5px 7px; margin: 5px 0 7px;
+  white-space: pre-wrap; word-break: break-word; max-height: 62px; overflow: auto;
+}
+.sb-approval-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.sb-approval-decision { font-size: 11px; color: var(--sb-dim); }
+.sb-queue-row { display: flex; align-items: center; gap: 7px; padding: 4px 0; font-size: 11.5px; }
+.sb-queue-row + .sb-queue-row { border-top: 1px solid var(--sb-border); }
+.sb-queue-index { font-family: var(--sb-mono); color: var(--sb-faint); font-size: 10px; width: 18px; }
+.sb-queue-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--sb-text); }
+.sb-error-row { border-color: color-mix(in srgb, var(--sb-err) 40%, var(--sb-border)); }
+
+/* transcript */
+.sb-transcript { display: flex; flex-direction: column; gap: 13px; }
+.sb-entry { display: flex; flex-direction: column; gap: 4px; max-width: 760px; }
+.sb-entry-user { align-self: flex-end; align-items: flex-end; width: min(100%, 620px); }
+.sb-entry-meta { display: flex; align-items: center; gap: 6px; font-size: 10.5px; color: var(--sb-faint); }
+.sb-bubble {
+  background: var(--sb-surface); border: 1px solid var(--sb-border);
+  border-radius: 9px; padding: 8px 10px; color: var(--sb-text);
+  overflow-wrap: anywhere;
+}
+.sb-entry-user .sb-bubble { background: var(--sb-accent-soft); border-color: var(--sb-accent-border); }
+.sb-entry-assistant .sb-bubble { background: var(--sb-surface); }
+.sb-live { border-style: dashed; }
+.sb-live::after { content: "▍"; color: var(--sb-accent); margin-left: 2px; }
+.sb-reduced .sb-live::after { content: "…"; color: var(--sb-dim); }
+.sb-seam { display: flex; align-items: center; gap: 8px; color: var(--sb-signal); font-size: 10.5px; margin: 2px 0; }
+.sb-seam::before, .sb-seam::after { content: ""; height: 1px; background: color-mix(in srgb, var(--sb-signal) 45%, var(--sb-border)); flex: 1; }
+.sb-fold { border: 1px solid var(--sb-border); background: var(--sb-surface2); border-radius: 8px; overflow: hidden; }
+.sb-fold summary {
+  list-style: none; display: flex; align-items: center; gap: 7px;
+  padding: 5px 8px; cursor: pointer; color: var(--sb-dim); font-size: 11px;
+}
+.sb-fold summary::-webkit-details-marker { display: none; }
+.sb-fold summary:hover { color: var(--sb-text); }
+.sb-fold-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sb-fold-body { border-top: 1px solid var(--sb-border); padding: 7px 9px; color: var(--sb-dim); font-size: 11.5px; background: var(--sb-well); }
+.sb-code { font-family: var(--sb-mono); font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.sb-tool-result { color: var(--sb-ok); font-size: 11px; }
+.sb-notice-entry { border-color: color-mix(in srgb, var(--sb-warn) 38%, var(--sb-border)); color: var(--sb-dim); }
+
+/* composer */
+.sb-composer-wrap { flex: none; padding: 8px 16px 12px; background: linear-gradient(to top, var(--sb-canvas) 70%, transparent); }
+.sb-composer {
+  max-width: 800px; margin: 0 auto; border: 1px solid var(--sb-border-strong);
+  background: var(--sb-surface); border-radius: 11px; padding: 8px 9px;
+  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.18);
+}
+.sb-composer textarea {
+  width: 100%; resize: none; border: 0; background: transparent; color: var(--sb-text);
+  min-height: 52px; max-height: 120px; padding: 2px 2px 4px; outline: none; font-size: 13px;
+}
+.sb-composer textarea::placeholder { color: var(--sb-faint); }
+.sb-composer-bottom { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-top: 4px; }
+.sb-composer-tools { display: flex; align-items: center; gap: 5px; min-width: 0; flex-wrap: wrap; }
+.sb-composer-right { display: flex; align-items: center; gap: 5px; flex: none; }
+.sb-mode, .sb-model {
+  display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--sb-border);
+  background: var(--sb-surface2); color: var(--sb-dim); border-radius: 6px;
+  padding: 2px 7px; font-size: 11px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sb-send { min-width: 58px; }
+.sb-send-stop { background: color-mix(in srgb, var(--sb-err) 18%, var(--sb-surface2)); border-color: color-mix(in srgb, var(--sb-err) 45%, var(--sb-border)); color: var(--sb-err); }
+.sb-composer-hint { max-width: 800px; margin: 5px auto 0; font-size: 10.5px; color: var(--sb-faint); display: flex; justify-content: space-between; gap: 8px; }
+
+/* banner / lock */
+.sb-banner {
+  display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+  border-radius: 7px; border: 1px solid; font-size: 11.5px;
+}
+.sb-banner-warn { color: #fff; background: #7a4a08; border-color: #a86a0e; }
+.sb-banner-fatal { color: #fff; background: #7f1d1d; border-color: #b03030; }
+.sb-banner-info { color: var(--sb-info); border-color: color-mix(in srgb, var(--sb-info) 40%, var(--sb-border)); background: color-mix(in srgb, var(--sb-info) 10%, var(--sb-surface)); }
+.sb-lock {
+  position: absolute; inset: 0; z-index: 3; display: flex; align-items: center; justify-content: center;
+  background: color-mix(in srgb, var(--sb-canvas) 72%, transparent); backdrop-filter: blur(1.5px);
+}
+.sb-lock-panel { max-width: 360px; text-align: center; padding: 16px 18px; border: 1px solid var(--sb-border-strong); border-radius: 11px; background: var(--sb-surface); }
+.sb-lock-title { color: var(--sb-bright); font-weight: 500; margin-bottom: 4px; }
+.sb-lock-text { color: var(--sb-dim); font-size: 12px; }
+
+/* empty / loading / error */
+.sb-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 6px; min-height: 300px; color: var(--sb-dim); }
+.sb-empty-mark { width: 44px; height: 44px; border-radius: 11px; border: 1px solid var(--sb-border-strong); display: grid; place-items: center; color: var(--sb-faint); font-family: var(--sb-mono); font-size: 18px; }
+.sb-empty-title { color: var(--sb-text); font-size: 13px; }
+.sb-empty-hint { font-size: 11.5px; max-width: 420px; }
+.sb-callout { display: flex; align-items: flex-start; gap: 8px; border: 1px solid color-mix(in srgb, var(--sb-err) 42%, var(--sb-border)); background: color-mix(in srgb, var(--sb-err) 9%, var(--sb-surface)); border-radius: 8px; padding: 9px 10px; color: var(--sb-text); font-size: 12px; }
+.sb-callout strong { color: var(--sb-err); font-weight: 500; }
+.sb-skeleton { display: flex; flex-direction: column; gap: 9px; padding-top: 8px; }
+.sb-sk-line { height: 10px; border-radius: 5px; background: linear-gradient(90deg, var(--sb-surface2), var(--sb-surface3), var(--sb-surface2)); background-size: 200% 100%; animation: sb-shimmer 1.4s linear infinite; }
+.sb-sk-line.w60 { width: 60%; } .sb-sk-line.w80 { width: 80%; } .sb-sk-line.w40 { width: 40%; }
+@keyframes sb-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+.sb-reduced .sb-sk-line { animation: none; }
+
+/* pages */
+.sb-page { padding: 14px 16px 20px; overflow: auto; flex: 1; min-height: 0; }
+.sb-page-inner { max-width: 900px; margin: 0 auto; }
+.sb-page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+.sb-page-title { font-size: 19px; line-height: 1.2; font-weight: 500; color: var(--sb-bright); margin: 0 0 3px; }
+.sb-page-sub { color: var(--sb-dim); font-size: 12px; margin: 0; }
+.sb-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.sb-panel { border: 1px solid var(--sb-border); background: var(--sb-surface); border-radius: 9px; padding: 10px; }
+.sb-form-row { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; }
+.sb-form-row input, .sb-form-row select {
+  flex: 1; min-width: 120px; background: var(--sb-surface2); border: 1px solid var(--sb-border);
+  border-radius: 6px; padding: 5px 8px; min-height: 30px; font-size: 12px;
+}
+.sb-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.sb-table th { text-align: left; font-weight: 500; color: var(--sb-faint); font-size: 10.5px; letter-spacing: .05em; padding: 5px 7px; border-bottom: 1px solid var(--sb-border); }
+.sb-table td { padding: 6px 7px; border-bottom: 1px solid var(--sb-border); vertical-align: top; }
+.sb-table tr:last-child td { border-bottom: 0; }
+.sb-session-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
+.sb-session-card { border: 1px solid var(--sb-border); background: var(--sb-surface); border-radius: 9px; padding: 9px 10px; display: flex; flex-direction: column; gap: 6px; }
+.sb-session-card h4 { margin: 0; font-size: 12px; font-weight: 500; color: var(--sb-bright); }
+.sb-session-card p { margin: 0; color: var(--sb-dim); font-size: 11px; }
+
+/* settings */
+.sb-settings { display: flex; flex: 1; min-height: 0; }
+.sb-settings-nav { width: 172px; flex: none; border-right: 1px solid var(--sb-border); padding: 10px 8px; overflow: auto; }
+.sb-settings-nav button {
+  display: flex; align-items: center; gap: 7px; width: 100%; text-align: left;
+  border: 0; background: transparent; color: var(--sb-dim); border-radius: 6px;
+  padding: 6px 8px; font-size: 12px;
+}
+.sb-settings-nav button:hover { background: var(--sb-surface2); color: var(--sb-text); }
+.sb-settings-nav button.active { background: var(--sb-accent-soft); color: var(--sb-bright); }
+.sb-settings-body { flex: 1; min-width: 0; overflow: auto; padding: 14px 18px 20px; }
+.sb-settings-body h3 { font-size: 15px; font-weight: 500; margin: 0 0 3px; color: var(--sb-bright); }
+.sb-settings-body .sb-note { margin: 0 0 12px; }
+.sb-field { margin-bottom: 10px; }
+.sb-field label { display: block; font-size: 11px; color: var(--sb-dim); margin-bottom: 3px; }
+.sb-field input, .sb-field select {
+  width: 100%; background: var(--sb-surface2); border: 1px solid var(--sb-border);
+  border-radius: 6px; padding: 5px 8px; min-height: 30px; font-size: 12px;
+}
+.sb-field-help { font-size: 10.5px; color: var(--sb-faint); margin-top: 3px; }
+.sb-readonly-note { display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--sb-warn); }
+.sb-toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--sb-border); }
+.sb-toggle-row:last-child { border-bottom: 0; }
+.sb-toggle-row strong { display: block; font-weight: 500; color: var(--sb-text); font-size: 12px; }
+.sb-toggle-row span { font-size: 11px; color: var(--sb-dim); }
+
+/* usage */
+.sb-usage-controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 12px; }
+.sb-usage-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-bottom: 10px; }
+.sb-stat { border: 1px solid var(--sb-border); background: var(--sb-surface); border-radius: 9px; padding: 8px 9px; }
+.sb-stat-num { font-family: var(--sb-mono); font-size: 17px; color: var(--sb-bright); font-variant-numeric: tabular-nums; }
+.sb-stat-label { font-size: 10.5px; color: var(--sb-dim); }
+.sb-chart-wrap { border: 1px solid var(--sb-border); background: var(--sb-surface); border-radius: 9px; padding: 8px 8px 4px; overflow-x: auto; }
+.sb-chart { width: 100%; min-width: 620px; height: 210px; display: block; }
+.sb-window.bp-375 .sb-chart { min-width: 640px; height: 200px; }
+.sb-legend { display: flex; flex-wrap: wrap; gap: 10px; padding: 4px 4px 2px; font-size: 10.5px; color: var(--sb-dim); }
+.sb-legend button { border: 0; background: transparent; color: inherit; display: inline-flex; align-items: center; gap: 5px; padding: 1px 2px; }
+.sb-legend button[aria-pressed="false"] { opacity: .4; }
+.sb-legend-swatch { width: 14px; height: 3px; border-radius: 2px; background: currentColor; }
+
+/* auth / setup */
+.sb-auth {
+  flex: 1; display: flex; align-items: center; justify-content: center; padding: 24px;
+  background:
+    radial-gradient(700px 320px at 82% -10%, var(--sb-accent-soft), transparent 64%),
+    var(--sb-canvas);
+}
+.sb-auth-card { width: min(100%, 360px); background: var(--sb-surface); border: 1px solid var(--sb-border); border-radius: 12px; padding: 20px; box-shadow: var(--sb-shadow); }
+.sb-auth-head { display: flex; align-items: center; gap: 9px; margin-bottom: 14px; }
+.sb-auth-title { font-size: 16px; font-weight: 500; color: var(--sb-bright); }
+.sb-auth-sub { font-size: 11.5px; color: var(--sb-dim); }
+.sb-auth-error { color: var(--sb-err); font-size: 11.5px; margin-top: 6px; min-height: 16px; }
+.sb-auth-ok { color: var(--sb-ok); font-size: 11.5px; margin-top: 6px; min-height: 16px; }
+.sb-auth-form { display: flex; flex-direction: column; gap: 9px; }
+.sb-auth-form .sb-btn { min-height: 32px; }
+
+/* states grid */
+.sb-states { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 9px; }
+.sb-state-card { border: 1px solid var(--sb-border); background: var(--sb-surface); border-radius: 9px; padding: 10px; min-height: 156px; display: flex; flex-direction: column; gap: 7px; }
+.sb-state-card h4 { margin: 0; font-size: 11px; color: var(--sb-faint); font-weight: 500; letter-spacing: .05em; }
+.sb-mini { border: 1px solid var(--sb-border); border-radius: 7px; background: var(--sb-well); padding: 7px; font-size: 11px; color: var(--sb-dim); flex: 1; }
+
+/* drawer */
+.sb-scrim { display: none; position: absolute; inset: 0; z-index: 5; background: rgba(0, 0, 0, 0.45); border: 0; }
+.sb-window.bp-375 .sb-rail { position: absolute; top: 0; bottom: 0; left: 0; width: 300px; max-width: 86%; transform: translateX(-102%); transition: transform .18s ease; box-shadow: var(--sb-shadow); }
+.sb-window.bp-375.drawer-open .sb-rail { transform: translateX(0); }
+.sb-window.bp-375.drawer-open .sb-scrim { display: block; }
+.sb-window.bp-375 .sb-menu-btn { display: inline-flex; }
+.sb-window.bp-375 .sb-topbar { padding: 6px 8px; gap: 6px; }
+.sb-window.bp-375 .sb-stage-scroll { padding: 10px 10px 6px; }
+.sb-window.bp-375 .sb-composer-wrap { padding: 6px 10px 10px; }
+.sb-window.bp-375 .sb-usage-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.sb-window.bp-375 .sb-settings { flex-direction: column; }
+.sb-window.bp-375 .sb-settings-nav { width: 100%; border-right: 0; border-bottom: 1px solid var(--sb-border); display: flex; gap: 3px; overflow-x: auto; padding: 6px; }
+.sb-window.bp-375 .sb-settings-nav button { width: auto; white-space: nowrap; }
+.sb-window.bp-375 .sb-settings-body { padding: 10px 12px 16px; }
+.sb-window.bp-375 .sb-topbar-sub, .sb-window.bp-375 .sb-url { display: none; }
+.sb-window.bp-375 .sb-session-cards { grid-template-columns: 1fr; }
+.sb-window.bp-768 .sb-rail { width: 64px; }
+.sb-window.bp-768 .sb-brand-name, .sb-window.bp-768 .sb-brand-sub,
+.sb-window.bp-768 .sb-rail-text, .sb-window.bp-768 .sb-project-name,
+.sb-window.bp-768 .sb-session-name, .sb-window.bp-768 .sb-count, .sb-window.bp-768 .sb-badge,
+.sb-window.bp-768 .sb-rail-label span:first-child { display: none; }
+.sb-window.bp-768 .sb-project-row, .sb-window.bp-768 .sb-session-row { justify-content: center; }
+.sb-window.bp-768 .sb-rail-label { justify-content: center; }
+.sb-window.bp-768 .sb-rail-link { justify-content: center; }
+.sb-window.bp-1024 .sb-rail { width: 250px; }
+
+.sb-reduced *, .sb-reduced *::before, .sb-reduced *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; scroll-behavior: auto !important; }
+@media (prefers-reduced-motion: reduce) {
+  #sebas-blueprint *, #sebas-blueprint *::before, #sebas-blueprint *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; scroll-behavior: auto !important; }
+}
+@media (max-width: 899px) {
+  .sb-rail { width: 64px; }
+  .sb-brand-name, .sb-brand-sub, .sb-rail-text, .sb-project-name, .sb-session-name, .sb-count, .sb-badge, .sb-rail-label span:first-child { display: none; }
+  .sb-project-row, .sb-session-row, .sb-rail-link, .sb-rail-label { justify-content: center; }
+}
+@media (max-width: 599px) {
+  .sb-window { height: auto; min-height: 620px; border-radius: 9px; }
+  .sb-rail { position: absolute; top: 0; bottom: 0; left: 0; width: 300px; max-width: 86%; transform: translateX(-102%); transition: transform .18s ease; box-shadow: var(--sb-shadow); }
+  .sb-window.drawer-open .sb-rail { transform: translateX(0); }
+  .sb-window.drawer-open .sb-scrim { display: block; }
+  .sb-menu-btn { display: inline-flex; }
+  .sb-topbar { padding: 6px 8px; gap: 6px; }
+  .sb-topbar-sub, .sb-url { display: none; }
+  .sb-stage-scroll { padding: 10px 10px 6px; }
+  .sb-composer-wrap { padding: 6px 10px 10px; }
+  .sb-usage-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .sb-settings { flex-direction: column; }
+  .sb-settings-nav { width: 100%; border-right: 0; border-bottom: 1px solid var(--sb-border); display: flex; gap: 3px; overflow-x: auto; padding: 6px; }
+  .sb-settings-nav button { width: auto; white-space: nowrap; }
+  .sb-settings-body { padding: 10px 12px 16px; }
+  .sb-session-cards { grid-template-columns: 1fr; }
+  .sb-chrome { gap: 8px; }
+  .sb-seg { flex-wrap: wrap; }
+  .sb-seg button { flex: 1 1 auto; }
+  /* the 375 drawer is a full labelled navigation surface, not the icon rail */
+  .sb-window.bp-375 .sb-brand-name,
+  .sb-window.bp-375 .sb-brand-sub,
+  .sb-window.bp-375 .sb-rail-text,
+  .sb-window.bp-375 .sb-project-name,
+  .sb-window.bp-375 .sb-session-name,
+  .sb-window.bp-375 .sb-count,
+  .sb-window.bp-375 .sb-badge,
+  .sb-window.bp-375 .sb-rail-label span:first-child { display: inline; }
+  .sb-window.bp-375 .sb-brand-sub { display: block; }
+  .sb-window.bp-375 .sb-project-row,
+  .sb-window.bp-375 .sb-session-row,
+  .sb-window.bp-375 .sb-rail-link,
+  .sb-window.bp-375 .sb-rail-label { justify-content: flex-start; }
+}
+</style>
+
+<div class="sb-titlebar">
+  <h2>sebas 工作台交互蓝图</h2>
+  <span class="sb-draft-badge">设计稿，非生产实现</span>
+  <span class="sb-note">React 19.3.1 + AntD 6.7.0 目标形态 · 中文 · 无线路由设置 · 无 CDN</span>
+</div>
+
+<div class="sb-chrome" role="group" aria-label="蓝图预览控制">
+  <div class="sb-chrome-group" role="group" aria-label="场景">
+    <span class="sb-chrome-label">场景</span>
+    <div class="sb-seg">
+      <button type="button" data-act="scenario" data-value="workbench" aria-pressed="true">工作台</button>
+      <button type="button" data-act="scenario" data-value="sessions" aria-pressed="false">会话总览</button>
+      <button type="button" data-act="scenario" data-value="settings" aria-pressed="false">设置</button>
+      <button type="button" data-act="scenario" data-value="usage" aria-pressed="false">用量</button>
+      <button type="button" data-act="scenario" data-value="auth" aria-pressed="false">登录</button>
+      <button type="button" data-act="scenario" data-value="setup" aria-pressed="false">首启</button>
+      <button type="button" data-act="scenario" data-value="states" aria-pressed="false">状态样本</button>
+    </div>
+  </div>
+  <div class="sb-chrome-group" role="group" aria-label="主题">
+    <span class="sb-chrome-label">主题</span>
+    <div class="sb-seg">
+      <button type="button" data-act="theme" data-value="system" aria-pressed="true">跟随系统</button>
+      <button type="button" data-act="theme" data-value="light" aria-pressed="false">浅色</button>
+      <button type="button" data-act="theme" data-value="dark" aria-pressed="false">深色</button>
+    </div>
+  </div>
+  <div class="sb-chrome-group" role="group" aria-label="视口">
+    <span class="sb-chrome-label">视口</span>
+    <div class="sb-seg">
+      <button type="button" data-act="bp" data-value="1440" aria-pressed="true">1440</button>
+      <button type="button" data-act="bp" data-value="1024" aria-pressed="false">1024</button>
+      <button type="button" data-act="bp" data-value="768" aria-pressed="false">768</button>
+      <button type="button" data-act="bp" data-value="375" aria-pressed="false">375</button>
+    </div>
+  </div>
+  <label class="sb-switch"><input type="checkbox" id="sb-reduced-toggle" /> 减少动态效果</label>
+  <label class="sb-switch">角色
+    <select class="sb-select" id="sb-role-select" aria-label="角色">
+      <option value="root">root</option>
+      <option value="admin" selected>admin</option>
+      <option value="member">member</option>
+      <option value="viewer">viewer</option>
+    </select>
+  </label>
+</div>
+
+<div class="sb-demo" id="sb-demo-actions" role="group" aria-label="演示控制">
+  <span class="sb-demo-label">演示控制</span>
+  <span id="sb-demo-buttons"></span>
+</div>
+
+<div class="sb-window bp-1440" id="sb-window">
+  <button type="button" class="sb-scrim" data-act="drawer-close" aria-label="关闭导航抽屉" tabindex="-1"></button>
+  <aside class="sb-rail" id="sb-rail" aria-label="项目导航">
+    <div class="sb-rail-head">
+      <a class="sb-brand" href="#sebas-blueprint" data-act="scenario" data-value="workbench">
+        <span class="sb-brand-mark" aria-hidden="true">&gt;</span>
+        <span class="sb-brand-name">sebas<span class="sb-brand-sub">agent console</span></span>
+      </a>
+      <span style="flex:1"></span>
+      <button type="button" class="sb-icon-btn" data-act="rail-collapse" aria-label="收起导航" title="收起导航"><span class="sb-glyph" aria-hidden="true">«</span></button>
+    </div>
+    <div class="sb-rail-actions">
+      <button type="button" class="sb-rail-link" data-act="scenario" data-value="usage"><span class="sb-glyph" aria-hidden="true">▤</span><span class="sb-rail-text">用量</span></button>
+      <button type="button" class="sb-rail-link active" data-act="scenario" data-value="workbench"><span class="sb-glyph" aria-hidden="true">▣</span><span class="sb-rail-text">工作台</span></button>
+    </div>
+    <div class="sb-rail-section">
+      <div class="sb-rail-label"><span>项目</span><button type="button" class="sb-icon-btn" data-act="noop" aria-label="添加项目" title="添加项目"><span class="sb-glyph" aria-hidden="true">+</span></button></div>
+      <div class="sb-rail-scroll" id="sb-project-tree"></div>
+    </div>
+    <div class="sb-rail-foot">
+      <button type="button" class="sb-rail-link" data-act="scenario" data-value="settings"><span class="sb-glyph" aria-hidden="true">⊞</span><span class="sb-rail-text">设置</span></button>
+      <button type="button" class="sb-rail-link" data-act="noop"><span class="sb-glyph" aria-hidden="true">↩</span><span class="sb-rail-text">退出 · admin</span></button>
+    </div>
+  </aside>
+  <main class="sb-main" id="sb-main">
+    <header class="sb-topbar">
+      <button type="button" class="sb-icon-btn sb-menu-btn" data-act="drawer-open" aria-label="打开项目树"><span class="sb-glyph" aria-hidden="true">☰</span></button>
+      <div class="sb-topbar-main">
+        <span class="sb-topbar-title" id="sb-top-title">sebas</span>
+        <span class="sb-topbar-sub" id="sb-top-sub">main · local</span>
+        <span class="sb-url" id="sb-url">/sessions/web%00s-1709</span>
+      </div>
+      <div class="sb-topbar-tools" id="sb-top-tools"></div>
+    </header>
+    <div class="sb-stage" id="sb-stage"></div>
+  </main>
+</div>
+
+<p class="sb-note" style="margin:10px 2px 0">设计稿：仅用于交互与视觉评审，不连接后端、不安装 React/AntD、不修改生产入口。按键路径：Tab 遍历、Enter 发送、Shift+Enter 换行、Esc 关闭抽屉/弹层。</p>
+
+<script>
+(function () {
+  var root = document.getElementById('sebas-blueprint');
+  if (!root) return;
+  var win = document.getElementById('sb-window');
+  var stageEl = document.getElementById('sb-stage');
+  var treeEl = document.getElementById('sb-project-tree');
+  var demoEl = document.getElementById('sb-demo-buttons');
+  var topTitle = document.getElementById('sb-top-title');
+  var topSub = document.getElementById('sb-top-sub');
+  var topTools = document.getElementById('sb-top-tools');
+  var urlEl = document.getElementById('sb-url');
+
+  var state = {
+    scenario: 'workbench',
+    theme: 'system',
+    bp: '1440',
+    reduced: false,
+    role: 'admin',
+    drawerOpen: false,
+    railCollapsed: false,
+    settingsSection: 'general',
+    usage: { source: 'all', gran: 'day', dim: 'total', unreachable: false, hover: -1 },
+    demo: 'normal',
+    connected: true,
+    streaming: false,
+    composerText: '',
+    focused: 's-1709',
+    project: 'sebas',
+    historyOpen: true,
+    approvals: [
+      { id: 'req-a1', tool: 'edit', args: 'path: src/api/client.ts\nold: raw 401 branch\nnew: shared guard', decision: null },
+      { id: 'req-a2', tool: 'bash', args: 'command: pnpm test -- --run\ncwd: sebas-webui/frontend', decision: null }
+    ],
+    queue: [
+      { id: 'q1', text: '把错误的 status 文案补到 i18n 常量。' },
+      { id: 'q2', text: '检查 401 分支是否覆盖 WS 重连。' }
+    ],
+    streamingText: '',
+    streamDone: false,
+    errorVisible: true,
+    liveText: '正在读取 client.ts 的鉴权分支，并对照 ws.ts 的 401 处理……'
+  };
+
+  var projects = [
+    {
+      id: 'sebas', name: 'sebas', branch: 'feat/react-webui-redesign', sessions: [
+        { id: 's-1709', name: '鉴权守卫抽取', status: 'working', unread: 0, preview: '把 401 处理抽成统一守卫' },
+        { id: 's-1708', name: '流式转录性能', status: 'waiting', unread: 3, preview: '长转录按条目隔离更新' },
+        { id: 's-1707', name: '设置工作区重组', status: 'done', unread: 0, preview: '分区导航与 RBAC 裁剪' }
+      ]
+    },
+    {
+      id: 'docs', name: 'sebas-docs', branch: 'main', sessions: [
+        { id: 's-1620', name: '迁移矩阵补全', status: 'dormant', unread: 0, preview: '把 71 个 spec 逐条对账' }
+      ]
+    },
+    {
+      id: 'infra', name: 'infra', branch: 'main', sessions: []
+    }
+  ];
+
+  var initialEntries = [
+    { id: 'e1', kind: 'user', text: '把 src/api/client.ts 的 401 处理抽成统一守卫，并补测试。' },
+    { id: 'e2', kind: 'assistant', agent: 'claude', status: 'done', text: '我先定位所有 401 分支，再抽成共用函数；WS 侧的鉴权失败单独处理，避免登录页反复重连。' },
+    { id: 'e3', kind: 'thinking', title: '分析 401 分支与重连预算', body: 'client.ts 有 3 处直接判断 status === 401；ws.ts 用未打开重连计数。统一守卫需要同时覆盖普通请求与升级失败，但不能改变现有错误文案。' },
+    { id: 'e4', kind: 'tool', title: 'read · src/api/client.ts', status: 'ok', body: '读取 240 行；找到 request() 与 doFetch() 两处入口。', result: 'OK · 240 lines' },
+    { id: 'e5', kind: 'tool', title: 'edit · src/api/client.ts', status: 'ok', body: '新增 onUnauthorized()，替换三处分支。', result: 'OK · 3 hunks' },
+    { id: 'e6', kind: 'assistant', agent: 'claude', status: 'working', text: '正在补统一守卫的测试，覆盖 401、403 与网络失败三条路径。' }
+  ];
+
+  var entries = initialEntries.map(function (e) { return Object.assign({}, e); });
+
+  var seamAfter = 'e5';
+
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  function effectiveTheme() {
+    if (state.theme === 'light') return 'light';
+    if (state.theme === 'dark') return 'dark';
+    try { return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'; }
+    catch (e) { return 'dark'; }
+  }
+
+  function statusChip(slug) {
+    var map = {
+      working: ['运行中', 'sb-chip-warn', '●'],
+      waiting: ['等待你处理', 'sb-chip-signal', '◆'],
+      done: ['完成', 'sb-chip-ok', '✓'],
+      failed: ['失败', 'sb-chip-err', '!'],
+      dormant: ['休眠', '', '○'],
+      starting: ['启动中', 'sb-chip-info', '◌'],
+      queued: ['排队中', 'sb-chip-info', '≡']
+    };
+    var m = map[slug] || [slug, '', '·'];
+    return '<span class="sb-chip ' + m[1] + '"><span class="sb-glyph" aria-hidden="true">' + m[2] + '</span>' + esc(m[0]) + '</span>';
+  }
+
+  function renderTree() {
+    var html = '';
+    projects.forEach(function (p) {
+      var current = p.id === state.project;
+      html += '<div class="sb-project-row' + (current ? ' current' : '') + '" role="treeitem" aria-expanded="true" tabindex="0" data-act="select-project" data-id="' + esc(p.id) + '">'
+        + '<span class="sb-glyph" aria-hidden="true">' + (current ? '▾' : '▸') + '</span>'
+        + '<span class="sb-project-name">' + esc(p.name) + '</span>'
+        + '<span class="sb-count">' + p.sessions.length + '</span>'
+        + '<button type="button" class="sb-icon-btn" style="width:20px;height:20px" data-act="noop" aria-label="新建会话">+</button>'
+        + '</div>';
+      if (current && p.sessions.length) {
+        html += '<ul class="sb-session-list" role="group">';
+        p.sessions.forEach(function (s) {
+          var focused = s.id === state.focused;
+          html += '<li><button type="button" class="sb-session-row' + (focused ? ' focused' : '') + '" data-act="focus-session" data-id="' + esc(s.id) + '" aria-current="' + (focused ? 'true' : 'false') + '">'
+            + '<span class="sb-dot ' + (s.status === 'working' ? '' : s.status === 'waiting' ? 'sb-dot-square' : s.status === 'done' ? '' : 'sb-dot-ring') + '" style="color:var(--sb-' + (s.status === 'working' ? 'warn' : s.status === 'waiting' ? 'wait' : s.status === 'done' ? 'ok' : 'dormant') + ')" aria-hidden="true"></span>'
+            + '<span class="sb-session-name">' + esc(s.name) + '</span>'
+            + (s.unread ? '<span class="sb-badge" aria-label="' + s.unread + ' 条未读">' + s.unread + '</span>' : '')
+            + '</button></li>';
+        });
+        html += '</ul>';
+      }
+    });
+    html += '<div class="sb-group" style="margin-top:6px">'
+      + '<button type="button" class="sb-rail-link" data-act="toggle-history" aria-expanded="' + (state.historyOpen ? 'true' : 'false') + '">'
+      + '<span class="sb-glyph" aria-hidden="true">' + (state.historyOpen ? '▾' : '▸') + '</span><span class="sb-rail-text">历史</span><span class="sb-count">2</span></button>';
+    if (state.historyOpen) {
+      html += '<ul class="sb-session-list" style="padding-left:10px"><li><button type="button" class="sb-session-row" data-act="noop"><span class="sb-glyph" aria-hidden="true">▢</span><span class="sb-session-name">旧版设置迁移复盘</span></button></li>'
+        + '<li><button type="button" class="sb-session-row" data-act="noop"><span class="sb-glyph" aria-hidden="true">▢</span><span class="sb-session-name">审批读模型修复</span></button></li></ul>';
+    }
+    html += '</div>';
+    treeEl.innerHTML = html;
+  }
+
+  function renderTop() {
+    var names = { workbench: ['sebas', 'main · local', '/sessions/web%00s-1709'], sessions: ['会话', '跨项目总览', '/sessions'], settings: ['设置', '工作区 · 无独立路由', '/sessions/web%00s-1709'], usage: ['用量', 'Token 时序', '/usage'], auth: ['登录', 'sebas console', '/'], setup: ['首启', '创建 root', '/'], states: ['状态样本', '空 / 载入 / 错误 / 断线', '/'] };
+    var n = names[state.scenario] || names.workbench;
+    if (state.scenario === 'workbench') {
+      var f = findSession(state.focused);
+      if (f) n = [f.project.name, f.project.branch + ' · ' + f.session.name, '/sessions/web%00' + f.session.id];
+    }
+    topTitle.textContent = n[0]; topSub.textContent = n[1]; urlEl.textContent = n[2];
+    var html = '';
+    if (state.scenario === 'workbench' || state.scenario === 'sessions' || state.scenario === 'settings') {
+      html += '<span class="sb-chip ' + (state.connected ? 'sb-chip-ok' : 'sb-chip-err') + '"><span class="sb-dot" aria-hidden="true"></span>' + (state.connected ? '核心可达' : '核心不可达') + '</span>';
+      html += '<span class="sb-chip sb-chip-signal"><span class="sb-glyph" aria-hidden="true">◆</span>待办 ' + (state.approvals.filter(function (a) { return !a.decision; }).length + state.queue.length) + '</span>';
+    }
+    html += '<button type="button" class="sb-icon-btn" data-act="scenario" data-value="settings" aria-label="打开设置"><span class="sb-glyph" aria-hidden="true">⊞</span></button>';
+    topTools.innerHTML = html;
+  }
+
+  function renderTodo() {
+    var pending = state.approvals.filter(function (a) { return !a.decision; });
+    if (!pending.length && !state.queue.length && !state.errorVisible) return '';
+    var html = '<div class="sb-todo" aria-label="会话内待办">';
+    if (pending.length) {
+      html += '<div class="sb-todo-head"><strong>需要你处理</strong><span class="sb-todo-count">' + pending.length + ' 项审批</span><span style="flex:1"></span><span>并行请求各自独立</span></div>';
+      pending.forEach(function (a, i) {
+        html += '<div class="sb-card sb-approval" role="group" aria-label="审批请求 ' + (i + 1) + '">'
+          + '<div class="sb-approval-head"><span class="sb-glyph" style="color:var(--sb-signal)" aria-hidden="true">◆</span><span class="sb-approval-title">工具调用等待允许</span><span class="sb-approval-tool">' + esc(a.tool) + '</span><span style="flex:1"></span><span class="sb-chip">' + esc(a.id) + '</span></div>'
+          + '<div class="sb-args">' + esc(a.args) + '</div>'
+          + '<div class="sb-approval-actions">'
+          + '<button type="button" class="sb-btn sb-btn-primary sb-btn-sm" data-act="approve" data-id="' + esc(a.id) + '">单次允许</button>'
+          + '<button type="button" class="sb-btn sb-btn-sm" data-act="allow-session" data-id="' + esc(a.id) + '">本会话允许</button>'
+          + '<button type="button" class="sb-btn sb-btn-danger sb-btn-sm" data-act="deny" data-id="' + esc(a.id) + '">拒绝</button>'
+          + '</div></div>';
+      });
+    }
+    if (state.errorVisible) {
+      html += '<div class="sb-card sb-error-row"><div class="sb-approval-head"><span class="sb-glyph" style="color:var(--sb-err)" aria-hidden="true">!</span><span class="sb-approval-title">回合错误</span><span style="flex:1"></span><button type="button" class="sb-btn sb-btn-ghost sb-btn-sm" data-act="dismiss-error">关闭</button></div>'
+        + '<div class="sb-note">ws 重连后迟到的 turn.append 被游标隔离，当前会话未写入；可重试本回合。</div>'
+        + '<div class="sb-approval-actions" style="margin-top:6px"><button type="button" class="sb-btn sb-btn-sm" data-act="retry-error">重试</button></div></div>';
+    }
+    if (state.queue.length) {
+      html += '<div class="sb-card"><div class="sb-todo-head" style="margin-bottom:3px"><strong>排队提交</strong><span>' + state.queue.length + ' 条 · 回合结束后执行</span></div>';
+      state.queue.forEach(function (q, i) {
+        html += '<div class="sb-queue-row"><span class="sb-queue-index">' + (i + 1) + '</span><span class="sb-queue-text">' + esc(q.text) + '</span>'
+          + '<button type="button" class="sb-btn sb-btn-ghost sb-btn-sm" data-act="queue-up" data-id="' + esc(q.id) + '" aria-label="上移" ' + (i === 0 ? 'disabled' : '') + '>↑</button>'
+          + '<button type="button" class="sb-btn sb-btn-ghost sb-btn-sm" data-act="queue-remove" data-id="' + esc(q.id) + '">移除</button></div>';
+      });
+      html += '</div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  function renderTranscript() {
+    var html = '<div class="sb-transcript" role="log" aria-label="会话转录">';
+    entries.forEach(function (e) {
+      if (e.id === seamAfter) {
+        html += '<div class="sb-seam" role="separator">上次读到此处 · 3 条新回复</div>';
+      }
+      if (e.kind === 'user') {
+        html += '<div class="sb-entry sb-entry-user"><div class="sb-entry-meta"><span>你</span><span>·</span><span>10:42</span></div><div class="sb-bubble">' + esc(e.text) + '</div></div>';
+      } else if (e.kind === 'assistant') {
+        var live = e.status === 'working' && state.streaming;
+        html += '<div class="sb-entry sb-entry-assistant"><div class="sb-entry-meta"><span class="sb-chip">' + esc(e.agent) + '</span><span>助手</span><span>·</span><span>' + (e.status === 'working' ? '正在输出' : '已完成') + '</span>' + statusChip(e.status) + '</div>'
+          + '<div class="sb-bubble' + (live ? ' sb-live' : '') + '" id="' + (live ? 'sb-live-bubble' : '') + '">' + (live ? '<span id="sb-live-text">' + esc(state.streamingText || e.text) + '</span>' : esc(e.text)) + '</div></div>';
+      } else if (e.kind === 'thinking') {
+        html += '<details class="sb-fold"><summary><span class="sb-glyph" aria-hidden="true">▸</span><span class="sb-fold-title">' + esc(e.title) + '</span><span class="sb-chip">thinking</span><span class="sb-chip">默认收起</span></summary><div class="sb-fold-body">' + esc(e.body) + '</div></details>';
+      } else if (e.kind === 'tool') {
+        html += '<details class="sb-fold"><summary><span class="sb-glyph" aria-hidden="true">▸</span><span class="sb-fold-title">' + esc(e.title) + '</span><span class="sb-tool-result">' + esc(e.result) + '</span></summary><div class="sb-fold-body"><div class="sb-code">' + esc(e.body) + '</div></div></details>';
+      } else if (e.kind === 'notice') {
+        html += '<div class="sb-entry"><div class="sb-bubble sb-notice-entry"><span class="sb-chip">notice</span> ' + esc(e.text) + '</div></div>';
+      }
+    });
+    html += '</div>';
+    return html;
+  }
+
+  function renderComposer() {
+    var readonly = state.role === 'viewer';
+    var turnActive = state.streaming || entries.some(function (e) { return e.kind === 'assistant' && e.status === 'working'; });
+    var mode = state.role === 'viewer' ? '只读' : (state.approvals.some(function (a) { return a.id === 'req-a2' && a.decision === 'session'; }) ? 'Auto · 自动执行' : 'Ask · 逐次询问');
+    var html = '<div class="sb-composer-wrap">';
+    if (state.connected === false) {
+      html += '<div style="max-width:800px;margin:0 auto 7px"><div class="sb-banner sb-banner-warn"><span class="sb-glyph" aria-hidden="true">!</span><span>核心不可达：disconnected · 输入已禁用，恢复后自动解锁。</span></div></div>';
+    }
+    html += '<div class="sb-composer">';
+    if (readonly) {
+      html += '<div style="padding:10px 4px;color:var(--sb-dim);font-size:12px">只读视图——当前角色（viewer）没有会话写权限：可浏览转录，不能发送消息或切换模型。</div>';
+    } else {
+      html += '<textarea id="sb-composer-input" aria-label="消息" placeholder="输入消息，Enter 发送，Shift+Enter 换行"' + (state.connected ? '' : ' disabled') + '>' + esc(state.composerText) + '</textarea>';
+      html += '<div class="sb-composer-bottom"><div class="sb-composer-tools">'
+        + '<button type="button" class="sb-mode" data-act="noop" aria-label="权限模式">' + esc(mode) + ' <span class="sb-glyph" aria-hidden="true">▾</span></button>'
+        + '<button type="button" class="sb-model" data-act="noop" aria-label="模型">claude-sonnet-4-5 <span class="sb-glyph" aria-hidden="true">▾</span></button>'
+        + '</div><div class="sb-composer-right">'
+        + (turnActive ? '<button type="button" class="sb-btn sb-send-queue" data-act="send">排队</button><button type="button" class="sb-btn sb-send sb-send-stop" data-act="stop">停止</button>' : '<button type="button" class="sb-btn sb-btn-primary sb-send" data-act="send">发送</button>')
+        + '</div></div>';
+    }
+    html += '</div>';
+    html += '<div class="sb-composer-hint"><span>' + (readonly ? '只读角色不渲染写控件' : 'Enter 发送 · Shift+Enter 换行') + '</span><span>模型与模式来自服务端真值</span></div>';
+    html += '</div>';
+    return html;
+  }
+
+  function renderWorkbench() {
+    if (state.demo === 'loading') {
+      return '<div class="sb-stage-scroll"><div class="sb-content"><div class="sb-skeleton" aria-label="加载中">'
+        + '<div class="sb-sk-line w60"></div><div class="sb-sk-line w80"></div><div class="sb-sk-line w40"></div>'
+        + '<div class="sb-sk-line w80"></div><div class="sb-sk-line w60"></div></div></div></div>';
+    }
+    if (state.demo === 'error') {
+      return '<div class="sb-stage-scroll"><div class="sb-content"><div class="sb-callout" role="alert"><span class="sb-glyph" aria-hidden="true">!</span><div><strong>加载失败</strong><div>GET /api/sessions/web%00s-1709 返回 503：核心不可达。</div><div style="margin-top:6px"><button type="button" class="sb-btn sb-btn-sm" data-act="retry-load">重试</button></div></div></div></div></div>';
+    }
+    if (state.demo === 'empty') {
+      return '<div class="sb-stage-scroll"><div class="sb-content"><div class="sb-empty"><div class="sb-empty-mark" aria-hidden="true">▣</div><div class="sb-empty-title">未聚焦任何会话</div><p class="sb-empty-hint">从左侧项目树选择一个会话——或用项目行的 + 新建。窄屏请先打开导航抽屉。</p></div></div></div>';
+    }
+    if (state.demo === 'archive') {
+      return '<div class="sb-stage-scroll"><div class="sb-content"><div class="sb-banner sb-banner-info" style="margin-bottom:10px"><span class="sb-glyph" aria-hidden="true">▢</span><span>只读归档视图 · 归档于 2026-10-30 · 恢复后重建会话行</span><span style="flex:1"></span><button type="button" class="sb-btn sb-btn-sm" data-act="noop">恢复会话</button></div>' + renderTranscript() + '</div></div>';
+    }
+    var content = '<div class="sb-stage-scroll"><div class="sb-content">' + renderTodo();
+    if (state.demo === 'disconnected') content += '<div class="sb-banner sb-banner-fatal" style="margin-bottom:10px"><span class="sb-glyph" aria-hidden="true">!</span><span>核心不可达（disconnected）：工作区已锁定，恢复后自动解锁。</span></div>';
+    content += renderTranscript() + '</div></div>';
+    if (state.demo === 'disconnected') content += '<div class="sb-lock"><div class="sb-lock-panel"><div class="sb-lock-title">工作区已锁定</div><div class="sb-lock-text">核心连接中断。恢复后待办与审批真值从服务端恢复，无需刷新。</div></div></div>';
+    content += renderComposer();
+    return content;
+  }
+
+  function renderSessions() {
+    var canWrite = state.role !== 'viewer';
+    var cards = projects[0].sessions.concat(projects[1].sessions).map(function (s) {
+      return '<div class="sb-session-card"><div style="display:flex;align-items:center;gap:6px">' + statusChip(s.status) + '<span style="flex:1"></span><span class="sb-chip">' + esc(s.id) + '</span></div>'
+        + '<h4>' + esc(s.name) + '</h4><p>' + esc(s.preview) + '</p>'
+        + '<div style="display:flex;gap:5px;margin-top:auto">' + (canWrite ? '<button type="button" class="sb-btn sb-btn-sm" data-act="focus-session" data-id="' + esc(s.id) + '">聚焦</button><button type="button" class="sb-btn sb-btn-ghost sb-btn-sm" data-act="noop">关闭</button>' : '<span class="sb-chip">只读</span>') + '</div></div>';
+    }).join('');
+    return '<div class="sb-page"><div class="sb-page-inner">'
+      + '<div class="sb-page-head"><div><h3 class="sb-page-title">会话</h3><p class="sb-page-sub">' + (canWrite ? '创建、聚焦与关闭 agent 会话。' : '只读总览——你的角色没有会话写权限。') + '</p></div></div>'
+      + '<div class="sb-chips"><span class="sb-chip"><span class="sb-dot" style="color:var(--sb-warn)"></span><b>1</b> 活跃</span><span class="sb-chip"><span class="sb-dot sb-dot-ring" style="color:var(--sb-dormant)"></span><b>1</b> 休眠</span><span class="sb-chip"><span class="sb-dot" style="color:var(--sb-info)"></span><b>0</b> 启动中</span><span class="sb-chip"><b>4</b> 总计</span></div>'
+      + (canWrite ? '<div class="sb-panel" style="margin-bottom:10px"><div class="sb-form-row"><input aria-label="新会话任务描述" placeholder="描述新会话要执行的任务……" /><select aria-label="项目"><option>sebas</option><option>sebas-docs</option></select><select aria-label="Agent"><option>claude</option><option>native</option></select><button type="button" class="sb-btn sb-btn-primary" data-act="noop">新建会话</button></div></div>' : '')
+      + '<div class="sb-session-cards">' + cards + '</div>'
+      + '</div></div>';
+  }
+
+  function settingsNav() {
+    var sections = [['general', '通用', '⊞'], ['appearance', '外观', '◐'], ['services', '服务', '◇'], ['users', '用户', '♙'], ['models', '模型', '◇'], ['aliases', '别名', '⇢'], ['agents', 'Agent', '▣'], ['skills', '技能', '◇'], ['env', '环境变量', '≡'], ['about', '关于', 'i']];
+    if (state.role !== 'root') sections = sections.filter(function (s) { return s[0] !== 'users'; });
+    return sections.map(function (s) {
+      return '<button type="button" class="' + (state.settingsSection === s[0] ? 'active' : '') + '" data-act="settings-section" data-value="' + s[0] + '"><span class="sb-glyph" aria-hidden="true">' + s[2] + '</span><span>' + s[1] + '</span></button>';
+    }).join('');
+  }
+
+  function settingsBody() {
+    var admin = state.role === 'admin' || state.role === 'root';
+    var canServices = state.role === 'admin' || state.role === 'root';
+    var s = state.settingsSection;
+    var head = '<h3>' + ({ general: '通用', appearance: '外观', services: '服务', users: '用户', models: '模型', aliases: '别名', agents: 'Agent', skills: '技能', env: '环境变量', about: '关于' }[s]) + '</h3>';
+    var body = '';
+    if (s === 'general') {
+      body = '<p class="sb-note">工作区默认行为；更改立即生效，保存在本地偏好。</p>'
+        + '<div class="sb-field"><label>默认项目</label><select><option>sebas</option><option>sebas-docs</option></select></div>'
+        + '<div class="sb-toggle-row"><div><strong>新会话默认 Agent</strong><span>从项目上次选择继承</span></div><select class="sb-select"><option>claude</option><option>native</option></select></div>'
+        + '<div class="sb-toggle-row"><div><strong>关闭设置后返回当前会话</strong><span>地址栏不产生 /settings 路由</span></div><span class="sb-chip sb-chip-ok">已启用</span></div>';
+    } else if (s === 'appearance') {
+      body = '<p class="sb-note">主题与动效；系统主题变化即时跟随。</p>'
+        + '<div class="sb-field"><label>主题</label><div class="sb-seg" style="margin-top:4px"><button type="button" class="active">跟随系统</button><button type="button">浅色</button><button type="button">深色</button></div></div>'
+        + '<div class="sb-toggle-row"><div><strong>减少动态效果</strong><span>抑制抽屉、toast、未读缝与流式光标动画</span></div><label class="sb-switch"><input type="checkbox" checked /> 开启</label></div>'
+        + '<div class="sb-toggle-row"><div><strong>界面语言</strong><span>中文（默认）</span></div><span class="sb-chip">zh-CN</span></div>';
+    } else if (s === 'services') {
+      body = '<p class="sb-note">受管服务与 router 状态；core 行只读。</p>'
+        + (canServices ? '' : '<p class="sb-readonly-note">你的角色没有 services.control 权限，动作按钮不呈现。</p>')
+        + '<table class="sb-table"><thead><tr><th>服务</th><th>状态</th><th>操作</th></tr></thead><tbody>'
+        + '<tr><td>core</td><td>' + statusChip('working') + '</td><td><span class="sb-chip">只读</span></td></tr>'
+        + '<tr><td>router</td><td>' + statusChip('done') + '</td><td>' + (canServices ? '<button type="button" class="sb-btn sb-btn-sm" data-act="noop">停止</button>' : '<span class="sb-chip">无权限</span>') + '</td></tr>'
+        + '<tr><td>webui</td><td>' + statusChip('done') + '</td><td>' + (canServices ? '<button type="button" class="sb-btn sb-btn-sm" data-act="noop">重启</button>' : '<span class="sb-chip">无权限</span>') + '</td></tr>'
+        + '</tbody></table>';
+    } else if (s === 'users') {
+      var isRoot = state.role === 'root';
+      body = '<p class="sb-note">仅 root 可管理用户；最后启用的 root 受保护。</p>'
+        + (isRoot ? '<table class="sb-table"><thead><tr><th>用户</th><th>角色</th><th>状态</th><th>操作</th></tr></thead><tbody>'
+          + '<tr><td>admin</td><td>admin</td><td>' + statusChip('done') + '</td><td><button type="button" class="sb-btn sb-btn-sm" data-act="noop">编辑</button></td></tr>'
+          + '<tr><td>qa-member</td><td>member</td><td>' + statusChip('done') + '</td><td><button type="button" class="sb-btn sb-btn-sm" data-act="noop">编辑</button></td></tr>'
+          + '</tbody></table>'
+          : '<p class="sb-readonly-note">Users 仅 root 可见：当前角色（' + esc(state.role) + '）的导航中无此分区，也不渲染用户表。</p>');
+    } else if (s === 'models') {
+      body = '<p class="sb-note">Provider 与模型目录；写入口按 settings.manage 裁剪。</p>'
+        + (admin ? '' : '<p class="sb-readonly-note">只读：member/viewer 看不到新建/编辑/删除。</p>')
+        + '<table class="sb-table"><thead><tr><th>Provider</th><th>模型</th><th>默认</th><th>操作</th></tr></thead><tbody>'
+        + '<tr><td>anthropic</td><td>claude-sonnet-4-5 · claude-opus-4-1</td><td>sonnet</td><td>' + (admin ? '<button type="button" class="sb-btn sb-btn-sm" data-act="noop">编辑</button>' : '<span class="sb-chip">只读</span>') + '</td></tr>'
+        + '<tr><td>openai</td><td>gpt-5 · gpt-5-mini</td><td>—</td><td>' + (admin ? '<button type="button" class="sb-btn sb-btn-sm" data-act="noop">编辑</button>' : '<span class="sb-chip">只读</span>') + '</td></tr>'
+        + '</tbody></table>';
+    } else if (s === 'aliases') {
+      body = '<p class="sb-note">模型别名；alias 禁 / 与 *。</p>'
+        + '<table class="sb-table"><thead><tr><th>别名</th><th>Provider</th><th>上游模型</th><th>操作</th></tr></thead><tbody>'
+        + '<tr><td><code>fast</code></td><td>anthropic</td><td>claude-haiku-4-5</td><td>' + (admin ? '<button type="button" class="sb-btn sb-btn-sm" data-act="noop">编辑</button>' : '<span class="sb-chip">只读</span>') + '</td></tr>'
+        + '</tbody></table>';
+    } else if (s === 'agents') {
+      body = '<p class="sb-note">Agent 目录与 claude 档位映射；native 为内置保留 id。</p>'
+        + '<table class="sb-table"><thead><tr><th>Agent</th><th>类型</th><th>可用性</th><th>操作</th></tr></thead><tbody>'
+        + '<tr><td>claude</td><td>acp</td><td>' + statusChip('done') + '</td><td>' + (admin ? '<button type="button" class="sb-btn sb-btn-sm" data-act="noop">编辑</button>' : '<span class="sb-chip">只读</span>') + '</td></tr>'
+        + '<tr><td>native</td><td>built-in</td><td>' + statusChip('done') + '</td><td><span class="sb-chip">保留 id</span></td></tr>'
+        + '</tbody></table>';
+    } else if (s === 'skills') {
+      body = '<p class="sb-note">技能仓只读预览；删除与同步需 settings.manage。</p>'
+        + '<table class="sb-table"><thead><tr><th>技能</th><th>描述</th><th>附件</th><th>操作</th></tr></thead><tbody>'
+        + '<tr><td>code-review</td><td>按仓库约定做差异审查</td><td>2</td><td>' + (admin ? '<button type="button" class="sb-btn sb-btn-sm" data-act="noop">删除</button>' : '<span class="sb-chip">只读</span>') + '</td></tr>'
+        + '</tbody></table>';
+    } else if (s === 'env') {
+      body = '<p class="sb-note">webui 进程环境变量的服务端策划清单；敏感值只显示 set。</p>'
+        + '<table class="sb-table"><thead><tr><th>变量</th><th>状态</th></tr></thead><tbody>'
+        + '<tr><td><code>SEBAS_CONFIG</code></td><td>set</td></tr>'
+        + '<tr><td><code>SEBAS_CORE_SECRET</code></td><td>set（已遮蔽）</td></tr>'
+        + '<tr><td><code>RUST_LOG</code></td><td>unset</td></tr></tbody></table>';
+    } else {
+      body = '<p class="sb-note">实例与构建信息；与 /api/about 对账。</p>'
+        + '<table class="sb-table"><tbody><tr><th>实例</th><td>sebas core · 0.1.0</td></tr><tr><th>构建</th><td>40d8ce3 · rust 1.99.1</td></tr><tr><th>前端</th><td>Lit 3.3.3 → React 19.3.1（迁移中）</td></tr></tbody></table>';
+    }
+    return head + body;
+  }
+
+  function renderSettings() {
+    return '<div class="sb-settings">'
+      + '<nav class="sb-settings-nav" aria-label="设置分区">' + settingsNav() + '</nav>'
+      + '<div class="sb-settings-body"><div style="display:flex;align-items:center;gap:8px;margin-bottom:12px"><span class="sb-chip">无独立路由</span><span class="sb-note">地址栏保持原会话；Esc 或关闭返回</span><span style="flex:1"></span><button type="button" class="sb-btn sb-btn-sm" data-act="scenario" data-value="workbench">关闭设置</button></div>'
+      + settingsBody() + '</div></div>';
+  }
+
+  function usageData() {
+    var days = ['10-20', '10-21', '10-22', '10-23', '10-24', '10-25', '10-26'];
+    var hours = []; for (var i = 0; i < 24; i++) hours.push(String(i).padStart(2, '0') + ':00');
+    var labels = state.usage.gran === 'day' ? days : hours;
+    var dims = {
+      total: [[120, 180, 90, 240, 310, 220, 280], [60, 70, 80, 120, 160, 90, 110], [20, 30, 25, 45, 60, 40, 50]],
+      input: [[80, 110, 60, 150, 200, 140, 180], [40, 45, 55, 80, 100, 60, 70], [15, 20, 18, 30, 40, 28, 32]],
+      output: [[30, 50, 20, 60, 80, 60, 75], [15, 18, 20, 28, 38, 22, 28], [4, 7, 6, 10, 14, 9, 12]],
+      cache: [[10, 20, 10, 30, 30, 20, 25], [5, 7, 5, 12, 22, 8, 12], [1, 3, 1, 5, 6, 3, 6]]
+    };
+    var src = state.usage.source;
+    var series = dims[state.usage.dim] || dims.total;
+    if (src === 'router') series = [series[0]];
+    if (src === 'local') series = [series[2]];
+    if (state.usage.gran === 'hour') {
+      series = series.map(function (line) {
+        var out = [];
+        for (var i = 0; i < 24; i++) out.push(Math.max(1, Math.round(line[i % line.length] * (0.55 + 0.45 * Math.sin((i + 2) / 3)))));
+        return out;
+      });
+    }
+    return { labels: labels, series: series };
+  }
+
+  function renderChart() {
+    var d = usageData();
+    var W = 860, H = 210, padL = 42, padR = 12, padT = 12, padB = 24;
+    var all = d.series.reduce(function (a, b) { return a.concat(b); }, []);
+    var max = Math.max.apply(null, all) * 1.15 || 1;
+    var names = ['claude-sonnet-4-5', 'gpt-5', 'claude-haiku-4-5'];
+    var colors = ['var(--sb-accent)', 'var(--sb-ok)', 'var(--sb-warn)'];
+    var innerW = W - padL - padR, innerH = H - padT - padB;
+    var stepX = d.labels.length > 1 ? innerW / (d.labels.length - 1) : innerW;
+    var svg = '<svg class="sb-chart" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="按模型分列的 token 用量折线图">';
+    svg += '<title>Token 用量时序</title><desc>横轴为时间，纵轴为 token 数；三条线分别代表一个模型。</desc>';
+    for (var g = 0; g <= 4; g++) {
+      var gy = padT + innerH * g / 4;
+      svg += '<line x1="' + padL + '" y1="' + gy + '" x2="' + (W - padR) + '" y2="' + gy + '" stroke="var(--sb-border)" stroke-width="1" />';
+      svg += '<text x="' + (padL - 6) + '" y="' + (gy + 3) + '" text-anchor="end" fill="var(--sb-faint)" font-size="10">' + Math.round(max * (1 - g / 4)) + '</text>';
+    }
+    var tickEvery = d.labels.length > 10 ? 4 : 1;
+    d.labels.forEach(function (lab, i) {
+      if (i % tickEvery !== 0 && i !== d.labels.length - 1) return;
+      var x = padL + stepX * i;
+      svg += '<text x="' + x + '" y="' + (H - 7) + '" text-anchor="middle" fill="var(--sb-faint)" font-size="10">' + esc(lab) + '</text>';
+    });
+    d.series.forEach(function (line, si) {
+      var pts = line.map(function (v, i) { return [padL + stepX * i, padT + innerH * (1 - v / max)]; });
+      var path = pts.map(function (p, i) { return (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1); }).join(' ');
+      svg += '<path d="' + path + '" fill="none" stroke="' + colors[si % colors.length] + '" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" />';
+      pts.forEach(function (p) { svg += '<circle cx="' + p[0].toFixed(1) + '" cy="' + p[1].toFixed(1) + '" r="2" fill="' + colors[si % colors.length] + '" />'; });
+    });
+    svg += '</svg>';
+    var legend = d.series.map(function (_, i) {
+      return '<button type="button" aria-pressed="true" data-act="noop"><span class="sb-legend-swatch" style="color:' + colors[i % colors.length] + '"></span>' + esc(names[i] || ('series ' + (i + 1))) + '</button>';
+    }).join('');
+    return { svg: svg, legend: legend, data: d };
+  }
+
+  function renderUsage() {
+    var chart = renderChart();
+    var totals = chart.data.series.reduce(function (acc, line) {
+      line.forEach(function (v, i) { acc[i] = (acc[i] || 0) + v; });
+      return acc;
+    }, []);
+    var sum = chart.data.series.reduce(function (a, l) { return a + l.reduce(function (x, y) { return x + y; }, 0); }, 0);
+    var body = '';
+    if (state.usage.unreachable) {
+      body = '<div class="sb-callout" role="alert" style="margin-top:10px"><span class="sb-glyph" aria-hidden="true">!</span><div><strong>router 不可达</strong><div>source=router 时服务端返回 503（router_unreachable）。切回「全部」可继续查看本地数据。</div><div style="margin-top:6px"><button type="button" class="sb-btn sb-btn-sm" data-act="usage-unreachable" data-value="0">切回全部</button></div></div></div>';
+    } else {
+      body = '<div class="sb-usage-summary"><div class="sb-stat"><div class="sb-stat-num">' + Math.round(sum / 100) + '</div><div class="sb-stat-label">请求数</div></div>'
+        + '<div class="sb-stat"><div class="sb-stat-num">' + totals.slice(0, 7).reduce(function (a, b) { return a + b; }, 0).toLocaleString() + '</div><div class="sb-stat-label">输入 tokens</div></div>'
+        + '<div class="sb-stat"><div class="sb-stat-num">' + Math.round(sum * 0.32).toLocaleString() + '</div><div class="sb-stat-label">输出 tokens</div></div>'
+        + '<div class="sb-stat"><div class="sb-stat-num">' + Math.round(sum * 0.08).toLocaleString() + '</div><div class="sb-stat-label">缓存 tokens</div></div></div>'
+        + '<div class="sb-chart-wrap">' + chart.svg + '<div class="sb-legend">' + chart.legend + '</div></div>'
+        + '<p class="sb-note" style="margin-top:6px">' + (state.usage.gran === 'day' ? '近 7 天 · 桶边界按本机时区' : '今天 0–23 时 · 桶边界按本机时区') + ' · 来源：' + (state.usage.source === 'all' ? '全部（router + 本地）' : state.usage.source) + ' · 数值为设计稿示意，非真实计量；窄屏图表可横向滚动。</p>';
+    }
+    return '<div class="sb-page"><div class="sb-page-inner"><div class="sb-page-head"><div><h3 class="sb-page-title">用量</h3><p class="sb-page-sub">Token 消耗时序：按模型分列，天 / 小时两种粒度。</p></div></div>'
+      + '<div class="sb-usage-controls">'
+      + '<div class="sb-seg" role="group" aria-label="来源"><button type="button" data-act="usage-source" data-value="all" aria-pressed="' + (state.usage.source === 'all') + '">全部</button><button type="button" data-act="usage-source" data-value="router" aria-pressed="' + (state.usage.source === 'router') + '">router</button><button type="button" data-act="usage-source" data-value="local" aria-pressed="' + (state.usage.source === 'local') + '">本地</button></div>'
+      + '<div class="sb-seg" role="group" aria-label="粒度"><button type="button" data-act="usage-gran" data-value="day" aria-pressed="' + (state.usage.gran === 'day') + '">按天</button><button type="button" data-act="usage-gran" data-value="hour" aria-pressed="' + (state.usage.gran === 'hour') + '">按小时</button></div>'
+      + '<div class="sb-seg" role="group" aria-label="维度"><button type="button" data-act="usage-dim" data-value="total" aria-pressed="' + (state.usage.dim === 'total') + '">总量</button><button type="button" data-act="usage-dim" data-value="input" aria-pressed="' + (state.usage.dim === 'input') + '">输入</button><button type="button" data-act="usage-dim" data-value="output" aria-pressed="' + (state.usage.dim === 'output') + '">输出</button><button type="button" data-act="usage-dim" data-value="cache" aria-pressed="' + (state.usage.dim === 'cache') + '">缓存</button></div>'
+      + '</div>' + body + '</div></div>';
+  }
+
+  function renderAuth(mode) {
+    var setup = mode === 'setup';
+    return '<div class="sb-auth"><div class="sb-auth-card">'
+      + '<div class="sb-auth-head"><span class="sb-brand-mark" aria-hidden="true">&gt;</span><div><div class="sb-auth-title">' + (setup ? '首次启动' : '登录 sebas') + '</div><div class="sb-auth-sub">' + (setup ? '创建管理员账户（root）' : '输入账户凭据以进入控制台') + '</div></div></div>'
+      + '<form class="sb-auth-form" id="sb-auth-form" data-mode="' + mode + '" novalidate>'
+      + '<div class="sb-field"><label for="sb-auth-user">用户名</label><input id="sb-auth-user" name="username" autocomplete="username" placeholder="admin" /></div>'
+      + '<div class="sb-field"><label for="sb-auth-pass">密码</label><input id="sb-auth-pass" name="password" type="password" autocomplete="' + (setup ? 'new-password' : 'current-password') + '" placeholder="••••••••" /></div>'
+      + (setup ? '<div class="sb-field"><label for="sb-auth-pass2">确认密码</label><input id="sb-auth-pass2" name="password2" type="password" autocomplete="new-password" placeholder="••••••••" /></div>' : '')
+      + '<button type="submit" class="sb-btn sb-btn-primary">' + (setup ? '创建并进入' : '登录') + '</button>'
+      + '<div class="sb-auth-error" id="sb-auth-error" role="alert"></div>'
+      + '<div class="sb-auth-ok" id="sb-auth-ok" aria-live="polite"></div>'
+      + '</form></div></div>';
+  }
+
+  function renderStates() {
+    var cards = [
+      ['空态', '<div class="sb-empty" style="min-height:96px"><div class="sb-empty-mark" aria-hidden="true">▣</div><div class="sb-empty-title">未聚焦任何会话</div><div class="sb-empty-hint">从项目树选择会话或用 + 新建。</div></div>'],
+      ['加载中', '<div class="sb-skeleton"><div class="sb-sk-line w80"></div><div class="sb-sk-line w60"></div><div class="sb-sk-line w40"></div></div>'],
+      ['加载失败', '<div class="sb-callout"><span class="sb-glyph" aria-hidden="true">!</span><div><strong>加载失败</strong><div>503 · 核心不可达</div><button type="button" class="sb-btn sb-btn-sm" style="margin-top:5px" data-act="noop">重试</button></div></div>'],
+      ['断线锁定', '<div class="sb-banner sb-banner-fatal"><span class="sb-glyph" aria-hidden="true">!</span><span>核心不可达 · 工作区已锁定</span></div><div class="sb-lock" style="position:static;margin-top:6px;border-radius:6px;min-height:54px"><div class="sb-lock-text">恢复后自动解锁，无需刷新</div></div>'],
+      ['审批待办', '<div class="sb-card sb-approval"><div class="sb-approval-head"><span class="sb-glyph" style="color:var(--sb-signal)" aria-hidden="true">◆</span><span class="sb-approval-title">edit 等待允许</span></div><div class="sb-approval-actions"><button type="button" class="sb-btn sb-btn-primary sb-btn-sm" data-act="noop">单次允许</button><button type="button" class="sb-btn sb-btn-sm" data-act="noop">本会话允许</button><button type="button" class="sb-btn sb-btn-danger sb-btn-sm" data-act="noop">拒绝</button></div></div>'],
+      ['流式输出', '<div class="sb-entry-assistant"><div class="sb-entry-meta"><span class="sb-chip">claude</span>' + statusChip('working') + '</div><div class="sb-bubble sb-live">正在按条目追加增量文本，历史正文不重解析</div></div>'],
+      ['归档只读', '<div class="sb-banner sb-banner-info"><span class="sb-glyph" aria-hidden="true">▢</span><span>只读归档 · 可恢复</span></div>'],
+      ['viewer 只读', '<div class="sb-mini">可浏览转录；composer 让位为只读说明，不渲染发送与模型切换。</div>']
+    ];
+    return '<div class="sb-page"><div class="sb-page-inner"><div class="sb-page-head"><div><h3 class="sb-page-title">状态样本</h3><p class="sb-page-sub">空 / 载入 / 错误 / 断线 / 审批 / 流式 / 归档 / 只读。</p></div></div><div class="sb-states">'
+      + cards.map(function (c) { return '<div class="sb-state-card"><h4>' + esc(c[0]) + '</h4>' + c[1] + '</div>'; }).join('')
+      + '</div></div></div>';
+  }
+
+  function renderDemoActions() {
+    var html = '';
+    if (state.scenario === 'workbench') {
+      html += '<label class="sb-switch">工作台状态 <select class="sb-select" id="sb-demo-state"><option value="normal"' + (state.demo === 'normal' ? ' selected' : '') + '>正常（含待办/流式）</option><option value="empty"' + (state.demo === 'empty' ? ' selected' : '') + '>未聚焦空态</option><option value="loading"' + (state.demo === 'loading' ? ' selected' : '') + '>加载中</option><option value="error"' + (state.demo === 'error' ? ' selected' : '') + '>加载失败</option><option value="disconnected"' + (state.demo === 'disconnected' ? ' selected' : '') + '>断线锁定</option><option value="archive"' + (state.demo === 'archive' ? ' selected' : '') + '>归档只读</option></select></label>';
+      html += '<button type="button" class="sb-btn sb-btn-sm" data-act="stream-start"' + (state.streaming ? ' disabled' : '') + '>演示流式输出</button>';
+      html += '<button type="button" class="sb-btn sb-btn-sm" data-act="stream-stop"' + (!state.streaming ? ' disabled' : '') + '>停止</button>';
+      html += '<button type="button" class="sb-btn sb-btn-sm" data-act="conn" data-value="' + (state.connected ? '0' : '1') + '">' + (state.connected ? '模拟断线' : '恢复连接') + '</button>';
+      html += '<button type="button" class="sb-btn sb-btn-sm" data-act="reset">重置演示</button>';
+    } else if (state.scenario === 'usage') {
+      html += '<button type="button" class="sb-btn sb-btn-sm" data-act="usage-unreachable" data-value="' + (state.usage.unreachable ? '0' : '1') + '">' + (state.usage.unreachable ? '恢复正常' : '模拟 router 不可达') + '</button>';
+    } else if (state.scenario === 'settings') {
+      html += '<span class="sb-note">切换分区查看 RBAC：admin 全量、member 部分只读、viewer 无写控件。</span>';
+    } else if (state.scenario === 'sessions') {
+      html += '<button type="button" class="sb-btn sb-btn-sm" data-act="scenario" data-value="workbench">进入工作台</button>';
+    } else if (state.scenario === 'auth') {
+      html += '<span class="sb-note">提交空表单或错误凭据可查看就地校验。</span>';
+    } else if (state.scenario === 'setup') {
+      html += '<span class="sb-note">短密码、两次不一致、409 均有就地提示。</span>';
+    } else {
+      html += '<span class="sb-note">状态样本用于视觉评审，不连接后端。</span>';
+    }
+    demoEl.innerHTML = html;
+  }
+
+  function render() {
+    win.setAttribute('data-theme', effectiveTheme());
+    root.classList.toggle('sb-reduced', state.reduced);
+    win.className = 'sb-window bp-' + state.bp + (state.drawerOpen ? ' drawer-open' : '') + ((state.scenario === 'auth' || state.scenario === 'setup') ? ' auth-mode' : '');
+    var railEl = document.getElementById('sb-rail');
+    if (railEl) railEl.classList.toggle('sb-rail-collapsed', state.railCollapsed);
+    var prevScroller = stageEl.querySelector('.sb-stage-scroll');
+    var keepScroll = 0, wasNearBottom = true;
+    if (prevScroller) {
+      keepScroll = prevScroller.scrollTop;
+      wasNearBottom = prevScroller.scrollHeight - prevScroller.scrollTop - prevScroller.clientHeight < 90;
+    }
+    document.querySelectorAll('#sebas-blueprint [data-act="scenario"]').forEach(function (b) {
+      if (b.closest('.sb-chrome')) b.setAttribute('aria-pressed', String(b.getAttribute('data-value') === state.scenario));
+    });
+    document.querySelectorAll('#sebas-blueprint [data-act="theme"]').forEach(function (b) {
+      b.setAttribute('aria-pressed', String(b.getAttribute('data-value') === state.theme));
+    });
+    document.querySelectorAll('#sebas-blueprint [data-act="bp"]').forEach(function (b) {
+      b.setAttribute('aria-pressed', String(b.getAttribute('data-value') === state.bp));
+    });
+    renderTree();
+    renderTop();
+    renderDemoActions();
+    if (state.scenario === 'workbench') {
+      stageEl.innerHTML = renderWorkbench();
+    } else if (state.scenario === 'sessions') {
+      stageEl.innerHTML = renderSessions();
+    } else if (state.scenario === 'settings') {
+      stageEl.innerHTML = renderSettings();
+    } else if (state.scenario === 'usage') {
+      stageEl.innerHTML = renderUsage();
+    } else if (state.scenario === 'auth') {
+      stageEl.innerHTML = renderAuth('login');
+    } else if (state.scenario === 'setup') {
+      stageEl.innerHTML = renderAuth('setup');
+    } else {
+      stageEl.innerHTML = renderStates();
+    }
+    var scroller = stageEl.querySelector('.sb-stage-scroll');
+    if (scroller) {
+      var hasTodo = state.approvals.some(function (a) { return !a.decision; }) || state.queue.length > 0 || state.errorVisible;
+      if (!prevScroller && hasTodo && state.scenario === 'workbench') scroller.scrollTop = 0;
+      else if (state.streaming || (wasNearBottom && prevScroller)) scroller.scrollTop = scroller.scrollHeight;
+      else scroller.scrollTop = keepScroll;
+    }
+  }
+
+  function findSession(id) {
+    for (var i = 0; i < projects.length; i++) {
+      for (var j = 0; j < projects[i].sessions.length; j++) {
+        if (projects[i].sessions[j].id === id) return { project: projects[i], session: projects[i].sessions[j] };
+      }
+    }
+    return null;
+  }
+
+  function addTranscriptNotice(text) {
+    entries.push({ id: 'n' + Date.now(), kind: 'notice', text: text });
+  }
+
+  var streamTimer = null;
+  var streamFull = '正在补统一守卫的测试：401 走登录门、403 走拒绝提示、网络失败保留草稿。测试文件会按现有 colocated 约定放在 client.test.ts，用 fake fetch 覆盖三条路径，不改生产错误文案。';
+  function startStream() {
+    if (state.streaming) return;
+    state.streaming = true;
+    state.streamDone = false;
+    state.streamingText = '';
+    var i = 0;
+    render();
+    streamTimer = setInterval(function () {
+      i = Math.min(streamFull.length, i + 3);
+      state.streamingText = streamFull.slice(0, i);
+      var t = document.getElementById('sb-live-text');
+      if (t) t.textContent = state.streamingText;
+      var scroller = stageEl.querySelector('.sb-stage-scroll');
+      if (scroller && scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80) scroller.scrollTop = scroller.scrollHeight;
+      if (i >= streamFull.length) {
+        clearInterval(streamTimer); streamTimer = null;
+        state.streaming = false; state.streamDone = true;
+        var last = entries.filter(function (e) { return e.kind === 'assistant'; }).slice(-1)[0];
+        if (last) { last.text = streamFull; last.status = 'done'; }
+        render();
+      }
+    }, 90);
+  }
+  function stopStream() {
+    if (streamTimer) { clearInterval(streamTimer); streamTimer = null; }
+    state.streaming = false;
+    var last = entries.filter(function (e) { return e.kind === 'assistant'; }).slice(-1)[0];
+    if (last && last.status === 'working') { last.text = state.streamingText || last.text; last.status = 'done'; }
+    addTranscriptNotice('回合已停止 · 会话仍可继续；刷新后不复活在飞状态。');
+    render();
+  }
+
+  root.addEventListener('click', function (e) {
+    var el = e.target.closest('[data-act]');
+    if (!el) return;
+    var act = el.getAttribute('data-act');
+    var value = el.getAttribute('data-value');
+    var id = el.getAttribute('data-id');
+    if (act === 'scenario') { state.scenario = value; state.drawerOpen = false; render(); return; }
+    if (act === 'theme') { state.theme = value; render(); return; }
+    if (act === 'bp') { state.bp = value; render(); return; }
+    if (act === 'drawer-open') { state.drawerOpen = true; render(); var c = win.querySelector('[data-act="drawer-close"]'); if (c) c.focus(); return; }
+    if (act === 'drawer-close') { state.drawerOpen = false; render(); var m = win.querySelector('[data-act="drawer-open"]'); if (m) m.focus(); return; }
+    if (act === 'rail-collapse') { state.railCollapsed = !state.railCollapsed; var rail = document.getElementById('sb-rail'); if (rail) rail.classList.toggle('sb-rail-collapsed', state.railCollapsed); return; }
+    if (act === 'select-project') {
+      state.project = id; state.drawerOpen = false;
+      var p = projects.filter(function (x) { return x.id === id; })[0];
+      if (p && p.sessions.length) state.focused = p.sessions[0].id;
+      render(); return;
+    }
+    if (act === 'focus-session') {
+      var f = findSession(id);
+      if (f) { state.project = f.project.id; state.focused = id; }
+      state.scenario = 'workbench'; state.drawerOpen = false; render(); return;
+    }
+    if (act === 'toggle-history') { state.historyOpen = !state.historyOpen; renderTree(); return; }
+    if (act === 'approve' || act === 'deny' || act === 'allow-session') {
+      state.approvals.forEach(function (a) {
+        if (a.id === id && !a.decision) {
+          a.decision = act === 'approve' ? 'once' : act === 'allow-session' ? 'session' : 'deny';
+          entries.push({ id: 'd' + a.id, kind: 'notice', text: '审批 ' + a.id + '：' + (act === 'approve' ? '单次允许' : act === 'allow-session' ? '本会话允许（模式切为 Auto）' : '拒绝') + '。工具结果同步写入转录，阅读位置不变。' });
+        }
+      });
+      render(); return;
+    }
+    if (act === 'queue-up') {
+      var qi = state.queue.findIndex(function (q) { return q.id === id; });
+      if (qi > 0) { var tmp = state.queue[qi - 1]; state.queue[qi - 1] = state.queue[qi]; state.queue[qi] = tmp; }
+      render(); return;
+    }
+    if (act === 'queue-remove') { state.queue = state.queue.filter(function (q) { return q.id !== id; }); render(); return; }
+    if (act === 'dismiss-error') { state.errorVisible = false; render(); return; }
+    if (act === 'retry-error') { addTranscriptNotice('已重试本回合；迟到帧仍按游标隔离。'); state.errorVisible = false; render(); return; }
+    if (act === 'retry-load') { state.demo = 'normal'; render(); return; }
+    if (act === 'send') {
+      var input = document.getElementById('sb-composer-input');
+      var text = input ? input.value.trim() : '';
+      if (!text) { if (input) input.focus(); return; }
+      entries.push({ id: 'u' + Date.now(), kind: 'user', text: text });
+      state.composerText = '';
+      state.queue.push({ id: 'q' + Date.now(), text: text });
+      render(); return;
+    }
+    if (act === 'stop') { stopStream(); return; }
+    if (act === 'stream-start') { startStream(); return; }
+    if (act === 'stream-stop') { stopStream(); return; }
+    if (act === 'conn') { state.connected = value === '1'; if (!state.connected) { state.demo = 'disconnected'; } else if (state.demo === 'disconnected') { state.demo = 'normal'; } render(); return; }
+    if (act === 'settings-section') { state.settingsSection = value; render(); return; }
+    if (act === 'usage-source') { state.usage.source = value; state.usage.unreachable = value === 'router'; render(); return; }
+    if (act === 'usage-gran') { state.usage.gran = value; render(); return; }
+    if (act === 'usage-dim') { state.usage.dim = value; render(); return; }
+    if (act === 'usage-unreachable') { state.usage.unreachable = value === '1'; if (!state.usage.unreachable && state.usage.source === 'router') state.usage.source = 'all'; render(); return; }
+    if (act === 'reset') {
+      state.demo = 'normal'; state.connected = true; state.streaming = false; state.streamingText = '';
+      state.approvals.forEach(function (a) { a.decision = null; });
+      state.queue = [{ id: 'q1', text: '把错误的 status 文案补到 i18n 常量。' }, { id: 'q2', text: '检查 401 分支是否覆盖 WS 重连。' }];
+      entries = initialEntries.map(function (en) { return Object.assign({}, en); });
+      seamAfter = 'e5';
+      state.errorVisible = true; render(); return;
+    }
+  });
+
+  root.addEventListener('change', function (e) {
+    var t = e.target;
+    if (t.id === 'sb-reduced-toggle') { state.reduced = t.checked; render(); return; }
+    if (t.id === 'sb-role-select') { state.role = t.value; if (state.role !== 'root' && state.settingsSection === 'users') state.settingsSection = 'general'; render(); return; }
+    if (t.id === 'sb-demo-state') { state.demo = t.value; if (t.value === 'disconnected') state.connected = false; else state.connected = true; render(); return; }
+  });
+
+  root.addEventListener('input', function (e) {
+    if (e.target.id === 'sb-composer-input') state.composerText = e.target.value;
+  });
+
+  root.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && state.drawerOpen) { state.drawerOpen = false; render(); var m = win.querySelector('[data-act="drawer-open"]'); if (m) m.focus(); }
+    if ((e.key === 'Enter' || e.key === ' ') && e.target.getAttribute && e.target.getAttribute('data-act') === 'select-project') { e.preventDefault(); e.target.click(); }
+    if (e.key === 'Enter' && !e.shiftKey && e.target.id === 'sb-composer-input' && !e.isComposing) {
+      e.preventDefault();
+      var send = win.querySelector('[data-act="send"]');
+      if (send) send.click();
+    }
+  });
+
+  root.addEventListener('submit', function (e) {
+    if (e.target.id !== 'sb-auth-form') return;
+    e.preventDefault();
+    var form = e.target;
+    var isSetup = form.getAttribute('data-mode') === 'setup';
+    var user = form.querySelector('[name="username"]').value.trim();
+    var pass = form.querySelector('[name="password"]').value;
+    var pass2 = form.querySelector('[name="password2"]');
+    var err = document.getElementById('sb-auth-error');
+    var ok = document.getElementById('sb-auth-ok');
+    err.textContent = ''; ok.textContent = '';
+    if (!user) { err.textContent = '请输入用户名。'; return; }
+    if (!pass) { err.textContent = '请输入密码。'; return; }
+    if (isSetup && pass.length < 8) { err.textContent = '密码至少 8 位。'; return; }
+    if (isSetup && pass2 && pass !== pass2.value) { err.textContent = '两次输入的密码不一致。'; return; }
+    if (!isSetup && pass === 'wrong') { err.textContent = '用户名或密码不正确。'; return; }
+    ok.textContent = isSetup ? '已创建 root（设计稿演示），进入工作台。' : '已登录（设计稿演示）。';
+  });
+
+  var mq = window.matchMedia ? window.matchMedia('(prefers-color-scheme: light)') : null;
+  if (mq && mq.addEventListener) mq.addEventListener('change', function () { if (state.theme === 'system') render(); });
+
+  render();
+})();
+</script>
+</div>

@@ -1,12 +1,15 @@
 /**
- * Page objects: the sidebar project rail (`sebas-project-rail`), the
- * transcript (`sebas-transcript-view`), review cards
- * (`sebas-review-cards`), the sessions list (`sebas-sessions`), and the
- * settings modal (`sebas-settings-modal`).
+ * Page objects for the React + AntD workbench surfaces.
+ *
+ * The class names are retained from the Lit suite so every legacy journey keeps
+ * its import, but the selectors underneath are public React semantics: ARIA
+ * roles, accessible names, and stable `data-testid` hooks. No Lit/Web Awesome
+ * host tags or Shadow DOM internals are used.
  */
 import { expect, type Locator, type Page } from '@playwright/test'
+import { cjk, pickSelectOption } from './react'
 
-/** Sidebar project tree: projects, per-project sessions, Waiting/History groups (rail-declutter-unread: Inbox 分组已移除，行操作收敛为 … 菜单). */
+/** Sidebar project tree: projects, per-project sessions, History group. */
 export class ProjectRail {
   readonly page: Page
   readonly host: Locator
@@ -14,231 +17,208 @@ export class ProjectRail {
 
   constructor(page: Page) {
     this.page = page
-    this.host = page.locator('sebas-project-rail')
-    this.addButton = page.locator('sebas-project-rail .section-label .add-btn')
+    this.host = page.getByRole('complementary', { name: '项目导航' })
+    this.addButton = this.host.getByRole('button', { name: '添加项目' })
   }
 
-  /** A project row by displayed name. */
+  /** A project row by displayed name (accessible name is `name + count`). */
   projectRow(name: string): Locator {
-    return this.host.locator('.row', { hasText: name })
+    return this.host.getByRole('button', {
+      name: new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\d+$`),
+    })
   }
 
-  /** Expand a project row to reveal its sessions (204a901 起行本身即展开开关). */
+  /** Expand a project row to reveal its sessions (the row itself toggles). */
   async expandProject(name: string): Promise<void> {
-    await this.projectRow(name).click()
+    await this.ensureProjectExpanded(name)
   }
 
-  /**
-   * Expand a project row ONLY when collapsed — the row itself is the toggle,
-   * so a blind click on an already-expanded row would hide the sessions this
-   * journey needs to see. Waits for the row first and re-reads the attribute
-   * after each click: the expansion default can lag the rail's first sessions
-   * fetch (the focused key arrives asynchronously), so a single attribute read
-   * at mount races the render.
-   */
+  /** Expand a project row only when collapsed. */
   async ensureProjectExpanded(name: string): Promise<void> {
     const row = this.projectRow(name)
     await row.waitFor({ state: 'visible', timeout: 15_000 })
     for (let guard = 0; guard < 5; guard++) {
       if ((await row.getAttribute('aria-expanded')) !== 'false') return
       await row.click()
-      await this.page.waitForTimeout(250)
+      await this.page.waitForTimeout(150)
     }
   }
 
+  /** The History group toggle (name `历史 <count>`), with its expanded state. */
+  get historyToggle(): Locator {
+    return this.host.getByRole('button', { name: /^历史 \d+$/ })
+  }
 
-  /**
-   * Expand the History group (archived sessions; hidden when empty).
-   *
-   * （fix-webui-qa-round14 4.4）展开态随 toggle 持久（localStorage，reload
-   * 恢复）——盲点会话不再成立：组可能已经是展开的（同一测试前半段展开过、
-   * 或 reload 后从存储恢复），再点会把它**收起**。与 ensureProjectExpanded
-   * 同款幂等：先读 aria-expanded，收起才点，点后复核。
-   */
+  /** Expand the History group (archived sessions; hidden when empty). */
   async expandHistory(): Promise<void> {
-    const head = this.host.locator('[data-testid="history-group-head"]')
+    const head = this.historyToggle
     await head.waitFor({ state: 'visible', timeout: 15_000 })
-    for (let guard = 0; guard < 5; guard++) {
-      if ((await head.getAttribute('aria-expanded')) !== 'false') return
-      await head.locator('.chevron').click()
-      await this.page.waitForTimeout(250)
-    }
+    if ((await head.getAttribute('aria-expanded')) === 'true') return
+    await head.click()
+    await expect(head).toHaveAttribute('aria-expanded', 'true')
   }
 
-  /**
-   * Session row by its display label (the `session_id_short` text the rail
-   * renders; backend rows carry no chat_id).
-   */
-  sessionItem(label: string): Locator {
-    return this.host.locator('li.session-item', { hasText: label }).first()
+  /** Open a project row's overflow menu (accessible name 项目操作 <name>). */
+  async openProjectMenu(name: string): Promise<void> {
+    await this.host.getByRole('button', { name: `项目操作 ${name}` }).click()
+    // AntD keeps previously opened dropdowns mounted while the new one
+    // animates in; only the visible menu is the active surface.
+    await expect(this.page.getByRole('menu').filter({ visible: true }).first()).toBeVisible()
   }
 
-  /**
-   * Open a session row's overflow (…) menu (rail-declutter-unread 3.2).
-   * The trigger is hover-revealed, so hover first (Playwright treats
-   * opacity-0 as hidden), then click it and wait for the items.
-   */
-  async openSessionMenu(rowLabel: string): Promise<Locator> {
-    const row = this.host
-      .locator('li.session-item:not(.archived)', { hasText: rowLabel })
+  /** Click one open overflow-menu item by its visible label. */
+  async clickMenuItem(name: string): Promise<void> {
+    await this.page
+      .getByRole('menuitem', { name, exact: true })
+      .filter({ visible: true })
       .first()
-    await row.hover()
-    await row.locator('wa-dropdown button[title="会话操作"]').click()
-    const menu = row.locator('wa-dropdown-item[value="archive"]')
+      .click()
+  }
+
+  /** Session row button by its displayed label. */
+  sessionItem(label: string): Locator {
+    return this.host
+      .getByRole('button', { name: new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`) })
+      .first()
+  }
+
+  /** The session row's overflow menu trigger (…). */
+  sessionMenu(label: string): Locator {
+    return this.host.getByRole('button', { name: `会话操作 ${label}` })
+  }
+
+  /** Open a session row's overflow menu and return the archive item. */
+  async openSessionMenu(rowLabel: string): Promise<Locator> {
+    await this.sessionMenu(rowLabel).click()
+    const menu = this.page.getByRole('menuitem', { name: '归档会话' })
     await expect(menu).toBeVisible()
     return menu
   }
 
-  /**
-   * The archive confirm dialog（workbench-live-conversation-flow 4.2：归档
-   * 即关闭、是会话唯一的生命周期出口——确认框点名将被丢弃的待执行条数）。
-   * Hosted by the rail; the host reads hidden in the top layer, assert the
-   * rendered contents.
-   */
   archiveDialog(): Locator {
-    return this.page.locator('sebas-project-rail wa-dialog[label="归档会话"]')
+    return this.page.getByRole('dialog', { name: '归档会话' })
   }
 
-  /**
-   * Drive a session row's … menu to the archive confirm dialog（归档一律
-   * 内联确认——「将丢弃 N 条待执行」的告知不依赖会话状态）. Returns the
-   * open dialog so callers can assert the naming before confirming.
-   */
   async openArchiveDialog(rowLabel: string): Promise<Locator> {
-    await this.openSessionMenu(rowLabel)
-    await this.host
-      .locator('li.session-item:not(.archived)', { hasText: rowLabel })
-      .first()
-      .locator('wa-dropdown-item[value="archive"]')
-      .click()
+    await this.sessionMenu(rowLabel).click()
+    await this.page.getByRole('menuitem', { name: '归档会话' }).click()
     const dialog = this.archiveDialog()
-    await expect(dialog.locator('wa-button').filter({ hasText: '归档' })).toBeVisible()
+    await expect(dialog).toBeVisible()
     return dialog
   }
 
-  /** Confirm the archive dialog (the danger footer button). */
   async confirmArchive(): Promise<void> {
-    await this.archiveDialog()
-      .locator('wa-button')
-      .filter({ hasText: '归档' })
-      .click()
+    await this.archiveDialog().getByRole('button', { name: cjk('归档') }).click()
   }
 
-  /**
-   * Archive a session row (by its displayed label — since
-   * rail-declutter-unread the first prompt's preview): … menu → 归档 →
-   * confirm the inline dialog.
-   */
   async archiveSession(rowLabel: string): Promise<void> {
     await this.openArchiveDialog(rowLabel)
     await this.confirmArchive()
   }
 
-  /**
-   * The add-project dialog (wa-dialog with the folder picker + manual
-   * path input). Web Awesome renders it in the top layer when open.
-   */
+  /** The add-project dialog (folder picker + manual path). */
   addDialog(): Locator {
-    return this.page.locator('sebas-project-rail wa-dialog[label="添加项目"]')
+    return this.page.getByRole('dialog', { name: '选择项目目录' })
   }
 
   async openAddDialog(): Promise<void> {
     await this.addButton.click()
-    // wa-dialog uses a top-layer popover: the <wa-dialog> host reads hidden,
-    // but the rendered contents (heading/tree/input) are visible. Assert on
-    // the visible heading instead of the host.
-    await expect(
-      this.addDialog().locator('h2, [role="heading"]', { hasText: '添加项目' }).first(),
-    ).toBeVisible()
+    await expect(this.addDialog()).toBeVisible()
   }
 
-  /**
-   * The creation dialog（workbench-interaction-polish D2：项目行「+」打开，
-   * agent 必选 + 两级模型 + mode）——hosted by the rail; Web Awesome renders
-   * it in the top layer when open.
-   */
+  /** The creation dialog (rail project menu → 新建会话). */
   newSessionDialog(): Locator {
-    return this.page.locator('sebas-new-session-dialog [data-testid="new-session-dialog"]')
+    return this.page.getByRole('dialog', { name: '新建会话' })
   }
 
-  /** The `+` trigger on a project row (hover-revealed like the … menu). */
   async openNewSessionDialog(projectName: string): Promise<void> {
-    const row = this.projectRow(projectName)
-    await row.hover()
-    await row.locator('button[aria-label^="在 "]').click()
-    await expect(
-      this.newSessionDialog().locator('h2, [role="heading"]').first(),
-    ).toBeVisible()
+    await this.host.getByRole('button', { name: `项目操作 ${projectName}` }).click()
+    await this.page.getByRole('menuitem', { name: '新建会话' }).click()
+    await expect(this.newSessionDialog()).toBeVisible()
   }
 
-  /** Pick an agent in the dialog (wa-select value + standard change event). */
   async pickDialogAgent(agent: string): Promise<void> {
-    await this.newSessionDialog()
-      .locator('[data-testid="dialog-agent-select"]')
-      .evaluate((el, v) => {
-        ;(el as unknown as { value: string }).value = v as string
-        el.dispatchEvent(new Event('change', { bubbles: true }))
-      }, agent)
+    await pickSelectOption(
+      this.page,
+      this.newSessionDialog().getByRole('combobox', { name: 'Agent' }),
+      agent,
+    )
   }
 
-  /** Pick the provider level in the dialog's two-level model selector. */
+  /** Provider level of the combined model selector (selects its first pair). */
   async pickDialogProvider(provider: string): Promise<void> {
-    await this.newSessionDialog()
-      .locator('[data-testid="dialog-provider-select"]')
-      .evaluate((el, v) => {
-        ;(el as unknown as { value: string }).value = v as string
-        el.dispatchEvent(new Event('change', { bubbles: true }))
-      }, provider)
+    await pickSelectOption(
+      this.page,
+      this.newSessionDialog().getByRole('combobox', { name: '模型' }),
+      provider,
+    )
   }
 
-  /** Pick the model level in the dialog's two-level model selector. */
   async pickDialogModel(model: string): Promise<void> {
-    await this.newSessionDialog()
-      .locator('[data-testid="dialog-model-select"]')
-      .evaluate((el, v) => {
-        ;(el as unknown as { value: string }).value = v as string
-        el.dispatchEvent(new Event('change', { bubbles: true }))
-      }, model)
+    await pickSelectOption(
+      this.page,
+      this.newSessionDialog().getByRole('combobox', { name: '模型' }),
+      model,
+    )
   }
 
-  /** Pick a permission mode ('' = agent default = omit the field). */
   async pickDialogMode(mode: string): Promise<void> {
-    await this.newSessionDialog()
-      .locator('[data-testid="dialog-mode-select"]')
-      .evaluate((el, v) => {
-        ;(el as unknown as { value: string }).value = v as string
-        el.dispatchEvent(new Event('change', { bubbles: true }))
-      }, mode)
+    await pickSelectOption(
+      this.page,
+      this.newSessionDialog().getByRole('combobox', { name: '权限模式' }),
+      mode,
+    )
   }
 
-  /** Confirm the creation dialog. */
   async confirmNewSessionDialog(): Promise<void> {
-    await this.newSessionDialog().locator('[data-testid="dialog-confirm"]').click()
+    const dialog = this.newSessionDialog()
+    // React does not preselect an agent (the Lit dialog did). Journeys that
+    // only care about "create the placeholder" keep their old intent by
+    // filling the default agent; journeys that exercise agent choice pick it
+    // explicitly first. AntD 6 renders the selected label as text inside
+    // `.ant-select-content` (the inner search input stays empty), so probe
+    // that instead of inputValue().
+    const agent = dialog.getByRole('combobox', { name: 'Agent' })
+    const selected = await agent.evaluate((el) => {
+      const root = el.closest('.ant-select')
+      const content = root?.querySelector('.ant-select-content')
+      // AntD 6 keeps the placeholder INSIDE `.ant-select-content`; treat an
+      // unselected select as empty instead of reading the placeholder text.
+      if (!content || content.querySelector('.ant-select-placeholder')) return ''
+      return (content.textContent ?? '').trim()
+    })
+    if (selected === '') {
+      await this.pickDialogAgent('claude')
+    }
+    const create = dialog.getByRole('button', { name: cjk('创建') })
+    // Picking an agent kicks off the slot/catalog load; AntD's loading button
+    // swallows clicks for that window (same failure mode as the add-folder
+    // submit). Settle before submitting.
+    await expect(create).not.toHaveClass(/ant-btn-loading/)
+    await expect(create).toBeEnabled()
+    await create.click()
   }
 
-  /** Cancel the creation dialog (nothing is created). */
   async cancelNewSessionDialog(): Promise<void> {
-    await this.newSessionDialog().locator('[data-testid="dialog-cancel"]').click()
+    await this.newSessionDialog().getByRole('button', { name: cjk('取消') }).click()
   }
 
-  /**
-   * Add a project by typing its absolute path (the dialog's manual path
-   * input — the same dialog that hosts the folder picker). The path field's
-   * `@input` handler gates the Add button, so we type character-by-character
-   * (`.fill` can bypass wa-input's input event in some versions).
-   */
+  /** Add a project by typing its absolute path and using it. */
   async addProjectByPath(dir: string): Promise<void> {
-    const input = this.addDialog().locator('wa-input[label="项目路径"] input')
-    await input.click()
-    await input.pressSequentially(dir)
-    await this.addDialog()
-      .locator('wa-button')
-      .filter({ hasText: '添加项目' })
-      .click()
+    const dialog = this.addDialog()
+    await dialog.getByRole('textbox', { name: '项目路径' }).fill(dir)
+    const use = dialog.getByRole('button', { name: '使用此路径' })
+    // The path field runs a debounced as-you-type precheck and the submit
+    // carries AntD's loading state for its whole window; a loading AntD
+    // button swallows clicks without reporting anything. Wait for the check
+    // to settle (and the field's state to commit) before submitting.
+    await expect(use).not.toHaveClass(/ant-btn-loading/)
+    await expect(use).toBeEnabled()
+    await use.click()
   }
 }
 
-/** Transcript view: bubbles, thinking folds, the unseen seam. */
+/** Transcript view: units (bubbles), folds, the unseen seam. */
 export class Transcript {
   readonly page: Page
   readonly host: Locator
@@ -247,54 +227,52 @@ export class Transcript {
 
   constructor(page: Page) {
     this.page = page
-    this.host = page.locator('sebas-transcript-view')
-    this.scroll = page.locator('sebas-transcript-view .scroll')
-    this.seam = page.locator('sebas-transcript-view .seam')
+    this.host = page.getByTestId('react-transcript')
+    this.scroll = page.getByTestId('conversation-pane')
+    this.seam = this.host.getByRole('separator', { name: /未读分界/ })
   }
 
-  /** Turn blocks (assistant + user bubbles) as a countable locator. */
   turns(): Locator {
-    return this.page.locator('sebas-transcript-view .turn-block')
+    return this.host.locator('[data-unit-key]')
   }
 
   turnWith(text: string): Locator {
-    return this.page.locator('sebas-transcript-view .turn-block', { hasText: text })
+    return this.turns().filter({ hasText: text })
   }
 }
 
-/** Review cards for gated tool calls. */
+/** Approval cards for gated tool calls. */
 export class ReviewCards {
   readonly page: Page
   readonly region: Locator
 
   constructor(page: Page) {
     this.page = page
-    this.region = page.locator('sebas-review-cards .review-cards[aria-label="权限审批"]')
+    this.region = page.getByLabel('待审批工具调用')
   }
 
-  /** Nth pending card. */
   card(index = 0): Locator {
-    return this.page.locator('sebas-review-cards section.review-card').nth(index)
+    return this.region.getByRole('alertdialog').nth(index)
   }
 
   all(): Locator {
-    return this.page.locator('sebas-review-cards section.review-card')
+    return this.region.getByRole('alertdialog')
   }
 
   allowOnce(index = 0): Locator {
-    return this.card(index).locator('wa-button.allow-once')
+    return this.card(index).getByRole('button', { name: /允\s*许\s*一\s*次/ })
   }
 
   allowSession(index = 0): Locator {
-    return this.card(index).locator('wa-button.allow-session')
+    return this.card(index).getByRole('button', { name: /本\s*会\s*话\s*允\s*许/ })
   }
 
   deny(index = 0): Locator {
-    return this.card(index).locator('wa-button.deny')
+    return this.card(index).getByRole('button', { name: /拒\s*绝/ })
   }
 }
 
-/** Sessions list page (`/sessions`): create form + card grid + close dialog. */
+/** Sessions list page (`/sessions`). */
 export class SessionsPage {
   readonly page: Page
   readonly host: Locator
@@ -306,37 +284,32 @@ export class SessionsPage {
 
   constructor(page: Page) {
     this.page = page
-    this.host = page.locator('sebas-sessions')
-    this.pageTitle = page.locator('sebas-sessions .page-title')
-    this.promptInput = page.locator('sebas-sessions wa-input[aria-label="新会话任务描述"] input')
-    this.newSessionButton = page
-      .locator('sebas-sessions form.composer wa-button')
-      .filter({ hasText: '新建会话' })
-    this.cards = page.locator('sebas-sessions article.scard')
-    this.closeDialog = page.locator('sebas-sessions wa-dialog[label="关闭会话"]')
+    this.host = page.getByTestId('sessions-page')
+    this.pageTitle = this.host.getByRole('heading', { level: 3, name: '会话总览' })
+    this.promptInput = this.page.getByRole('dialog', { name: '新建会话' }).getByRole('textbox', {
+      name: '任务描述',
+    })
+    this.newSessionButton = this.host.getByRole('button', { name: cjk('新建会话') })
+    this.cards = this.host.locator('.ant-card')
+    this.closeDialog = this.page.getByRole('dialog', { name: '归档会话' })
   }
 
-  /** The card whose detail link targets the given encoded key. */
-  cardFor(encodedKey: string): Locator {
-    return this.cards.filter({ has: this.page.locator(`a.chat[href="/sessions/${encodedKey}"]`) })
+  /**
+   * The card for a session. The React card does not expose the encoded key, so
+   * callers that only know the key must pass the display label instead.
+   */
+  cardFor(label: string): Locator {
+    return this.cards.filter({ hasText: label })
   }
 
-  async closeCard(encodedKey: string): Promise<void> {
-    await this.cardFor(encodedKey)
-      .locator('wa-button[aria-label^="关闭会话"]')
-      .click()
-    // wa-dialog host is popover-hidden; assert the visible dialog copy.
-    await expect(
-      this.closeDialog.locator('h2, [role="heading"]', { hasText: '关闭会话' }).first(),
-    ).toBeVisible()
-    await this.closeDialog
-      .locator('wa-button')
-      .filter({ hasText: '关闭会话' })
-      .click()
+  async closeCard(label: string): Promise<void> {
+    await this.cardFor(label).getByRole('button', { name: cjk('归档') }).click()
+    await expect(this.closeDialog).toBeVisible()
+    await this.closeDialog.getByRole('button', { name: cjk('归档') }).click()
   }
 }
 
-/** Settings modal (opens from the composer's `settings →`). */
+/** Settings workspace (opens from the rail footer). */
 export class SettingsModal {
   readonly page: Page
   readonly host: Locator
@@ -345,29 +318,16 @@ export class SettingsModal {
 
   constructor(page: Page) {
     this.page = page
-    this.host = page.locator('sebas-settings-modal')
-    this.panel = page.locator('sebas-settings-modal .panel[role="dialog"][aria-label="设置"]')
-    this.closeButton = page.locator('sebas-settings-modal button.close[aria-label="关闭设置"]')
+    this.host = page.getByRole('region', { name: '设置' })
+    this.panel = this.host
+    this.closeButton = this.host.getByRole('button', { name: '关闭设置' })
   }
 
   async openViaSidebar(): Promise<void> {
-    // workbench-interaction-polish 4.1：composer 不再有 settings 入口——
-    // Settings 归 app shell 侧栏底部（pinned footer）。
-    await this.page
-      .locator('sebas-app .sidebar-footer button[aria-label="打开设置"]')
-      .click()
+    await this.page.getByRole('complementary', { name: '项目导航' }).getByRole('button', { name: /设\s*置/ }).click()
     await expect(this.panel).toBeVisible()
   }
 
-  /**
-   * Switch to a settings section by its nav label; waits for load to settle.
-   * Order is the spec (settings-modal SECTIONS): Generic → Appearance →
-   *〔分隔线〕Services · Users(仅 root) → Models · Agents · Skills →
-   *〔压底分隔线〕Env Vars · About. The former Settings overview and
-   * standalone Env sections are gone; split-env-vars-settings-section 迁出的
-   * Env 表住底部只读组「Env Vars」；Agents 为 add-agent-settings-and-session-
-   * titles 5.1 新增（Models 之后）。
-   */
   async openSection(
     label:
       | '通用'
@@ -381,10 +341,9 @@ export class SettingsModal {
       | '关于'
       | '环境变量',
   ): Promise<void> {
-    await this.panel.locator('.nav-item', { hasText: label }).click()
-    await expect(
-      this.panel.locator('.nav-item', { hasText: label }),
-    ).toHaveAttribute('aria-current', 'true')
+    const button = this.panel.getByRole('button', { name: label, exact: true })
+    await button.click()
+    await expect(button).toHaveAttribute('aria-current', 'page')
   }
 
   async close(): Promise<void> {

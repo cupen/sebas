@@ -89,7 +89,7 @@ test.describe('提交控件状态机', () => {
     page,
   }) => {
     const workbench = new Workbench(page)
-    const railNote = page.locator('sebas-pending-stack [data-testid="pending-stack"]')
+    const railNote = workbench.composer.getByLabel('待执行提交')
 
     await resetState(page.request)
     const { id: projectId } = await ensureSceneProject(page.request)

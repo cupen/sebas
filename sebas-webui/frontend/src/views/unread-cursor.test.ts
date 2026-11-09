@@ -13,7 +13,15 @@
  */
 
 import { beforeEach, describe, expect, it } from 'vitest'
-import { readAnchorCount, unreadCount, writeFocusAnchor, writeSeen } from './unread-cursor.js'
+import {
+  armOpeningSeam,
+  clearOpeningSeam,
+  peekOpeningSeam,
+  readAnchorCount,
+  unreadCount,
+  writeFocusAnchor,
+  writeSeen,
+} from './unread-cursor.js'
 
 const store = new Map<string, string>()
 beforeEach(() => store.clear())
@@ -120,5 +128,22 @@ describe('unread cursor (single segment-count anchor)', () => {
     expect(() => writeFocusAnchor('oc_x', 1)).not.toThrow()
     expect(() => writeSeen('oc_x', 5)).not.toThrow()
     Object.defineProperty(globalThis, 'localStorage', { value: ls, configurable: true })
+  })
+})
+
+// ── fix-webui-qa-round2 2.1：开卷边界登记（原 transcript-view.test.ts） ──────
+
+describe('opening-seam registry (round2 2.1)', () => {
+  it('arm/peek/clear round-trips per session key', () => {
+    armOpeningSeam('k1', 3)
+    expect(peekOpeningSeam('k1')).toBe(3)
+    armOpeningSeam('k2', null)
+    expect(peekOpeningSeam('k2')).toBeNull()
+    expect(peekOpeningSeam('k3')).toBeUndefined()
+    // 同会话重复聚焦覆盖登记。
+    armOpeningSeam('k1', 5)
+    expect(peekOpeningSeam('k1')).toBe(5)
+    clearOpeningSeam('k1')
+    expect(peekOpeningSeam('k1')).toBeUndefined()
   })
 })

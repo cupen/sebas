@@ -179,11 +179,9 @@ test.describe('agent 对话覆盖', () => {
       const { name: projectName } = await ensureSceneProject(request)
       const rail = new ProjectRail(page)
       await rail.ensureProjectExpanded(projectName)
-      const failedRow = page
-        .locator('sebas-project-rail li.session-item')
-        .filter({ has: page.locator('.session-dot[data-status="failed"]') })
-      await expect(failedRow).toHaveCount(1)
-      await expect(failedRow.locator('.session-name')).toHaveText('未命名会话')
+      const failedRow = rail.host.locator('button').filter({ hasText: '失败' }).first()
+      await expect(failedRow).toBeVisible({ timeout: 10_000 })
+      await expect(failedRow).toContainText('未命名会话')
 
       expect(collector.clean()).toEqual([])
     })

@@ -52,7 +52,7 @@ test.describe('agent 对话覆盖', () => {
       const detail = new FocusedSession(page)
       // 既有选择器（task 2.4）：不新增测试专用 DOM 钩子。
       const assistantTurns = page.locator(
-        'sebas-dashboard sebas-transcript-view .turn-block.is-assistant',
+        ':is([data-testid="workbench-session"],[data-testid="workbench-home"]) [data-testid="react-transcript"] [data-unit-key]:has-text("agent")',
       )
 
       // D4：0-turn placeholder（prompt 缺省 = null，不 spawn 子进程），绑定
@@ -91,13 +91,18 @@ test.describe('agent 对话覆盖', () => {
               .map((t) => t.trim())
               .filter((t) => t.length > 0)
             if (texts.length > 0 && slug !== undefined && RUNNING.includes(slug)) {
-              earlyText = texts.join(' ')
               earlySlug = slug
               // 与文本同一时刻采样：回合进行中，末尾正文以 live-tail 纯文本形态
               // 上屏（3.4 的「中途形态」半边），并留下此刻的正文用于拼接对照。
-              const liveBody = assistantTurns.first().locator('.body.text-live')
+              const liveBody = assistantTurns.first().locator('pre')
               earlyLiveTail = (await liveBody.count()) > 0
-              if (earlyLiveTail) earlyBodyText = (await liveBody.first().textContent()) ?? ''
+              if (earlyLiveTail) {
+                earlyBodyText = (await liveBody.first().textContent()) ?? ''
+                // Body-only sample (the unit text also carries the role label).
+                earlyText = earlyBodyText
+              } else {
+                earlyText = texts.join(' ')
+              }
               return 'incremental-while-running'
             }
             if (slug !== undefined && TERMINAL.includes(slug)) return `terminal:${slug}`
@@ -118,7 +123,9 @@ test.describe('agent 对话覆盖', () => {
       // status_slug 仍读到 working。要求 early 是 final 的真前缀且更短，
       // 才能证明"部分正文在回合进行中已上屏"。
       const norm = (s: string) => s.replace(/\s+/g, ' ').trim()
-      const finalText = norm((await assistantTurns.first().textContent()) ?? '')
+      const finalText = norm(
+        (await assistantTurns.first().locator('p, pre').allTextContents()).join(' '),
+      )
       const earlyNorm = norm(earlyText)
       expect(earlyNorm.length).toBeGreaterThan(0)
       expect(finalText.startsWith(earlyNorm)).toBe(true)
@@ -134,14 +141,16 @@ test.describe('agent 对话覆盖', () => {
 
       // 结算后：同一正文切回 markdown 渲染——live-tail 形态从 DOM 消失，正文落进
       // markdown 块（renderMarkdown 产出 <p>）。
-      await expect(assistantTurns.locator('.body.text-live')).toHaveCount(0)
-      const settledBody = assistantTurns.first().locator('.body').last()
+      await expect(assistantTurns.locator('pre')).toHaveCount(0)
+      const settledBody = assistantTurns.first().locator('article').last()
       await expect(settledBody.locator('p').first()).toBeVisible()
 
       // 拼接一致、无重复条目：结算正文恰为三段 drip 的拼接，且以流式期间采到的
       // live-tail 正文为前缀（中途看到的那部分一字不改地接上后两段），每段在整条
       // 转写里只出现一次（不重复、不丢段）。
-      const settledText = norm((await settledBody.textContent()) ?? '')
+      const settledText = norm(
+        (await settledBody.locator('p, pre').allTextContents()).join(' '),
+      )
       expect(settledText).toBe('drip0 drip1 drip2')
       const earlyBodyNorm = norm(earlyBodyText)
       expect(earlyBodyNorm.length).toBeGreaterThan(0)
@@ -150,16 +159,16 @@ test.describe('agent 对话覆盖', () => {
       // 结构上的「无重复条目」：一回合只有一个 assistant 气泡、一个正文块，
       // 且三段 drip 在转写里各只出现一次（不重复、不丢段）。取文本用**穿透
       // shadow root 的 locator**（`allTextContents`），不能取宿主元素的
-      // `textContent`/`innerText`——`sebas-transcript-view` 是 shadow DOM 宿主，
+      // `textContent`/`innerText`——`[data-testid="react-transcript"]` 是 shadow DOM 宿主，
       // 宿主的 textContent 不含影子树内容，会得到假阴性的 0。
       await expect(assistantTurns).toHaveCount(1)
       await expect(
-        assistantTurns.first().locator('.body:not(.fold-body):not(.item-body)'),
+        assistantTurns.first().locator('article'),
       ).toHaveCount(1)
       const transcriptText = norm(
         (
           await page
-            .locator('sebas-dashboard sebas-transcript-view .turn-block')
+            .locator(':is([data-testid="workbench-session"],[data-testid="workbench-home"]) [data-testid="react-transcript"] [data-unit-key]')
             .allTextContents()
         ).join(' '),
       )

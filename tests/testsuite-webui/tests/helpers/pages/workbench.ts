@@ -1,11 +1,22 @@
 /**
- * Page objects: the app shell (nav/outlet/sidebar) and the workbench main
- * area (project header, turn-stream, composer). One object per custom
- * element, selectors mirroring the frontend's class/aria hooks.
+ * Page objects for the React workbench shell and focused conversation.
+ *
+ * Public class/property names are retained from the Lit suite; every locator is
+ * React/AntD public semantics (roles, accessible names, stable testids).
  */
 import { expect, type Locator, type Page } from '@playwright/test'
 
-/** The app shell: auth state, sidebar footer, outlet routing. */
+const STATUS_TEXT: Record<string, string> = {
+  starting: '启动中',
+  queued: '排队中',
+  working: '运行中',
+  waiting: '等待你处理',
+  done: '完成',
+  failed: '失败',
+  dormant: '休眠',
+}
+
+/** The app shell. */
 export class AppShell {
   readonly page: Page
   readonly app: Locator
@@ -14,34 +25,24 @@ export class AppShell {
 
   constructor(page: Page) {
     this.page = page
-    this.app = page.locator('sebas-app')
-    this.brand = page.locator('sebas-app nav .brand .name')
-    this.outlet = page.locator('sebas-app main .outlet')
+    this.app = page.getByTestId('react-shell')
+    this.brand = this.app.getByRole('button', { name: /sebas/ }).first()
+    this.outlet = this.app.locator('main')
+  }
+
+  /** Main navigation (rail labels: 工作台 / 会话总览 / 用量 / 设置). */
+  get nav(): Locator {
+    return this.app.getByRole('navigation', { name: '主导航' })
   }
 
   async logout(username: string): Promise<void> {
-    await page$logout(this.page, username)
+    await this.app.getByRole('button', { name: '用户菜单' }).click()
+    await expect(this.page.getByRole('menuitem', { name: /退出登录/ })).toContainText(username)
+    await this.page.getByRole('menuitem', { name: /退出登录/ }).click()
   }
 }
 
-/** Sidebar footer logout button: `退出 (${username} · role)`——role 段
- * （gate-agent-directory-writes 2.2）在 me 未带回角色的过渡期缺省，匹配
- * 兼容两形。 */
-async function page$logout(page: Page, username: string): Promise<void> {
-  await page
-    .locator('sebas-app .sidebar-footer .settings-btn', {
-      hasText: new RegExp(`退出 \\(${username}(?: · [a-z]+)?\\)`),
-    })
-    .click()
-}
-
-/**
- * The workbench main area (`sebas-dashboard`): project header, turn-stream
- * stage (empty state / focused transcript), and the composer. The composer
- * is pure follow-up mode（workbench-interaction-polish：创建唯一入口是 rail
- * 的创建对话框，composer 无任何创建/设置控件）— it renders only when a
- * session is focused; with no focus it shows the rail-creation hint.
- */
+/** The workbench main area (home or focused session). */
 export class Workbench {
   readonly page: Page
   readonly host: Locator
@@ -59,50 +60,33 @@ export class Workbench {
 
   constructor(page: Page) {
     this.page = page
-    this.host = page.locator('sebas-dashboard')
-    this.projectHeader = page.locator('sebas-dashboard .project-header')
-    this.noProjectSelected = page.locator('sebas-dashboard .project-header .path.muted')
-    this.emptyStream = page.locator('sebas-dashboard .empty-stream')
-    this.composer = page.locator('sebas-workbench-composer')
-    // Web Awesome wa-textarea wraps a native <textarea> in its open shadow
-    // root — the piercing CSS engine reaches it directly.
-    this.composerTextarea = page.locator('sebas-workbench-composer wa-textarea textarea')
-    this.sendButton = page.locator('sebas-workbench-composer .send-button')
-    // D4 状态机控件（disabled | send | sending | stop | queued）。
-    this.submitControl = page.locator('sebas-workbench-composer [data-testid="submit-control"]')
-    // D3 模型芯片与两级分组菜单。
-    this.modelChip = page.locator('sebas-workbench-composer [data-testid="model-chip"]')
-    this.modelMenu = page.locator('sebas-workbench-composer [data-testid="model-menu"]')
-    // 无聚焦会话时的显式提示（指向 rail 创建入口）。
-    this.noFocusHint = page.locator('sebas-workbench-composer [data-testid="composer-no-focus"]')
-    this.reachabilityWarning = page.locator(
-      'sebas-workbench-composer .callout-warning[role="status"]',
+    this.host = page.locator(
+      ':is([data-testid="workbench-session"], [data-testid="workbench-home"])',
     )
+    this.projectHeader = page.getByRole('banner')
+    this.noProjectSelected = this.host.getByText('从左侧选择项目与会话。')
+    this.emptyStream = page.getByTestId('workbench-home').getByText('还没有聚焦会话')
+    this.composer = page.getByTestId('composer')
+    this.composerTextarea = this.composer.getByRole('textbox', { name: '输入消息' })
+    this.sendButton = this.composer.locator('button[data-state]')
+    this.submitControl = this.composer.locator('button[data-state]')
+    this.modelChip = this.composer.getByRole('combobox', { name: '会话模型' })
+    this.modelMenu = this.page.locator('.ant-select-dropdown:not(.ant-select-dropdown-hidden)')
+    this.noFocusHint = this.emptyStream
+    this.reachabilityWarning = this.composer.getByText(/核心不可达/)
   }
 
-  /**
-   * Type a prompt and submit with Enter (the composer's keyboard path).
-   * Follow-up mode only — creation lives in the rail's creation dialog.
-   */
   async sendPrompt(text: string): Promise<void> {
     await this.composerTextarea.fill(text)
     await this.composerTextarea.press('Enter')
   }
 
-  /** The submit control's current state attribute (design D4). */
   submitState(): Promise<string | null> {
     return this.submitControl.getAttribute('data-state')
   }
 }
 
-/**
- * The focused session ON THE WORKBENCH (workbench-conversation-view 3.3/3.4:
- * the retired `sebas-session-detail` view is gone - `/sessions/:key` deep
- * links and rail switches render the same `sebas-dashboard` focused). One
- * object for the session head（display-only since workbench-live-conversation-
- * flow 4.2：badge/chat id/mode 标签——close/archive 收进 rail 行菜单、模型
- * 芯片归 composer 底沿）, the conversation stream, and the follow-up composer.
- */
+/** The focused session on the workbench. */
 export class FocusedSession {
   readonly page: Page
   readonly host: Locator
@@ -111,159 +95,84 @@ export class FocusedSession {
   readonly chatId: Locator
   readonly transcript: Locator
   readonly emptyConversation: Locator
+  readonly unavailableNote: Locator
   readonly composerTextarea: Locator
   readonly sendButton: Locator
-  readonly unavailableNote: Locator
   readonly modelPick: Locator
 
   constructor(page: Page) {
     this.page = page
-    this.host = page.locator('sebas-dashboard')
-    this.sessionHead = page.locator('sebas-dashboard .session-head')
-    // （session-parallel-liveness-and-unread-polish 3.6/D6b）会话状态只挂 rail
-    // 行首彩色圆点一处：session-head 的 status-badge 与状态边框已下线，焦点
-    // 会话的状态面改由 rail 当前行（`li.session-item.current`）的圆点承载。
-    // （fix-webui-qa-round14 4.2）泊车中的聚焦会话同时呈现在项目组与「等待
-    // 你处理」组（本地泊车入组是本 change 的修复语义）——同一行渲染两份、
-    // 两份都带 current 且圆点同态，`.first()` 取项目组那份，避免 strict
-    // violation（等待组的副本状态逐字相同，取哪份断言都等价）。
-    this.statusBadge = page
-      .locator('sebas-project-rail li.session-item.current .session-dot')
-      .first()
-    this.chatId = page.locator('sebas-dashboard .session-head .ident .chat')
-    this.transcript = page.locator('sebas-dashboard .turn-stream-area')
-    this.emptyConversation = page
-      .locator('sebas-dashboard .turn-stream-area .empty-stream')
-      .filter({ hasText: '还没有对话' })
-    this.unavailableNote = page
-      .locator('sebas-dashboard .turn-stream-area .empty-stream')
-      .filter({ hasText: '会话不可得' })
-    // The composer is the dashboard's own workbench composer (follow-up mode).
-    this.composerTextarea = page.locator('sebas-workbench-composer wa-textarea textarea')
-    this.sendButton = page.locator('sebas-workbench-composer .send-button')
-    // 模型选择器（4.2：头部去交互化后归 composer 底沿的芯片）。
-    this.modelPick = page.locator('sebas-workbench-composer [data-testid="model-chip"]')
+    this.host = page.getByTestId('workbench-session')
+    this.sessionHead = this.host.locator('header').first()
+    this.statusBadge = this.sessionHead.locator('.ant-tag').first()
+    this.chatId = this.sessionHead.locator('code').first()
+    this.transcript = page.getByTestId('react-transcript')
+    this.emptyConversation = this.transcript.getByText('会话还没有消息')
+    this.unavailableNote = page.getByRole('alert').filter({ hasText: '会话加载失败' })
+    this.composerTextarea = page
+      .getByTestId('composer')
+      .getByRole('textbox', { name: '输入消息' })
+    this.sendButton = page.getByTestId('composer').locator('button[data-state]')
+    this.modelPick = page.getByTestId('composer')
   }
 
-  /** 状态圆点的当前 slug（rail 行 `data-status` = 七词相位）。 */
   async statusSlug(): Promise<string> {
-    return (await this.statusBadge.getAttribute('data-status')) ?? ''
+    const text = (await this.statusBadge.innerText()).trim()
+    return Object.entries(STATUS_TEXT).find(([, label]) => label === text)?.[0] ?? text
   }
 
-  /**
-   * 焦点会话的相位断言（D6b：会话状态只挂 rail 行首彩色圆点一处）。会话行落在
-   * 项目行的折叠体里——先展开项目行，否则行不在 DOM。展开是幂等的（行本身即
-   * 展开开关，重复点会收起，故先读 `aria-expanded`）。
-   *
-   * ⚠ 展开 = 点项目行 = 同时**选中**该项目（工作台随 rail-select 重绘一次）。
-   * 断言之后再读工作台 DOM（如数气泡）的用例，要先等它落回稳定值。
-   */
   async expectStatus(slug: string, timeout = 15_000): Promise<void> {
-    await this.expandAllProjects()
-    await expect(this.statusBadge).toHaveAttribute('data-status', slug, { timeout })
+    await expect(this.statusBadge).toHaveText(STATUS_TEXT[slug] ?? slug, { timeout })
   }
 
-  /** 展开 rail 里所有收起（`aria-expanded=false`）的项目行。 */
-  private async expandAllProjects(): Promise<void> {
-    const collapsed = this.page.locator(
-      'sebas-project-rail li > div.row[aria-expanded="false"]',
-    )
-    for (let guard = 0; guard < 10; guard++) {
-      if ((await collapsed.count()) === 0) return
-      // 竞态护栏：聚焦项目的「缺省展开」可能在 count 与 click 之间把最后一行
-      // 翻成 true（locator 随即不再匹配，click 会永远等下去）——点击用短超时，
-      // 翻面不算失败，交给循环顶部的重查；真有卡死的收起行时，由调用方的
-      // 后续断言（toHaveAttribute 等）如实报红。
-      await collapsed
-        .first()
-        .click({ timeout: 2_000 })
-        .catch(() => {})
-      await this.page.waitForTimeout(150)
-    }
+  /** Expand rail projects (kept as a no-op compatibility hook). */
+  async expandAllProjects(): Promise<void> {
+    return
   }
 
-  /**
-   * 指定会话行的相位（按行标签子串定位，不依赖「当前」标记）。会话行落在
-   * 项目行的折叠体里——先展开，否则行不在 DOM。
-   */
   async expectSessionStatus(label: string, slug: string, timeout = 15_000): Promise<void> {
-    await this.expandAllProjects()
-    const dot = this.page
-      .locator('sebas-project-rail li.session-item', { hasText: label })
-      .locator('.session-dot')
-    await expect(dot).toHaveAttribute('data-status', slug, { timeout })
+    const row = this.page
+      .getByRole('complementary', { name: '项目导航' })
+      .getByRole('button', {
+        name: new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`),
+      })
+      .first()
+    await expect(row).toContainText(STATUS_TEXT[slug] ?? slug, { timeout })
   }
 
-  /**
-   * All conversation bubble bodies (both sides) as text. 折叠体不算气泡：
-   * `.body.fold-body`（tool/thinking 过程折叠）与 `.body.item-body`（二级条目）
-   * 只在展开时渲染，混进来会让「气泡数」随折叠开合漂移（曾表现为 flaky）。
-   */
   bubbles(): Locator {
-    return this.page.locator(
-      'sebas-dashboard sebas-transcript-view .turn-block .body:not(.fold-body):not(.item-body)',
-    )
+    return this.transcript.locator('[data-unit-key]')
   }
 
-  /** The conversation turn block containing `text` (either side). */
   turnWith(text: string): Locator {
-    return this.page.locator('sebas-dashboard sebas-transcript-view .turn-block', {
-      hasText: text,
-    })
+    return this.bubbles().filter({ hasText: text })
   }
 
-  /** The operator's own turn bubble carrying `text` (2.3: both sides render). */
   userTurn(text: string): Locator {
-    return this.page.locator('sebas-dashboard sebas-transcript-view .turn-block.is-user', {
-      hasText: text,
-    })
+    return this.turnWith(text).filter({ has: this.page.getByText('你', { exact: true }) })
   }
 
-  /** An agent turn bubble carrying `text`. */
   agentTurn(text: string): Locator {
-    return this.page.locator('sebas-dashboard sebas-transcript-view .turn-block.is-assistant', {
-      hasText: text,
-    })
+    return this.turnWith(text).filter({ has: this.page.getByText('agent', { exact: true }) })
   }
 
-  /**
-   * The agent turn's single process fold（workbench-agent-identity-and-
-   * process-folds 2.1/2.2: one collapsed fold per turn, link label
-   * `process + 尾条目 title + 计数`）. 折叠体是懒渲染的（收起时不在 DOM）。
-   */
+  /** Collapsed process/tool folds are React `<details>` elements. */
   processFold(): Locator {
-    return this.page.locator('sebas-dashboard sebas-transcript-view div.process-fold')
+    return this.transcript.locator('details')
   }
 
-  /**
-   * Second-level per-entry folds inside the process fold（2.2: each thinking
-   * segment / tool invocation, collapsed by default, titled by the entry's
-   * structured `title`）.
-   */
   processItems(): Locator {
-    return this.page.locator('sebas-dashboard sebas-transcript-view div.process-item')
+    return this.transcript.locator('details')
   }
 
-  /**
-   * 展开转写里所有收起的折叠（外层 process 折叠 + 二级条目）。折叠体**懒渲染**
-   * ——不展开就不在 DOM 里，所以任何「工具/结果文本可见」的断言都必须先展开。
-   */
   async expandAllFolds(): Promise<void> {
-    const collapsed = this.page.locator(
-      'sebas-dashboard sebas-transcript-view button.fold-link[aria-expanded="false"]',
-    )
-    // 逐次点击（展开会往 DOM 里塞新的折叠），带上限防死循环。
+    const collapsed = this.transcript.locator('details:not([open]) > summary')
     for (let guard = 0; guard < 20; guard++) {
       if ((await collapsed.count()) === 0) return
       await collapsed.first().click()
     }
   }
 
-  /**
-   * 折叠体内文本的断言（工具结果等）：定稿重分组会把条目折回收起态，且折叠
-   * 体懒渲染——一次展开不足以把它留在 DOM，所以「展开 → 数一下 → 不够再
-   * 展开」轮询到出现为止。
-   */
   async expectFoldedText(text: string, timeout = 20_000): Promise<void> {
     await expect
       .poll(
@@ -276,10 +185,6 @@ export class FocusedSession {
       .toBeGreaterThan(0)
   }
 
-  /**
-   * Send a follow-up through the dashboard composer (follow-up mode targets
-   * the focused session). Submits with Enter.
-   */
   async sendFollowUp(text: string): Promise<void> {
     await this.composerTextarea.fill(text)
     await this.composerTextarea.press('Enter')
