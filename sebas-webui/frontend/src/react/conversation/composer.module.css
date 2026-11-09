@@ -1,0 +1,107 @@
+.composer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  height: 100%;
+  box-sizing: border-box;
+  padding: 10px 0 0;
+  border-top: 1px solid var(--sebas-border, #303030);
+}
+
+.queue {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 120px;
+  overflow: auto;
+}
+
+.queueRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--sebas-well);
+}
+
+.queueText {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.palette {
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  border: 1px solid var(--sebas-border, #303030);
+  border-radius: 8px;
+  background: var(--sebas-panel, #1f1f1f);
+  max-height: 220px;
+  overflow: auto;
+}
+
+.paletteRow {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  padding: 6px 8px;
+  text-align: left;
+  color: inherit;
+  background: none;
+  border: 0;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.paletteRow:hover,
+.palette [aria-selected='true'] .paletteRow {
+  background: var(--sebas-hover, rgba(255, 255, 255, 0.06));
+}
+
+.command {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.hint {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--sebas-muted, #8c8c8c);
+  font-size: 12px;
+}
+
+/* Highlighted command's description, bounded so the palette row stays compact. */
+.commandDetail {
+  max-height: 96px;
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--sebas-border, #303030);
+  border-radius: 8px;
+  background: var(--sebas-well);
+  font-size: 12px;
+}
+
+.commandDetail :global(p) {
+  margin: 0 0 4px;
+}
+
+.commandDetail :global(p:last-child) {
+  margin-bottom: 0;
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}

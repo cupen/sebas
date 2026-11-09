@@ -11,14 +11,16 @@
  * | 入口 | 权限档 | root | admin | member | viewer |
  * |---|---|---|---|---|---|
  * | Settings → Users 分区 | users.manage | ✓ | | | |
- * | Settings → Services 分区 | services.control | ✓ | ✓ | | |
+ * | Settings → Services 分区数据与启停 | services.control | ✓ | ✓ | | |
  * | Agents 写入口（New/Edit/Delete） | agents.manage（settings.manage 档） | ✓ | ✓ | | |
  * | Provider/别名/默认选择写入口（fix-webui-qa-round10 3.2） | settings.manage | ✓ | ✓ | | |
  * | Skills 删除入口（fix-webui-qa-round11 2.2） | settings.manage 档 | ✓ | ✓ | | |
  * | 「新建会话」入口（sessions.write） | sessions.write | ✓ | ✓ | ✓ | |
  *
  * （Users 分区在鉴权关闭的宿主上**不**因 null 放开：auth=false 没有用户
- * 面可管理，保持既有隐藏；其余三个入口在 auth=false 的单机形态照旧可用。）
+ * 面可管理，保持既有隐藏；其余三个入口在 auth=false 的单机形态照旧可用。
+ * Services 的分区壳对已认证角色保留，但服务列表与启停控件只对 root/admin
+ * 呈现——member/viewer 落到只读说明，服务端 403 仍是最终防线。）
  */
 
 import type { Role } from '../api/client.js'

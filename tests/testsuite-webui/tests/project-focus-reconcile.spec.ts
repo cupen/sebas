@@ -67,33 +67,31 @@ test.describe('displayed-project 焦点调和', () => {
 
     // Display alpha: clicking the project row selects it into the workbench.
     await rail.projectRow(alpha).click()
-    const headerPath = page.locator('sebas-dashboard .project-header .path')
-    await expect(headerPath).toHaveText(alpha, { timeout: 10_000 })
+    const headerPath = page.getByRole('banner')
+    await expect(headerPath.getByText(alpha, { exact: true })).toBeVisible({ timeout: 10_000 })
 
     // Remove the DISPLAYED project through the rail (the operator path from
     // the A2 evidence): row menu → 移除项目 → confirm.
     const row = rail.projectRow(alpha)
-    await row.hover()
-    await row.locator('button[title="项目操作"]').click()
-    await row.locator('wa-dropdown-item[value="remove"]').click()
-    // wa-dialog 是 top-layer popover：host 本体读作 hidden，内容可见——
+    await rail.openProjectMenu(alpha)
+    await rail.clickMenuItem('移除项目')
+    // [role="dialog"] 是 top-layer popover：host 本体读作 hidden，内容可见——
     // 可见性断言打在标题上（同 rail.openAddDialog 纪律）。
-    const dialog = page.locator('wa-dialog', { hasText: '移除项目' })
-    await expect(
-      dialog.locator('h2, [role="heading"]', { hasText: '移除项目' }).first(),
-    ).toBeVisible()
-    await dialog.locator('wa-button').filter({ hasText: '移除' }).click()
+    const dialog = page.locator('[role="dialog"]', { hasText: '移除项目' })
+    await expect(dialog.getByText('移除项目', { exact: true })).toBeVisible()
+    await dialog.getByRole('button', { name: /移\s*除/ }).click()
 
     // Rail drops the row, the removal receipt lands (M6)…
     await expect(rail.projectRow(alpha)).toHaveCount(0, { timeout: 10_000 })
     await expect(
-      page.locator('wa-toast-item').filter({ hasText: '已移除注册' }),
+      page.getByRole('alert').filter({ hasText: '已移除注册' }),
     ).toBeVisible({ timeout: 10_000 })
 
     // …and the main panel MUST stop naming the removed project — same live
     // page, no reload. This is THE A2 regression lock: the header used to
     // keep showing `alpha` while the rail had already dropped it.
-    await expect(headerPath).toHaveText('未选择项目', { timeout: 10_000 })
+    await expect(headerPath).not.toContainText(alpha, { timeout: 10_000 })
+    await expect(headerPath.getByText('工作台', { exact: true })).toBeVisible()
 
     // API truth: the registry no longer has alpha; beta is untouched.
     const paths = (await listProjects(page.request)).map((p) => p.path)
@@ -122,26 +120,24 @@ test.describe('displayed-project 焦点调和', () => {
     await page.goto('/')
     await expect(rail.host).toBeVisible()
     await rail.projectRow(last).click()
-    const headerPath = page.locator('sebas-dashboard .project-header .path')
-    await expect(headerPath).toHaveText(last, { timeout: 10_000 })
+    const headerPath = page.getByRole('banner')
+    await expect(headerPath.getByText(last, { exact: true })).toBeVisible({ timeout: 10_000 })
 
     // Remove the ONLY project: the rail falls to 尚未注册项目…
     const row = rail.projectRow(last)
-    await row.hover()
-    await row.locator('button[title="项目操作"]').click()
-    await row.locator('wa-dropdown-item[value="remove"]').click()
-    const dialog = page.locator('wa-dialog', { hasText: '移除项目' })
-    await expect(
-      dialog.locator('h2, [role="heading"]', { hasText: '移除项目' }).first(),
-    ).toBeVisible()
-    await dialog.locator('wa-button').filter({ hasText: '移除' }).click()
+    await rail.openProjectMenu(last)
+    await rail.clickMenuItem('移除项目')
+    const dialog = page.locator('[role="dialog"]', { hasText: '移除项目' })
+    await expect(dialog.getByText('移除项目', { exact: true })).toBeVisible()
+    await dialog.getByRole('button', { name: /移\s*除/ }).click()
 
     await expect(rail.projectRow(last)).toHaveCount(0, { timeout: 10_000 })
-    await expect(rail.host).toContainText('尚未注册项目', { timeout: 10_000 })
+    await expect(rail.host).toContainText('还没有项目', { timeout: 10_000 })
 
     // …and the header must not keep naming the removed project (the A2
     // zero-projects form: rail empty, main panel still `last local`).
-    await expect(headerPath).toHaveText('未选择项目', { timeout: 10_000 })
+    await expect(headerPath).not.toContainText(last, { timeout: 10_000 })
+    await expect(headerPath.getByText('工作台', { exact: true })).toBeVisible()
 
     await resetState(page.request)
     fs.rmSync(lastDir, { recursive: true, force: true })
@@ -172,11 +168,11 @@ test.describe('displayed-project 焦点调和', () => {
     await rail.ensureProjectExpanded(alphaName)
     // Focus the session from the rail (explicit operator action).
     await rail.sessionItem(prompt).click()
-    await expect(page.locator('sebas-dashboard sebas-transcript-view')).toBeVisible({
+    await expect(page.locator(':is([data-testid="workbench-session"],[data-testid="workbench-home"]) [data-testid="react-transcript"]')).toBeVisible({
       timeout: 15_000,
     })
-    const headerPath = page.locator('sebas-dashboard .project-header .path')
-    await expect(headerPath).toHaveText(alphaName, { timeout: 10_000 })
+    const headerPath = page.getByRole('banner')
+    await expect(headerPath.getByText(alphaName, { exact: true })).toBeVisible({ timeout: 10_000 })
     // Settle past the rail-focus override window (the 500ms throttled summary
     // refresh clears focusOverride; clicking the other project before that
     // would ride the override's explicit-action exemption instead of the
@@ -188,21 +184,23 @@ test.describe('displayed-project 焦点调和', () => {
     // stale conversation must NOT linger, and the composer yields to the
     // stale placeholder instead of offering input for an unfocused session.
     await rail.projectRow(beta).click()
-    await expect(headerPath).toHaveText(beta, { timeout: 10_000 })
-    await expect(page.locator('sebas-dashboard sebas-transcript-view')).toHaveCount(0, {
+    await expect(headerPath.getByText(beta, { exact: true })).toBeVisible({ timeout: 10_000 })
+    await expect(page.locator(':is([data-testid="workbench-session"],[data-testid="workbench-home"]) [data-testid="react-transcript"]')).toHaveCount(0, {
       timeout: 10_000,
     })
-    await expect(page.locator('sebas-dashboard .empty-stream')).toBeVisible()
-    await expect(page.locator('[data-testid="composer-stale-project"]')).toBeVisible()
+    // 空态即 workbench-home 本体；原选择器把它嵌在同级 is() 里面，永远命中
+    // 不了（测试侧笔误，不是产品缺口——快照里 home 已带「新建会话/打开会话」）。
+    await expect(page.getByTestId('workbench-home')).toBeVisible()
+    await expect(page.getByTestId('composer')).toHaveCount(0)
 
     // Explicit restore (spec: the stale view MAY be restored by explicit
     // operator action, never by inertia): selecting the session again brings
     // the conversation — and the project context — back.
     await rail.sessionItem(prompt).click()
-    await expect(page.locator('sebas-dashboard sebas-transcript-view')).toBeVisible({
+    await expect(page.locator(':is([data-testid="workbench-session"],[data-testid="workbench-home"]) [data-testid="react-transcript"]')).toBeVisible({
       timeout: 15_000,
     })
-    await expect(headerPath).toHaveText(alphaName, { timeout: 10_000 })
+    await expect(headerPath.getByText(alphaName, { exact: true })).toBeVisible({ timeout: 10_000 })
 
     await resetState(page.request)
     fs.rmSync(betaDir, { recursive: true, force: true })

@@ -250,7 +250,7 @@ def _emit_report(c, suite, channel, **kwargs):
 
 
 #: Playwright reporter shards. The main config writes the bare name; the other
-#: five configs suffix their config stem (collect-json.ts owns the naming).
+#: configs suffix their config stem (collect-json.ts owns the naming).
 _WEBUI_SHARDS = (
     "webui-results.json",
     "webui-results-auth.json",
@@ -258,6 +258,9 @@ _WEBUI_SHARDS = (
     "webui-results-deployment.json",
     "webui-results-detached.json",
     "webui-results-dead-core.json",
+    "webui-results-react.json",
+    "webui-results-react-auth.json",
+    "webui-results-react-setup.json",
 )
 
 
@@ -522,6 +525,15 @@ def testsuite_webui(c, case=None):
                 cmd = f"pnpm --dir {suite_dir} exec playwright test --config playwright.dead-core.config.ts"
             elif case == "native":
                 cmd = f"pnpm --dir {suite_dir} exec playwright test --config playwright.native.config.ts"
+            elif case == "react":
+                # React 生产入口 `/` 上的工作台与响应式旅程。
+                cmd = f"pnpm --dir {suite_dir} exec playwright test --config playwright.react.config.ts"
+            elif case == "react-auth":
+                # auth-on 装配下同一 React 入口的鉴权/RBAC 旅程。
+                cmd = f"pnpm --dir {suite_dir} exec playwright test --config playwright.react-auth.config.ts"
+            elif case == "react-setup":
+                # auth 开、零用户装配下同一 React 入口的首启建户旅程。
+                cmd = f"pnpm --dir {suite_dir} exec playwright test --config playwright.react-setup.config.ts"
             elif case in ("deployment", "approval-detached", "core-link-badge"):
                 cmd = (
                     f"pnpm --dir {suite_dir} exec playwright test --config playwright.detached.config.ts"
@@ -537,6 +549,9 @@ def testsuite_webui(c, case=None):
                 f" && pnpm --dir {suite_dir} exec playwright test --config playwright.detached.config.ts"
                 f" && pnpm --dir {suite_dir} exec playwright test --config playwright.dead-core.config.ts"
                 f" && pnpm --dir {suite_dir} exec playwright test --config playwright.native.config.ts"
+                f" && pnpm --dir {suite_dir} exec playwright test --config playwright.react.config.ts"
+                f" && pnpm --dir {suite_dir} exec playwright test --config playwright.react-auth.config.ts"
+                f" && pnpm --dir {suite_dir} exec playwright test --config playwright.react-setup.config.ts"
             )
         # Pin the shard location explicitly (absolute) so the reporter never has
         # to guess the repo root from its own file path — that guess was one
@@ -764,7 +779,7 @@ api_key = "sk-sandbox-dummy"
 
 # router 只以独立进程运行（unify-router-process-shape）：listen 默认
 # 8787 是固定值，会撞操作员实例的托管 router——沙箱钉一个专用端口。
-# 端口**随本装配的 webui 端口派生**（`_router_port_for`）：六链串行时若所有
+# 端口**随本装配的 webui 端口派生**（`_router_port_for`）：九链串行时若所有
 # 装配共用同一个固定端口，前一链尚在收尾的 router 会让后一链 bind 失败
 # （`Address already in use`），而后一链的 native 内核仍会连上那个残留 router
 # ——表现为首个 createSession 撞 `BackendUnavailable` → 409（sebas-ps9r）。
@@ -790,9 +805,10 @@ def _health_ok(url):
         return False
 
 
-# 沙箱 debug router 端口基址与偏移：`invoke testsuite-webui` 的六链是**串行**
-# 的（main → auth → auth-setup → detached → dead-core → native），但它们各自
-# 的 webui 端口互不相同（9895-9899 / 9894）。router 端口此前是固定 8791，
+# 沙箱 debug router 端口基址与偏移：`invoke testsuite-webui` 的九链是**串行**
+# 的（main → auth → auth-setup → detached → dead-core → native → react →
+# react-auth → react-setup），但它们各自
+# 的 webui 端口互不相同（9895-9899 / 9894 / 9893 / 9892 / 9891）。router 端口此前是固定 8791，
 # 于是前一链的 router 还没退干净时，后一链的 router 会 bind 失败；更糟的是
 # 残留 router 仍在 8791 上答 `/healthz`，就绪探针被骗过，而 native 内核连的是
 # 那个「别人家的」router → `BackendUnavailable` → 409。让端口随 webui 端口派生

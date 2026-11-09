@@ -70,7 +70,7 @@ test.describe('停止收尾', () => {
       // cancelled（7.3：不再用错误色/错误文案呈现主动取消）, instead of the
       // user's message silently hanging.
       await expect(
-        page.locator('sebas-dashboard sebas-transcript-view').getByText('回合已取消'),
+        page.locator(':is([data-testid="workbench-session"],[data-testid="workbench-home"]) [data-testid="react-transcript"]').getByText('回合已取消'),
       ).toBeVisible({ timeout: 15_000 })
 
       // The composer no longer offers stop once the turn settled.
@@ -89,7 +89,7 @@ test.describe('停止收尾', () => {
       // entry persists, no stop control, session idle.
       await page.reload()
       await expect(
-        page.locator('sebas-dashboard sebas-transcript-view').getByText('回合已取消'),
+        page.locator(':is([data-testid="workbench-session"],[data-testid="workbench-home"]) [data-testid="react-transcript"]').getByText('回合已取消'),
       ).toBeVisible({ timeout: 15_000 })
       await expect(workbench.submitControl).not.toHaveAttribute('data-state', 'stop', {
         timeout: 10_000,
@@ -121,10 +121,12 @@ test.describe('停止收尾', () => {
 
       await page.goto(`/sessions/${key}`)
       await expect(detail.host).toBeVisible()
-      await expect(page.locator('sebas-review-cards')).toHaveCount(1)
+      await expect(detail.composerTextarea).toBeVisible()
       await detail.sendFollowUp('perm')
       await expect(cards.all().first()).toBeVisible({ timeout: 15_000 })
-      const requestId = await cards.card().getAttribute('data-request-id')
+      const parked = await getSessionApprovals(page.request, key)
+      expect(parked.status).toBe(200)
+      const requestId = parked.approvals[0]?.request_id
       expect(requestId).toBeTruthy()
 
       // Parked = engaged: the stop control applies while a decision is
@@ -139,17 +141,13 @@ test.describe('停止收尾', () => {
       expect(released.status).toBe(200)
       expect(released.approvals).toEqual([])
       // …the rail's waiting projection flips back…
-      const row = page
-        .locator('sebas-project-rail li.session-item', { hasText: 'idle' })
-        .first()
+      const row = rail.host.locator('button', { hasText: 'idle' }).first()
       await rail.ensureProjectExpanded(projectName)
       await expect(row).toBeVisible({ timeout: 10_000 })
-      await expect(row.locator('[data-testid="session-waiting"]')).toHaveCount(0, {
-        timeout: 10_000,
-      })
+      await expect(row).not.toContainText('等待你处理', { timeout: 10_000 })
       // …and the turn settles with the visible cancel notice.
       await expect(
-        page.locator('sebas-dashboard sebas-transcript-view').getByText('回合已取消'),
+        page.locator(':is([data-testid="workbench-session"],[data-testid="workbench-home"]) [data-testid="react-transcript"]').getByText('回合已取消'),
       ).toBeVisible({ timeout: 15_000 })
 
       // 释放的请求不可再批复 — API face: a late decision for the released id
@@ -163,9 +161,12 @@ test.describe('停止收尾', () => {
       )
 
       // UI face: the stale card stays visible but inert — deciding it answers
-      // 404 and the card honestly degrades to the expired state.
+      // 404; the React card surfaces the typed rejection inline.
       await cards.deny().click()
-      await expect(cards.card()).toHaveAttribute('data-state', 'expired', { timeout: 10_000 })
+      await expect(cards.card().getByRole('alert')).toContainText(
+        'no pending permission request',
+        { timeout: 10_000 },
+      )
 
       // Reload: no stop control (released → turn_engaged false), the stop
       // entry persists, and the decided/expired card is not resurrected.
@@ -174,7 +175,7 @@ test.describe('停止收尾', () => {
         timeout: 10_000,
       })
       await expect(
-        page.locator('sebas-dashboard sebas-transcript-view').getByText('回合已取消'),
+        page.locator(':is([data-testid="workbench-session"],[data-testid="workbench-home"]) [data-testid="react-transcript"]').getByText('回合已取消'),
       ).toBeVisible({ timeout: 15_000 })
       const settled = (await getSession(page.request, key)).detail!
       expect(settled.turn_engaged).toBeUndefined()

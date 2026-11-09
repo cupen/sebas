@@ -1,0 +1,16 @@
+.form {
+  margin-top: 8px;
+}
+
+/* Dialog heading: AntD renders `.ant-modal-title` as a plain div, so the
+ * accessible heading level has to come from a real element inside it. */
+.dialogTitle {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.actions {
+  margin-top: 4px;
+}

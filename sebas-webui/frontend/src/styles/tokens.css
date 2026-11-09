@@ -1,16 +1,14 @@
 /* Design tokens for the sebas console.
  *
  * Dark is the default theme: the palette below is the dark scheme, and the
- * `:root:not(.wa-dark)` override further down re-maps it for light. The single
- * switch is the `wa-dark` class on <html> (default on, shipped by index.html
- * and applied pre-paint from src/theme.ts), so a user can override the OS
- * preference from Settings → Appearance and Web Awesome, these tokens and
- * wa-overrides.css all move together. Every status colour ships as a
- * trio (foreground/dot, tinted background, border) so badges, table rows,
- * cards and headers can share one consistent semantic source. Colour is
- * never the only status channel — the status badge always renders label +
- * glyph from the API, and statuses additionally carry a `data-status`
- * attribute for CSS hooking. */
+ * `:root[data-theme='light']` block further down re-maps it for light. The
+ * single switch is the `data-theme` attribute on <html> (pre-painted by
+ * index.html, then owned by src/react/theme/ThemeProvider.tsx, which also
+ * mirrors the semantic subset as inline custom properties) so a user can
+ * override the OS preference from Settings → Appearance. Every status colour
+ * ships as a trio (foreground/dot, tinted background, border) so badges, table
+ * rows, cards and headers can share one consistent semantic source. Colour is
+ * never the only status channel — status text always accompanies the tone. */
 
 :root {
   color-scheme: dark;
@@ -123,12 +121,19 @@
 
   /* Selection */
   --sebas-selection-bg: rgba(139, 147, 255, 0.32);
+
+  /* Aliases consumed by the React surfaces' CSS Modules; indirections so the
+   * light block below re-maps them without restating the names. */
+  --sebas-muted: var(--sebas-text-dim);
+  --sebas-hover: var(--sebas-accent-soft);
+  --sebas-active: var(--sebas-accent-soft);
+  --sebas-panel: var(--sebas-surface-2);
+  --sebas-mono: var(--sebas-font-mono);
 }
 
-/* Light re-map: engages whenever <html> is missing the wa-dark class —
- * system-light via theme.ts, or an explicit light choice in
- * Settings → Appearance. */
-:root:not(.wa-dark) {
+/* Light re-map: engages when <html> carries `data-theme="light"` —
+ * system-light, or an explicit light choice in Settings → Appearance. */
+:root[data-theme='light'] {
   color-scheme: light;
 
   --sebas-bg: #f4f5f9;
@@ -192,8 +197,8 @@
   *,
   *::before,
   *::after {
-    animation-duration: 0.01ms !important;
+    animation-duration: 0s !important;
     animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
+    transition-duration: 0s !important;
   }
 }

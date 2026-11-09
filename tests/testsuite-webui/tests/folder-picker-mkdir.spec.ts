@@ -45,20 +45,19 @@ test.describe('目录选择器建目录', () => {
     await expect(rail.host).toBeVisible()
     await rail.openAddDialog()
     const dialog = rail.addDialog()
-    const picker = dialog.locator('sebas-folder-picker')
-    await expect(picker.locator('[data-testid="mkdir-toggle"]')).toBeVisible({
+    // React's picker is a single AntD modal (no nested role=dialog host) and
+    // keeps the mkdir row permanently visible.
+    await expect(dialog.getByRole('textbox', { name: '新建文件夹名称' })).toBeVisible({
       timeout: 10_000,
     })
-    return { dialog, picker }
+    return { dialog, picker: dialog }
   }
 
   /** 打开内联命名行并提交一个名字（click 路径，不经键盘）。 */
   async function submitMkdir(picker: import('@playwright/test').Locator, name: string) {
-    await picker.locator('[data-testid="mkdir-toggle"]').click()
-    const input = picker.locator('[data-testid="mkdir-name"]')
-    await expect(input).toBeVisible()
+    const input = picker.getByRole('textbox', { name: '新建文件夹名称' })
     await input.fill(name)
-    await picker.locator('[data-testid="mkdir-confirm"]').click()
+    await picker.getByRole('button', { name: /新\s*建/ }).click()
   }
 
   test('边界内建目录成功：树内即时可见、可进入、可用于项目注册', async ({ page }) => {
@@ -75,42 +74,36 @@ test.describe('目录选择器建目录', () => {
       const { dialog, picker } = await openPicker(page)
 
       // 根 = workspace root（沙箱场景目录）。
-      await expect(picker.locator('.root-path')).toContainText(scene, { timeout: 10_000 })
+      await expect(dialog.getByText(scene, { exact: true }).first()).toBeVisible({
+        timeout: 10_000,
+      })
 
       // ── 合法名：创建成功 ────────────────────────────────────────────
       await submitMkdir(picker, dirA)
-      // 无内联错误；树中即时出现（「无需手工刷新」的 UI 半边——refreshNode
-      // 走局部重载，根目录 = 重载整树）。
-      const itemA = picker.locator('wa-tree-item').filter({ hasText: dirA })
-      await expect(itemA).toBeVisible({ timeout: 10_000 })
-      // folder-selected 照发：路径输入框回填新目录（选中即选中）。
-      const pathInput = dialog.locator('wa-input[label="项目路径"] input')
-      await expect
-        .poll(async () => (await pathInput.inputValue()).replace(/\\/g, '/'), {
-          timeout: 10_000,
-          intervals: [200],
-        })
-        .toBe(`${scene}/${dirA}`.replace(/\\/g, '/'))
-      // 服务端真相：目录真实存在且 browse-dirs 立即可见（服务端半边）。
+      // 无内联错误；树中即时出现（局部刷新，无需手工刷新）。
+      const itemA = picker.getByRole('button', { name: /▸?\s*mk-outer-/ })
+      await expect(picker.getByRole('button', { name: new RegExp(dirA) })).toBeVisible({
+        timeout: 10_000,
+      })
       expect(fs.existsSync(pathA)).toBe(true)
 
-      // ── 可进入：新目录作为下一步创建的父目录 ──────────────────────
-      // mkdirParent = 当前选中节点（dirA）——在它下面再建一层，证明树内
-      // 可以进入新目录并继续浏览/创建（单层 × N 的连续形态，与
-      // mkdir_in_nested_existing_parent_round_trips 单测互为镜像）。
+      // ── 可进入：点击新目录进入，再在它下面建第二层 ────────────────
+      await picker.getByRole('button', { name: new RegExp(dirA) }).click()
+      await expect(dialog.getByText(`${scene}/${dirA}`, { exact: true }).first()).toBeVisible({
+        timeout: 10_000,
+      })
       await submitMkdir(picker, dirB)
-      const itemB = itemA.locator('wa-tree-item[slot="children"]').filter({ hasText: dirB })
-      await expect(itemB).toBeVisible({ timeout: 10_000 })
-      await expect
-        .poll(async () => (await pathInput.inputValue()).replace(/\\/g, '/'), {
-          timeout: 10_000,
-          intervals: [200],
-        })
-        .toBe(`${scene}/${dirA}/${dirB}`.replace(/\\/g, '/'))
+      await expect(picker.getByRole('button', { name: new RegExp(dirB) })).toBeVisible({
+        timeout: 10_000,
+      })
       expect(fs.existsSync(pathB)).toBe(true)
 
-      // ── 可用于项目注册（tasks 3.3 回归）：提交弹窗 → rail 落行 ─────
-      await dialog.locator('wa-button').filter({ hasText: '添加项目' }).click()
+      // ── 可用于项目注册（tasks 3.3 回归）：进入新建目录 → 选中当前目录 → rail 落行 ─
+      await picker.getByRole('button', { name: new RegExp(dirB) }).click()
+      await expect(dialog.getByText(`${scene}/${dirA}/${dirB}`, { exact: true }).first()).toBeVisible({
+        timeout: 10_000,
+      })
+      await dialog.getByRole('button', { name: '选择此目录' }).click()
       await expect
         .poll(async () => (await listProjects(page.request)).some((p) => p.path === pathB), {
           timeout: 10_000,
@@ -143,12 +136,12 @@ test.describe('目录选择器建目录', () => {
     ]
     for (const [name, reason] of cases) {
       await submitMkdir(picker, name)
-      const err = picker.locator('[data-testid="mkdir-error"]')
+      const err = picker.getByRole('alert')
       await expect(err).toBeVisible({ timeout: 5_000 })
       await expect(err).toContainText(reason)
       // 拒绝路径零副作用：树中无同名条目、服务端目录清单不变。
       await expect(
-        picker.locator('wa-tree-item').filter({ hasText: name }),
+        picker.locator('button').filter({ hasText: name }),
       ).toHaveCount(0)
     }
     const listing = await page.request.get('/api/fs/browse-dirs')
@@ -158,9 +151,8 @@ test.describe('目录选择器建目录', () => {
     expect(names).not.toContain('..')
     expect(names.filter((n) => n.includes('/'))).toEqual([])
 
-    // 取消收起命名行，弹窗保持可用。
-    await picker.locator('[data-testid="mkdir-cancel"]').click()
-    await expect(picker.locator('[data-testid="mkdir-name"]')).toHaveCount(0)
+    // 弹窗保持可用：命名输入仍在（React has no collapsible mkdir row）。
+    await expect(picker.getByRole('textbox', { name: '新建文件夹名称' })).toBeVisible()
 
     expect(collector.clean()).toEqual([])
   })
@@ -192,11 +184,11 @@ test.describe('目录选择器建目录', () => {
     expect(created.status()).toBe(201)
     try {
       await submitMkdir(picker, dup)
-      const err = picker.locator('[data-testid="mkdir-error"]')
+      const err = picker.getByRole('alert')
       await expect(err).toBeVisible({ timeout: 5_000 })
       await expect(err).toContainText(`同名目录已存在: ${dup}`)
       // 输入行保持打开（拒绝不吞操作者的输入现场）。
-      await expect(picker.locator('[data-testid="mkdir-name"]')).toBeVisible()
+      await expect(picker.getByRole('textbox', { name: '新建文件夹名称' })).toBeVisible()
     } finally {
       fs.rmSync(path.join(scene, dup), { recursive: true, force: true })
     }

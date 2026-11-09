@@ -259,6 +259,35 @@ describe('network-level failures', () => {
     expect(err).toBeInstanceOf(ApiError)
     expect((err as ApiError).status).toBe(503)
   })
+
+  it('reports a gateway 502 without an application envelope as NetworkError', async () => {
+    // The dev/reverse proxy answers 502 with an HTML body when the core process
+    // behind it is gone. There is no application envelope, so the fact is
+    // "nothing is listening behind the gateway" — the same class as a refused
+    // connection, not an application rejection ("HTTP 502").
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 502,
+      json: async () => {
+        throw new SyntaxError('Unexpected token <')
+      },
+    } as unknown as Response)
+
+    const err = await api.about().catch((e) => e)
+    expect(err).toBeInstanceOf(NetworkError)
+    expect((err as Error).message).toContain('无法连接服务器')
+    expect((err as Error).message).toContain('502')
+  })
+
+  it('keeps an enveloped 5xx as ApiError even with a gateway status', async () => {
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValue(errorResponse(503, { error: 'no watchdog adapter' }))
+
+    const err = await api.about().catch((e) => e)
+    expect(err).toBeInstanceOf(ApiError)
+    expect((err as ApiError).message).toBe('no watchdog adapter')
+  })
 })
 
 /**

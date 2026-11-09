@@ -15,7 +15,8 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "types": ["vite/client"],
-    "noEmit": true
+    "noEmit": true,
+    "jsx": "react-jsx"
   },
   "include": ["src", "vite.config.ts"]
 }

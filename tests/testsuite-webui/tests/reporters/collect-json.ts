@@ -17,8 +17,10 @@ import type {
  * this one only records what ran so `scripts/testsuite_report.py` can render
  * `.artifacts/verify/report-webui.html` + the terminal tree.
  *
- * The webui suite is **six Playwright runs** (main / auth / auth-setup /
- * deployment / detached / dead-core configs), so each run writes its own shard
+ * The webui suite is **nine Playwright runs** (main / auth / auth-setup /
+ * deployment / detached / dead-core / react / react-auth / react-setup
+ * configs), so each
+ * run writes its own shard
  * and the report generator merges the shards into one tree (design D2/D3). The
  * shard is keyed by the config file stem — `playwright.config.ts` → the bare
  * `<out>.json`, every other config → `<out>-<stem>.json`. Later shards merge
@@ -42,7 +44,7 @@ const REPO_ROOT = path.resolve(import.meta.dirname, '../../../..')
 const OUT_BASE =
   process.env.TESTSUITE_REPORT_JSON ?? path.join(REPO_ROOT, '.artifacts', 'verify', 'webui-results.json')
 
-/** Shards carry the config identity so the six runs stay distinguishable.
+/** Shards carry the config identity so the nine runs stay distinguishable.
  *  `playwright.config.ts` → `<out>.json`; e.g. `playwright.auth.config.ts` →
  *  `<out>-auth.json`. tasks.py merges exactly this set. */
 const shardPath = (configFile: string): string => {

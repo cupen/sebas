@@ -1026,6 +1026,8 @@ async function unwrap<T>(resp: Response, path?: string, method = 'GET'): Promise
   let message = `HTTP ${resp.status}`
   let code: string | null = null
   let count: number | null = null
+  /** Did the application answer with its own envelope? */
+  let envelope = false
   try {
     // 错误体信封不钉死（unify-router-process-shape D4）：拒绝载荷可能是
     // 顶层 `{code, count}`，也可能是嵌套信封 `{error: {code, count}}`；
@@ -1039,10 +1041,22 @@ async function unwrap<T>(resp: Response, path?: string, method = 'GET'): Promise
           : b
       if (typeof inner.code === 'string') code = inner.code
       if (typeof inner.count === 'number') count = inner.count
-      if (typeof b.error === 'string') message = b.error
+      if (typeof b.error === 'string') {
+        message = b.error
+        envelope = true
+      }
     }
   } catch {
     // non-JSON error body; keep the generic message
+  }
+  // Gateway-level failures (dev proxy / reverse proxy in front of a dead core)
+  // carry no application envelope: they say "nothing is listening behind me",
+  // which is the same fact as a refused connection. Reporting them as an
+  // application rejection ("HTTP 502") hides that the core is gone.
+  if (!envelope && (resp.status === 502 || resp.status === 503 || resp.status === 504)) {
+    const err = new NetworkError(`无法连接服务器（服务可能未运行）：HTTP ${resp.status}`)
+    if (path) reportForNotice(method, path, err.message, resp.status)
+    throw err
   }
   if (path) reportForNotice(method, path, message, resp.status)
   throw new ApiError(resp.status, message, code, count)

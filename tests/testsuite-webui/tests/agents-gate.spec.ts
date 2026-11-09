@@ -30,9 +30,8 @@ import {
   ensureSceneProject,
   ErrorCollector,
   Login,
-  ProjectRail,
-  SettingsModal,
 } from './helpers/index'
+import { ReactRail, ReactSettings, ReactShell } from './helpers/pages/react'
 
 const VIEWER = { username: 'gate-viewer', password: 'viewer-pass-123' }
 const MEMBER = { username: 'gate-member', password: 'member-pass-123' }
@@ -115,35 +114,35 @@ test.describe('agents 写执法（gate-agent-directory-writes）', () => {
     const login = new Login(page)
     await login.visible()
     await login.login(VIEWER.username, VIEWER.password)
-    await expect(page.locator('sebas-dashboard')).toBeVisible({ timeout: 15_000 })
+    await expect(page.getByTestId('react-shell')).toBeVisible({ timeout: 15_000 })
 
-    // 侧栏角色展示位（gate-agent-directory-writes 2.2）。
-    await expect(
-      page.locator('sebas-app .sidebar-footer .settings-btn', {
-        hasText: `退出 (${VIEWER.username} · viewer)`,
-      }),
-    ).toBeVisible()
+    // 侧栏用户菜单（gate-agent-directory-writes 2.2）：用户名 + 角色展示位。
+    const shell = new ReactShell(page)
+    await expect(shell.userMenu).toContainText(VIEWER.username)
+    await expect(shell.userMenu).toContainText('只读')
 
-    // 新建会话入口（项目行「+」）不呈现；只读浏览不受影响（行本身在）。
-    const rail = new ProjectRail(page)
+    // 新建会话入口（项目操作菜单）不呈现；只读浏览不受影响（项目行在）。
+    const rail = new ReactRail(page)
     await expect(rail.host).toBeVisible()
     await page.reload()
-    await expect(page.locator('sebas-dashboard')).toBeVisible({ timeout: 15_000 })
-    const rows = rail.host.locator('.row')
+    await expect(page.getByTestId('react-shell')).toBeVisible({ timeout: 15_000 })
+    const rows = rail.host.getByRole('button', { name: /^.*\s\d+$/ })
     await expect(rows.first()).toBeVisible({ timeout: 10_000 })
-    await expect(rail.host.locator('button[aria-label^="New session"]')).toHaveCount(0)
+    await expect(rail.host.getByRole('button', { name: /^项目操作/ })).toHaveCount(0)
 
     // Settings → Agents：分区可浏览（读），写入口全部不呈现。
-    const settings = new SettingsModal(page)
-    await settings.openViaSidebar()
+    const settings = new ReactSettings(page)
+    await shell.openSettings()
     await settings.openSection('Agent')
-    const modal = page.locator('sebas-settings-modal')
-    await expect(modal.locator('wa-button').filter({ hasText: '新建 agent' })).toHaveCount(0)
-    await expect(modal.locator('[data-testid="agent-row"]').first()).toBeVisible()
-    await expect(modal.locator('[data-testid="agent-row"] button[title="编辑"]')).toHaveCount(0)
-    await expect(modal.locator('[data-testid="agent-row"] button[title="删除"]')).toHaveCount(0)
-    await settings.closeButton.click()
-    await expect(settings.panel).toBeHidden()
+    await expect(settings.region.getByRole('button', { name: '新建 agent' })).toHaveCount(0)
+    const claudeRow = settings.region
+      .locator('strong', { hasText: /^claude$/ })
+      .locator('xpath=../..')
+    await expect(claudeRow).toBeVisible()
+    await expect(claudeRow.getByRole('button', { name: /编\s*辑/ })).toHaveCount(0)
+    await expect(claudeRow.getByRole('button', { name: /删\s*除/ })).toHaveCount(0)
+    await settings.close()
+    await expect(settings.region).toBeHidden()
 
     // 直调写 API：viewer 会话（cookie 随行）仍 403（呈现层隐藏不构成防线）。
     // 走 context 级 request 而非 page.evaluate fetch——同一 cookie 罐，且
@@ -159,18 +158,20 @@ test.describe('agents 写执法（gate-agent-directory-writes）', () => {
     const login = new Login(page)
     await login.visible()
     await login.login('admin', 'admin')
-    await expect(page.locator('sebas-dashboard')).toBeVisible({ timeout: 15_000 })
+    await expect(page.getByTestId('react-shell')).toBeVisible({ timeout: 15_000 })
 
-    const settings = new SettingsModal(page)
-    await settings.openViaSidebar()
+    const shell = new ReactShell(page)
+    const settings = new ReactSettings(page)
+    await shell.openSettings()
     await settings.openSection('Agent')
-    const modal = page.locator('sebas-settings-modal')
-    await expect(modal.locator('wa-button').filter({ hasText: '新建 agent' })).toBeVisible()
+    await expect(settings.region.getByRole('button', { name: '新建 agent' })).toBeVisible()
     // config 种子的 claude 行带编辑/删除入口（呈现层与执法同档开放）。
-    const row = modal.locator('[data-testid="agent-row"][data-id="claude"]')
+    const row = settings.region
+      .locator('strong', { hasText: /^claude$/ })
+      .locator('xpath=../..')
     await expect(row).toBeVisible()
-    await expect(row.locator('button[title="编辑"]')).toBeVisible()
-    await expect(row.locator('button[title="删除"]')).toBeVisible()
+    await expect(row.getByRole('button', { name: /编\s*辑/ })).toBeVisible()
+    await expect(row.getByRole('button', { name: /删\s*除/ })).toBeVisible()
   })
 })
 
@@ -375,11 +376,11 @@ test.describe.serial('角色/禁用即时生效（agents 写，spec「会话绑�
     const login = new Login(page)
     await login.visible()
     await login.login(LIVE.username, LIVE.password)
-    await expect(page.locator('sebas-dashboard')).toBeVisible({ timeout: 15_000 })
-    // 侧栏角色展示位（gate-agent-directory-writes 2.2）：与 /api/auth/me 一致。
-    // 页脚有两个 .settings-btn（退出 + 设置）——用 aria-label 精确点名退出钮。
-    const logoutBtn = page.locator('sebas-app .sidebar-footer button[aria-label="退出登录"]')
-    await expect(logoutBtn).toHaveText(/退出 \(gate-live · admin\)/)
+    await expect(page.getByTestId('react-shell')).toBeVisible({ timeout: 15_000 })
+    // 侧栏用户菜单（gate-agent-directory-writes 2.2）：与 /api/auth/me 一致。
+    const shell = new ReactShell(page)
+    await expect(shell.userMenu).toContainText(LIVE.username)
+    await expect(shell.userMenu).toContainText('admin')
 
     // root 降级为 member（API 侧，浏览器不动）。
     expect(
@@ -387,18 +388,14 @@ test.describe.serial('角色/禁用即时生效（agents 写，spec「会话绑�
     ).toBe(200)
 
     // 登出 → 登录页（无残留：用户名与角色不留在界面上）。
-    await logoutBtn.click()
-    await expect(page.locator('sebas-login')).toBeVisible({ timeout: 15_000 })
-    await expect(page.locator('sebas-app .sidebar-footer button[aria-label="退出登录"]')).toHaveCount(
-      0,
-    )
+    await shell.logout()
+    await expect(page.getByRole('heading', { name: '登录以继续' })).toBeVisible({ timeout: 15_000 })
+    await expect(shell.userMenu).toHaveCount(0)
 
     // 重登：前端重取 me，展示位随新角色翻转（display 与执法同源）。
     await login.login(LIVE.username, LIVE.password)
-    await expect(page.locator('sebas-dashboard')).toBeVisible({ timeout: 15_000 })
-    await expect(page.locator('sebas-app .sidebar-footer button[aria-label="退出登录"]')).toHaveText(
-      /退出 \(gate-live · member\)/,
-    )
+    await expect(page.getByTestId('react-shell')).toBeVisible({ timeout: 15_000 })
+    await expect(shell.userMenu).toContainText('member')
 
     expect(collector.pageErrors).toEqual([])
     expect(collector.consoleErrors).toEqual([])

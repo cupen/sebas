@@ -1,9 +1,8 @@
 /**
- * Page object: `sebas-setup`（首启设置页，add-webui-multiuser-rbac 5.2）。
+ * Page object: the React first-run root setup gate (`SetupView`).
  *
- * Playwright's CSS engine pierces open shadow roots, so plain CSS reaches
- * the Lit-rendered internals (`sebas-setup input[name=…]`) without
- * hand-rolled `>>` chains.
+ * Selectors are the product's public semantics: the setup heading, labelled
+ * fields and the submitted form's alert. No Lit/WA/Shadow DOM internals.
  */
 import { expect, type Locator, type Page } from '@playwright/test'
 
@@ -18,12 +17,12 @@ export class Setup {
 
   constructor(page: Page) {
     this.page = page
-    this.host = page.locator('sebas-setup')
-    this.username = page.locator('sebas-setup input[name="username"]')
-    this.password = page.locator('sebas-setup input[name="password"]')
-    this.confirm = page.locator('sebas-setup input[name="confirm"]')
-    this.submit = page.locator('sebas-setup button[type="submit"]')
-    this.error = page.locator('sebas-setup p.error[role="alert"]')
+    this.host = page.getByRole('heading', { name: '创建管理员账户' })
+    this.username = page.getByRole('textbox', { name: '用户名' })
+    this.password = page.getByLabel(/^密码（至少/)
+    this.confirm = page.getByLabel('确认密码')
+    this.submit = page.getByRole('button', { name: '创建并进入' })
+    this.error = page.getByRole('alert')
   }
 
   async visible(): Promise<void> {

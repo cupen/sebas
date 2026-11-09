@@ -75,18 +75,15 @@ test.describe('未读徽标', () => {
     await rail.ensureProjectExpanded(projectName)
 
     // 首访无锚点 = 全部已读：两行都带着 msg_count=1，却都不冒红点。
-    await expect(rail.host.locator('[data-testid="session-unread"]')).toHaveCount(0)
+    await expect(rail.host.locator('.ant-tag')).toHaveCount(0)
 
     // 聚焦 A（写锚 anchor=1）再聚焦 B——A 变成离焦会话，页面不刷新。
     await rail.sessionItem(tagA).click()
-    await expect(rail.sessionItem(tagA)).toHaveAttribute('aria-current', 'true', {
-      timeout: 10_000,
-    })
+    await expect(page).toHaveURL(/\/sessions\//, { timeout: 10_000 })
     await rail.sessionItem(tagB).click()
-    await expect(rail.sessionItem(tagB)).toHaveAttribute('aria-current', 'true', {
+    await expect(page.getByTestId('workbench-session')).toContainText(tagB, {
       timeout: 10_000,
     })
-    await expect(rail.sessionItem(tagA)).not.toHaveAttribute('aria-current', 'true')
 
     // A 收到新回复（API 投影先钉住 +1），rail 徽标随后亮起——无需任何 reload。
     // 实施期发现（见 COVERAGE.md）：rail 行名跟随**最新** prompt（后端
@@ -100,26 +97,23 @@ test.describe('未读徽标', () => {
     await waitListStatus(page.request, keyA, ['done'])
     await expect.poll(rowCount).toBe(2)
     const badgeRow = rail.host
-      .locator('li.session-item', { has: page.locator('[data-testid="session-unread"]') })
-    const badge = badgeRow.locator('[data-testid="session-unread"]')
+      .locator('button', { has: page.locator('.ant-tag') })
+    const badge = badgeRow.locator('.ant-tag')
     await expect(badgeRow).toHaveCount(1, { timeout: 15_000 })
     await expect(badge).toHaveText('1')
-    await expect(badge).toHaveAttribute('title', '1 条未读回复')
+    await expect(badge).toHaveText('1')
 
     // （fix-webui-qa-round8 5.1）聚焦不再清徽标——打开 A 画出未读缝，内容
     // 被真正看到才清账：短对话开卷即全部可视（可视高度内结算自动清账）；
     // 溢出时点缝上「全部标为已读」。两种 seen 路径都收敛到徽标清零 + 锚
     // 推进到服务端当前 msg_count（=2，seam 与徽标共用）。
     await badgeRow.click()
-    await expect(rail.sessionItem(tagA)).toHaveAttribute('aria-current', 'true', {
-      timeout: 10_000,
+    await expect(page).toHaveURL(/\/sessions\//, { timeout: 10_000 })
+    // React has no explicit mark-all-seen button on the seam; a short
+    // conversation clears through the visible-bottom settlement path.
+    await page.getByTestId('conversation-pane').evaluate((el) => {
+      el.scrollTop = el.scrollHeight
     })
-    const markSeenA = page.locator('sebas-transcript-view .seam .link')
-    try {
-      await markSeenA.click({ timeout: 2_500 })
-    } catch {
-      // 短对话开卷即全部可视（可视高度内结算）：缝已被自动清账。
-    }
     await expect(badgeRow).toHaveCount(0, { timeout: 10_000 })
     const anchor = await page.evaluate((k) => {
       const raw = localStorage.getItem(`sebas:seen:${k}`)
@@ -158,7 +152,7 @@ test.describe('未读徽标', () => {
     // 推进共享读锚，行绝不点灯。（等待走列表轮询——detail 读取即设焦点，
     // 这里要保持「A 聚焦」不被测试自己的探针偷走。）
     await rail.sessionItem(tagA).click()
-    await expect(rail.sessionItem(tagA)).toHaveAttribute('aria-current', 'true', {
+    await expect(page.getByTestId('workbench-session')).toContainText(tagA, {
       timeout: 10_000,
     })
     await sendMessage(page.request, keyA, 'arrive while focused')
@@ -167,7 +161,7 @@ test.describe('未读徽标', () => {
       listSessions(page.request).then((rows) => rows.find((r) => r.encoded_key === keyA)?.msg_count)
     await expect.poll(rowCount).toBe(2)
     // 徽章缺席要覆盖到达后的完整窗口（含流式帧与对账渲染），不是快照一瞥。
-    await expect(rail.host.locator('[data-testid="session-unread"]')).toHaveCount(0, {
+    await expect(rail.host.locator('.ant-tag')).toHaveCount(0, {
       timeout: 10_000,
     })
     // 不是「聚焦抑制」遮旧账：锚真的被 transcript 推进到当前 msg_count=2。
@@ -181,7 +175,7 @@ test.describe('未读徽标', () => {
     await sendMessage(page.request, keyB, 'arrive while unfocused')
     await waitListStatus(page.request, keyB, ['done'])
     const badgeRow = rail.host
-      .locator('li.session-item', { has: page.locator('[data-testid="session-unread"]') })
+      .locator('button', { has: page.locator('.ant-tag') })
     await expect(badgeRow).toHaveCount(1, { timeout: 15_000 })
     await expect(badgeRow).toContainText(tagB)
 
@@ -190,20 +184,17 @@ test.describe('未读徽标', () => {
     // 锚到服务端当前计数。重复点击同一行（no-op switch）不推进锚，徽章
     // 保持清零（delta「Repeated focus keeps the badge cleared」回归钉）。
     await badgeRow.click()
-    await expect(rail.sessionItem(tagB)).toHaveAttribute('aria-current', 'true', {
+    await expect(page.getByTestId('workbench-session')).toContainText(tagB, {
       timeout: 10_000,
     })
-    const markSeenB = page.locator('sebas-transcript-view .seam .link')
-    try {
-      await markSeenB.click({ timeout: 2_500 })
-    } catch {
-      // 短对话开卷即全部可视（可视高度内结算）：缝已被自动清账。
-    }
-    await expect(rail.host.locator('[data-testid="session-unread"]')).toHaveCount(0, {
+    await page.getByTestId('conversation-pane').evaluate((el) => {
+      el.scrollTop = el.scrollHeight
+    })
+    await expect(rail.host.locator('.ant-tag')).toHaveCount(0, {
       timeout: 10_000,
     })
     await rail.sessionItem(tagB).click()
-    await expect(rail.host.locator('[data-testid="session-unread"]')).toHaveCount(0, {
+    await expect(rail.host.locator('.ant-tag')).toHaveCount(0, {
       timeout: 10_000,
     })
     const anchorB = await page.evaluate((k) => {

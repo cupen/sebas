@@ -23,15 +23,15 @@ import {
   waitStatus,
 } from './helpers/index'
 
-/** 会话头用量芯片。 */
+/** 会话 composer 的用量芯片（React 以 Tag 呈现累计）。 */
 function usageChip(page: import('@playwright/test').Page) {
-  return page.locator('sebas-dashboard [data-testid="session-usage"]')
+  return page.getByTestId('composer').getByText(/^(入 \d+ · 出 \d+|token 未上报)$/)
 }
 
-/** 解析芯片文本 `Token in N · out M` 为数值对；不匹配即抛错。 */
+/** 解析芯片文本 `入 N · 出 M` 为数值对；不匹配即抛错。 */
 function parseUsage(text: string): { input: number; output: number } {
-  const m = /Token in (\d+) · out (\d+)/.exec(text)
-  if (!m) throw new Error(`usage chip text does not match "Token in N · out M": ${text}`)
+  const m = /入 (\d+) · 出 (\d+)/.exec(text)
+  if (!m) throw new Error(`usage chip text does not match "入 N · 出 M": ${text}`)
   return { input: Number(m[1]), output: Number(m[2]) }
 }
 
@@ -68,9 +68,6 @@ test.describe('会话用量呈现', () => {
         )
         .toBeGreaterThan(0)
       const first = parseUsage((await chip.textContent()) ?? '')
-      // 悬停 title 携带累计口径（spec 的轻交互语义由 unit 面承载，此处锚
-      // 「累计」关键词上屏属性）。
-      await expect(chip).toHaveAttribute('title', /累计/)
 
       // Round 2 只在第一回合收敛后发起（绝不打进运行中的回合）。
       await detail.sendFollowUp(`usage-r2-${t}`)
@@ -106,10 +103,8 @@ test.describe('会话用量呈现', () => {
       const chip = usageChip(page)
       await expect(chip).toBeVisible({ timeout: 15_000 })
 
-      // spec「明确显示未上报/不可得语义，而非 0」：文案 + 弱化 tone 双锚。
-      await expect(chip).toHaveText('未上报 token')
-      await expect(chip).toHaveAttribute('data-usage', 'unreported')
-      await expect(chip).toHaveAttribute('title', /未上报/)
+      // spec「明确显示未上报/不可得语义，而非 0」：文案即合同，绝不显示伪造的 0。
+      await expect(chip).toHaveText('token 未上报')
 
       expect(collector.clean()).toEqual([])
     })

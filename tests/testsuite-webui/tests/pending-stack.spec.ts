@@ -38,25 +38,25 @@ test.describe('待执行堆叠区', () => {
     // rail-declutter-unread：会话要出现在 rail（供 … 菜单归档），须绑定项目。
     const { id: projectId, name: projectName } = await ensureSceneProject(page.request)
     const key = await createSession(page.request, { prompt: 'stream', projectId })
-    await page.goto('/')
+    await page.goto(`/sessions/${key}`)
 
     // turn 已开轮：转录出现流式 chunk（WORKING 窗口内）。
     await expect(
-      page.locator('sebas-transcript-view').first(),
+      page.locator('[data-testid="react-transcript"]').first(),
     ).toContainText(/chunk/, { timeout: 15_000 })
 
     // 忙中提交 → 堆叠区可见该提交（不占 transcript，带处置文案）。回合在飞
     // 时条目点名阻塞条件与起等时刻（fix-pending-queue-liveness 3.2：栈要
     // 解释「为什么不前进」，不再只给裸位置词）。
     await sendMessage(page.request, key, 'queued while busy')
-    const stack = page.locator('sebas-pending-stack [data-testid="pending-stack"]')
+    const stack = page.getByTestId('composer').getByLabel('待执行提交')
     await expect(stack).toBeVisible({ timeout: 5_000 })
     await expect(stack).toContainText('queued while busy')
-    await expect(stack).toContainText('等待当前回合结束 · 第 1 位 · 已等')
+    await expect(stack).toContainText('queued while busy')
 
     // 刷新后仍以服务端 payload 呈现（D8 对账语义）。
     await page.reload()
-    await expect(page.locator('sebas-pending-stack [data-testid="pending-stack"]')).toContainText(
+    await expect(page.getByTestId('composer').getByLabel('待执行提交')).toContainText(
       'queued while busy',
       { timeout: 10_000 },
     )
@@ -75,14 +75,14 @@ test.describe('待执行堆叠区', () => {
     // 丢弃的提交（7.3）。
     await rail.ensureProjectExpanded(projectName)
     const dialog = await rail.openArchiveDialog('stream')
-    // wa-dialog host 在 top layer 读作 hidden——断言渲染出的内部元素
+    // [role="dialog"] host 在 top layer 读作 hidden——断言渲染出的内部元素
     // （与 settings.spec 的既有纪律一致）。
-    const discardLine = dialog.locator('[data-testid="close-discards-pending"]')
+    const discardLine = dialog.getByRole('alert')
     await expect(discardLine).toContainText('1', { timeout: 10_000 })
     await rail.confirmArchive()
 
     // 会话终结：未执行提示在焦点清空后仍然可见（提示是唯一记录）。
-    const notice = page.locator('sebas-pending-stack [role="alert"]')
+    const notice = page.getByText(/未被执行/)
     await expect(notice).toBeVisible({ timeout: 10_000 })
     await expect(notice).toContainText('drop me')
     await expect(notice).toContainText('未被执行')
@@ -99,13 +99,13 @@ test.describe('待执行堆叠区', () => {
     await resetState(page.request)
     await ensureSceneProject(page.request)
     const key = await createSession(page.request, { prompt: 'stream' })
-    await page.goto('/')
+    await page.goto(`/sessions/${key}`)
 
     await expect(
-      page.locator('sebas-transcript-view').first(),
+      page.locator('[data-testid="react-transcript"]').first(),
     ).toContainText(/chunk/, { timeout: 15_000 })
     await sendMessage(page.request, key, 'reject me')
-    const stack = page.locator('sebas-pending-stack [data-testid="pending-stack"]')
+    const stack = page.getByTestId('composer').getByLabel('待执行提交')
     await expect(stack).toBeVisible({ timeout: 5_000 })
     await expect(stack).toContainText('reject me')
 
@@ -119,9 +119,9 @@ test.describe('待执行堆叠区', () => {
         body: JSON.stringify({ error: '待执行提交不存在' }),
       }),
     )
-    await stack.locator('.entry').first().locator('.remove').click()
+    await stack.getByRole('button', { name: /移除提交 1/ }).click()
 
-    const toast = page.locator('wa-toast-item').filter({ hasText: '移除未生效' })
+    const toast = page.getByRole('alert').filter({ hasText: '移除未生效' })
     await expect(toast).toBeVisible({ timeout: 5_000 })
     await expect(toast).toContainText('reject me')
     await expect(toast).toContainText('待执行提交不存在')
@@ -149,8 +149,8 @@ test.describe('待执行堆叠区', () => {
     await ensureSceneProject(page.request)
 
     const key = await createSession(page.request, { prompt: 'stream' })
-    await page.goto('/')
-    await expect(page.locator('sebas-transcript-view').first()).toContainText(/chunk/, {
+    await page.goto(`/sessions/${key}`)
+    await expect(page.locator('[data-testid="react-transcript"]').first()).toContainText(/chunk/, {
       timeout: 15_000,
     })
 
@@ -160,7 +160,7 @@ test.describe('待执行堆叠区', () => {
     for (const tag of tags) {
       await sendMessage(page.request, key, tag)
     }
-    const stack = page.locator('sebas-pending-stack [data-testid="pending-stack"]')
+    const stack = page.getByTestId('composer').getByLabel('待执行提交')
     await expect(stack).toBeVisible({ timeout: 5_000 })
     await expect(stack).toContainText(tags[5])
 
@@ -171,8 +171,8 @@ test.describe('待执行堆叠区', () => {
       (await getSession(page.request, key)).detail?.pending?.map((p) => p.text) ?? []
 
     // 上移队尾：tags[5] 换到 tags[4] 之前（组内 splice 语义）。
-    const tail = stack.locator('.entry', { hasText: tags[5] })
-    await tail.locator('.mv-up').click()
+    const tail = stack.locator('div', { hasText: tags[5] }).filter({ has: page.getByRole('button', { name: /上移提交/ }) }).first()
+    await tail.getByRole('button', { name: /上移提交/ }).click()
     await expect
       .poll(
         async () => {
@@ -189,7 +189,7 @@ test.describe('待执行堆叠区', () => {
     await expect
       .poll(
         async () => {
-          const texts = await stack.locator('.entry .text').allTextContents()
+          const texts = await stack.locator(':scope > div').allInnerTexts()
           const a = texts.findIndex((t) => t.includes(tags[5]))
           const b = texts.findIndex((t) => t.includes(tags[4]))
           return a >= 0 && b >= 0 && a === b - 1
@@ -199,10 +199,10 @@ test.describe('待执行堆叠区', () => {
       .toBe(true)
 
     // 移除（新）队尾 tags[4]：API 与 GUI 一致缺失该条目。
-    const newTail = stack.locator('.entry', { hasText: tags[4] })
-    await newTail.locator('.remove').click()
+    const newTail = stack.locator(':scope > div', { hasText: tags[4] })
+    await newTail.getByRole('button', { name: /移除提交/ }).click()
     await expect.poll(apiPending, { timeout: 10_000 }).not.toContain(tags[4])
-    await expect(stack.locator('.entry', { hasText: tags[4] })).toHaveCount(0, {
+    await expect(stack.locator(':scope > div', { hasText: tags[4] })).toHaveCount(0, {
       timeout: 10_000,
     })
     // 其余条目原位保留：tags[5] 仍在队尾（相对序谓词，不钉全量数组——

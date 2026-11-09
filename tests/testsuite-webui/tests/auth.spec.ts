@@ -12,7 +12,7 @@
  * main-config spec.)
  */
 import { expect, test } from '@playwright/test'
-import { authLogin, createSession, ErrorCollector, Login } from './helpers/index'
+import { authLogin, createSession, ErrorCollector, Login, ReactShell } from './helpers/index'
 
 test.describe('鉴权闭环', () => {
   let collector: ErrorCollector
@@ -33,7 +33,7 @@ test.describe('鉴权闭环', () => {
       // Logged-out browser hitting the deep path: login gate, not the session.
       await page.goto(`/sessions/${key}`)
       await expect(login.host).toBeVisible()
-      await expect(page.locator('sebas-dashboard')).toHaveCount(0)
+      await expect(page.getByTestId('react-shell')).toHaveCount(0)
 
       // The logged-out page surfaces WS auth-failed as a console error by
       // design; assert clean of real uncaught exceptions only.
@@ -48,21 +48,20 @@ test.describe('鉴权闭环', () => {
       await page.goto('/')
       await expect(login.host).toBeVisible()
       await login.login('admin', 'admin')
-      await expect(page.locator('sebas-dashboard')).toBeVisible({ timeout: 15_000 })
+      await expect(page.getByTestId('react-shell')).toBeVisible({ timeout: 15_000 })
 
       // Reload: the session cookie keeps the workbench up — no gate re-prompt.
       await page.reload()
-      await expect(page.locator('sebas-dashboard')).toBeVisible({ timeout: 15_000 })
+      await expect(page.getByTestId('react-shell')).toBeVisible({ timeout: 15_000 })
       await expect(login.host).toHaveCount(0)
 
       // Logout: back to the gate, and it sticks across another reload.
-      await page
-        .locator('sebas-app .sidebar-footer .settings-btn', { hasText: '退出 (admin · root)' })
-        .click()
+      const shell = new ReactShell(page)
+      await shell.logout()
       await expect(login.host).toBeVisible({ timeout: 15_000 })
       await page.reload()
       await expect(login.host).toBeVisible()
-      await expect(page.locator('sebas-dashboard')).toHaveCount(0)
+      await expect(page.getByTestId('react-shell')).toHaveCount(0)
 
       expect(collector.pageErrors).toEqual([])
     })
@@ -76,21 +75,20 @@ test.describe('鉴权闭环', () => {
       // Wrong password: rejected in place, no workbench.
       await login.login('admin', 'wrong-password')
       await expect(login.error).toHaveText('用户名或密码错误')
-      await expect(page.locator('sebas-dashboard')).toHaveCount(0)
+      await expect(page.getByTestId('react-shell')).toHaveCount(0)
 
       // Correct credentials: into the workbench.
       await login.login('admin', 'admin')
-      await expect(page.locator('sebas-app nav .brand .name')).toBeVisible({ timeout: 15_000 })
-      await expect(page.locator('sebas-dashboard')).toBeVisible()
+      await expect(page.getByTestId('react-shell')).toBeVisible({ timeout: 15_000 })
+      await expect(page.getByTestId('react-shell')).toBeVisible()
 
       // Logout: back to the unauthenticated gate.
-      await page
-        .locator('sebas-app .sidebar-footer .settings-btn', { hasText: '退出 (admin · root)' })
-        .click()
+      const shell = new ReactShell(page)
+      await shell.logout()
       await expect(login.host).toBeVisible({ timeout: 15_000 })
 
       // And the gate actually gates: workbench content is gone.
-      await expect(page.locator('sebas-dashboard')).toHaveCount(0)
+      await expect(page.getByTestId('react-shell')).toHaveCount(0)
 
       // Auth journey intentionally exercises REJECTION paths (wrong password →
       // 401; unauthenticated WS → auth-failed), which the browser logs as
@@ -139,7 +137,7 @@ test.describe('鉴权闭环', () => {
       // 登录成功 = 撤闸：工作台出现（/ws 连上），且登录后不再新增失败——
       // 恢复正常连接姿态，无重试风暴。
       await login.login('admin', 'admin')
-      await expect(page.locator('sebas-dashboard')).toBeVisible({ timeout: 15_000 })
+      await expect(page.getByTestId('react-shell')).toBeVisible({ timeout: 15_000 })
       const atLogin = wsFailures.length
       await page.waitForTimeout(4_000)
       expect(

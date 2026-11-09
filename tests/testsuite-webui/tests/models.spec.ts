@@ -47,6 +47,7 @@ import {
   FocusedSession,
   ProjectRail,
   SettingsModal,
+  cjk,
   waitStatus,
 } from './helpers/index'
 
@@ -209,7 +210,11 @@ test.describe('模型管理覆盖', () => {
       await resetState(page.request)
       // Seed a custom provider over the API; the UI edit journey then owns it.
       const created = await page.request.post('/api/providers', {
-        data: { name: 'editable', base_url_openai_chat: 'http://127.0.0.1:9/v1' },
+        data: {
+          name: 'editable',
+          base_url_openai_chat: 'http://127.0.0.1:9/v1',
+          models: [{ id: 'entry-a', tags: ['vision'] }],
+        },
       })
       expect(created.ok()).toBe(true)
 
@@ -225,24 +230,19 @@ test.describe('模型管理覆盖', () => {
         void route.continue()
       })
 
-      const row = settings.panel.locator('.provider-row', { hasText: 'editable' })
+      const row = settings.panel
+        .getByText('editable', { exact: true })
+        .locator('xpath=../..')
       await expect(row).toBeVisible({ timeout: 10_000 })
       // revamp…4.1: the provider row no longer carries a fetch button.
-      await expect(row.locator('button[data-testid="fetch-models"]')).toHaveCount(0)
+      await expect(row.getByRole('button', { name: '抓取模型列表' })).toHaveCount(0)
 
-      // Model entries are editable: add two entries, one tagged vision.
-      await row.locator('button[title="编辑"]').click()
-      const editor = page.locator('sebas-settings-modal wa-dialog.provider-editor')
-      const add = editor.locator('button[data-testid="add-model-entry"]')
-      await expect(add).toBeVisible()
-      await add.click()
-      const entry0 = editor.locator('[data-testid="model-entry"]').first()
-      await entry0.locator('wa-input input').fill('entry-a')
-      await entry0.locator('input[data-testid="tag-vision"]').check()
-      await add.click()
-      const entry1 = editor.locator('[data-testid="model-entry"]').nth(1)
-      await entry1.locator('wa-input input').fill('entry-b')
-      await editor.locator('wa-button').filter({ hasText: '保存' }).click()
+      // Model entries are editable through the editor's comma-separated list;
+      // an existing entry keeps its capability tags across the save.
+      await row.getByRole('button', { name: /编\s*辑/ }).click()
+      const editor = page.getByRole('dialog', { name: /编辑 provider：editable/ })
+      await editor.getByLabel('模型列表').fill('entry-a, entry-b')
+      await editor.getByRole('button', { name: cjk('保存') }).click()
       await expect(editor).toBeHidden({ timeout: 10_000 })
 
       // API truth: the entries persisted with their capability tags (entry
@@ -259,8 +259,8 @@ test.describe('模型管理覆盖', () => {
       ])
 
       // UI parity: the row lists the entries and the vision tag.
-      await expect(row.locator('.model-chip', { hasText: 'entry-a' })).toContainText('vision')
-      await expect(row.locator('.model-chip', { hasText: 'entry-b' })).toBeVisible()
+      await expect(row.locator('.ant-tag', { hasText: 'entry-a' })).toContainText('vision')
+      await expect(row.locator('.ant-tag', { hasText: 'entry-b' })).toBeVisible()
 
       // Browsing + editing never dialed an upstream.
       expect(fetchCalls).toBe(0)
@@ -318,51 +318,47 @@ test.describe('模型管理覆盖', () => {
         await settings.openViaSidebar()
         await settings.openSection('模型')
 
-        const row = settings.panel.locator('.provider-row', { hasText: 'fetchable' })
+        const row = settings.panel
+          .getByText('fetchable', { exact: true })
+          .locator('xpath=../..')
         await expect(row).toBeVisible({ timeout: 10_000 })
 
         // ── Cancel-discard phase: fetch replaces the DRAFT only; cancelling
         // the editor leaves the stored catalog untouched.
-        await row.locator('button[title="编辑"]').click()
-        let editor = page.locator('sebas-settings-modal wa-dialog.provider-editor')
+        await row.getByRole('button', { name: /编\s*辑/ }).click()
+        let editor = page.getByRole('dialog', { name: /编辑 provider：fetchable/ })
         await expect(
-          editor.locator('button[data-testid="fetch-models"]'),
+          editor.getByRole('button', { name: '抓取模型列表' }),
         ).toBeVisible({ timeout: 10_000 })
-        await editor.locator('button[data-testid="fetch-models"]').click()
+        await editor.getByRole('button', { name: '抓取模型列表' }).click()
 
-        // The draft now lists the upstream ids — the surviving id keeps its
-        // manual vision tag, the new one starts text-only.
-        const entry0 = editor.locator('[data-testid="model-entry"]').nth(0)
-        const entry1 = editor.locator('[data-testid="model-entry"]').nth(1)
-        await expect(entry0.locator('wa-input input')).toHaveValue('fetch-m-1', {
+        // The draft now lists the upstream ids in order.
+        await expect(editor.getByLabel('模型列表')).toHaveValue('fetch-m-1, fetch-m-2', {
           timeout: 10_000,
         })
-        await expect(entry1.locator('wa-input input')).toHaveValue('fetch-m-2')
-        await expect(entry0.locator('input[data-testid="tag-vision"]')).not.toBeChecked()
-        await expect(entry1.locator('input[data-testid="tag-vision"]')).toBeChecked()
 
         // Fetch persists nothing by itself.
         expect(await storedEntries()).toEqual([{ id: 'fetch-m-2', tags: ['vision'] }])
 
-        await editor.locator('wa-button').filter({ hasText: '取消' }).click()
+        await editor.getByRole('button', { name: cjk('取消') }).click()
         await expect(editor).toBeHidden({ timeout: 10_000 })
         expect(await storedEntries()).toEqual([{ id: 'fetch-m-2', tags: ['vision'] }])
 
         // ── Save phase: reopen, fetch again, save through the ordinary edit
         // flow — the wholesale replacement (dedup by id) reaches the store.
-        await row.locator('button[title="编辑"]').click()
-        editor = page.locator('sebas-settings-modal wa-dialog.provider-editor')
+        await row.getByRole('button', { name: /编\s*辑/ }).click()
+        editor = page.getByRole('dialog', { name: /编辑 provider：fetchable/ })
         await expect(
-          editor.locator('button[data-testid="fetch-models"]'),
+          editor.getByRole('button', { name: '抓取模型列表' }),
         ).toBeVisible({ timeout: 10_000 })
-        await editor.locator('button[data-testid="fetch-models"]').click()
+        await editor.getByRole('button', { name: '抓取模型列表' }).click()
         // fetch-m-1 只在抓取完成后出现在草稿里（存量目录只有 fetch-m-2）——
         // 以它为同步锚点。
-        await expect(editor.locator('[data-testid="model-entry"]').nth(0).locator('wa-input input')).toHaveValue(
-          'fetch-m-1',
+        await expect(editor.getByLabel('模型列表')).toHaveValue(
+          'fetch-m-1, fetch-m-2',
           { timeout: 10_000 },
         )
-        await editor.locator('wa-button').filter({ hasText: '保存' }).click()
+        await editor.getByRole('button', { name: cjk('保存') }).click()
         await expect(editor).toBeHidden({ timeout: 10_000 })
         await expect.poll(storedEntries, { timeout: 10_000, intervals: [250] }).toEqual([
           { id: 'fetch-m-1', tags: [] },
@@ -411,15 +407,17 @@ test.describe('模型管理覆盖', () => {
         await page.goto('/')
         await settings.openViaSidebar()
         await settings.openSection('模型')
-        const row = settings.panel.locator('.provider-row', { hasText: 'dialog-seam' })
+        const row = settings.panel
+          .getByText('dialog-seam', { exact: true })
+          .locator('xpath=../..')
         await expect(row).toBeVisible({ timeout: 10_000 })
-        await row.locator('button[title="编辑"]').click()
-        const editor = page.locator('sebas-settings-modal wa-dialog.provider-editor')
-        await editor.locator('button[data-testid="fetch-models"]').click()
-        await expect(
-          editor.locator('[data-testid="model-entry"]').nth(0).locator('wa-input input'),
-        ).toHaveValue('dlg-m-1', { timeout: 10_000 })
-        await editor.locator('wa-button').filter({ hasText: '保存' }).click()
+        await row.getByRole('button', { name: /编\s*辑/ }).click()
+        const editor = page.getByRole('dialog', { name: /编辑 provider：dialog-seam/ })
+        await editor.getByRole('button', { name: '抓取模型列表' }).click()
+        await expect(editor.getByLabel('模型列表')).toHaveValue('dlg-m-1, dlg-m-2', {
+          timeout: 10_000,
+        })
+        await editor.getByRole('button', { name: cjk('保存') }).click()
         await expect(editor).toBeHidden({ timeout: 10_000 })
 
         // API truth: the fetched ids persisted through the ordinary save.
@@ -438,12 +436,14 @@ test.describe('模型管理覆盖', () => {
         await rail.expandProject(projectName)
         await rail.openNewSessionDialog(projectName)
         const dialog = rail.newSessionDialog()
-        const providerSelect = dialog.locator('[data-testid="dialog-provider-select"]')
-        await expect(providerSelect).toBeVisible({ timeout: 15_000 })
-        await expect(providerSelect).toContainText('dialog-seam')
-        await expect(dialog.locator('[data-testid="dialog-model-select"]')).toContainText(
-          'dlg-m-1',
-        )
+        const modelSelect = dialog.getByRole('combobox', { name: '模型' })
+        await expect(modelSelect).toBeEnabled({ timeout: 15_000 })
+        await modelSelect.click()
+        const option = page
+          .locator('.ant-select-dropdown:not(.ant-select-dropdown-hidden)')
+          .locator('.ant-select-item-option')
+          .filter({ hasText: 'dialog-seam / dlg-m-1' })
+        await expect(option).toHaveCount(1)
         await rail.cancelNewSessionDialog()
 
         // Hygiene: drop the provider so later journeys' honest "no provider
@@ -472,13 +472,15 @@ test.describe('模型管理覆盖', () => {
       await settings.openViaSidebar()
       await settings.openSection('模型')
 
-      const row = settings.panel.locator('.provider-row', { hasText: 'urlless' })
+      const row = settings.panel
+        .getByText('urlless', { exact: true })
+        .locator('xpath=../..')
       await expect(row).toBeVisible({ timeout: 10_000 })
-      await row.locator('button[title="编辑"]').click()
-      const editor = page.locator('sebas-settings-modal wa-dialog.provider-editor')
-      await expect(editor.locator('wa-button').filter({ hasText: '保存' })).toBeVisible()
-      await expect(editor.locator('button[data-testid="fetch-models"]')).toHaveCount(0)
-      await editor.locator('wa-button').filter({ hasText: '取消' }).click()
+      await row.getByRole('button', { name: /编\s*辑/ }).click()
+      const editor = page.getByRole('dialog', { name: /编辑 provider：urlless/ })
+      await expect(editor.getByRole('button', { name: cjk('保存') })).toBeVisible()
+      await expect(editor.getByRole('button', { name: '抓取模型列表' })).toHaveCount(0)
+      await editor.getByRole('button', { name: cjk('取消') }).click()
       await expect(editor).toBeHidden({ timeout: 10_000 })
       await settings.close()
 
@@ -496,13 +498,11 @@ test.describe('模型管理覆盖', () => {
       await page.goto(`/sessions/${key}`)
       await expect(detail.host).toBeVisible()
 
-      // Agent 不可变的 UI 承诺：🔒 + tooltip（spec scenario "UI communicates
-      // immutability"）；不渲染任何 agent 切换控件。（session-detail 视图已
-      // 退休——锁提示现在住在工作台的聚焦会话头里，3.3。）
-      // 会话头与跟随模式 composer 各有一枚锁提示——限定会话头那枚。
-      const lock = page.locator('sebas-dashboard .session-head [data-testid="agent-lock"]')
-      await expect(lock).toContainText('🔒')
-      await expect(lock).toHaveAttribute('title', /agent 创建时选定，之后不可更改/)
+      // Agent 不可变的 UI 承诺：React composer 以只读 Tag 呈现绑定的 agent，
+      // 且不渲染任何 agent 切换控件。
+      const composer = page.getByTestId('composer')
+      await expect(composer.getByText('claude', { exact: true })).toBeVisible()
+      await expect(composer.getByRole('combobox', { name: /agent/i })).toHaveCount(0)
 
       expect(collector.clean()).toEqual([])
     })

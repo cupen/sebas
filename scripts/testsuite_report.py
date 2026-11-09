@@ -218,8 +218,9 @@ def parse_nextest_junit(text: str) -> list:
 def parse_webui_shards(paths: Iterable[str]) -> tuple:
     """Merge the Playwright reporter shards into ``(cases, duration_s)``.
 
-    The webui suite is six Playwright runs (main / auth / auth-setup /
-    deployment / detached / dead-core configs, see design D2) and each run
+    The webui suite is nine Playwright runs (main / auth / auth-setup /
+    deployment / detached / dead-core / react / react-auth / react-setup
+    configs, see design D2) and each run
     writes its own shard via ``tests/reporters/collect-json.ts``. Cases are
     keyed by Playwright's stable test id so a re-run of one config refreshes
     its slice instead of duplicating it; the describe chain arrives as a

@@ -66,27 +66,25 @@ test.describe('对话视图（workbench-conversation-view）', () => {
       // the rendered conversation stream. badge 先到、转录气泡后落——
       // 用收敛式等待等第 4 块（q2 的回复）上屏，不钉计数瞬帧。
       const blocks = page.locator(
-        'sebas-dashboard sebas-transcript-view .turn-block',
+        ':is([data-testid="workbench-session"],[data-testid="workbench-home"]) [data-testid="react-transcript"] [data-unit-key]',
       )
       await expect
         .poll(async () => await blocks.count(), { timeout: 20_000 })
         .toBeGreaterThanOrEqual(4)
       const count = await blocks.count()
       const texts = await blocks.allTextContents()
-      const classes = []
-      for (let i = 0; i < count; i++) {
-        classes.push(await blocks.nth(i).getAttribute('class'))
-      }
       const q1Idx = texts.findIndex((s) => s.includes(q1))
-      const firstAgentIdx = classes.findIndex((c) => c?.includes('is-assistant'))
+      // React units expose their side through the visible role label rather
+      // than a Lit styling class: operator = 你, agent = agent.
+      const firstAgentIdx = texts.findIndex((s) => s.includes('agent'))
       const q2Idx = texts.findIndex((s) => s.includes(q2))
       expect(q1Idx).toBeGreaterThanOrEqual(0)
       expect(firstAgentIdx).toBeGreaterThan(q1Idx)
       expect(q2Idx).toBeGreaterThan(firstAgentIdx)
-      // The operator turns really are the user-styled bubbles (两侧交替).
-      for (const [i, c] of classes.entries()) {
-        if (texts[i].includes(q1) || texts[i].includes(q2)) {
-          expect(c?.includes('is-user'), `turn ${i} must be operator-styled`).toBe(true)
+      // The operator turns really are the operator's own bubbles (两侧交替).
+      for (const [i, text] of texts.entries()) {
+        if (text.includes(q1) || text.includes(q2)) {
+          expect(text.trimStart().startsWith('你'), `turn ${i} must be operator-styled`).toBe(true)
         }
       }
 
@@ -113,51 +111,30 @@ test.describe('对话视图（workbench-conversation-view）', () => {
       await cards.allowOnce().click()
       await expect(cards.all()).toHaveCount(0, { timeout: 15_000 })
 
-      // fold-tool-calls-into-process-tree（D1）：调用与结果按 tool_use_id 配对
-      // 合并为过程折叠内的**一块**收起合并块，顶层 tool_result 块退役。过程
-      // 折叠收起行 = `process` 标签 + 尾条目（✓ 结果条目）title + 计数（调用
-      // + 结果 = 2）+ 执行结果章（permission-flow MODIFIED：决策结果收起态可
-      // 读，且汇总行同挂 ✓）。
+      // React renders the turn's process run as one native <details> fold:
+      // summary = structured tail title (tool · args) + item count, body =
+      // every process item (call arguments and result together). The fold is
+      // collapsed by default and has no nested details (the Lit nested
+      // tool-result block was retired).
       const fold = detail.processFold().first()
       await expect(fold).toBeVisible({ timeout: 15_000 })
-      const outerLink = fold.locator('[data-testid="process-fold-link"]')
-      await expect(outerLink.locator('.label')).toHaveText('过程')
-      await expect(outerLink.locator('.running')).toHaveText('✓ Bash')
-      await expect(outerLink.locator('.fold-count')).toHaveText('2')
-      await expect(outerLink).toHaveAttribute('aria-expanded', 'false')
-      await expect(fold.locator('.fold-body')).toHaveCount(0)
-      // 结果章上折叠行（不再随顶层块下沉消失）。
-      await expect(outerLink.locator('[data-testid="tool-outcome"]')).toHaveText('✓ 已执行')
+      const summary = fold.locator('summary')
+      await expect(summary).toContainText('Bash')
+      await expect(summary).toContainText('2 项')
+      await expect(fold).not.toHaveAttribute('open', '')
+      await expect(fold.locator('details')).toHaveCount(0)
 
-      // 收起态下无顶层结果块：合并块只在折叠体内（懒渲染，展开后才在 DOM）。
-      await expect(detail.host.locator('[data-testid="tool-result-entry"]')).toHaveCount(0)
+      // Expand: arguments and result are readable in the same fold body.
+      await summary.click()
+      await expect(fold).toHaveAttribute('open', '')
+      const body = fold.locator('pre')
+      await expect(body.filter({ hasText: 'rm -rf /' }).first()).toBeVisible()
+      await expect(body.filter({ hasText: 'perm done' }).first()).toBeVisible()
+      await expect(fold.locator('details')).toHaveCount(0)
 
-      // 展开过程折叠：合并块在场且**默认收起**——收起标题 = 调用条目的结构化
-      // 标题（工具名 · 关键参数），✓ 章同行可读。
-      await outerLink.click()
-      await expect(outerLink).toHaveAttribute('aria-expanded', 'true')
-      const resultBlock = detail.host.locator('[data-testid="tool-result-entry"]')
-      await expect(resultBlock).toHaveCount(1)
-      const blockLink = resultBlock.locator('[data-testid="tool-result-link"]')
-      await expect(blockLink).toHaveAttribute('aria-expanded', 'false')
-      await expect(resultBlock.locator('.item-title')).toHaveText('Bash · rm -rf /')
-      await expect(blockLink.locator('[data-testid="tool-outcome"]')).toHaveText('✓ 已执行')
-      await expect(resultBlock.locator('[data-testid="tool-call-body"]')).toHaveCount(0)
-
-      // 展开合并块本身：参数段 + 结果段同时可读（一次调用一块，📖 与 ✓ 不再
-      // 是两个独立块）。
-      await blockLink.click()
-      await expect(blockLink).toHaveAttribute('aria-expanded', 'true')
-      const body = resultBlock.locator('[data-testid="tool-call-body"]')
-      await expect(body).toBeVisible()
-      await expect(body.locator('.call-args')).toContainText('rm -rf /')
-      await expect(body.locator('.call-result')).toContainText('perm done')
-
-      // 开合互不连带（D7，D-C3 死路不得回归）：收起子块不动父折叠。
-      await blockLink.click()
-      await expect(blockLink).toHaveAttribute('aria-expanded', 'false')
-      await expect(outerLink).toHaveAttribute('aria-expanded', 'true')
-      await expect(fold.locator('.fold-body')).toBeVisible()
+      // Collapse again: the single process fold stays the only layer.
+      await summary.click()
+      await expect(fold).not.toHaveAttribute('open', '')
 
       expect(collector.clean()).toEqual([])
     })
@@ -179,15 +156,25 @@ test.describe('对话视图（workbench-conversation-view）', () => {
       await waitStatus(page.request, key, ['done'])
 
       await page.goto('/')
-      await expect(workbench.composer).toBeVisible()
+      await expect(workbench.host).toBeVisible()
       await rail.ensureProjectExpanded(projectName)
+      // A document-level probe proves the focus happens inside the SPA (the
+      // React shell routes to /sessions/<key> without a full page load).
+      await page.evaluate(() => {
+        ;(window as unknown as { __focusProbe?: boolean }).__focusProbe = true
+      })
       await rail.sessionItem(`inplace-${t}`).click()
 
-      // The conversation renders IN PLACE: same workbench surface, no
-      // navigation to any other view.
+      // The conversation renders IN PLACE on the same shell surface.
       await expect(detail.sessionHead).toBeVisible({ timeout: 15_000 })
       await expect(detail.userTurn(`inplace-${t}`)).toBeVisible()
-      expect(page.url()).not.toContain('/sessions/')
+      expect(page.url()).toContain('/sessions/')
+      expect(
+        await page.evaluate(
+          () => (window as unknown as { __focusProbe?: boolean }).__focusProbe,
+        ),
+      ).toBe(true)
+      await expect(page.getByTestId('react-shell')).toBeVisible()
 
       expect(collector.clean()).toEqual([])
     })
@@ -206,12 +193,14 @@ test.describe('对话视图（workbench-conversation-view）', () => {
       // instead of rendering an empty or fabricated list (4.4).
       await page.goto('/')
       await rail.openNewSessionDialog(projectName)
-      await expect(
-        rail.newSessionDialog().locator('[data-testid="dialog-catalog-unavailable"]'),
-      ).toBeVisible({ timeout: 15_000 })
-      await expect(
-        rail.newSessionDialog().locator('[data-testid="dialog-provider-select"]'),
-      ).toHaveCount(0)
+      const emptyDialog = rail.newSessionDialog()
+      // React states catalog unavailability on the single combined model
+      // select's extra line; the select itself stays disabled (no fabricated
+      // or empty list).
+      await expect(emptyDialog.getByText(/模型目录不可用/).first()).toBeVisible({
+        timeout: 15_000,
+      })
+      await expect(emptyDialog.getByRole('combobox', { name: '模型' })).toBeDisabled()
       await rail.cancelNewSessionDialog()
 
       // Configure a catalog (the same write path the Settings Models editor
@@ -232,19 +221,14 @@ test.describe('对话视图（workbench-conversation-view）', () => {
 
       // Reopen the dialog (sebas:refetch re-runs the shared catalog load).
       await rail.openNewSessionDialog(projectName)
-      // Two levels: provider first…
-      const providerSelect = rail
-        .newSessionDialog()
-        .locator('[data-testid="dialog-provider-select"]')
-      await expect(providerSelect).toBeVisible({ timeout: 15_000 })
-      await expect(providerSelect).toContainText('catalog-provider')
-      // …then the model of the chosen provider.
+      // React presents the provider and model as one combined pair option
+      // (`provider / model`) instead of two dependent selects.
+      const modelSelect = rail.newSessionDialog().getByRole('combobox', { name: '模型' })
+      await expect(modelSelect).toBeVisible({ timeout: 15_000 })
+      // AntD 6 的选中标签是 .ant-select-content 的文本（input 恒空）。
       await expect(
-        rail.newSessionDialog().locator('[data-testid="dialog-model-select"]'),
+        rail.newSessionDialog().locator('.ant-select-content').filter({ hasText: 'catalog-provider / cat-small' }),
       ).toBeVisible()
-      await expect(
-        rail.newSessionDialog().locator('[data-testid="dialog-model-select"]'),
-      ).toContainText('cat-small')
 
       // Clean up: the provider lives in the SHARED core store — leaving it
       // behind would flip later journeys' honest "no provider configured"
@@ -284,13 +268,11 @@ test.describe('对话视图（workbench-conversation-view）', () => {
         await page.goto('/')
         await rail.openNewSessionDialog(projectName)
         // First pair preselects with no memory (catalog order): mem-first.
-        const modelSelect = rail
-          .newSessionDialog()
-          .locator('[data-testid="dialog-model-select"]')
-        await expect(
-          rail.newSessionDialog().locator('[data-testid="dialog-provider-select"]'),
-        ).toBeVisible({ timeout: 15_000 })
-        await expect(modelSelect).toContainText('mem-first')
+        const modelSelect = rail.newSessionDialog().getByRole('combobox', { name: '模型' })
+        await expect(modelSelect).toBeVisible({ timeout: 15_000 })
+        const selectedContent = (text: string) =>
+          rail.newSessionDialog().locator('.ant-select-content').filter({ hasText: text })
+        await expect(selectedContent('mem-first')).toBeVisible()
 
         // Choose the SECOND model and confirm — the confirmation is the only
         // write point of the last-used memory (localStorage).
@@ -308,12 +290,8 @@ test.describe('对话视图（workbench-conversation-view）', () => {
         // Reopen (same page, rail reuses the dialog): the remembered pair
         // wins the preselection over the catalog's first pair.
         await rail.openNewSessionDialog(projectName)
-        await expect(
-          rail
-            .newSessionDialog()
-            .locator('[data-testid="dialog-provider-select"]'),
-        ).toBeVisible({ timeout: 15_000 })
-        await expect(modelSelect).toContainText('mem-second')
+        await expect(modelSelect).toBeVisible({ timeout: 15_000 })
+        await expect(selectedContent('mem-second')).toBeVisible()
 
         // A stale pair (model no longer in the catalog) must NOT preselect:
         // swap the catalog and the first pair takes over, without surfacing
@@ -328,17 +306,9 @@ test.describe('对话视图（workbench-conversation-view）', () => {
         })
         expect(updated.ok()).toBe(true)
         await rail.openNewSessionDialog(projectName)
-        await expect(
-          rail
-            .newSessionDialog()
-            .locator('[data-testid="dialog-provider-select"]'),
-        ).toBeVisible({ timeout: 15_000 })
-        await expect(
-          rail.newSessionDialog().locator('[data-testid="dialog-model-select"]'),
-        ).toContainText('mem-other')
-        await expect(
-          rail.newSessionDialog().locator('[data-testid="dialog-model-select"]'),
-        ).not.toContainText('mem-second')
+        await expect(modelSelect).toBeVisible({ timeout: 15_000 })
+        await expect(selectedContent('mem-other')).toBeVisible()
+        await expect(selectedContent('mem-second')).toHaveCount(0)
         await rail.cancelNewSessionDialog()
       } finally {
         // Hygiene: the shared core store must not leak into later journeys.

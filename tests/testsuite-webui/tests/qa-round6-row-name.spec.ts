@@ -65,11 +65,17 @@ test.describe('fix-webui-qa-round6 占位会话行名', () => {
       .not.toBeNull()
 
     // rail 行名 = 「未命名会话」：行文本与 hover title 都是可读占位——
-    // 短 id 截片（旧行为）不再是任何命名来源。
-    const placeholderRow = rail.sessionItem('未命名会话')
+    // 短 id 截片（旧行为）不再是任何命名来源。列出本会话行的可访问名，
+    // 失败时直接给出实现实际投影（而非空定位器的泛化超时）。
+    const rowNames = (
+      await rail.host
+        .locator('li button[aria-label]')
+        .evaluateAll((els) => els.map((el) => el.getAttribute('aria-label') ?? ''))
+    ).filter((name) => !name.startsWith('会话操作'))
+    expect(rowNames).toContain('未命名会话')
+    const placeholderRow = rail.host.getByRole('button', { name: /^未命名会话/ }).first()
     await expect(placeholderRow).toBeVisible()
-    await expect(placeholderRow.locator('.session-name')).toHaveText('未命名会话')
-    await expect(placeholderRow).toHaveAttribute('title', '未命名会话')
+    // React does not add a row title attribute; accessible name is the contract.
 
     // 首条消息：深链聚焦占位会话 → composer 发第一条。
     await page.goto(`/sessions/${key!}`)
@@ -88,10 +94,12 @@ test.describe('fix-webui-qa-round6 占位会话行名', () => {
 
     // UI 半边（同一页面、无刷新）：行名原地从「未命名会话」切到首条 prompt
     // 预览——session.updated live 链，占位词退场。
-    await expect(rail.sessionItem('未命名会话')).toHaveCount(0, { timeout: 15_000 })
+    await expect(rail.host.getByRole('button', { name: /^未命名会话/ })).toHaveCount(0, {
+      timeout: 15_000,
+    })
     const namedRow = rail.sessionItem('hello')
     await expect(namedRow).toBeVisible()
-    await expect(namedRow.locator('.session-name')).toHaveText('hello')
+    await expect(namedRow).toHaveAccessibleName(/^hello/)
 
     expect(collector.clean()).toEqual([])
   })

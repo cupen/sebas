@@ -22,12 +22,12 @@
 import { expect, test } from '@playwright/test'
 import {
   ErrorCollector,
-  FocusedSession,
   Login,
   authLogin,
   createSession,
   sendMessage,
 } from './helpers/index'
+import { ReactWorkbench } from './helpers/pages/react'
 
 test.describe('fix-webui-qa-round7 未认证 WS 重连闸', () => {
   test.describe.configure({ retries: 0 })
@@ -63,10 +63,12 @@ test.describe('fix-webui-qa-round7 未认证 WS 重连闸', () => {
     // 在此窗口内只有模块装载的 1 条首连失败，旧实现必然出现第 2 条。
     await page.waitForTimeout(35_000)
 
+    // 合同是「不反复」：允许 sharedWs 模块装载的首连失败（旧栈恒 1 条），
+    // React 入口按需连接时为 0 条——两者都满足「至多一条」。
     expect(
       wsFailures.length,
       `unauthenticated login page must not repeatedly hit the /ws upgrade (got ${wsFailures.length}): ${JSON.stringify(wsFailures)}`,
-    ).toBe(1)
+    ).toBeLessThanOrEqual(1)
   })
 
   test('admin/admin 登录后 WS 建立，agent 回复实时上屏（无刷新）', async ({
@@ -83,31 +85,26 @@ test.describe('fix-webui-qa-round7 未认证 WS 重连闸', () => {
     const login = new Login(page)
     await expect(login.host).toBeVisible({ timeout: 15_000 })
     await login.login('admin', 'admin')
-    await expect(page.locator('sebas-dashboard')).toBeVisible({ timeout: 15_000 })
+    await expect(page.getByTestId('react-shell')).toBeVisible({ timeout: 15_000 })
 
-    // WS 已建立：断线驻留横幅缺席（app-shell 只在 ready 态 setWsDown——
-    // 「与服务器的连接已断开…」横幅驻留即 WS 未建立的信号）。
-    await expect(
-      page.locator('sebas-notice-layer').getByText('与服务器的连接已断开'),
-    ).toHaveCount(0)
+    // WS 已建立：断线驻留横幅缺席（Shell 只在 ready 态 setWsDown——
+    // 「服务器连接已断开…」横幅驻留即 WS 未建立的信号）。
+    const disconnected = page.getByText(/服务器连接已断开/)
+    await expect(disconnected).toHaveCount(0)
 
     // 深链聚焦会话；首屏渲染走初始拉取，之后的增量只能来自 WS 推送。
-    const detail = new FocusedSession(page)
+    const workbench = new ReactWorkbench(page)
     await page.goto(`/sessions/${key}`)
-    await expect(detail.agentTurn('world').first()).toBeVisible({ timeout: 20_000 })
-    await expect(detail.composerTextarea).toBeVisible()
-    const before = (await detail.bubbles().allTextContents()).length
+    await expect(workbench.unitWith('world').first()).toBeVisible({ timeout: 20_000 })
+    await expect(workbench.composerTextarea).toBeVisible()
+    const before = await workbench.units.count()
 
     // 实时事件链路：页面已就位后经 API 追加一条消息，其气泡**不经刷新**上屏
     // ——只能走 WS turn.append 推送。
     await sendMessage(request, key, 'realtime probe')
     await expect
-      .poll(async () => (await detail.bubbles().allTextContents()).length, {
-        timeout: 20_000,
-      })
+      .poll(async () => workbench.units.count(), { timeout: 20_000 })
       .toBeGreaterThan(before)
-    await expect(
-      page.locator('sebas-notice-layer').getByText('与服务器的连接已断开'),
-    ).toHaveCount(0)
+    await expect(disconnected).toHaveCount(0)
   })
 })

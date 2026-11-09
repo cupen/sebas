@@ -43,11 +43,13 @@ test.describe('转录滚动跟随与跳到最新（fix-webui-qa-round8）', () =
   /** 转录滚动容器的距底余量（px）；> 80 = 视口下方还有内容。 */
   async function distanceFromBottom(page: Page): Promise<number> {
     return page
-      .locator('sebas-transcript-view .scroll')
+      .getByTestId('conversation-pane')
+      .locator(':scope > div')
+      .first()
       .evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight)
   }
 
-  const pill = (page: Page) => page.locator('sebas-transcript-view [data-testid="jump-latest"]')
+  const pill = (page: Page) => page.getByRole('button', { name: '跳到最新' })
 
   /**
    * 垫高转录：全部垫高消息一口气发出（引擎串行排队执行），统一等 done。
@@ -88,26 +90,21 @@ test.describe('转录滚动跟随与跳到最新（fix-webui-qa-round8）', () =
     await rail.ensureProjectExpanded(projectName)
     // 先聚焦 A（立锚）再切到 B——A 变离焦会话。
     await rail.sessionItem(tagA).click()
-    await expect(rail.sessionItem(tagA)).toHaveAttribute('aria-current', 'true', {
-      timeout: 10_000,
-    })
+    await expect(page).toHaveURL(/\/sessions\//, { timeout: 10_000 })
+    await expect(page.getByTestId('workbench-session')).toContainText(tagA, { timeout: 10_000 })
     await rail.sessionItem(tagB).click()
-    await expect(rail.sessionItem(tagB)).toHaveAttribute('aria-current', 'true', {
-      timeout: 10_000,
-    })
+    await expect(page.getByTestId('workbench-session')).toContainText(tagB, { timeout: 10_000 })
 
     // A 在离焦状态收到高未读尾段（table 场景的富 markdown 回复）。
     await sendMessage(page.request, keyA, 'table')
     await waitListStatus(page.request, keyA, ['done'], 45_000)
-    const badgeRow = rail.host.locator('li.session-item', {
-      has: page.locator('[data-testid="session-unread"]'),
-    })
+    const badgeRow = rail.host.locator('button', { has: page.locator('.ant-tag') })
     await expect(badgeRow).toHaveCount(1, { timeout: 15_000 })
 
     // 重聚焦 A：未读缝开卷——定位停在中部（seam 可见），sticky 保持脱离。
     await badgeRow.click()
     await expect(badgeRow).toHaveCount(0, { timeout: 10_000 })
-    const seam = page.locator('sebas-dashboard sebas-transcript-view div.seam:not([hidden])')
+    const seam = page.getByTestId('react-transcript').getByRole('separator', { name: /未读分界/ })
     await expect(seam).toBeVisible({ timeout: 15_000 })
     // 开卷停在缝上：距底余量远超浮标阈值（未读尾段是高表格）。
     await expect

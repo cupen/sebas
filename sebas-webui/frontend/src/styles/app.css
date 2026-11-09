@@ -1,9 +1,17 @@
 /* Global app chrome built on the design tokens. Component-specific styling
- * lives inside Lit components (see src/styles/shared.ts for the shared kit);
- * this file covers the document background, focus, selection, and scrollbars. */
+ * lives in the React surfaces' CSS Modules; this file covers the document
+ * background, focus, selection, and scrollbars. */
 
 * {
   box-sizing: border-box;
+}
+
+/* 4.6 touch budget: primary controls reach 44x44 on phone widths. */
+@media (max-width: 600px) {
+  body .ant-btn {
+    min-width: 44px;
+    min-height: 44px;
+  }
 }
 
 html,
@@ -33,9 +41,26 @@ body {
 
 /* One visible focus indicator everywhere, keyboard or pointer. */
 :focus-visible {
-  outline: var(--sebas-focus-ring);
+  /* AntD's 3px control ring outranks the bare selector; keep the blueprint's
+   * single 2px accent ring across product chrome and library controls. */
+  outline: var(--sebas-focus-ring) !important;
   outline-offset: 2px;
   border-radius: var(--sebas-radius-sm);
+}
+
+/* Wide GFM tables scroll inside their transcript entry, never the page. */
+.sebas-table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+/* AntD keeps its inline loading icon mounted while the leave motion runs —
+ * and a fast async result can strand that node at 0 opacity indefinitely.
+ * An invisible spinner must not contribute "loading" to the button's
+ * accessible name once the busy state has already cleared. */
+.ant-btn .ant-btn-loading-icon-motion-leave,
+.ant-btn .ant-btn-loading-icon-motion-leave-active {
+  visibility: hidden;
 }
 
 /* Quiet, dev-tool scrollbars. */

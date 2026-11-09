@@ -47,18 +47,23 @@ test.describe('零输出回合 notice（close-acceptance-blind-spots）', () => 
 
       // notice 条目在时间线上可见：中性信息条 +「回合已结束且无输出」导语
       // （与后端 ZERO_OUTPUT_NOTICE 措辞对齐，进程级 journey 钉过形状）。
-      const notice = page.locator('sebas-transcript-view [data-testid="notice-entry"]')
+      // React renders the zero-output notice as a neutral transcript unit
+      // (role label 提示), not a Lit `notice-entry` element.
+      const notice = page
+        .getByTestId('react-transcript')
+        .locator('[data-unit-key]')
+        .filter({ hasText: '回合已结束且无输出' })
       await expect(notice).toBeVisible()
       await expect(notice).toContainText('回合已结束且无输出')
 
       // 时间线恰好两个回合块：操作者 prompt + notice。零输出回合不再
       // 不可见地消失，也没有多余的 agent 气泡（时间线序 = spec 的
       // prompt → notice 落点序，进程级 journey 钉过同序）。
-      const blocks = page.locator('sebas-transcript-view .turn-block')
+      const blocks = page.locator('[data-testid="react-transcript"] [data-unit-key]')
       await expect(blocks).toHaveCount(2)
       await expect(blocks.nth(0)).toContainText('say nothing')
       await expect(blocks.nth(1)).toContainText('回合已结束且无输出')
-      await expect(page.locator('sebas-transcript-view .turn-block.is-notice')).toHaveCount(1)
+      await expect(page.locator('[data-testid="react-transcript"] [data-unit-key]:has-text("提示")')).toHaveCount(1)
 
       expect(collector.clean()).toEqual([])
     })
@@ -73,10 +78,13 @@ test.describe('零输出回合 notice（close-acceptance-blind-spots）', () => 
       await expect(detail.sessionHead).toBeVisible()
 
       // 正常产出正文/工具输出的回合没有 notice——零输出落点只对空回合生效。
-      await expect(page.locator('sebas-transcript-view [data-testid="notice-entry"]')).toHaveCount(
-        0,
-      )
-      await expect(page.locator('sebas-transcript-view .turn-block.is-notice')).toHaveCount(0)
+      await expect(
+        page
+          .getByTestId('react-transcript')
+          .locator('[data-unit-key]')
+          .filter({ hasText: '回合已结束且无输出' }),
+      ).toHaveCount(0)
+      await expect(page.locator('[data-testid="react-transcript"] [data-unit-key]:has-text("提示")')).toHaveCount(0)
       // 回合本身照常可见：操作者 prompt + hello world 正文气泡。
       await expect(detail.turnWith('hello world')).toBeVisible()
 
@@ -85,7 +93,7 @@ test.describe('零输出回合 notice（close-acceptance-blind-spots）', () => 
   })
 
   test.describe('notice 明暗两态', () => {
-    test('light 主题（默认 system→light）：notice 条目可见且页面不带 wa-dark', async ({
+    test('light 主题（默认 system→light）：notice 条目可见且 html[data-theme=light]', async ({
       page,
     }) => {
       const detail = new FocusedSession(page)
@@ -99,8 +107,13 @@ test.describe('零输出回合 notice（close-acceptance-blind-spots）', () => 
       await page.goto(`/sessions/${key}`)
       await expect(detail.sessionHead).toBeVisible()
 
-      await expect(page.locator('html')).not.toHaveClass(/wa-dark/)
-      await expect(page.locator('sebas-transcript-view [data-testid="notice-entry"]')).toBeVisible()
+      await expect(page.locator('html')).toHaveAttribute('data-theme', 'light')
+      await expect(
+        page
+          .getByTestId('react-transcript')
+          .locator('[data-unit-key]')
+          .filter({ hasText: '回合已结束且无输出' }),
+      ).toBeVisible()
 
       expect(collector.clean()).toEqual([])
     })
@@ -108,7 +121,7 @@ test.describe('零输出回合 notice（close-acceptance-blind-spots）', () => 
     test.describe('dark 主题（prefers-color-scheme: dark）', () => {
       test.use({ colorScheme: 'dark' })
 
-      test('notice 条目可见且页面带 wa-dark', async ({ page }) => {
+      test('notice 条目可见且 html[data-theme=dark]', async ({ page }) => {
         const detail = new FocusedSession(page)
 
         await resetState(page.request)
@@ -120,11 +133,14 @@ test.describe('零输出回合 notice（close-acceptance-blind-spots）', () => 
         await page.goto(`/sessions/${key}`)
         await expect(detail.sessionHead).toBeVisible()
 
-        // 主题机制：wa-dark 类挂在 <html>（theme.ts 单一开关），notice 条目
-        // 随 tokens.css 同源翻转——深色面下中性信息条依旧可见可读。
-        await expect(page.locator('html')).toHaveClass(/wa-dark/)
+        // 主题机制：React ThemeProvider 把 resolved theme 写到
+        // html[data-theme]（单一开关），notice 条目随 tokens 同源翻转。
+        await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark')
         await expect(
-          page.locator('sebas-transcript-view [data-testid="notice-entry"]'),
+          page
+            .getByTestId('react-transcript')
+            .locator('[data-unit-key]')
+            .filter({ hasText: '回合已结束且无输出' }),
         ).toBeVisible()
 
         expect(collector.clean()).toEqual([])

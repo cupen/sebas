@@ -73,43 +73,33 @@ test.describe('审批卡片旅程', () => {
       // （「独立卡片，未合并」）。**不假设泊车次序**——两条 hook_callback 的回调
       // 在 SDK 边界竞速（回调表锁不保证 FIFO），Bash / Read 谁先到都可能；契约是
       // 「两张各自独立」，不是「Bash 一定先出现」。
-      await expect(cards.all().first()).toBeVisible({ timeout: 30_000 })
-      const firstId = await cards.card().getAttribute('data-request-id')
-      expect(firstId).toBeTruthy()
-      const firstTool = (await cards.card().locator('.head .tool').innerText()).trim()
+      await expect(cards.all()).toHaveCount(2, { timeout: 30_000 })
+      const firstTool = (await cards.card().locator('strong').innerText()).trim()
       expect(['Bash', 'Read'], 'the card names one of the two scripted tools').toContain(firstTool)
       const secondTool = firstTool === 'Bash' ? 'Read' : 'Bash'
       const firstArgs = firstTool === 'Bash' ? 'echo first' : '/tmp/fake-parallel.txt'
       const secondArgs = firstTool === 'Bash' ? '/tmp/fake-parallel.txt' : 'echo first'
-      await expect(cards.card().locator('pre.args')).toContainText(firstArgs)
-      await expect(cards.card().locator('pre.args')).not.toContainText(secondArgs)
+      const cardByTool = (tool: string) => cards.all().filter({ hasText: tool })
+      await expect(cards.card().locator('pre')).toContainText(firstArgs)
+      await expect(cards.card().locator('pre')).not.toContainText(secondArgs)
 
       await cards.allowOnce().click()
 
-      // 第一张卡决策后由第二张卡接替。**不钉「计数归零」**：驱动侧一次只泊一条
-      // （SDK 回调表锁），第二张卡的 permission.requested 可能在第一张卡的
-      // permission.resolved 同一批 WS 帧里到达，DOM 从「1 张」直接换到「1 张」
-      // 而不经过 0——零窗口是竞速的，不是契约。契约是「换成另一张独立卡片」：
-      // 等首张消失、且可见卡片全部换成了别的 request_id。
+      // The decided card retires and the other independent card takes its
+      // place (no request_id is exposed in the React DOM; tool identity is
+      // the operator-visible independent surface).
       await expect
         .poll(
-          async () => {
-            const ids = await cards
-              .all()
-              .evaluateAll((els) => els.map((el) => el.getAttribute('data-request-id') ?? ''))
-            return ids.length > 0 && ids.every((id) => id !== firstId)
-          },
+          async () =>
+            (await cardByTool(firstTool).count()) === 0 &&
+            (await cardByTool(secondTool).count()) === 1,
           { timeout: 30_000 },
         )
         .toBe(true)
 
-      // 第二张卡：另一个工具、另一个 request_id（独立泊车与决策）。
-      const secondId = await cards.card().getAttribute('data-request-id')
-      expect(secondId).toBeTruthy()
-      expect(secondId).not.toBe(firstId)
-      await expect(cards.card().locator('.head .tool')).toHaveText(secondTool)
-      await expect(cards.card().locator('pre.args')).toContainText(secondArgs)
-      await expect(cards.card().locator('pre.args')).not.toContainText(firstArgs)
+      await expect(cardByTool(secondTool).locator('strong')).toHaveText(secondTool)
+      await expect(cardByTool(secondTool).locator('pre')).toContainText(secondArgs)
+      await expect(cardByTool(secondTool).locator('pre')).not.toContainText(firstArgs)
 
       await cards.allowOnce().click()
       await expect(cards.all()).toHaveCount(0, { timeout: 20_000 })

@@ -1,0 +1,249 @@
+.workspace {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  background: var(--sebas-bg, #141414);
+  z-index: 20;
+}
+
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 190px;
+  padding: 16px;
+  border-right: 1px solid var(--sebas-border, #303030);
+  overflow: auto;
+}
+
+.navHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.navTitle {
+  margin: 0 !important;
+}
+
+.navItem {
+  display: block;
+  width: 100%;
+  padding: 7px 10px;
+  text-align: left;
+  color: inherit;
+  background: none;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.navItem:hover {
+  background: var(--sebas-hover, rgba(255, 255, 255, 0.06));
+}
+
+.navItem[aria-current='page'] {
+  background: var(--sebas-active, rgba(22, 119, 255, 0.16));
+  color: var(--sebas-accent, #4096ff);
+}
+
+.navFoot {
+  margin-top: auto;
+  font-size: 12px;
+}
+
+.content {
+  flex: 1;
+  min-width: 0;
+  padding: 20px 24px;
+  overflow: auto;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 920px;
+}
+
+.panel[hidden] {
+  display: none;
+}
+
+.head h4 {
+  margin-bottom: 2px !important;
+}
+
+.row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--sebas-border, #303030);
+  border-radius: 8px;
+  background: var(--sebas-well);
+}
+
+.meta {
+  display: block;
+  margin-top: 3px;
+  color: var(--sebas-muted, #8c8c8c);
+  font-size: 12px;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 16px;
+  margin: 0;
+}
+
+.facts dt {
+  color: var(--sebas-muted, #8c8c8c);
+}
+
+.facts dd {
+  margin: 0;
+  word-break: break-all;
+}
+
+.hint {
+  margin-top: 12px;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.table th,
+.table td {
+  padding: 7px 10px;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--sebas-border, #303030);
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  word-break: break-all;
+}
+
+.skillBody {
+  min-width: 0;
+  flex: 1;
+}
+
+.skillToggle {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.skillToggle strong {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.skillPreview {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--sebas-border, #303030);
+  border-radius: 8px;
+  background: var(--sebas-well);
+}
+
+.skillMarkdown :global(h1),
+.skillMarkdown :global(h2),
+.skillMarkdown :global(h3) {
+  margin-top: 0;
+}
+
+.skillFiles {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: var(--sebas-muted, #8c8c8c);
+  font-size: 12px;
+}
+
+.slotGroup {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--sebas-border, #303030);
+  border-radius: 8px;
+}
+
+.slotLegend {
+  padding: 0 4px;
+  color: var(--sebas-text-dim);
+  font-size: 12px;
+}
+
+.slotRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+  padding: 0;
+  border: 0;
+}
+
+.slotName {
+  width: 56px;
+  padding: 0;
+  font-family: var(--sebas-mono, monospace);
+  font-size: 12px;
+}
+
+.slotToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.slotRow :global(.ant-select) {
+  min-width: 160px;
+  flex: 1;
+}
+
+/* Probe/cause text must read as a block: a long upstream failure is allowed to
+ * break anywhere and wraps onto its own rows instead of being clipped at the
+ * form's right edge. */
+.probeError {
+  width: 100%;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+/* AntD renders the title inside its own content box; restate the wrapping
+ * contract there so the long cause actually occupies multiple lines. */
+.probeError :global(.ant-alert-content),
+.probeError :global(.ant-alert-title),
+.probeError :global(.ant-alert-message) {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.5;
+}

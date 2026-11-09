@@ -8,7 +8,7 @@
  *
  * 覆盖：
  * - agent-workbench「转录为操作者提交渲染用户气泡（不分执行体）」native
- *   半边（2.3）：composer 提交 → `is-user` 气泡先于回复上屏（2.1 内核宿主
+ *   半边（2.3）：composer 提交 → 用户气泡先于回复上屏（2.1 内核宿主
  *   在投递前落的 prompt 条目）；
  * - agent-workbench「会话内模型切换留痕」native 半边（5.2）：API 切模型 →
  *   `model_change` 系统条目含新旧模型名（native override 路径）；
@@ -39,7 +39,7 @@ async function setModel(request: Parameters<typeof sendMessage>[0], key: string,
 
 /** composer 提交（操作者路径）：聚焦会话的 follow-up 输入 + Enter。 */
 async function composerSubmit(page: import('@playwright/test').Page, text: string): Promise<void> {
-  const input = page.locator('sebas-workbench-composer wa-textarea textarea')
+  const input = page.getByTestId('composer').getByRole('textbox', { name: '输入消息' })
   await input.fill(text)
   await input.press('Enter')
 }
@@ -67,15 +67,15 @@ test.describe('native 转录补全与影子队列（fix-webui-qa-round8）', () 
       // prompt 拉起一个种子回合（既有形态：spawn 的首 prompt 驱动首轮，
       // prompt=null 即空轮回——curl 可复现：entry0 空 prompt + 空回显），
       // 它先于操作者提交在场，不属本需求判据。
-      const transcript = page.locator('sebas-transcript-view')
+      const transcript = page.locator('[data-testid="react-transcript"]')
       await expect
         .poll(async () => {
-          const blocks = await transcript.locator('.turn-block').evaluateAll((els) =>
-            els.map((el) => ({ cls: el.className, text: el.textContent ?? '' })),
+          const blocks = await transcript.locator('[data-unit-key]').evaluateAll((els) =>
+            els.map((el) => el.textContent ?? ''),
           )
-          const user = blocks.findIndex((b) => b.cls.includes('is-user') && b.text.includes(tag))
+          const user = blocks.findIndex((text) => text.includes('你') && text.includes(tag))
           const reply = blocks.findIndex(
-            (b) => b.cls.includes('is-assistant') && b.text.includes(tag),
+            (text) => text.includes('agent') && text.includes(tag),
           )
           return user >= 0 && reply >= 0 && user < reply
         }, { timeout: 60_000 })
@@ -84,7 +84,9 @@ test.describe('native 转录补全与影子队列（fix-webui-qa-round8）', () 
       // 模型切换留痕（native override 路径）：条目含新旧模型名——切换前的
       // 当前模型 = 装配注入的默认模型 test/text。
       await setModel(page.request, key, 'test/long')
-      const entry = page.locator('sebas-transcript-view [data-testid="model-change-entry"]')
+      const entry = transcript
+        .locator('[data-unit-key]', { hasText: 'test/long' })
+        .filter({ has: page.getByText('模型', { exact: true }) })
       await expect(entry).toBeVisible({ timeout: 15_000 })
       await expect(entry).toContainText('test/text')
       await expect(entry).toContainText('test/long')
@@ -105,15 +107,15 @@ test.describe('native 转录补全与影子队列（fix-webui-qa-round8）', () 
       await setModel(page.request, key, 'test/long')
       await page.goto(`/sessions/${key}`)
 
-      const transcript = page.locator('sebas-transcript-view')
-      const stack = page.locator('sebas-pending-stack [data-testid="pending-stack"]')
+      const transcript = page.locator('[data-testid="react-transcript"]')
+      const stack = page.getByTestId('composer').getByLabel('待执行提交')
 
       // ── 开轮：test/long 的 SSE 滴流给一个 ≥2s 的在飞窗口（另加内核首启
       // 开销）。开轮提交的 prompt 气泡即时可见（提交即落账）＝提交通路就绪；
       // 随后的追加提交（+数百 ms）必然仍在窗口内。──
       await sendMessage(page.request, key, 'long turn opener')
       await expect(
-        transcript.locator('.turn-block.is-user', { hasText: 'long turn opener' }),
+        transcript.locator('[data-unit-key]:has-text("你")', { hasText: 'long turn opener' }),
       ).toBeVisible({ timeout: 15_000 })
 
       // 回合进行中追加提交（操作者路径）：待执行栈出现该提交的条目，排队
@@ -122,7 +124,7 @@ test.describe('native 转录补全与影子队列（fix-webui-qa-round8）', () 
       await composerSubmit(page, queuedTag)
       await expect(stack).toBeVisible({ timeout: 5_000 })
       await expect(stack).toContainText(queuedTag)
-      await expect(transcript.locator('.turn-block.is-user', { hasText: queuedTag })).toBeVisible()
+      await expect(transcript.locator('[data-unit-key]:has-text("你")', { hasText: queuedTag })).toBeVisible()
 
       // ── 回合结束后队列按序执行（API 真源）：test/long 每个执行完的回合
       // 恰落一条「🗒 turn summary」条目。0-turn 占位（prompt: null）不产
@@ -157,14 +159,15 @@ test.describe('native 转录补全与影子队列（fix-webui-qa-round8）', () 
       // 提交一条并从栈上移除：条目退场，API 真源清空（与 ACP 面同契约）。──
       await sendMessage(page.request, key, 'long turn for remove')
       await expect(
-        transcript.locator('.turn-block.is-user', { hasText: 'long turn for remove' }),
+        transcript.locator('[data-unit-key]:has-text("你")', { hasText: 'long turn for remove' }),
       ).toBeVisible({ timeout: 15_000 })
       const doomedTag = `doomed-${Date.now()}`
       await composerSubmit(page, doomedTag)
       await expect(stack).toBeVisible({ timeout: 5_000 })
-      await expect(stack.locator('.entry', { hasText: doomedTag })).toBeVisible({ timeout: 5_000 })
-      await stack.locator('.entry', { hasText: doomedTag }).locator('.remove').click()
-      await expect(stack.locator('.entry', { hasText: doomedTag })).toHaveCount(0, {
+      const doomedRow = stack.getByText(doomedTag).locator('xpath=..')
+      await expect(doomedRow).toBeVisible({ timeout: 5_000 })
+      await doomedRow.getByRole('button', { name: /移\s*除提交/ }).click()
+      await expect(doomedRow).toHaveCount(0, {
         timeout: 10_000,
       })
       await expect

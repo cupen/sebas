@@ -1,0 +1,226 @@
+.transcript {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.empty {
+  color: var(--sebas-muted, #8c8c8c);
+  padding: 24px 0;
+}
+
+.unit {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--sebas-border, #303030);
+  border-radius: 8px;
+  background: var(--sebas-well);
+  max-width: 100%;
+}
+
+.operator {
+  border-left: 3px solid var(--sebas-accent, #4096ff);
+}
+
+.agent {
+  border-left: 3px solid var(--sebas-ok, #52c41a);
+}
+
+.error {
+  border-left: 3px solid var(--sebas-err, #ff4d4f);
+}
+
+.notice,
+.system {
+  border-left: 3px solid var(--sebas-border-strong, #555);
+}
+
+.roleRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.role {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--sebas-muted, #8c8c8c);
+}
+
+/* Receipt badge: the newest submission is accepted but the agent has not
+   started emitting yet (queued counts). Muted on purpose — it is a phase
+   fact, not a success signal. */
+.receipt {
+  padding: 0 6px;
+  border: 1px solid var(--sebas-border, #303030);
+  border-radius: 999px;
+  font-size: 11px;
+  white-space: nowrap;
+  color: var(--sebas-muted, #8c8c8c);
+}
+
+.count {
+  font-size: 11px;
+  color: var(--sebas-err, #ff4d4f);
+}
+
+/* Turn model badge: the model that was effective when the turn started. */
+.modelChip {
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--sebas-surface-2, rgba(255, 255, 255, 0.06));
+  font-size: 11px;
+  white-space: nowrap;
+  color: var(--sebas-text-dim, var(--sebas-muted, #8c8c8c));
+}
+
+.plain {
+  margin: 0;
+  font-family: inherit;
+  font-size: 13px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.markdown {
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.markdown pre {
+  overflow: auto;
+  padding: 10px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.markdown table {
+  border-collapse: collapse;
+  max-width: 100%;
+}
+
+.markdown th,
+.markdown td {
+  padding: 4px 8px;
+  border: 1px solid var(--sebas-border, #303030);
+}
+
+.fold {
+  border: 1px solid var(--sebas-border, #303030);
+  border-radius: 6px;
+  padding: 4px 8px;
+}
+
+.foldHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.foldHead::-webkit-details-marker {
+  display: none;
+}
+
+.foldFull {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--sebas-muted, #8c8c8c);
+  font-size: 12px;
+}
+
+.foldCount {
+  font-size: 11px;
+  color: var(--sebas-muted, #8c8c8c);
+}
+
+.foldBody {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.processItem {
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.processHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.processKind {
+  margin-right: 6px;
+  font-size: 11px;
+  color: var(--sebas-accent, #4096ff);
+}
+
+.processTitle {
+  font-size: 12px;
+  color: var(--sebas-muted, #8c8c8c);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.outcomeOk,
+.outcomeDenied {
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.outcomeOk {
+  color: var(--sebas-ok, #52c41a);
+}
+
+.outcomeDenied {
+  color: var(--sebas-err, #ff4d4f);
+}
+
+.truncationNote {
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: var(--sebas-muted, #8c8c8c);
+}
+
+.viewAll {
+  padding: 0 4px;
+  height: auto;
+}
+
+.viewAllBody {
+  max-height: 60vh;
+  overflow: auto;
+}
+
+.seam {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0;
+  color: var(--sebas-warn, #faad14);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+}
+
+.seam::before,
+.seam::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: currentColor;
+  opacity: 0.4;
+}

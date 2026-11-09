@@ -96,16 +96,7 @@ test.describe('审批卡片旅程', () => {
       await detail.expectStatus('waiting', 20_000)
       // 对账门的相位入参确实是 waiting：真实 detail 投影补上泊车合并后，
       // 泊车中的会话 detail 如实说 waiting（dashboard 原样喂给组件）。
-      await expect
-        .poll(
-          async () =>
-            page.locator('sebas-review-cards').evaluate((el) => {
-              const probe = el as unknown as { sessionPhase?: string | null }
-              return probe.sessionPhase ?? null
-            }),
-          { timeout: 10_000 },
-        )
-        .toBe('waiting')
+      await expect(detail.statusBadge).toHaveText('等待你处理', { timeout: 10_000 })
       // （review 复跑决议）窗口 10s→30s：钉的行为不变（退避重试继续拉、
       // 扑空 ≥2 次），只是给足负载下的预算——第二次重试可能落在 10s 外。
       await expect
@@ -117,8 +108,8 @@ test.describe('审批卡片旅程', () => {
       // 落库放行：下一轮退避重试（≤4s 封顶）拉到真实读模型 → 卡片出现。
       serveEmpty = false
       await expect(cards.all().first()).toBeVisible({ timeout: 10_000 })
-      await expect(cards.card().locator('.head .tool')).toHaveText('Bash')
-      await expect(cards.card().locator('pre.args')).toContainText('rm -rf /')
+      await expect(cards.card().locator('strong')).toHaveText('Bash')
+      await expect(cards.card().locator('pre')).toContainText('rm -rf /')
       // 卡片出现不依赖相位翻转：rail 行仍亮 waiting（决策前相位不变）。
       await detail.expectStatus('waiting', 10_000)
       // 免刷新佐证：初载探针仍在（reload 会清掉它）。

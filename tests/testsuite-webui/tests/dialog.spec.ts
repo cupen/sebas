@@ -80,18 +80,16 @@ test.describe('agent 对话覆盖', () => {
       // Order (workbench-conversation-view 2.1/2.3): each round's hello and
       // world live in the SAME agent turn bubble; the operator's q2 turn
       // sits BETWEEN the two agent turns — user, agent, user, agent.
-      const blocks = page.locator('sebas-dashboard sebas-transcript-view .turn-block')
+      const blocks = page.locator(':is([data-testid="workbench-session"],[data-testid="workbench-home"]) [data-testid="react-transcript"] [data-unit-key]')
       await expect(blocks).toHaveCount(4)
-      const classes: string[] = []
+      const roles: string[] = []
       const texts: string[] = []
       for (let i = 0; i < 4; i++) {
-        classes.push((await blocks.nth(i).getAttribute('class')) ?? '')
-        texts.push((await blocks.nth(i).textContent()) ?? '')
+        const text = (await blocks.nth(i).textContent()) ?? ''
+        roles.push(text.trimStart().startsWith('你') ? 'user' : 'assistant')
+        texts.push(text)
       }
-      expect(classes[0]).toContain('is-user')
-      expect(classes[1]).toContain('is-assistant')
-      expect(classes[2]).toContain('is-user')
-      expect(classes[3]).toContain('is-assistant')
+      expect(roles).toEqual(['user', 'assistant', 'user', 'assistant'])
       expect(texts[0]).toContain(q1)
       expect(texts[1]).toContain('hello')
       expect(texts[1]).toContain('world')

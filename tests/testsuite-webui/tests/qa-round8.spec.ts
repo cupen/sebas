@@ -25,6 +25,7 @@ import {
   ErrorCollector,
   FocusedSession,
   getSession,
+  pickSelectOption,
   resetState,
   ReviewCards,
   SettingsModal,
@@ -54,26 +55,24 @@ test.describe('fix-webui-qa-round8 契约留痕与管理面', () => {
 
       await expect(cards.all().first()).toBeVisible({ timeout: 15_000 })
 
-      // 4.4 审批面板展示位：会话 chip 是友好形式（渠道 · 本地段），原始
-      // 编码串只在 title 里（可复制、可与日志对账）。
-      const sid = cards.card().locator('.session-id')
-      await expect(sid).toContainText('Web · ')
-      await expect(sid).not.toContainText('%00')
-
-      // escalate：填原因 → 上抛（决策投递后卡片退场）。
-      await cards.card().locator('wa-input.escalate-reason input').fill('need sudo once')
-      await cards.card().locator('wa-button.escalate').click()
+      // 审批卡由 React 以 role=alertdialog（aria-label 点名工具）呈现。
+      await expect(cards.card()).toHaveAccessibleName(/待审批 Bash/)
+      // React 审批卡尚未提供「上抛 + 原因」控件（实现缺口）：按语义寻找原因
+      // 输入与上抛按钮；缺席时本断言如实失败，不删除旅程。
+      const reason = cards.card().getByRole('textbox', { name: /原\s*因/ })
+      await expect(reason).toBeVisible({ timeout: 10_000 })
+      await reason.fill('need sudo once')
+      await cards.card().getByRole('button', { name: /上\s*抛|升级/ }).click()
       await expect(cards.all()).toHaveCount(0, { timeout: 15_000 })
 
       // 转录的可见降级条目：中性系统条目点名降级语义、工具名与原因原文。
-      const entry = page.locator('sebas-transcript-view [data-testid="escalate-downgrade-entry"]')
+      const entry = page
+        .getByTestId('react-transcript')
+        .locator('[data-unit-key]', { hasText: '审批降级' })
       await expect(entry).toBeVisible({ timeout: 15_000 })
-      await expect(entry).toContainText('审批降级')
       await expect(entry).toContainText('仅放行一次')
       await expect(entry).toContainText('Bash')
-      await expect(entry.locator('[data-testid="escalate-downgrade-reason"]')).toHaveText(
-        'need sudo once',
-      )
+      await expect(entry).toContainText('need sudo once')
 
       // 工具执行有痕：降级后的 allow_once 真的放行——'perm done' 落折叠体，
       // 回合照常收尾。
@@ -120,8 +119,9 @@ test.describe('fix-webui-qa-round8 契约留痕与管理面', () => {
       // 一条 from=null 的条目，它不含 opus——按 hasText 精确锁定本次切换）。
       await page.goto(`/sessions/${key}`)
       const entry = page
-        .locator('sebas-transcript-view [data-testid="model-change-entry"]')
-        .filter({ hasText: 'opus' })
+        .getByTestId('react-transcript')
+        .locator('[data-unit-key]', { hasText: 'opus' })
+        .filter({ has: page.getByText('模型', { exact: true }) })
       await expect(entry).toBeVisible({ timeout: 15_000 })
       await expect(entry).toContainText('fake')
       await expect(entry).toContainText('opus')
@@ -136,12 +136,14 @@ test.describe('fix-webui-qa-round8 契约留痕与管理面', () => {
     }) => {
       await resetState(page.request)
       await page.goto('/')
-      // 组头链接区是常驻入口：归档为空也渲染（总览页不再只能手输 URL）。
-      const link = page.locator('sebas-project-rail [data-testid="history-sessions-link"]')
+      // React 壳把总览入口放在主导航（常驻，归档为空也可达）。
+      const link = page
+        .getByRole('navigation', { name: '主导航' })
+        .getByRole('button', { name: '会话总览' })
       await expect(link).toBeVisible({ timeout: 10_000 })
       await link.click()
       // SPA 路由（history pushState）：总览页宿主上屏即达。
-      await expect(page.locator('sebas-sessions')).toBeVisible({ timeout: 10_000 })
+      await expect(page.getByTestId('sessions-page')).toBeVisible({ timeout: 10_000 })
 
       expect(collector.clean()).toEqual([])
     })
@@ -180,7 +182,7 @@ test.describe('fix-webui-qa-round8 契约留痕与管理面', () => {
     }
 
     /**
-     * 编辑器里保存（provider 选择走 wa-select 的 value + change 事件）。
+     * 编辑器里保存（provider 选择走 [role="combobox"] 的 value + change 事件）。
      * `name` 只在新建时填——编辑态名称即主键、输入框 disabled（fill 会等
      * 可编辑性直到超时）。
      */
@@ -188,20 +190,15 @@ test.describe('fix-webui-qa-round8 契约留痕与管理面', () => {
       page: import('@playwright/test').Page,
       opts: { name?: string; provider: string; upstream: string },
     ) {
-      const host = page.locator('sebas-model-aliases')
+      const host = page.getByRole('region', { name: '设置' })
       if (opts.name !== undefined) {
-        await host.locator('[data-testid="alias-name-input"] input').fill(opts.name)
+        await host.getByLabel('别名', { exact: true }).fill(opts.name)
       }
-      await host
-        .locator('[data-testid="alias-provider-select"]')
-        .evaluate((el, v) => {
-          ;(el as unknown as { value: string }).value = v as string
-          el.dispatchEvent(new Event('change', { bubbles: true }))
-        }, opts.provider)
+      await pickSelectOption(page, host.getByRole('combobox', { name: '别名 provider' }), opts.provider)
       if (opts.upstream) {
-        await host.locator('[data-testid="alias-upstream-input"] input').fill(opts.upstream)
+        await host.getByLabel('上游模型').fill(opts.upstream)
       }
-      await host.locator('[data-testid="alias-save"]').click()
+      await host.getByRole('button', { name: /新建别名|保\s*存/ }).click()
     }
 
     test('新建、刷新后仍在、编辑、删除（带确认）一轮，列表与后端一致', async ({ page }) => {
@@ -218,18 +215,19 @@ test.describe('fix-webui-qa-round8 契约留痕与管理面', () => {
       await settings.openViaSidebar()
       await settings.openSection('别名')
 
-      const host = page.locator('sebas-settings-modal sebas-model-aliases')
+      const host = page.getByRole('region', { name: '设置' })
       // 沙箱起点无别名 → 空态在场（分区入口本身可见可导航）。
-      await expect(host.locator('[data-testid="alias-empty"]')).toBeVisible({ timeout: 10_000 })
+      await expect(host.getByText('还没有别名')).toBeVisible({ timeout: 10_000 })
 
       // ── 新建：名称 + 目标 provider + 可选上游模型。──
-      await host.locator('[data-testid="alias-create"]').click()
       await fillAndSave(page, {
         name: 'qa-alias-a',
         provider: SRC_PROVIDER,
         upstream: 'claude-opus-4-6',
       })
-      const rowA = host.locator('[data-testid="alias-row"][data-alias="qa-alias-a"]')
+      const aliasRow = (name: string) =>
+        host.getByText(name, { exact: true }).locator('xpath=../..')
+      const rowA = aliasRow('qa-alias-a')
       await expect(rowA).toBeVisible({ timeout: 10_000 })
       await expect(rowA).toContainText(SRC_PROVIDER)
       await expect(rowA).toContainText('claude-opus-4-6')
@@ -243,24 +241,25 @@ test.describe('fix-webui-qa-round8 契约留痕与管理面', () => {
       await settings.openSection('别名')
       await expect(
         page
-          .locator('sebas-settings-modal sebas-model-aliases')
-          .locator('[data-testid="alias-row"][data-alias="qa-alias-a"]'),
+          .getByRole('region', { name: '设置' })
+          .getByText('qa-alias-a', { exact: true })
+          .locator('xpath=../..'),
       ).toBeVisible({ timeout: 10_000 })
 
       // ── 编辑：换上游模型后保存，行与后端一致。──
-      await page
-        .locator('sebas-settings-modal sebas-model-aliases')
-        .locator('[data-testid="alias-row"][data-alias="qa-alias-a"]')
-        .locator('button[aria-label="编辑别名 qa-alias-a"]')
+      // React 别名面板尚无「编辑别名」入口（实现缺口）：按语义寻找行内编辑
+      // 按钮；缺席时如实失败。
+      await host
+        .getByText('qa-alias-a', { exact: true })
+        .locator('xpath=../..')
+        .getByRole('button', { name: /编辑别名 qa-alias-a/ })
         .click()
       await fillAndSave(page, {
         provider: SRC_PROVIDER,
         upstream: 'claude-sonnet-4-5',
       })
       await expect(
-        page
-          .locator('sebas-settings-modal sebas-model-aliases')
-          .locator('[data-testid="alias-row"][data-alias="qa-alias-a"]'),
+        host.getByText('qa-alias-a', { exact: true }).locator('xpath=../..'),
       ).toContainText('claude-sonnet-4-5', { timeout: 10_000 })
       await expect
         .poll(
@@ -269,28 +268,25 @@ test.describe('fix-webui-qa-round8 契约留痕与管理面', () => {
         )
         .toBe('claude-sonnet-4-5')
 
-      // ── 删除：确认步骤点名目标，确认后行与后端一致消失。──
-      await host.locator('[data-testid="alias-create"]').click()
+      // ── 删除：React 行内直接删除（当前无确认步骤——实现缺口，按语义寻找
+      // 确认对话框；缺失时如实失败）。──
       await fillAndSave(page, { name: 'qa-alias-b', provider: SRC_PROVIDER, upstream: '' })
-      await expect(host.locator('[data-testid="alias-row"][data-alias="qa-alias-b"]')).toBeVisible({
-        timeout: 10_000,
-      })
+      const rowB = host.getByText('qa-alias-b', { exact: true }).locator('xpath=../..')
+      await expect(rowB).toBeVisible({ timeout: 10_000 })
 
-      await host.locator('button[aria-label="删除别名 qa-alias-b"]').click()
-      // wa-dialog host 在 top layer 读作 hidden——断言渲染出的内部元素。
-      const confirm = host.locator('wa-dialog', { hasText: '删除别名' })
-      await expect(confirm.locator('p')).toContainText('qa-alias-b')
-      await confirm.locator('[data-testid="alias-delete-confirm"]').click()
+      await rowB.getByRole('button', { name: /删\s*除/ }).click()
+      const confirm = page.getByRole('dialog', { name: /删除别名/ })
+      await expect(confirm).toContainText('qa-alias-b')
+      await confirm.getByRole('button', { name: /删\s*除|确\s*认/ }).click()
 
-      await expect(host.locator('[data-testid="alias-row"][data-alias="qa-alias-b"]')).toHaveCount(
-        0,
-        { timeout: 10_000 },
-      )
+      await expect(rowB).toHaveCount(0, { timeout: 10_000 })
       await expect
         .poll(async () => Object.keys(await aliases(request)), { timeout: 10_000 })
         .not.toContain('qa-alias-b')
       // 未被删的条目原位保留。
-      await expect(host.locator('[data-testid="alias-row"][data-alias="qa-alias-a"]')).toBeVisible()
+      await expect(
+        host.getByText('qa-alias-a', { exact: true }).locator('xpath=../..'),
+      ).toBeVisible()
 
       await settings.close()
 

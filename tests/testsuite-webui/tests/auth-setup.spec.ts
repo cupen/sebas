@@ -20,7 +20,7 @@
  * intervals.
  */
 import { expect, test } from '@playwright/test'
-import { ErrorCollector, Login, Setup } from './helpers/index'
+import { ErrorCollector, Login, ReactShell, Setup } from './helpers/index'
 
 test.describe('鉴权与访问旅程', () => {
   let collector: ErrorCollector
@@ -45,8 +45,8 @@ test.describe('鉴权与访问旅程', () => {
       const setup = new Setup(page)
       await page.goto('/')
       await setup.visible()
-      await expect(page.locator('sebas-login')).toHaveCount(0)
-      await expect(page.locator('sebas-dashboard')).toHaveCount(0)
+      await expect(page.getByRole('heading', { name: '登录以继续' })).toHaveCount(0)
+      await expect(page.getByTestId('react-shell')).toHaveCount(0)
 
       // The flip regression: outlive two reachability-poll intervals (5s
       // each) — the card must still be the setup card, not the login gate.
@@ -56,8 +56,8 @@ test.describe('鉴权与访问旅程', () => {
       // assert clean of real uncaught exceptions only.)
       await page.waitForTimeout(11_000)
       await setup.visible()
-      await expect(page.locator('sebas-login')).toHaveCount(0)
-      await expect(page.locator('sebas-dashboard')).toHaveCount(0)
+      await expect(page.getByRole('heading', { name: '登录以继续' })).toHaveCount(0)
+      await expect(page.getByTestId('react-shell')).toHaveCount(0)
       expect(collector.pageErrors).toEqual([])
     })
   })
@@ -73,7 +73,7 @@ test.describe('鉴权与访问旅程', () => {
       // Short password: the 8-char floor, same standard as the server 400.
       await setup.setup('admin', 'short')
       await expect(setup.error).toHaveText('密码至少需要 8 个字符')
-      await expect(page.locator('sebas-dashboard')).toHaveCount(0)
+      await expect(page.getByTestId('react-shell')).toHaveCount(0)
 
       // Mismatched confirm: same inline rejection, still no workbench.
       await setup.username.fill('admin')
@@ -81,7 +81,7 @@ test.describe('鉴权与访问旅程', () => {
       await setup.confirm.fill('password9')
       await setup.submit.click()
       await expect(setup.error).toHaveText('两次输入的密码不一致')
-      await expect(page.locator('sebas-dashboard')).toHaveCount(0)
+      await expect(page.getByTestId('react-shell')).toHaveCount(0)
       expect(collector.pageErrors).toEqual([])
     })
 
@@ -106,18 +106,18 @@ test.describe('鉴权与访问旅程', () => {
         await login.visible()
         await login.login('admin', 'password8')
       }
-      await expect(page.locator('sebas-dashboard')).toBeVisible({ timeout: 15_000 })
-      await expect(page.locator('sebas-setup')).toHaveCount(0)
+      await expect(page.getByTestId('react-shell')).toBeVisible({ timeout: 15_000 })
+      await expect(page.getByRole('heading', { name: '创建管理员账户' })).toHaveCount(0)
 
       // The setup response sets the session cookie: the sidebar shows the
       // signed-in account and a reload keeps the workbench up.
-      await expect(
-        page.locator('sebas-app .sidebar-footer .settings-btn', { hasText: '退出 (admin · root)' }),
-      ).toBeVisible()
+      const shell = new ReactShell(page)
+      await expect(shell.userMenu).toContainText('admin')
+      await expect(shell.userMenu).toContainText('root')
       await page.reload()
-      await expect(page.locator('sebas-dashboard')).toBeVisible({ timeout: 15_000 })
-      await expect(page.locator('sebas-login')).toHaveCount(0)
-      await expect(page.locator('sebas-setup')).toHaveCount(0)
+      await expect(page.getByTestId('react-shell')).toBeVisible({ timeout: 15_000 })
+      await expect(page.getByRole('heading', { name: '登录以继续' })).toHaveCount(0)
+      await expect(page.getByRole('heading', { name: '创建管理员账户' })).toHaveCount(0)
       expect(collector.pageErrors).toEqual([])
     })
 

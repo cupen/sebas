@@ -24,7 +24,7 @@ export interface RouteDef {
 }
 
 /** Match a concrete path against the declared route patterns. */
-export function matchRoute(routes: RouteDef[], path: string): RouteMatch | null {
+export function matchRoute(routes: readonly RouteDef[], path: string): RouteMatch | null {
   for (const route of routes) {
     const patternSegments = route.pattern.split('/').filter(Boolean)
     const pathSegments = path.split('/').filter(Boolean)

@@ -1,0 +1,329 @@
+.rail {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  flex: 1;
+}
+
+.sectionHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 4px;
+}
+
+.sectionTitle {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--sebas-text-faint);
+}
+
+.projects {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-right: 2px;
+}
+
+.project {
+  border-radius: 7px;
+}
+
+.projectRow {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: 7px;
+}
+
+.projectRow:hover {
+  background: var(--sebas-surface-2);
+}
+
+.projectActive {
+  background: var(--sebas-well);
+  box-shadow: inset 2px 0 0 var(--sebas-accent);
+}
+
+.projectButton {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  background: transparent;
+  color: var(--sebas-text);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  padding: 5px 6px;
+  cursor: pointer;
+}
+
+.projectName {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.count {
+  font-size: 10px;
+  color: var(--sebas-text-faint);
+  font-family: ui-monospace, monospace;
+}
+
+.sessions {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 2px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.sessionRow {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  border-radius: 6px;
+}
+
+.sessionRow:hover {
+  background: var(--sebas-surface-2);
+}
+
+.sessionButton {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 4px 5px;
+  border: 0;
+  background: transparent;
+  color: var(--sebas-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sessionText {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.sessionName {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sessionMeta {
+  font-size: 10px;
+  color: var(--sebas-text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-top: 5px;
+  flex: none;
+  background: var(--sebas-text-faint);
+}
+
+.dot_starting,
+.dot_queued {
+  background: var(--sebas-info);
+}
+
+.dot_working {
+  background: var(--sebas-warn);
+}
+
+.dot_waiting {
+  background: var(--sebas-signal);
+  border-radius: 2px;
+}
+
+.dot_done {
+  background: var(--sebas-ok);
+}
+
+.dot_failed {
+  background: var(--sebas-err);
+}
+
+.dot_dormant {
+  background: transparent;
+  border: 1px solid var(--sebas-text-faint);
+}
+
+.unread {
+  margin-inline-end: 0 !important;
+  font-size: 10px;
+  line-height: 16px;
+}
+
+.archive {
+  border-top: 1px solid var(--sebas-border);
+  padding-top: 6px;
+}
+
+.archiveToggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  background: transparent;
+  color: var(--sebas-text-dim);
+  font: inherit;
+  font-size: 11px;
+  padding: 4px;
+  cursor: pointer;
+}
+
+.archiveList {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.archiveRow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.archiveRow > button:first-child {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  border: 0;
+  background: transparent;
+  color: var(--sebas-text);
+  font: inherit;
+  text-align: left;
+  padding: 3px 4px;
+  cursor: pointer;
+}
+
+.empty {
+  color: var(--sebas-text-faint);
+  font-size: 11px;
+  padding: 4px;
+}
+
+.hint {
+  font-size: 11px;
+}
+
+.archiveDetail {
+  max-height: 60vh;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.archiveEntry {
+  border-left: 2px solid var(--sebas-border);
+  padding-left: 8px;
+}
+
+.archiveText {
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--sebas-text);
+}
+
+/* 56px icon rail: names/menus collapse, counts and status dots remain. */
+:global([data-rail-compact='true']) .sectionTitle,
+:global([data-rail-compact='true']) .sectionHead :global(.ant-btn),
+:global([data-rail-compact='true']) .projectName,
+:global([data-rail-compact='true']) .projectRow :global(.ant-btn),
+:global([data-rail-compact='true']) .sessionText,
+:global([data-rail-compact='true']) .sessionRow :global(.ant-btn),
+:global([data-rail-compact='true']) .archiveToggle > span:first-child,
+:global([data-rail-compact='true']) .archiveRow :global(.ant-btn),
+:global([data-rail-compact='true']) .hint {
+  display: none;
+}
+
+:global([data-rail-compact='true']) .sectionHead,
+:global([data-rail-compact='true']) .projectRow,
+:global([data-rail-compact='true']) .sessionRow {
+  justify-content: center;
+}
+
+:global([data-rail-compact='true']) .projectButton,
+:global([data-rail-compact='true']) .sessionButton {
+  justify-content: center;
+  padding-inline: 2px;
+}
+
+:global([data-rail-compact='true']) .sessions {
+  padding-left: 0;
+}
+
+:global([data-rail-compact='true']) .archiveToggle {
+  justify-content: center;
+}
+
+/* Transport-down notice: the cached tree is stale, so the rail states the
+ * cause and offers the retry instead of pretending the list is fresh. */
+.unreachable {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--sebas-border, #303030);
+  border-radius: 6px;
+  background: var(--sebas-well, rgba(255, 255, 255, 0.04));
+  color: var(--sebas-muted, #8c8c8c);
+  font-size: 12px;
+}
+
+/* Touch budget (blueprint ≥44px). At ≤600px the shell hosts this tree in the
+ * navigation Drawer (Shell.tsx `narrow`), so every row and row action grows to
+ * a 44px hit area. The desktop rail never renders below 601px, so its compact
+ * 28–32px density is untouched. */
+@media (max-width: 600px) {
+  .projectButton,
+  .sessionButton,
+  .archiveToggle,
+  .archiveRow > button:first-child {
+    min-height: 44px;
+  }
+
+  .sessionButton {
+    align-items: center;
+  }
+
+  .archiveRow :global(.ant-btn) {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}

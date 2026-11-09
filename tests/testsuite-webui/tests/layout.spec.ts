@@ -30,8 +30,11 @@ test.describe('工作台布局分割', () => {
   })
 
   const railSplit = (page: Page): Locator =>
-    page.locator('sebas-app wa-split-panel.frame .divider').first()
-  const composerSplit = (page: Page): Locator => page.locator('wa-split-panel.vsplit .divider')
+    page.getByRole('separator', { name: '调整导航宽度' })
+  // React exposes only the rail width separator; the composer height is not
+  // operator-resizable (no vertical separator in the public semantics).
+  const composerSplit = (page: Page): Locator =>
+    page.getByRole('separator', { name: '调整输入区高度' })
 
   /** Panel 已完成首次布局测量（宽度/高度 > 0）。 */
   async function measured(locator: Locator): Promise<number> {
@@ -47,11 +50,12 @@ test.describe('工作台布局分割', () => {
     await resetState(page.request)
     await ensureSceneProject(page.request)
     await page.goto('/')
-    const frame = page.locator('sebas-app wa-split-panel.frame')
+    const frame = railSplit(page)
     await expect(frame).toBeVisible()
     await expect.poll(async () => measured(frame), { timeout: 10_000 }).toBeGreaterThan(0)
 
-    const railBox = () => page.locator('sebas-app nav').boundingBox()
+    const railBox = () =>
+      page.getByRole('complementary', { name: '项目导航' }).boundingBox()
     const before = (await railBox())?.width ?? 0
 
     const divider = railSplit(page)
@@ -89,13 +93,13 @@ test.describe('工作台布局分割', () => {
     await resetState(page.request)
     const { id: projectId } = await ensureSceneProject(page.request)
     // 一个会话聚焦（composer 进入跟随态、vsplit 在位；turn 很快收敛）。
-    await createSession(page.request, { prompt: 'layout', projectId })
-    await page.goto('/')
-    const vsplit = page.locator('wa-split-panel.vsplit')
+    const key = await createSession(page.request, { prompt: 'layout', projectId })
+    await page.goto(`/sessions/${key}`)
+    const vsplit = composerSplit(page)
     await expect(vsplit).toBeVisible()
     await expect.poll(async () => measured(vsplit), { timeout: 10_000 }).toBeGreaterThan(0)
 
-    const composerBox = () => page.locator('sebas-workbench-composer .composer').boundingBox()
+    const composerBox = () => page.getByTestId('composer').boundingBox()
     const heightBefore = (await composerBox())?.height ?? 0
     expect(heightBefore).toBeGreaterThan(0)
 
@@ -132,19 +136,16 @@ test.describe('工作台布局分割', () => {
     await resetState(page.request)
     await ensureSceneProject(page.request)
     await page.goto('/')
-    await expect(page.locator('sebas-app wa-split-panel.frame')).toBeVisible()
+    await expect(railSplit(page)).toBeVisible()
 
-    // 浮岛：nav 圆角卡片；canvas 与浮岛底色是两个色阶。
-    const navRadius = await page
-      .locator('sebas-app nav')
-      .evaluate((el) => getComputedStyle(el).borderRadius)
+    // 浮岛：rail surface 圆角卡片；canvas 与 rail 底色是两个色阶。
+    const rail = page.getByRole('complementary', { name: '项目导航' })
+    const navRadius = await rail.evaluate((el) => getComputedStyle(el).borderRadius)
     expect(parseFloat(navRadius)).toBeGreaterThan(0)
     const hostBg = await page
-      .locator('sebas-app')
+      .getByTestId('react-shell')
       .evaluate((el) => getComputedStyle(el).backgroundColor)
-    const navBg = await page
-      .locator('sebas-app nav')
-      .evaluate((el) => getComputedStyle(el).backgroundColor)
+    const navBg = await rail.evaluate((el) => getComputedStyle(el).backgroundColor)
     expect(hostBg).not.toBe(navBg)
 
     // 分隔缝 rest 透明、hover 亮起（150ms 过渡，等稳再读）。
@@ -157,7 +158,7 @@ test.describe('工作台布局分割', () => {
     expect(hoverBg).not.toBe(restBg)
 
     // 舞台浮岛存在（项目头部 + 对话流合为一张圆角卡）。
-    await expect(page.locator('sebas-dashboard .stage-island')).toBeVisible()
+    await expect(page.getByTestId('workbench-home')).toBeVisible()
 
     expect(collector.clean()).toEqual([])
   })
@@ -167,12 +168,15 @@ test.describe('工作台布局分割', () => {
     await ensureSceneProject(page.request)
     await page.setViewportSize({ width: 375, height: 720 })
     await page.goto('/')
-    await expect(page.locator('sebas-app wa-split-panel.frame')).toBeVisible()
-
-    // 分割面板禁拖（disabled 属性）。
-    await expect(page.locator('sebas-app wa-split-panel.frame')).toHaveAttribute('disabled', '')
-    // 分隔缝隐藏。
-    await expect(railSplit(page)).toBeHidden()
+    // Narrow layout replaces the rail with a Drawer: no resize separator is
+    // exposed, and navigation opens as an overlay instead of a column.
+    await expect(railSplit(page)).toHaveCount(0)
+    const menu = page.getByRole('button', { name: /菜\s*单/ })
+    await expect(menu).toBeVisible()
+    await menu.click()
+    const drawer = page.getByRole('dialog', { name: '导航' })
+    await expect(drawer).toBeVisible()
+    await expect(drawer.getByText('添加项目')).toBeVisible()
 
     expect(collector.clean()).toEqual([])
   })

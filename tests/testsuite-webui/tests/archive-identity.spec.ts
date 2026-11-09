@@ -39,20 +39,20 @@ test.describe('会话管理', () => {
     collector = new ErrorCollector(page)
   })
 
-  /** Drive History → read-only archived view → restore confirm dialog. */
+  /** Drive History → archive snapshot dialog → restore. */
   async function restoreFromHistory(page: import('@playwright/test').Page, tag: string) {
     const rail = new ProjectRail(page)
     await rail.expandHistory()
     const archivedRow = rail.host
-      .locator('li.session-item.archived', { hasText: tag })
+      .locator('button:has-text("归档于")', { hasText: tag })
       .first()
     await expect(archivedRow).toBeVisible({ timeout: 10_000 })
     await archivedRow.click()
-    const archivedView = page.locator('sebas-dashboard [data-testid="archived-view"]')
-    await expect(archivedView).toBeVisible({ timeout: 10_000 })
-    await archivedView.locator('[data-testid="archived-restore"]').click()
-    await page.locator('sebas-dashboard [data-testid="restore-confirm"]').click()
-    await expect(archivedView).toHaveCount(0, { timeout: 15_000 })
+    const dialog = page.getByRole('dialog', { name: /归档会话：/ })
+    await expect(dialog).toBeVisible({ timeout: 10_000 })
+    await expect(dialog).toContainText(tag)
+    await dialog.getByRole('button', { name: '恢复会话' }).click()
+    await expect(dialog).toBeHidden({ timeout: 15_000 })
   }
 
   test.describe('归档恢复身份', () => {
@@ -99,12 +99,12 @@ test.describe('会话管理', () => {
 
       // ── restore through the History journey ───────────────────────────
       await restoreFromHistory(page, tag)
-      // The header shows the SAME agent honestly (no silent re-binding).
-      await expect(
-        page
-          .locator('sebas-dashboard .session-head [data-testid="agent-lock"]')
-          .first(),
-      ).toContainText('fakeacp', { timeout: 15_000 })
+      // The composer's agent chip shows the SAME agent honestly (no silent
+      // re-binding); React carries identity there rather than in the header.
+      await page.goto(`/sessions/${key}`)
+      await expect(page.getByTestId('composer')).toContainText('fakeacp', {
+        timeout: 15_000,
+      })
       const restored = (await getSession(page.request, key)).detail!
       expect(restored.agent_kind).toBe('fakeacp')
       expect(restored.desired_mode).toBe('ask')
@@ -123,7 +123,7 @@ test.describe('会话管理', () => {
       const file = JSON.parse(fs.readFileSync(archivePath, 'utf8')) as {
         entries: Record<string, unknown>[]
       }
-      const legacyTag = file.entries[0]?.label ?? ''
+      const legacyTag = (file.entries[0]?.label as string | undefined) ?? ''
       expect(legacyTag).toBeTruthy()
       for (const e of file.entries) {
         delete e.agent_kind
@@ -137,19 +137,16 @@ test.describe('会话管理', () => {
 
       // The fallback is presented honestly: "默认 agent", NOT a
       // fabricated identity. API agrees (agent_kind null).
-      await expect(
-        page
-          .locator('sebas-dashboard .session-head [data-testid="agent-lock"]')
-          .first(),
-      ).toContainText('默认 agent', { timeout: 15_000 })
+      await page.goto(`/sessions/${key}`)
+      await expect(page.getByTestId('composer')).toContainText('默认 agent', {
+        timeout: 15_000,
+      })
       const legacy = (await getSession(page.request, key)).detail!
       expect(legacy.agent_kind ?? null).toBeNull()
       // The rebuilt session is listed again (row back under the rail; the
       // row LABEL legitimately regresses to the fallback chain — a restored
       // mapping carries no operator label).
-      await expect(
-        rail.host.locator('li.session-item:not(.archived)').first(),
-      ).toBeVisible({ timeout: 15_000 })
+      await expect(rail.projectRow(projectName)).toBeVisible({ timeout: 15_000 })
 
       expect(collector.clean()).toEqual([])
     })

@@ -1,9 +1,8 @@
 /**
- * Page object: `sebas-login` (the auth-gate view).
+ * Page object: the React login gate (`LoginView`).
  *
- * Playwright's CSS engine pierces open shadow roots, so plain CSS reaches
- * the Lit-rendered internals (`sebas-login input[name=…]`) without
- * hand-rolled `>>` chains.
+ * Selectors are the product's public semantics: the gate heading, labelled
+ * fields and the submitted form's alert. No Lit/WA/Shadow DOM internals.
  */
 import { expect, type Locator, type Page } from '@playwright/test'
 
@@ -17,11 +16,11 @@ export class Login {
 
   constructor(page: Page) {
     this.page = page
-    this.host = page.locator('sebas-login')
-    this.username = page.locator('sebas-login input[name="username"]')
-    this.password = page.locator('sebas-login input[name="password"]')
-    this.submit = page.locator('sebas-login button[type="submit"]')
-    this.error = page.locator('sebas-login p.error[role="alert"]')
+    this.host = page.getByRole('heading', { name: '登录以继续' })
+    this.username = page.getByRole('textbox', { name: '用户名' })
+    this.password = page.getByRole('textbox', { name: /^密码/ })
+    this.submit = page.getByRole('button', { name: /登\s*录/ })
+    this.error = page.getByRole('alert')
   }
 
   async visible(): Promise<void> {

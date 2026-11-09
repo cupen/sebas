@@ -1,0 +1,64 @@
+.picker {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.list {
+  max-height: 300px;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+  border: 1px solid var(--sebas-border, #303030);
+  border-radius: 6px;
+  background: var(--sebas-well);
+}
+
+.item {
+  border-bottom: 1px solid var(--sebas-border, #303030);
+}
+
+.item:last-child {
+  border-bottom: none;
+}
+
+.itemButton {
+  width: 100%;
+  padding: 6px 10px;
+  text-align: left;
+  color: inherit;
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+.itemButton:hover {
+  background: var(--sebas-hover, rgba(255, 255, 255, 0.06));
+}
+
+.emptyItem {
+  padding: 12px;
+  color: var(--sebas-muted, #8c8c8c);
+  list-style: none;
+}
+
+.mkdir,
+.manual {
+  display: flex;
+  gap: 8px;
+}

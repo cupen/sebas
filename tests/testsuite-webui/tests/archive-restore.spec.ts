@@ -58,7 +58,7 @@ test.describe('会话管理', () => {
         await row.click()
       }
       const target = rail.host
-        .locator('li.session-item:not(.archived)', { hasText: sessionText })
+        .locator('button:not(:has-text("归档于"))', { hasText: sessionText })
         .first()
       try {
         await target.waitFor({ state: 'visible', timeout: 2_500 })
@@ -96,32 +96,32 @@ test.describe('会话管理', () => {
       // History group holds the archived entry.
       await rail.expandHistory()
       const archivedRow = rail.host
-        .locator('li.session-item.archived', { hasText: tag })
+        .locator('button:has-text("归档于")', { hasText: tag })
         .first()
       await expect(archivedRow).toBeVisible({ timeout: 10_000 })
 
-      // ── restore: History row → read-only view → confirm dialog ────────
+      // ── restore: History row → archive snapshot dialog → restore ─────
       await archivedRow.click()
-      const archivedView = page.locator('sebas-dashboard [data-testid="archived-view"]')
-      await expect(archivedView).toBeVisible({ timeout: 10_000 })
-      await archivedView.locator('[data-testid="archived-restore"]').click()
-      // The confirm dialog names the NEW semantics upfront (task 2.3): the
-      // rebuild note promises the session row will be rebuilt WITH its
-      // transcript, not merely that the History entry disappears. (The
-      // wa-dialog host reads hidden in the top layer — assert the rendered
-      // contents, same as sessions.spec / pending-stack.spec.)
-      await expect(
-        page.locator('sebas-dashboard [data-testid="restore-rebuild-note"]'),
-      ).toContainText('将重建会话并保留对话记录', { timeout: 10_000 })
-      await page.locator('sebas-dashboard [data-testid="restore-confirm"]').click()
+      const dialog = page.getByRole('dialog', { name: /归档会话：/ })
+      await expect(dialog).toBeVisible({ timeout: 10_000 })
+      // The snapshot carries the archived transcript, so the operator can
+      // inspect it before restoring.
+      await expect(dialog).toContainText(tag)
+      await dialog.getByRole('button', { name: '恢复会话' }).click()
+      await expect(dialog).toBeHidden({ timeout: 15_000 })
 
-      // The read-only view exits (archive-view-close)…
-      await expect(archivedView).toHaveCount(0, { timeout: 10_000 })
-      // …and the workbench renders the REBUILT session's conversation — the
-      // restore handler switched focus onto the restored key (switch now
-      // succeeds: the Dormant mapping exists again, vs the old 404 silence).
+      // The session row is rebuilt under its original project; focusing it
+      // renders the restored conversation (React keeps restore and navigation
+      // as two explicit operator steps).
+      await expect(rail.projectRow(projectName)).toBeVisible({ timeout: 15_000 })
+      await rail.ensureProjectExpanded(projectName)
+      // AntD 的 Modal 关闭后 wrap/mask 仍挂载一小段时间并继续拦截指针事件
+      // （实测三次 click 重试都被 `.ant-modal-wrap` 吃掉，行未触发聚焦）。
+      // 等可见遮罩真正退场再点行，而不是盲点后由 20s 超时掩盖。
+      await expect(page.locator('.ant-modal-wrap:visible')).toHaveCount(0, { timeout: 15_000 })
+      await rail.sessionItem(tag).click()
       await expect(detail.userTurn(tag)).toBeVisible({ timeout: 20_000 })
-      expect(page.url()).not.toContain('/sessions/')
+      expect(page.url()).toContain('/sessions/')
 
       // Rail 可见：the active (non-archived) row is back under its original
       // project; the History group no longer lists the entry. round4 3.1
@@ -130,11 +130,9 @@ test.describe('会话管理', () => {
       // (= tag here) — the restored mapping is NOT label-less: the pre-round4
       // session_id_short fallback assertion is obsolete by design.
       await ensureProjectExpanded(rail, projectName, tag)
+      await expect(rail.sessionItem(tag)).toBeVisible({ timeout: 15_000 })
       await expect(
-        rail.host.locator('li.session-item:not(.archived)', { hasText: tag }).first(),
-      ).toBeVisible({ timeout: 15_000 })
-      await expect(
-        rail.host.locator('li.session-item.archived', { hasText: tag }),
+        rail.host.locator('button:has-text("归档于")', { hasText: tag }),
       ).toHaveCount(0, { timeout: 10_000 })
 
       // API truth — /api/archive drops the entry (History 清空)…

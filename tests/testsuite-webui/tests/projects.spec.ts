@@ -67,7 +67,7 @@ test.describe('项目管理覆盖', () => {
       await rail.openAddDialog()
 
       // The dialog's manual path field (this is the folder-picker dialog;
-      // typing the directory avoids the recorded wa-tree lazy-load bug).
+      // typing the directory avoids the recorded ul lazy-load bug).
       await rail.addProjectByPath(scene)
 
       // Functural contract: the project lands server-side and the rail shows
@@ -80,12 +80,12 @@ test.describe('项目管理覆盖', () => {
         })
         .toBe(true)
       await expect(rail.projectRow(projectName)).toBeVisible({ timeout: 10_000 })
-      // 工作台头部 .path 渲染项目 basename（产品刻意行为：dashboard.ts 只放
-      // basename，完整路径放 title 悬浮属性——与 204a901 收紧项目 rail 一致）；
-      // 用例据此断言 basename 文本 + title 携带完整路径以锚定路径身份。
-      const headerPath = page.locator('sebas-dashboard .project-header .path')
-      await expect(headerPath).toHaveText(projectName, { timeout: 10_000 })
-      await expect(headerPath).toHaveAttribute('title', scene, { timeout: 10_000 })
+      // 选中新项目后，工作台头部呈现项目路径（React 首页副标题即项目 path，
+      // 完整路径是路径身份的唯一可见真源）。
+      await rail.projectRow(projectName).click()
+      const headerPath = page.getByTestId('workbench-home')
+      await expect(headerPath).toContainText(projectName, { timeout: 10_000 })
+      await expect(headerPath).toContainText(scene, { timeout: 10_000 })
 
       // Remove via the API surface; the rail reflects it on reload.
       await removeProject(page.request, await projectIdOf(page.request, scene))
@@ -119,15 +119,15 @@ test.describe('项目管理覆盖', () => {
       await page.goto('/')
       await expect(rail.host).toBeVisible()
       await rail.expandProject(projectName)
-      // … 菜单 → 移除 → 弹窗就地说明「先归档/关闭（N 个会话）」。
-      const row = rail.projectRow(projectName)
-      await row.hover()
-      await row.locator('button[title="项目操作"]').click()
-      const removeItem = row.locator('wa-dropdown-item[value="remove"]')
-      await expect(removeItem).toBeVisible()
-      await removeItem.click()
-      const dialog = page.locator('wa-dialog', { hasText: '移除项目' })
-      const blocked = dialog.locator('[data-testid="remove-blocked"]')
+      // … 菜单 → 移除 → 弹窗内提交后由服务端 409 就地说明「先归档/关闭（N 个会话）」。
+      // React 的菜单触发器（项目操作 <name>）是项目行的兄弟节点，不是行内
+      // 后代——按无障碍名直接定位，避免跨过行元素找按钮。
+      await rail.openProjectMenu(projectName)
+      await page.getByRole('menuitem', { name: '移除项目', exact: true }).click()
+      const dialog = page.getByRole('dialog', { name: '移除项目' })
+      await expect(dialog).toBeVisible()
+      await dialog.getByRole('button', { name: /移\s*除/ }).click()
+      const blocked = dialog.getByRole('alert')
       await expect(blocked).toBeVisible({ timeout: 10_000 })
       await expect(blocked).toContainText('1')
 
@@ -227,14 +227,17 @@ test.describe('项目管理覆盖', () => {
 
       for (const d of [...dirs, gitDir, plainDir]) await addProject(page.request, d)
 
-      // Rail order helper (project rows only).
-      // `.name` also carries the node chip (8.5) — read the project-name
-      // span only.
+      // Rail order helper (project rows only): the row button's accessible
+      // name is `name + session count`; strip the count for the name.
       const railNames = () =>
         rail.host
-          .locator('.row .name > span:first-child')
-          .allTextContents()
-          .then((ts) => ts.map((s) => s.trim()))
+          .locator('button[aria-expanded]')
+          .evaluateAll((els) =>
+            els
+              .map((el) => el.getAttribute('aria-label') ?? '')
+              .filter((label) => label !== '' && !label.startsWith('历史 '))
+              .map((label) => label.replace(/\s+\d+$/, '')),
+          )
 
       await page.goto('/')
       await expect(rail.host).toBeVisible()
@@ -278,12 +281,11 @@ test.describe('项目管理覆盖', () => {
 
       // Rail rendering (rail-declutter-unread D8): the branch NAME is no
       // longer shown in the project row — but the probe still runs (the API
-      // truth above) and the accessibility marking stays driven by it.
+      // truth above). The row's accessible name carries the project name and
+      // count only, never the branch.
       const gitRow = rail.projectRow(gitName)
-      await expect(rail.projectRow(gitName).locator('.meta .branch')).toHaveCount(0)
-      await expect(
-        rail.projectRow(plainName).locator('.meta .branch'),
-      ).toHaveCount(0)
+      await expect(gitRow).not.toContainText(gitBranch)
+      await expect(rail.projectRow(plainName)).not.toContainText('main')
 
       // New branch still surfaces via the API after reload (defeats the 30s
       // branch TTL cache) — the probe chain survives, only the label is gone.
@@ -297,7 +299,7 @@ test.describe('项目管理覆盖', () => {
           { timeout: 10_000, intervals: [200] },
         )
         .toContain(gitBranch2)
-      await expect(gitRow.locator('.meta .branch')).toHaveCount(0)
+      await expect(gitRow).not.toContainText(gitBranch2)
 
       // Cleanup: unregister everything this journey created.
       await resetState(page.request)
@@ -312,7 +314,7 @@ test.describe('项目管理覆盖', () => {
    *
    * P1 drives the folder-picker TREE (not the manual path field): lazy-expand
    * a prepared parent dir, click-select the child, and submit — the full
-   * tree→input→rail loop. The wa-tree lazy-append pageerror is a recorded
+   * tree→input→rail loop. The ul lazy-append pageerror is a recorded
    * known-benign (helpers/errors.ts) and stays filtered.
    * P2 pins the inline-error contract: empty path disables submit; a missing
    * path surfaces the server rejection inside the dialog without closing it
@@ -335,49 +337,32 @@ test.describe('项目管理覆盖', () => {
       await rail.openAddDialog()
 
       const dialog = rail.addDialog()
-      const tree = dialog.locator('sebas-folder-picker')
-      // add-workspace-root：选择器根 = workspace root（沙箱里即场景目录）。
-      // 夹具在 scene/work 下——先展开 work，再展开夹具父目录。
-      await expect(tree.locator('.root-path')).toContainText(scene, { timeout: 10_000 })
-      // wa-tree-item 的文本带图标后的前导空格——按子串匹配，不要锚定。
-      const workItem = tree.locator('wa-tree-item').filter({ hasText: 'work' })
-      await expect(workItem).toBeVisible({ timeout: 10_000 })
-      await workItem.click()
-
-      // Lazy-expand the prepared parent; the child appears underneath it.
-      // data-path 携带反斜杠路径——原始 CSS 属性选择器会把 `\U` 当转义
-      // 吃掉，永匹配不到；fixture 名带时间戳，按文本过滤是唯一匹配。
-      // pick-parent 渲染在 work 的 slot="children" 槽内——按 slot 圈定，
-      // 否则已展开的 work 项（DOM 后代含子项文本）也会命中造成 strict violation。
-      const parentItem = tree
-        .locator('wa-tree-item[slot="children"]')
-        .filter({ hasText: `pick-parent-${t}` })
-      await expect(parentItem).toBeVisible({ timeout: 10_000 })
-      await parentItem.click()
-      // 子项渲染在父项的 slot="children" 槽内——把定位圈进父项的 DOM 子树，
-      // 否则已展开的祖先项（文本含子项名）也会命中造成 strict violation。
-      const childItem = parentItem.locator('wa-tree-item[slot="children"]')
-      await expect(childItem).toBeVisible({ timeout: 10_000 })
-
-      // Click-select fills the manual path field (the dialog's submit gate).
-      await childItem.click()
-      // 选择器把点击项路径回填进输入框，回显**跟随请求原样形**：joinChildPath
-      // 保留父路径风格（有单测锚定 join 行为本身），而父路径的斜杠形取决于
-      // 沙箱配置里 workspace root 的写法——正斜杠根回显即全正斜杠形，反斜杠
-      // 根回显即反斜杠形。故断言只锚路径语义、不锚斜杠风格：两侧都归一为
-      // `/` 后比较。注册经后端 canonicalize_plain 归一，rail 侧断言用
-      // path.join 形，与此处互不影响。
-      const pathInput = dialog.locator('wa-input[label="项目路径"] input')
+      // 选择器根 = workspace root（沙箱里即场景目录）；路径以 code 元素的
+      // 文本如实呈现（antd Typography.Text 把 title 放在外层 span 上，code
+      // 本身没有 title 属性，因此按可见文本断言）。
+      const pathDisplay = dialog.locator('code').first()
+      await expect(pathDisplay).toContainText(scene.replace(/\\/g, '/'), { timeout: 10_000 })
+      // 目录树按层导航：root → work → 夹具父目录 → 子目录，当前路径逐层推进。
+      const openDir = async (name: string) => {
+        const item = dialog.getByRole('button', { name, exact: true })
+        await expect(item).toBeVisible({ timeout: 10_000 })
+        await item.click()
+        return item
+      }
+      await openDir('work')
+      await openDir(`pick-parent-${t}`)
+      await openDir(`pick-child-${t}`)
+      // 进入子目录后「选择此目录」把该路径回填为提交值。
       const expectedSelected = `${scene}/work/pick-parent-${t}/pick-child-${t}`.replace(/\\/g, '/')
       await expect
-        .poll(async () => (await pathInput.inputValue()).replace(/\\/g, '/'), {
+        .poll(async () => (await pathDisplay.innerText()).trim().replace(/\\/g, '/'), {
           timeout: 10_000,
           intervals: [200],
         })
         .toBe(expectedSelected)
 
       // Submit through the dialog footer; the project lands in the rail.
-      await dialog.locator('wa-button').filter({ hasText: '添加项目' }).click()
+      await dialog.getByRole('button', { name: '选择此目录' }).click()
       await expect
         .poll(async () => (await listProjects(page.request)).some((p) => p.path === child), {
           timeout: 10_000,
@@ -406,30 +391,25 @@ test.describe('项目管理覆盖', () => {
       await rail.openAddDialog()
 
       const dialog = rail.addDialog()
-      const submit = dialog.locator('wa-button').filter({ hasText: '添加项目' })
-      // Empty path: the footer submit is disabled. wa-button does not reflect
-      // disabled to a host attribute — assert the property, not native
-      // semantics (Playwright can't see WA's internal disabled state).
-      await expect(submit).toHaveJSProperty('disabled', true)
+      // Empty manual path: the man-path submit is disabled (tree submit would
+      // register the current root, so the manual gate is the empty-path one).
+      const pathInput = dialog.getByLabel('项目路径')
+      const submit = dialog.getByRole('button', { name: '使用此路径' })
+      await expect(submit).toBeDisabled()
 
-      // Missing path: the browse-dirs precheck（本 change 5.2）answers with
-      // the concrete reason under the input and the submit STAYS disabled —
-      // the register-side inline error is reserved for precheck-pass races,
-      // not for this journey (不可解析即越界，add-workspace-root).
+      // Missing path: the browse-dirs precheck answers with the concrete
+      // reason under the input and the submit STAYS disabled.
       const missing = path.join(sceneDir(), `no-such-dir-${Date.now()}`)
-      const pathInput = dialog.locator('wa-input[label="项目路径"] input')
       await pathInput.click()
       await pathInput.pressSequentially(missing)
-      const hint = dialog.locator('[data-testid="add-project-scope-hint"]')
+      const hint = dialog.getByRole('alert')
       await expect(hint).toContainText('不存在', { timeout: 10_000 })
-      await expect(submit).toHaveJSProperty('disabled', true)
-      // The dialog is still open (heading visible) and the registry untouched.
-      await expect(
-        dialog.locator('h2, [role="heading"]', { hasText: '添加项目' }).first(),
-      ).toBeVisible()
+      await expect(submit).toBeDisabled()
+      // The dialog is still open (title visible) and the registry untouched.
+      await expect(dialog.getByText('选择项目目录', { exact: true })).toBeVisible()
       expect((await listProjects(page.request)).length).toBe(before)
 
-      await dialog.locator('wa-button').filter({ hasText: '取消' }).click()
+      await dialog.getByRole('button', { name: /取\s*消/ }).click()
 
       expect(collector.clean()).toEqual([])
     })

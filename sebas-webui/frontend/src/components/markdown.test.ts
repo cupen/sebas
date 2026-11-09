@@ -35,6 +35,12 @@ describe('renderMarkdown', () => {
     expect(html).toMatch(/class="[^"]*hljs/)
   })
 
+  it('wraps GFM tables in their own horizontal scroll container', () => {
+    const html = renderMarkdown('| a | b |\n| --- | --- |\n| 1 | 2 |')
+    expect(html).toContain('<div class="sebas-table-scroll"><table>')
+    expect(html.match(/sebas-table-scroll/g)).toHaveLength(1)
+  })
+
   it('keeps inline code and links', () => {
     const html = renderMarkdown('run `npm test` and see [docs](https://example.com)')
     expect(html).toContain('<code>npm test</code>')

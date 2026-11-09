@@ -68,9 +68,10 @@ test.describe('agent 对话覆盖', () => {
       // 2.1: the turn renders as ONE assistant bubble carrying every chunk
       // in order — not five per-chunk bubbles.
       const assistantTurns = page
-        .locator('sebas-dashboard sebas-transcript-view .turn-block.is-assistant')
+        .locator(':is([data-testid="workbench-session"],[data-testid="workbench-home"]) [data-testid="react-transcript"] [data-unit-key]:has-text("agent")')
       await expect(assistantTurns).toHaveCount(1, { timeout: 15_000 })
-      const turnText = (await assistantTurns.first().textContent()) ?? ''
+      // Exclude the visible role label (`agent`) from the body assertion.
+      const turnText = (await assistantTurns.first().locator('p, pre').allTextContents()).join(' ')
       for (let i = 0; i < 5; i++) {
         expect(turnText).toContain(`chunk${i}`)
       }

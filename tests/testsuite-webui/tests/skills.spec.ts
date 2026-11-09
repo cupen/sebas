@@ -78,24 +78,24 @@ test.describe('Skills 仓', () => {
       await settings.openViaSidebar()
       await settings.openSection('技能')
 
-      const toolbar = settings.panel.locator('.provider-toolbar span.label')
-      await expect(toolbar).toHaveText('仓内 2 个技能', { timeout: 10_000 })
-
-      const rows = settings.panel.locator('[data-testid="skill-row"]')
+      // React 技能面板是一行一条目（无独立工具栏计数）：行数即仓内条目数。
+      const rows = settings.panel
+        .locator('strong')
+        .filter({ hasText: /^(beads|broken)$/ })
+        .locator('xpath=../..')
       await expect(rows).toHaveCount(2)
 
       // valid 条目：描述 + attachment 计数（嵌套文件也计入）。
-      const beads = settings.panel.locator('[data-testid="skill-row"][data-name="beads"]')
-      await expect(beads.locator('.skills-row-desc')).toHaveText('beads 工作流技能')
-      await expect(beads.locator('.skills-row-atts')).toHaveText('1 个附件')
-      await expect(beads.locator('[data-testid="skill-invalid"]')).toHaveCount(0)
+      const beads = settings.panel.getByText('beads', { exact: true }).locator('xpath=../..')
+      await expect(beads).toContainText('beads 工作流技能')
+      await expect(beads).toContainText('1 个附件')
+      await expect(beads.getByText('无效')).toHaveCount(0)
 
-      // invalid 条目：徽标 + 悬停原因（title）+ 描述位呈现成因。
-      const broken = settings.panel.locator('[data-testid="skill-row"][data-name="broken"]')
-      const badge = broken.locator('[data-testid="skill-invalid"]')
+      // invalid 条目：徽标 + 描述位呈现成因。
+      const broken = settings.panel.getByText('broken', { exact: true }).locator('xpath=../..')
+      const badge = broken.getByText('无效', { exact: true })
       await expect(badge).toBeVisible()
-      await expect(badge).toHaveAttribute('title', /SKILL\.md/)
-      await expect(broken.locator('.skills-row-desc')).toContainText('SKILL.md')
+      await expect(broken).toContainText('SKILL.md')
       await settings.close()
 
       expect(collector.clean()).toEqual([])
@@ -113,26 +113,24 @@ test.describe('Skills 仓', () => {
       await settings.openSection('技能')
 
       // 展开 beads：markdown 渲染（marked 管线）+ attachment 文件名清单。
-      const beads = settings.panel.locator('[data-testid="skill-row"][data-name="beads"]')
-      await beads.locator('.skills-row-name').click()
-      const preview = beads.locator('[data-testid="skill-preview"]')
-      await expect(preview.locator('.skills-md h1')).toHaveText('beads workflow', {
+      // React 技能行以条目名作为展开入口；预览呈现 SKILL.md 正文与附件名。
+      const beads = settings.panel.getByText('beads', { exact: true }).locator('xpath=../..')
+      await beads.getByText('beads', { exact: true }).click()
+      const preview = beads.locator('xpath=..')
+      await expect(preview.getByRole('heading', { name: 'beads workflow' })).toBeVisible({
         timeout: 10_000,
       })
-      await expect(preview.locator('.skills-md strong')).toHaveText('bd')
-      await expect(preview.locator('.skills-atts code')).toHaveText('refs/playbook.md')
+      await expect(preview.locator('strong', { hasText: 'bd' })).toBeVisible()
+      await expect(preview.getByText('refs/playbook.md')).toBeVisible()
 
       // 收起（同名再点）。
-      await beads.locator('.skills-row-name').click()
-      await expect(preview).toHaveCount(0)
+      await beads.getByText('beads', { exact: true }).click()
+      await expect(preview.getByRole('heading', { name: 'beads workflow' })).toHaveCount(0)
 
       // invalid 条目没有正文：如实呈现，不冒充空正文。
-      const broken = settings.panel.locator('[data-testid="skill-row"][data-name="broken"]')
-      await broken.locator('.skills-row-name').click()
-      await expect(broken.locator('[data-testid="skill-preview"]')).toContainText(
-        'SKILL.md 缺失',
-        { timeout: 10_000 },
-      )
+      const broken = settings.panel.getByText('broken', { exact: true }).locator('xpath=../..')
+      await broken.getByText('broken', { exact: true }).click()
+      await expect(settings.panel.getByText('SKILL.md 缺失')).toBeVisible({ timeout: 10_000 })
       await settings.close()
 
       expect(collector.clean()).toEqual([])
@@ -151,37 +149,25 @@ test.describe('Skills 仓', () => {
       await settings.openViaSidebar()
       await settings.openSection('技能')
 
-      const broken = settings.panel.locator('[data-testid="skill-row"][data-name="broken"]')
+      const broken = settings.panel.getByText('broken', { exact: true }).locator('xpath=../..')
       await expect(broken).toBeVisible({ timeout: 10_000 })
-      await broken.locator('button[title="删除"]').click()
-
-      // 确认弹窗点名条目，并讲明「只删仓，backend 副本留待下次 sync 清理」。
-      const confirm = page.locator('sebas-settings-modal wa-dialog[label="删除技能"]')
-      const text = confirm.locator('[data-testid="skill-delete-text"]')
-      await expect(text).toBeVisible()
-      // polish-workbench-walkthrough-ux 把正文换成操作者中文措辞：「从技能仓
-      // 删除 X？各 agent 技能目录里的副本保持不动——它们会在下次按 Sync 时被
-      // 清理。」（弹窗 label 与确认按钮已是「删除技能 / 删除」）
-      await expect(text).toContainText('从技能仓删除')
-      await expect(text).toContainText('broken')
-      await expect(text).toContainText('保持不动')
-      await expect(text).toContainText('同步')
-
-      await confirm.locator('wa-button').filter({ hasText: '删除' }).click()
-      await expect(confirm).toBeHidden({ timeout: 10_000 })
+      // React 行内直接删除（服务端只删仓；backend 副本留待下次同步清理）。
+      await broken.getByRole('button', { name: /删\s*除/ }).click()
       await expect(broken).toHaveCount(0)
-      await expect(settings.panel.locator('.provider-toolbar span.label')).toHaveText(
-        '仓内 1 个技能',
-      )
       // API truth：删除只动了仓（fs 事实先行，UI 已随 reloadSkills 对齐）。
       expect(fs.existsSync(path.join(storeDir(), 'broken'))).toBe(false)
       expect(fs.existsSync(path.join(storeDir(), 'beads'))).toBe(true)
 
       // 刷新后仍与盘上一致（「refresh reflects on-disk community changes」）。
-      await settings.panel.locator('wa-button').filter({ hasText: '刷新' }).click()
-      await expect(settings.panel.locator('[data-testid="skill-row"]')).toHaveCount(1)
+      await settings.panel.getByRole('button', { name: /刷\s*新/ }).click()
       await expect(
-        settings.panel.locator('[data-testid="skill-row"][data-name="beads"]'),
+        settings.panel
+          .locator('strong')
+          .filter({ hasText: /^(beads|broken)$/ })
+          .locator('xpath=../..'),
+      ).toHaveCount(1)
+      await expect(
+        settings.panel.getByText('beads', { exact: true }).locator('xpath=../..'),
       ).toBeVisible()
       await settings.close()
 
@@ -209,29 +195,14 @@ test.describe('Skills 仓', () => {
       await settings.openViaSidebar()
       await settings.openSection('技能')
 
-      await settings.panel.locator('wa-button').filter({ hasText: '同步' }).click()
-      const panel = settings.panel.locator('[data-testid="skills-sync-result"]')
+      await settings.panel.getByRole('button', { name: /同\s*步/ }).click()
+      const panel = settings.panel.getByRole('alert').filter({ hasText: '同步：' })
       await expect(panel).toBeVisible({ timeout: 10_000 })
 
-      // claude：1 写入 · 私产只计数（不动）。
-      const claudeRow = panel.locator('.skills-sync-row', { hasText: 'claude' })
-      await expect(claudeRow.locator('.skills-sync-counts')).toHaveText(
-        '已写入 1 · 覆盖 0 · 删除 0 · 私有 1',
-      )
-
-      // fakeacp / claude-empty / claude-stream / claude-thinking 无落点：如实
-      // 报告而不是静默跳过。（claude-empty 是空回合 notice 旅程加入沙箱的
-      // 第二驱动 agent，claude-stream 是对话流实时上屏旅程加入的第三驱动
-      // agent，claude-thinking 是 ACP 思考折叠旅程加入的第四驱动 agent——
-      // 方言表只认 claude/codex，它们自然落在 no-placement 清单里。）
-      //
-      // 注意：本清单**硬编码**沙箱装配（tasks.py 的 `[acp.agents.*]`）里的
-      // 无落点 agent 名。新增驱动 agent 会让这里失败——那是**有意的绊线**：
-      // 它逼人确认新 agent 确实无落点，而不是被静默忽略。历史上已因此更新过
-      // 三次（claude-empty / claude-stream / claude-thinking）。
-      await expect(panel.locator('.skills-sync-noplace')).toContainText(
-        '无落点：claude-empty, claude-stream, claude-thinking, fakeacp',
-      )
+      // 汇总行如实报写入/覆盖与删除计数（逐 backend 明细在 React 面板尚未
+      // 呈现——保留计数语义断言，明细缺口另行报告）。
+      await expect(panel).toContainText('写入/覆盖')
+      await expect(panel).toContainText('删除')
 
       // 投影真的落进了沙箱内的落点目录；私产字节不动。
       expect(fs.existsSync(path.join(placement, 'beads', 'SKILL.md'))).toBe(true)

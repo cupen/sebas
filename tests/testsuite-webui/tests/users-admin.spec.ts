@@ -8,32 +8,40 @@
  * 承载（extract-sebas-db：连接配方 + ActiveRecord CRUD），本旅程同时充当
  * user_store 改道后的浏览器级回归。
  *
- * 交互约定与既有套件一致（helpers/pages/components.ts）：
- *  - wa-input 内层 input 逐字键入（pressSequentially）——`.fill` 会绕过
- *    wa-input 的 input 事件，@input 驱动的状态不更新（addProjectByPath 同款）；
- *  - wa-select 用 evaluate 设 value + 派发 change（pickDialogAgent 同款）。
+ * 选择器已迁到 React 设置的公共语义：设置分区导航（设置分区 aside）、
+ * 对话框标题/字段可访问名、行动作的可访问名与状态文案。AntD 的 Select 用
+ * pickSelectOption 走可见选项行，不再 evaluate 组件私有 value。
  */
 import { expect, test } from '@playwright/test'
-import { authLogin, ErrorCollector, Login, SettingsModal } from './helpers/index'
+import { authLogin, ErrorCollector, Login } from './helpers/index'
+import { pickSelectOption, ReactSettings, ReactShell } from './helpers/pages/react'
 
 const USERNAME = 'tester'
 const PASSWORD = 'tester-pass-123'
 const WEAK_PASSWORD = 'short'
 
+type Page = import('@playwright/test').Page
+
 /** admin cases 的公共前置：fresh context 无 cookie，先过登录门再进面板。 */
-async function loginAsAdmin(page: import('@playwright/test').Page): Promise<SettingsModal> {
+async function loginAsAdmin(page: Page): Promise<ReactSettings> {
   await page.goto('/')
   const login = new Login(page)
   await login.visible()
   await login.login('admin', 'admin')
-  await expect(page.locator('sebas-login')).toBeHidden()
-  const settings = new SettingsModal(page)
-  await settings.openViaSidebar()
+  await expect(page.getByTestId('react-shell')).toBeVisible()
+  const settings = new ReactSettings(page)
+  await new ReactShell(page).openSettings()
   await settings.openSection('用户')
   return settings
 }
 
-test.describe.serial('Users 管理闭环', () => {
+function userRow(settings: ReactSettings, username: string) {
+  return settings.region
+    .locator('strong', { hasText: new RegExp(`^${username}$`) })
+    .locator('xpath=../..')
+}
+
+test.describe('Users 管理闭环', () => {
   let collector: ErrorCollector
 
   test.beforeEach(({ page }) => {
@@ -53,120 +61,66 @@ test.describe.serial('Users 管理闭环', () => {
     const { users } = (await resp.json()) as {
       users: Array<{ id: number; username: string }>
     }
-    const stale = users.find((u) => u.username.toLowerCase() === USERNAME)
-    if (stale) expect((await request.delete(`/api/users/${stale.id}`)).status()).toBe(200)
+    for (const name of [USERNAME, 'shortlived']) {
+      const stale = users.find((u) => u.username.toLowerCase() === name)
+      if (stale) expect((await request.delete(`/api/users/${stale.id}`)).status()).toBe(200)
+    }
   })
 
   test('root 经对话框创建 member 用户，列表即时可见', async ({ page }) => {
     const settings = await loginAsAdmin(page)
 
-    await page
-      .locator('sebas-settings-modal wa-button')
-      .filter({ hasText: '新建用户' })
-      .click()
-    const dialog = page.locator('sebas-settings-modal wa-dialog[label="新建用户"]')
-    // wa-dialog 宿主在 top layer 读作 hidden——可见性断言落在渲染出的内部
-    // 元素上（settings.spec 同款纪律）。
-    await expect(dialog.locator('wa-button').filter({ hasText: '创建' })).toBeVisible()
+    await settings.region.getByRole('button', { name: '新建用户' }).click()
+    const dialog = page.getByRole('dialog', { name: '新建用户' })
+    await expect(dialog.getByRole('button', { name: /创\s*建/ })).toBeVisible()
 
-    const nameInput = dialog.locator('wa-input[label="用户名"] input')
-    await nameInput.click()
-    await nameInput.pressSequentially(USERNAME)
-    const passInput = dialog.locator('wa-input[label="密码（至少 8 个字符）"] input')
-    await passInput.click()
-    await passInput.pressSequentially(PASSWORD)
+    await dialog.getByLabel('新用户名').fill(USERNAME)
+    await dialog.getByLabel('新用户密码').fill(PASSWORD)
     // 角色留默认 member（对话框打开即 member，无需再选）。
-    await dialog.locator('wa-button').filter({ hasText: '创建' }).click()
+    await dialog.getByRole('button', { name: /创\s*建/ }).click()
 
     await expect(dialog).toBeHidden()
-    await expect(
-      page.locator('sebas-settings-modal [data-testid="user-action"]'),
-    ).toHaveText(`用户 ${USERNAME} 已创建（角色 member）`)
-    const row = page.locator(`sebas-settings-modal [data-testid="user-row"][data-username="${USERNAME}"]`)
+    await expect(settings.region.getByRole('alert')).toHaveText('用户已创建')
+    const row = userRow(settings, USERNAME)
     await expect(row).toBeVisible()
-    await expect(row.locator('.provider-badge')).toHaveText('member')
-    await expect(row.locator('.provider-key')).toHaveText('已启用')
+    await expect(row.getByText('member', { exact: true }).first()).toBeVisible()
+    await expect(row).toContainText('已启用')
   })
 
   test('重名创建被 409 拒绝并就地展示（大小写不敏感）', async ({ page }) => {
     const settings = await loginAsAdmin(page)
 
-    await page
-      .locator('sebas-settings-modal wa-button')
-      .filter({ hasText: '新建用户' })
-      .click()
-    const dialog = page.locator('sebas-settings-modal wa-dialog[label="新建用户"]')
-    await expect(dialog.locator('wa-button').filter({ hasText: '创建' })).toBeVisible()
+    await settings.region.getByRole('button', { name: '新建用户' }).click()
+    const dialog = page.getByRole('dialog', { name: '新建用户' })
+    await expect(dialog.getByRole('button', { name: /创\s*建/ })).toBeVisible()
 
-    const nameInput = dialog.locator('wa-input[label="用户名"] input')
-    await nameInput.click()
     // 大写变体：唯一性按 NOCASE 判定（user_store 的 COLLATE NOCASE 契约）。
-    await nameInput.pressSequentially(USERNAME.toUpperCase())
-    const passInput = dialog.locator('wa-input[label="密码（至少 8 个字符）"] input')
-    await passInput.click()
-    await passInput.pressSequentially(PASSWORD)
-    await dialog.locator('wa-button').filter({ hasText: '创建' }).click()
+    await dialog.getByLabel('新用户名').fill(USERNAME.toUpperCase())
+    await dialog.getByLabel('新用户密码').fill(PASSWORD)
+    await dialog.getByRole('button', { name: /创\s*建/ }).click()
 
-    await expect(dialog.locator('[data-testid="user-create-error"]')).toHaveText(
-      '用户名已存在（大小写不敏感）',
-    )
-    // 对话框保持打开、失败不发通知条。
-    await expect(dialog.locator('[data-testid="user-create-error"]')).toBeVisible()
-    await dialog.locator('wa-button').filter({ hasText: '取消' }).click()
+    // React 把创建失败放在设置区的 action alert（对话框仍在）；断言错误
+    // 语义（409/用户名已存在）而不是把错误安置位置写成实现细节。
+    await expect(settings.region.getByRole('alert')).toContainText('用户名已存在')
+    await expect(dialog).toBeVisible()
+    await dialog.getByRole('button', { name: /取\s*消/ }).click()
     await expect(dialog).toBeHidden()
-  })
-
-  test('弱密码被客户端拦截，不发起请求', async ({ page }) => {
-    const settings = await loginAsAdmin(page)
-
-    await page
-      .locator('sebas-settings-modal wa-button')
-      .filter({ hasText: '新建用户' })
-      .click()
-    const dialog = page.locator('sebas-settings-modal wa-dialog[label="新建用户"]')
-    await expect(dialog.locator('wa-button').filter({ hasText: '创建' })).toBeVisible()
-
-    const nameInput = dialog.locator('wa-input[label="用户名"] input')
-    await nameInput.click()
-    await nameInput.pressSequentially('shortlived')
-    const passInput = dialog.locator('wa-input[label="密码（至少 8 个字符）"] input')
-    await passInput.click()
-    await passInput.pressSequentially(WEAK_PASSWORD)
-    await dialog.locator('wa-button').filter({ hasText: '创建' }).click()
-
-    await expect(dialog.locator('[data-testid="user-create-error"]')).toHaveText(
-      '密码至少需要 8 个字符',
-    )
-    await expect(dialog.locator('[data-testid="user-create-error"]')).toBeVisible()
-    await dialog.locator('wa-button').filter({ hasText: '取消' }).click()
-    await expect(
-      page.locator('sebas-settings-modal [data-testid="user-row"][data-username="shortlived"]'),
-    ).toHaveCount(0)
   })
 
   test('角色 member→viewer 即时生效且重开面板后仍在', async ({ page }) => {
     const settings = await loginAsAdmin(page)
 
-    const row = page.locator(`sebas-settings-modal [data-testid="user-row"][data-username="${USERNAME}"]`)
-    await row.locator('wa-select.user-role').evaluate((el) => {
-      ;(el as unknown as { value: string }).value = 'viewer'
-      el.dispatchEvent(new Event('change', { bubbles: true }))
-    })
+    const row = userRow(settings, USERNAME)
+    await pickSelectOption(page, row.getByRole('combobox', { name: `${USERNAME} 的角色` }), 'viewer')
 
-    await expect(
-      page.locator('sebas-settings-modal [data-testid="user-action"]'),
-    ).toHaveText(`用户 ${USERNAME} 的角色已改为 viewer`)
-    await expect(row.locator('.provider-badge')).toHaveText('viewer')
+    await expect(settings.region.getByRole('alert')).toHaveText(`${USERNAME} 角色更新`)
+    await expect(row.getByText('viewer', { exact: true }).first()).toBeVisible()
 
     // 关掉重开：角色来自 auth.db 读回，不是前端残留状态。
     await settings.close()
-    await settings.openViaSidebar()
+    await new ReactShell(page).openSettings()
     await settings.openSection('用户')
-    await expect(
-      page
-        .locator(`sebas-settings-modal [data-testid="user-row"][data-username="${USERNAME}"]`)
-        .locator('.provider-badge'),
-    ).toHaveText('viewer')
+    await expect(userRow(settings, USERNAME).getByText('viewer', { exact: true }).first()).toBeVisible()
   })
 
   test('member 登录后 Users 管理入口被裁剪，API 越权 403', async ({ browser }) => {
@@ -177,12 +131,12 @@ test.describe.serial('Users 管理闭环', () => {
     await page.goto('/')
     await login.visible()
     await login.login(USERNAME, PASSWORD)
-    await expect(page.locator('sebas-login')).toBeHidden()
+    await expect(page.getByTestId('react-shell')).toBeVisible()
 
-    const settings = new SettingsModal(page)
-    await settings.openViaSidebar()
+    const settings = new ReactSettings(page)
+    await new ReactShell(page).openSettings()
     // 角色驱动入口裁剪（5.4）：非 root 不渲染 Users 分区。
-    await expect(settings.panel.locator('.nav-item', { hasText: '用户' })).toHaveCount(0)
+    await expect(settings.section('用户')).toHaveCount(0)
     // API 侧同一把尺：同一成员会话直呼 /api/users 被点名拒绝。
     expect((await ctx.request.get('/api/users')).status()).toBe(403)
     await ctx.close()
@@ -191,58 +145,25 @@ test.describe.serial('Users 管理闭环', () => {
   test('停用用户后行内状态翻转，可再启用', async ({ page }) => {
     const settings = await loginAsAdmin(page)
 
-    const row = page.locator(`sebas-settings-modal [data-testid="user-row"][data-username="${USERNAME}"]`)
-    await row.locator('button[title="停用用户"]').click()
-    await expect(
-      page.locator('sebas-settings-modal [data-testid="user-action"]'),
-    ).toHaveText(`用户 ${USERNAME} 已禁用`)
-    await expect(row.locator('.provider-key')).toHaveText('已禁用')
+    const row = userRow(settings, USERNAME)
+    await row.getByRole('button', { name: /停\s*用/ }).click()
+    await expect(settings.region.getByRole('alert')).toHaveText('已停用用户')
+    await expect(row).toContainText('已禁用')
 
-    await row.locator('button[title="启用用户"]').click()
-    await expect(row.locator('.provider-key')).toHaveText('已启用')
-  })
-
-  test('最后一个启用的 root 受保护：自己那一行的停用/删除被客户端自锁', async ({ page }) => {
-    // 契约更新（观察于 fix-webui-qa-round8 验收期）：用户行动作按钮落地了
-    // 客户端自锁（isSelf → disabled + 自锁 title）——此前本旅程点「停用」
-    // 打服务端 LastRoot 守卫、点「删除」打自删守卫的路径在 UI 上已不可达
-    // （按钮禁用，点击等可 interactive 直至超时）。自锁的当前契约：自己
-    // 那一行的停用/删除禁用且 title 点名原因，角色下拉同锁；重置密码不受
-    // 自锁约束。服务端 LastRoot/自删守卫由后端测试钉住，浏览器面不再可
-    // 构造。
-    const settings = await loginAsAdmin(page)
-
-    const adminRow = page.locator(
-      'sebas-settings-modal [data-testid="user-row"][data-username="admin"]',
-    )
-    const selfGuardTitle = '不能对自己行执行该操作（自锁防护）'
-    // 行内动作序（enabled 用户）：■ 停用 / 🔑 重置密码 / 🗑 删除。
-    const actions = adminRow.locator('button.row-action')
-    await expect(actions).toHaveCount(3, { timeout: 10_000 })
-    await expect(actions.nth(0)).toBeDisabled()
-    await expect(actions.nth(0)).toHaveAttribute('title', selfGuardTitle)
-    await expect(actions.nth(1)).toBeEnabled()
-    await expect(actions.nth(2)).toBeDisabled()
-    await expect(actions.nth(2)).toHaveAttribute('title', selfGuardTitle)
-    // wa-select 宿主的 disabled 不映射原生语义——断言 disabled 属性在场。
-    await expect(adminRow.locator('wa-select.user-role')).toHaveAttribute('disabled', '')
-
-    await expect(adminRow.locator('.provider-key')).toHaveText('已启用')
+    await row.getByRole('button', { name: /启\s*用/ }).click()
+    await expect(row).toContainText('已启用')
   })
 
   test('删除用户后从名册消失且无法再登录', async ({ page, playwright }) => {
     const settings = await loginAsAdmin(page)
 
-    const row = page.locator(`sebas-settings-modal [data-testid="user-row"][data-username="${USERNAME}"]`)
-    await row.locator('button[title="删除用户"]').click()
-    const dialog = page.locator('sebas-settings-modal wa-dialog[label="删除用户"]')
-    await expect(dialog.locator('.dialog-text')).toBeVisible()
-    await expect(dialog.locator('.dialog-text')).toContainText(USERNAME)
-    await dialog.locator('wa-button').filter({ hasText: '删除' }).click()
+    const row = userRow(settings, USERNAME)
+    await row.getByRole('button', { name: /删\s*除/ }).click()
+    const dialog = page.getByRole('dialog', { name: '删除用户' })
+    await expect(dialog).toContainText(USERNAME)
+    await dialog.getByRole('button', { name: /删\s*除/ }).click()
 
-    await expect(
-      page.locator('sebas-settings-modal [data-testid="user-action"]'),
-    ).toHaveText(`用户 ${USERNAME} 已删除`)
+    await expect(settings.region.getByRole('alert')).toHaveText('已删除用户')
     await expect(row).toHaveCount(0)
 
     // 删除即时生效：旧凭据登录被就地拒绝（会话已随删除失效）。用无 cookie
@@ -251,4 +172,50 @@ test.describe.serial('Users 管理闭环', () => {
     expect(await authLogin(dead, USERNAME, PASSWORD)).toBe(401)
     await dead.dispose()
   })
+  test('弱密码被客户端拦截，不发起请求', async ({ page }) => {
+    const settings = await loginAsAdmin(page)
+    const creates: string[] = []
+    page.on('request', (request) => {
+      if (request.method() === 'POST' && request.url().endsWith('/api/users')) {
+        creates.push(request.url())
+      }
+    })
+
+    await settings.region.getByRole('button', { name: '新建用户' }).click()
+    const dialog = page.getByRole('dialog', { name: '新建用户' })
+    await expect(dialog.getByRole('button', { name: /创\s*建/ })).toBeVisible()
+
+    await dialog.getByLabel('新用户名').fill('shortlived')
+    await dialog.getByLabel('新用户密码').fill(WEAK_PASSWORD)
+    await dialog.getByRole('button', { name: /创\s*建/ }).click()
+
+    await expect(settings.region.getByRole('alert')).toContainText('密码至少需要 8 个字符')
+    await expect(dialog).toBeVisible()
+    // 客户端拦截＝请求根本没有发出（不是服务端 400 的另一种说法）。
+    expect(creates).toEqual([])
+    await dialog.getByRole('button', { name: /取\s*消/ }).click()
+    await expect(userRow(settings, 'shortlived')).toHaveCount(0)
+  })
+
+  test('最后一个启用的 root 受保护：自己那一行的停用/删除被客户端自锁', async ({ page }) => {
+    // 契约（fix-webui-qa-round8 验收期）：自己那一行的停用/删除禁用且
+    // title 点名原因，角色下拉同锁；重置密码不受自锁约束。
+    const settings = await loginAsAdmin(page)
+
+    const adminRow = userRow(settings, 'admin')
+    const selfGuardTitle = '不能对自己行执行该操作（自锁防护）'
+    // 行内动作序（enabled 用户）：停用 / 重置密码 / 删除（+ 角色下拉）。
+    const stop = adminRow.getByRole('button', { name: /停\s*用/ })
+    const reset = adminRow.getByRole('button', { name: '重置密码' })
+    const remove = adminRow.getByRole('button', { name: /删\s*除/ })
+    await expect(stop).toBeDisabled()
+    await expect(stop).toHaveAttribute('title', selfGuardTitle)
+    await expect(reset).toBeEnabled()
+    await expect(remove).toBeDisabled()
+    await expect(remove).toHaveAttribute('title', selfGuardTitle)
+    await expect(adminRow.getByRole('combobox', { name: 'admin 的角色' })).toBeDisabled()
+
+    await expect(adminRow).toContainText('已启用')
+  })
+
 })

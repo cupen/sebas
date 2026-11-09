@@ -20,12 +20,8 @@
  * 就绪）——与 agents-gate.spec 同款纪律。
  */
 import { expect, test, type APIRequestContext } from '@playwright/test'
-import {
-  authLogin,
-  ErrorCollector,
-  Login,
-  SettingsModal,
-} from './helpers/index'
+import { authLogin, ErrorCollector, Login } from './helpers/index'
+import { ReactSettings, ReactShell } from './helpers/pages/react'
 
 const MEMBER = { username: 'pgate-member', password: 'pgate-member-123' }
 const VIEWER = { username: 'pgate-viewer', password: 'pgate-viewer-123' }
@@ -137,36 +133,36 @@ test.describe('provider 变更面角色执法（fix-webui-qa-round10 3.x）', ()
     const login = new Login(page)
     await login.visible()
     await login.login(MEMBER.username, MEMBER.password)
-    await expect(page.locator('sebas-dashboard')).toBeVisible({ timeout: 15_000 })
+    await expect(page.getByTestId('react-shell')).toBeVisible({ timeout: 15_000 })
 
-    const settings = new SettingsModal(page)
-    await settings.openViaSidebar()
+    const shell = new ReactShell(page)
+    const settings = new ReactSettings(page)
+    await shell.openSettings()
     await settings.openSection('模型')
-    const modal = page.locator('sebas-settings-modal')
     // 读面保留：provider 列表照常呈现（探针行在册；providers 读面异步加载）。
-    await expect(modal.locator('.provider-row', { hasText: PROVIDER })).toBeVisible({
-      timeout: 10_000,
-    })
+    const row = settings.region
+      .locator('strong', { hasText: new RegExp(`^${PROVIDER}$`) })
+      .locator('xpath=../..')
+    await expect(row).toBeVisible({ timeout: 10_000 })
     // 写控件全部不呈现（呈现层与执法同档）。
-    await expect(modal.locator('wa-button').filter({ hasText: '新建（预设）' })).toHaveCount(0)
-    await expect(modal.locator('wa-button').filter({ hasText: '新建（自定义）' })).toHaveCount(0)
-    await expect(modal.locator('button[title="设为新建会话的默认"]')).toHaveCount(0)
-    await expect(modal.locator('button[title="清除新建会话的默认值"]')).toHaveCount(0)
-    await expect(modal.locator('button[title="编辑"]')).toHaveCount(0)
-    await expect(modal.locator('button[title="删除"]')).toHaveCount(0)
+    await expect(settings.region.getByRole('button', { name: '新建 provider' })).toHaveCount(0)
+    await expect(settings.region.getByRole('button', { name: /新建（预设|自定义）/ })).toHaveCount(0)
+    await expect(row.getByRole('button', { name: /编\s*辑/ })).toHaveCount(0)
+    await expect(row.getByRole('button', { name: /删\s*除/ })).toHaveCount(0)
 
     // 别名分区：写入口不呈现、列表保留（探针别名可浏览）。
     await settings.openSection('别名')
-    const aliases = modal.locator('sebas-model-aliases')
-    await expect(aliases.locator('[data-testid="alias-create"]')).toHaveCount(0)
-    await expect(aliases.locator('[data-testid="alias-list"]')).toContainText(ALIAS, {
-      timeout: 10_000,
-    })
-    await expect(aliases.locator('button[title="编辑"]')).toHaveCount(0)
-    await expect(aliases.locator('button[title="删除"]')).toHaveCount(0)
+    await expect(settings.region.getByRole('button', { name: '新建别名' })).toHaveCount(0)
+    await expect(settings.region.getByLabel('别名')).toHaveCount(0)
+    const aliasRow = settings.region
+      .locator('strong', { hasText: new RegExp(`^${ALIAS}$`) })
+      .locator('xpath=../..')
+    await expect(aliasRow).toContainText(ALIAS, { timeout: 10_000 })
+    await expect(aliasRow.getByRole('button', { name: /编\s*辑/ })).toHaveCount(0)
+    await expect(aliasRow.getByRole('button', { name: /删\s*除/ })).toHaveCount(0)
 
-    await settings.closeButton.click()
-    await expect(settings.panel).toBeHidden()
+    await settings.close()
+    await expect(settings.region).toBeHidden()
 
     // 直调写 API：member 会话（cookie 随行）仍 403——呈现层不是防线。
     // 走 context 级 request，注定的 403 不进页面 console（净空断言不受污染）。
@@ -181,22 +177,21 @@ test.describe('provider 变更面角色执法（fix-webui-qa-round10 3.x）', ()
     const login = new Login(page)
     await login.visible()
     await login.login('admin', 'admin')
-    await expect(page.locator('sebas-dashboard')).toBeVisible({ timeout: 15_000 })
+    await expect(page.getByTestId('react-shell')).toBeVisible({ timeout: 15_000 })
 
-    const settings = new SettingsModal(page)
-    await settings.openViaSidebar()
+    const shell = new ReactShell(page)
+    const settings = new ReactSettings(page)
+    await shell.openSettings()
     await settings.openSection('模型')
-    const modal = page.locator('sebas-settings-modal')
-    await expect(modal.locator('wa-button').filter({ hasText: '新建（预设）' }).first()).toBeVisible()
-    await expect(modal.locator('wa-button').filter({ hasText: '新建（自定义）' }).first()).toBeVisible()
-    const row = modal.locator('.provider-row', { hasText: PROVIDER })
-    await expect(row.locator('button[title="设为新建会话的默认"]')).toBeVisible({
-      timeout: 10_000,
-    })
-    await expect(row.locator('button[title="编辑"]')).toBeVisible()
-    await expect(row.locator('button[title="删除"]')).toBeVisible()
-    await settings.closeButton.click()
-    await expect(settings.panel).toBeHidden()
+    await expect(settings.region.getByRole('button', { name: '新建 provider' })).toBeVisible()
+    const row = settings.region
+      .locator('strong', { hasText: new RegExp(`^${PROVIDER}$`) })
+      .locator('xpath=../..')
+    await expect(row).toBeVisible({ timeout: 10_000 })
+    await expect(row.getByRole('button', { name: /编\s*辑/ })).toBeVisible()
+    await expect(row.getByRole('button', { name: /删\s*除/ })).toBeVisible()
+    await settings.close()
+    await expect(settings.region).toBeHidden()
 
     // API 全管闭环（正向半边；beforeAll 已覆盖建，这里覆盖改→删→再建）。
     const request = page.request
