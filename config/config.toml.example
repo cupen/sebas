@@ -127,6 +127,21 @@ driver = "claude"
 #                      #   SEBAS_WEBUI_AUTH_DB 覆盖）。
 #                      # false = 全路由免登录（仅测试用）；host 非 loopback
 #                      # 时无论开关与否都拒绝启动（安全门）。
+# task_center_enabled = true
+#                      # 项目任务中心开关（agent-task-center）。开启（默认）=
+#                      #   `/api/projects/{id}/tasks/*` 与 `tasks.watch` WS 订阅
+#                      #   可用：任务即项目目录的 beads issue（`.beads/` 首次
+#                      #   进入面板时惰性 `bd init`，已存在则只强制
+#                      #   events-journal=true），人/agent 以 beads 原子 claim
+#                      #   协作，会话终态联动给任务加 in-review 标签。
+#                      # **外部依赖**：任务中心 spawn 本机 `bd` CLI（beads，
+#                      #   ≥ 1.3.4；`SEBAS_BD_BIN` 可指定路径，缺省走 PATH）。
+#                      #   `bd` 不在 PATH 时任务面板内联显示安装指引，其余
+#                      #   WebUI 面不受影响。
+#                      # false = 任务面（HTTP + WS 订阅）503 并点名本键。
+#                      # 单机边界：`.beads/` 必须是本机仓库；`bd dolt pull`
+#                      #   跨机同步后请点「Refresh tasks」重新基线（journal 是
+#                      #   per-replica 的，见 AGENTS.md「Task center」）。
 #
 # core 恒启动（会话核心，无开关）。[service.core] 只配置通道路径：
 # [service.core]

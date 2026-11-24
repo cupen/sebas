@@ -7,7 +7,7 @@ sebas 已有 project（git 目录）+ session（agent 会话）两层概念，�
 技术约束：
 - 项目规则「一个文件一个写入者」——beads DB 由 `bd` CLI 独占，sebas 不直接读写 Dolt。
 - sebas 持久层走 `sebas_db::conn`——但 beads DB 不是 sebas 管的库，不受此约束；sebas 侧的 `session_map` 表加列才走 `sebas_db::schema`。
-- 实时性已实测：后端轮询 `bd events tail --since <seq>` 端到端 p95 = 330ms，亚秒达标（spike 报告：`/tmp/bd-spike-1795352597/spike-report.md`）。
+- 实时性已实测：后端轮询 `bd events tail --since <seq>` 端到端 p95 = 330ms，亚秒达标（spike 报告：`openspec/changes/agent-task-center/spike-report.md`）。
 
 ## Goals / Non-Goals
 

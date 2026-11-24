@@ -849,6 +849,13 @@ pub struct ServiceWebUiConfig {
     /// （webui 配置的现唯一归属地，无独立 `[webui]` 顶层节）。
     #[serde(default = "default_archive_retention_days")]
     pub archive_retention_days: u64,
+    /// 任务中心开关（agent-task-center 11.1）。默认 true：项目任务面板
+    /// （`/api/projects/{id}/tasks/*` 与 `tasks.watch` WS 订阅）可用。关闭
+    /// 时任务面 503 并点名配置键，其余 WebUI 面不受影响。任务中心依赖本机
+    /// `bd` CLI（beads ≥ 1.3.4）；`bd` 缺失时任务面板内联显示安装指引，
+    /// 与本开关无关。
+    #[serde(default = "default_task_center_enabled")]
+    pub task_center_enabled: bool,
     // 兼容性（add-workspace-root）：未标 `deny_unknown_fields`，旧键
     // `allowed_roots` 出现在配置里被静默忽略、解析不报错——白名单机制已由
     // 单一 workspace root 接管（顶层 `[workspace] root` / `SEBAS_WORKSPACE_ROOT`）。
@@ -862,12 +869,17 @@ impl Default for ServiceWebUiConfig {
             port: default_webui_port(),
             auth: default_webui_auth(),
             archive_retention_days: default_archive_retention_days(),
+            task_center_enabled: default_task_center_enabled(),
         }
     }
 }
 
 fn default_archive_retention_days() -> u64 {
     30
+}
+
+fn default_task_center_enabled() -> bool {
+    true
 }
 
 /// 解析生效的 workspace root（add-workspace-root，spec「解析顺序」）：
@@ -1066,7 +1078,14 @@ fn warn_unknown_webui_keys(raw: &str) {
 
 /// 纯收集（测试锚点）：raw 中 `[service.webui]` 表内不在已知字段集的键。
 fn unknown_webui_keys(raw: &str) -> Vec<String> {
-    const KNOWN: [&str; 5] = ["enabled", "host", "port", "auth", "archive_retention_days"];
+    const KNOWN: [&str; 6] = [
+        "enabled",
+        "host",
+        "port",
+        "auth",
+        "archive_retention_days",
+        "task_center_enabled",
+    ];
     let Ok(v) = toml::from_str::<toml::Value>(raw) else {
         return Vec::new(); // 解析失败由主 parse 报错，这里不抢戏
     };

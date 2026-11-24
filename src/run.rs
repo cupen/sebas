@@ -651,6 +651,7 @@ pub async fn run(
                 cfg.service.webui.archive_retention_days,
                 skills,
                 build_info,
+                cfg.service.webui.task_center_enabled,
             )
             .await;
         });

@@ -1337,3 +1337,275 @@ async fn remote_node_mode_journey() {
     webui.kill().await.ok();
 }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// agent-task-center 10.2：任务看板生命周期 + 双主体认领竞速
+//
+// 完整看板生命周期（惰性 `bd init` → 建任务 → 认领 → 释放 → 指派 → 评审 →
+// 关闭）之上，加一条**真并发**的认领竞速：人（webui 的 bd actor = alice）
+// 与 agent（`bd --actor claude` CLI）同时对同一个 open 任务 claim，beads 的
+// 原子 claim 保证单赢家；输家经 WebUI 拿到 409 并点名持有者，看板显示赢家。
+//
+// 隔离红线（11.3）：`bd init` 向上发现祖先 `.beads`——项目目录必须落在仓库
+// 之外的 /tmp 一次性目录（`sebas-task-center-acceptance-*`），workspace root
+// 一并指过去；`SEBAS_HOME`/`HOME` 由沙箱钉住，bd 全局状态不出沙箱。
+// ═══════════════════════════════════════════════════════════════════════════
+mod task_center {
+    use super::*;
+    use std::path::Path;
+
+    /// `bd` 可执行文件：`SEBAS_BD_BIN` 显式覆盖优先，否则 `PATH` 上的 `bd`。
+    fn bd_bin() -> std::path::PathBuf {
+        std::env::var_os(sebas_webui::beads_client::BD_BIN_ENV)
+            .map(std::path::PathBuf::from)
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| "bd".into())
+    }
+
+    fn bd_available() -> bool {
+        std::process::Command::new(bd_bin())
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    fn task_center_root() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("sebas-task-center-acceptance-")
+            .tempdir()
+            .expect("create task-center root")
+    }
+
+    /// `bd -C <project> --json --actor <actor> <args…>`：agent 侧的进程级
+    /// 主体（与 webui 进程内 spawn 的 `bd` 是两个独立进程——竞速才真实）。
+    async fn bd_as(sb: &Sandbox, project_dir: &Path, actor: &str, args: &[&str]) -> (i32, String) {
+        let output = tokio::process::Command::new(bd_bin())
+            .current_dir(&sb.path)
+            .env("HOME", &sb.path)
+            .env("NO_COLOR", "1")
+            .arg("-C")
+            .arg(project_dir)
+            .arg("--json")
+            .arg("--no-color")
+            .arg("--actor")
+            .arg(actor)
+            .args(args)
+            .output()
+            .await
+            .expect("run bd");
+        (
+            output.status.code().unwrap_or(-1),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        )
+    }
+
+    async fn get_json(cli: &reqwest::Client, url: &str) -> (u16, serde_json::Value) {
+        let resp = cli.get(url).send().await.expect("GET");
+        let status = resp.status().as_u16();
+        let json = resp.json::<serde_json::Value>().await.unwrap_or_default();
+        (status, json)
+    }
+
+    #[tokio::test]
+    #[ignore = "acceptance journey; run with -- --ignored or invoke testsuite-acceptance"]
+    async fn task_board_lifecycle_and_claim_race_journey() {
+        if !bd_available() {
+            panic!(
+                "任务中心验收旅程需要 bd >= 1.3.4：把 {} 指向可执行文件或加入 PATH",
+                sebas_webui::beads_client::BD_BIN_ENV
+            );
+        }
+        let sb = Sandbox::new("acceptance", "task-center");
+        let root = task_center_root();
+        let project_dir = root.path().join("board-project");
+        std::fs::create_dir_all(&project_dir).expect("mkdir board project");
+        let project_path = support::forward_slash(&project_dir);
+        let root_path = support::forward_slash(root.path());
+
+        let cli = http_client();
+        // 人 = alice（bd 默认 actor 经 BEADS_ACTOR 钉定）；agent = claude 走
+        // 独立 `bd` 进程（--actor claude）。
+        let extra: Vec<(&str, &str)> = vec![
+            ("SEBAS_WORKSPACE_ROOT", &root_path),
+            ("BEADS_ACTOR", "alice"),
+        ];
+        let _core = sb.spawn_core_extra(&extra);
+        let _webui = sb.spawn_webui_extra(&sb.core_secret, &extra);
+        support::wait_reachable(&cli, &sb).await;
+
+        // 1) 项目注册 → 任务面板首访（惰性 bd init）。
+        let (status, project) = post_json(
+            &cli,
+            &format!("{}/api/projects", sb.webui_url()),
+            serde_json::json!({ "path": project_path }),
+        )
+        .await
+        .expect("register board project");
+        assert_eq!(status, 201, "register project: {project}");
+        let project_id = project["id"].as_str().expect("project id").to_string();
+        let tasks_url = format!("{}/api/projects/{project_id}/tasks", sb.webui_url());
+        let (status, board) = get_json(&cli, &tasks_url).await;
+        assert_eq!(status, 200, "first visit: {board}");
+        assert_eq!(board["tasks"], serde_json::json!([]));
+        assert!(
+            project_dir.join(".beads").is_dir(),
+            "首访必须在项目目录内初始化 .beads/"
+        );
+
+        // 2) 建任务（reviewer = claude，评审闸门的元数据）。
+        let (status, created) = post_json(
+            &cli,
+            &tasks_url,
+            serde_json::json!({
+                "title": "Race the claim",
+                "description": "双主体认领竞速",
+                "reviewer": "claude",
+            }),
+        )
+        .await
+        .expect("create task");
+        assert_eq!(status, 201, "create task: {created}");
+        let task_id = created["id"].as_str().expect("task id").to_string();
+        assert_eq!(created["status"], "open", "新任务进公开队列: {created}");
+
+        // 3) 双主体竞速：人（HTTP，actor alice）与 agent（bd CLI，actor
+        //    claude）同时 claim 同一个 open 任务。
+        let claim_url = format!("{tasks_url}/{task_id}/claim");
+        let agent_dir = project_dir.clone();
+        let agent_args = ["update", task_id.as_str(), "--claim"];
+        let (human_result, agent_result) = tokio::join!(
+            post_json(&cli, &claim_url, serde_json::json!({})),
+            bd_as(&sb, &agent_dir, "claude", &agent_args),
+        );
+        let (human_status, human_body) = human_result.expect("human claim request");
+        let (agent_code, agent_out) = agent_result;
+        let human_won = human_status == 200;
+        let agent_won = agent_code == 0;
+        assert!(
+            human_won ^ agent_won,
+            "认领竞速必须单赢家（human={human_status} {human_body}, agent={agent_code} {agent_out}）"
+        );
+
+        // 4) 输家：agent 输 → HTTP 409 点名 claude；人输 → 409 点名 alice。
+        if human_won {
+            assert_ne!(agent_code, 0, "agent 输了却成功？{agent_out}");
+            assert!(
+                agent_out.contains("already claimed by alice"),
+                "beads 必须在 agent 侧点名持有者: {agent_out}"
+            );
+            assert_eq!(human_body["assignee"], "alice");
+        } else {
+            assert_eq!(
+                human_status, 409,
+                "人输了必须 409（点名持有者）: {human_body}"
+            );
+            assert_eq!(
+                human_body["holder"], "claude",
+                "409 必须点名赢家: {human_body}"
+            );
+        }
+        let winner = if human_won { "alice" } else { "claude" };
+
+        // 5) 看板显示赢家：in_progress 列 + 唯一 assignee。
+        let (status, board) = get_json(&cli, &tasks_url).await;
+        assert_eq!(status, 200);
+        let row = board["tasks"]
+            .as_array()
+            .expect("task list")
+            .iter()
+            .find(|task| task["id"] == task_id.as_str())
+            .expect("task on the board");
+        assert_eq!(row["status"], "in_progress", "赢家进 In progress 列: {row}");
+        assert_eq!(row["assignee"], winner, "看板显示赢家: {row}");
+
+        // 6) 归一：赢家释放回公开队列（跨 actor 的 unclaim 只有持有者能跑）。
+        let (code, out) = bd_as(&sb, &project_dir, winner, &["unclaim", &task_id]).await;
+        assert_eq!(code, 0, "赢家释放: {out}");
+        let (status, released) = get_json(&cli, &format!("{tasks_url}/{task_id}")).await;
+        assert_eq!(status, 200);
+        assert_eq!(released["status"], "open", "释放回公开队列: {released}");
+        assert!(
+            released["assignee"].is_null(),
+            "释放必须清空 assignee: {released}"
+        );
+
+        // 7) 人的完整动作面：认领 → 释放（经 HTTP，actor alice）。
+        let (status, claimed) = post_json(&cli, &claim_url, serde_json::json!({}))
+            .await
+            .expect("human claim");
+        assert_eq!(status, 200, "human claim: {claimed}");
+        assert_eq!(claimed["assignee"], "alice");
+        let (status, released) = post_json(
+            &cli,
+            &format!("{tasks_url}/{task_id}/release"),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("release");
+        assert_eq!(status, 200, "release: {released}");
+        assert_eq!(released["status"], "open");
+
+        // 8) 指派给 agent（词表：claude 是已配置 agent kind）——assign 只是
+        //    归属，不改 status（仍 open，留在 Unassigned 列）；随后 agent 认领
+        //    才进 In progress。
+        let (status, assigned) = post_json(
+            &cli,
+            &format!("{tasks_url}/{task_id}/assign"),
+            serde_json::json!({ "assignee": "claude" }),
+        )
+        .await
+        .expect("assign");
+        assert_eq!(status, 200, "assign: {assigned}");
+        assert_eq!(assigned["assignee"], "claude");
+        assert_eq!(
+            assigned["status"], "open",
+            "assign 不是 claim（状态机分离）: {assigned}"
+        );
+
+        let (code, out) = bd_as(&sb, &project_dir, "claude", &["update", &task_id, "--claim"]).await;
+        assert_eq!(code, 0, "assigned agent claims: {out}");
+
+        let (status, reviewed) = post_json(
+            &cli,
+            &format!("{tasks_url}/{task_id}/review"),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("review");
+        assert_eq!(status, 200, "review: {reviewed}");
+        assert!(
+            reviewed["labels"]
+                .as_array()
+                .is_some_and(|labels| labels.iter().any(|label| label == "in-review")),
+            "评审 = in-review label（status 保持 in_progress）: {reviewed}"
+        );
+        assert_eq!(reviewed["status"], "in_progress");
+
+        // 人是放行档（非 agent kind）→ 关闭；任务落 done 区。
+        let (status, closed) = post_json(
+            &cli,
+            &format!("{tasks_url}/{task_id}/close"),
+            serde_json::json!({ "reason": "reviewed" }),
+        )
+        .await
+        .expect("close");
+        assert_eq!(status, 200, "close: {closed}");
+        assert_eq!(closed["status"], "closed");
+        let (status, board) = get_json(&cli, &tasks_url).await;
+        assert_eq!(status, 200);
+        let row = board["tasks"]
+            .as_array()
+            .expect("task list")
+            .iter()
+            .find(|task| task["id"] == task_id.as_str())
+            .expect("closed task on the board");
+        assert_eq!(row["status"], "closed", "done/cancelled 区: {row}");
+    }
+}

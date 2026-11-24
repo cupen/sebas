@@ -4204,6 +4204,7 @@ mod about_build_info_tests {
             skills: Arc::new(UnwiredSkills),
             build,
             tasks: Arc::new(crate::task_events::TaskEventHub::new()),
+            task_center_enabled: true,
         }
     }
 

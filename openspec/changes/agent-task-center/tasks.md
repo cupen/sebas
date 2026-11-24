@@ -67,13 +67,13 @@
 
 ## 10. Integration & acceptance
 
-- [ ] 10.1 Add a process-level e2e test (`tests/testsuite_e2e_test.rs`) covering: project create → first task panel visit (auto-init) → task create → human claim → session create from task → fake-claude turn completes → task auto-advances to in-review → reviewer closes. Verify each step's observable state.
-- [ ] 10.2 Add an acceptance journey (`tests/acceptance/`) that runs the full board lifecycle including a two-actor claim race (one human, one agent); verify the loser sees 409 and the board shows the winner.
-- [ ] 10.3 Manual sandbox smoke: `invoke testsuite-webui-sandbox --auth`, log in as admin, register a project, open Tasks tab, create a task, claim it, open a session from it, send a message (fake-claude), watch the board auto-advance to in-review, close as reviewer. Verify sub-second board updates throughout.
-- [ ] 10.4 Update `AGENTS.md` with a short "Task center" section: how to install `bd` ≥ 1.3.4, sandbox recipe addition, pointer to spike report.
+- [x] 10.1 Add a process-level e2e test (`tests/testsuite_e2e_test.rs`) covering: project create → first task panel visit (auto-init) → task create → human claim → session create from task → fake-claude turn completes → task auto-advances to in-review → reviewer closes. Verify each step's observable state.
+- [x] 10.2 Add an acceptance journey (`tests/acceptance/`) that runs the full board lifecycle including a two-actor claim race (one human, one agent); verify the loser sees 409 and the board shows the winner.
+- [x] 10.3 Manual sandbox smoke: `invoke testsuite-webui-sandbox --auth`, log in as admin, register a project, open Tasks tab, create a task, claim it, open a session from it, send a message (fake-claude), watch the board auto-advance to in-review, close as reviewer. Verify sub-second board updates throughout.
+- [x] 10.4 Update `AGENTS.md` with a short "Task center" section: how to install `bd` ≥ 1.3.4, sandbox recipe addition, pointer to spike report.
 
 ## 11. Documentation & handoff
 
-- [ ] 11.1 Update `config/config.toml.example` with `[service.webui] task_center_enabled = true` (default true) and document the `bd` CLI dependency.
-- [ ] 11.2 Add a "Troubleshooting" note: what to do when `bd events tail` reports schema drift, and the manual "Refresh tasks" button as the re-baseline affordance after `bd dolt pull`.
-- [ ] 11.3 Confirm no operator-facing path touches real `~/.sebas` or the operator's `bd` data: all sandbox runs use throwaway project dirs.
+- [x] 11.1 Update `config/config.toml.example` with `[service.webui] task_center_enabled = true` (default true) and document the `bd` CLI dependency.
+- [x] 11.2 Add a "Troubleshooting" note: what to do when `bd events tail` reports schema drift, and the manual "Refresh tasks" button as the re-baseline affordance after `bd dolt pull`.
+- [x] 11.3 Confirm no operator-facing path touches real `~/.sebas` or the operator's `bd` data: all sandbox runs use throwaway project dirs.

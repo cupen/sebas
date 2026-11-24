@@ -58,6 +58,15 @@ pub(crate) async fn lookup_project(
     state: &WebUiState,
     raw_id: &str,
 ) -> Result<ProjectCtx, (StatusCode, String)> {
+    // 任务中心总开关（agent-task-center 11.1，`[service.webui]
+    // task_center_enabled`，默认 true）：关闭时任务面（含 WS 订阅）503 并
+    // 点名配置键——「关掉的能力」与「不存在的项目」必须可区分。
+    if !state.task_center_enabled {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "任务中心已禁用（[service.webui] task_center_enabled = false）".to_string(),
+        ));
+    }
     let id = urlencoding::decode(raw_id)
         .map(|d| d.into_owned())
         .map_err(|_| (StatusCode::BAD_REQUEST, "invalid id encoding".to_string()))?;

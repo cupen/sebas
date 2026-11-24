@@ -91,6 +91,10 @@ pub struct WebUiState {
     /// 任务中心（agent-task-center）：每项目 beads 事件泵 + `bd` 客户端。
     /// 进程级共享——同一项目多个 WS 订阅者复用一条泵（fan-out）。
     pub tasks: Arc<crate::task_events::TaskEventHub>,
+    /// 任务中心开关（agent-task-center 11.1）：`[service.webui]
+    /// task_center_enabled`，默认 true。关闭时任务面（HTTP + WS 订阅）
+    /// 503 并点名配置键，其余 WebUI 面不受影响。
+    pub task_center_enabled: bool,
 }
 
 /// 便捷装配形态（测试 / 最小入口）的 workspace root 缺省：进程 cwd 回退、
@@ -117,6 +121,7 @@ pub fn build_router(
         fallback_workspace_root(),
         Arc::new(UnwiredSkills),
         BuildInfo::unknown(),
+        true,
     )
 }
 
@@ -139,6 +144,7 @@ pub fn build_router_with_agent_kind_provider(
         fallback_workspace_root(),
         Arc::new(UnwiredSkills),
         BuildInfo::unknown(),
+        true,
     )
 }
 
@@ -160,6 +166,7 @@ pub fn build_router_with_admin_adapter(
         fallback_workspace_root(),
         Arc::new(UnwiredSkills),
         BuildInfo::unknown(),
+        true,
     )
 }
 
@@ -184,6 +191,7 @@ pub fn build_router_with_auth(
         fallback_workspace_root(),
         Arc::new(UnwiredSkills),
         BuildInfo::unknown(),
+        true,
     )
 }
 
@@ -209,6 +217,7 @@ pub fn build_router_with_workspace_root(
         workspace_root,
         Arc::new(UnwiredSkills),
         BuildInfo::unknown(),
+        true,
     )
 }
 
@@ -235,6 +244,7 @@ pub fn build_router_with_skills(
         workspace_root,
         skills,
         BuildInfo::unknown(),
+        true,
     )
 }
 
@@ -250,6 +260,7 @@ fn build_router_full(
     workspace_root: std::path::PathBuf,
     skills: Arc<dyn SkillsService>,
     build: BuildInfo,
+    task_center_enabled: bool,
 ) -> Router {
     let state = WebUiState {
         backend,
@@ -263,6 +274,7 @@ fn build_router_full(
         skills,
         build,
         tasks: Arc::new(crate::task_events::TaskEventHub::new()),
+        task_center_enabled,
     };
 
     // Core SPA + API + WS routes, bound to WebUiState.
@@ -718,6 +730,7 @@ pub async fn run(
         // 薄包装拿不到根 build.rs 注入值（option_env! 按编译 crate 求值，
         // add-about-build-info D1）——BuildInfo 只能按 unknown 诚实退化。
         BuildInfo::unknown(),
+        true,
     )
     .await;
 }
@@ -744,6 +757,7 @@ pub async fn run_with_admin_adapter(
         Arc::new(UnwiredSkills),
         // 同 `run`：薄包装按 unknown 退化（add-about-build-info D1）。
         BuildInfo::unknown(),
+        true,
     )
     .await;
 }
@@ -771,6 +785,7 @@ pub async fn run_with_admin_adapter_and_auth(
     archive_retention_days: u64,
     skills: Arc<dyn SkillsService>,
     build: BuildInfo,
+    task_center_enabled: bool,
 ) {
     run_full(
         backend,
@@ -784,6 +799,7 @@ pub async fn run_with_admin_adapter_and_auth(
         workspace_root,
         skills,
         build,
+        task_center_enabled,
     )
     .await;
 }
@@ -811,6 +827,7 @@ async fn run_full(
     workspace_root: std::path::PathBuf,
     skills: Arc<dyn SkillsService>,
     build: BuildInfo,
+    task_center_enabled: bool,
 ) {
     let addr = listener.local_addr().expect("bound listener");
     // 引导用户：就绪日志直接给出可点开的访问地址 + 按鉴权形态的下一步提示。
@@ -840,6 +857,7 @@ async fn run_full(
         workspace_root,
         skills,
         build,
+        task_center_enabled,
     );
     tracing::info!(%url, hint, "webui dashboard started");
     if let Err(e) = serve(

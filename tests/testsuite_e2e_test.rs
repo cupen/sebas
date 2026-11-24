@@ -12849,3 +12849,395 @@ done
         }
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// agent-task-center 10.1：任务中心进程级旅程
+//
+// 真实 core + 独立 webui 进程 + 真实 `bd`（≥ 1.3.4）+ fake-claude 桩：
+// 项目注册 → 任务面板首访（惰性 `bd init`）→ 建任务 → 人认领 → 从任务开
+// 会话（`task_id` 透传）→ fake-claude 回合正常完成 → 关闭会话触发引擎终态
+// 联动（任务自动进评审）→ reviewer 关闭 → 任务落 done 区。
+//
+// 隔离红线（11.3）：`bd init` 会**向上发现祖先 `.beads`**——沙箱根在仓库
+// 内（`target/tests/...`），直接在该目录 init 会命中操作员真实的 sebas 仓库
+// 库（更糟：后续每条 `bd -C` 都写进真实库）。本旅程因此把项目目录放到
+// /tmp 的一次性目录（`sebas-task-center-e2e-*`），并把 core/webui 的
+// `SEBAS_WORKSPACE_ROOT` 一并指过去；`SEBAS_HOME`/`HOME` 仍由沙箱钉住，
+// bd 的全局状态（`~/.beads`、`~/.config/bd`、`~/.dolt`）不出沙箱。
+// ═══════════════════════════════════════════════════════════════════════════
+mod task_center {
+    use super::*;
+
+    /// `bd` 可执行文件：`SEBAS_BD_BIN` 显式覆盖优先，否则 `PATH` 上的 `bd`。
+    fn bd_bin() -> std::path::PathBuf {
+        std::env::var_os(sebas_webui::beads_client::BD_BIN_ENV)
+            .map(std::path::PathBuf::from)
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| "bd".into())
+    }
+
+    fn bd_available() -> bool {
+        std::process::Command::new(bd_bin())
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    /// 在 `/tmp` 下开一个一次性根目录（任务中心项目 + workspace root 的
+    /// 共同祖先）。不用 `Sandbox` 自带的 `target/tests` 路径：那在仓库内，
+    /// `bd init` 会向上撞到操作员的真实 `.beads`（见模块头）。
+    fn task_center_root() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("sebas-task-center-e2e-")
+            .tempdir()
+            .expect("create task-center root")
+    }
+
+    /// 依次读 WebSocket 帧，直到满足谓词（`session.resync` 等无关键跳过）。
+    async fn ws_wait_frame(
+        ws: &mut WsStream,
+        what: &str,
+        pred: impl Fn(&serde_json::Value) -> bool,
+    ) -> serde_json::Value {
+        for _ in 0..40 {
+            let frame = next_ws_frame(ws).await;
+            if pred(&frame) {
+                return frame;
+            }
+        }
+        panic!("timed out waiting for ws frame: {what}");
+    }
+
+    /// 轮询 `GET /api/projects/{id}/tasks/{task_id}` 直到谓词成立。
+    async fn wait_task(
+        cli: &reqwest::Client,
+        sb: &Sandbox,
+        task_url: &str,
+        what: &str,
+        pred: impl Fn(&serde_json::Value) -> bool + Send + Sync + 'static,
+    ) -> serde_json::Value {
+        let cli = cli.clone();
+        let url = task_url.to_string();
+        let hint = sb.path.clone();
+        let pred = std::sync::Arc::new(pred);
+        wait_for(what, Duration::from_secs(30), &hint, move || {
+            let cli = cli.clone();
+            let url = url.clone();
+            let pred = pred.clone();
+            Box::pin(async move {
+                let v = cli
+                    .get(&url)
+                    .send()
+                    .await
+                    .ok()?
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()?;
+                pred(&v).then_some(v)
+            })
+        })
+        .await
+    }
+
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn task_center_lifecycle_journey() {
+        if !bd_available() {
+            panic!(
+                "任务中心 e2e 需要 bd >= 1.3.4：把 {} 指向可执行文件或加入 PATH",
+                sebas_webui::beads_client::BD_BIN_ENV
+            );
+        }
+        let sb = Sandbox::new("testsuite_e2e", "task-center");
+        // 项目目录与 workspace root 落在仓库之外的 /tmp 一次性目录（bd 的
+        // 祖先 `.beads` 发现不得命中操作员真实库）。
+        let root = task_center_root();
+        let project_dir = root.path().join("task-project");
+        std::fs::create_dir_all(&project_dir).expect("mkdir task project");
+        let project_path = forward_slash(&project_dir);
+        let root_path = forward_slash(root.path());
+
+        let cli = http_client();
+        // 人 = `alice`（bd 默认 actor 经 BEADS_ACTOR 钉定，claim 的
+        // assignee 断言才有确定性——沙箱不继承宿主 USER 的偶然值）。
+        let extra: Vec<(&str, &str)> = vec![
+            ("SEBAS_WORKSPACE_ROOT", &root_path),
+            ("BEADS_ACTOR", "alice"),
+        ];
+        let _core = sb.spawn_core_extra(&extra);
+        let _webui = sb.spawn_webui_extra(&sb.core_secret, &extra);
+        support::wait_reachable(&cli, &sb).await;
+
+        // 1) 项目注册（workspace root 内的新目录）。
+        let (status, project) = post_json(
+            &cli,
+            &format!("{}/api/projects", sb.webui_url()),
+            serde_json::json!({ "path": project_path }),
+        )
+        .await
+        .expect("register task project");
+        assert_eq!(status, 201, "register project: {project}");
+        let project_id = project["id"].as_str().expect("project id").to_string();
+        let tasks_url = format!("{}/api/projects/{project_id}/tasks", sb.webui_url());
+
+        // 2) 看板订阅（进程级：webui 进程内的 per-project 泵 + WS 桥）。
+        let mut ws = ws_connect(&sb.webui_url()).await;
+        {
+            use futures_util::SinkExt;
+            ws.send(tokio_tungstenite::tungstenite::Message::Text(
+                serde_json::json!({
+                    "id": 1,
+                    "method": "tasks.watch",
+                    "params": { "project_id": project_id },
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .expect("send tasks.watch");
+        }
+        let reply = ws_wait_frame(&mut ws, "tasks.watch reply", |frame| frame["id"] == 1).await;
+        assert_eq!(
+            reply["result"]["status"], "watching",
+            "tasks.watch reply: {reply}"
+        );
+
+        // 3) 任务面板首访：惰性 `bd init` + 空列表。
+        let (status, body) = get_json_status(&cli, &tasks_url).await.expect("list tasks");
+        assert_eq!(status, 200, "first task panel visit: {body}");
+        assert_eq!(body["tasks"], serde_json::json!([]), "fresh board: {body}");
+        assert!(
+            project_dir.join(".beads").is_dir(),
+            "首次访问必须在项目目录内跑 bd init（.beads/ 的落点）"
+        );
+
+        // 4) 建任务（reviewer 元数据落 beads issue）。
+        let (status, created) = post_json(
+            &cli,
+            &tasks_url,
+            serde_json::json!({
+                "title": "Ship the task center",
+                "description": "进程级 e2e 旅程",
+                "reviewer": "claude",
+            }),
+        )
+        .await
+        .expect("create task");
+        assert_eq!(status, 201, "create task: {created}");
+        let task_id = created["id"].as_str().expect("task id").to_string();
+        assert_eq!(created["status"], "open");
+        assert_eq!(created["metadata"]["reviewer"], "claude");
+
+        // 5) 人认领（beads 原子 claim → in_progress + assignee）。
+        let (status, claimed) = post_json(
+            &cli,
+            &format!("{tasks_url}/{task_id}/claim"),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("claim task");
+        assert_eq!(status, 200, "claim: {claimed}");
+        assert_eq!(claimed["status"], "in_progress");
+        assert_eq!(claimed["assignee"], "alice", "claim records the actor");
+
+        // 6) WS 推送：`task_updated` 携带完整 issue 快照（无回查）。订阅早于
+        //    建任务，泵从 seq 0 起放——先到达的是 create 事件，这里等认领
+        //    那条（同一任务的 in_progress 快照）。
+        let event = ws_wait_frame(&mut ws, "task_updated (claim)", |frame| {
+            frame["method"] == "task_updated"
+                && frame["params"]["issue"]["id"] == task_id.as_str()
+                && frame["params"]["issue"]["status"] == "in_progress"
+        })
+        .await;
+        assert_eq!(event["params"]["project_id"], project_id.as_str());
+        assert_eq!(event["params"]["issue"]["assignee"], "alice");
+
+        // 7) 从任务开一轮会话（`task_id` 透传到 session_map）。
+        let (status, session) = post_json(
+            &cli,
+            &format!("{}/api/sessions", sb.webui_url()),
+            serde_json::json!({
+                "prompt": "hello",
+                "agent": "claude",
+                "project_id": project_id,
+                "task_id": task_id,
+            }),
+        )
+        .await
+        .expect("create session from task");
+        assert_eq!(status, 201, "create session: {session}");
+        let key = session["key"].as_str().expect("session key").to_string();
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+
+        // 8) fake-claude 回合正常完成；会话详情回显 task_id（9.1 回链数据源）。
+        wait_turn_done(&cli, &sb, &detail_url).await;
+        let (status, detail) = get_json_status(&cli, &detail_url).await.expect("session detail");
+        assert_eq!(status, 200);
+        assert_eq!(detail["task_id"], task_id.as_str(), "task_id round-trips: {detail}");
+
+        // 9) 关闭会话（终态 Closed + 正常完成回合）→ 引擎 hook 加 in-review。
+        let (status, closed_session) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/close", sb.webui_url()),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("close session");
+        assert_eq!(status, 200, "close session: {closed_session}");
+
+        let task_url = format!("{tasks_url}/{task_id}");
+        let reviewed = wait_task(&cli, &sb, &task_url, "task auto-advances to in-review", |v| {
+            v["labels"]
+                .as_array()
+                .is_some_and(|labels| labels.iter().any(|label| label == "in-review"))
+        })
+        .await;
+        assert_eq!(
+            reviewed["status"], "in_progress",
+            "in-review 是 label 而非 status: {reviewed}"
+        );
+
+        // 10) reviewer 关闭（人是放行档）→ closed，看板归 done 区。
+        let (status, closed) = post_json(
+            &cli,
+            &format!("{tasks_url}/{task_id}/close"),
+            serde_json::json!({ "reason": "reviewed" }),
+        )
+        .await
+        .expect("close task");
+        assert_eq!(status, 200, "close task: {closed}");
+        assert_eq!(closed["status"], "closed");
+        assert_eq!(closed["close_reason"], "reviewed");
+
+        let (status, board) = get_json_status(&cli, &tasks_url).await.expect("board after close");
+        assert_eq!(status, 200);
+        let rows = board["tasks"].as_array().expect("task list");
+        let row = rows
+            .iter()
+            .find(|task| task["id"] == task_id.as_str())
+            .expect("closed task still on the board (done region)");
+        assert_eq!(row["status"], "closed", "done region row: {row}");
+
+        {
+            use futures_util::SinkExt;
+            let _ = ws
+                .send(tokio_tungstenite::tungstenite::Message::Close(None))
+                .await;
+        }
+    }
+
+    /// 11.1 总开关完整性：`task_center_enabled = false` 时**每一个**任务面
+    /// 端点（10 个 HTTP + WS `tasks.watch` 订阅）都 503 并点名配置键——不是
+    /// 只挡列表入口。项目注册面（`/api/projects`）不属于任务面，照常 201。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn task_center_disabled_gates_every_endpoint() {
+        let sb = Sandbox::new("testsuite_e2e", "task-center-disabled");
+        // 沙箱模板缺省不写该键（= 默认 true）；spawn 前在 [service.webui]
+        // 段内追加显式关闭，core/webui 两个进程都读到 false。
+        let config = std::fs::read_to_string(&sb.config_path).expect("read sandbox config");
+        let patched = config.replace(
+            "auth = false\n",
+            "auth = false\ntask_center_enabled = false\n",
+        );
+        assert_ne!(patched, config, "[service.webui] 段应含 auth = false");
+        std::fs::write(&sb.config_path, patched).expect("write sandbox config");
+
+        let project_dir = sb.path.join("gated-project");
+        std::fs::create_dir_all(&project_dir).expect("mkdir gated project");
+        let project_path = forward_slash(&project_dir);
+
+        let cli = http_client();
+        let _core = sb.spawn_core_extra(&[]);
+        let _webui = sb.spawn_webui_extra(&sb.core_secret, &[]);
+        support::wait_reachable(&cli, &sb).await;
+
+        // 项目注册面不受任务开关影响（它不属于任务面）。
+        let (status, project) = post_json(
+            &cli,
+            &format!("{}/api/projects", sb.webui_url()),
+            serde_json::json!({ "path": project_path }),
+        )
+        .await
+        .expect("register gated project");
+        assert_eq!(status, 201, "项目注册面应照常可用: {project}");
+
+        let project_id = project["id"].as_str().expect("project id").to_string();
+        let tasks_url = format!("{}/api/projects/{project_id}/tasks", sb.webui_url());
+        let task_url = format!("{tasks_url}/tsk-gated");
+        let key = "task_center_enabled";
+
+        let pinned = |label: &str, status: u16, body: &serde_json::Value| {
+            assert_eq!(status, 503, "{label} 必须 503: {body}");
+            assert!(
+                body["error"].as_str().unwrap_or_default().contains(key),
+                "{label} 必须点名配置键 {key}: {body}"
+            );
+        };
+
+        // GET 面：list / show。
+        for (label, url) in [
+            ("GET list", tasks_url.as_str()),
+            ("GET show", task_url.as_str()),
+        ] {
+            let (status, body) = get_json_status(&cli, url).await.expect(label);
+            pinned(label, status, &body);
+        }
+        // POST 面：create / refresh / claim / release / assign / review /
+        // close / comment。
+        let post_cases: Vec<(&str, String)> = vec![
+            ("POST create", tasks_url.clone()),
+            ("POST refresh", format!("{tasks_url}/refresh")),
+            ("POST claim", format!("{task_url}/claim")),
+            ("POST release", format!("{task_url}/release")),
+            ("POST assign", format!("{task_url}/assign")),
+            ("POST review", format!("{task_url}/review")),
+            ("POST close", format!("{task_url}/close")),
+            ("POST comment", format!("{task_url}/comment")),
+        ];
+        for (label, url) in &post_cases {
+            let (status, body) = post_json(&cli, url, serde_json::json!({}))
+                .await
+                .expect(label);
+            pinned(label, status, &body);
+        }
+
+        // WS 订阅同样被挡（gate 在 lookup_project 里，watch 与 HTTP 同源）。
+        let mut ws = ws_connect(&sb.webui_url()).await;
+        {
+            use futures_util::SinkExt;
+            ws.send(tokio_tungstenite::tungstenite::Message::Text(
+                serde_json::json!({
+                    "id": 7,
+                    "method": "tasks.watch",
+                    "params": { "project_id": project_id },
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .expect("send tasks.watch");
+        }
+        let reply = ws_wait_frame(&mut ws, "tasks.watch gated", |frame| frame["id"] == 7).await;
+        assert_eq!(
+            reply["error"]["code"], "project_unavailable",
+            "关闭时 WS 订阅必须报 project_unavailable: {reply}"
+        );
+        assert!(
+            reply["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(key),
+            "WS 错误必须点名配置键: {reply}"
+        );
+        {
+            use futures_util::SinkExt;
+            let _ = ws
+                .send(tokio_tungstenite::tungstenite::Message::Close(None))
+                .await;
+        }
+    }
+}
