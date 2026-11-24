@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type CSSProperties,
@@ -8,7 +9,7 @@ import {
   type ReactNode,
 } from 'react'
 import { Button, Drawer, Dropdown, Modal, Tag } from 'antd'
-import type { Role, SessionRow } from '../../api/client.js'
+import { api, type Role, type SessionRow } from '../../api/client.js'
 import { sharedWs } from '../../api/shared-ws.js'
 import { notify, setFatal, setWsDown } from '../../notify.js'
 import { canCreateSessions } from '../../views/role-visibility.js'
@@ -28,8 +29,10 @@ import { ProjectRail } from './ProjectRail.js'
 import { SessionCreateModal } from './SessionCreateModal.js'
 import { UsagePage } from '../pages/UsagePage.js'
 import { SessionsPage } from '../pages/SessionsPage.js'
-import { WorkbenchHome } from './WorkbenchHome.js'
+import { WorkbenchHome, type StageTab } from './WorkbenchHome.js'
 import { SettingsPage } from '../pages/SettingsPage.js'
+import { TaskStore } from '../tasks/task-store.js'
+import { tabForProject, withProjectTab, type StageTabState } from '../tasks/stage-tabs.js'
 import { statusLabel } from './labels.js'
 import styles from './shell.module.css'
 
@@ -109,11 +112,33 @@ export function Shell({ auth, sessions, role, username }: ShellProps) {
   const dragOrigin = useRef<{ x: number; width: number } | null>(null)
   const settingsReturnFocus = useRef<HTMLElement | null>(null)
   const [connected, setConnected] = useState<boolean | null>(null)
-  const [create, setCreate] = useState<{ open: boolean; projectId: string | null }>({
-    open: false,
-    projectId: null,
-  })
+  const [create, setCreate] = useState<{
+    open: boolean
+    projectId: string | null
+    /** 任务详情页发起的创建：标题改写 + 请求携带 task_id。 */
+    task: { id: string; title: string } | null
+  }>({ open: false, projectId: null, task: null })
+  // 任务中心（agent-task-center 7.1/9.1）：每项目各记一份 stage 视图；
+  // 详情打开态记在 Shell，切 tab 不改变聚焦会话指针。
+  const taskStore = useMemo(() => new TaskStore(), [])
+  const [tabByProject, setTabByProject] = useState<StageTabState>({})
+  const [openTask, setOpenTask] = useState<{ projectId: string; taskId: string } | null>(null)
+  const [agentIds, setAgentIds] = useState<ReadonlySet<string>>(() => new Set())
   const canCreate = canCreateSessions(role)
+  useEffect(() => {
+    let cancelled = false
+    api
+      .agents()
+      .then((response) => {
+        if (!cancelled) setAgentIds(new Set(response.agents.map((agent) => agent.id)))
+      })
+      .catch(() => {
+        /* agent 目录不可用时按「无 agent kind」渲染，任务面不受影响 */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
   // Focus projection for turn-end notices: only the session actually open in
   // the conversation pane suppresses its own completion toast.
   useEffect(() => {
@@ -143,10 +168,34 @@ export function Shell({ auth, sessions, role, username }: ShellProps) {
       armOpeningSeam(key, readAnchorCount(key))
       const projectId =
         (list?.recent_sessions ?? []).find((row) => row.encoded_key === key)?.project_id ?? null
-      if (projectId !== null) setSelectedProjectId(projectId)
+      if (projectId !== null) {
+        setSelectedProjectId(projectId)
+        // 打开会话总是回到会话视图（回链/关联会话跳转的语义）。
+        setTabByProject((current) => withProjectTab(current, projectId, 'conversation'))
+      }
       navigate(`/sessions/${key}`)
     },
     [list],
+  )
+
+  const setStageTab = useCallback(
+    (projectId: string | null) => (tab: StageTab) => {
+      setTabByProject((current) => withProjectTab(current, projectId, tab))
+    },
+    [],
+  )
+
+  const openTaskDetail = useCallback((projectId: string | null, taskId: string) => {
+    if (projectId === null) return
+    setOpenTask({ projectId, taskId })
+    setTabByProject((current) => withProjectTab(current, projectId, 'tasks'))
+  }, [])
+
+  const requestCreateForTask = useCallback(
+    (projectId: string | null, task: { id: string; title: string }) => {
+      setCreate({ open: true, projectId, task })
+    },
+    [],
   )
 
   const selectProject = useCallback(
@@ -316,6 +365,12 @@ export function Shell({ auth, sessions, role, username }: ShellProps) {
         case 'config.updated':
           void sessions.refresh()
           break
+        case 'task_updated':
+        case 'task_resync':
+          // 任务面板的实时面（7.5）：事件载荷是完整 issue 快照，直接替换本地
+          // 状态，不回查 `bd show`（store 负责缓冲未加载窗口）。
+          taskStore.applyEvent(event)
+          break
         case 'core.reachability':
           applyFatal(
             event.ok
@@ -345,7 +400,7 @@ export function Shell({ auth, sessions, role, username }: ShellProps) {
       window.removeEventListener('sebas:ws-state', onWsState)
       window.removeEventListener('sebas:refetch', onRefetch)
     }
-  }, [sessions, probeReachability, applyFatal])
+  }, [sessions, taskStore, probeReachability, applyFatal])
 
   useEffect(() => {
     document.title = project ? `${project.name} · sebas` : 'sebas 工作台'
@@ -430,7 +485,7 @@ export function Shell({ auth, sessions, role, username }: ShellProps) {
         canCreate={canCreate}
         focusedKey={route.kind === 'session' ? route.key : null}
         onFocus={openSession}
-        onRequestCreate={(projectId) => setCreate({ open: true, projectId })}
+        onRequestCreate={(projectId) => setCreate({ open: true, projectId, task: null })}
         disconnected={connected === false}
         onRetry={() => {
           sharedWs.reconnectNow()
@@ -475,18 +530,31 @@ export function Shell({ auth, sessions, role, username }: ShellProps) {
         sessions={sessions}
         canCreate={canCreate}
         onFocus={openSession}
-        onRequestCreate={() => setCreate({ open: true, projectId: selectedProjectId })}
+        onRequestCreate={() => setCreate({ open: true, projectId: selectedProjectId, task: null })}
       />
     )
   } else {
+    const stageProjectId = focusedProjectId ?? selectedProjectId
     content = (
       <WorkbenchHome
         sessionKey={route.kind === 'session' ? route.key : null}
         sessions={sessions}
-        selectedProjectId={selectedProjectId}
+        selectedProjectId={stageProjectId}
         canCreate={canCreate}
-        onRequestCreate={() => setCreate({ open: true, projectId: selectedProjectId })}
+        onRequestCreate={() =>
+          setCreate({ open: true, projectId: stageProjectId, task: null })
+        }
         onFocus={openSession}
+        tab={tabForProject(tabByProject, stageProjectId)}
+        onTabChange={setStageTab(stageProjectId)}
+        tasks={taskStore}
+        openTaskId={openTask !== null && openTask.projectId === stageProjectId ? openTask.taskId : null}
+        onOpenTask={(taskId) => openTaskDetail(stageProjectId, taskId)}
+        onCloseTask={() => setOpenTask(null)}
+        onStartTaskSession={(task) => requestCreateForTask(stageProjectId, task)}
+        username={username}
+        role={role}
+        agentIds={agentIds}
       />
     )
   }
@@ -610,9 +678,16 @@ export function Shell({ auth, sessions, role, username }: ShellProps) {
         open={create.open}
         projectId={create.projectId}
         projects={projects}
-        onClose={() => setCreate({ open: false, projectId: null })}
+        task={create.task}
+        onClose={() => setCreate({ open: false, projectId: null, task: null })}
         onCreated={(key) => {
-          setCreate({ open: false, projectId: null })
+          // 反查项目不可靠：新行尚未进列表（refresh 未 await）——直接用创建
+          // 请求的项目把 stage 切回会话视图。
+          const projectId = create.projectId
+          setCreate({ open: false, projectId: null, task: null })
+          if (projectId !== null) {
+            setTabByProject((c) => withProjectTab(c, projectId, 'conversation'))
+          }
           void sessions.refresh()
           openSession(key)
         }}

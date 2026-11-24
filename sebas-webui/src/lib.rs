@@ -20,6 +20,7 @@ pub mod server;
 pub mod session_backend;
 pub mod skills;
 pub mod task_events;
+pub mod task_hook;
 pub mod task_routes;
 pub mod user_store;
 pub mod web_adapter;

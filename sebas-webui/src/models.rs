@@ -238,6 +238,10 @@ pub struct SessionRow {
     /// 「未上报」，不以 0 冒充）；None 不上 wire。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<sebas_channels::AppUsage>,
+    /// （agent-task-center 6.1/8.4）会话推进的 beads 任务 id；`None` = 非任务
+    /// 会话（None 不上 wire——旧前端看到的行形状不变）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
 }
 
 /// Dashboard overview data.
@@ -449,6 +453,8 @@ impl From<&sebas_dispatch::SessionInfo> for SessionRow {
             turn_engaged: info.turn_engaged,
             // （add-webui-round7-gaps 1.1）用量随行透传（None 不上 wire）。
             usage: info.usage.clone(),
+            // （agent-task-center 6.1）任务关联随行透传（None 不上 wire）。
+            task_id: info.task_id.clone(),
         }
     }
 }

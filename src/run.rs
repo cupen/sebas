@@ -362,6 +362,11 @@ pub async fn run(
         let sink = local_usage_sink.clone();
         std::sync::Arc::new(move |rec| sink.record(rec))
     });
+    // （agent-task-center 5.1~5.3）会话终态 → 任务 `in-review` 联动：引擎裁决
+    // 通过后才调用；钩子内部异步 spawn `bd`，绝不阻塞会话生命周期主循环。
+    router.set_session_terminal_hook(sebas_webui::task_hook::make_hook(
+        sebas_webui::beads_client::BeadsClient::new(),
+    ));
     // native 直连回合的本地落账（design D1 双算规避的另一半）：注入了
     // `SEBAS_AGENT_ROUTER_URL` 的装配经 router（router 已记）→ 不本地记。
     let native_local_sink = if crate::usage_local::native_records_locally_from_env() {

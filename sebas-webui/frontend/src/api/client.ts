@@ -129,6 +129,12 @@ export interface SessionRow {
   available_models: string[] | null
   /** 创建时绑定的执行后端 kind（add-composer-agent-binding）；null = 默认 kind。 */
   agent_kind: string | null
+  /**
+   * （agent-task-center 6.1/8.4）该会话推进的 beads 任务 id；缺省/null =
+   * 非任务会话（服务端 None 不上 wire）。任务卡片的会话计数与详情页会话
+   * 列表的数据源。
+   */
+  task_id?: string | null
   /** （wire-webui-sebas-agent-e2e）会话所属执行体（"acp"/"native"）；null = 未打标。 */
   backend?: string | null
   /** （workbench-turn-queue 7.4）待生效提交条数（Rail 关闭确认文案用）。 */
@@ -433,6 +439,11 @@ export interface SessionDetail {
   available_models: string[] | null
   /** 创建时绑定的执行后端 kind（add-composer-agent-binding）；null = 默认 kind。 */
   agent_kind: string | null
+  /**
+   * （agent-task-center 9.1）该会话推进的 beads 任务 id；null = 非任务会话。
+   * 会话头「Task bd-XX」回链的数据源。
+   */
+  task_id?: string | null
   /** （wire-webui-sebas-agent-e2e）会话所属执行体（"acp"/"native"）；null = 未打标。 */
   backend?: string | null
   /**
@@ -1272,6 +1283,70 @@ export const api = {
     del<{ status: string; name: string }>(`/api/skills/${encodeURIComponent(name)}`),
   skillsSync: () => post<SkillsSyncResponse>('/api/skills/sync'),
 
+  // 任务中心（agent-task-center 3.x）：项目下的 beads 任务 CRUD/流转。
+  // 错误由调用方就地呈现（path 已被 NOTIFY_EXEMPT_PATHS 的 /api/projects
+  // 段豁免）：404 = 任务/项目不存在，409 = claim 撞他人认领，503 = bd 缺失。
+  tasksList: (projectId: string, filter?: { status?: string; assignee?: string }) =>
+    get<TaskListResponse>(
+      withQuery(`/api/projects/${encodeURIComponent(projectId)}/tasks`, {
+        status: filter?.status,
+        assignee: filter?.assignee,
+      }),
+    ),
+  taskShow: (projectId: string, taskId: string) =>
+    get<BeadsIssue>(
+      `/api/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}`,
+    ),
+  taskCreate: (
+    projectId: string,
+    opts: {
+      title: string
+      description?: string | null
+      assignee?: string | null
+      reviewer?: string | null
+    },
+  ) =>
+    post<BeadsIssue>(`/api/projects/${encodeURIComponent(projectId)}/tasks`, {
+      title: opts.title,
+      description: opts.description ?? null,
+      assignee: opts.assignee ?? null,
+      reviewer: opts.reviewer ?? null,
+    }),
+  taskClaim: (projectId: string, taskId: string) =>
+    post<BeadsIssue>(
+      `/api/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/claim`,
+    ),
+  taskRelease: (projectId: string, taskId: string) =>
+    post<BeadsIssue>(
+      `/api/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/release`,
+    ),
+  taskAssign: (projectId: string, taskId: string, assignee: string) =>
+    post<BeadsIssue>(
+      `/api/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/assign`,
+      { assignee },
+    ),
+  /** 进入评审：`bd update --add-label in-review`（status 保持 in_progress）。 */
+  taskReview: (projectId: string, taskId: string) =>
+    post<BeadsIssue>(
+      `/api/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/review`,
+    ),
+  /** 关单：`reason: 'cancelled'` = 取消（服务端 reviewer 闸门照常生效）。 */
+  taskClose: (projectId: string, taskId: string, reason?: string | null) =>
+    post<BeadsIssue>(
+      `/api/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/close`,
+      { reason: reason ?? null },
+    ),
+  taskComment: (projectId: string, taskId: string, text: string) =>
+    post<BeadsComment>(
+      `/api/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/comment`,
+      { text },
+    ),
+  /** 手动 Refresh：全量重载 + 事件游标重新基线（`bd dolt pull` 后的恢复面）。 */
+  tasksRefresh: (projectId: string) =>
+    post<TaskListResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/tasks/refresh`,
+    ),
+
   // Session mutations
   /**
    * Create a session（workbench-agent-wire-fix D2）：`agent` 必填（agent id
@@ -1287,6 +1362,12 @@ export const api = {
     /** 权限模式（add-agent-mode-selection）：`ask`/`edit`/`allow`/`auto`；
      * `null` = agent 默认行为（不发送 mode 字段）。 */
     mode?: string | null
+    /**
+     * （agent-task-center 6.1/8.5）推进的 beads 任务 id（任务详情页的「开
+     * 一轮会话推进此任务」携带）；`null`/缺省 = 非任务会话（键照常上 wire
+     * 为 null，服务端 serde default 收 None）。
+     */
+    taskId?: string | null
   }) =>
     post<{ key: string }>('/api/sessions', {
       prompt: opts.prompt ?? null,
@@ -1296,6 +1377,9 @@ export const api = {
       // undefined = 未选 mode：JSON 序列化时整个键省略（服务端 serde default
       // 语义 = agent 默认行为），与"缺省不发送字段"的 wire 姿态一致。
       mode: opts.mode,
+      // 非任务会话省略该键（协议演进规则 1：新字段带 serde 默认值，缺省不
+      // 上 wire → 旧字节形状零变化）。
+      ...(opts.taskId ? { task_id: opts.taskId } : {}),
     }),
   /** 中程切换会话模型（add-acp-model-selection）：`session/set_config_option`。 */
   setSessionModel: (encodedKey: string, modelId: string) =>
@@ -1549,6 +1633,58 @@ export interface ProjectBranchInfo {
   project_id: string
   branch: string | null
   accessible: boolean
+}
+
+// ---- 任务中心（agent-task-center）：beads issue 的只读投影 ----
+
+/** beads issue 快照（`bd --json` 的公共子集；任务面只消费这些字段）。 */
+export interface BeadsIssue {
+  id: string
+  title: string
+  description?: string | null
+  /** beads 原生 status：`open` / `in_progress` / `closed`。 */
+  status: string
+  assignee?: string | null
+  labels: string[]
+  /** `reviewer` 存在 issue metadata 里（design D4）。 */
+  metadata?: { reviewer?: string | null } | null
+  /** `bd show --include-comments` 才携带评论正文。 */
+  comments?: BeadsComment[]
+  comment_count?: number | null
+  created_at?: string | null
+  updated_at?: string | null
+  closed_at?: string | null
+  /** `cancelled` = 取消关单（Done / Cancelled 分区据此区分）。 */
+  close_reason?: string | null
+}
+
+/** 一条 beads 评论。 */
+export interface BeadsComment {
+  id: string
+  issue_id: string
+  author: string
+  text: string
+  created_at: string
+}
+
+export interface TaskListResponse {
+  tasks: BeadsIssue[]
+  /** 仅 Refresh 响应携带：事件游标的重置基线。 */
+  last_seq?: number
+}
+
+/**
+ * `task_updated` 推送载荷：journal 记录 + 完整 issue 快照。`issue` 缺省
+ * = 该记录没有快照（前端保持本地值，等 Refresh 收敛）。
+ */
+export interface TaskUpdatedEvent {
+  project_id: string
+  seq: number
+  op: string
+  issue_id: string
+  actor?: string | null
+  issue?: BeadsIssue | null
+  comment?: BeadsComment | null
 }
 
 /** One archived session entry. */

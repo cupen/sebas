@@ -35,35 +35,35 @@
 
 ## 5. Session-terminal hook
 
-- [ ] 5.1 Add a `on_session_terminal` hook in the session lifecycle manager that fires when a session reaches `Closed` or `Exited`; verify it does not fire for `Failed`/`Terminated`.
-- [ ] 5.2 Implement the hook body: if the session's `task_id` is set AND the session is the task's most-recently-created session AND the last completed turn has `stop_reason = end_turn` (not `cancelled`, not error), call `bd update <task_id> --add-label in-review`. Verify via integration test: a fake-claude turn that ends normally triggers the label.
-- [ ] 5.3 Verify the hook is fire-and-forget (async spawn, error logged not propagated) and does not block the session lifecycle main loop.
+- [x] 5.1 Add a `on_session_terminal` hook in the session lifecycle manager that fires when a session reaches `Closed` or `Exited`; verify it does not fire for `Failed`/`Terminated`.
+- [x] 5.2 Implement the hook body: if the session's `task_id` is set AND the session is the task's most-recently-created session AND the last completed turn has `stop_reason = end_turn` (not `cancelled`, not error), call `bd update <task_id> --add-label in-review`. Verify via integration test: a fake-claude turn that ends normally triggers the label.
+- [x] 5.3 Verify the hook is fire-and-forget (async spawn, error logged not propagated) and does not block the session lifecycle main loop.
 
 ## 6. Session creation with task_id
 
-- [ ] 6.1 Wire `task_id` through `POST /api/sessions` request body → core create-session RPC → `session_map` row. Verify `task_id` round-trips and is queryable via `/api/sessions/{key}`.
-- [ ] 6.2 Add a `WHERE task_id = ?` lookup (`sebas-models::session_map::find_by_task_id`) returning all sessions for a given task, ordered `created_at DESC`; unit-test the query.
+- [x] 6.1 Wire `task_id` through `POST /api/sessions` request body → core create-session RPC → `session_map` row. Verify `task_id` round-trips and is queryable via `/api/sessions/{key}`.
+- [x] 6.2 Add a `WHERE task_id = ?` lookup (`sebas-models::session_map::find_by_task_id`) returning all sessions for a given task, ordered `created_at DESC`; unit-test the query.
 
 ## 7. Frontend — tabs and board
 
-- [ ] 7.1 Add `Conversation` / `Tasks` tabs to the stage header in `sebas-webui/frontend`; verify per-project tab state persists across project switches (component test).
-- [ ] 7.2 Build a `<TaskBoard>` component: three columns (`Unassigned`, `In progress`, `In review`) + collapsed `Done / Cancelled` region, each column header showing count; verify renders correctly with fixture data.
-- [ ] 7.3 Build a `<TaskCard>` component: title (2-line truncation + tooltip), assignee avatar (human letter / agent icon / unassigned dashed), `agent` chip when applicable, comment count, session count, relative updated timestamp; verify visually with storybook/fixture.
-- [ ] 7.4 Wire drag-and-drop between columns → call the corresponding API endpoint; verify a drag from `Unassigned` to `In progress` triggers claim and the card moves on success (Playwright test).
-- [ ] 7.5 Wire WebSocket `task_updated` events → update local task state by replacing the issue snapshot (no `bd show` re-fetch); verify the board updates within ~500ms of a backend mutation (manual or Playwright assertion).
+- [x] 7.1 Add `Conversation` / `Tasks` tabs to the stage header in `sebas-webui/frontend`; verify per-project tab state persists across project switches (component test).
+- [x] 7.2 Build a `<TaskBoard>` component: three columns (`Unassigned`, `In progress`, `In review`) + collapsed `Done / Cancelled` region, each column header showing count; verify renders correctly with fixture data.
+- [x] 7.3 Build a `<TaskCard>` component: title (2-line truncation + tooltip), assignee avatar (human letter / agent icon / unassigned dashed), `agent` chip when applicable, comment count, session count, relative updated timestamp; verify visually with storybook/fixture.
+- [x] 7.4 Wire drag-and-drop between columns → call the corresponding API endpoint; verify a drag from `Unassigned` to `In progress` triggers claim and the card moves on success (Playwright test).
+- [x] 7.5 Wire WebSocket `task_updated` events → update local task state by replacing the issue snapshot (no `bd show` re-fetch); verify the board updates within ~500ms of a backend mutation (manual or Playwright assertion).
 
 ## 8. Frontend — task detail page
 
-- [ ] 8.1 Build `<TaskDetail>`: left main column (title, markdown description, comment stream) + right sidebar (metadata, action buttons, session list); verify layout matches GitHub issue convention.
-- [ ] 8.2 Wire action buttons (Claim / Release / Enter review / Mark done / Cancel) to their respective endpoints; verify conditional rendering by state and caller identity (component test with mocked API).
-- [ ] 8.3 Build `<CommentStream>`: list of comments with author avatar (human/agent convention), timestamp, markdown body; verify posting a comment refreshes the stream.
-- [ ] 8.4 Build `<LinkedSessionList>`: shows sessions from `find_by_task_id`, each row title/agent/phase/timestamp; verify clicking a row switches the stage to the conversation view focused on that session.
-- [ ] 8.5 Wire "Start a session for this task" button: opens the existing `<SessionCreationDialog>` retitled to "Advance task bd-XX: <title>", confirming calls `POST /api/sessions` with `task_id`; verify cancel creates nothing.
+- [x] 8.1 Build `<TaskDetail>`: left main column (title, markdown description, comment stream) + right sidebar (metadata, action buttons, session list); verify layout matches GitHub issue convention.
+- [x] 8.2 Wire action buttons (Claim / Release / Enter review / Mark done / Cancel) to their respective endpoints; verify conditional rendering by state and caller identity (component test with mocked API).
+- [x] 8.3 Build `<CommentStream>`: list of comments with author avatar (human/agent convention), timestamp, markdown body; verify posting a comment refreshes the stream.
+- [x] 8.4 Build `<LinkedSessionList>`: shows sessions from `find_by_task_id`, each row title/agent/phase/timestamp; verify clicking a row switches the stage to the conversation view focused on that session.
+- [x] 8.5 Wire "Start a session for this task" button: opens the existing `<SessionCreationDialog>` retitled to "Advance task bd-XX: <title>", confirming calls `POST /api/sessions` with `task_id`; verify cancel creates nothing.
 
 ## 9. Frontend — session back-link
 
-- [ ] 9.1 Add a "Task bd-XX" back-link to the session detail header when `task_id` is set; verify clicking switches stage to `Tasks` tab and opens the task detail.
-- [ ] 9.2 Verify rail session rows do NOT display the task link (density preserved).
+- [x] 9.1 Add a "Task bd-XX" back-link to the session detail header when `task_id` is set; verify clicking switches stage to `Tasks` tab and opens the task detail.
+- [x] 9.2 Verify rail session rows do NOT display the task link (density preserved).
 
 ## 10. Integration & acceptance
 

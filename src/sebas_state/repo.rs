@@ -1811,7 +1811,8 @@ mod active_record_tests {
 #[cfg(test)]
 mod writer_wiring_tests {
     use super::{
-        SETTINGS_TABLES, TableSchema, delete_agent, load_agents, load_persisted_state, save_agent,
+        PROJECTS_TABLES, SETTINGS_TABLES, TableSchema, delete_agent, load_agents,
+        load_persisted_state, save_agent,
     };
     use crate::sebas_state::writer::StateWriter;
     use sebas_db::schema::open_and_sync;

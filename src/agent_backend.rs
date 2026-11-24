@@ -1798,6 +1798,7 @@ impl SessionBackend for DualSessionBackend {
         model: Option<String>,
         mode: Option<String>,
         node: Option<String>,
+        task_id: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
         // 远端放置由 core 的节点链路负责（5.1）；这个复合后端只承载主控本机的
         // 两种执行体。远端节点到这里说明调用路径走错了——如实拒绝，不悄悄在本机
@@ -1817,7 +1818,7 @@ impl SessionBackend for DualSessionBackend {
             // `set_model` 管线，provider/id 词表）。
             return self
                 .acp
-                .spawn_with(prompt, project_dir, "pi", model, mode, None)
+                .spawn_with(prompt, project_dir, "pi", model, mode, None, task_id)
                 .await;
         }
         // agent id 即 kind（D2）：ACP 侧按配置键名钉住 kind。模型 id
@@ -1827,7 +1828,7 @@ impl SessionBackend for DualSessionBackend {
             // （add-agent-mode-selection）对 ACP 侧随 spawn 透传（只有 claude
             // 驱动会把它落成 `--permission-mode`）。
             self.acp
-                .spawn_with(prompt, project_dir, agent, model, mode, None)
+                .spawn_with(prompt, project_dir, agent, model, mode, None, task_id)
                 .await
         }
     }
@@ -1841,6 +1842,7 @@ impl SessionBackend for DualSessionBackend {
         model: Option<String>,
         mode: Option<String>,
         node: Option<String>,
+        task_id: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
         if let Some(remote) = remote_node_of(node.as_deref()) {
             return Err(SessionRejection::Unavailable {
@@ -1852,11 +1854,11 @@ impl SessionBackend for DualSessionBackend {
             // （1.1）占位创建同样转发 ACP 侧 pi（0-turn，不 spawn 子进程）。
             return self
                 .acp
-                .create_placeholder(project_dir, "pi", model, mode, None)
+                .create_placeholder(project_dir, "pi", model, mode, None, task_id)
                 .await;
         } else {
             self.acp
-                .create_placeholder(project_dir, agent, model, mode, None)
+                .create_placeholder(project_dir, agent, model, mode, None, task_id)
                 .await
         }
     }
@@ -2377,6 +2379,7 @@ mod tests {
                 Some("m-spawn".into()),
                 None,
                 None,
+                None,
             )
             .await
             .expect("spawn native");
@@ -2390,7 +2393,7 @@ mod tests {
         // D2：agent 必填——"claude" 在测试配置中不存在，但词汇合法；路由
         // 到 acp 侧（key 非 native 前缀即为断言点）。
         let acp_key = dual
-            .spawn_with("hi".into(), None, "claude", None, None, None)
+            .spawn_with("hi".into(), None, "claude", None, None, None, None)
             .await
             .expect("spawn acp");
         assert!(!DualSessionBackend::is_native(&acp_key));
@@ -2619,7 +2622,7 @@ mod tests {
         // 词汇形式非法：driver 命名空间残留（acp:*）、空串。
         for agent in ["acp", "acp:claude", ""] {
             let err = dual
-                .spawn_with("hi".into(), None, agent, None, None, None)
+                .spawn_with("hi".into(), None, agent, None, None, None, None)
                 .await
                 .expect_err("legacy/empty agent value must reject");
             match &err {
@@ -2635,7 +2638,7 @@ mod tests {
         }
         // 占位创建同受校验；且全程未产生任何会话。
         assert!(
-            dual.create_placeholder(None, "acp:claude", None, None, None)
+            dual.create_placeholder(None, "acp:claude", None, None, None, None)
                 .await
                 .is_err()
         );
@@ -2646,7 +2649,7 @@ mod tests {
 
         // 合法 agent id（含大小写敏感的普通 id、native）放行路由。
         for agent in ["claude", "native"] {
-            dual.spawn_with("hi".into(), None, agent, None, None, None)
+            dual.spawn_with("hi".into(), None, agent, None, None, None, None)
                 .await
                 .unwrap_or_else(|e| panic!("agent {agent:?} must route: {e}"));
         }
@@ -2676,7 +2679,7 @@ mod tests {
 
         // agent=native 不再因内核凭据缺失而拒绝——转发到 ACP 侧（web key）。
         let key = dual
-            .spawn_with("hi".into(), None, "native", None, None, None)
+            .spawn_with("hi".into(), None, "native", None, None, None, None)
             .await
             .expect("native must route to the ACP-side pi slot, not reject on kernel credentials");
         assert_eq!(key.channel_str(), "web", "native 新会话走 web key");

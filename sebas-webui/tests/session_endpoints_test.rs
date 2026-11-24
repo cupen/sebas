@@ -10,6 +10,7 @@ use sebas_channels::ChannelKey;
 use sebas_dispatch::engine::DispatchHandle;
 use sebas_dispatch::state::{Mapping, SessionMap};
 use sebas_feishu::cards::CardConfig;
+use sebas_webui::SessionBackend;
 use sebas_webui::build_router;
 use sebas_webui::models::RouterInfo;
 use sebas_webui::projects;
@@ -3224,4 +3225,37 @@ async fn detail_entries_after_beyond_max_position_returns_empty_entries() {
     assert_eq!(detail["status"], "active");
     assert_eq!(detail["encoded_key"].as_str(), Some(encoded.as_str()));
     assert!(detail.get("msg_count").is_some());
+}
+
+// ---- agent-task-center 6.1: task_id round-trip on creation ----
+
+/// `task_id` 随创建进入映射，并经 `/api/sessions/{key}` 的 detail 如实往返
+/// （`None` = 非任务会话，不上 wire）。
+#[tokio::test]
+async fn create_session_carries_task_id_into_detail() {
+    let (router, _rx, app) = fixture().await;
+    let backend = sebas_webui::session_backend::InProcessBackend::new(router.clone());
+    let spawned = backend
+        .spawn_with("hi".into(), None, "claude", None, None, None, Some("bd-42".into()))
+        .await
+        .expect("spawn");
+    assert_eq!(router.map.get(&spawned).await.unwrap().task_id.as_deref(), Some("bd-42"));
+
+    // /api/sessions 行同样带 task_id（LinkedSessionList 的数据源）。
+    let rows = sebas_webui::models::SessionRow::from(&{
+        let infos = backend.snapshot().await;
+        infos
+            .into_iter()
+            .find(|i| i.key == spawned.reference)
+            .expect("spawned session in snapshot")
+    });
+    assert_eq!(rows.task_id.as_deref(), Some("bd-42"));
+
+    let (status, detail) = get_json(&app, &format!("/api/sessions/{}", encode(&spawned))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["task_id"], "bd-42", "detail 必须回传 task_id: {detail}");
+
+    // 非任务会话：detail 的 task_id 为 null（不伪造关联）。
+    let (_, plain) = get_json(&app, &format!("/api/sessions/{}", encode(&key("a")))).await;
+    assert!(plain["task_id"].is_null(), "非任务会话 task_id 为 null: {plain}");
 }

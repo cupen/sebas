@@ -689,7 +689,7 @@ impl SessionBackend for CoreChannelBackend {
         // 通道帧的 agent 必填（workbench-agent-wire-fix D2）：无 agent 的
         // 调用方（feishu 默认路径）语义是「配置的默认 kind」，此处无法解析
         // 配置——由服务端按空 agent 拒绝，调用方应改用 spawn_with 显式传。
-        self.spawn_with(prompt, project_dir, "", None, None, None)
+        self.spawn_with(prompt, project_dir, "", None, None, None, None)
             .await
     }
 
@@ -772,6 +772,7 @@ impl SessionBackend for CoreChannelBackend {
         model: Option<String>,
         mode: Option<String>,
         node: Option<String>,
+        task_id: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
         match self
             .request(&CoreChannelRequest::Spawn {
@@ -784,9 +785,9 @@ impl SessionBackend for CoreChannelBackend {
                 // 节点维度由调用方给出：`None`/`local` = 本机（与今日一致），
                 // 别的值由 core 经节点链路建立——client 自己不解析节点。
                 node,
-                // （agent-task-center 1.2）任务关联由 WebUI 创建请求携带；
-                // 继电器 1 的 webui 请求体尚未透传（见 change 6.1）。
-                task_id: None,
+                // （agent-task-center 6.1）任务关联随创建请求透传；`None` = 非
+                // 任务会话（core 只记不校验存在性）。
+                task_id,
             })
             .await?
         {
@@ -842,6 +843,7 @@ impl SessionBackend for CoreChannelBackend {
         model: Option<String>,
         mode: Option<String>,
         node: Option<String>,
+        task_id: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
         match self
             .request(&CoreChannelRequest::CreatePlaceholder {
@@ -850,7 +852,8 @@ impl SessionBackend for CoreChannelBackend {
                 mode,
                 agent: agent.to_string(),
                 node,
-                task_id: None,
+                // （agent-task-center 6.1）任务关联随占位创建透传。
+                task_id,
             })
             .await?
         {

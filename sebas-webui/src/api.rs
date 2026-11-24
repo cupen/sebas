@@ -287,6 +287,9 @@ pub async fn session_detail(
         "effective_mode": info.effective_mode,
         // （add-composer-agent-binding）创建时绑定的 agent kind；null = 默认。
         "agent_kind": info.agent_kind,
+        // （agent-task-center 6.1/9.1）会话推进的 beads 任务 id；null = 非任务
+        // 会话。会话头「Task bd-XX」回链的数据源。
+        "task_id": info.task_id,
         // （add-webui-round7-gaps 1.1）会话累计 token 用量（引擎快照透传）。
         // null = 引擎尚无 usage 事件（通用 ACP 无 token 上报——前端如实标
         // 「未上报」，不以 0 冒充）。
@@ -1337,6 +1340,11 @@ pub struct CreateSessionRequest {
     /// 同 model 语义）。
     #[serde(default)]
     pub mode: Option<String>,
+    /// （agent-task-center 6.1）该会话推进的 beads 任务 id（如 `bd-42`）。
+    /// `None`/空串 = 非任务会话。WebUI 只透传给 core（任务有效性由任务面
+    /// 裁决——创建会话不因 beads 不可达而失败）。
+    #[serde(default)]
+    pub task_id: Option<String>,
 }
 
 /// （add-agent-mode-selection）创建与切换共用的 mode 词汇表。单一出处：
@@ -1449,6 +1457,14 @@ pub async fn create_session(
         );
     }
     let prompt = req.prompt.unwrap_or_default();
+    // （agent-task-center 6.1）空串归 None：非任务会话不写空 task_id（空串
+    // 会让「按任务查会话」查出伪关联）。
+    let task_id = req
+        .task_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string);
     // 0-turn 占位（P2）：无 prompt 时只建行、不 spawn 子进程、不把空串当
     // prompt 发给 agent（opencode 收到 `session/prompt ""` 会挂起）。agent/
     // model/project 记在 mapping 上，首条消息到达时才 spawn。远端节点上的
@@ -1462,6 +1478,7 @@ pub async fn create_session(
                 req.model.clone(),
                 req.mode.clone(),
                 Some(node.clone()),
+                task_id,
             )
             .await
         {
@@ -1478,6 +1495,7 @@ pub async fn create_session(
                 req.model,
                 req.mode,
                 Some(node.clone()),
+                task_id,
             )
             .await
         {

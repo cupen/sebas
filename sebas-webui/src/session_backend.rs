@@ -333,6 +333,7 @@ pub trait SessionBackend: Send + Sync {
         _model: Option<String>,
         _mode: Option<String>,
         _node: Option<String>,
+        _task_id: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
         self.spawn(prompt, project_dir).await
     }
@@ -395,6 +396,7 @@ pub trait SessionBackend: Send + Sync {
         _model: Option<String>,
         _mode: Option<String>,
         _node: Option<String>,
+        _task_id: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
         self.spawn(String::new(), project_dir).await
     }
@@ -666,6 +668,7 @@ impl SessionBackend for InProcessBackend {
         model: Option<String>,
         mode: Option<String>,
         node: Option<String>,
+        task_id: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
         if let Some(remote) = remote_node_of(node.as_deref()) {
             return Err(SessionRejection::Unavailable {
@@ -673,10 +676,14 @@ impl SessionBackend for InProcessBackend {
             });
         }
         let kind = agent_kind_of(agent);
-        self.router
+        let key = self
+            .router
             .web_spawn(prompt, project_dir, Some(kind), model, mode)
             .await
-            .map_err(rejection_from_dispatch)
+            .map_err(rejection_from_dispatch)?;
+        // （agent-task-center 6.1）任务关联随创建落映射（None 为 no-op）。
+        self.router.set_session_task_id(&key, task_id).await;
+        Ok(key)
     }
 
     /// 0-turn placeholder: create the session row without spawning an agent
@@ -689,6 +696,7 @@ impl SessionBackend for InProcessBackend {
         model: Option<String>,
         mode: Option<String>,
         node: Option<String>,
+        task_id: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
         if let Some(remote) = remote_node_of(node.as_deref()) {
             return Err(SessionRejection::Unavailable {
@@ -696,10 +704,14 @@ impl SessionBackend for InProcessBackend {
             });
         }
         let kind = agent_kind_of(agent);
-        self.router
+        let key = self
+            .router
             .web_create_placeholder(project_dir, Some(kind), model, mode)
             .await
-            .map_err(rejection_from_dispatch)
+            .map_err(rejection_from_dispatch)?;
+        // （agent-task-center 6.1）占位同样记住任务关联，首条消息拉起后仍生效。
+        self.router.set_session_task_id(&key, task_id).await;
+        Ok(key)
     }
 
     async fn set_session_model(
@@ -1242,6 +1254,9 @@ pub struct FakeBackend {
     /// add-remote-execution-node 8.1（route 层测试用）：最近一次
     /// `spawn_with` / `create_placeholder` 收到的 `node`。`None` = 还没调用过。
     last_spawn_node: std::sync::Mutex<Option<Option<String>>>,
+    /// （agent-task-center 6.1，route 层测试用）：最近一次创建调用收到的
+    /// `task_id`。`None` = 还没调用过。
+    last_task_id: std::sync::Mutex<Option<Option<String>>>,
     /// fix-webui-qa-defects 2.2（route 层测试用）：记录 `restore_session`
     /// 调用 `(key, session_id, project_dir, 条目数, 身份, label, prompt_preview)`。
     #[allow(clippy::type_complexity)] // 测试桩的逐参记录元组，不引入命名类型
@@ -1302,6 +1317,7 @@ impl FakeBackend {
             nodes: std::sync::Mutex::new(None),
             path_checks: std::sync::Mutex::new(HashMap::new()),
             last_spawn_node: std::sync::Mutex::new(None),
+            last_task_id: std::sync::Mutex::new(None),
             restores: std::sync::Mutex::new(Vec::new()),
             approvals: std::sync::Mutex::new(HashMap::new()),
             last_label: std::sync::Mutex::new(None),
@@ -1860,8 +1876,10 @@ impl SessionBackend for FakeBackend {
         _model: Option<String>,
         _mode: Option<String>,
         node: Option<String>,
+        task_id: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
         *self.last_spawn_node.lock().expect("last spawn node lock") = Some(node.clone());
+        *self.last_task_id.lock().expect("last task id lock") = Some(task_id);
         self.spawn(prompt, project_dir).await
     }
 
@@ -1874,8 +1892,10 @@ impl SessionBackend for FakeBackend {
         _model: Option<String>,
         _mode: Option<String>,
         node: Option<String>,
+        task_id: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
         *self.last_spawn_node.lock().expect("last spawn node lock") = Some(node.clone());
+        *self.last_task_id.lock().expect("last task id lock") = Some(task_id);
         if let Some(remote) = remote_node_of(node.as_deref()) {
             return Err(SessionRejection::Unavailable {
                 cause: format!("远端会话不能建 0-turn 占位（节点 {remote}）：请直接发送第一条输入"),

@@ -1027,13 +1027,12 @@ async fn dispatch(
             let project_dir = project_dir
                 .map(|dir| sebas_webui::fs::canonicalize_plain(Path::new(&dir)).unwrap_or(dir));
             match backend
-                .spawn_with(prompt, project_dir, &agent, model, mode, None)
+                .spawn_with(prompt, project_dir, &agent, model, mode, None, task_id)
                 .await
             {
                 Ok(key) => {
-                    // （agent-task-center 1.2）任务关联随创建请求透传到映射
-                    // （core 不校验存在性）；None 时 helper 是 no-op。
-                    router.set_session_task_id(&key, task_id).await;
+                    // （agent-task-center 6.1）任务关联随创建入映射（各执行体
+                    // 后端在创建事务内落定；core 只透传、不校验存在性）。
                     CoreChannelResponse::Spawned { key }
                 }
                 Err(rejection) => CoreChannelResponse::Rejected { rejection },
@@ -1079,13 +1078,10 @@ async fn dispatch(
             let project_dir = project_dir
                 .map(|dir| sebas_webui::fs::canonicalize_plain(Path::new(&dir)).unwrap_or(dir));
             match backend
-                .create_placeholder(project_dir, &agent, model, mode, None)
+                .create_placeholder(project_dir, &agent, model, mode, None, task_id)
                 .await
             {
-                Ok(key) => {
-                    router.set_session_task_id(&key, task_id).await;
-                    CoreChannelResponse::Spawned { key }
-                }
+                Ok(key) => CoreChannelResponse::Spawned { key },
                 Err(rejection) => CoreChannelResponse::Rejected { rejection },
             }
         }

@@ -26,6 +26,8 @@ export interface CreateSessionDraft {
   model: string | null
   /** 可选预命名（qa-round14 4.7）：创建后立即作为会话 label 写回。 */
   title?: string
+  /** （agent-task-center 8.5）推进的 beads 任务 id。 */
+  taskId?: string | null
 }
 
 /** Client-side gate before `POST /api/sessions`; null means submit. */
@@ -42,14 +44,18 @@ export function createSessionPayload(draft: CreateSessionDraft): {
   prompt: string | null
   model: string | null
   mode: string | null
+  taskId?: string
 } | null {
   if (createDraftError(draft) !== null) return null
+  const taskId = (draft.taskId ?? '').trim()
   return {
     agent: draft.agent!,
     projectId: draft.projectId!,
     prompt: draft.prompt.trim() ? draft.prompt : null,
     model: draft.model,
     mode: draft.mode,
+    // 缺省不带任务键：非任务会话的 wire 形状零变化（协议演进规则 1）。
+    ...(taskId !== '' ? { taskId } : {}),
   }
 }
 
@@ -59,6 +65,9 @@ export interface SessionCreateModalProps {
   projects: Project[]
   onClose: () => void
   onCreated: (encodedKey: string) => void
+  /** 任务详情页「开一轮会话推进此任务」携带：标题改为「推进任务 bd-XX：…」
+   *  且创建请求带 `task_id`（agent-task-center 8.5）。 */
+  task?: { id: string; title: string } | null
   loadAgents?: () => Promise<{ agents: AgentKindInfo[] }>
   loadCatalog?: () => Promise<LoadedCatalog>
   createSession?: typeof api.createSession
@@ -73,6 +82,7 @@ export function SessionCreateModal({
   projects,
   onClose,
   onCreated,
+  task = null,
   loadAgents = api.agents,
   loadCatalog = loadModelCatalog,
   createSession = api.createSession,
@@ -199,7 +209,14 @@ export function SessionCreateModal({
 
   async function submit(): Promise<void> {
     if (busy) return
-    const draft: CreateSessionDraft = { projectId: selectedProject, agent, prompt, mode, model }
+    const draft: CreateSessionDraft = {
+      projectId: selectedProject,
+      agent,
+      prompt,
+      mode,
+      model,
+      taskId: task?.id ?? null,
+    }
     const invalid = createDraftError(draft)
     if (invalid !== null) {
       setError(invalid)
@@ -245,7 +262,11 @@ export function SessionCreateModal({
   return (
     <Modal
       open={open}
-      title={<h2 className={styles.dialogTitle}>新建会话</h2>}
+      title={
+        <h2 className={styles.dialogTitle}>
+          {task === null ? '新建会话' : `推进任务 ${task.id}：${task.title}`}
+        </h2>
+      }
       onCancel={onClose}
       onOk={() => void submit()}
       okText="创建"
