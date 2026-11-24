@@ -448,7 +448,11 @@ async fn spa_fallback_serves_entry_for_client_routes() {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK, "GET {path} must serve SPA");
         let body = body_string(resp.into_body()).await;
-        assert!(body.contains("<sebas-app>"), "SPA shell missing for {path}");
+        // The React app mounts into #react-root (index.html is the only shell).
+        assert!(
+            body.contains(r#"id="react-root""#),
+            "SPA shell missing for {path}"
+        );
     }
     // Unknown API path stays a JSON-ish 404, never the SPA document.
     let resp = app
