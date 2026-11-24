@@ -354,8 +354,7 @@ pub fn tool_use_block(id: &str, name: &str, input: Value) -> Value {
 /// 按 **char** 切，不按字节：多字节 UTF-8 字符不会被劈开。
 fn chunk_text(text: &str, size: Option<usize>) -> Vec<String> {
     match size {
-        None => vec![text.to_string()],
-        Some(size) if size == 0 => vec![text.to_string()],
+        None | Some(0) => vec![text.to_string()],
         Some(size) => {
             let chars: Vec<char> = text.chars().collect();
             if chars.is_empty() {
@@ -441,12 +440,11 @@ mod tests {
                                 block.as_object_mut().expect("object").remove("signature");
                             }
                         }
-                        "tool_use" => {
-                            if !partial.is_empty() {
+                        "tool_use"
+                            if !partial.is_empty() => {
                                 block["input"] =
                                     serde_json::from_str(&partial).expect("partial_json reassembles");
                             }
-                        }
                         _ => {}
                     }
                     while out.len() <= index {

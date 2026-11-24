@@ -210,6 +210,7 @@ pub fn validate_dir_name(name: &str) -> Result<String, String> {
 ///   创建，防误操作面扩大）；
 /// - 名称段经 [`validate_dir_name`] 校验，空/`.`/`..`/分隔符全部类型化拒绝；
 /// - `create_dir` 的原子语义：目标已存在（同名目录或文件）即失败，无覆盖。
+///
 /// 所有拒绝路径都先于任何文件系统写发生，无副作用。
 pub fn mkdir_in(path: &str, name: &str, workspace_root: &Path) -> Result<MkdirResponse, String> {
     let name = validate_dir_name(name)?;

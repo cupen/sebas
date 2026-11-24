@@ -339,7 +339,7 @@ fn handshake_is_the_only_intentional_wire_change() {
     );
     assert_eq!(field_names(&actual), vec!["secret", "version"]);
     assert_eq!(
-        serde_json::to_value(&ChannelHandshake::new("s3cret")).unwrap()["version"],
+        serde_json::to_value(ChannelHandshake::new("s3cret")).unwrap()["version"],
         1
     );
 }

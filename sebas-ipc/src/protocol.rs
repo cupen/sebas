@@ -477,8 +477,14 @@ fn default_true() -> bool {
 /// One frame of the subscription stream (task 4.2): exactly one snapshot
 /// frame first, then event frames — interleaved with approval frames when a
 /// native-kernel session gates a tool call (wire-webui-sebas-agent-e2e).
+///
+/// 变体大小差（`Event` 的 `SessionEvent` ≥704 字节 vs 其余 ≤128）是 wire
+/// 形状的代价：Box 化虽对 serde 透明，但会改公共字段类型、波及全部消费方
+/// ——通道帧逐条序列化下发，从不在栈上密集复制，按 claude/driver.rs `Sel`
+/// 的先例 allow。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "frame", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum SessionStreamFrame {
     Snapshot {
         sessions: Vec<SessionInfo>,

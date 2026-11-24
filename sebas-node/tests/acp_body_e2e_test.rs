@@ -14,7 +14,7 @@ use sebas_node::config::{AgentDriverKind, AgentSection, NodeBodyConfig, Upstream
 use sebas_node::session::SessionHost;
 use sebas_node_link::{ApprovalDecision, SessionRejectCode};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -36,7 +36,7 @@ fn fake_claude() -> Option<PathBuf> {
     None
 }
 
-fn body_config(fake: &PathBuf, enforces_mode: bool) -> NodeBodyConfig {
+fn body_config(fake: &Path, enforces_mode: bool) -> NodeBodyConfig {
     let mut agents = BTreeMap::new();
     agents.insert(
         "claude".to_string(),

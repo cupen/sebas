@@ -394,12 +394,12 @@ mod tests {
                  FROM usage_records ORDER BY id",
             )
             .expect("prepare");
-        let rows = stmt
+
+        stmt
             .query_map([], UsageRow::from_row)
             .expect("query")
             .collect::<sebas_db::rusqlite::Result<Vec<_>>>()
-            .expect("collect");
-        rows
+            .expect("collect")
     }
 
     /// 轮询直到断言成立（writer 是异步的）。
@@ -532,7 +532,7 @@ mod tests {
         sink.record(rec.clone());
 
         let p = path.clone();
-        wait_until("row committed", move || rows_of(&p).len() >= 1).await;
+        wait_until("row committed", move || !rows_of(&p).is_empty()).await;
         let back = UsageRecord::from(rows_of(&path).remove(0));
 
         assert_eq!(back, rec, "全部字段经库往返后逐字不变");
@@ -571,7 +571,7 @@ mod tests {
         assert_eq!(rec.key, "", "settle 构造的 record 里 key 就是空的");
         sink.record(rec);
         let p = path.clone();
-        wait_until("row committed", move || rows_of(&p).len() >= 1).await;
+        wait_until("row committed", move || !rows_of(&p).is_empty()).await;
 
         let rows = rows_of(&path);
         let back = UsageRecord::from(rows.into_iter().next().unwrap());
@@ -607,7 +607,7 @@ mod tests {
         };
         sink.record(rec.clone());
         let p = path.clone();
-        wait_until("row committed", move || rows_of(&p).len() >= 1).await;
+        wait_until("row committed", move || !rows_of(&p).is_empty()).await;
         let back = UsageRecord::from(rows_of(&path).remove(0));
         assert_eq!(back, rec);
         assert!(back.input_tokens.is_none(), "未观测 ≠ 0");
@@ -795,7 +795,7 @@ mod tests {
         let sink = UsageSink::spawn_writer(&path, policy).expect("spawn_writer");
         sink.record(sample_record("2000-01-01T00:00:00+00:00"));
         let p = path.clone();
-        wait_until("one row", move || rows_of(&p).len() >= 1).await;
+        wait_until("one row", move || !rows_of(&p).is_empty()).await;
 
         let writer = StateWriter::start(path.clone(), USAGE_TABLES).unwrap();
         prune_once(writer.handle(), policy).await;
@@ -854,7 +854,7 @@ mod tests {
 
         sink.record(sample_record("2000-01-01T00:00:00+00:00"));
         let p = path.clone();
-        wait_until("row landed before prune", move || rows_of(&p).len() >= 1).await;
+        wait_until("row landed before prune", move || !rows_of(&p).is_empty()).await;
 
         let p = path.clone();
         wait_until("background pruner removed the aged row", move || {

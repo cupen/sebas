@@ -540,7 +540,7 @@ mod tests {
     /// `char::is_line_terminator` 切行的实现必红。
     #[test]
     fn u2028_u2029_inside_json_string_are_not_frame_boundaries() {
-        let json = format!("{{\"delta\":\"a\u{2028}b\u{2029}c\"}}");
+        let json = "{\"delta\":\"a\u{2028}b\u{2029}c\"}".to_string();
         let mut raw = json.clone().into_bytes();
         raw.push(b'\n');
         raw.extend_from_slice(b"{\"next\":1}\n");

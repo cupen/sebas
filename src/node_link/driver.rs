@@ -874,8 +874,7 @@ mod tests {
                 auth: NodeAuth::Credential { secret },
                 manifest: CapabilityManifest::default(),
             })
-            .unwrap()
-            .into(),
+            .unwrap(),
         ))
         .await
         .unwrap();
@@ -923,7 +922,7 @@ mod tests {
                                 },
                             };
                             ws.send(ClientMessage::Text(
-                                serde_json::to_string(&ack).unwrap().into(),
+                                serde_json::to_string(&ack).unwrap(),
                             ))
                             .await
                             .unwrap();
@@ -981,7 +980,7 @@ mod tests {
                         },
                     };
                     ws.send(ClientMessage::Text(
-                        serde_json::to_string(&ack).unwrap().into(),
+                        serde_json::to_string(&ack).unwrap(),
                     ))
                     .await
                     .unwrap();
@@ -1015,7 +1014,7 @@ mod tests {
                         },
                     };
                     ws.send(ClientMessage::Text(
-                        serde_json::to_string(&ack).unwrap().into(),
+                        serde_json::to_string(&ack).unwrap(),
                     ))
                     .await
                     .unwrap();
@@ -1113,7 +1112,7 @@ mod tests {
                         },
                     };
                     ws.send(ClientMessage::Text(
-                        serde_json::to_string(&ack).unwrap().into(),
+                        serde_json::to_string(&ack).unwrap(),
                     ))
                     .await
                     .unwrap();
@@ -1131,7 +1130,7 @@ mod tests {
                         result: SessionResult::ParkedApprovals { approvals: vec![] },
                     };
                     ws.send(ClientMessage::Text(
-                        serde_json::to_string(&ack).unwrap().into(),
+                        serde_json::to_string(&ack).unwrap(),
                     ))
                     .await
                     .unwrap();
@@ -1186,7 +1185,7 @@ mod tests {
                         result: SessionResult::ApprovalApplied { applied: true },
                     };
                     ws.send(ClientMessage::Text(
-                        serde_json::to_string(&ack).unwrap().into(),
+                        serde_json::to_string(&ack).unwrap(),
                     ))
                     .await
                     .unwrap();
@@ -1204,7 +1203,7 @@ mod tests {
                         result: SessionResult::ApprovalApplied { applied: false },
                     };
                     ws.send(ClientMessage::Text(
-                        serde_json::to_string(&ack).unwrap().into(),
+                        serde_json::to_string(&ack).unwrap(),
                     ))
                     .await
                     .unwrap();

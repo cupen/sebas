@@ -84,7 +84,7 @@ async fn fake_provider_bad_scenario_exits_75_with_summary() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
-    let last = stderr.lines().filter(|l| !l.trim().is_empty()).next_back();
+    let last = stderr.lines().rfind(|l| !l.trim().is_empty());
     assert!(
         last.is_some_and(|l| l.starts_with("startup-failure: ")),
         "stderr last line must carry the summary: {stderr:?}"

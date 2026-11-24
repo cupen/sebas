@@ -162,7 +162,7 @@ mod tests {
             manifest: CapabilityManifest::default(),
         };
         let (mut ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
-        ws.send(Message::Text(serde_json::to_string(&hello).unwrap().into()))
+        ws.send(Message::Text(serde_json::to_string(&hello).unwrap()))
             .await
             .unwrap();
         let text = match ws.next().await {

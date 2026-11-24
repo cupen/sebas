@@ -44,10 +44,7 @@ const CLAUDE_SUBAGENT_MODEL_ENV: &str = "CLAUDE_CODE_SUBAGENT_MODEL";
 /// 且用 claude 的 env 名字空间给 pi 传凭据是错配。现行路径是
 /// [`resolve_pi_bridge_spawn_env`]（`models.json` 桥 + `PI_CODING_AGENT_DIR`
 /// + `${SEBAS_PI_KEY_n}` 插值）。保留此名仅为不破坏旧引用路径，恒返回空。
-#[deprecated(
-    since = "make-pi-ride-sebas-provider",
-    note = "use resolve_pi_bridge_spawn_env (models.json bridge) instead"
-)]
+#[deprecated(note = "use resolve_pi_bridge_spawn_env (models.json bridge) instead")]
 pub fn resolve_pi_spawn_env(
     _router_cfg: Option<&RouterConfig>,
 ) -> (Vec<(String, String)>, Vec<String>) {
@@ -907,9 +904,11 @@ auth_token = {auth_token:?}
             deleted: Vec<String>,
         }
         let seed: Seed = serde_json::from_str(body).expect("test seed parses as an overlay body");
-        let mut state = sebas_dispatch::state_store::PersistedState::default();
-        state.providers = seed.providers;
-        state.deleted = seed.deleted;
+        let state = sebas_dispatch::state_store::PersistedState {
+            providers: seed.providers,
+            deleted: seed.deleted,
+            ..Default::default()
+        };
         let (_engine, guard) = sebas_dispatch::test_engine::install_fresh_with(state);
         guard
     }
@@ -2230,14 +2229,14 @@ base_url_anthropic = "https://api.anthropic.com"
             "Off 形态下继承变量全部漏网并逐一点名"
         );
         // 进程 env 断言：检测前后继承值原样（不 remove、不改写）。
-        // SAFETY: ENV_LOCK held。
-        unsafe {
-            assert_eq!(std::env::var("ANTHROPIC_MODEL").as_deref(), Ok("stale-from-shell"));
-            assert_eq!(
-                std::env::var("ANTHROPIC_BASE_URL").as_deref(),
-                Ok("https://corp-gw.internal")
-            );
-        }
+        assert_eq!(
+            std::env::var("ANTHROPIC_MODEL").as_deref(),
+            Ok("stale-from-shell")
+        );
+        assert_eq!(
+            std::env::var("ANTHROPIC_BASE_URL").as_deref(),
+            Ok("https://corp-gw.internal")
+        );
         // SAFETY: ENV_LOCK held。
         unsafe {
             std::env::remove_var("ANTHROPIC_MODEL");

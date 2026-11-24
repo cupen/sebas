@@ -153,7 +153,7 @@ impl NodeConnection {
                             let response = Frame::Response { id, result };
                             match serde_json::to_string(&response) {
                                 Ok(json) => {
-                                    let _ = reader.outbound.send(Message::Text(json.into()));
+                                    let _ = reader.outbound.send(Message::Text(json));
                                 }
                                 Err(e) => eprintln!(
                                     "node-link: 应答无法序列化（节点 {}）：{e}",
@@ -239,7 +239,7 @@ impl NodeConnection {
         let text = serde_json::to_string(&frame).map_err(|e| NodeLinkError::Transport {
             cause: format!("无法序列化请求：{e}"),
         })?;
-        if self.outbound.send(Message::Text(text.into())).is_err() {
+        if self.outbound.send(Message::Text(text)).is_err() {
             self.waiters.lock().await.remove(&id);
             let cause = self
                 .close_reason()
@@ -325,7 +325,7 @@ mod tests {
             manifest: CapabilityManifest::default(),
         };
         ws.send(ClientMessage::Text(
-            serde_json::to_string(&hello).unwrap().into(),
+            serde_json::to_string(&hello).unwrap(),
         ))
         .await
         .unwrap();
@@ -378,8 +378,7 @@ mod tests {
                 id,
                 result: SessionResult::Pong,
             })
-            .unwrap()
-            .into(),
+            .unwrap(),
         ))
         .await
         .unwrap();
@@ -420,8 +419,7 @@ mod tests {
         for (id, result) in [second, first] {
             ws.send(ClientMessage::Text(
                 serde_json::to_string(&Frame::Response { id, result })
-                    .unwrap()
-                    .into(),
+                    .unwrap(),
             ))
             .await
             .unwrap();
@@ -455,8 +453,7 @@ mod tests {
                     cause: "会话 ghost 不存在".into(),
                 },
             })
-            .unwrap()
-            .into(),
+            .unwrap(),
         ))
         .await
         .unwrap();
@@ -482,8 +479,7 @@ mod tests {
                     coalesced_overflow: false,
                 },
             })
-            .unwrap()
-            .into(),
+            .unwrap(),
         ))
         .await
         .unwrap();
@@ -516,8 +512,7 @@ mod tests {
                 id,
                 result: SessionResult::Pong,
             })
-            .unwrap()
-            .into(),
+            .unwrap(),
         ))
         .await
         .unwrap();
@@ -530,8 +525,7 @@ mod tests {
                 id: id2,
                 result: SessionResult::Pong,
             })
-            .unwrap()
-            .into(),
+            .unwrap(),
         ))
         .await
         .unwrap();

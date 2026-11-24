@@ -173,6 +173,7 @@ pub async fn serve(
 /// Serve over a **pre-bound** listener: the caller (run.rs auto-arm path) owns
 /// the bind so readiness can be sequenced after it, and bind failures abort
 /// startup before any ready signal is sent (D4).
+#[allow(clippy::too_many_arguments)] // 装配入口逐段注入可选能力，参数即装配面
 pub async fn serve_bound(
     backend: Arc<dyn SessionBackend>,
     router: DispatchHandle,
@@ -318,6 +319,7 @@ async fn write_handshake_ack(
     Ok(ack)
 }
 
+#[allow(clippy::too_many_arguments)] // 与 serve_bound 同装配面，参数逐段透传
 async fn handle_connection(
     stream: IpcStream,
     backend: Arc<dyn SessionBackend>,
@@ -1496,7 +1498,7 @@ async fn dispatch(
             };
             match crate::usage_local::usage_timeseries_outcome(
                 local_usage,
-                router_listen.as_deref(),
+                router_listen,
                 &source,
                 params,
                 chrono::Utc::now(),
@@ -1955,12 +1957,11 @@ mod tests {
                     .await
                     .expect("frame timeout")
                     .expect("coalescer alive");
-            if let SessionStreamFrame::Turn { event } = frame {
-                if event.entries.iter().any(|e| e.content == "after") {
+            if let SessionStreamFrame::Turn { event } = frame
+                && event.entries.iter().any(|e| e.content == "after") {
                     resumed = true;
                     break;
                 }
-            }
         }
         assert!(resumed, "stream must resume with Turn frames after resync");
     }

@@ -205,8 +205,10 @@ wire_string_enum! {
     /// 原定义住在 `sebas-node-link`（链路契约 crate）；domain 不该依赖链路契约
     /// （依赖方向反了），故定义移入本层，node-link 原位再导出（design D4），
     /// 其公开 API 与线拼写不变。
+    #[derive(Default)]
     pub enum SessionMode {
         /// 每个受门控的动作都要问（**缺省**；`auto` 永远不是缺省）。
+        #[default]
         Ask => "ask",
         /// 编辑类动作放行，其它受门控动作仍要问。
         Edit => "edit",
@@ -214,12 +216,6 @@ wire_string_enum! {
         Allow => "allow",
         /// 完全不门控；必须留审计痕迹（谁在什么时候把它打开过）。
         Auto => "auto",
-    }
-}
-
-impl Default for SessionMode {
-    fn default() -> Self {
-        Self::Ask
     }
 }
 

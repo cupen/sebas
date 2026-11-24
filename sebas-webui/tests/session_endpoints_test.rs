@@ -1110,7 +1110,7 @@ async fn projects_branch_unreachable_core_answers_503_not_404() {
 
 #[tokio::test]
 async fn detail_projection_carries_the_owning_project_id() {
-    let (router, _rx, app) = fixture().await;
+    let (_router, _rx, app) = fixture().await;
     let _env = isolated_projects().await;
 
     // 注册项目并创建从属会话，然后读详情：detail 投影必须携带归属项目的
@@ -2922,7 +2922,7 @@ async fn close_response_names_discarded_pending_count() {
 #[tokio::test]
 async fn sessions_list_rows_carry_msg_count() {
     let (router, _rx, app) = fixture().await;
-    let k1 = key("a");
+    let _k1 = key("a");
     // prompt + 两条 markdown delta = 一段。
     router.seed_card("s1".into(), "hello".into()).await;
     router

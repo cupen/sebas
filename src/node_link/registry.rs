@@ -237,7 +237,7 @@ impl NodeRegistry {
         entry.consumed_by = Some(node_id.to_string());
         // 消费必须立刻落盘：否则主控崩溃后同一个 token 可以被再次消费。
         // 落盘失败对节点而言是「主控暂时不可用」（瞬时可重试），而不是令牌问题。
-        self.save().map_err(|e| persist_rejection(e))
+        self.save().map_err(persist_rejection)
     }
 
     /// 配对：签发长期凭据并登记节点。返回**原始凭据**（只出现这一次）。
@@ -282,7 +282,7 @@ impl NodeRegistry {
             }),
         }
         // 凭据签发必须落盘后才算数：否则节点会拿着一份主控不认识的凭据重连。
-        self.save().map_err(|e| persist_rejection(e))?;
+        self.save().map_err(persist_rejection)?;
         Ok(raw)
     }
 

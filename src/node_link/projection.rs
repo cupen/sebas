@@ -1134,6 +1134,7 @@ pub struct ProjectionObserver {
 
 impl ProjectionObserver {
     /// 包装一个投影。
+    #[allow(clippy::new_ret_no_self)] // 调用方要的就是 Arc<dyn ConnectionObserver> 挂载形态
     pub fn new(projection: Arc<RemoteProjection>) -> Arc<dyn ConnectionObserver> {
         Arc::new(Self { projection })
     }
@@ -1419,13 +1420,12 @@ mod tests {
         assert_eq!(row.status, "dormant".into());
         // 终止的成因来自节点，措辞不该与「暂时联系不上」混为一谈。
         assert!(
-            p.fleet
+            !p.fleet
                 .lock()
                 .await
                 .lifecycle("proj-a:1")
                 .unwrap()
                 .is_alive()
-                == false
         );
     }
 

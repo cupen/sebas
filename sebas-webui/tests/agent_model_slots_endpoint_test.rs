@@ -1,7 +1,8 @@
 //! add-claude-model-slots 3.1 集成层：`/api/agents` 管理面的模型档位映射
-//! **端点级**端到端路径——真实 axum handler（`agent_create` / `agent_update`）
-//! + 真实状态库引擎（`InProcessBackend` → 全局 `StateStoreEngine` →
-//! `agents_mutation` 校验）+ 真实 catalog union（`GET /api/agents` 富化）。
+//! **端点级**端到端路径——真实 axum handler（`agent_create` /
+//! `agent_update`）+ 真实状态库引擎（`InProcessBackend` → 全局
+//! `StateStoreEngine` → `agents_mutation` 校验）+ 真实 catalog union
+//! （`GET /api/agents` 富化）。
 //!
 //! 与各层单元测试的分工：
 //! - `sebas-models` 单测钉 `ModelSlotMapping` 的形状/不变量；

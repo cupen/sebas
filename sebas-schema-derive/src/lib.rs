@@ -126,10 +126,7 @@ fn analyze_with_fields(input: &syn::DeriveInput) -> syn::Result<Vec<(ColumnMeta,
             },
         }
     }
-    match errors {
-        Some(e) => return Err(e),
-        None => {}
-    }
+    if let Some(e) = errors { return Err(e) }
 
     // rename_from 去重：同一 struct 内两个字段不得声明同一个旧列名——迁移源
     // 只会被消费一次，重复即意图不明（retire-schema-reset D2 编译期校验）。
@@ -622,7 +619,7 @@ mod tests {
             assert_eq!(col.name, name);
             assert_eq!(col.affinity, affinity);
             assert_eq!(col.not_null, !nullable);
-            assert_eq!(col.default.is_none(), true);
+            assert!(col.default.is_none());
         }
     }
 

@@ -24,7 +24,7 @@
 //!    - 多余列（未被索引/主键/外键引用）→ `ALTER TABLE DROP COLUMN`，数据随列
 //!      丢弃，日志点名表与列；
 //!    - 整个表缺失 → 按注册 DDL 建表。
-//!    中途失败 → 事务回滚 + 拒启动 + 诊断点名失败步骤；数据库字节不变。
+//!      中途失败 → 事务回滚 + 拒启动 + 诊断点名失败步骤；数据库字节不变。
 //! 5. 任何路径都**不删除、不重建数据库文件**；`SyncOutcome` 只报告结构化动作
 //!    计数（design D6/D7），不再有重置出口。
 //!
@@ -386,7 +386,10 @@ fn plan_table<'a>(
 
     if let Some(reason) = type_mismatch {
         warn!(table = table.name, reason = %reason, "schema 漂移: 事务内重建表，按列名交集保数据（先备份）");
-        return Ok(push_rebuild(plan, table, renames, extra, missing, reason));
+        return {
+            push_rebuild(plan, table, renames, extra, missing, reason);
+            Ok(())
+        };
     }
     if !restricted.is_empty() {
         let names = restricted
@@ -396,7 +399,10 @@ fn plan_table<'a>(
             .join(", ");
         let reason = format!("多余列 {names} 被索引/主键/外键引用，不能直接 DROP COLUMN");
         warn!(table = table.name, reason = %reason, "schema 漂移: 事务内重建表（先备份）");
-        return Ok(push_rebuild(plan, table, renames, extra, missing, reason));
+        return {
+            push_rebuild(plan, table, renames, extra, missing, reason);
+            Ok(())
+        };
     }
 
     // ---- 非破坏性动作：先改名，再补列，最后删列 ----
@@ -571,11 +577,10 @@ fn execute_plan(conn: &mut Connection, plan: &Plan) -> Result<(), String> {
             .map_err(|e| format!("关闭外键约束失败（重建前置）: {e}"))?;
     }
     let result = run_in_transaction(conn, plan, fk_off);
-    if fk_off {
-        if let Err(e) = conn.execute_batch("PRAGMA foreign_keys = ON") {
+    if fk_off
+        && let Err(e) = conn.execute_batch("PRAGMA foreign_keys = ON") {
             warn!(error = %e, "恢复外键约束失败（连接即将关闭，不影响已提交结果）");
         }
-    }
     result
 }
 
@@ -1655,8 +1660,7 @@ mod tests {
         let before = snapshot(&path);
 
         let err = open_and_sync(&path, UNADDABLE_ALPHA_TABLES)
-            .err()
-            .expect("非空无默认的缺列必须拒启动");
+            .expect_err("非空无默认的缺列必须拒启动");
         assert!(err.contains("req") && err.contains("非空"), "诊断要点名表列: {err}");
         assert_eq!(snapshot(&path), before, "拒启动时数据库字节与 mtime 都不变");
     }
@@ -1671,8 +1675,7 @@ mod tests {
         let before = snapshot(&path);
 
         let err = open_and_sync(&path, DROP_NOTE_TABLES)
-            .err()
-            .expect("备份失败必须阻断破坏性迁移");
+            .expect_err("备份失败必须阻断破坏性迁移");
         assert!(
             err.contains(BACKUP_SUFFIX) && err.contains("备份失败"),
             "诊断要点名备份失败: {err}"
@@ -1714,8 +1717,7 @@ mod tests {
         let before = snapshot(&path);
 
         let err = open_and_sync(&path, CHECKED_ALPHA_TABLES)
-            .err()
-            .expect("中途失败必须拒启动");
+            .expect_err("中途失败必须拒启动");
         assert!(
             err.contains("1 步失败") && err.contains("重建表"),
             "诊断要点名失败步骤: {err}"
@@ -1951,7 +1953,7 @@ mod tests {
         let garbage = b"this is definitely not a sqlite database".to_vec();
         std::fs::write(&path, &garbage).unwrap();
 
-        let err = open_and_sync(&path, TEST_TABLES).err().expect("损坏库必须拒启");
+        let err = open_and_sync(&path, TEST_TABLES).expect_err("损坏库必须拒启");
         assert!(
             err.contains("损坏") || err.contains("打开状态库失败"),
             "报错要说明损坏: {err}"

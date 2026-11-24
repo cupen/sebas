@@ -1089,10 +1089,10 @@ pub(crate) fn map_server_info_commands(info: &serde_json::Value) -> Vec<Availabl
 ///   type strictness (e.g. missing optional fields) can't drop them.
 /// - `Result{is_error:false}` → Finished; `is_error:true` → terminal Error
 ///   (post-error CLI state is unknown; the honest mapping is session death).
-/// （fix-webui-approval-restore-and-session-identity 6.2）`MessageParse` 的
-/// 降噪告警判定与文案：带消息 type/subtype 上下文（排查可用），同一会话连续
-/// parse 失败只告警一次（`shown` 置位；调用方在合法消息到达时复位）。返回
-/// `Some(文案)` = 本轮失败序列的第一次；`None` = 重复失败，跳过（降噪）。
+///   （fix-webui-approval-restore-and-session-identity 6.2）`MessageParse` 的
+///   降噪告警判定与文案：带消息 type/subtype 上下文（排查可用），同一会话连续
+///   parse 失败只告警一次（`shown` 置位；调用方在合法消息到达时复位）。返回
+///   `Some(文案)` = 本轮失败序列的第一次；`None` = 重复失败，跳过（降噪）。
 fn message_parse_warning(shown: &mut bool, raw: Option<&serde_json::Value>) -> Option<String> {
     if *shown {
         return None;

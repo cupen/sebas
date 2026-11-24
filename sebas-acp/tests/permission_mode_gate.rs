@@ -291,9 +291,7 @@ async fn set_mode_auto_silences_the_next_tool_call_without_respawn() {
         "both gated calls consult the hook (fake stays in ask tier): {raw}"
     );
     let last_hook_answer = raw
-        .lines()
-        .filter(|l| l.contains("control_response") && l.contains("permissionDecision"))
-        .last()
+        .lines().rfind(|l| l.contains("control_response") && l.contains("permissionDecision"))
         .expect("second consult must be answered")
         .to_string();
     assert!(

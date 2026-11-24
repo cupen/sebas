@@ -225,6 +225,7 @@ pub async fn resolve_spawn_config(cfg: &Config, kind: &str) -> Option<AgentConfi
 ///    the next spawn」；AGENTS.md「store 行赢」）；
 /// 2. config 注册表条目——operator 改 config 重启后对新 spawn 生效；
 /// 3. store 行 `source == "seed"`（启动种子的等价副本，config 未声明时兜底）。
+///
 /// 三处皆无 → `None`（调用方给 typed unknown-agent 拒绝）。每次 spawn 直读
 /// （本地 SQLite 单行查，微秒级）。墓碑守卫：id 在 store 留有删除墓碑时
 /// config 与 seed 两臂都视为缺席——UI 删除的种子 agent 不经 config 复活

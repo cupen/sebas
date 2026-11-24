@@ -104,11 +104,10 @@ const KEY_ARG_PREFERRED: [&str; 11] = [
 fn key_arg_from_args(args: &serde_json::Value) -> Option<String> {
     let obj = args.as_object()?;
     for key in KEY_ARG_PREFERRED {
-        if let Some(s) = obj.get(key).and_then(|v| v.as_str()) {
-            if !s.is_empty() {
+        if let Some(s) = obj.get(key).and_then(|v| v.as_str())
+            && !s.is_empty() {
                 return Some(s.to_string());
             }
-        }
     }
     obj.values()
         .find_map(|v| v.as_str())
@@ -148,9 +147,9 @@ pub fn tool_entry_title(
     truncate_chars(&title, TITLE_MAX_CHARS)
 }
 
-/// Wall-clock seconds since the UNIX epoch：唯一实现在
-/// `sebas_domain::prim::now_unix`（add-domain-layer 2.5）；u64 形态在
-/// 唯一调用点内联换算，不留第二份定义。
+// Wall-clock seconds since the UNIX epoch：唯一实现在
+// `sebas_domain::prim::now_unix`（add-domain-layer 2.5）；u64 形态在
+// 唯一调用点内联换算，不留第二份定义。
 
 #[cfg(test)]
 mod tests {

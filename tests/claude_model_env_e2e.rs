@@ -4,10 +4,10 @@
 //! claude agent 的档位映射）:
 //!
 //! 1. **env 注入层**：`sebas::spawn_env::resolve_spawn_overrides` 算出来的
-//!    `extra_env`（endpoint 键 `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN`
-//!    + 由 agent 档位映射派生的模型键 `ANTHROPIC_MODEL` /
-//!    `ANTHROPIC_DEFAULT_{FABLE,OPUS,SONNET,HAIKU}_MODEL` /
-//!    `CLAUDE_CODE_SUBAGENT_MODEL`）真的进了 fake-claude 子进程，由
+//!    `extra_env`（endpoint 键 `ANTHROPIC_BASE_URL` /
+//!    `ANTHROPIC_AUTH_TOKEN` + 由 agent 档位映射派生的模型键
+//!    `ANTHROPIC_MODEL` / `ANTHROPIC_DEFAULT_{FABLE,OPUS,SONNET,HAIKU}_MODEL`
+//!    / `CLAUDE_CODE_SUBAGENT_MODEL`）真的进了 fake-claude 子进程，由
 //!    fake-claude 启动期 journal `meta.env` 行回读断言。
 //! 2. **SetModel 控制协议层**：环境里钉了默认模型后，`mgr.set_model(...)`
 //!    走 cc-agent-sdk 的 set_model 控制协议依然把 assistant 帧 model 字段
@@ -71,11 +71,10 @@ fn wait_meta_env(journal_path: &PathBuf) -> serde_json::Value {
                 {
                     continue;
                 }
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-                    if let Some(env) = v.pointer("/msg/env").cloned() {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(line)
+                    && let Some(env) = v.pointer("/msg/env").cloned() {
                         return env;
                     }
-                }
             }
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -155,6 +154,7 @@ async fn drain_until<F: Fn(&AcpEvent) -> bool>(
 ///     Direct+Anthropic 分支——preset "deepseek" 给出 base_url_anthropic）
 ///   - 档位映射派生的模型键：ANTHROPIC_MODEL = 默认档值、各启用档
 ///     ANTHROPIC_DEFAULT_*_MODEL、CLAUDE_CODE_SUBAGENT_MODEL = 最弱启用档值
+#[allow(clippy::await_holding_lock)] // 串行锁有意横跨整个测试调用
 #[tokio::test(flavor = "multi_thread")]
 async fn direct_provider_injects_endpoint_and_slot_mapping_env_into_claude_child() {
     let _g = ENV_LOCK.lock().unwrap();
@@ -292,6 +292,7 @@ async fn direct_provider_injects_endpoint_and_slot_mapping_env_into_claude_child
 /// Router 模式没有 provider 凭据解析（凭据半边 = router 端点），故只断言
 /// 模型键到达子进程：ANTHROPIC_MODEL = 默认档值、启用档 DEFAULT 键、
 /// SUBAGENT = 最弱启用档；停用档不出键。
+#[allow(clippy::await_holding_lock)] // 串行锁有意横跨整个测试调用
 #[tokio::test(flavor = "multi_thread")]
 async fn router_mode_injects_slot_mapping_env_into_claude_child() {
     let _g = ENV_LOCK.lock().unwrap();
@@ -377,6 +378,7 @@ api_key = "sk-dummy"
 /// "deepseek-v4-flash"，但 fake-claude 跑 hello 场景时 set_model("opus")
 /// 切完下一回合报 "opus"；切回 "default" 时 fake 的 init 帧 "fake" 覆盖
 /// 乐观值（D5 自愈）。
+#[allow(clippy::await_holding_lock)] // 串行锁有意横跨整个测试调用
 #[tokio::test(flavor = "multi_thread")]
 async fn set_model_after_slot_env_takes_effect_from_next_turn() {
     let _g = ENV_LOCK.lock().unwrap();

@@ -8,6 +8,7 @@
 //! - a session with an EMPTY table (native agents, nothing advertised) → the
 //!   key is absent from both payloads — the wire shape an old frontend sees
 //!   is unchanged (新 core + 旧前端组合的字段缺省行为).
+//!
 //! The reverse direction (旧 core 报文无该键 → 反序列化为空表) is pinned at
 //! the type boundary in `sebas-dispatch` (`session_info_available_commands_
 //! field_is_additive`); `CoreChannelBackend` consumes exactly that type.

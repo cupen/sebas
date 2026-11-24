@@ -371,7 +371,7 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
             std::fs::set_permissions(
-                &sibling(&path, "-wal"),
+                sibling(&path, "-wal"),
                 std::fs::Permissions::from_mode(0o644),
             )
             .unwrap();

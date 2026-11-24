@@ -1436,7 +1436,7 @@ impl DispatchHandle {
             && let Some(key) = self.map.lookup_key_by_session(session_id).await
         {
             self.map
-                .set_effective_mode(&key, Some(SessionMode::from_wire(&mode)))
+                .set_effective_mode(&key, Some(SessionMode::from_wire(mode)))
                 .await;
             self.transcript_push(
                 session_id,
@@ -2308,6 +2308,7 @@ impl DispatchHandle {
     ///   退化为短 id。`None`/空串 = 旧档无该字段，回退现状（短 id）。
     /// - 拒绝：key 已有映射（活会话/占位与归档同 key 是状态矛盾）→
     ///   [`crate::error::DispatchError`]；容量满 → Capacity。
+    #[allow(clippy::too_many_arguments)]
     pub async fn web_restore_session(
         &self,
         key: ChannelKey,

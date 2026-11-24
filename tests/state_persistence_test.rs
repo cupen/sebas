@@ -416,7 +416,7 @@ fn session_checkpoint_rows_round_trip_through_the_projects_engine() {
             assert_eq!(rows.len(), 2, "upsert must replace, not duplicate");
             assert_eq!(rows[0].session_id, "sess-1");
             assert_eq!(rows[0].usage_in, 99, "latest snapshot wins");
-            assert_eq!(rows[0].usage_reported, true);
+            assert!(rows[0].usage_reported);
             assert_eq!(rows[1].session_id, "sess-2");
         });
 

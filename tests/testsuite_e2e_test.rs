@@ -1120,7 +1120,7 @@ async fn queue_two_submissions(
     // （seed 的 prompt 条目在 SEED 阶段就进 transcript，等非空会提前放行）。
     let content_cli = cli.clone();
     let content_url = detail_url.clone();
-    let content_hint = hint.to_path_buf();
+    let _content_hint = hint.to_path_buf();
     wait_for("first turn content to stream", Duration::from_secs(40), hint, move || {
         let cli = content_cli.clone();
         let url = content_url.clone();
@@ -1324,7 +1324,7 @@ fn seed_spawning_placeholder(sb: &Sandbox, reference: &str, kind: &str) {
     let canonical = sebas_webui::fs::canonicalize_plain(&work)
         .unwrap_or_else(|_| support::forward_slash(&work));
     let projects_db = sb.path.join("projects.db");
-    let mut conn = open_and_sync(&projects_db, sebas::sebas_state::repo::PROJECTS_TABLES)
+    let conn = open_and_sync(&projects_db, sebas::sebas_state::repo::PROJECTS_TABLES)
         .expect("open sandbox projects.db for seeding")
         .0;
     let row = SessionMapRow {
@@ -1490,7 +1490,7 @@ async fn row_name_stays_anchored_to_the_first_prompt_across_crash_respawn() {
                     .ok()?;
                 v["recent_sessions"]
                     .as_array()?
-                    .into_iter()
+                    .iter()
                     .find(|r| r["encoded_key"].as_str() == Some(key.as_str()))
                     .cloned()
             })
@@ -7274,17 +7274,12 @@ async fn claude_turn_streams_multiple_frames_to_the_webui() {
     // 并窗的冲刷略迟于状态翻转），短暂排水补齐「逐字各一次」的对账——多帧
     // 断言只用 done 之前到达的帧，不受此处影响。
     let drain_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-    loop {
-        match tokio::time::timeout_at(drain_deadline, next_ws_frame(&mut ws)).await {
-            Ok(ev) => {
-                if ev["method"] == "turn.append" && ev["params"]["session_id"] == key.as_str() {
-                    let texts = append_frame_texts(&ev);
-                    if !texts.is_empty() {
-                        frames.push(texts);
-                    }
-                }
+    while let Ok(ev) = tokio::time::timeout_at(drain_deadline, next_ws_frame(&mut ws)).await {
+        if ev["method"] == "turn.append" && ev["params"]["session_id"] == key.as_str() {
+            let texts = append_frame_texts(&ev);
+            if !texts.is_empty() {
+                frames.push(texts);
             }
-            Err(_) => break,
         }
     }
 
@@ -7421,17 +7416,12 @@ async fn claude_delta_gap_spreads_ws_frame_arrivals_over_time() {
     // 收尾竞速窗口：最后一个 content 帧可能与 done 同时就绪（250ms 合并窗的
     // 冲刷略迟于状态翻转），短暂排水补齐内容对账。
     let drain_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-    loop {
-        match tokio::time::timeout_at(drain_deadline, next_ws_frame(&mut ws)).await {
-            Ok(ev) => {
-                if ev["method"] == "turn.append" && ev["params"]["session_id"] == key.as_str() {
-                    let texts = append_frame_texts(&ev);
-                    if !texts.is_empty() {
-                        arrivals.push((tokio::time::Instant::now(), texts));
-                    }
-                }
+    while let Ok(ev) = tokio::time::timeout_at(drain_deadline, next_ws_frame(&mut ws)).await {
+        if ev["method"] == "turn.append" && ev["params"]["session_id"] == key.as_str() {
+            let texts = append_frame_texts(&ev);
+            if !texts.is_empty() {
+                arrivals.push((tokio::time::Instant::now(), texts));
             }
-            Err(_) => break,
         }
     }
 
@@ -7544,17 +7534,12 @@ async fn claude_delta_gap_spaces_the_default_scenario_deltas() {
     }
 
     let drain_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-    loop {
-        match tokio::time::timeout_at(drain_deadline, next_ws_frame(&mut ws)).await {
-            Ok(ev) => {
-                if ev["method"] == "turn.append" && ev["params"]["session_id"] == key.as_str() {
-                    let texts = append_frame_texts(&ev);
-                    if !texts.is_empty() {
-                        arrivals.push((tokio::time::Instant::now(), texts));
-                    }
-                }
+    while let Ok(ev) = tokio::time::timeout_at(drain_deadline, next_ws_frame(&mut ws)).await {
+        if ev["method"] == "turn.append" && ev["params"]["session_id"] == key.as_str() {
+            let texts = append_frame_texts(&ev);
+            if !texts.is_empty() {
+                arrivals.push((tokio::time::Instant::now(), texts));
             }
-            Err(_) => break,
         }
     }
 
@@ -7895,7 +7880,7 @@ async fn archive_restore_rebuilds_row_transcript_and_clears_history() {
     assert!(
         list["recent_sessions"]
             .as_array()
-            .map_or(true, |rows| rows
+            .is_none_or(|rows| rows
                 .iter()
                 .all(|r| r["encoded_key"].as_str() != Some(key.as_str()))),
         "the archived session must leave the active list: {list}"
@@ -7969,7 +7954,7 @@ async fn archive_restore_rebuilds_row_transcript_and_clears_history() {
     assert!(
         archive["archived_sessions"]
             .as_array()
-            .map_or(true, |rows| rows.is_empty()),
+            .is_none_or(|rows| rows.is_empty()),
         "History must be cleared after a successful restore: {archive}"
     );
 
@@ -8216,11 +8201,11 @@ async fn escalation_kill_keeps_the_session_on_the_api_surface() {
         "the killed turn must be finalized with a visible error entry: {after}"
     );
     assert!(
-        last["content"].as_str().map_or(false, |c| c.contains("agent hung")),
+        last["content"].as_str().is_some_and(|c| c.contains("agent hung")),
         "the escalation cause must ride the error entry: {last:?}"
     );
     assert!(
-        after["pending"].as_array().map_or(false, Vec::is_empty),
+        after["pending"].as_array().is_some_and(Vec::is_empty),
         "the released queue must be empty on the retired row: {after}"
     );
 
@@ -10293,7 +10278,7 @@ async fn second_turn_permission_request_still_parks_and_is_decidable() {
                         .ok()?;
                     v["recent_sessions"]
                         .as_array()?
-                        .into_iter()
+                        .iter()
                         .find(|r| r["encoded_key"].as_str() == Some(key.as_str()))?
                         ["status_slug"]
                         .as_str()
@@ -10817,7 +10802,7 @@ mod agent_catalog {
         // 4) 删除：catalog 消失；未知 id 的建会话在 spawn 处 typed 拒绝
         // （spawn-failed 相位 + 原因点名 id），已建会话（上面那轮）不受影响。
         let resp = cli
-            .delete(&format!("{agents_url}/stub"))
+            .delete(format!("{agents_url}/stub"))
             .send()
             .await
             .expect("delete agent");
@@ -10986,7 +10971,7 @@ mod agent_catalog {
         // 3) Settings 可改（API 面）：改名即时反映到 catalog，store 是权威。
         let (status, body) = {
             let resp = cli
-                .put(&format!("{}/api/agents/claude", sb.webui_url()))
+                .put(format!("{}/api/agents/claude", sb.webui_url()))
                 .json(&serde_json::json!({ "display": "CLI Claude (edited)" }))
                 .send()
                 .await

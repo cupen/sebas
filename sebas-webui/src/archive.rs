@@ -673,7 +673,7 @@ mod tests {
         archive_session("sess_naming_omit", "/proj", "T", None, Default::default(), 30, Vec::new(), None, None)
             .unwrap();
         let raw =
-            std::fs::read_to_string(&std::env::var("SEBAS_ARCHIVE_PATH").unwrap()).unwrap();
+            std::fs::read_to_string(std::env::var("SEBAS_ARCHIVE_PATH").unwrap()).unwrap();
         assert!(
             !raw.contains("operator_label") && !raw.contains("prompt_preview"),
             "all-None naming sources must not serialize keys: {raw}"
@@ -702,7 +702,7 @@ mod tests {
         let _p = test_path("identity_omit");
         archive_session("sess_omit", "/proj", "T", None, Default::default(), 30, Vec::new(), None, None)
             .unwrap();
-        let raw = std::fs::read_to_string(&std::env::var("SEBAS_ARCHIVE_PATH").unwrap()).unwrap();
+        let raw = std::fs::read_to_string(std::env::var("SEBAS_ARCHIVE_PATH").unwrap()).unwrap();
         assert!(
             !raw.contains("agent_kind"),
             "all-None identity must not serialize keys: {raw}"

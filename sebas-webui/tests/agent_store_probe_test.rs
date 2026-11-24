@@ -84,7 +84,7 @@ async fn app_after_gui_create(agent_payload: serde_json::Value) -> axum::Router 
     )
 }
 
-fn store_row<'a>(v: &'a Value) -> &'a Value {
+fn store_row(v: &Value) -> &Value {
     v["agents"]
         .as_array()
         .expect("agents array")

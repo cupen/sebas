@@ -2194,6 +2194,7 @@ mod workspace_root_tests {
         }
     }
 
+    #[allow(clippy::await_holding_lock)] // 串行锁有意横跨整个测试调用
     #[tokio::test]
     async fn close_and_archive_stay_available_for_out_of_scope_session() {
         // archive 写的是 SEBAS_ARCHIVE_PATH（进程全局）：与 archive.rs 测试共用
@@ -2791,6 +2792,7 @@ mod restore_route_tests {
 
     /// 主契约：重建成功（fake 可达）→ 200、归档条目被消费、重建请求确实
     /// 带着原 session_id 与完整转写到达了 backend 缝。
+    #[allow(clippy::await_holding_lock)] // 串行锁有意横跨整个测试调用
     #[tokio::test]
     async fn restore_rebuilds_first_and_only_then_consumes_the_archive() {
         let _lock = test_env_lock();
@@ -2820,6 +2822,7 @@ mod restore_route_tests {
     }
 
     /// 失败路径：core 不可达 → 503，且 archive.json 一个字节都没动。
+    #[allow(clippy::await_holding_lock)] // 串行锁有意横跨整个测试调用
     #[tokio::test]
     async fn failed_rebuild_leaves_the_archive_untouched() {
         let _lock = test_env_lock();
@@ -2844,6 +2847,7 @@ mod restore_route_tests {
     }
 
     /// 未知 key 照旧 404（无条目可恢复，不触碰任何状态）。
+    #[allow(clippy::await_holding_lock)] // 串行锁有意横跨整个测试调用
     #[tokio::test]
     async fn restore_unknown_key_is_a_not_found() {
         let _lock = test_env_lock();

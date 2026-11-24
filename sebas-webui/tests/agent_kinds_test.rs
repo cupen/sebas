@@ -251,7 +251,7 @@ mod store_row_probe {
     async fn app_with_store_rows(snapshot: serde_json::Value) -> axum::Router {
         let map = SessionMap::new();
         let (router, _rx) = DispatchHandle::new(map);
-        let backend: Arc<dyn sebas_webui::SessionBackend> =
+        let _backend: Arc<dyn sebas_webui::SessionBackend> =
             Arc::new(sebas_webui::session_backend::InProcessBackend::new(router));
         // config 种子面为空：catalog 里的非 native 行只来自 store union。
         let fake = FakeBackend::new();

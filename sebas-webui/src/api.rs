@@ -455,7 +455,7 @@ pub(crate) async fn probe_rust_toolchain() -> ToolchainProbe {
         },
         Ok(Ok(out)) => {
             let stdout = String::from_utf8_lossy(&out.stdout);
-            let first = stdout.lines().next().unwrap_or("").trim().to_string();
+            let first = parse_rustc_version_line(&stdout).unwrap_or_default();
             if !out.status.success() {
                 let stderr = String::from_utf8_lossy(&out.stderr);
                 ToolchainProbe {
@@ -1902,6 +1902,7 @@ fn filter_out_of_scope_local_projects(
 /// 项目」（Ok(vec![])）。读改写的调用点（移除 / 重排 / 以 project_id 建会话）
 /// 必须走这里：把不可达报成「未找到」会误导操作员去排查一个不存在的问题，
 /// 而重排更危险——按空列表写回等于抹掉注册表。
+#[allow(clippy::result_large_err)] // axum Response 是 handler 错误面的常态形状
 async fn projects_or_unavailable(
     state: &WebUiState,
     what: &str,
@@ -3661,6 +3662,7 @@ mod approvals_label_route_tests {
     //! - GET /api/sessions/{key}/approvals：泊车中返回请求体、空时返回 `[]`、
     //!   未知会话 404（FakeBackend 注入读模型）；
     //! - POST /api/sessions/{key}/label：设置/清空直达 seam、未知会话 404。
+    //!
     //! 鉴权关闭（AuthHandle::disabled）——语义归鉴权套件，这里只测路由面。
 
     use super::*;

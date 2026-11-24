@@ -146,7 +146,7 @@ mod tests {
         assert_eq!(sel, None);
 
         save_runtime_state(
-            &mut conn,
+            &conn,
             &RuntimeStateRow {
                 mode: ProviderMode::Router,
                 default_selection: Some(DefaultSelection::with_model("p", "m")),
@@ -169,7 +169,7 @@ mod tests {
         assert!(defaults_import_done(&mut conn).unwrap());
         // 已导入 → 不覆盖（用户选择优先）。
         save_runtime_state(
-            &mut conn,
+            &conn,
             &RuntimeStateRow {
                 mode: ProviderMode::Router,
                 default_selection: Some(DefaultSelection::new("user-pick")),

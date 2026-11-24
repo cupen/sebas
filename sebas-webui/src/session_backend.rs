@@ -110,6 +110,8 @@ pub enum UsageQueryError {
 }
 
 /// The seam every session-data source must satisfy.
+#[allow(clippy::too_many_arguments)]
+// async_trait 展开后 restore_session 计 8 参（与 dispatch 侧 web_restore_session 同形状）
 #[async_trait]
 pub trait SessionBackend: Send + Sync {
     /// Every known session, in the shape the session rows need.
@@ -1240,6 +1242,7 @@ pub struct FakeBackend {
     last_spawn_node: std::sync::Mutex<Option<Option<String>>>,
     /// fix-webui-qa-defects 2.2（route 层测试用）：记录 `restore_session`
     /// 调用 `(key, session_id, project_dir, 条目数, 身份, label, prompt_preview)`。
+    #[allow(clippy::type_complexity)] // 测试桩的逐参记录元组，不引入命名类型
     restores: std::sync::Mutex<
         Vec<(
             ChannelKey,
@@ -1656,11 +1659,10 @@ impl SessionBackend for FakeBackend {
         _key: ChannelKey,
         _pending_id: u64,
     ) -> Result<Vec<PendingSubmission>, SessionRejection> {
-        match self
+        match *self
             .pending_op_rejection
             .lock()
             .expect("pending op rejection lock")
-            .clone()
         {
             Some(reason) => Err(SessionRejection::PendingRejected { reason }),
             None => Err(SessionRejection::Unavailable {
@@ -1675,11 +1677,10 @@ impl SessionBackend for FakeBackend {
         _pending_id: u64,
         _to_index: usize,
     ) -> Result<Vec<PendingSubmission>, SessionRejection> {
-        match self
+        match *self
             .pending_op_rejection
             .lock()
             .expect("pending op rejection lock")
-            .clone()
         {
             Some(reason) => Err(SessionRejection::PendingRejected { reason }),
             None => Err(SessionRejection::Unavailable {

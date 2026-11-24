@@ -187,8 +187,7 @@ async fn handle_web_spawn(
     if kind == "claude"
         && mode
             .as_deref()
-            .map(mode_to_permission_flag)
-            .flatten()
+            .and_then(mode_to_permission_flag)
             .is_some()
     {
         router
@@ -324,8 +323,7 @@ async fn handle_spawn_resume_without_feishu(
         && resume_mode
             .as_ref()
             .map(|m| m.as_str())
-            .map(mode_to_permission_flag)
-            .flatten()
+            .and_then(mode_to_permission_flag)
             .is_some()
     {
         router

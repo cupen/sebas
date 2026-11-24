@@ -586,8 +586,7 @@ impl SessionHost {
                 model,
                 mode,
                 provider,
-            })
-            .map_err(|r| r)?;
+            })?;
         let MadeBody {
             body,
             provider: effective_provider,
@@ -1661,7 +1660,14 @@ mod tests {
         }
     }
 
-    fn park_host(enforces: bool) -> (tempfile::TempDir, SessionHost, Arc<Mutex<Vec<(String, ApprovalDecision)>>>) {
+    /// `(临时目录, 宿主, 已解析的审批记录)`——临时目录由调用方持有（drop 即删）。
+    type ParkHost = (
+        tempfile::TempDir,
+        SessionHost,
+        Arc<Mutex<Vec<(String, ApprovalDecision)>>>,
+    );
+
+    fn park_host(enforces: bool) -> ParkHost {
         let dir = tempfile::tempdir().unwrap();
         let resolved = Arc::new(Mutex::new(Vec::new()));
         let factory = Arc::new(ParkFactory {

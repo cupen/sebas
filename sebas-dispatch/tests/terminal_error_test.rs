@@ -359,11 +359,10 @@ async fn escalation_kill_keeps_the_session_browsable() {
     while let Ok(ev) = events.try_recv() {
         match ev {
             sebas_dispatch::engine::SessionEvent::Removed { .. } => saw_removed = true,
-            sebas_dispatch::engine::SessionEvent::Updated { session } => {
-                if session.status == "dormant".into() {
+            sebas_dispatch::engine::SessionEvent::Updated { session }
+                if session.status == "dormant".into() => {
                     saw_updated = true;
                 }
-            }
             _ => {}
         }
     }

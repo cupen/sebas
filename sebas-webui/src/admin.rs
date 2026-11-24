@@ -357,11 +357,10 @@ pub async fn admin_mutation_guard(
     }
 
     // Origin check: absent / empty / loopback passes, the rest is foreign.
-    if let Some(origin) = req.headers().get("origin").and_then(|v| v.to_str().ok()) {
-        if !origin.is_empty() && !is_loopback_origin(origin) {
+    if let Some(origin) = req.headers().get("origin").and_then(|v| v.to_str().ok())
+        && !origin.is_empty() && !is_loopback_origin(origin) {
             return Err(StatusCode::FORBIDDEN);
         }
-    }
 
     Ok(next.run(req).await)
 }

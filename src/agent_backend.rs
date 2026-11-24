@@ -170,7 +170,7 @@ impl NativeSession {
                 id: p.id,
                 text: p.text.clone(),
                 position: i,
-                disposition: p.disposition.clone(),
+                disposition: p.disposition,
                 priority: p.priority,
             })
             .collect()
@@ -3161,7 +3161,7 @@ mod tests {
             .spawn("go".into(), Some(ws.path().to_string_lossy().into()))
             .await
             .expect("webui spawn");
-        let _ = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 let joined: String = backend
                     .turns(key.clone(), 0)
@@ -3190,7 +3190,7 @@ mod tests {
         );
         let bridge_key = sebas_channels::ChannelKey::new("feishu", "agent-parity");
         bridge.clone().prompt(bridge_key.clone(), "go".into());
-        let _ = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 if router.session_exists(&bridge_key).await {
                     break;
@@ -3200,7 +3200,7 @@ mod tests {
         })
         .await
         .expect("bridge session registered");
-        let _ = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 let turns = router.session_turns(&bridge_key, 0).await.unwrap_or_default();
                 let joined: String = turns.iter().map(|e| e.content.clone()).collect();
@@ -3240,7 +3240,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             bridge_turns
                 .iter()
-                .map(|e| semantic_content(e))
+                .map(semantic_content)
                 .collect::<Vec<_>>(),
             "webui face and IM bridge face must render identical streamed transcripts"
         );
@@ -3297,7 +3297,7 @@ mod tests {
     }
 
     async fn wait_until_content(backend: &NativeAgentBackend, key: &ChannelKey, needle: &str) {
-        let _ = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 let turns = backend.turns(key.clone(), 0).await.unwrap();
                 if turns.iter().any(|t| t.content.contains(needle)) {

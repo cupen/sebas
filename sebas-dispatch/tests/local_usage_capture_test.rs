@@ -165,9 +165,10 @@ async fn finished_without_a_turn_open_lands_no_row() {
         })
         .await;
     // s-lazy 只有一条（来自 harness 的 seed）；s-ghost 零行。
-    let rows = captured.lock().unwrap();
-    assert_eq!(rows.len(), 0, "幽灵回合不产行");
-    drop(rows);
+    {
+        let rows = captured.lock().unwrap();
+        assert_eq!(rows.len(), 0, "幽灵回合不产行");
+    }
     // s-lazy 自己 Finished → 一行。
     router
         .dispatch_acp_event(AcpEvent::Finished {

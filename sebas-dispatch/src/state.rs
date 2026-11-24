@@ -804,7 +804,7 @@ impl SessionMap {
         // 失败不改变「它属于哪个项目、由哪个 agent 服务」。此前整体替换会把这些
         // 一并抹掉——会话因此从项目里消失、agent 展示名回退通用标签，等于把
         // 「启动失败」谎报成「这个会话没有归属」。
-        let Some(m) = g.get_mut(key) else { return None };
+        let m = g.get_mut(key)?;
         let session_id = next_failed_id();
         m.state = MappingState::SpawnFailed {
             session_id: session_id.clone(),

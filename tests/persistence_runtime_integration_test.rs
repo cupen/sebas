@@ -13,7 +13,6 @@
 //! 域 DDL 事实（哪张表、什么约束）按 design D2 留在域侧——本文件作为集成
 //! 测试夹具内联与根 crate 注册表同形的 DDL，仅用于驱动共享层的同步与 CRUD。
 
-use sebas_db::record::Record;
 use sebas_db::schema::{SyncOutcome, TableSchema};
 use sebas_models::provider::{aliases_for_provider, ModelAliasRow, ProviderRow};
 use sebas_models::project::ProjectRow;
@@ -97,7 +96,7 @@ fn typed_provider_row(id: &str) -> ProviderRow {
 /// 插入必须被拒（`foreign_keys=ON` 是配方三件套之一，R1 场景的行为面）。
 #[test]
 fn shared_recipe_enforces_foreign_keys_on_a_second_database() {
-    let (_dir, mut conn) = synced_db("fk.db");
+    let (_dir, conn) = synced_db("fk.db");
 
     let err = ModelAliasRow {
         alias: "orphan".into(),
@@ -105,7 +104,7 @@ fn shared_recipe_enforces_foreign_keys_on_a_second_database() {
         upstream_model: None,
         created_at: 1,
     }
-    .save(&mut conn);
+    .save(&conn);
 
     let err = err.expect_err("FK ON 时引用缺失 provider 的插入必须失败");
     assert!(
@@ -142,7 +141,7 @@ fn added_column_reads_back_at_default_through_generated_crud() {
     // 旧形状库：projects 只有迁移前五列，含一行业务数据；版本键已按自描述
     // 格式落好（缺列走「原地补齐」，不走重置）。
     {
-        let mut conn = sebas_db::conn::open(&path).unwrap();
+        let conn = sebas_db::conn::open(&path).unwrap();
         conn.execute_batch(
             "CREATE TABLE projects (
                 path        TEXT PRIMARY KEY,
@@ -165,7 +164,7 @@ fn added_column_reads_back_at_default_through_generated_crud() {
         .unwrap();
     }
 
-    let (mut conn, outcome) =
+    let (conn, outcome) =
         sebas_db::schema::open_and_sync(&path, LEGACY_PROJECTS_TABLE).unwrap();
     assert_eq!(
         outcome,

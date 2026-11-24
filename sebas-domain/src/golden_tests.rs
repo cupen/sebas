@@ -84,7 +84,9 @@ fn golden_spelling_serialization_is_byte_identical() {
         );
     }
 
-    let lists: [(&str, fn(&str) -> String, &str); 5] = [
+    /// 一个词汇的线渲染器：`from_wire` → 序列化，用于逐字节比对。
+    type Render = fn(&str) -> String;
+    let lists: [(&str, Render, &str); 5] = [
         (
             "session_phase_spellings",
             (|s| serde_json::to_string(&SessionPhase::from_wire(s)).unwrap()) as fn(&str) -> String,

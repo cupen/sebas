@@ -1627,8 +1627,7 @@ mod active_record_tests {
         let before_mtime = std::fs::metadata(&db_path).unwrap().modified().unwrap();
 
         let err = open_and_sync(&db_path, PROJECTS_TABLES)
-            .err()
-            .expect("非空无默认的缺列必须拒启动");
+            .expect_err("非空无默认的缺列必须拒启动");
         assert!(
             err.contains("desired_mode") && err.contains("非空"),
             "诊断要点名不可迁移的缺列: {err}"

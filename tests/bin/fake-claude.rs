@@ -49,12 +49,15 @@
 //!     小于阈值即「慢后端」反馈时限形态。
 //!   - error：上游错误形态——result 帧 is_error=true（error_during_request）
 //!     后进程退出，投影落 error 条目、会话转 failed。
+//!
 //!   journal 逐行携带 `scenario` 字段（场景断言的数据源）；未知 `--scenario`
 //!   值解析期即拒（exit 2——子进程秒退，driver 以终态错误如实上报）。
+//!
 //!   --advertise-commands: the initialize control response carries a fixed
 //!   command table (goal with an argumentHint + compact) — the claude-path
 //!   command-discovery data source (session-slash-commands 1.2); without the
 //!   flag the response stays `{}` exactly as before.
+//!
 //!   --resume-fails: exit(1) with "No conversation found" on stderr, but ONLY
 //!   when argv carries --resume — a fresh --session-id spawn still works
 //!   (mirrors the real CLI; exercises the manager's fresh-session fallback).
@@ -575,7 +578,7 @@ fn main() {
                     // （布局旅程断言表格块级横向滚动、pre 滚动语义不回退、
                     // CJK 折行不撑破面板的数据源；与 perm/drip 同机制）。
                     emit_assistant_text(&mut io, &flags.session_id, &rich_markdown_reply(), reported_model(&flags));
-                    settle_pause(&mut flags);
+                    settle_pause(&flags);
                     io.emit(&result_frame(&flags.session_id, "success", false));
                 } else if text == "stream" {
                     stream_turn(&mut flags, &mut io, &stdin_rx);
@@ -919,6 +922,7 @@ fn flood_turn(flags: &mut Flags, io: &mut Io, stdin_rx: &std::sync::mpsc::Receiv
 /// 2. **长行代码块**：单行 200+ 字符无空格 token，断言 `pre` 保持
 ///    white-space:pre + 自身横向滚动（overflow-wrap:anywhere 不回退其语义）；
 /// 3. **无空格 CJK 长句**：断言 CJK 文本折行不撑破面板（anywhere 兜底）。
+///
 /// 内容逐字面（无随机、无时间戳），多次触发形状一致，截图可对照。
 fn rich_markdown_reply() -> String {
     // 表格取 **160 列短 token**：块级横滚断言需要一个「min-content 仍宽于容
@@ -927,7 +931,7 @@ fn rich_markdown_reply() -> String {
     // 行为已作为观感发现上报）；列数多到压不进容器时，display:block +
     // overflow-x:auto 的横滚路径才真实可达。
     let header: Vec<String> = (1..=160).map(|i| format!("c{i:03}")).collect();
-    let rule: Vec<&str> = std::iter::repeat("----").take(160).collect();
+    let rule: Vec<&str> = std::iter::repeat_n("----", 160).collect();
     let row: Vec<String> = (1..=160).map(|i| format!("v{i:03}")).collect();
     let long_code_line = "x".repeat(220);
     let cjk_run = "中文连续长句".repeat(160);
@@ -1679,7 +1683,7 @@ mod parallel_turn_tests {
     fn position(frames: &[Value], pred: impl Fn(&Value) -> bool) -> usize {
         frames
             .iter()
-            .position(|f| pred(f))
+            .position(pred)
             .unwrap_or_else(|| panic!("no frame matched: {frames:?}"))
     }
 

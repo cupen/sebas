@@ -866,7 +866,6 @@ pub struct PermissionNotice {
 /// （type-session-vocabularies 3.1）定义已收敛到 [`crate::vocabulary::PermissionDecision`]
 /// ——唯一共享定义（四值 + 未知值路径），此处经文件顶部的 `pub use` 再导出，
 /// `sebas_domain::session::PermissionDecision` 这条既有公开路径不变。
-
 #[cfg(test)]
 mod webui_wire_tests {
     use super::*;
@@ -894,7 +893,7 @@ mod webui_wire_tests {
             assert_eq!(serde_json::to_value(&rejection).unwrap()["code"], tag);
         }
         assert_eq!(
-            serde_json::to_value(&PendingReason::PriorityConflict).unwrap(),
+            serde_json::to_value(PendingReason::PriorityConflict).unwrap(),
             "priority_conflict"
         );
     }

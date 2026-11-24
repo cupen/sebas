@@ -108,9 +108,6 @@ enum Execution {
 pub struct ControlExecutor {
     control: Arc<Mutex<ControlService>>,
     runner: Arc<dyn UpdaterRunner>,
-    /// 受管服务三节（core/webui/router）的配置——router 停止保护探针从
-    /// 这里解析 core channel 位置与 secret（simplify-service-config 拆分）。
-    service: ServiceConfig,
     config: WatchdogConfig,
     config_path: String,
     /// Managed-service table (core/webui/router supervision handles).
@@ -171,22 +168,13 @@ impl ControlExecutor {
             channel_path,
             secret,
         });
-        Self::with_activity_probe(
-            control,
-            runner,
-            service,
-            config,
-            config_path,
-            services,
-            probe,
-        )
+        Self::with_activity_probe(control, runner, config, config_path, services, probe)
     }
 
     /// 注入探针的构造形态（测试替身 / 未来扩展用）。
     pub fn with_activity_probe(
         control: Arc<Mutex<ControlService>>,
         runner: Arc<dyn UpdaterRunner>,
-        service: ServiceConfig,
         config: WatchdogConfig,
         config_path: String,
         services: ServiceManager,
@@ -195,7 +183,6 @@ impl ControlExecutor {
         Self {
             control,
             runner,
-            service,
             config,
             config_path,
             services,
@@ -887,7 +874,6 @@ mod tests {
         let executor = ControlExecutor::with_activity_probe(
             control.clone(),
             Arc::new(FakeRunner::default()),
-            ServiceConfig::default(),
             WatchdogConfig::default(),
             "./config.toml".into(),
             services,
@@ -1256,8 +1242,7 @@ mod tests {
             &self,
         ) -> crate::error::Result<crate::watchdog::supervisor::SpawnedInstance> {
             self.spawns.fetch_add(1, Ordering::SeqCst);
-            Err(SebasError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            Err(SebasError::Io(std::io::Error::other(
                 "disabled entry must never spawn",
             )))
         }

@@ -11,7 +11,6 @@ use futures_util::{SinkExt, StreamExt};
 use sebas_dispatch::engine::DispatchHandle;
 use sebas_dispatch::state::SessionMap;
 use sebas_feishu::cards::CardConfig;
-use sebas_webui::build_router;
 use sebas_webui::models::RouterInfo;
 use serde_json::Value;
 use std::sync::Arc;

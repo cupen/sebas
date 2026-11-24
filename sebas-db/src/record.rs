@@ -140,7 +140,7 @@ fn pk_equals_sql<R: Record>() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::conn;
+
     use crate::fixtures::KvRow;
     use crate::schema::open_and_sync;
     use crate::fixtures;

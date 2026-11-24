@@ -928,7 +928,7 @@ async fn creation_dialog_journey() {
     .await
     .expect("legacy agent create");
     assert!(
-        status >= 400 && status < 500,
+        (400..500).contains(&status),
         "legacy backend word must be rejected: {status} {resp}"
     );
 }

@@ -59,7 +59,7 @@ static TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// 「重启后」的读回面：另开裸 SQLite 连接读 session_map 全表——独立于
 /// 全局引擎的写者句柄，等价于新进程重新打开库。
-fn read_rows(db: &PathBuf) -> Vec<SessionMapRow> {
+fn read_rows(db: &Path) -> Vec<SessionMapRow> {
     let mut conn = sebas_db::conn::open(db).expect("reopen projects.db");
     sebas_models::session_map::load_session_map(&mut conn).expect("load session_map")
 }
@@ -73,6 +73,7 @@ fn web_key(reference: &str) -> ChannelKey {
 /// → 进程优雅退出（不写任何文件）→ 重开库读回：映射完整（session_id +
 /// desired_mode + label + current_model），且状态目录里**从未出现**
 /// sessions.json（state-store「No separate session-map file exists」）。
+#[allow(clippy::await_holding_lock)] // 串行锁有意横跨整个测试调用
 #[tokio::test]
 async fn sigterm_committed_mappings_survive_graceful_shutdown() {
     let _guard = TEST_SERIAL.lock().unwrap();
@@ -130,6 +131,7 @@ async fn sigterm_committed_mappings_survive_graceful_shutdown() {
 
 /// 生命周期逐事件落库（persist-session-map 2.2）：创建/退役/归档/移除
 /// 各触发一次提交，库中行与内存映射一致；非持久形态不落库。
+#[allow(clippy::await_holding_lock)] // 串行锁有意横跨整个测试调用
 #[tokio::test]
 async fn lifecycle_mutations_are_each_committed() {
     let _guard = TEST_SERIAL.lock().unwrap();
@@ -230,6 +232,7 @@ async fn lifecycle_mutations_are_each_committed() {
 /// SIGKILL 用例：会话创建后**不调用任何关停/退役路径**，进程直接消失——
 /// 已提交映射不依赖快照，重开库读回仍在（含 session_id 与 desired_mode），
 /// 恢复侧按行原样重建映射。
+#[allow(clippy::await_holding_lock)] // 串行锁有意横跨整个测试调用
 #[tokio::test]
 async fn sigkill_committed_mappings_survive_unclean_exit() {
     let _guard = TEST_SERIAL.lock().unwrap();

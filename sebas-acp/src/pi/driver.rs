@@ -930,6 +930,9 @@ done
         handle: DriverHandle,
         cmd_tx: mpsc::Sender<AcpCommand>,
         evt_rx: mpsc::Receiver<AcpEvent>,
+        /// 只为把取消通道**保活**：丢弃它会让 `cancel_rx` 立刻以 `RecvError`
+        /// 结束，driver 会把「测试还没发出取消」误当成取消。
+        #[allow(dead_code)]
         cancel_tx: tokio::sync::oneshot::Sender<()>,
         /// run loop 的 JoinHandle。`DriverHandle::run` 是**未启动**的 future
         /// （生产里由 `SessionManager` `tokio::spawn`），测试须自行启动，

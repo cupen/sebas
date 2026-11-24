@@ -92,7 +92,10 @@ impl Drop for AbortOnDrop {
     }
 }
 
-/// 一次拨号尝试的结果。
+/// 一次拨号尝试的结果。`Connected` 持有整条 WebSocket 流（≥320 字节）——
+/// 瞬态单值、逐次拨号构造一次，从不密集复制，不 Box（同
+/// sebas-ipc `SessionStreamFrame` 的取舍）。
+#[allow(clippy::large_enum_variant)]
 pub enum Attempt {
     /// 链路已建立。会话协议（prompt / turn 流 / 对账）属于后续 group，此处只持有连接。
     Connected(WebSocketStream<MaybeTlsStream<TcpStream>>),
@@ -171,7 +174,7 @@ impl LinkClient {
             host: tokio::sync::Mutex::new(SessionHost::new(
                 sessions_dir,
                 workspace_root,
-                0usize.max(max_sessions),
+                max_sessions,
                 // 存储上限随 4.5 的策略落地；0 = 暂不限。
                 0,
                 Arc::new(EchoOnlyFactory),
@@ -227,10 +230,7 @@ impl LinkClient {
             .router
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        *slot = match url {
-            Some(url) => Some(RouterEndpoint { url, token }),
-            None => None,
-        };
+        *slot = url.map(|url| RouterEndpoint { url, token });
     }
 
     /// 组装本次握手的凭据：**还没用过的** join token 优先（那是操作者要求配对），
@@ -291,7 +291,7 @@ impl LinkClient {
             Ok(pair) => pair,
             Err(e) => return Attempt::Transient(format!("拨号 {} 失败：{e}", self.control_plane)),
         };
-        if let Err(e) = ws.send(Message::Text(payload.into())).await {
+        if let Err(e) = ws.send(Message::Text(payload)).await {
             return Attempt::Transient(format!("发送握手失败：{e}"));
         }
 
@@ -380,7 +380,7 @@ impl LinkClient {
         let sent = {
             let guard = self.outbound.lock().await;
             match guard.as_ref() {
-                Some(tx) => tx.send(Message::Text(json.into())).is_ok(),
+                Some(tx) => tx.send(Message::Text(json)).is_ok(),
                 None => false,
             }
         };
@@ -568,7 +568,7 @@ impl LinkClient {
                                                     if let Ok(json) =
                                                         serde_json::to_string(&response)
                                                     {
-                                                        let _ = out.send(Message::Text(json.into()));
+                                                        let _ = out.send(Message::Text(json));
                                                     }
                                                 });
                                             }
@@ -610,7 +610,7 @@ impl LinkClient {
                                     let frame = Frame::Event { event };
                                     match serde_json::to_string(&frame) {
                                         Ok(json) => {
-                                            if out_tx.send(Message::Text(json.into())).is_err() {
+                                            if out_tx.send(Message::Text(json)).is_err() {
                                                 break 'link;
                                             }
                                         }
@@ -663,7 +663,7 @@ mod tests {
             };
             if let Some(reply) = reply {
                 let _ = ws
-                    .send(Message::Text(serde_json::to_string(&reply).unwrap().into()))
+                    .send(Message::Text(serde_json::to_string(&reply).unwrap()))
                     .await;
                 // 让客户端读完应答再关。
                 let _ = ws.next().await;
@@ -985,7 +985,7 @@ mod tests {
                 let _ = ws.next().await; // 读 Hello
                 let ack = sebas_node_link::accepted(None);
                 let _ = ws
-                    .send(Message::Text(serde_json::to_string(&ack).unwrap().into()))
+                    .send(Message::Text(serde_json::to_string(&ack).unwrap()))
                     .await;
                 if nth == 1 {
                     // 立刻断开，逼客户端重连。
@@ -1041,7 +1041,7 @@ mod tests {
             let _ = ws.next().await; // 读 Hello
             let ack = sebas_node_link::accepted(None);
             let _ = ws
-                .send(Message::Text(serde_json::to_string(&ack).unwrap().into()))
+                .send(Message::Text(serde_json::to_string(&ack).unwrap()))
                 .await;
             let mut tx = Some(tx);
             while let Some(Ok(Message::Text(text))) = ws.next().await {
@@ -1052,11 +1052,9 @@ mod tests {
                     session_id,
                     reclaimed_through_seq,
                 } = event
-                {
-                    if let Some(tx) = tx.take() {
+                    && let Some(tx) = tx.take() {
                         let _ = tx.send((session_id, reclaimed_through_seq));
                     }
-                }
             }
         });
 

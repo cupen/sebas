@@ -448,11 +448,10 @@ async fn seed_to_working_transition_publishes_updated_with_turn_engaged() {
     // = 占用。
     let mut engaged_timeline: Vec<bool> = Vec::new();
     while let Ok(ev) = events.try_recv() {
-        if let SessionEvent::Updated { session } = ev {
-            if session.key == key.reference {
+        if let SessionEvent::Updated { session } = ev
+            && session.key == key.reference {
                 engaged_timeline.push(session.turn_engaged);
             }
-        }
     }
     assert_eq!(
         engaged_timeline,
@@ -706,15 +705,14 @@ async fn parked_entry_and_exit_each_publish_updated_with_parked_count() {
         .await;
     let mut saw_parked_entry = false;
     while let Ok(ev) = events.try_recv() {
-        if let SessionEvent::Updated { session } = ev {
-            if session.key == key.reference {
+        if let SessionEvent::Updated { session } = ev
+            && session.key == key.reference {
                 assert_eq!(
                     session.parked_approvals, 1,
                     "the entry flip must carry the parked count"
                 );
                 saw_parked_entry = true;
             }
-        }
     }
     assert!(saw_parked_entry, "permission entry must emit an Updated frame");
 
@@ -731,15 +729,14 @@ async fn parked_entry_and_exit_each_publish_updated_with_parked_count() {
         .await;
     let mut saw_parked_exit = false;
     while let Ok(ev) = events.try_recv() {
-        if let SessionEvent::Updated { session } = ev {
-            if session.key == key.reference {
+        if let SessionEvent::Updated { session } = ev
+            && session.key == key.reference {
                 assert_eq!(
                     session.parked_approvals, 0,
                     "the exit flip must carry the cleared count"
                 );
                 saw_parked_exit = true;
             }
-        }
     }
     assert!(
         saw_parked_exit,

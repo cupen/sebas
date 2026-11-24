@@ -385,7 +385,7 @@ pub async fn handle_connection(
     );
     if let Err(e) = ws
         .send(Message::Text(
-            serde_json::to_string(&ack).unwrap_or_default().into(),
+            serde_json::to_string(&ack).unwrap_or_default(),
         ))
         .await
     {
@@ -440,7 +440,7 @@ where
     S: futures_util::Sink<Message> + Unpin,
 {
     if let Ok(text) = serde_json::to_string(&ack) {
-        let _ = ws.send(Message::Text(text.into())).await;
+        let _ = ws.send(Message::Text(text)).await;
     }
 }
 
@@ -488,7 +488,7 @@ mod tests {
     async fn send_hello(url: &str, hello: &Hello) -> HelloAck {
         let (mut ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
         ws.send(ClientMessage::Text(
-            serde_json::to_string(hello).unwrap().into(),
+            serde_json::to_string(hello).unwrap(),
         ))
         .await
         .unwrap();
@@ -698,8 +698,7 @@ mod tests {
         let (mut ws1, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
         ws1.send(ClientMessage::Text(
             serde_json::to_string(&hello("dev-box", NodeAuth::JoinToken { token: first }))
-                .unwrap()
-                .into(),
+                .unwrap(),
         ))
         .await
         .unwrap();

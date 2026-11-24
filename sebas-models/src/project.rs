@@ -111,140 +111,6 @@ impl ProjectRow {
 /// 现由本定义再导出，调用点零改动）。
 pub type ProjectEntry = ProjectRow;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// 稳定 id 的形状与「节点进材料」的语义：本机拼写（节点省略）与显式
-    /// `local` 同值，远端节点不同值——这是 `(节点, 路径)` 身份的核心断言。
-    ///
-    /// 该测试原在 `sebas-domain::project`；随放置规则（add-domain-layer D5）
-    /// 与派生本身一起迁到记录所在处，顺带钉住唯一来源——域侧那份重复常量已删。
-    #[test]
-    fn stable_project_id_is_derived_from_node_and_path() {
-        let local = project_id_for_on("local", "/data/work");
-        assert_eq!(local, project_id_for_on("", "/data/work"));
-        assert_eq!(local, project_id_for_on("  ", "/data/work"));
-        assert_eq!(local, project_id_for_on("local", "/data/work"));
-        assert_eq!(local.len(), "proj-".len() + 12);
-        assert!(local.starts_with("proj-"));
-        // 同路径不同节点 → 不同 id；同节点不同路径 → 不同 id。
-        assert_ne!(local, project_id_for_on("dev-box", "/data/work"));
-        assert_ne!(local, project_id_for_on("local", "/data/other"));
-        // 确定性：同输入恒等（重启/重建后稳定）。
-        assert_eq!(local, project_id_for_on("local", "/data/work"));
-    }
-
-    /// add_project 落库时写 id 的行为**不在这里测**：那需要一张 `projects`
-    /// 表，而手写 `CREATE TABLE` 只允许出现在根 crate 的注册表（AGENTS.md 的
-    /// 持久层准入规则 3）。覆盖在根 crate 的 `tests/state_persistence_test.rs`
-    /// 与 e2e 旅程 `single_state_dir_journey_pins_every_state_location`
-    /// （断言注册行的 id 落库即为 `proj-` 前缀）。
-
-    fn row() -> ProjectRow {
-        ProjectRow {
-            id: Some("proj-abcdef123456".into()),
-            path: "/data/work".into(),
-            name: "work".into(),
-            branch_at: 1_700_000_100,
-            added_at: 1_700_000_000,
-            sort_order: 3,
-            node_id: LOCAL_NODE_ID.into(),
-            default_agent: Some("claude".into()),
-            branch: Some("main".into()),
-        }
-    }
-
-    /// 形状钉（存储 + 线同一形状的两侧拼写）：可选字段缺席不序列化、
-    /// node_id 缺省 `local`、旧最小条目反序列化回填——给规范定义加字段
-    /// 即本测试失败（两侧一起变，无法只改一边）。
-    #[test]
-    fn project_record_serialized_shape_is_pinned() {
-        // 完整条目（远端节点，可选字段在场）。
-        let mut full = row();
-        full.node_id = "node-b".into();
-        assert_eq!(
-            serde_json::to_value(&full).unwrap(),
-            serde_json::json!({
-                "id": "proj-abcdef123456",
-                "path": "/data/work",
-                "name": "work",
-                "branch_at": 1_700_000_100,
-                "added_at": 1_700_000_000,
-                "sort_order": 3,
-                "node_id": "node-b",
-                "default_agent": "claude",
-                "branch": "main",
-            })
-        );
-
-        // 本机条目：可选字段缺席（skip_serializing_if），node_id 原样上 wire
-        // （default 回填后的拼写保持 `local`，与合并前 ProjectEntry 一致）。
-        let mut local = row();
-        local.default_agent = None;
-        local.branch = None;
-        local.sort_order = 0;
-        assert_eq!(
-            serde_json::to_value(&local).unwrap(),
-            serde_json::json!({
-                "id": "proj-abcdef123456",
-                "path": "/data/work",
-                "name": "work",
-                "branch_at": 1_700_000_100,
-                "added_at": 1_700_000_000,
-                "sort_order": 0,
-                "node_id": "local",
-            })
-        );
-
-        // 旧注册表条目（无 id / 无可选字段 / 无 node_id）：缺省回填，不报错。
-        let legacy: ProjectRow = serde_json::from_str(
-            r#"{"path": "/tmp/p2", "name": "p2", "added_at": 5}"#,
-        )
-        .unwrap();
-        assert_eq!(legacy.id, None);
-        assert_eq!(legacy.node_id, LOCAL_NODE_ID);
-        assert!(legacy.is_local());
-    }
-
-    /// 列元数据形状钉（4.5 基线 + node_id 列）：列名/亲和/默认值/可空性。
-    #[test]
-    fn schema_columns_match_target_shape() {
-        use sebas_db::record::Record;
-        use sebas_db::schema::SchemaColumn;
-        assert_eq!(ProjectRow::TABLE, "projects");
-        assert_eq!(ProjectRow::PK_COLUMNS, &["path"]);
-        let baseline: &[SchemaColumn] = &[
-            SchemaColumn { name: "id", affinity: "TEXT", default: None, not_null: false, rename_from: None },
-            SchemaColumn { name: "path", affinity: "TEXT", default: None, not_null: true, rename_from: None },
-            SchemaColumn { name: "name", affinity: "TEXT", default: None, not_null: true, rename_from: None },
-            SchemaColumn { name: "branch_at", affinity: "INTEGER", default: Some("0"), not_null: true, rename_from: None },
-            SchemaColumn { name: "added_at", affinity: "INTEGER", default: None, not_null: true, rename_from: None },
-            SchemaColumn { name: "sort_order", affinity: "INTEGER", default: Some("0"), not_null: true, rename_from: None },
-            SchemaColumn { name: "node_id", affinity: "TEXT", default: Some("'local'"), not_null: true, rename_from: None },
-            SchemaColumn { name: "default_agent", affinity: "TEXT", default: None, not_null: false, rename_from: None },
-            SchemaColumn { name: "branch", affinity: "TEXT", default: None, not_null: false, rename_from: None },
-        ];
-        assert_eq!(ProjectRow::schema_columns(), baseline);
-        assert_eq!(ProjectRow::COLUMNS, baseline.iter().map(|c| c.name).collect::<Vec<_>>().as_slice());
-    }
-
-    /// migrate-project-registry 2.5：展示层计算字段不进记录——注册表不携带
-    /// 仅用于呈现的字段（分支缓存 `branch`/`branch_at` 是数据本身，不算）。
-    #[test]
-    fn record_carries_no_presentation_only_fields() {
-        use sebas_db::record::Record;
-        let fields: Vec<&str> = ProjectRow::COLUMNS.to_vec();
-        let presentation = ["status_label", "accessible", "branch_display"];
-        for f in fields {
-            assert!(
-                !presentation.contains(&f),
-                "展示字段 {f} 不应进入规范记录"
-            );
-        }
-    }
-}
-
 // ---- 非标准查询（返回 struct 实例；标准 CRUD 走生成的 save/find/delete）----
 
 /// 加载所有项目（注册表列表的展示顺序：sort_order, added_at——非标准排序
@@ -386,4 +252,138 @@ pub fn update_project_branch(
     )
     .map_err(|e| format!("更新项目分支 {path} 失败: {e}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 稳定 id 的形状与「节点进材料」的语义：本机拼写（节点省略）与显式
+    /// `local` 同值，远端节点不同值——这是 `(节点, 路径)` 身份的核心断言。
+    ///
+    /// 该测试原在 `sebas-domain::project`；随放置规则（add-domain-layer D5）
+    /// 与派生本身一起迁到记录所在处，顺带钉住唯一来源——域侧那份重复常量已删。
+    #[test]
+    fn stable_project_id_is_derived_from_node_and_path() {
+        let local = project_id_for_on("local", "/data/work");
+        assert_eq!(local, project_id_for_on("", "/data/work"));
+        assert_eq!(local, project_id_for_on("  ", "/data/work"));
+        assert_eq!(local, project_id_for_on("local", "/data/work"));
+        assert_eq!(local.len(), "proj-".len() + 12);
+        assert!(local.starts_with("proj-"));
+        // 同路径不同节点 → 不同 id；同节点不同路径 → 不同 id。
+        assert_ne!(local, project_id_for_on("dev-box", "/data/work"));
+        assert_ne!(local, project_id_for_on("local", "/data/other"));
+        // 确定性：同输入恒等（重启/重建后稳定）。
+        assert_eq!(local, project_id_for_on("local", "/data/work"));
+    }
+
+    // add_project 落库时写 id 的行为**不在这里测**：那需要一张 `projects`
+    // 表，而手写 `CREATE TABLE` 只允许出现在根 crate 的注册表（AGENTS.md 的
+    // 持久层准入规则 3）。覆盖在根 crate 的 `tests/state_persistence_test.rs`
+    // 与 e2e 旅程 `single_state_dir_journey_pins_every_state_location`
+    // （断言注册行的 id 落库即为 `proj-` 前缀）。
+
+    fn row() -> ProjectRow {
+        ProjectRow {
+            id: Some("proj-abcdef123456".into()),
+            path: "/data/work".into(),
+            name: "work".into(),
+            branch_at: 1_700_000_100,
+            added_at: 1_700_000_000,
+            sort_order: 3,
+            node_id: LOCAL_NODE_ID.into(),
+            default_agent: Some("claude".into()),
+            branch: Some("main".into()),
+        }
+    }
+
+    /// 形状钉（存储 + 线同一形状的两侧拼写）：可选字段缺席不序列化、
+    /// node_id 缺省 `local`、旧最小条目反序列化回填——给规范定义加字段
+    /// 即本测试失败（两侧一起变，无法只改一边）。
+    #[test]
+    fn project_record_serialized_shape_is_pinned() {
+        // 完整条目（远端节点，可选字段在场）。
+        let mut full = row();
+        full.node_id = "node-b".into();
+        assert_eq!(
+            serde_json::to_value(&full).unwrap(),
+            serde_json::json!({
+                "id": "proj-abcdef123456",
+                "path": "/data/work",
+                "name": "work",
+                "branch_at": 1_700_000_100,
+                "added_at": 1_700_000_000,
+                "sort_order": 3,
+                "node_id": "node-b",
+                "default_agent": "claude",
+                "branch": "main",
+            })
+        );
+
+        // 本机条目：可选字段缺席（skip_serializing_if），node_id 原样上 wire
+        // （default 回填后的拼写保持 `local`，与合并前 ProjectEntry 一致）。
+        let mut local = row();
+        local.default_agent = None;
+        local.branch = None;
+        local.sort_order = 0;
+        assert_eq!(
+            serde_json::to_value(&local).unwrap(),
+            serde_json::json!({
+                "id": "proj-abcdef123456",
+                "path": "/data/work",
+                "name": "work",
+                "branch_at": 1_700_000_100,
+                "added_at": 1_700_000_000,
+                "sort_order": 0,
+                "node_id": "local",
+            })
+        );
+
+        // 旧注册表条目（无 id / 无可选字段 / 无 node_id）：缺省回填，不报错。
+        let legacy: ProjectRow = serde_json::from_str(
+            r#"{"path": "/tmp/p2", "name": "p2", "added_at": 5}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.id, None);
+        assert_eq!(legacy.node_id, LOCAL_NODE_ID);
+        assert!(legacy.is_local());
+    }
+
+    /// 列元数据形状钉（4.5 基线 + node_id 列）：列名/亲和/默认值/可空性。
+    #[test]
+    fn schema_columns_match_target_shape() {
+        use sebas_db::record::Record;
+        use sebas_db::schema::SchemaColumn;
+        assert_eq!(ProjectRow::TABLE, "projects");
+        assert_eq!(ProjectRow::PK_COLUMNS, &["path"]);
+        let baseline: &[SchemaColumn] = &[
+            SchemaColumn { name: "id", affinity: "TEXT", default: None, not_null: false, rename_from: None },
+            SchemaColumn { name: "path", affinity: "TEXT", default: None, not_null: true, rename_from: None },
+            SchemaColumn { name: "name", affinity: "TEXT", default: None, not_null: true, rename_from: None },
+            SchemaColumn { name: "branch_at", affinity: "INTEGER", default: Some("0"), not_null: true, rename_from: None },
+            SchemaColumn { name: "added_at", affinity: "INTEGER", default: None, not_null: true, rename_from: None },
+            SchemaColumn { name: "sort_order", affinity: "INTEGER", default: Some("0"), not_null: true, rename_from: None },
+            SchemaColumn { name: "node_id", affinity: "TEXT", default: Some("'local'"), not_null: true, rename_from: None },
+            SchemaColumn { name: "default_agent", affinity: "TEXT", default: None, not_null: false, rename_from: None },
+            SchemaColumn { name: "branch", affinity: "TEXT", default: None, not_null: false, rename_from: None },
+        ];
+        assert_eq!(ProjectRow::schema_columns(), baseline);
+        assert_eq!(ProjectRow::COLUMNS, baseline.iter().map(|c| c.name).collect::<Vec<_>>().as_slice());
+    }
+
+    /// migrate-project-registry 2.5：展示层计算字段不进记录——注册表不携带
+    /// 仅用于呈现的字段（分支缓存 `branch`/`branch_at` 是数据本身，不算）。
+    #[test]
+    fn record_carries_no_presentation_only_fields() {
+        use sebas_db::record::Record;
+        let fields: Vec<&str> = ProjectRow::COLUMNS.to_vec();
+        let presentation = ["status_label", "accessible", "branch_display"];
+        for f in fields {
+            assert!(
+                !presentation.contains(&f),
+                "展示字段 {f} 不应进入规范记录"
+            );
+        }
+    }
 }

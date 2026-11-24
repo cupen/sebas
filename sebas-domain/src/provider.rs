@@ -176,7 +176,7 @@ mod tests {
         assert_eq!(modern, DefaultSelection::with_model("p", "m"));
         // 序列化只上新形状；model 缺省不上 wire。
         assert_eq!(
-            serde_json::to_value(&DefaultSelection::new("solo")).unwrap(),
+            serde_json::to_value(DefaultSelection::new("solo")).unwrap(),
             serde_json::json!({"provider": "solo"})
         );
     }

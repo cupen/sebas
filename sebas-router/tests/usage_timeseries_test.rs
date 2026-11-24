@@ -102,6 +102,7 @@ fn bucket_models<'a>(body: &'a Value, label: &str) -> &'a Vec<Value> {
         .expect("models array")
 }
 
+#[allow(clippy::await_holding_lock)] // 串行锁有意横跨整个测试调用
 #[tokio::test(flavor = "multi_thread")]
 async fn timeseries_endpoint_requires_the_admin_bearer_when_secret_is_set() {
     // admin_auth 逐请求读 `SEBAS_CONTROL_SECRET`：启动后置 env 即可让本端点
@@ -146,6 +147,7 @@ async fn timeseries_endpoint_requires_the_admin_bearer_when_secret_is_set() {
     assert_eq!(resp.status(), 200);
 }
 
+#[allow(clippy::await_holding_lock)] // 串行锁有意横跨整个测试调用
 #[tokio::test(flavor = "multi_thread")]
 async fn two_models_aggregate_into_separate_day_buckets_and_zero_fill() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -201,6 +203,7 @@ async fn two_models_aggregate_into_separate_day_buckets_and_zero_fill() {
     assert_eq!(body["totals"]["input_tokens"], 15);
 }
 
+#[allow(clippy::await_holding_lock)] // 串行锁有意横跨整个测试调用
 #[tokio::test(flavor = "multi_thread")]
 async fn unobserved_tokens_add_requests_only() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -229,6 +232,7 @@ async fn unobserved_tokens_add_requests_only() {
     assert_eq!(models[0]["output_tokens"], 5);
 }
 
+#[allow(clippy::await_holding_lock)] // 串行锁有意横跨整个测试调用
 #[tokio::test(flavor = "multi_thread")]
 async fn param_validation_is_enforced_at_the_endpoint() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -266,6 +270,7 @@ async fn param_validation_is_enforced_at_the_endpoint() {
     );
 }
 
+#[allow(clippy::await_holding_lock)] // 串行锁有意横跨整个测试调用
 #[tokio::test(flavor = "multi_thread")]
 async fn hour_granularity_returns_24_buckets_of_today() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());

@@ -87,7 +87,7 @@ impl DispatchHandle {
                 })
                 .await;
             }
-            AcpEvent::ModelChanged { model_id: _, .. } => {
+            AcpEvent::ModelChanged { .. } => {
                 // 模型切换成功：映射 current model + `model_change` 条目 +
                 // Updated 发布——单点在 apply_event 的 ModelChanged 分支
                 // （fix-webui-qa-round8 5.2 收敛后它内部即调

@@ -10,7 +10,6 @@
 //!    field names preserved verbatim. The frontend reconstitutes the event
 //!    object from `params`, so a renamed field would silently break views.
 
-use sebas_channels::AppUsage;
 use sebas_dispatch::TurnEntry;
 use sebas_webui::events::{PendingSubmissionView, WebUiEvent, notification_frame};
 use sebas_webui::ws_rpc::{

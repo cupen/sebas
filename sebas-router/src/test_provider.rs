@@ -1168,8 +1168,8 @@ mod tests {
         // 偏好命中与首个一致的工具表 → 连 tool 名与 input 都相同。
         let same_shape =
             r#"{"model":"m","tools":[{"name":"Read","input_schema":{"type":"object","required":["path"],"properties":{"path":{"type":"string"}}}}],"messages":[{"role":"user","content":"hi"}]}"#;
-        let body_bytes = body(&same_shape.clone().replace("\"model\":\"m\"", "\"model\":\"test/tool-use\""));
-        let parsed: Value = serde_json::from_str(&same_shape).expect("json");
+        let body_bytes = body(&same_shape.replace("\"model\":\"m\"", "\"model\":\"test/tool-use\""));
+        let parsed: Value = serde_json::from_str(same_shape).expect("json");
         let (fake_content, fake_stop) = crate::fake_provider::builtin_response(Some(&parsed));
         let v = json_of(scenario_response(
             WireProtocol::Anthropic,

@@ -143,11 +143,10 @@ pub fn parallel_tool_inputs(tools: &[Value]) -> Vec<(String, Value)> {
         if input.as_object().is_some_and(|o| o.is_empty()) {
             input = json!({ "index": index });
         }
-        if out.iter().any(|(_, prev)| *prev == input) {
-            if let Some(obj) = input.as_object_mut() {
+        if out.iter().any(|(_, prev)| *prev == input)
+            && let Some(obj) = input.as_object_mut() {
                 obj.insert("index".to_string(), json!(index));
             }
-        }
         out.push((name.to_string(), input));
     }
     out
