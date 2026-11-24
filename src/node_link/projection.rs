@@ -32,9 +32,7 @@ use crate::node_link::placement::{PlacementError, RemoteSessionId};
 use crate::node_link::server::ConnectionObserver;
 use sebas_channels::ChannelKey;
 use sebas_dispatch::{RemoteSessionView, SessionEvent, SessionInfo, TurnEntry};
-use sebas_domain::vocabulary::{
-    CardPhase, SessionMode, SessionPhase, TurnElementType, TurnKind,
-};
+use sebas_domain::vocabulary::{CardPhase, SessionMode, SessionPhase, TurnElementType, TurnKind};
 use sebas_node_link::{
     ApprovalDecision, LogEntry, ParkedApproval, SessionEvent as NodeEvent, SessionOp, SessionResult,
 };
@@ -969,7 +967,8 @@ impl RemoteProjection {
             // 活跃（OnIt）或在等审批即占用。远端队列不归本进程（Non-goal：
             // 不动远端节点会话），保守取这两个可见事实。
             turn_engaged: parked > 0 || matches!(node_phase, SessionPhase::Active),
-first_prompt_preview: None,
+            first_prompt_preview: None,
+            task_id: None,
         })
     }
 }
@@ -1209,10 +1208,8 @@ mod tests {
         );
         // escalate 在节点侧没有对应语义：落 deny（既有行为，逐字保留）。
         assert_eq!(
-            approval_decision(PermissionDecision::Escalate {
-                reason: "x".into()
-            })
-            .map(|d| d.as_str().to_string()),
+            approval_decision(PermissionDecision::Escalate { reason: "x".into() })
+                .map(|d| d.as_str().to_string()),
             Some("deny".to_string())
         );
         // 未知取值不得翻译成任何决定投递出去（那会解除一条泊车审批）。
@@ -1370,7 +1367,8 @@ mod tests {
             "悬空请求数要能数出来"
         );
         assert_eq!(
-            row.status, "dormant".into(),
+            row.status,
+            "dormant".into(),
             "在等人批的会话不得呈现为运行中（spec：等待 ≠ 运行中）"
         );
         assert_eq!(p.parked("proj-a:1").await.len(), 1, "请求本身要可达");

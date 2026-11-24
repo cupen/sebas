@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use sebas_channels::key::ChannelKey;
 use sebas_dispatch::engine::CancelOutcome;
 use sebas_dispatch::{
-    PendingApproval, PendingSubmission, SessionEvent, SessionInfo, SessionIdentity, TurnEntry,
+    PendingApproval, PendingSubmission, SessionEvent, SessionIdentity, SessionInfo, TurnEntry,
     TurnStreamEvent,
 };
 use serde::{Deserialize, Serialize};
@@ -23,10 +23,10 @@ use serde::{Deserialize, Serialize};
 // 3.2，design D3 原位再导出）：`SessionRejection` / `PendingReason` /
 // `PermissionNotice` / `PermissionDecision` 的既有路径零改动。
 // `SessionBackend` trait 与 `Reachability` 是本 crate 的缝，不迁。
-pub use sebas_domain::session::{
-    PermissionDecision, PermissionNotice, PendingReason, SessionRejection,
-};
 pub use sebas_domain::node::NodeView as NodeInfo;
+pub use sebas_domain::session::{
+    PendingReason, PermissionDecision, PermissionNotice, SessionRejection,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast};
@@ -462,9 +462,9 @@ fn rejection_from_dispatch(e: sebas_dispatch::error::DispatchError) -> SessionRe
         sebas_dispatch::error::DispatchError::Capacity(limit) => {
             SessionRejection::Capacity { limit }
         }
-        sebas_dispatch::error::DispatchError::Conflict(msg) => SessionRejection::Unavailable {
-            cause: msg,
-        },
+        sebas_dispatch::error::DispatchError::Conflict(msg) => {
+            SessionRejection::Unavailable { cause: msg }
+        }
     }
 }
 
@@ -950,12 +950,11 @@ impl SessionBackend for InProcessBackend {
         &self,
         key: ChannelKey,
     ) -> Result<Vec<PendingApproval>, SessionRejection> {
-        self.router
-            .pending_permission_requests(&key)
-            .await
-            .ok_or(SessionRejection::UnknownSession {
+        self.router.pending_permission_requests(&key).await.ok_or(
+            SessionRejection::UnknownSession {
                 key: key.reference.clone(),
-            })
+            },
+        )
     }
 
     /// （5.1）label 设置直达引擎映射；未知 key → UnknownSession。
@@ -1037,7 +1036,10 @@ impl SessionBackend for InProcessBackend {
                 .map(|p| p.tool_name)
                 .unwrap_or_default();
             self.router
-                .push_transcript_entry(&session_id, escalate_downgrade_entry(request_id, &tool, reason))
+                .push_transcript_entry(
+                    &session_id,
+                    escalate_downgrade_entry(request_id, &tool, reason),
+                )
                 .await;
         }
         // fix-webui-qa-round9 2.1（permission-flow）：应答留痕——泊车校验已过
@@ -1337,10 +1339,7 @@ impl FakeBackend {
     /// fix-webui-approval-restore-and-session-identity 5.1（route 层测试用）：
     /// 最近一次 `set_session_label` 收到的 `(编码键, label)`。
     pub fn last_label(&self) -> Option<(String, Option<String>)> {
-        self.last_label
-            .lock()
-            .expect("last label lock")
-            .clone()
+        self.last_label.lock().expect("last label lock").clone()
     }
 
     /// fix-webui-qa-defects-round5 1.2（route 层测试用）：注入 pending 管理
@@ -1577,6 +1576,7 @@ impl SessionBackend for FakeBackend {
             parked_approvals: 0,
             label: None,
             first_prompt_preview: None,
+            task_id: None,
         };
         let ev = SessionEvent::Created { session };
         if let SessionEvent::Created { session } = &ev {
@@ -1716,10 +1716,7 @@ impl SessionBackend for FakeBackend {
         tz_offset: i32,
     ) -> Result<serde_json::Value, UsageQueryError> {
         // 记录最近一次入参，route 层据此断言参数透传。
-        *self
-            .last_usage_query
-            .lock()
-            .expect("last usage query lock") =
+        *self.last_usage_query.lock().expect("last usage query lock") =
             Some((source.to_string(), granularity.to_string(), days, tz_offset));
         match self.usage_result.lock().expect("usage result lock").clone() {
             Some(result) => result,
@@ -1747,18 +1744,15 @@ impl SessionBackend for FakeBackend {
             });
         }
         let n = transcript.len();
-        self.restores
-            .lock()
-            .expect("restores lock")
-            .push((
-                key,
-                session_id,
-                project_dir,
-                n,
-                identity,
-                label,
-                prompt_preview,
-            ));
+        self.restores.lock().expect("restores lock").push((
+            key,
+            session_id,
+            project_dir,
+            n,
+            identity,
+            label,
+            prompt_preview,
+        ));
         Ok(())
     }
 
@@ -1771,9 +1765,7 @@ impl SessionBackend for FakeBackend {
         let encoded = crate::routes::encode_session_key(&key);
         match self.approvals.lock().expect("approvals lock").get(&encoded) {
             Some(list) => Ok(list.clone()),
-            None => Err(SessionRejection::UnknownSession {
-                key: encoded,
-            }),
+            None => Err(SessionRejection::UnknownSession { key: encoded }),
         }
     }
 
@@ -1940,7 +1932,11 @@ mod tests {
         // 让中继任务把 request_id → session_id 登记进 request_sessions。
         for _ in 0..40 {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            if router.permission_parked_session("req-esc-1").await.is_some() {
+            if router
+                .permission_parked_session("req-esc-1")
+                .await
+                .is_some()
+            {
                 break;
             }
         }
@@ -1978,8 +1974,7 @@ mod tests {
         for _ in 0..8 {
             match out_rx.recv().await {
                 Some(sebas_dispatch::Out::SendAcp {
-                    cmd:
-                        sebas_acp::AcpCommand::PermissionReply { decision, .. },
+                    cmd: sebas_acp::AcpCommand::PermissionReply { decision, .. },
                     ..
                 }) => {
                     assert_eq!(
@@ -1994,7 +1989,10 @@ mod tests {
                 None => break,
             }
         }
-        assert!(saw_reply, "the downgraded decision still reaches the driver");
+        assert!(
+            saw_reply,
+            "the downgraded decision still reaches the driver"
+        );
     }
 
     /// （type-session-vocabularies 3.3，design D5）**core channel → ACP** 边界的
@@ -2027,10 +2025,7 @@ mod tests {
         );
         // 单独钉住降级目标，确认它是有意的适配而不是「碰巧落在三值里」。
         assert_eq!(
-            map_permission_decision(PermissionDecision::Escalate {
-                reason: "x".into()
-            })
-            .as_str(),
+            map_permission_decision(PermissionDecision::Escalate { reason: "x".into() }).as_str(),
             "allow_once"
         );
     }
@@ -2063,7 +2058,10 @@ mod tests {
         // 空表快照 = 空 agents 数组（catalog 只余内置 native 的前提）。
         let empty = backend.state_snapshot("agents").await.unwrap();
         assert_eq!(
-            empty.get("agents").and_then(serde_json::Value::as_array).map(Vec::len),
+            empty
+                .get("agents")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
             Some(0)
         );
 
@@ -2091,12 +2089,18 @@ mod tests {
 
         // delete 走同一 seam；unknown domain 报错文案不变。
         backend
-            .state_mutate("agents", serde_json::json!({"op": "delete", "id": "opencode"}))
+            .state_mutate(
+                "agents",
+                serde_json::json!({"op": "delete", "id": "opencode"}),
+            )
             .await
             .expect("agents delete via in-process backend");
         assert!(
             backend
-                .state_mutate("agents", serde_json::json!({"op": "delete", "id": "opencode"}))
+                .state_mutate(
+                    "agents",
+                    serde_json::json!({"op": "delete", "id": "opencode"})
+                )
                 .await
                 .unwrap_err()
                 .contains("不存在")
@@ -2191,6 +2195,7 @@ mod tests {
                 parked_approvals: 0,
                 label: None,
                 first_prompt_preview: None,
+                task_id: None,
             }])
             .await;
         backend.push_turn("s9", "prompt", "p1").await;

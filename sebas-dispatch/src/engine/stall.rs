@@ -285,9 +285,12 @@ mod tests {
     #[tokio::test]
     async fn resolve_is_targeted_and_tolerates_unknown_ids() {
         let reg = StallRegistry::default();
-        reg.note_permission_parked("s1", "r1", "Bash", serde_json::json!({})).await;
-        reg.note_permission_parked("s1", "r2", "Read", serde_json::json!({})).await;
-        reg.note_permission_parked("s2", "r3", "Grep", serde_json::json!({})).await;
+        reg.note_permission_parked("s1", "r1", "Bash", serde_json::json!({}))
+            .await;
+        reg.note_permission_parked("s1", "r2", "Read", serde_json::json!({}))
+            .await;
+        reg.note_permission_parked("s2", "r3", "Grep", serde_json::json!({}))
+            .await;
         reg.note_permission_resolved("does-not-exist").await;
         assert_eq!(reg.parked_count("s1").await, 2);
         assert_eq!(reg.parked_count("s2").await, 1);
@@ -302,20 +305,34 @@ mod tests {
     async fn parked_requests_enumerate_tool_and_args_and_clear_on_resolve() {
         let reg = StallRegistry::default();
         let args = serde_json::json!({"command": "rm -rf build", "dir": "/x"});
-        reg.note_permission_parked("s1", "claude:tc-1", "Bash", args.clone()).await;
+        reg.note_permission_parked("s1", "claude:tc-1", "Bash", args.clone())
+            .await;
         // 同 id 重登 = 覆盖（幂等），不重复计数。
-        reg.note_permission_parked("s1", "claude:tc-1", "Bash", args.clone()).await;
-        reg.note_permission_parked("s1", "claude:tc-2", "Read", serde_json::json!({"path": "a.rs"})).await;
+        reg.note_permission_parked("s1", "claude:tc-1", "Bash", args.clone())
+            .await;
+        reg.note_permission_parked(
+            "s1",
+            "claude:tc-2",
+            "Read",
+            serde_json::json!({"path": "a.rs"}),
+        )
+        .await;
 
         let listed = reg.parked_requests("s1").await;
         assert_eq!(listed.len(), 2, "one card per request id");
-        assert_eq!(listed[0].request_id, "claude:tc-1", "stable request_id order");
+        assert_eq!(
+            listed[0].request_id, "claude:tc-1",
+            "stable request_id order"
+        );
         assert_eq!(listed[0].tool_name, "Bash");
         assert_eq!(listed[0].args, args);
         assert_eq!(listed[1].tool_name, "Read");
 
         // 批复 → 该请求从读模型消失；另一条不受影响。
-        assert_eq!(reg.note_permission_resolved("claude:tc-1").await.as_deref(), Some("s1"));
+        assert_eq!(
+            reg.note_permission_resolved("claude:tc-1").await.as_deref(),
+            Some("s1")
+        );
         let listed = reg.parked_requests("s1").await;
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].request_id, "claude:tc-2");
@@ -329,15 +346,22 @@ mod tests {
     #[tokio::test]
     async fn release_session_clears_every_parked_request_idempotently() {
         let reg = StallRegistry::default();
-        reg.note_permission_parked("s1", "r1", "Bash", serde_json::json!({})).await;
-        reg.note_permission_parked("s1", "r2", "Read", serde_json::json!({})).await;
-        reg.note_permission_parked("s2", "r3", "Grep", serde_json::json!({})).await;
+        reg.note_permission_parked("s1", "r1", "Bash", serde_json::json!({}))
+            .await;
+        reg.note_permission_parked("s1", "r2", "Read", serde_json::json!({}))
+            .await;
+        reg.note_permission_parked("s2", "r3", "Grep", serde_json::json!({}))
+            .await;
 
         assert_eq!(reg.parked_owner("r1").await.as_deref(), Some("s1"));
         let released = reg.release_session("s1").await;
         assert_eq!(released, vec!["r1".to_string(), "r2".to_string()]);
         assert_eq!(reg.parked_count("s1").await, 0, "s1 fully released");
-        assert_eq!(reg.parked_owner("r1").await, None, "released id is no longer answerable");
+        assert_eq!(
+            reg.parked_owner("r1").await,
+            None,
+            "released id is no longer answerable"
+        );
         assert_eq!(reg.parked_count("s2").await, 1, "other sessions untouched");
 
         // 幂等：重复释放返回空表。

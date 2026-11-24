@@ -147,8 +147,7 @@ async fn nodes_lists_remote_entries_with_status_and_last_seen() {
 
 #[tokio::test]
 async fn registering_on_a_named_node_is_validated_by_that_node() {
-    let (app, backend) =
-        app_with(Some(vec![local_node(), node("dev-box", "online")])).await;
+    let (app, backend) = app_with(Some(vec![local_node(), node("dev-box", "online")])).await;
     backend.set_path_check(
         "dev-box",
         "/srv/repo",
@@ -179,8 +178,7 @@ async fn registering_on_a_named_node_is_validated_by_that_node() {
 
 #[tokio::test]
 async fn node_side_rejection_names_the_node_path_and_problem() {
-    let (app, backend) =
-        app_with(Some(vec![local_node(), node("dev-box", "online")])).await;
+    let (app, backend) = app_with(Some(vec![local_node(), node("dev-box", "online")])).await;
     // 节点说路径不存在（界内）——本用例专测「不存在」文案，containment 判定
     // 置 true；越界拒绝另有专测（node_judged_out_of_workspace_...）。
     backend.set_path_check(
@@ -215,8 +213,7 @@ async fn node_side_rejection_names_the_node_path_and_problem() {
 
 #[tokio::test]
 async fn node_judged_out_of_workspace_rejects_registration() {
-    let (app, backend) =
-        app_with(Some(vec![local_node(), node("dev-box", "online")])).await;
+    let (app, backend) = app_with(Some(vec![local_node(), node("dev-box", "online")])).await;
     // 节点自判：路径存在、是目录，但越出**该节点**的 workspace root。
     backend.set_path_check(
         "dev-box",
@@ -248,8 +245,7 @@ async fn node_judged_out_of_workspace_rejects_registration() {
 
 #[tokio::test]
 async fn legacy_node_answer_without_within_workspace_field_still_admits() {
-    let (app, backend) =
-        app_with(Some(vec![local_node(), node("dev-box", "online")])).await;
+    let (app, backend) = app_with(Some(vec![local_node(), node("dev-box", "online")])).await;
     // 老节点应答没有 within_workspace 字段：serde 缺省 true → 放行。
     let check: PathCheck = serde_json::from_value(serde_json::json!({
         "exists": true,
@@ -274,8 +270,7 @@ async fn legacy_node_answer_without_within_workspace_field_still_admits() {
 
 #[tokio::test]
 async fn registering_on_an_offline_node_is_refused_with_the_node_named() {
-    let (app, _backend) =
-        app_with(Some(vec![local_node(), node("dev-box", "offline")])).await;
+    let (app, _backend) = app_with(Some(vec![local_node(), node("dev-box", "offline")])).await;
     let (status, body) = send(
         &app,
         "POST",
@@ -303,8 +298,7 @@ async fn registering_on_an_unknown_node_is_refused() {
 
 #[tokio::test]
 async fn node_check_unavailable_is_not_reported_as_a_bad_path() {
-    let (app, _backend) =
-        app_with(Some(vec![local_node(), node("dev-box", "online")])).await;
+    let (app, _backend) = app_with(Some(vec![local_node(), node("dev-box", "online")])).await;
     // 未注入 path check → 后端默认「不能向节点发起路径校验」。
     let (status, body) = send(
         &app,
@@ -324,8 +318,7 @@ async fn local_registration_without_a_node_keeps_the_implicit_behavior() {
     let dir = tempfile::tempdir().unwrap();
     // add-workspace-root：本机注册必须落在 workspace root 内——把根钉到
     // 临时目录本身，`repo` 即在界内；缺省节点 = 本机的隐式行为不变。
-    let (app, _backend) =
-        app_with_root(Some(vec![local_node()]), Some(dir.path())).await;
+    let (app, _backend) = app_with_root(Some(vec![local_node()]), Some(dir.path())).await;
     let project_dir = dir.path().join("repo");
     std::fs::create_dir_all(&project_dir).unwrap();
 
@@ -380,6 +373,7 @@ fn remote_session() -> SessionInfo {
         parked_approvals: 0,
         label: None,
         first_prompt_preview: None,
+        task_id: None,
     }
 }
 

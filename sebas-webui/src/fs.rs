@@ -967,8 +967,7 @@ mod tests {
         // 绝对路径指到 workspace root 之外：拒绝且树外无任何写入。
         let (dir, _sub) = dir_with_sub();
         let (sibling, s_sub) = dir_with_sub();
-        let err =
-            mkdir_in(sibling.path().to_str().unwrap(), "evil", dir.path()).unwrap_err();
+        let err = mkdir_in(sibling.path().to_str().unwrap(), "evil", dir.path()).unwrap_err();
         assert_eq!(err, "路径超出根目录范围");
         assert!(!s_sub.join("evil").exists(), "越界请求不得产生副作用");
         // `..` 穿越同样拒绝（canonicalize 解析后越界）。

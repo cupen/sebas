@@ -36,6 +36,8 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 axum = { version = "0.8", features = ["ws"] }
 tracing = "0.1"
 chrono = "0.4"
+# agent-task-center 1.4：BeadsError 的类型化错误面。
+thiserror = "2"
 urlencoding = "2"
 # add-webui-picker-workdir-start：browse-dirs 回显路径剥 Windows verbatim
 # 前缀（UNC / 长路径等剥离会破坏语义的形态保守保留，正确性由 safe_path

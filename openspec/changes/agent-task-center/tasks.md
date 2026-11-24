@@ -2,36 +2,36 @@
 
 ## 1. Schema migration & beads client skeleton
 
-- [ ] 1.1 Add `task_id TEXT` column to `session_map` model in `sebas-models`, bump `sebas_db::schema` date version, and verify the migration runs against an existing database with `ALTER TABLE session_map ADD COLUMN task_id TEXT` (existing rows keep data, new column is NULL).
-- [ ] 1.2 Wire `task_id` through `SessionInfo` in `sebas-domain`, `sebas-ipc::protocol`, and the create-session RPC; verify round-trip via `cargo test -p sebas-ipc` and the IPC contract golden fixture (`tests/ipc_protocol_contract_test.rs`).
-- [ ] 1.3 Create `sebas-webui/src/beads_client.rs` exposing `async fn` wrappers around `bd` CLI (`create`, `show`, `list`, `update`, `claim`, `unclaim`, `assign`, `close`, `comment`, `comments`, `events_tail`, `init`, `config_set`) using `tokio::process::Command` with `--json`; verify each wrapper parses its stdout into a typed Rust struct (unit-test against fixture JSON captured in spike).
-- [ ] 1.4 Add `thiserror`-based `BeadsError` enum (not installed, non-zero exit, JSON parse failure, timeout); verify each variant maps to a sensible HTTP status code in `task_routes` (404/400/409/500/503).
+- [x] 1.1 Add `task_id TEXT` column to `session_map` model in `sebas-models`, bump `sebas_db::schema` date version, and verify the migration runs against an existing database with `ALTER TABLE session_map ADD COLUMN task_id TEXT` (existing rows keep data, new column is NULL).
+- [x] 1.2 Wire `task_id` through `SessionInfo` in `sebas-domain`, `sebas-ipc::protocol`, and the create-session RPC; verify round-trip via `cargo test -p sebas-ipc` and the IPC contract golden fixture (`tests/ipc_protocol_contract_test.rs`).
+- [x] 1.3 Create `sebas-webui/src/beads_client.rs` exposing `async fn` wrappers around `bd` CLI (`create`, `show`, `list`, `update`, `claim`, `unclaim`, `assign`, `close`, `comment`, `comments`, `events_tail`, `init`, `config_set`) using `tokio::process::Command` with `--json`; verify each wrapper parses its stdout into a typed Rust struct (unit-test against fixture JSON captured in spike).
+- [x] 1.4 Add `thiserror`-based `BeadsError` enum (not installed, non-zero exit, JSON parse failure, timeout); verify each variant maps to a sensible HTTP status code in `task_routes` (404/400/409/500/503).
 
 ## 2. Beads initialization & lazy bootstrap
 
-- [ ] 2.1 Implement `ensure_beads_initialized(project_dir)` in `beads_client`: detect `.beads/` absence, run `bd init --prefix <first 4 chars of basename>` + `bd config set events-journal true`; if `.beads/` exists, only ensure `events-journal = true`. Unit-test against a fixture project dir.
-- [ ] 2.2 Wire `ensure_beads_initialized` into the first hit of `GET /api/projects/{id}/tasks`; verify second hit does not re-run init (test by checking invocation count via a mock).
-- [ ] 2.3 Surface init failure as a structured 503 with the underlying `bd` stderr; verify the WebUI task panel renders the failure inline (manual browser check).
+- [x] 2.1 Implement `ensure_beads_initialized(project_dir)` in `beads_client`: detect `.beads/` absence, run `bd init --prefix <first 4 chars of basename>` + `bd config set events-journal true`; if `.beads/` exists, only ensure `events-journal = true`. Unit-test against a fixture project dir.
+- [x] 2.2 Wire `ensure_beads_initialized` into the first hit of `GET /api/projects/{id}/tasks`; verify second hit does not re-run init (test by checking invocation count via a mock).
+- [x] 2.3 Surface init failure as a structured 503 with the underlying `bd` stderr; verify the WebUI task panel renders the failure inline (manual browser check).
 
 ## 3. Task HTTP API
 
-- [ ] 3.1 Implement `GET /api/projects/{id}/tasks` (list, filterable by `?status=` / `?assignee=`) → calls `bd list --json`; verify returns full task list with assignee/status/labels/comments-count.
-- [ ] 3.2 Implement `POST /api/projects/{id}/tasks` (create) → calls `bd create --json` with title/description/optional assignee/optional reviewer (stored in `--metadata`); verify validation rejects unknown assignee/reviewer with 400.
-- [ ] 3.3 Implement `GET /api/projects/{id}/tasks/{task_id}` (show) → calls `bd show --include-comments --json`; verify returns full task including comments.
-- [ ] 3.4 Implement `POST /api/projects/{id}/tasks/{task_id}/claim` → calls `bd update --claim`; verify idempotent 200 for same actor, 409 with current holder name on race.
-- [ ] 3.5 Implement `POST /api/projects/{id}/tasks/{task_id}/release` → calls `bd unclaim`; verify task returns to `open`.
-- [ ] 3.6 Implement `POST /api/projects/{id}/tasks/{task_id}/assign` → calls `bd assign`; verify assignee vocabulary check rejects unknown principal with 400.
-- [ ] 3.7 Implement `POST /api/projects/{id}/tasks/{task_id}/review` → calls `bd update --add-label in-review`; verify the label appears in subsequent reads.
-- [ ] 3.8 Implement `POST /api/projects/{id}/tasks/{task_id}/close` with reviewer-gate: refuse 403 if caller is a non-reviewer agent kind; allow otherwise. Verify both branches.
-- [ ] 3.9 Implement `POST /api/projects/{id}/tasks/{task_id}/comment` → calls `bd comment`; verify comment appears with caller as author.
-- [ ] 3.10 Add integration test covering the full CRUD+claim+review+close flow against a sandbox project dir; verify each step's HTTP status and persisted beads state.
+- [x] 3.1 Implement `GET /api/projects/{id}/tasks` (list, filterable by `?status=` / `?assignee=`) → calls `bd list --json`; verify returns full task list with assignee/status/labels/comments-count.
+- [x] 3.2 Implement `POST /api/projects/{id}/tasks` (create) → calls `bd create --json` with title/description/optional assignee/optional reviewer (stored in `--metadata`); verify validation rejects unknown assignee/reviewer with 400.
+- [x] 3.3 Implement `GET /api/projects/{id}/tasks/{task_id}` (show) → calls `bd show --include-comments --json`; verify returns full task including comments.
+- [x] 3.4 Implement `POST /api/projects/{id}/tasks/{task_id}/claim` → calls `bd update --claim`; verify idempotent 200 for same actor, 409 with current holder name on race.
+- [x] 3.5 Implement `POST /api/projects/{id}/tasks/{task_id}/release` → calls `bd unclaim`; verify task returns to `open`.
+- [x] 3.6 Implement `POST /api/projects/{id}/tasks/{task_id}/assign` → calls `bd assign`; verify assignee vocabulary check rejects unknown principal with 400.
+- [x] 3.7 Implement `POST /api/projects/{id}/tasks/{task_id}/review` → calls `bd update --add-label in-review`; verify the label appears in subsequent reads.
+- [x] 3.8 Implement `POST /api/projects/{id}/tasks/{task_id}/close` with reviewer-gate: refuse 403 if caller is a non-reviewer agent kind; allow otherwise. Verify both branches.
+- [x] 3.9 Implement `POST /api/projects/{id}/tasks/{task_id}/comment` → calls `bd comment`; verify comment appears with caller as author.
+- [x] 3.10 Add integration test covering the full CRUD+claim+review+close flow against a sandbox project dir; verify each step's HTTP status and persisted beads state.
 
 ## 4. Real-time events pump
 
-- [ ] 4.1 Implement `task_events.rs`: a per-project tokio task that calls `bd events tail --since <last_seq>` every 300ms with a 200ms timeout, tracking `last_seq` and publishing new events to a `tokio::sync::broadcast` channel. Unit-test the loop with a fake `bd` binary that emits fixture events.
-- [ ] 4.2 Bridge the broadcast channel to WebSocket: add `task_updated` message type in `webui-ws-rpc`, carrying the full beads issue snapshot; verify a connected client receives one WS message per journal event.
-- [ ] 4.3 Add a manual "Refresh tasks" endpoint (`POST /api/projects/{id}/tasks/refresh`) that performs a full `bd list --json` reload and resets `last_seq` to the journal head; verify it works after a simulated `bd dolt pull` (manual `cp -r` of `.beads/` from another dir).
-- [ ] 4.4 Verify the polling loop survives transient `bd` failures (kill `bd` mid-poll): the loop logs and retries with the same `last_seq`, no events skipped once `bd` recovers.
+- [x] 4.1 Implement `task_events.rs`: a per-project tokio task that calls `bd events tail --since <last_seq>` every 300ms with a 200ms timeout, tracking `last_seq` and publishing new events to a `tokio::sync::broadcast` channel. Unit-test the loop with a fake `bd` binary that emits fixture events.
+- [x] 4.2 Bridge the broadcast channel to WebSocket: add `task_updated` message type in `webui-ws-rpc`, carrying the full beads issue snapshot; verify a connected client receives one WS message per journal event.
+- [x] 4.3 Add a manual "Refresh tasks" endpoint (`POST /api/projects/{id}/tasks/refresh`) that performs a full `bd list --json` reload and resets `last_seq` to the journal head; verify it works after a simulated `bd dolt pull` (manual `cp -r` of `.beads/` from another dir).
+- [x] 4.4 Verify the polling loop survives transient `bd` failures (kill `bd` mid-poll): the loop logs and retries with the same `last_seq`, no events skipped once `bd` recovers.
 
 ## 5. Session-terminal hook
 

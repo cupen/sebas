@@ -335,7 +335,10 @@ async fn create_session_without_a_project_is_rejected_400() {
         let (status, v) = request(&app, "POST", "/api/sessions", Some(body.clone())).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "body {body}: {v}");
         assert!(
-            v["error"].as_str().unwrap_or_default().contains("project_id"),
+            v["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("project_id"),
             "拒绝文案必须点名 project_id：{v}"
         );
     }
@@ -350,7 +353,10 @@ async fn create_session_without_a_project_is_rejected_400() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "body: {v}");
     assert!(
-        v["error"].as_str().unwrap_or_default().contains("未知 project_id"),
+        v["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("未知 project_id"),
         "未知 id 的拒绝文案：{v}"
     );
 
@@ -1102,8 +1108,11 @@ mod multiuser_rbac {
     /// fix-webui-qa-round14（webui-user-management viewer 只读口径）夹具：
     /// rbac_app 的用户面 + 一条可寻址的 FakeBackend 会话（backend 句柄一并
     /// 交出，供断言焦点指针的副作用）。
-    async fn rbac_app_with_session()
-    -> (axum::Router, Arc<sebas_webui::session_backend::FakeBackend>, tempfile::TempDir) {
+    async fn rbac_app_with_session() -> (
+        axum::Router,
+        Arc<sebas_webui::session_backend::FakeBackend>,
+        tempfile::TempDir,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let auth = Arc::new(AuthHandle::open_with_iterations(
             dir.path().join("auth.db"),
@@ -1140,6 +1149,7 @@ mod multiuser_rbac {
                 parked_approvals: 0,
                 label: None,
                 first_prompt_preview: None,
+                task_id: None,
             }])
             .await;
         let app = build_router_with_auth(
@@ -1172,9 +1182,8 @@ mod multiuser_rbac {
         let bob = login_cookie(&app, "bob", "password8").await;
 
         let key = ChannelKey::new("web", "web-fake-1");
-        let encoded =
-            urlencoding::encode(&format!("{}\0{}", key.channel.as_str(), key.reference))
-                .into_owned();
+        let encoded = urlencoding::encode(&format!("{}\0{}", key.channel.as_str(), key.reference))
+            .into_owned();
 
         // 写档对照先立：viewer 的会话创建（sessions.write）403。
         let (status, v) = request(
@@ -1213,7 +1222,11 @@ mod multiuser_rbac {
             None,
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "viewer GET detail must be open: {v}");
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "viewer GET detail must be open: {v}"
+        );
 
         // member 对照：同一 switch 写放行（handler 可达，焦点指针落位）。
         let (status, v) = request(
@@ -1305,11 +1318,7 @@ mod usage_timeseries_route {
         (app, backend, cookie, dir)
     }
 
-    async fn get(
-        app: &axum::Router,
-        uri: &str,
-        cookie: Option<&str>,
-    ) -> (StatusCode, Value) {
+    async fn get(app: &axum::Router, uri: &str, cookie: Option<&str>) -> (StatusCode, Value) {
         let mut builder = Request::builder()
             .uri(uri)
             .header("host", "127.0.0.1:12345")
@@ -1337,7 +1346,11 @@ mod usage_timeseries_route {
     async fn unauthenticated_request_is_rejected_by_the_existing_auth_gate() {
         let (app, _backend, _cookie, _dir) = app_with_viewer().await;
         let (status, body) = get(&app, "/api/usage/timeseries", None).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED, "未登录 401（与其它 /api/* 同门）");
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "未登录 401（与其它 /api/* 同门）"
+        );
         assert_eq!(body["error"], "authentication required");
     }
 
@@ -1357,9 +1370,12 @@ mod usage_timeseries_route {
         });
         backend.set_usage_result(Ok(payload.clone()));
 
-        let (status, body) =
-            get(&app, "/api/usage/timeseries?granularity=day&days=3&tz_offset=480", Some(&cookie))
-                .await;
+        let (status, body) = get(
+            &app,
+            "/api/usage/timeseries?granularity=day&days=3&tz_offset=480",
+            Some(&cookie),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, payload, "聚合载荷原样回传");
 
@@ -1380,7 +1396,10 @@ mod usage_timeseries_route {
 
         let (status, body) = get(&app, "/api/usage/timeseries", Some(&cookie)).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(body["cause"], "router_unreachable", "结构化 cause 点名不可达");
+        assert_eq!(
+            body["cause"], "router_unreachable",
+            "结构化 cause 点名不可达"
+        );
         assert_eq!(body["code"], "router_unreachable");
         assert_eq!(body["error"], "router_unreachable: connection refused");
 
@@ -1397,12 +1416,16 @@ mod usage_timeseries_route {
             status: 400,
             message: "invalid granularity \"week\"".into(),
         }));
-        let (status, body) = get(&app, "/api/usage/timeseries?granularity=week", Some(&cookie)).await;
+        let (status, body) = get(
+            &app,
+            "/api/usage/timeseries?granularity=week",
+            Some(&cookie),
+        )
+        .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "router 的 400 原状态透传");
         assert_eq!(body["cause"], "router_error");
         assert!(body["error"].as_str().unwrap().contains("granularity"));
     }
-
 
     #[tokio::test]
     async fn absent_params_default_to_day_14_utc() {
@@ -1487,8 +1510,7 @@ mod usage_timeseries_route {
             "router_cause": "router_unreachable: connection refused"
         });
         backend.set_usage_result(Ok(payload.clone()));
-        let (status, body) =
-            get(&app, "/api/usage/timeseries?source=all", Some(&cookie)).await;
+        let (status, body) = get(&app, "/api/usage/timeseries?source=all", Some(&cookie)).await;
         assert_eq!(status, StatusCode::OK, "all 降级态仍 200");
         assert_eq!(body, payload, "载荷原样回传（router_cause 在场）");
     }
@@ -1622,7 +1644,11 @@ mod provider_role_gate {
             Some(r#"{"name":"evil","api_key":"sk-member-key"}"#.into()),
         )
         .await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "member 创建 provider 必须 403: {v}");
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "member 创建 provider 必须 403: {v}"
+        );
 
         let (status, v) = request(
             &app,
@@ -1632,11 +1658,25 @@ mod provider_role_gate {
             Some(r#"{"api_key":"sk-swapped"}"#.into()),
         )
         .await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "member 编辑 provider 必须 403: {v}");
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "member 编辑 provider 必须 403: {v}"
+        );
 
-        let (status, v) =
-            request(&app, "DELETE", "/api/providers/anthropic", Some(&member), None).await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "member 删除 provider 必须 403: {v}");
+        let (status, v) = request(
+            &app,
+            "DELETE",
+            "/api/providers/anthropic",
+            Some(&member),
+            None,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "member 删除 provider 必须 403: {v}"
+        );
 
         // 读面对 member 保留（spec「Read access … remains available」）。
         let (status, _) = request(&app, "GET", "/api/providers", Some(&member), None).await;
@@ -1663,7 +1703,11 @@ mod provider_role_gate {
             ("DELETE", "/api/model-aliases/fast", None),
         ] {
             let (status, v) = request(&app, method, uri, Some(&member), body).await;
-            assert_eq!(status, StatusCode::FORBIDDEN, "member {method} {uri} 必须 403: {v}");
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "member {method} {uri} 必须 403: {v}"
+            );
         }
     }
 
@@ -1714,7 +1758,11 @@ mod provider_role_gate {
             Some(r#"{"name":"x"}"#.into()),
         )
         .await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "viewer 写 provider 必须 403: {v}");
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "viewer 写 provider 必须 403: {v}"
+        );
     }
 
     #[tokio::test]
@@ -1731,7 +1779,11 @@ mod provider_role_gate {
             None,
         )
         .await;
-        assert_ne!(status, StatusCode::FORBIDDEN, "probe 不是变更面：member 不吃 403");
+        assert_ne!(
+            status,
+            StatusCode::FORBIDDEN,
+            "probe 不是变更面：member 不吃 403"
+        );
     }
 
     #[tokio::test]

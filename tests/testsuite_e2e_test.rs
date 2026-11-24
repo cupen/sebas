@@ -145,9 +145,7 @@ fn read_usage_records(path: &std::path::Path) -> Vec<sebas_router::usage::UsageR
     let Ok(rows) = stmt.query_map([], UsageRow::from_row) else {
         return Vec::new();
     };
-    rows.filter_map(|r| r.ok())
-        .map(UsageRecord::from)
-        .collect()
+    rows.filter_map(|r| r.ok()).map(UsageRecord::from).collect()
 }
 
 /// 读 core 的**本地**回合用量账本（`usage_local.db`，add-local-usage-statistics
@@ -185,11 +183,13 @@ fn find_claude_bin() -> Option<String> {
         if path.is_file() {
             return Some(p);
         }
-        eprintln!(
-            "[skip] SEBAS_TEST_CLAUDE_BIN={p} is not an existing file — ignoring it"
-        );
+        eprintln!("[skip] SEBAS_TEST_CLAUDE_BIN={p} is not an existing file — ignoring it");
     }
-    let exe = if cfg!(windows) { "claude.exe" } else { "claude" };
+    let exe = if cfg!(windows) {
+        "claude.exe"
+    } else {
+        "claude"
+    };
     std::env::split_paths(&std::env::var_os("PATH")?)
         .map(|dir| dir.join(exe))
         .find(|p| p.is_file())
@@ -363,57 +363,74 @@ use sebas_webui::session_backend::{PermissionDecision, PermissionNotice};
 /// 兜底：仅当模板仍带相对名时改写。
 fn pin_absolute_channel(sb: &Sandbox) {
     let cfg = std::fs::read_to_string(&sb.config_path).expect("read sandbox config");
-    if cfg.contains(&format!("channel_path = \"{}\"", forward_slash(&sb.channel_path))) {
+    if cfg.contains(&format!(
+        "channel_path = \"{}\"",
+        forward_slash(&sb.channel_path)
+    )) {
         return;
     }
     let patched = cfg.replace(
         "channel_path = \"core-channel.sock\"",
         &format!("channel_path = \"{}\"", forward_slash(&sb.channel_path)),
     );
-    assert_ne!(cfg, patched, "channel_path line not found in sandbox config");
+    assert_ne!(
+        cfg, patched,
+        "channel_path line not found in sandbox config"
+    );
     std::fs::write(&sb.config_path, patched).expect("write sandbox config");
 }
 
 /// 通道可连接性轮询（named pipe 无文件残留，不能靠 path.exists()）。
 async fn wait_channel_accept(sb: &Sandbox) {
     let hint = sb.path.clone();
-    wait_for("core channel to accept a handshake", Duration::from_secs(20), &hint, move || {
-        let path = sb.channel_path.clone();
-        let secret = sb.core_secret.clone();
-        Box::pin(async move {
-            let Ok(stream) = sebas_ipc::connect(&path).await else {
-                return None;
-            };
-            let (r, mut w) = sebas_ipc::split(stream);
-            let hs = serde_json::to_string(&ChannelHandshake::new(secret)).unwrap();
-            if w.write_all(hs.as_bytes()).await.is_err()
-                || w.write_all(b"\n").await.is_err()
-                || w.flush().await.is_err()
-            {
-                return None;
-            }
-            let mut reader = BufReader::new(r);
-            let mut ack = String::new();
-            match tokio::time::timeout(Duration::from_secs(3), reader.read_line(&mut ack)).await {
-                Ok(Ok(1..)) => Some(()),
-                _ => None,
-            }
-        })
-    })
+    wait_for(
+        "core channel to accept a handshake",
+        Duration::from_secs(20),
+        &hint,
+        move || {
+            let path = sb.channel_path.clone();
+            let secret = sb.core_secret.clone();
+            Box::pin(async move {
+                let Ok(stream) = sebas_ipc::connect(&path).await else {
+                    return None;
+                };
+                let (r, mut w) = sebas_ipc::split(stream);
+                let hs = serde_json::to_string(&ChannelHandshake::new(secret)).unwrap();
+                if w.write_all(hs.as_bytes()).await.is_err()
+                    || w.write_all(b"\n").await.is_err()
+                    || w.flush().await.is_err()
+                {
+                    return None;
+                }
+                let mut reader = BufReader::new(r);
+                let mut ack = String::new();
+                match tokio::time::timeout(Duration::from_secs(3), reader.read_line(&mut ack)).await
+                {
+                    Ok(Ok(1..)) => Some(()),
+                    _ => None,
+                }
+            })
+        },
+    )
     .await;
 }
 
 /// 开一条订阅连接：握手 + Subscribe，吃掉 ack 与 Snapshot 帧，返回读端。
 async fn open_subscriber(sb: &Sandbox) -> BufReader<sebas_ipc::ReadHalf> {
-    let stream = sebas_ipc::connect(&sb.channel_path).await.expect("subscriber connect");
+    let stream = sebas_ipc::connect(&sb.channel_path)
+        .await
+        .expect("subscriber connect");
     let (r, mut w) = sebas_ipc::split(stream);
-    let hs = serde_json::to_string(&ChannelHandshake::new(sb.core_secret.clone()))
-    .unwrap();
+    let hs = serde_json::to_string(&ChannelHandshake::new(sb.core_secret.clone())).unwrap();
     w.write_all(hs.as_bytes()).await.unwrap();
     w.write_all(b"\n").await.unwrap();
-    w.write_all(serde_json::to_string(&CoreChannelRequest::Subscribe).unwrap().as_bytes())
-        .await
-        .unwrap();
+    w.write_all(
+        serde_json::to_string(&CoreChannelRequest::Subscribe)
+            .unwrap()
+            .as_bytes(),
+    )
+    .await
+    .unwrap();
     w.write_all(b"\n").await.unwrap();
     w.flush().await.unwrap();
     let mut reader = BufReader::new(r);
@@ -437,11 +454,12 @@ async fn raw_channel_request(
 ) -> CoreChannelResponse {
     let stream = sebas_ipc::connect(channel).await.expect("request connect");
     let (r, mut w) = sebas_ipc::split(stream);
-    let hs = serde_json::to_string(&ChannelHandshake::new(secret.to_string()))
-    .unwrap();
+    let hs = serde_json::to_string(&ChannelHandshake::new(secret.to_string())).unwrap();
     w.write_all(hs.as_bytes()).await.unwrap();
     w.write_all(b"\n").await.unwrap();
-    w.write_all(serde_json::to_string(req).unwrap().as_bytes()).await.unwrap();
+    w.write_all(serde_json::to_string(req).unwrap().as_bytes())
+        .await
+        .unwrap();
     w.write_all(b"\n").await.unwrap();
     w.flush().await.unwrap();
     let mut reader = BufReader::new(r);
@@ -522,7 +540,10 @@ async fn drive_parked_perm_to_decision(
     )
     .await;
     assert!(
-        matches!(resp, CoreChannelResponse::Ok | CoreChannelResponse::Spawned { .. }),
+        matches!(
+            resp,
+            CoreChannelResponse::Ok | CoreChannelResponse::Spawned { .. }
+        ),
         "ensure must be accepted: {resp:?}"
     );
 
@@ -838,10 +859,7 @@ impl NativeTurnTrace {
 }
 
 /// 读会话详情的转录条目（element_type, content）。
-async fn fetch_session_entries(
-    cli: &reqwest::Client,
-    url: &str,
-) -> Option<Vec<(String, String)>> {
+async fn fetch_session_entries(cli: &reqwest::Client, url: &str) -> Option<Vec<(String, String)>> {
     let v = cli
         .get(url)
         .send()
@@ -1121,24 +1139,29 @@ async fn queue_two_submissions(
     let content_cli = cli.clone();
     let content_url = detail_url.clone();
     let _content_hint = hint.to_path_buf();
-    wait_for("first turn content to stream", Duration::from_secs(40), hint, move || {
-        let cli = content_cli.clone();
-        let url = content_url.clone();
-        Box::pin(async move {
-            let v = cli
-                .get(&url)
-                .send()
-                .await
-                .ok()?
-                .json::<serde_json::Value>()
-                .await
-                .ok()?;
-            let streamed = v["entries"]
-                .as_array()
-                .is_some_and(|b| b.iter().any(|e| e["kind"].as_str() == Some("content")));
-            streamed.then_some(())
-        })
-    })
+    wait_for(
+        "first turn content to stream",
+        Duration::from_secs(40),
+        hint,
+        move || {
+            let cli = content_cli.clone();
+            let url = content_url.clone();
+            Box::pin(async move {
+                let v = cli
+                    .get(&url)
+                    .send()
+                    .await
+                    .ok()?
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()?;
+                let streamed = v["entries"]
+                    .as_array()
+                    .is_some_and(|b| b.iter().any(|e| e["kind"].as_str() == Some("content")));
+                streamed.then_some(())
+            })
+        },
+    )
     .await;
 
     for (tag, text) in [("b", "queued-round5-b"), ("c", "queued-round5-c")] {
@@ -1149,21 +1172,36 @@ async fn queue_two_submissions(
         )
         .await
         .unwrap_or_else(|e| panic!("submit {tag}: {e}"));
-        assert_eq!(status, 200, "busy-time submission {tag} must be accepted: {body}");
+        assert_eq!(
+            status, 200,
+            "busy-time submission {tag} must be accepted: {body}"
+        );
     }
 
     // 两条都已在 pending 里（seed 同步落账；条目开始消费前有 ≈1s 窗口）。
     let poll_cli = cli.clone();
     let poll_url = detail_url.clone();
-    let detail = wait_for("both submissions to ride in pending", Duration::from_secs(8), hint, move || {
-        let cli = poll_cli.clone();
-        let url = poll_url.clone();
-        Box::pin(async move {
-            let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
-            let n = v["pending"].as_array().map(Vec::len)?;
-            (n == 2).then_some(v)
-        })
-    })
+    let detail = wait_for(
+        "both submissions to ride in pending",
+        Duration::from_secs(8),
+        hint,
+        move || {
+            let cli = poll_cli.clone();
+            let url = poll_url.clone();
+            Box::pin(async move {
+                let v = cli
+                    .get(&url)
+                    .send()
+                    .await
+                    .ok()?
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()?;
+                let n = v["pending"].as_array().map(Vec::len)?;
+                (n == 2).then_some(v)
+            })
+        },
+    )
     .await;
     let pending = detail["pending"].as_array().expect("pending list");
     let id_of = |text: &str| {
@@ -1174,7 +1212,11 @@ async fn queue_two_submissions(
             .as_u64()
             .expect("pending id")
     };
-    (detail_url, id_of("queued-round5-b"), id_of("queued-round5-c"))
+    (
+        detail_url,
+        id_of("queued-round5-b"),
+        id_of("queued-round5-c"),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1217,24 +1259,29 @@ async fn queue_three_pending(
     let content_cli = cli.clone();
     let content_url = detail_url.clone();
     let content_hint = hint.to_path_buf();
-    wait_for("first turn content to stream", Duration::from_secs(40), &content_hint, move || {
-        let cli = content_cli.clone();
-        let url = content_url.clone();
-        Box::pin(async move {
-            let v = cli
-                .get(&url)
-                .send()
-                .await
-                .ok()?
-                .json::<serde_json::Value>()
-                .await
-                .ok()?;
-            let streamed = v["entries"]
-                .as_array()
-                .is_some_and(|b| b.iter().any(|e| e["kind"].as_str() == Some("content")));
-            streamed.then_some(())
-        })
-    })
+    wait_for(
+        "first turn content to stream",
+        Duration::from_secs(40),
+        &content_hint,
+        move || {
+            let cli = content_cli.clone();
+            let url = content_url.clone();
+            Box::pin(async move {
+                let v = cli
+                    .get(&url)
+                    .send()
+                    .await
+                    .ok()?
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()?;
+                let streamed = v["entries"]
+                    .as_array()
+                    .is_some_and(|b| b.iter().any(|e| e["kind"].as_str() == Some("content")));
+                streamed.then_some(())
+            })
+        },
+    )
     .await;
 
     // 三条普通提交入栈（会话在飞 → 全部 pending）。
@@ -1250,7 +1297,10 @@ async fn queue_three_pending(
         )
         .await
         .unwrap_or_else(|e| panic!("submit {tag}: {e}"));
-        assert_eq!(status, 200, "busy-time submission {tag} must be accepted: {body}");
+        assert_eq!(
+            status, 200,
+            "busy-time submission {tag} must be accepted: {body}"
+        );
     }
 
     // 三条都在 pending。
@@ -1264,7 +1314,14 @@ async fn queue_three_pending(
             let cli = poll_cli.clone();
             let url = poll_url.clone();
             Box::pin(async move {
-                let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+                let v = cli
+                    .get(&url)
+                    .send()
+                    .await
+                    .ok()?
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()?;
                 let n = v["pending"].as_array().map(Vec::len)?;
                 (n == 3).then_some(v)
             })
@@ -1280,7 +1337,12 @@ async fn queue_three_pending(
             .as_u64()
             .expect("pending id")
     };
-    (detail_url, id_of("queued-round5-b"), id_of("queued-round5-c"), id_of("queued-round5-p"))
+    (
+        detail_url,
+        id_of("queued-round5-b"),
+        id_of("queued-round5-c"),
+        id_of("queued-round5-p"),
+    )
 }
 
 /// 轮询直到某进程日志同时出现全部给定片段（posture 告警在启动早期落盘，
@@ -1342,6 +1404,7 @@ fn seed_spawning_placeholder(sb: &Sandbox, reference: &str, kind: &str) {
         label: None,
         prompt_preview: None,
         awaiting_first_prompt: true,
+        task_id: None,
     };
     row.save(&conn).expect("seed session_map row");
 }
@@ -1402,11 +1465,9 @@ fn state_dir_walk(dir: &std::path::Path) -> Vec<String> {
 
 /// 只读打开一个 SQLite 库并对 `sqlite_master` 计数指定表。
 fn state_dir_table_count(db: &std::path::Path, tables: &[&str]) -> usize {
-    let conn = rusqlite::Connection::open_with_flags(
-        db,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .unwrap_or_else(|e| panic!("open {}: {e}", db.display()));
+    let conn =
+        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap_or_else(|e| panic!("open {}: {e}", db.display()));
     let mut hits = 0;
     for t in tables {
         let n: i64 = conn
@@ -1422,699 +1483,16 @@ fn state_dir_table_count(db: &std::path::Path, tables: &[&str]) -> usize {
 }
 
 /// 等会话回合到 Done，返回会话详情（轮询 /api/sessions/{key}）。
-async fn state_dir_wait_done(
-    cli: &reqwest::Client,
-    sb: &Sandbox,
-    key: &str,
-) -> serde_json::Value {
+async fn state_dir_wait_done(cli: &reqwest::Client, sb: &Sandbox, key: &str) -> serde_json::Value {
     let url = format!("{}/api/sessions/{key}", sb.webui_url());
     let hint = sb.path.clone();
-    wait_for("session turn to reach Done", Duration::from_secs(30), &hint, move || {
-        let cli = cli.clone();
-        let url = url.clone();
-        Box::pin(async move {
-            let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
-            (v["status_slug"].as_str() == Some("done")).then_some(v)
-        })
-    })
-    .await
-}
-
-mod session_lifecycle {
-    use super::*;
-
-/// fix-webui-qa-round6 2.1（project-session-actions「crash 重生后行名仍取首条
-/// prompt」）：fake-claude 会话首条 prompt=hello → 发 `crash`（子进程中途崩死、
-/// 映射退役）→ 再发 `hi`（重生续聊）——行名的 prompt_preview 必须始终是首条
-/// "hello"，绝不漂向崩溃回合或重生回合的 prompt。回归钉：首条锚定是死代码、
-/// 行名实走 user_prompt 回退（crash 后被改写为崩溃回合 prompt，QA-1 实锤）
-/// 在这里当场爆。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn row_name_stays_anchored_to_the_first_prompt_across_crash_respawn() {
-    let sb = Sandbox::new("testsuite_e2e", "row-name-crash-respawn");
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "project_id": project_id, "prompt": "hello", "agent": "claude" }),
-    )
-    .await
-    .expect("create session");
-    assert_eq!(status, 201, "create session: {body}");
-    let key = body["key"].as_str().expect("key").to_string();
-    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
-
-    // 首轮落定：行名预览 = 首条 prompt。
-    wait_turn_done(&cli, &sb, &detail_url).await;
-    let row_of = {
-        let cli = cli.clone();
-        let url = format!("{}/api/sessions", sb.webui_url());
-        let key = key.clone();
+    wait_for(
+        "session turn to reach Done",
+        Duration::from_secs(30),
+        &hint,
         move || {
             let cli = cli.clone();
             let url = url.clone();
-            let key = key.clone();
-            Box::pin(async move {
-                let v = cli
-                    .get(&url)
-                    .send()
-                    .await
-                    .ok()?
-                    .json::<serde_json::Value>()
-                    .await
-                    .ok()?;
-                v["recent_sessions"]
-                    .as_array()?
-                    .iter()
-                    .find(|r| r["encoded_key"].as_str() == Some(key.as_str()))
-                    .cloned()
-            })
-        }
-    };
-    let row = wait_for(
-        "first-prompt preview to appear on the row",
-        Duration::from_secs(15),
-        &sb.path,
-        {
-            let row_of = row_of.clone();
-            move || {
-                let row_of = row_of.clone();
-                Box::pin(async move {
-                    row_of()
-                        .await
-                        .and_then(|r| {
-                            r["prompt_preview"]
-                                .as_str()
-                                .map(str::to_string)
-                        })
-                })
-            }
-        },
-    )
-    .await;
-    assert_eq!(row, "hello", "the row is named by the first prompt");
-
-    // 中途崩死：`crash` 触发词让桩出一帧后 exit(1)——终态错误 → 映射退役。
-    let (st, b) = post_json(
-        &cli,
-        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
-        serde_json::json!({ "message": "crash" }),
-    )
-    .await
-    .expect("send crash");
-    assert_eq!(st, 200, "crash accepted: {b}");
-    wait_entry_containing(&cli, &sb, &key, "boom").await;
-    // 终态错误收尾（退役）落定：行离开在飞态（failed/dormant 均为终态呈现）。
-    wait_for(
-        "crashed session to leave the engaged state",
-        Duration::from_secs(20),
-        &sb.path,
-        {
-            let row_of = row_of.clone();
-            move || {
-                let row_of = row_of.clone();
-                Box::pin(async move {
-                    row_of().await.and_then(|r| {
-                        let slug = r["status_slug"].as_str()?.to_string();
-                        matches!(slug.as_str(), "failed" | "dormant" | "done").then_some(())
-                    })
-                })
-            }
-        },
-    )
-    .await;
-
-    // 崩溃后行名仍锚定首条（绝不漂成 "crash"）。
-    let row = wait_for(
-        "row preview to stay anchored after the crash",
-        Duration::from_secs(15),
-        &sb.path,
-        {
-            let row_of = row_of.clone();
-            move || {
-                let row_of = row_of.clone();
-                Box::pin(async move {
-                    row_of().await.and_then(|r| {
-                        r["prompt_preview"].as_str().map(str::to_string)
-                    })
-                })
-            }
-        },
-    )
-    .await;
-    assert_eq!(
-        row, "hello",
-        "the crash turn's prompt must never become the row name"
-    );
-
-    // 重生续聊：下一条消息拉起子进程，回合照常完成。
-    let (st, b) = post_json(
-        &cli,
-        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
-        serde_json::json!({ "message": "hi" }),
-    )
-    .await
-    .expect("send hi after respawn");
-    assert_eq!(st, 200, "respawn message accepted: {b}");
-    wait_turn_done(&cli, &sb, &detail_url).await;
-
-    // 重生后行名仍是首条 "hello"（也绝不漂成 "hi"）。
-    let row = row_of().await.expect("row after respawn");
-    assert_eq!(
-        row["prompt_preview"].as_str(),
-        Some("hello"),
-        "the row name must stay anchored to the first prompt across the respawn: {row}"
-    );
-}
-/// 9.3 进程级 e2e：**core 与 node 是两个进程**。
-///
-/// 覆盖：一次性 bootstrap token 配对 → 节点在工作台可见 → 项目路径由**节点**判定
-/// → 杀节点后如实离线 → 节点带原凭据重启后免刷新恢复（core 没动）→ 杀主控重启后
-/// 节点自动重连并重新登记（主控视图重建，执行侧不受影响）。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn remote_node_pairs_survives_node_and_core_restarts() {
-    let sb = Sandbox::new("testsuite_e2e", "remote-node");
-    sb.enable_node_link();
-    let node_work = sb.node_work_dir();
-    let cli = http_client();
-    let mut core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-
-    // 1) 配对：token 只打印一次，节点用它换长期凭据。
-    let token = wait_bootstrap_token(&sb).await;
-    let mut node = sb.spawn_node("itest-node", Some(&token));
-    wait_node_status(&cli, &sb, "itest-node", "online").await;
-
-    // 2) 远端项目注册：主控不 stat 这个路径，**节点**说了算。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/projects", sb.webui_url()),
-        serde_json::json!({
-            "path": node_work.to_string_lossy(),
-            "node_id": "itest-node",
-        }),
-    )
-    .await
-    .expect("register remote project");
-    assert_eq!(status, 201, "远端项目注册应由节点校验通过: {body}");
-
-    // 3) 在**节点上**建会话并跑一轮：项目决定节点（d1），所以带上项目 id。
-    let project_id = body["id"].as_str().expect("project id").to_string();
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({
-            "prompt": "hello",
-            "agent": "echo",
-            "project_id": project_id,
-        }),
-    )
-    .await
-    .expect("create remote session");
-    assert_eq!(status, 201, "远端会话应建立成功: {body}");
-    let key = body["key"].as_str().expect("session key").to_string();
-
-    // 会话真的要落到节点上：投影把节点维度带到了工作台。
-    let row = wait_for(
-        "远端会话出现在工作台上并标注其节点",
-        Duration::from_secs(20),
-        &sb.path.clone(),
-        {
-            let cli = cli.clone();
-            let url = format!("{}/api/sessions", sb.webui_url());
-            let key = key.clone();
-            move || {
-                let cli = cli.clone();
-                let url = url.clone();
-                let key = key.clone();
-                Box::pin(async move {
-                    let v = cli
-                        .get(&url)
-                        .send()
-                        .await
-                        .ok()?
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()?;
-                    let rows = v.get("recent_sessions")?.as_array()?.clone();
-                    rows.into_iter().find(|r| {
-                        r.get("encoded_key").and_then(|k| k.as_str()) == Some(key.as_str())
-                    })
-                })
-            }
-        },
-    )
-    .await;
-    assert_eq!(
-        row["remote"]["node_id"].as_str(),
-        Some("itest-node"),
-        "远端行必须点名它跑在哪台机器上: {row}"
-    );
-
-    // 4) 一轮跑通：echo 执行体的应答经节点日志 → 事件流 → 工作台转写可见。
-    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
-    let transcript = wait_for(
-        "远端会话的转写出现 echo 应答",
-        Duration::from_secs(20),
-        &sb.path.clone(),
-        {
-            let cli = cli.clone();
-            let url = detail_url.clone();
-            move || {
-                let cli = cli.clone();
-                let url = url.clone();
-                Box::pin(async move {
-                    let v = cli
-                        .get(&url)
-                        .send()
-                        .await
-                        .ok()?
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()?;
-                    let text = v
-                        .get("entries")?
-                        .as_array()?
-                        .iter()
-                        .filter_map(|b| b.get("content").and_then(|c| c.as_str()))
-                        .collect::<Vec<_>>()
-                        .join("");
-                    text.contains("echo: hello").then_some(text)
-                })
-            }
-        },
-    )
-    .await;
-    assert!(transcript.contains("echo: hello"), "{transcript}");
-
-    // 5) kill 主控重启：执行事实在节点上，重建视图后**对账补回**这一段。
-    core.kill().await.expect("kill core");
-    let _ = core.wait().await;
-    let mut core = sb.spawn_core();
-    wait_node_status(&cli, &sb, "itest-node", "online").await;
-    let recovered = wait_for(
-        "主控重启后对账补回远端会话的转写",
-        Duration::from_secs(30),
-        &sb.path.clone(),
-        {
-            let cli = cli.clone();
-            let url = detail_url.clone();
-            move || {
-                let cli = cli.clone();
-                let url = url.clone();
-                Box::pin(async move {
-                    let v = cli
-                        .get(&url)
-                        .send()
-                        .await
-                        .ok()?
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()?;
-                    let text = v
-                        .get("entries")?
-                        .as_array()?
-                        .iter()
-                        .filter_map(|b| b.get("content").and_then(|c| c.as_str()))
-                        .collect::<Vec<_>>()
-                        .join("");
-                    text.contains("echo: hello").then_some(text)
-                })
-            }
-        },
-    )
-    .await;
-    assert!(
-        recovered.contains("echo: hello"),
-        "主控重启后必须能从节点回拉出这轮事实（对账补齐）: {recovered}"
-    );
-
-    // 6) 悬空审批：`run:` 触发执行体里的受门控动作 → 节点停住、上报、等人批。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
-        serde_json::json!({ "message": "run: echo gated" }),
-    )
-    .await
-    .expect("send gated prompt");
-    assert_eq!(status, 200, "{body}");
-
-    // 「等待 ≠ 运行中」（spec 8.4）：有悬空审批的会话必须呈现为 waiting。
-    let waiting = wait_for(
-        "悬空审批把远端会话呈现为等待",
-        Duration::from_secs(20),
-        &sb.path.clone(),
-        {
-            let cli = cli.clone();
-            let url = format!("{}/api/sessions", sb.webui_url());
-            let key = key.clone();
-            move || {
-                let cli = cli.clone();
-                let url = url.clone();
-                let key = key.clone();
-                Box::pin(async move {
-                    let v = cli
-                        .get(&url)
-                        .send()
-                        .await
-                        .ok()?
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()?;
-                    let rows = v.get("recent_sessions")?.as_array()?.clone();
-                    let row = rows.into_iter().find(|r| {
-                        r.get("encoded_key").and_then(|k| k.as_str()) == Some(key.as_str())
-                    })?;
-                    let parked = row.get("remote")?.get("parked_approvals")?.as_u64()?;
-                    (parked > 0).then_some(row)
-                })
-            }
-        },
-    )
-    .await;
-    assert_eq!(
-        waiting["status_slug"].as_str(),
-        Some("waiting"),
-        "{waiting}"
-    );
-
-    // 7) 杀节点：如实离线（不是"已终止"，也不是继续假装在线）。
-    node.kill().await.expect("kill node");
-    let _ = node.wait().await;
-    wait_node_status(&cli, &sb, "itest-node", "offline").await;
-
-    // 8) 节点带**原凭据**重启（不给 token）：主控进程没动，应免刷新恢复，
-    //    且节点上那个会话还在（链路断了不等于会话没了）。
-    let mut node = sb.spawn_node("itest-node", None);
-    wait_node_status(&cli, &sb, "itest-node", "online").await;
-    wait_for(
-        "重启后的节点仍持有那个会话",
-        Duration::from_secs(30),
-        &sb.path.clone(),
-        {
-            let cli = cli.clone();
-            let url = detail_url.clone();
-            move || {
-                let cli = cli.clone();
-                let url = url.clone();
-                Box::pin(async move {
-                    let v = cli
-                        .get(&url)
-                        .send()
-                        .await
-                        .ok()?
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()?;
-                    let text = v
-                        .get("entries")?
-                        .as_array()?
-                        .iter()
-                        .filter_map(|b| b.get("content").and_then(|c| c.as_str()))
-                        .collect::<Vec<_>>()
-                        .join("");
-                    text.contains("echo: hello").then_some(text)
-                })
-            }
-        },
-    )
-    .await;
-
-    core.kill().await.ok();
-    node.kill().await.ok();
-}
-
-/// Startup: core + standalone webui come up, webui reports the core channel
-/// reachable and /health serves.
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn detached_startup_reports_reachability() {
-    let sb = Sandbox::new("testsuite_e2e", "startup");
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-
-    wait_reachable(&cli, &sb).await;
-    let health_url = format!("{}/health", sb.webui_url());
-    let hint = sb.path.clone();
-    let healthy = wait_for(
-        "webui /health ok",
-        Duration::from_secs(10),
-        &hint,
-        move || {
-            let cli = cli.clone();
-            let url = health_url.clone();
-            Box::pin(async move {
-                cli.get(&url)
-                    .send()
-                    .await
-                    .ok()?
-                    .text()
-                    .await
-                    .ok()
-                    .map(|b| b.trim() == "ok")
-                    .filter(|ok| *ok)
-            })
-        },
-    )
-    .await;
-    assert!(healthy, "webui /health must report ok once serving");
-}
-
-/// Full session round-trip over the webui HTTP surface: create (ACP) →
-/// core channel → fake-claude turn → Done with the stub's reply visible.
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn session_round_trip_via_webui_http() {
-    let sb = Sandbox::new("testsuite_e2e", "round-trip");
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "project_id": project_id.clone(), "prompt": "hello", "agent": "claude" }),
-    )
-    .await
-    .expect("create session");
-    assert_eq!(status, 201, "create session: {body}");
-    let key = body["key"]
-        .as_str()
-        .expect("key in create response")
-        .to_string();
-    assert!(!key.is_empty());
-
-    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
-    let hint = sb.path.clone();
-    let detail = wait_for(
-        "session turn to reach Done",
-        Duration::from_secs(25),
-        &hint,
-        move || {
-            let cli = cli.clone();
-            let url = detail_url.clone();
-            Box::pin(async move {
-                let v = cli
-                    .get(&url)
-                    .send()
-                    .await
-                    .ok()?
-                    .json::<serde_json::Value>()
-                    .await
-                    .ok()?;
-                let done = v["status_slug"].as_str() == Some("done")
-                    || v["status"]
-                        .as_str()
-                        .is_some_and(|s| s.eq_ignore_ascii_case("done"));
-                done.then_some(v)
-            })
-        },
-    )
-    .await;
-
-    let transcript = detail["entries"]
-        .as_array()
-        .map(|blocks| {
-            blocks
-                .iter()
-                .filter_map(|b| b["content"].as_str())
-                .collect::<Vec<_>>()
-                .join("")
-        })
-        .unwrap_or_default();
-    assert!(
-        transcript.contains("hello") && transcript.contains("world"),
-        "turn transcript must carry fake-claude's reply, got: {transcript:?}"
-    );
-}
-
-// ---- session-parallel-liveness-and-unread-polish 1.2：双会话并行 spawn ----
-/// Two 0-turn placeholder sessions spawn concurrently: while the first
-/// session's child is mid-handshake (fake-claude `--delay-init-ms 2500`),
-/// the second session's spawn instruction SHALL NOT queue behind the first
-/// handshake. The ordering that proves it: B (instant "hello" turn) finishes
-/// BEFORE A (800ms "stream" turn after an identical handshake) — serialized
-/// spawn flips the order (B's handshake only starts after A activates).
-///
-/// Fix basis: `dispatch_out_without_feishu` spawns a dedicated task per
-/// WebSpawn (`src/dispatch.rs`, design D1 candidate A). Before the fix this
-/// journey takes ≥ 2 handshakes serialised; after it the two handshakes
-/// overlap.
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn two_sessions_spawn_and_turn_concurrently() {
-    let sb = Sandbox::new("testsuite_e2e", "parallel-spawn");
-    // Stretch the handshake so the two spawn instructions measurably overlap:
-    // every fake-claude child answers initialize only after 2.5s.
-    sb.append_acp_args(&["--delay-init-ms", "2500"]);
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-
-    // Two first messages back-to-back: both sessions enter the spawn window.
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status_a, body_a) = post_json(
-        &cli,
-        &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "project_id": project_id.clone(), "prompt": "stream", "agent": "claude" }),
-    )
-    .await
-    .expect("create session A");
-    assert_eq!(status_a, 201, "create A: {body_a}");
-    let key_a = body_a["key"].as_str().expect("key A").to_string();
-
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status_b, body_b) = post_json(
-        &cli,
-        &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "project_id": project_id.clone(), "prompt": "hello", "agent": "claude" }),
-    )
-    .await
-    .expect("create session B");
-    assert_eq!(status_b, 201, "create B: {body_b}");
-    let key_b = body_b["key"].as_str().expect("key B").to_string();
-
-    // B 完成时（hello 回合零等待）A 必须**还没**完成（stream 含 800ms 拖
-    // 尾）。串行 spawn 下 B 的握手要等 A 激活 → B done ≈ 5s > A done ≈ 3.3s；
-    // 并行 spawn 下两握手重叠 → B done ≈ 2.6s < A done ≈ 3.3s。
-    async fn fetch_detail(cli: &reqwest::Client, url: &str) -> Option<serde_json::Value> {
-        cli.get(url).send().await.ok()?.json().await.ok()
-    }
-    fn is_done(v: &serde_json::Value) -> bool {
-        v["status_slug"].as_str() == Some("done")
-            || v["status"]
-                .as_str()
-                .is_some_and(|s| s.eq_ignore_ascii_case("done"))
-    }
-
-    let url_a = format!("{}/api/sessions/{key_a}", sb.webui_url());
-    let url_b = format!("{}/api/sessions/{key_b}", sb.webui_url());
-    let hint = sb.path.clone();
-    let b_done_before_a = wait_for(
-        "B finishes its turn while A is still working",
-        Duration::from_secs(20),
-        &hint,
-        {
-            let cli = cli.clone();
-            let url_a = url_a.clone();
-            let url_b = url_b.clone();
-            move || {
-                let cli = cli.clone();
-                let url_a = url_a.clone();
-                let url_b = url_b.clone();
-                Box::pin(async move {
-                    let b = fetch_detail(&cli, &url_b).await?;
-                    if !is_done(&b) {
-                        return None;
-                    }
-                    let a = fetch_detail(&cli, &url_a).await?;
-                    // B done 且 A 未 done = 两会话确实并行活着。
-                    (!is_done(&a)).then_some(true)
-                })
-            }
-        },
-    )
-    .await;
-    assert!(
-        b_done_before_a,
-        "B (instant hello turn) must finish before A (2.5s handshake + 800ms \
-         stream); B only finishing after A means the second spawn waited for \
-         the first session — `core.log` in the kept sandbox dir has the \
-         dispatch timeline"
-    );
-
-    // B 完成后 A 也必须顺利完成自己的回合（两个活子进程都走到了 done）。
-    let hint = sb.path.clone();
-    let a_done = wait_for(
-        "A finishes its stream turn",
-        Duration::from_secs(20),
-        &hint,
-        {
-            let cli = cli.clone();
-            let url_a = url_a.clone();
-            move || {
-                let cli = cli.clone();
-                let url_a = url_a.clone();
-                Box::pin(async move { fetch_detail(&cli, &url_a).await.filter(is_done) })
-            }
-        },
-    )
-    .await;
-    assert!(is_done(&a_done), "A must complete its stream turn too");
-}
-
-// ---- workbench-interaction-polish 6.1：cancel 链路（BFF → core channel）----
-/// Cancel 链路的类型化拒绝：未知 key 404；已知但空闲（无在飞 turn）的会话
-/// 409——「无事可取消」不再伪造成功。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn cancel_typed_rejections_over_webui_http() {
-    let sb = Sandbox::new("testsuite_e2e", "cancel-reject");
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-
-    // 未知 key → 404 typed rejection。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions/web%00ghost/cancel", sb.webui_url()),
-        serde_json::json!({}),
-    )
-    .await
-    .expect("cancel unknown");
-    assert_eq!(status, 404, "unknown key must 404: {body}");
-
-    // 已知会话、无在飞 turn（首个 turn 已收敛）→ 409 空闲。
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "project_id": project_id.clone(), "prompt": "hello", "agent": "claude" }),
-    )
-    .await
-    .expect("create session");
-    assert_eq!(status, 201, "create session: {body}");
-    let key = body["key"].as_str().expect("key").to_string();
-    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
-    wait_for(
-        "session turn to reach Done",
-        Duration::from_secs(25),
-        &sb.path.clone(),
-        || {
-            let cli = cli.clone();
-            let url = detail_url.clone();
             Box::pin(async move {
                 let v = cli
                     .get(&url)
@@ -2128,848 +1506,680 @@ async fn cancel_typed_rejections_over_webui_http() {
             })
         },
     )
-    .await;
-
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions/{key}/cancel", sb.webui_url()),
-        serde_json::json!({}),
-    )
     .await
-    .expect("cancel idle");
-    assert_eq!(status, 409, "idle session must 409: {body}");
-    assert!(
-        body["error"].as_str().unwrap_or("").contains("空闲"),
-        "{body}"
-    );
-
-    // 会话不受拒绝影响：仍然可继续对话（补一条消息也收敛）。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
-        serde_json::json!({ "message": "hello" }),
-    )
-    .await
-    .expect("follow-up after idle cancel");
-    assert_eq!(status, 200, "{body}");
 }
 
-/// 真实中断路径（受 stub 限制如实标注）：fake-claude 桩对 control_request
-/// interrupt 的语义是「turn 以错误结果收尾 + 子进程退出 → 驱动 respawn
-/// with resume」。这里验证 cancel 链路端到端打通——200、turn 离开
-/// working、会话存活可继续——「真模型的中断体验」另需真实凭据，沙箱只能
-/// 证到桩级（AGENTS.md 诚实边界）。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn cancel_interrupts_in_flight_turn_over_webui_http() {
-    let sb = Sandbox::new("testsuite_e2e", "cancel-interrupt");
-    // 每个 turn 在飞 ≈2s（5 帧 × 250ms + slow-ms 800），给取消留窗口。
-    sb.slow_fake_agent(800);
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
+mod session_lifecycle {
+    use super::*;
 
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "project_id": project_id.clone(), "prompt": "stream", "agent": "claude" }),
-    )
-    .await
-    .expect("create session");
-    assert_eq!(status, 201, "{body}");
-    let key = body["key"].as_str().expect("key").to_string();
+    /// fix-webui-qa-round6 2.1（project-session-actions「crash 重生后行名仍取首条
+    /// prompt」）：fake-claude 会话首条 prompt=hello → 发 `crash`（子进程中途崩死、
+    /// 映射退役）→ 再发 `hi`（重生续聊）——行名的 prompt_preview 必须始终是首条
+    /// "hello"，绝不漂向崩溃回合或重生回合的 prompt。回归钉：首条锚定是死代码、
+    /// 行名实走 user_prompt 回退（crash 后被改写为崩溃回合 prompt，QA-1 实锤）
+    /// 在这里当场爆。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn row_name_stays_anchored_to_the_first_prompt_across_crash_respawn() {
+        let sb = Sandbox::new("testsuite_e2e", "row-name-crash-respawn");
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions", sb.webui_url()),
+            serde_json::json!({ "project_id": project_id, "prompt": "hello", "agent": "claude" }),
+        )
+        .await
+        .expect("create session");
+        assert_eq!(status, 201, "create session: {body}");
+        let key = body["key"].as_str().expect("key").to_string();
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
 
-    // 等 turn 开轮（WORKING）再取消。
-    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
-    wait_for(
-        "session turn to reach Working",
-        Duration::from_secs(25),
-        &sb.path.clone(),
-        || {
+        // 首轮落定：行名预览 = 首条 prompt。
+        wait_turn_done(&cli, &sb, &detail_url).await;
+        let row_of = {
             let cli = cli.clone();
-            let url = detail_url.clone();
-            Box::pin(async move {
-                let v = cli
-                    .get(&url)
-                    .send()
-                    .await
-                    .ok()?
-                    .json::<serde_json::Value>()
-                    .await
-                    .ok()?;
-                (v["status_slug"].as_str() == Some("working")).then_some(v)
-            })
-        },
-    )
-    .await;
+            let url = format!("{}/api/sessions", sb.webui_url());
+            let key = key.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                let key = key.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    v["recent_sessions"]
+                        .as_array()?
+                        .iter()
+                        .find(|r| r["encoded_key"].as_str() == Some(key.as_str()))
+                        .cloned()
+                })
+            }
+        };
+        let row = wait_for(
+            "first-prompt preview to appear on the row",
+            Duration::from_secs(15),
+            &sb.path,
+            {
+                let row_of = row_of.clone();
+                move || {
+                    let row_of = row_of.clone();
+                    Box::pin(async move {
+                        row_of()
+                            .await
+                            .and_then(|r| r["prompt_preview"].as_str().map(str::to_string))
+                    })
+                }
+            },
+        )
+        .await;
+        assert_eq!(row, "hello", "the row is named by the first prompt");
 
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions/{key}/cancel", sb.webui_url()),
-        serde_json::json!({}),
-    )
-    .await
-    .expect("cancel in-flight");
-    assert_eq!(status, 200, "cancel must be accepted: {body}");
-    assert_eq!(body["status"].as_str(), Some("cancelled"), "{body}");
+        // 中途崩死：`crash` 触发词让桩出一帧后 exit(1)——终态错误 → 映射退役。
+        let (st, b) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+            serde_json::json!({ "message": "crash" }),
+        )
+        .await
+        .expect("send crash");
+        assert_eq!(st, 200, "crash accepted: {b}");
+        wait_entry_containing(&cli, &sb, &key, "boom").await;
+        // 终态错误收尾（退役）落定：行离开在飞态（failed/dormant 均为终态呈现）。
+        wait_for(
+            "crashed session to leave the engaged state",
+            Duration::from_secs(20),
+            &sb.path,
+            {
+                let row_of = row_of.clone();
+                move || {
+                    let row_of = row_of.clone();
+                    Box::pin(async move {
+                        row_of().await.and_then(|r| {
+                            let slug = r["status_slug"].as_str()?.to_string();
+                            matches!(slug.as_str(), "failed" | "dormant" | "done").then_some(())
+                        })
+                    })
+                }
+            },
+        )
+        .await;
 
-    // turn 离开 working；会话保留且可继续（child 退出后驱动 respawn）。
-    wait_for(
-        "session turn to leave Working",
-        Duration::from_secs(25),
-        &sb.path.clone(),
-        || {
-            let cli = cli.clone();
-            let url = detail_url.clone();
-            Box::pin(async move {
-                let v = cli
-                    .get(&url)
-                    .send()
-                    .await
-                    .ok()?
-                    .json::<serde_json::Value>()
-                    .await
-                    .ok()?;
-                (v["status_slug"].as_str() != Some("working")).then_some(v)
-            })
-        },
-    )
-    .await;
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
-        serde_json::json!({ "message": "hello" }),
-    )
-    .await
-    .expect("follow-up after cancel");
-    assert_eq!(status, 200, "session survives a cancel: {body}");
-}
+        // 崩溃后行名仍锚定首条（绝不漂成 "crash"）。
+        let row = wait_for(
+            "row preview to stay anchored after the crash",
+            Duration::from_secs(15),
+            &sb.path,
+            {
+                let row_of = row_of.clone();
+                move || {
+                    let row_of = row_of.clone();
+                    Box::pin(async move {
+                        row_of()
+                            .await
+                            .and_then(|r| r["prompt_preview"].as_str().map(str::to_string))
+                    })
+                }
+            },
+        )
+        .await;
+        assert_eq!(
+            row, "hello",
+            "the crash turn's prompt must never become the row name"
+        );
 
-/// core 不可达时 cancel 的诚实退化：503，绝不伪造成功。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn cancel_without_core_answers_503() {
-    let sb = Sandbox::new("testsuite_e2e", "cancel-503");
-    let cli = http_client();
-    let mut core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
+        // 重生续聊：下一条消息拉起子进程，回合照常完成。
+        let (st, b) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+            serde_json::json!({ "message": "hi" }),
+        )
+        .await
+        .expect("send hi after respawn");
+        assert_eq!(st, 200, "respawn message accepted: {b}");
+        wait_turn_done(&cli, &sb, &detail_url).await;
 
-    // 先建一个会话（idle 即可——503 来自通道不可达，先于 idle 判定）。
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status, body) = post_json(
+        // 重生后行名仍是首条 "hello"（也绝不漂成 "hi"）。
+        let row = row_of().await.expect("row after respawn");
+        assert_eq!(
+            row["prompt_preview"].as_str(),
+            Some("hello"),
+            "the row name must stay anchored to the first prompt across the respawn: {row}"
+        );
+    }
+    /// 9.3 进程级 e2e：**core 与 node 是两个进程**。
+    ///
+    /// 覆盖：一次性 bootstrap token 配对 → 节点在工作台可见 → 项目路径由**节点**判定
+    /// → 杀节点后如实离线 → 节点带原凭据重启后免刷新恢复（core 没动）→ 杀主控重启后
+    /// 节点自动重连并重新登记（主控视图重建，执行侧不受影响）。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn remote_node_pairs_survives_node_and_core_restarts() {
+        let sb = Sandbox::new("testsuite_e2e", "remote-node");
+        sb.enable_node_link();
+        let node_work = sb.node_work_dir();
+        let cli = http_client();
+        let mut core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
+
+        // 1) 配对：token 只打印一次，节点用它换长期凭据。
+        let token = wait_bootstrap_token(&sb).await;
+        let mut node = sb.spawn_node("itest-node", Some(&token));
+        wait_node_status(&cli, &sb, "itest-node", "online").await;
+
+        // 2) 远端项目注册：主控不 stat 这个路径，**节点**说了算。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/projects", sb.webui_url()),
+            serde_json::json!({
+                "path": node_work.to_string_lossy(),
+                "node_id": "itest-node",
+            }),
+        )
+        .await
+        .expect("register remote project");
+        assert_eq!(status, 201, "远端项目注册应由节点校验通过: {body}");
+
+        // 3) 在**节点上**建会话并跑一轮：项目决定节点（d1），所以带上项目 id。
+        let project_id = body["id"].as_str().expect("project id").to_string();
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions", sb.webui_url()),
+            serde_json::json!({
+                "prompt": "hello",
+                "agent": "echo",
+                "project_id": project_id,
+            }),
+        )
+        .await
+        .expect("create remote session");
+        assert_eq!(status, 201, "远端会话应建立成功: {body}");
+        let key = body["key"].as_str().expect("session key").to_string();
+
+        // 会话真的要落到节点上：投影把节点维度带到了工作台。
+        let row = wait_for(
+            "远端会话出现在工作台上并标注其节点",
+            Duration::from_secs(20),
+            &sb.path.clone(),
+            {
+                let cli = cli.clone();
+                let url = format!("{}/api/sessions", sb.webui_url());
+                let key = key.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    let key = key.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        let rows = v.get("recent_sessions")?.as_array()?.clone();
+                        rows.into_iter().find(|r| {
+                            r.get("encoded_key").and_then(|k| k.as_str()) == Some(key.as_str())
+                        })
+                    })
+                }
+            },
+        )
+        .await;
+        assert_eq!(
+            row["remote"]["node_id"].as_str(),
+            Some("itest-node"),
+            "远端行必须点名它跑在哪台机器上: {row}"
+        );
+
+        // 4) 一轮跑通：echo 执行体的应答经节点日志 → 事件流 → 工作台转写可见。
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+        let transcript = wait_for(
+            "远端会话的转写出现 echo 应答",
+            Duration::from_secs(20),
+            &sb.path.clone(),
+            {
+                let cli = cli.clone();
+                let url = detail_url.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        let text = v
+                            .get("entries")?
+                            .as_array()?
+                            .iter()
+                            .filter_map(|b| b.get("content").and_then(|c| c.as_str()))
+                            .collect::<Vec<_>>()
+                            .join("");
+                        text.contains("echo: hello").then_some(text)
+                    })
+                }
+            },
+        )
+        .await;
+        assert!(transcript.contains("echo: hello"), "{transcript}");
+
+        // 5) kill 主控重启：执行事实在节点上，重建视图后**对账补回**这一段。
+        core.kill().await.expect("kill core");
+        let _ = core.wait().await;
+        let mut core = sb.spawn_core();
+        wait_node_status(&cli, &sb, "itest-node", "online").await;
+        let recovered = wait_for(
+            "主控重启后对账补回远端会话的转写",
+            Duration::from_secs(30),
+            &sb.path.clone(),
+            {
+                let cli = cli.clone();
+                let url = detail_url.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        let text = v
+                            .get("entries")?
+                            .as_array()?
+                            .iter()
+                            .filter_map(|b| b.get("content").and_then(|c| c.as_str()))
+                            .collect::<Vec<_>>()
+                            .join("");
+                        text.contains("echo: hello").then_some(text)
+                    })
+                }
+            },
+        )
+        .await;
+        assert!(
+            recovered.contains("echo: hello"),
+            "主控重启后必须能从节点回拉出这轮事实（对账补齐）: {recovered}"
+        );
+
+        // 6) 悬空审批：`run:` 触发执行体里的受门控动作 → 节点停住、上报、等人批。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+            serde_json::json!({ "message": "run: echo gated" }),
+        )
+        .await
+        .expect("send gated prompt");
+        assert_eq!(status, 200, "{body}");
+
+        // 「等待 ≠ 运行中」（spec 8.4）：有悬空审批的会话必须呈现为 waiting。
+        let waiting = wait_for(
+            "悬空审批把远端会话呈现为等待",
+            Duration::from_secs(20),
+            &sb.path.clone(),
+            {
+                let cli = cli.clone();
+                let url = format!("{}/api/sessions", sb.webui_url());
+                let key = key.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    let key = key.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        let rows = v.get("recent_sessions")?.as_array()?.clone();
+                        let row = rows.into_iter().find(|r| {
+                            r.get("encoded_key").and_then(|k| k.as_str()) == Some(key.as_str())
+                        })?;
+                        let parked = row.get("remote")?.get("parked_approvals")?.as_u64()?;
+                        (parked > 0).then_some(row)
+                    })
+                }
+            },
+        )
+        .await;
+        assert_eq!(
+            waiting["status_slug"].as_str(),
+            Some("waiting"),
+            "{waiting}"
+        );
+
+        // 7) 杀节点：如实离线（不是"已终止"，也不是继续假装在线）。
+        node.kill().await.expect("kill node");
+        let _ = node.wait().await;
+        wait_node_status(&cli, &sb, "itest-node", "offline").await;
+
+        // 8) 节点带**原凭据**重启（不给 token）：主控进程没动，应免刷新恢复，
+        //    且节点上那个会话还在（链路断了不等于会话没了）。
+        let mut node = sb.spawn_node("itest-node", None);
+        wait_node_status(&cli, &sb, "itest-node", "online").await;
+        wait_for(
+            "重启后的节点仍持有那个会话",
+            Duration::from_secs(30),
+            &sb.path.clone(),
+            {
+                let cli = cli.clone();
+                let url = detail_url.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        let text = v
+                            .get("entries")?
+                            .as_array()?
+                            .iter()
+                            .filter_map(|b| b.get("content").and_then(|c| c.as_str()))
+                            .collect::<Vec<_>>()
+                            .join("");
+                        text.contains("echo: hello").then_some(text)
+                    })
+                }
+            },
+        )
+        .await;
+
+        core.kill().await.ok();
+        node.kill().await.ok();
+    }
+
+    /// Startup: core + standalone webui come up, webui reports the core channel
+    /// reachable and /health serves.
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn detached_startup_reports_reachability() {
+        let sb = Sandbox::new("testsuite_e2e", "startup");
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+
+        wait_reachable(&cli, &sb).await;
+        let health_url = format!("{}/health", sb.webui_url());
+        let hint = sb.path.clone();
+        let healthy = wait_for(
+            "webui /health ok",
+            Duration::from_secs(10),
+            &hint,
+            move || {
+                let cli = cli.clone();
+                let url = health_url.clone();
+                Box::pin(async move {
+                    cli.get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .text()
+                        .await
+                        .ok()
+                        .map(|b| b.trim() == "ok")
+                        .filter(|ok| *ok)
+                })
+            },
+        )
+        .await;
+        assert!(healthy, "webui /health must report ok once serving");
+    }
+
+    /// Full session round-trip over the webui HTTP surface: create (ACP) →
+    /// core channel → fake-claude turn → Done with the stub's reply visible.
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn session_round_trip_via_webui_http() {
+        let sb = Sandbox::new("testsuite_e2e", "round-trip");
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
+
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
         serde_json::json!({ "project_id": project_id.clone(), "prompt": "hello", "agent": "claude" }),
     )
     .await
     .expect("create session");
-    assert_eq!(status, 201, "{body}");
-    let key = body["key"].as_str().expect("key").to_string();
+        assert_eq!(status, 201, "create session: {body}");
+        let key = body["key"]
+            .as_str()
+            .expect("key in create response")
+            .to_string();
+        assert!(!key.is_empty());
 
-    // core 下线。
-    core.kill().await.expect("kill core");
-    wait_unreachable_with_cause(&cli, &sb).await;
-
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions/{key}/cancel", sb.webui_url()),
-        serde_json::json!({}),
-    )
-    .await
-    .expect("cancel without core");
-    assert_eq!(status, 503, "unreachable core must answer 503: {body}");
-}
-
-/// workbench-live-conversation-flow 3.1/7.1：聚焦即拉起的进程级旅程。
-///
-/// 0-turn 占位（无 prompt）→ `POST /api/sessions/{key}/activate` 一次 =
-/// `started`（无 prompt 拉起子进程，占位离开 starting 态且没有任何回合）
-/// → 再 activate = `already-running`（幂等，无重复 spawn）。模型芯片的
-/// 数据源（fakeacp 的 configOptions）由沙箱冒烟覆盖——专用 claude 驱动
-/// 不报 configOptions，这里不断言模型表。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn activate_placeholder_spawns_without_prompt() {
-    let sb = Sandbox::new("testsuite_e2e", "activate-placeholder");
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-
-    // 0-turn 占位：创建请求不带 prompt。
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "project_id": project_id.clone(), "agent": "claude" }),
-    )
-    .await
-    .expect("create placeholder");
-    assert_eq!(status, 201, "create placeholder: {body}");
-    let key = body["key"].as_str().expect("key").to_string();
-    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
-    let activate_url = format!("{}/api/sessions/{key}/activate", sb.webui_url());
-
-    // 第一次激活 = started（无 prompt 拉起）。
-    let (status, body) = post_json(&cli, &activate_url, serde_json::json!({}))
-        .await
-        .expect("activate #1");
-    assert_eq!(status, 200, "activate #1: {body}");
-    assert_eq!(body["status"], "started", "activate #1: {body}");
-
-    // 子进程拉起后离开 starting 态（无 prompt、无回合——0-turn 占位保持）。
-    let detail = wait_for(
-        "placeholder to leave starting after activate",
-        Duration::from_secs(25),
-        &sb.path.clone(),
-        {
-            let cli = cli.clone();
-            let url = detail_url.clone();
-            move || {
-                let cli = cli.clone();
-                let url = url.clone();
-                Box::pin(async move {
-                    let v = cli
-                        .get(&url)
-                        .send()
-                        .await
-                        .ok()?
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()?;
-                    (v["status_slug"].as_str() != Some("starting")).then_some(v)
-                })
-            }
-        },
-    )
-    .await;
-    assert_eq!(
-        detail["entries"].as_array().map(Vec::len),
-        Some(0),
-        "activation must not run a turn: {detail}"
-    );
-
-    // 幂等：第二次激活 = already-running（无第二次 spawn）。
-    let (status, body) = post_json(&cli, &activate_url, serde_json::json!({}))
-        .await
-        .expect("activate #2");
-    assert_eq!(status, 200, "activate #2: {body}");
-    assert_eq!(body["status"], "already-running", "activate #2: {body}");
-}
-
-/// fix-webui-qa-defects 3.3（session-lifecycle「idle placeholder is never
-/// stall-settled」的进程级回归）：0-turn 占位经聚焦拉起（activate：无 prompt
-/// spawn、握手 lazy seed 出 SEED 卡、transcript 恒空——QA 幽灵回合的实体）
-/// 后闲置超过配置调小的 `turn_stall_timeout`（3s）——
-/// 1) detail 无任何 error 条目：占位不构成在飞回合，看门狗绝不注入合成
-///    「回合停滞被强制收尾」；
-/// 2) 状态可写：首条消息照常开轮并完成完整回合；完成后再次越过阈值，
-///    transcript 依旧无合成错误（看门狗不误伤已收回合）。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn idle_placeholder_never_stall_settles_and_stays_writable() {
-    let sb = Sandbox::new("testsuite_e2e", "placeholder-idle-stall");
-    sb.set_turn_stall_timeout(3);
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-
-    // 0-turn 占位（创建请求不带 prompt）→ 聚焦拉起（activate #1 = started）。
-    let project_id = scene_project_id(&cli, &sb).await;
-    let key = create_project_placeholder(&cli, &sb, &project_id, "idle-stall").await;
-    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
-    let activate_url = format!("{}/api/sessions/{key}/activate", sb.webui_url());
-    let (status, body) = post_json(&cli, &activate_url, serde_json::json!({}))
-        .await
-        .expect("activate placeholder");
-    assert_eq!(status, 200, "activate placeholder: {body}");
-    assert_eq!(body["status"], "started", "activate placeholder: {body}");
-
-    // 子进程拉起后离开 starting 态（0-turn 占位：无 prompt、零条目）。
-    let hint = sb.path.clone();
-    wait_for(
-        "placeholder to leave starting after activate",
-        Duration::from_secs(25),
-        &hint,
-        {
-            let cli = cli.clone();
-            let url = detail_url.clone();
-            move || {
-                let cli = cli.clone();
-                let url = url.clone();
-                Box::pin(async move {
-                    let v = cli
-                        .get(&url)
-                        .send()
-                        .await
-                        .ok()?
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()?;
-                    (v["status_slug"].as_str() != Some("starting")).then_some(v)
-                })
-            }
-        },
-    )
-    .await;
-
-    // 闲置超过阈值（3s 配置，8s 观察窗）：detail 保持干净——零 error 条目、
-    // 无「回合停滞」合成文案（占位幽灵回合的进程级反证）。
-    tokio::time::sleep(Duration::from_secs(8)).await;
-    let (status, v) = get_json_status(&cli, &detail_url)
-        .await
-        .expect("detail after the idle window");
-    assert_eq!(status, 200, "detail after the idle window: {v}");
-    let entries = v["entries"].as_array().cloned().unwrap_or_default();
-    assert!(
-        entries
-            .iter()
-            .all(|e| e["element_type"].as_str() != Some("error")),
-        "an idle 0-turn placeholder must never carry a synthetic error entry: {entries:?}"
-    );
-
-    // 状态可写：首条消息照常开轮并完成完整回合（占位豁免绝不外溢到真实
-    // 回合——看门狗对它照常计时，回合正常完成即不受影响）。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
-        serde_json::json!({ "message": "first real message" }),
-    )
-    .await
-    .expect("message the idle placeholder");
-    assert_eq!(status, 200, "the idle placeholder must stay writable: {body}");
-    wait_turn_done(&cli, &sb, &detail_url).await;
-
-    // 完成后再次越过阈值：看门狗不误伤已收回合，transcript 仍无合成错误，
-    // 且真实回合的事实（操作者 prompt + fake-claude 回复）完整在场。
-    tokio::time::sleep(Duration::from_secs(6)).await;
-    let (_status, v) = get_json_status(&cli, &detail_url)
-        .await
-        .expect("detail after the post-done window");
-    let entries = v["entries"].as_array().cloned().unwrap_or_default();
-    assert!(
-        entries
-            .iter()
-            .all(|e| e["element_type"].as_str() != Some("error")),
-        "a completed turn must not gain a synthetic error after the timeout: {entries:?}"
-    );
-    let transcript = entries
-        .iter()
-        .filter_map(|e| e["content"].as_str())
-        .collect::<Vec<_>>()
-        .join("");
-    assert!(
-        transcript.contains("first real message")
-            && transcript.contains("hello")
-            && transcript.contains("world"),
-        "the real turn's prompt and reply must be intact: {transcript:?}"
-    );
-}
-
-/// 重启不留僵尸 spawning（重投激活分支，close-acceptance-blind-spots 3.2）：
-/// 状态库（session_map 表）里播一个 spawning 相位（0-turn 占位）的会话条目 → 起 core
-/// → 恢复路径重投 spawn 指令（design D2 重投优先）→ 该会话离开 spawning 相位，
-/// 以创建时记住的 agent（fake-claude 桩）完成 fresh spawn 激活 → active。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn restarted_spawning_session_redispatches_and_activates() {
-    let sb = Sandbox::new("testsuite_e2e", "restore-spawning-settle");
-    const REF: &str = "restore-spawn-seed";
-    seed_spawning_placeholder(&sb, REF, "claude");
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-
-    let list_url = format!("{}/api/sessions", sb.webui_url());
-    let hint = sb.path.clone();
-    // 恢复落定：该会话不再停留 spawning——重投激活后是 active（fake-claude
-    // 握手确定性成功；若重投失败也会落 spawn-failed，同样不是 spawning，
-    // 但在本沙箱形态下那属于环境性失败）。
-    let settled = wait_for(
-        "the seeded spawning row to settle off spawning",
-        Duration::from_secs(30),
-        &hint,
-        {
-            let cli = cli.clone();
-            let list_url = list_url.clone();
-            let reference = REF.to_string();
-            move || {
-                let cli = cli.clone();
-                let list_url = list_url.clone();
-                let reference = reference.clone();
-                Box::pin(async move {
-                    let row = listed_row_by_reference(&cli, &list_url, &reference).await?;
-                    let status = row["status"].as_str()?;
-                    (status != "spawning").then_some(status.to_string())
-                })
-            }
-        },
-    )
-    .await;
-    assert_eq!(
-        settled, "active",
-        "重投 spawn 指令应经 fake-claude 激活为 active"
-    );
-
-    // 行上身份保留：agent 仍是恢复记录里绑定的 claude，且已有真实路由 id。
-    let row = listed_row_by_reference(&cli, &list_url, REF)
-        .await
-        .expect("seeded row stays listed");
-    assert_eq!(row["agent_kind"].as_str(), Some("claude"));
-    assert!(row["session_id"].as_str().is_some_and(|s| !s.is_empty()));
-}
-
-/// 重投失败的失败分支（close-acceptance-blind-spots 3.2）：占位记录绑定的
-/// agent 配置不存在（ghost-agent）→ spawn 指令重投失败 → 会话投影追加合成
-/// 错误条目（spawn failed + 点名原因）且状态落 spawn-failed 非 spawning 终态。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn restarted_spawning_session_failed_redispatch_lands_synthetic_error() {
-    let sb = Sandbox::new("testsuite_e2e", "restore-spawning-fail");
-    const REF: &str = "restore-spawn-ghost";
-    seed_spawning_placeholder(&sb, REF, "ghost-agent");
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-
-    // 失败分支收敛：spawn-failed 终态 + 如实的失败原因（unknown agent kind）。
-    let list_url = format!("{}/api/sessions", sb.webui_url());
-    let hint = sb.path.clone();
-    wait_for(
-        "the failed redispatch to land on spawn-failed",
-        Duration::from_secs(30),
-        &hint,
-        {
-            let cli = cli.clone();
-            let list_url = list_url.clone();
-            let reference = REF.to_string();
-            move || {
-                let cli = cli.clone();
-                let list_url = list_url.clone();
-                let reference = reference.clone();
-                Box::pin(async move {
-                    let row =
-                        listed_row_by_reference(&cli, &list_url, &reference).await?;
-                    let failed = row["status"].as_str() == Some("spawn-failed");
-                    let reason_named = row["spawn_failure_reason"]
-                        .as_str()
-                        .is_some_and(|r| r.contains("ghost-agent"));
-                    (failed && reason_named).then_some(row)
-                })
-            }
-        },
-    )
-    .await;
-
-    // 合成错误条目随投影可见（detail 按 encoded_key 取回）。
-    let row = listed_row_by_reference(&cli, &list_url, REF)
-        .await
-        .expect("seeded row stays listed");
-    let encoded = row["encoded_key"]
-        .as_str()
-        .expect("row carries its encoded key")
-        .to_string();
-    let detail_url = format!("{}/api/sessions/{encoded}", sb.webui_url());
-    wait_for(
-        "the synthetic error entry to surface in the projection",
-        Duration::from_secs(15),
-        &hint,
-        {
-            let cli = cli.clone();
-            let url = detail_url.clone();
-            move || {
-                let cli = cli.clone();
-                let url = url.clone();
-                Box::pin(async move {
-                    let v = cli
-                        .get(&url)
-                        .send()
-                        .await
-                        .ok()?
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()?;
-                    let errored = v["entries"].as_array().is_some_and(|entries| {
-                        entries.iter().any(|e| {
-                            e["element_type"].as_str() == Some("error")
-                                && e["content"]
-                                    .as_str()
-                                    .is_some_and(|c| c.contains("spawn failed"))
-                        })
-                    });
-                    errored.then_some(())
-                })
-            }
-        },
-    )
-    .await;
-}
-}
-
-mod router_and_provider {
-    use super::*;
-
-/// The built-in debug router answers `model = "test"` over /v1/messages.
-/// （独立 router 子进程：`sebas router --config <沙箱配置> --debug`。）
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn router_debug_provider_serves_messages() {
-    let sb = Sandbox::new("testsuite_e2e", "router");
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _router = sb.spawn_router_debug();
-
-    let router = wait_router_addr(&sb).await;
-    let (status, body) = post_json(
-        &cli,
-        &format!("{router}/v1/messages"),
-        serde_json::json!({
-            "model": "test",
-            "max_tokens": 16,
-            "messages": [{ "role": "user", "content": "hi" }]
-        }),
-    )
-    .await
-    .expect("router /v1/messages");
-    assert_eq!(status, 200, "debug router: {body}");
-    assert_eq!(
-        body["id"].as_str(),
-        Some("msg_test_debug"),
-        "debug provider fixed reply id: {body}"
-    );
-}
-
-/// fake-provider-upstream 3.1：`spawn_fake_provider` helper 冒烟——spawn →
-/// 拨号 200 → journal 落一条 → 拆卸后端口释放。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn fake_provider_spawn_helper_smoke() {
-    let sb = Sandbox::new("testsuite_e2e", "fake-provider-helper");
-    let cli = http_client();
-    let mut fake = sb.spawn_fake_provider(None).await;
-    assert!(fake.port > 0, "probed random port must be non-zero");
-    assert!(
-        fake.base_url.starts_with("http://127.0.0.1:"),
-        "loopback base url: {}",
-        fake.base_url
-    );
-
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/v1/messages", fake.base_url),
-        serde_json::json!({"model": "m", "messages": [{"role": "user", "content": "hi"}]}),
-    )
-    .await
-    .expect("dial fake provider");
-    assert_eq!(status, 200, "fake /v1/messages: {body}");
-    assert_eq!(body["content"][0]["text"], FAKE_PLAIN_TEXT);
-    assert_eq!(
-        read_jsonl(&fake.journal).len(),
-        1,
-        "one dial → exactly one journal line"
-    );
-
-    // 拆卸（等价 SandboxDir Drop 的进程收割）：端口必须释放。
-    fake.child.kill().await.expect("kill fake provider");
-    let _ = fake.child.wait().await;
-    let addr: std::net::SocketAddr = format!("127.0.0.1:{}", fake.port)
-        .parse()
-        .expect("addr");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        match tokio::net::TcpListener::bind(addr).await {
-            Ok(_) => break,
-            Err(_) if tokio::time::Instant::now() < deadline => {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            Err(e) => panic!("port {} not released after teardown: {e}", fake.port),
-        }
-    }
-}
-
-/// fake-provider-upstream 3.3：provider 透传全链路 journey。
-///
-/// 本地 fake 上游 + sandbox `[provider.fake]`（namespace `fake/fake-model`）+
-/// **非 debug** 独立 router → 非流式（应答 + usage 落账）/ 流式（SSE 逐事件
-/// 透传）/ journal 离线断言（上游 key 注入、下游 key 与 hop-by-hop 不泄漏）。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn fake_provider_passthrough_journey() {
-    let sb = Sandbox::new("testsuite_e2e", "fake-passthrough");
-    let cli = http_client();
-    let fake = sb.spawn_fake_provider(None).await;
-    sb.enable_fake_provider(&fake.base_url);
-    let _core = sb.spawn_core();
-    let _router = sb.spawn_router(); // 非 debug：走真透传面（无内置 test provider）
-    let router = wait_router_addr(&sb).await;
-    let url = format!("{router}/v1/messages");
-    let payload = serde_json::json!({
-        "model": "fake/fake-model",
-        "max_tokens": 32,
-        "messages": [{ "role": "user", "content": "hello" }]
-    });
-
-    // --- 非流式：fake 的确定性内容 + router usage 落账 ---
-    let resp = cli
-        .post(&url)
-        .header("content-type", "application/json")
-        .header("anthropic-version", "2023-06-01")
-        .header("x-api-key", DOWNSTREAM_KEY)
-        .body(payload.to_string())
-        .send()
-        .await
-        .expect("non-stream passthrough");
-    assert_eq!(resp.status().as_u16(), 200);
-    let body: serde_json::Value = resp.json().await.expect("json body");
-    assert_eq!(body["id"], "msg_fake_builtin", "fake reply: {body}");
-    assert_eq!(body["content"][0]["text"], FAKE_PLAIN_TEXT);
-    assert_eq!(body["stop_reason"], "end_turn");
-    assert!(body["usage"]["input_tokens"].as_u64().unwrap_or(0) > 0);
-
-    // usage 结算：非零 input/output + provider 名 + model rename 记录。
-    // persist-router-usage：断言面由「解析 NDJSON」改为「查用量库」——覆盖点
-    // （provider / model / upstream_model / token 计数）逐条保留。
-    let usage_path = sb.path.join("usage.db");
-    let hint = sb.path.clone();
-    let fake_usage = {
-        let usage_path = usage_path.clone();
-        wait_for(
-            "router usage record for provider fake",
-            Duration::from_secs(15),
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+        let hint = sb.path.clone();
+        let detail = wait_for(
+            "session turn to reach Done",
+            Duration::from_secs(25),
             &hint,
             move || {
-                let usage_path = usage_path.clone();
+                let cli = cli.clone();
+                let url = detail_url.clone();
                 Box::pin(async move {
-                    read_usage_records(&usage_path)
-                        .into_iter()
-                        .find(|r| r.provider == "fake" && r.status == 200)
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    let done = v["status_slug"].as_str() == Some("done")
+                        || v["status"]
+                            .as_str()
+                            .is_some_and(|s| s.eq_ignore_ascii_case("done"));
+                    done.then_some(v)
                 })
             },
         )
-        .await
-    };
-    assert_eq!(fake_usage.model.as_deref(), Some("fake/fake-model"));
-    assert_eq!(fake_usage.upstream_model.as_deref(), Some("fake-model"));
-    assert!(
-        fake_usage.input_tokens.unwrap_or(0) > 0 && fake_usage.output_tokens.unwrap_or(0) > 0,
-        "non-zero usage must settle: {fake_usage:?}"
-    );
+        .await;
 
-    // --- 流式：SSE 完整事件序列透传，文本与非流式一致 ---
-    let mut streaming = payload.clone();
-    streaming["stream"] = serde_json::json!(true);
-    let resp = cli
-        .post(&url)
-        .header("content-type", "application/json")
-        .body(streaming.to_string())
-        .send()
-        .await
-        .expect("stream passthrough");
-    assert_eq!(resp.status().as_u16(), 200);
-    assert_eq!(
-        resp.headers().get("content-type").map(|v| v.to_str().unwrap()),
-        Some("text/event-stream")
-    );
-    let sse = resp.text().await.expect("sse body");
-    for event in [
-        "event: message_start",
-        "event: content_block_start",
-        "event: content_block_delta",
-        "event: content_block_stop",
-        "event: message_delta",
-        "event: message_stop",
-    ] {
-        assert!(sse.contains(event), "missing {event} in SSE:\n{sse}");
-    }
-    assert!(
-        sse.contains(FAKE_PLAIN_TEXT),
-        "SSE text must match the non-stream reply:\n{sse}"
-    );
-
-    // 流式也落账（SseUsageParser 从 message_start/message_delta 取 usage）。
-    let usage_path2 = usage_path.clone();
-    let hint2 = sb.path.clone();
-    wait_for(
-        "second usage record (stream settled)",
-        Duration::from_secs(15),
-        &hint2,
-        move || {
-            let usage_path2 = usage_path2.clone();
-            Box::pin(async move {
-                let fake_records = read_usage_records(&usage_path2)
-                    .into_iter()
-                    .filter(|r| r.provider == "fake")
-                    .count();
-                (fake_records >= 2).then_some(())
+        let transcript = detail["entries"]
+            .as_array()
+            .map(|blocks| {
+                blocks
+                    .iter()
+                    .filter_map(|b| b["content"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("")
             })
-        },
-    )
-    .await;
-
-    // --- journal 离线断言：上游 key 注入 / 下游 key 与 hop-by-hop 不泄漏 ---
-    let journal = read_jsonl(&fake.journal);
-    assert_eq!(
-        journal.len(),
-        2,
-        "router forwarded exactly two requests: {journal:?}"
-    );
-    let raw = std::fs::read_to_string(&fake.journal).expect("journal text");
-    assert!(
-        !raw.contains(DOWNSTREAM_KEY),
-        "downstream key must never reach the upstream:\n{raw}"
-    );
-    let non_stream = journal
-        .iter()
-        .find(|l| l["body"]["stream"].as_bool() != Some(true))
-        .expect("non-stream journal line");
-    let headers = non_stream["headers"]
-        .as_object()
-        .expect("journal headers object");
-    assert_eq!(
-        headers.get("x-api-key").and_then(|v| v.as_str()),
-        Some(FAKE_UPSTREAM_KEY),
-        "upstream key must be injected: {headers:?}"
-    );
-    assert!(
-        !headers.contains_key("authorization"),
-        "downstream auth header must be stripped: {headers:?}"
-    );
-    for hop in [
-        "connection",
-        "transfer-encoding",
-        "keep-alive",
-        "te",
-        "trailer",
-        "upgrade",
-    ] {
+            .unwrap_or_default();
         assert!(
-            !headers.contains_key(hop),
-            "{hop} is hop-by-hop and must not be forwarded: {headers:?}"
+            transcript.contains("hello") && transcript.contains("world"),
+            "turn transcript must carry fake-claude's reply, got: {transcript:?}"
         );
     }
-    assert_eq!(
-        non_stream["body"]["model"], "fake-model",
-        "namespace rest + rename lands upstream: {non_stream}"
-    );
-    assert_eq!(non_stream["body"]["messages"][0]["content"], "hello");
-}
 
-/// fake-provider-upstream 3.4：确定性限流/用量——fake 秒回消除真实上游网络
-/// 延迟抖动，token bucket 的越界 429 精确可复现，且越界请求不外呼。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn fake_provider_deterministic_rate_limit() {
-    let sb = Sandbox::new("testsuite_e2e", "fake-rate-limit");
-    let cli = http_client();
-    let fake = sb.spawn_fake_provider(None).await;
-    sb.enable_fake_provider(&fake.base_url);
-    // capacity=2 + 极慢 refill：测试窗口内不自动补充（消除时序抖动）。
-    sb.set_router_rate_limit(2, 0.0001);
-    let _router = sb.spawn_router();
-    let router = wait_router_addr(&sb).await;
-    let url = format!("{router}/v1/messages");
-    let payload = serde_json::json!({
-        "model": "fake/fake-model",
-        "max_tokens": 16,
-        "messages": [{ "role": "user", "content": "hi" }]
-    })
-    .to_string();
+    // ---- session-parallel-liveness-and-unread-polish 1.2：双会话并行 spawn ----
+    /// Two 0-turn placeholder sessions spawn concurrently: while the first
+    /// session's child is mid-handshake (fake-claude `--delay-init-ms 2500`),
+    /// the second session's spawn instruction SHALL NOT queue behind the first
+    /// handshake. The ordering that proves it: B (instant "hello" turn) finishes
+    /// BEFORE A (800ms "stream" turn after an identical handshake) — serialized
+    /// spawn flips the order (B's handshake only starts after A activates).
+    ///
+    /// Fix basis: `dispatch_out_without_feishu` spawns a dedicated task per
+    /// WebSpawn (`src/dispatch.rs`, design D1 candidate A). Before the fix this
+    /// journey takes ≥ 2 handshakes serialised; after it the two handshakes
+    /// overlap.
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn two_sessions_spawn_and_turn_concurrently() {
+        let sb = Sandbox::new("testsuite_e2e", "parallel-spawn");
+        // Stretch the handshake so the two spawn instructions measurably overlap:
+        // every fake-claude child answers initialize only after 2.5s.
+        sb.append_acp_args(&["--delay-init-ms", "2500"]);
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
 
-    let mut statuses = Vec::new();
-    let mut over_body = serde_json::Value::Null;
-    for _ in 0..3 {
-        let resp = cli
-            .post(&url)
-            .header("content-type", "application/json")
-            .body(payload.clone())
-            .send()
-            .await
-            .expect("POST /v1/messages");
-        let status = resp.status().as_u16();
-        if status == 429 {
-            over_body = resp.json().await.expect("429 body");
-        } else {
-            let _ = resp.text().await;
-        }
-        statuses.push(status);
-    }
-    assert_eq!(
-        statuses,
-        vec![200, 200, 429],
-        "bucket capacity 2 drained deterministically (fake answers instantly)"
-    );
-    assert_eq!(over_body["type"], "error");
-    assert_eq!(over_body["error"]["type"], "rate_limit_error");
-
-    // 无外呼浪费：只有桶内两个请求到达 fake。
-    let journal = read_jsonl(&fake.journal);
-    assert_eq!(
-        journal.len(),
-        2,
-        "over-capacity request must not reach the upstream: {journal:?}"
-    );
-}
-
-/// fake-provider-upstream 3.5：agent-loop journey（零 token）。
-///
-/// 真 claude-code 作 ACP 执行体、模型请求打到本地 fake 上游：消息 →
-/// tool_use → 工具执行 → tool_result → 终文本 → 会话 Done。claude-code
-/// 缺席（`SEBAS_TEST_CLAUDE_BIN` / PATH 都没有）时输出原因并跳过，不判失败。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn agent_loop_journey_claude_over_fake_upstream() {
-    let Some(claude_bin) = find_claude_bin() else {
-        eprintln!(
-            "[skip] agent_loop_journey_claude_over_fake_upstream: no claude-code binary \
-             (set SEBAS_TEST_CLAUDE_BIN or put `claude` on PATH); journey ready"
-        );
-        return;
-    };
-
-    let sb = Sandbox::new("testsuite_e2e", "agent-loop");
-    let cli = http_client();
-    let fake = sb.spawn_fake_provider(None).await;
-    sb.set_agent_claude_path(&claude_bin);
-    // claude-code 子进程继承 core 的 env：ProviderResolution::Off 不注入任何
-    // provider env，这里直接把假上游地址+哑 token 塞给它（零登录、零 token；
-    // 真实的 claude 登录态与真实上游完全不参与）。
-    let _core = sb.spawn_core_extra(&[
-        ("ANTHROPIC_BASE_URL", fake.base_url.as_str()),
-        ("ANTHROPIC_AUTH_TOKEN", "sk-fake-agent-loop"),
-    ]);
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status, body) = post_json(
+        // Two first messages back-to-back: both sessions enter the spawn window.
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status_a, body_a) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "project_id": project_id.clone(), "prompt": "Use the Read tool on the file SEBAS_FAKE_TOOL_LOOP, then report what happened.", "agent": "claude", "mode": "allow" }),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "stream", "agent": "claude" }),
     )
     .await
-    .expect("create ACP session");
-    assert_eq!(status, 201, "session create: {body}");
-    let key = body["key"].as_str().expect("session key").to_string();
-    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+    .expect("create session A");
+        assert_eq!(status_a, 201, "create A: {body_a}");
+        let key_a = body_a["key"].as_str().expect("key A").to_string();
 
-    // 真 claude-code 冷启动 + 两轮假上游应答；预算放宽但有界。
-    let hint = sb.path.clone();
-    let detail = wait_for(
-        "agent-loop turn to reach Done",
-        Duration::from_secs(180),
-        &hint,
-        {
-            let cli = cli.clone();
-            let url = detail_url.clone();
-            move || {
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status_b, body_b) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "hello", "agent": "claude" }),
+    )
+    .await
+    .expect("create session B");
+        assert_eq!(status_b, 201, "create B: {body_b}");
+        let key_b = body_b["key"].as_str().expect("key B").to_string();
+
+        // B 完成时（hello 回合零等待）A 必须**还没**完成（stream 含 800ms 拖
+        // 尾）。串行 spawn 下 B 的握手要等 A 激活 → B done ≈ 5s > A done ≈ 3.3s；
+        // 并行 spawn 下两握手重叠 → B done ≈ 2.6s < A done ≈ 3.3s。
+        async fn fetch_detail(cli: &reqwest::Client, url: &str) -> Option<serde_json::Value> {
+            cli.get(url).send().await.ok()?.json().await.ok()
+        }
+        fn is_done(v: &serde_json::Value) -> bool {
+            v["status_slug"].as_str() == Some("done")
+                || v["status"]
+                    .as_str()
+                    .is_some_and(|s| s.eq_ignore_ascii_case("done"))
+        }
+
+        let url_a = format!("{}/api/sessions/{key_a}", sb.webui_url());
+        let url_b = format!("{}/api/sessions/{key_b}", sb.webui_url());
+        let hint = sb.path.clone();
+        let b_done_before_a = wait_for(
+            "B finishes its turn while A is still working",
+            Duration::from_secs(20),
+            &hint,
+            {
                 let cli = cli.clone();
-                let url = url.clone();
+                let url_a = url_a.clone();
+                let url_b = url_b.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url_a = url_a.clone();
+                    let url_b = url_b.clone();
+                    Box::pin(async move {
+                        let b = fetch_detail(&cli, &url_b).await?;
+                        if !is_done(&b) {
+                            return None;
+                        }
+                        let a = fetch_detail(&cli, &url_a).await?;
+                        // B done 且 A 未 done = 两会话确实并行活着。
+                        (!is_done(&a)).then_some(true)
+                    })
+                }
+            },
+        )
+        .await;
+        assert!(
+            b_done_before_a,
+            "B (instant hello turn) must finish before A (2.5s handshake + 800ms \
+         stream); B only finishing after A means the second spawn waited for \
+         the first session — `core.log` in the kept sandbox dir has the \
+         dispatch timeline"
+        );
+
+        // B 完成后 A 也必须顺利完成自己的回合（两个活子进程都走到了 done）。
+        let hint = sb.path.clone();
+        let a_done = wait_for(
+            "A finishes its stream turn",
+            Duration::from_secs(20),
+            &hint,
+            {
+                let cli = cli.clone();
+                let url_a = url_a.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url_a = url_a.clone();
+                    Box::pin(async move { fetch_detail(&cli, &url_a).await.filter(is_done) })
+                }
+            },
+        )
+        .await;
+        assert!(is_done(&a_done), "A must complete its stream turn too");
+    }
+
+    // ---- workbench-interaction-polish 6.1：cancel 链路（BFF → core channel）----
+    /// Cancel 链路的类型化拒绝：未知 key 404；已知但空闲（无在飞 turn）的会话
+    /// 409——「无事可取消」不再伪造成功。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn cancel_typed_rejections_over_webui_http() {
+        let sb = Sandbox::new("testsuite_e2e", "cancel-reject");
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
+
+        // 未知 key → 404 typed rejection。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions/web%00ghost/cancel", sb.webui_url()),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("cancel unknown");
+        assert_eq!(status, 404, "unknown key must 404: {body}");
+
+        // 已知会话、无在飞 turn（首个 turn 已收敛）→ 409 空闲。
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "hello", "agent": "claude" }),
+    )
+    .await
+    .expect("create session");
+        assert_eq!(status, 201, "create session: {body}");
+        let key = body["key"].as_str().expect("key").to_string();
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+        wait_for(
+            "session turn to reach Done",
+            Duration::from_secs(25),
+            &sb.path.clone(),
+            || {
+                let cli = cli.clone();
+                let url = detail_url.clone();
                 Box::pin(async move {
                     let v = cli
                         .get(&url)
@@ -2981,282 +2191,1138 @@ async fn agent_loop_journey_claude_over_fake_upstream() {
                         .ok()?;
                     (v["status_slug"].as_str() == Some("done")).then_some(v)
                 })
-            }
-        },
-    )
-    .await;
+            },
+        )
+        .await;
 
-    let entries = detail["entries"].as_array().cloned().unwrap_or_default();
-    let transcript: String = entries
-        .iter()
-        .filter_map(|e| e["content"].as_str())
-        .collect::<Vec<_>>()
-        .join("");
-    assert!(
-        transcript.contains(FAKE_FINAL_TEXT),
-        "turn must carry the fake upstream's final text, got: {transcript:?}"
-    );
-    assert!(
-        entries
-            .iter()
-            .any(|e| e["element_type"].as_str() == Some("tool")),
-        "tool execution trace must be visible in the turn: {transcript:?}"
-    );
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/cancel", sb.webui_url()),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("cancel idle");
+        assert_eq!(status, 409, "idle session must 409: {body}");
+        assert!(
+            body["error"].as_str().unwrap_or("").contains("空闲"),
+            "{body}"
+        );
 
-    // agent 工具环确实闭合：带工具表的回合 ≥2 —— 首轮无 tool_result（要求
-    // tool_use），次轮带 tool_result（要求终文本）。claude-code 在会话创建时
-    // 还会先打一轮无 tools 的标题生成请求（也是 fake 的活体证据）。
-    let journal = read_jsonl(&fake.journal);
-    let loop_turns: Vec<&serde_json::Value> = journal
-        .iter()
-        .filter(|l| {
-            l["body"]["tools"]
-                .as_array()
-                .is_some_and(|t| !t.is_empty())
-        })
-        .collect();
-    assert!(
-        loop_turns.len() >= 2,
-        "tool loop needs ≥2 tool-carrying upstream turns, got {journal:?}"
-    );
-    let first = loop_turns[0];
-    assert!(
-        first["body"]["model"].is_string(),
-        "real claude-code sends a model id: {first}"
-    );
-    let has_tool_result = |l: &serde_json::Value| {
-        l["body"]["messages"].as_array().is_some_and(|msgs| {
-            msgs.iter().any(|m| {
-                m["content"].as_array().is_some_and(|blocks| {
-                    blocks
-                        .iter()
-                        .any(|b| b["type"].as_str() == Some("tool_result"))
-                })
-            })
-        })
-    };
-    assert!(
-        !has_tool_result(first),
-        "the first tool-carrying turn has no tool_result yet: {first}"
-    );
-    let last = loop_turns.last().expect("non-empty loop turns");
-    assert!(
-        has_tool_result(last),
-        "the closing turn must carry a tool_result: {last}"
-    );
-}
+        // 会话不受拒绝影响：仍然可继续对话（补一条消息也收敛）。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+            serde_json::json!({ "message": "hello" }),
+        )
+        .await
+        .expect("follow-up after idle cancel");
+        assert_eq!(status, 200, "{body}");
+    }
 
-/// make-core-own-provider-data 3.4 / router-admin-api「Configuration source」
-/// 「card-edited provider reaches router」+「External change hot reload」
-/// 「card edit hot-applies」：watchdog 形态下 router 以独立子进程运行
-/// （watchdog 注入 SEBAS_CORE_SOCKET/SEBAS_CORE_SECRET），订阅 core 通道。
-/// 经 webui BFF 写入 core 状态库的 provider 在 router 不重启、不写任何
-/// provider 文件的情况下变为可路由——router 只是 core 数据的只读消费者。
-/// （此前的全部测试要么用 spawn 前写好的 seed 文件，要么是 core/webui 单侧
-/// 闭环；router 的通道订阅投影 reload_from_channel 在任何层都无进程级覆盖。）
-#[cfg(target_os = "linux")] // find_child_pid 走 /proc/<pid>/cmdline，非 linux 无从自证
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn core_owned_provider_reaches_router_without_restart() {
-    let sb = Sandbox::new("testsuite_e2e", "provider-hotswap");
-    // 固定默认端口 8787 会让并行用例互踩——沙箱配置已钉一个 probed 空闲端口。
-    let router_port = sb.router_port;
+    /// 真实中断路径（受 stub 限制如实标注）：fake-claude 桩对 control_request
+    /// interrupt 的语义是「turn 以错误结果收尾 + 子进程退出 → 驱动 respawn
+    /// with resume」。这里验证 cancel 链路端到端打通——200、turn 离开
+    /// working、会话存活可继续——「真模型的中断体验」另需真实凭据，沙箱只能
+    /// 证到桩级（AGENTS.md 诚实边界）。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn cancel_interrupts_in_flight_turn_over_webui_http() {
+        let sb = Sandbox::new("testsuite_e2e", "cancel-interrupt");
+        // 每个 turn 在飞 ≈2s（5 帧 × 250ms + slow-ms 800），给取消留窗口。
+        sb.slow_fake_agent(800);
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
 
-    // 本地假上游（anthropic 协议应答，记录被问到的 model）——绝不连外网。
-    let asked = Arc::new(tokio::sync::Mutex::new(None::<String>));
-    let stub = support::spawn_stub_upstream(asked.clone()).await;
-
-    // watchdog 形态：`run --debug` 强制 router 子服务上线。
-    let xdg_run = sb.path.join("xdg-run");
-    std::fs::create_dir_all(&xdg_run).expect("mkdir xdg-run");
-    let xdg = support::forward_slash(&xdg_run);
-    let cfg = support::forward_slash(&sb.config_path);
-    let cli = http_client();
-    let mut watchdog = sb.spawn(
-        &["run", "-c", &cfg, "--debug"],
-        &sb.core_secret,
-        &[("XDG_RUNTIME_DIR", &xdg)],
-        &sb.core_log,
-    );
-    wait_reachable(&cli, &sb).await;
-    let watchdog_pid = watchdog.id().expect("watchdog pid");
-
-    // router 子进程出现并解析监听地址（子进程 stdout/stderr inherit → 日志）。
-    let hint = sb.path.clone();
-    let log = sb.core_log.clone();
-    let (router_pid, router_url) = wait_for(
-        "router child addr in log",
-        Duration::from_secs(30),
-        &hint,
-        move || {
-            let log = log.clone();
-            Box::pin(async move {
-                let pid = router_child_pid(watchdog_pid)?;
-                let text = std::fs::read_to_string(&log).ok()?;
-                for line in text.lines().rev() {
-                    if line.contains("router listening")
-                        && let Some(idx) = line.find("addr=")
-                        && let Ok(addr) = line[idx + 5..]
-                            .split_whitespace()
-                            .next()?
-                            .parse::<std::net::SocketAddr>()
-                    {
-                        return Some((pid, format!("http://{addr}")));
-                    }
-                }
-                None
-            })
-        },
-    )
-    .await;
-    assert_eq!(
-        router_url,
-        format!("http://127.0.0.1:{router_port}"),
-        "router child must honor the pinned [router] listen"
-    );
-
-    // 经 webui BFF 建 provider：写入 core 状态库（core 是唯一写者）。
-    let (status, body) = post_json(
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
         &cli,
-        &format!("{}/api/providers", sb.webui_url()),
-        serde_json::json!({
-            "name": "stub",
-            "protocol": "anthropic",
-            "base_url_anthropic": format!("http://127.0.0.1:{stub}"),
-            "api_key": "sk-stub-e2e"
-        }),
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "stream", "agent": "claude" }),
     )
     .await
-    .expect("create provider via webui BFF");
-    assert_eq!(status, 201, "provider create: {body}");
+    .expect("create session");
+        assert_eq!(status, 201, "{body}");
+        let key = body["key"].as_str().expect("key").to_string();
 
-    // 订阅驱动：不重启任何进程，router 按新 provider 路由（改变通知 →
-    // StateSnapshot 拉取 → 热交换）。轮询直到首次命中。
-    wait_for(
-        "router routes the core-stored provider",
-        Duration::from_secs(60),
-        &hint,
-        move || {
-            let cli = cli.clone();
-            let url = format!("{router_url}/v1/messages");
-            Box::pin(async move {
-                let Ok((status, body)) = post_json(
-                    &cli,
-                    &url,
-                    serde_json::json!({
-                        "model": "stub/stub-model",
-                        "max_tokens": 16,
-                        "messages": [{ "role": "user", "content": "hi" }]
-                    }),
-                )
-                .await
-                else {
-                    return None;
-                };
-                (status == 200 && body["id"] == "msg_stub").then_some(body)
-            })
-        },
+        // 等 turn 开轮（WORKING）再取消。
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+        wait_for(
+            "session turn to reach Working",
+            Duration::from_secs(25),
+            &sb.path.clone(),
+            || {
+                let cli = cli.clone();
+                let url = detail_url.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    (v["status_slug"].as_str() == Some("working")).then_some(v)
+                })
+            },
+        )
+        .await;
+
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/cancel", sb.webui_url()),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("cancel in-flight");
+        assert_eq!(status, 200, "cancel must be accepted: {body}");
+        assert_eq!(body["status"].as_str(), Some("cancelled"), "{body}");
+
+        // turn 离开 working；会话保留且可继续（child 退出后驱动 respawn）。
+        wait_for(
+            "session turn to leave Working",
+            Duration::from_secs(25),
+            &sb.path.clone(),
+            || {
+                let cli = cli.clone();
+                let url = detail_url.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    (v["status_slug"].as_str() != Some("working")).then_some(v)
+                })
+            },
+        )
+        .await;
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+            serde_json::json!({ "message": "hello" }),
+        )
+        .await
+        .expect("follow-up after cancel");
+        assert_eq!(status, 200, "session survives a cancel: {body}");
+    }
+
+    /// core 不可达时 cancel 的诚实退化：503，绝不伪造成功。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn cancel_without_core_answers_503() {
+        let sb = Sandbox::new("testsuite_e2e", "cancel-503");
+        let cli = http_client();
+        let mut core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
+
+        // 先建一个会话（idle 即可——503 来自通道不可达，先于 idle 判定）。
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "hello", "agent": "claude" }),
     )
-    .await;
-    assert_eq!(
-        asked.lock().await.as_deref(),
-        Some("stub-model"),
-        "upstream must receive the namespace-rest model id"
-    );
+    .await
+    .expect("create session");
+        assert_eq!(status, 201, "{body}");
+        let key = body["key"].as_str().expect("key").to_string();
 
-    // router 只是只读消费者：provider 文件从未被写（core 状态库是唯一真源）。
-    assert!(
-        !sb.path.join("providers.json").exists(),
-        "no provider file may be written in the core-owned topology"
-    );
-    // retire-legacy-state-json 5.3：三个 legacy 状态文件在进程级 e2e 里
-    // **一个都不该出现**——core 全程没有写过它们（状态库是唯一权威：文件既不
-    // 写、也不读、也不导入）。`providers.json` 是 router 侧的旧 overlay；
-    // `state.json` / `settings.json` 是 core 侧的旧运行态与卡片配置。
-    for legacy in ["state.json", "settings.json", "providers.json"] {
+        // core 下线。
+        core.kill().await.expect("kill core");
+        wait_unreachable_with_cause(&cli, &sb).await;
+
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/cancel", sb.webui_url()),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("cancel without core");
+        assert_eq!(status, 503, "unreachable core must answer 503: {body}");
+    }
+
+    /// workbench-live-conversation-flow 3.1/7.1：聚焦即拉起的进程级旅程。
+    ///
+    /// 0-turn 占位（无 prompt）→ `POST /api/sessions/{key}/activate` 一次 =
+    /// `started`（无 prompt 拉起子进程，占位离开 starting 态且没有任何回合）
+    /// → 再 activate = `already-running`（幂等，无重复 spawn）。模型芯片的
+    /// 数据源（fakeacp 的 configOptions）由沙箱冒烟覆盖——专用 claude 驱动
+    /// 不报 configOptions，这里不断言模型表。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn activate_placeholder_spawns_without_prompt() {
+        let sb = Sandbox::new("testsuite_e2e", "activate-placeholder");
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
+
+        // 0-turn 占位：创建请求不带 prompt。
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions", sb.webui_url()),
+            serde_json::json!({ "project_id": project_id.clone(), "agent": "claude" }),
+        )
+        .await
+        .expect("create placeholder");
+        assert_eq!(status, 201, "create placeholder: {body}");
+        let key = body["key"].as_str().expect("key").to_string();
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+        let activate_url = format!("{}/api/sessions/{key}/activate", sb.webui_url());
+
+        // 第一次激活 = started（无 prompt 拉起）。
+        let (status, body) = post_json(&cli, &activate_url, serde_json::json!({}))
+            .await
+            .expect("activate #1");
+        assert_eq!(status, 200, "activate #1: {body}");
+        assert_eq!(body["status"], "started", "activate #1: {body}");
+
+        // 子进程拉起后离开 starting 态（无 prompt、无回合——0-turn 占位保持）。
+        let detail = wait_for(
+            "placeholder to leave starting after activate",
+            Duration::from_secs(25),
+            &sb.path.clone(),
+            {
+                let cli = cli.clone();
+                let url = detail_url.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        (v["status_slug"].as_str() != Some("starting")).then_some(v)
+                    })
+                }
+            },
+        )
+        .await;
+        assert_eq!(
+            detail["entries"].as_array().map(Vec::len),
+            Some(0),
+            "activation must not run a turn: {detail}"
+        );
+
+        // 幂等：第二次激活 = already-running（无第二次 spawn）。
+        let (status, body) = post_json(&cli, &activate_url, serde_json::json!({}))
+            .await
+            .expect("activate #2");
+        assert_eq!(status, 200, "activate #2: {body}");
+        assert_eq!(body["status"], "already-running", "activate #2: {body}");
+    }
+
+    /// fix-webui-qa-defects 3.3（session-lifecycle「idle placeholder is never
+    /// stall-settled」的进程级回归）：0-turn 占位经聚焦拉起（activate：无 prompt
+    /// spawn、握手 lazy seed 出 SEED 卡、transcript 恒空——QA 幽灵回合的实体）
+    /// 后闲置超过配置调小的 `turn_stall_timeout`（3s）——
+    /// 1) detail 无任何 error 条目：占位不构成在飞回合，看门狗绝不注入合成
+    ///    「回合停滞被强制收尾」；
+    /// 2) 状态可写：首条消息照常开轮并完成完整回合；完成后再次越过阈值，
+    ///    transcript 依旧无合成错误（看门狗不误伤已收回合）。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn idle_placeholder_never_stall_settles_and_stays_writable() {
+        let sb = Sandbox::new("testsuite_e2e", "placeholder-idle-stall");
+        sb.set_turn_stall_timeout(3);
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
+
+        // 0-turn 占位（创建请求不带 prompt）→ 聚焦拉起（activate #1 = started）。
+        let project_id = scene_project_id(&cli, &sb).await;
+        let key = create_project_placeholder(&cli, &sb, &project_id, "idle-stall").await;
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+        let activate_url = format!("{}/api/sessions/{key}/activate", sb.webui_url());
+        let (status, body) = post_json(&cli, &activate_url, serde_json::json!({}))
+            .await
+            .expect("activate placeholder");
+        assert_eq!(status, 200, "activate placeholder: {body}");
+        assert_eq!(body["status"], "started", "activate placeholder: {body}");
+
+        // 子进程拉起后离开 starting 态（0-turn 占位：无 prompt、零条目）。
+        let hint = sb.path.clone();
+        wait_for(
+            "placeholder to leave starting after activate",
+            Duration::from_secs(25),
+            &hint,
+            {
+                let cli = cli.clone();
+                let url = detail_url.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        (v["status_slug"].as_str() != Some("starting")).then_some(v)
+                    })
+                }
+            },
+        )
+        .await;
+
+        // 闲置超过阈值（3s 配置，8s 观察窗）：detail 保持干净——零 error 条目、
+        // 无「回合停滞」合成文案（占位幽灵回合的进程级反证）。
+        tokio::time::sleep(Duration::from_secs(8)).await;
+        let (status, v) = get_json_status(&cli, &detail_url)
+            .await
+            .expect("detail after the idle window");
+        assert_eq!(status, 200, "detail after the idle window: {v}");
+        let entries = v["entries"].as_array().cloned().unwrap_or_default();
         assert!(
-            !sb.path.join(legacy).exists(),
-            "legacy state file {legacy} must never be created (retire-legacy-state-json)"
+            entries
+                .iter()
+                .all(|e| e["element_type"].as_str() != Some("error")),
+            "an idle 0-turn placeholder must never carry a synthetic error entry: {entries:?}"
+        );
+
+        // 状态可写：首条消息照常开轮并完成完整回合（占位豁免绝不外溢到真实
+        // 回合——看门狗对它照常计时，回合正常完成即不受影响）。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+            serde_json::json!({ "message": "first real message" }),
+        )
+        .await
+        .expect("message the idle placeholder");
+        assert_eq!(
+            status, 200,
+            "the idle placeholder must stay writable: {body}"
+        );
+        wait_turn_done(&cli, &sb, &detail_url).await;
+
+        // 完成后再次越过阈值：看门狗不误伤已收回合，transcript 仍无合成错误，
+        // 且真实回合的事实（操作者 prompt + fake-claude 回复）完整在场。
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        let (_status, v) = get_json_status(&cli, &detail_url)
+            .await
+            .expect("detail after the post-done window");
+        let entries = v["entries"].as_array().cloned().unwrap_or_default();
+        assert!(
+            entries
+                .iter()
+                .all(|e| e["element_type"].as_str() != Some("error")),
+            "a completed turn must not gain a synthetic error after the timeout: {entries:?}"
+        );
+        let transcript = entries
+            .iter()
+            .filter_map(|e| e["content"].as_str())
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(
+            transcript.contains("first real message")
+                && transcript.contains("hello")
+                && transcript.contains("world"),
+            "the real turn's prompt and reply must be intact: {transcript:?}"
         );
     }
-    // router 子进程全程未重启（同一 pid），且 pid 确是 router 子进程
-    // （cmdline 首参校验——进程树定位按 cmdline 子串匹配，先自证锚点）。
-    let pid_now = router_child_pid(watchdog_pid);
-    assert_eq!(
-        pid_now,
-        Some(router_pid),
-        "router must not restart for a provider change to take effect"
-    );
-    assert_router_child_cmdline(pid_now);
-    assert!(
-        watchdog.try_wait().expect("watchdog try_wait").is_none(),
-        "watchdog must stay up"
-    );
-}
 
-/// close-acceptance-blind-spots 盲区 2 进程级 e2e（spec 场景「未覆盖的继承
-/// env 触发告警」）：shell 导出 `ANTHROPIC_BASE_URL` / `ANTHROPIC_MODEL` 后，
-/// core 与 standalone webui 的启动日志各出现一条 env posture WARN，逐变量
-/// 点名「继承自 shell、将在 Claude 子进程生效」。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn env_posture_warn_names_inherited_anthropic_vars() {
-    let sb = Sandbox::new("testsuite_e2e", "env-posture-warn");
-    let cli = http_client();
-    let inherited: &[(&str, &str)] = &[
-        ("ANTHROPIC_BASE_URL", "https://corp-gw.internal/anthropic"),
-        ("ANTHROPIC_MODEL", "corp-unrouted-model"),
-    ];
-    let _core = sb.spawn_core_extra(inherited);
-    let _webui = sb.spawn_webui_extra(&sb.core_secret, inherited);
-    wait_reachable(&cli, &sb).await;
+    /// 重启不留僵尸 spawning（重投激活分支，close-acceptance-blind-spots 3.2）：
+    /// 状态库（session_map 表）里播一个 spawning 相位（0-turn 占位）的会话条目 → 起 core
+    /// → 恢复路径重投 spawn 指令（design D2 重投优先）→ 该会话离开 spawning 相位，
+    /// 以创建时记住的 agent（fake-claude 桩）完成 fresh spawn 激活 → active。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn restarted_spawning_session_redispatches_and_activates() {
+        let sb = Sandbox::new("testsuite_e2e", "restore-spawning-settle");
+        const REF: &str = "restore-spawn-seed";
+        seed_spawning_placeholder(&sb, REF, "claude");
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
 
-    for (who, log) in [("core", sb.core_log.clone()), ("webui", sb.webui_log.clone())] {
-        wait_log_contains(
-            &format!("{who} 启动日志出现 env posture 告警并点名两个继承变量"),
-            &log,
-            &[
-                "env posture",
-                "ANTHROPIC_BASE_URL",
-                "ANTHROPIC_MODEL",
-                "继承自 shell",
-                "Claude 子进程生效",
-            ],
+        let list_url = format!("{}/api/sessions", sb.webui_url());
+        let hint = sb.path.clone();
+        // 恢复落定：该会话不再停留 spawning——重投激活后是 active（fake-claude
+        // 握手确定性成功；若重投失败也会落 spawn-failed，同样不是 spawning，
+        // 但在本沙箱形态下那属于环境性失败）。
+        let settled = wait_for(
+            "the seeded spawning row to settle off spawning",
+            Duration::from_secs(30),
+            &hint,
+            {
+                let cli = cli.clone();
+                let list_url = list_url.clone();
+                let reference = REF.to_string();
+                move || {
+                    let cli = cli.clone();
+                    let list_url = list_url.clone();
+                    let reference = reference.clone();
+                    Box::pin(async move {
+                        let row = listed_row_by_reference(&cli, &list_url, &reference).await?;
+                        let status = row["status"].as_str()?;
+                        (status != "spawning").then_some(status.to_string())
+                    })
+                }
+            },
+        )
+        .await;
+        assert_eq!(
+            settled, "active",
+            "重投 spawn 指令应经 fake-claude 激活为 active"
+        );
+
+        // 行上身份保留：agent 仍是恢复记录里绑定的 claude，且已有真实路由 id。
+        let row = listed_row_by_reference(&cli, &list_url, REF)
+            .await
+            .expect("seeded row stays listed");
+        assert_eq!(row["agent_kind"].as_str(), Some("claude"));
+        assert!(row["session_id"].as_str().is_some_and(|s| !s.is_empty()));
+    }
+
+    /// 重投失败的失败分支（close-acceptance-blind-spots 3.2）：占位记录绑定的
+    /// agent 配置不存在（ghost-agent）→ spawn 指令重投失败 → 会话投影追加合成
+    /// 错误条目（spawn failed + 点名原因）且状态落 spawn-failed 非 spawning 终态。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn restarted_spawning_session_failed_redispatch_lands_synthetic_error() {
+        let sb = Sandbox::new("testsuite_e2e", "restore-spawning-fail");
+        const REF: &str = "restore-spawn-ghost";
+        seed_spawning_placeholder(&sb, REF, "ghost-agent");
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
+
+        // 失败分支收敛：spawn-failed 终态 + 如实的失败原因（unknown agent kind）。
+        let list_url = format!("{}/api/sessions", sb.webui_url());
+        let hint = sb.path.clone();
+        wait_for(
+            "the failed redispatch to land on spawn-failed",
+            Duration::from_secs(30),
+            &hint,
+            {
+                let cli = cli.clone();
+                let list_url = list_url.clone();
+                let reference = REF.to_string();
+                move || {
+                    let cli = cli.clone();
+                    let list_url = list_url.clone();
+                    let reference = reference.clone();
+                    Box::pin(async move {
+                        let row = listed_row_by_reference(&cli, &list_url, &reference).await?;
+                        let failed = row["status"].as_str() == Some("spawn-failed");
+                        let reason_named = row["spawn_failure_reason"]
+                            .as_str()
+                            .is_some_and(|r| r.contains("ghost-agent"));
+                        (failed && reason_named).then_some(row)
+                    })
+                }
+            },
+        )
+        .await;
+
+        // 合成错误条目随投影可见（detail 按 encoded_key 取回）。
+        let row = listed_row_by_reference(&cli, &list_url, REF)
+            .await
+            .expect("seeded row stays listed");
+        let encoded = row["encoded_key"]
+            .as_str()
+            .expect("row carries its encoded key")
+            .to_string();
+        let detail_url = format!("{}/api/sessions/{encoded}", sb.webui_url());
+        wait_for(
+            "the synthetic error entry to surface in the projection",
+            Duration::from_secs(15),
+            &hint,
+            {
+                let cli = cli.clone();
+                let url = detail_url.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        let errored = v["entries"].as_array().is_some_and(|entries| {
+                            entries.iter().any(|e| {
+                                e["element_type"].as_str() == Some("error")
+                                    && e["content"]
+                                        .as_str()
+                                        .is_some_and(|c| c.contains("spawn failed"))
+                            })
+                        });
+                        errored.then_some(())
+                    })
+                }
+            },
         )
         .await;
     }
 }
 
-/// spec 场景「全覆盖时保持安静」的进程级反例：不继承任何被检变量时，core
-/// 与 webui 的启动日志都不得出现 env posture 告警。七个被检变量显式置空
-/// （空值 = 未继承），避免跑套件的 shell 恰好导出真实 `ANTHROPIC_*` 污染断言。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn env_posture_stays_silent_without_inherited_vars() {
-    let sb = Sandbox::new("testsuite_e2e", "env-posture-silent");
-    let cli = http_client();
-    let blanks: &[(&str, &str)] = &[
-        ("ANTHROPIC_BASE_URL", ""),
-        ("ANTHROPIC_AUTH_TOKEN", ""),
-        ("ANTHROPIC_MODEL", ""),
-        ("ANTHROPIC_DEFAULT_OPUS_MODEL", ""),
-        ("ANTHROPIC_DEFAULT_SONNET_MODEL", ""),
-        ("ANTHROPIC_DEFAULT_HAIKU_MODEL", ""),
-        ("ANTHROPIC_SMALL_FAST_MODEL", ""),
-    ];
-    let _core = sb.spawn_core_extra(blanks);
-    let _webui = sb.spawn_webui_extra(&sb.core_secret, blanks);
-    wait_reachable(&cli, &sb).await;
+mod router_and_provider {
+    use super::*;
 
-    // posture 检测在启动早期执行；reachable 蕴含两边启动日志早已落盘。
-    for (who, log) in [("core", &sb.core_log), ("webui", &sb.webui_log)] {
-        let text = std::fs::read_to_string(log).unwrap_or_default();
-        assert!(
-            !text.contains("env posture"),
-            "{who} 启动日志不得出现 env posture 告警（无继承必须静默）:\n{text}"
+    /// The built-in debug router answers `model = "test"` over /v1/messages.
+    /// （独立 router 子进程：`sebas router --config <沙箱配置> --debug`。）
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn router_debug_provider_serves_messages() {
+        let sb = Sandbox::new("testsuite_e2e", "router");
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _router = sb.spawn_router_debug();
+
+        let router = wait_router_addr(&sb).await;
+        let (status, body) = post_json(
+            &cli,
+            &format!("{router}/v1/messages"),
+            serde_json::json!({
+                "model": "test",
+                "max_tokens": 16,
+                "messages": [{ "role": "user", "content": "hi" }]
+            }),
+        )
+        .await
+        .expect("router /v1/messages");
+        assert_eq!(status, 200, "debug router: {body}");
+        assert_eq!(
+            body["id"].as_str(),
+            Some("msg_test_debug"),
+            "debug provider fixed reply id: {body}"
         );
     }
-}
+
+    /// fake-provider-upstream 3.1：`spawn_fake_provider` helper 冒烟——spawn →
+    /// 拨号 200 → journal 落一条 → 拆卸后端口释放。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn fake_provider_spawn_helper_smoke() {
+        let sb = Sandbox::new("testsuite_e2e", "fake-provider-helper");
+        let cli = http_client();
+        let mut fake = sb.spawn_fake_provider(None).await;
+        assert!(fake.port > 0, "probed random port must be non-zero");
+        assert!(
+            fake.base_url.starts_with("http://127.0.0.1:"),
+            "loopback base url: {}",
+            fake.base_url
+        );
+
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/v1/messages", fake.base_url),
+            serde_json::json!({"model": "m", "messages": [{"role": "user", "content": "hi"}]}),
+        )
+        .await
+        .expect("dial fake provider");
+        assert_eq!(status, 200, "fake /v1/messages: {body}");
+        assert_eq!(body["content"][0]["text"], FAKE_PLAIN_TEXT);
+        assert_eq!(
+            read_jsonl(&fake.journal).len(),
+            1,
+            "one dial → exactly one journal line"
+        );
+
+        // 拆卸（等价 SandboxDir Drop 的进程收割）：端口必须释放。
+        fake.child.kill().await.expect("kill fake provider");
+        let _ = fake.child.wait().await;
+        let addr: std::net::SocketAddr = format!("127.0.0.1:{}", fake.port).parse().expect("addr");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match tokio::net::TcpListener::bind(addr).await {
+                Ok(_) => break,
+                Err(_) if tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(e) => panic!("port {} not released after teardown: {e}", fake.port),
+            }
+        }
+    }
+
+    /// fake-provider-upstream 3.3：provider 透传全链路 journey。
+    ///
+    /// 本地 fake 上游 + sandbox `[provider.fake]`（namespace `fake/fake-model`）+
+    /// **非 debug** 独立 router → 非流式（应答 + usage 落账）/ 流式（SSE 逐事件
+    /// 透传）/ journal 离线断言（上游 key 注入、下游 key 与 hop-by-hop 不泄漏）。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn fake_provider_passthrough_journey() {
+        let sb = Sandbox::new("testsuite_e2e", "fake-passthrough");
+        let cli = http_client();
+        let fake = sb.spawn_fake_provider(None).await;
+        sb.enable_fake_provider(&fake.base_url);
+        let _core = sb.spawn_core();
+        let _router = sb.spawn_router(); // 非 debug：走真透传面（无内置 test provider）
+        let router = wait_router_addr(&sb).await;
+        let url = format!("{router}/v1/messages");
+        let payload = serde_json::json!({
+            "model": "fake/fake-model",
+            "max_tokens": 32,
+            "messages": [{ "role": "user", "content": "hello" }]
+        });
+
+        // --- 非流式：fake 的确定性内容 + router usage 落账 ---
+        let resp = cli
+            .post(&url)
+            .header("content-type", "application/json")
+            .header("anthropic-version", "2023-06-01")
+            .header("x-api-key", DOWNSTREAM_KEY)
+            .body(payload.to_string())
+            .send()
+            .await
+            .expect("non-stream passthrough");
+        assert_eq!(resp.status().as_u16(), 200);
+        let body: serde_json::Value = resp.json().await.expect("json body");
+        assert_eq!(body["id"], "msg_fake_builtin", "fake reply: {body}");
+        assert_eq!(body["content"][0]["text"], FAKE_PLAIN_TEXT);
+        assert_eq!(body["stop_reason"], "end_turn");
+        assert!(body["usage"]["input_tokens"].as_u64().unwrap_or(0) > 0);
+
+        // usage 结算：非零 input/output + provider 名 + model rename 记录。
+        // persist-router-usage：断言面由「解析 NDJSON」改为「查用量库」——覆盖点
+        // （provider / model / upstream_model / token 计数）逐条保留。
+        let usage_path = sb.path.join("usage.db");
+        let hint = sb.path.clone();
+        let fake_usage = {
+            let usage_path = usage_path.clone();
+            wait_for(
+                "router usage record for provider fake",
+                Duration::from_secs(15),
+                &hint,
+                move || {
+                    let usage_path = usage_path.clone();
+                    Box::pin(async move {
+                        read_usage_records(&usage_path)
+                            .into_iter()
+                            .find(|r| r.provider == "fake" && r.status == 200)
+                    })
+                },
+            )
+            .await
+        };
+        assert_eq!(fake_usage.model.as_deref(), Some("fake/fake-model"));
+        assert_eq!(fake_usage.upstream_model.as_deref(), Some("fake-model"));
+        assert!(
+            fake_usage.input_tokens.unwrap_or(0) > 0 && fake_usage.output_tokens.unwrap_or(0) > 0,
+            "non-zero usage must settle: {fake_usage:?}"
+        );
+
+        // --- 流式：SSE 完整事件序列透传，文本与非流式一致 ---
+        let mut streaming = payload.clone();
+        streaming["stream"] = serde_json::json!(true);
+        let resp = cli
+            .post(&url)
+            .header("content-type", "application/json")
+            .body(streaming.to_string())
+            .send()
+            .await
+            .expect("stream passthrough");
+        assert_eq!(resp.status().as_u16(), 200);
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .map(|v| v.to_str().unwrap()),
+            Some("text/event-stream")
+        );
+        let sse = resp.text().await.expect("sse body");
+        for event in [
+            "event: message_start",
+            "event: content_block_start",
+            "event: content_block_delta",
+            "event: content_block_stop",
+            "event: message_delta",
+            "event: message_stop",
+        ] {
+            assert!(sse.contains(event), "missing {event} in SSE:\n{sse}");
+        }
+        assert!(
+            sse.contains(FAKE_PLAIN_TEXT),
+            "SSE text must match the non-stream reply:\n{sse}"
+        );
+
+        // 流式也落账（SseUsageParser 从 message_start/message_delta 取 usage）。
+        let usage_path2 = usage_path.clone();
+        let hint2 = sb.path.clone();
+        wait_for(
+            "second usage record (stream settled)",
+            Duration::from_secs(15),
+            &hint2,
+            move || {
+                let usage_path2 = usage_path2.clone();
+                Box::pin(async move {
+                    let fake_records = read_usage_records(&usage_path2)
+                        .into_iter()
+                        .filter(|r| r.provider == "fake")
+                        .count();
+                    (fake_records >= 2).then_some(())
+                })
+            },
+        )
+        .await;
+
+        // --- journal 离线断言：上游 key 注入 / 下游 key 与 hop-by-hop 不泄漏 ---
+        let journal = read_jsonl(&fake.journal);
+        assert_eq!(
+            journal.len(),
+            2,
+            "router forwarded exactly two requests: {journal:?}"
+        );
+        let raw = std::fs::read_to_string(&fake.journal).expect("journal text");
+        assert!(
+            !raw.contains(DOWNSTREAM_KEY),
+            "downstream key must never reach the upstream:\n{raw}"
+        );
+        let non_stream = journal
+            .iter()
+            .find(|l| l["body"]["stream"].as_bool() != Some(true))
+            .expect("non-stream journal line");
+        let headers = non_stream["headers"]
+            .as_object()
+            .expect("journal headers object");
+        assert_eq!(
+            headers.get("x-api-key").and_then(|v| v.as_str()),
+            Some(FAKE_UPSTREAM_KEY),
+            "upstream key must be injected: {headers:?}"
+        );
+        assert!(
+            !headers.contains_key("authorization"),
+            "downstream auth header must be stripped: {headers:?}"
+        );
+        for hop in [
+            "connection",
+            "transfer-encoding",
+            "keep-alive",
+            "te",
+            "trailer",
+            "upgrade",
+        ] {
+            assert!(
+                !headers.contains_key(hop),
+                "{hop} is hop-by-hop and must not be forwarded: {headers:?}"
+            );
+        }
+        assert_eq!(
+            non_stream["body"]["model"], "fake-model",
+            "namespace rest + rename lands upstream: {non_stream}"
+        );
+        assert_eq!(non_stream["body"]["messages"][0]["content"], "hello");
+    }
+
+    /// fake-provider-upstream 3.4：确定性限流/用量——fake 秒回消除真实上游网络
+    /// 延迟抖动，token bucket 的越界 429 精确可复现，且越界请求不外呼。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn fake_provider_deterministic_rate_limit() {
+        let sb = Sandbox::new("testsuite_e2e", "fake-rate-limit");
+        let cli = http_client();
+        let fake = sb.spawn_fake_provider(None).await;
+        sb.enable_fake_provider(&fake.base_url);
+        // capacity=2 + 极慢 refill：测试窗口内不自动补充（消除时序抖动）。
+        sb.set_router_rate_limit(2, 0.0001);
+        let _router = sb.spawn_router();
+        let router = wait_router_addr(&sb).await;
+        let url = format!("{router}/v1/messages");
+        let payload = serde_json::json!({
+            "model": "fake/fake-model",
+            "max_tokens": 16,
+            "messages": [{ "role": "user", "content": "hi" }]
+        })
+        .to_string();
+
+        let mut statuses = Vec::new();
+        let mut over_body = serde_json::Value::Null;
+        for _ in 0..3 {
+            let resp = cli
+                .post(&url)
+                .header("content-type", "application/json")
+                .body(payload.clone())
+                .send()
+                .await
+                .expect("POST /v1/messages");
+            let status = resp.status().as_u16();
+            if status == 429 {
+                over_body = resp.json().await.expect("429 body");
+            } else {
+                let _ = resp.text().await;
+            }
+            statuses.push(status);
+        }
+        assert_eq!(
+            statuses,
+            vec![200, 200, 429],
+            "bucket capacity 2 drained deterministically (fake answers instantly)"
+        );
+        assert_eq!(over_body["type"], "error");
+        assert_eq!(over_body["error"]["type"], "rate_limit_error");
+
+        // 无外呼浪费：只有桶内两个请求到达 fake。
+        let journal = read_jsonl(&fake.journal);
+        assert_eq!(
+            journal.len(),
+            2,
+            "over-capacity request must not reach the upstream: {journal:?}"
+        );
+    }
+
+    /// fake-provider-upstream 3.5：agent-loop journey（零 token）。
+    ///
+    /// 真 claude-code 作 ACP 执行体、模型请求打到本地 fake 上游：消息 →
+    /// tool_use → 工具执行 → tool_result → 终文本 → 会话 Done。claude-code
+    /// 缺席（`SEBAS_TEST_CLAUDE_BIN` / PATH 都没有）时输出原因并跳过，不判失败。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn agent_loop_journey_claude_over_fake_upstream() {
+        let Some(claude_bin) = find_claude_bin() else {
+            eprintln!(
+                "[skip] agent_loop_journey_claude_over_fake_upstream: no claude-code binary \
+             (set SEBAS_TEST_CLAUDE_BIN or put `claude` on PATH); journey ready"
+            );
+            return;
+        };
+
+        let sb = Sandbox::new("testsuite_e2e", "agent-loop");
+        let cli = http_client();
+        let fake = sb.spawn_fake_provider(None).await;
+        sb.set_agent_claude_path(&claude_bin);
+        // claude-code 子进程继承 core 的 env：ProviderResolution::Off 不注入任何
+        // provider env，这里直接把假上游地址+哑 token 塞给它（零登录、零 token；
+        // 真实的 claude 登录态与真实上游完全不参与）。
+        let _core = sb.spawn_core_extra(&[
+            ("ANTHROPIC_BASE_URL", fake.base_url.as_str()),
+            ("ANTHROPIC_AUTH_TOKEN", "sk-fake-agent-loop"),
+        ]);
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
+
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "Use the Read tool on the file SEBAS_FAKE_TOOL_LOOP, then report what happened.", "agent": "claude", "mode": "allow" }),
+    )
+    .await
+    .expect("create ACP session");
+        assert_eq!(status, 201, "session create: {body}");
+        let key = body["key"].as_str().expect("session key").to_string();
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+
+        // 真 claude-code 冷启动 + 两轮假上游应答；预算放宽但有界。
+        let hint = sb.path.clone();
+        let detail = wait_for(
+            "agent-loop turn to reach Done",
+            Duration::from_secs(180),
+            &hint,
+            {
+                let cli = cli.clone();
+                let url = detail_url.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        (v["status_slug"].as_str() == Some("done")).then_some(v)
+                    })
+                }
+            },
+        )
+        .await;
+
+        let entries = detail["entries"].as_array().cloned().unwrap_or_default();
+        let transcript: String = entries
+            .iter()
+            .filter_map(|e| e["content"].as_str())
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(
+            transcript.contains(FAKE_FINAL_TEXT),
+            "turn must carry the fake upstream's final text, got: {transcript:?}"
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|e| e["element_type"].as_str() == Some("tool")),
+            "tool execution trace must be visible in the turn: {transcript:?}"
+        );
+
+        // agent 工具环确实闭合：带工具表的回合 ≥2 —— 首轮无 tool_result（要求
+        // tool_use），次轮带 tool_result（要求终文本）。claude-code 在会话创建时
+        // 还会先打一轮无 tools 的标题生成请求（也是 fake 的活体证据）。
+        let journal = read_jsonl(&fake.journal);
+        let loop_turns: Vec<&serde_json::Value> = journal
+            .iter()
+            .filter(|l| l["body"]["tools"].as_array().is_some_and(|t| !t.is_empty()))
+            .collect();
+        assert!(
+            loop_turns.len() >= 2,
+            "tool loop needs ≥2 tool-carrying upstream turns, got {journal:?}"
+        );
+        let first = loop_turns[0];
+        assert!(
+            first["body"]["model"].is_string(),
+            "real claude-code sends a model id: {first}"
+        );
+        let has_tool_result = |l: &serde_json::Value| {
+            l["body"]["messages"].as_array().is_some_and(|msgs| {
+                msgs.iter().any(|m| {
+                    m["content"].as_array().is_some_and(|blocks| {
+                        blocks
+                            .iter()
+                            .any(|b| b["type"].as_str() == Some("tool_result"))
+                    })
+                })
+            })
+        };
+        assert!(
+            !has_tool_result(first),
+            "the first tool-carrying turn has no tool_result yet: {first}"
+        );
+        let last = loop_turns.last().expect("non-empty loop turns");
+        assert!(
+            has_tool_result(last),
+            "the closing turn must carry a tool_result: {last}"
+        );
+    }
+
+    /// make-core-own-provider-data 3.4 / router-admin-api「Configuration source」
+    /// 「card-edited provider reaches router」+「External change hot reload」
+    /// 「card edit hot-applies」：watchdog 形态下 router 以独立子进程运行
+    /// （watchdog 注入 SEBAS_CORE_SOCKET/SEBAS_CORE_SECRET），订阅 core 通道。
+    /// 经 webui BFF 写入 core 状态库的 provider 在 router 不重启、不写任何
+    /// provider 文件的情况下变为可路由——router 只是 core 数据的只读消费者。
+    /// （此前的全部测试要么用 spawn 前写好的 seed 文件，要么是 core/webui 单侧
+    /// 闭环；router 的通道订阅投影 reload_from_channel 在任何层都无进程级覆盖。）
+    #[cfg(target_os = "linux")] // find_child_pid 走 /proc/<pid>/cmdline，非 linux 无从自证
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn core_owned_provider_reaches_router_without_restart() {
+        let sb = Sandbox::new("testsuite_e2e", "provider-hotswap");
+        // 固定默认端口 8787 会让并行用例互踩——沙箱配置已钉一个 probed 空闲端口。
+        let router_port = sb.router_port;
+
+        // 本地假上游（anthropic 协议应答，记录被问到的 model）——绝不连外网。
+        let asked = Arc::new(tokio::sync::Mutex::new(None::<String>));
+        let stub = support::spawn_stub_upstream(asked.clone()).await;
+
+        // watchdog 形态：`run --debug` 强制 router 子服务上线。
+        let xdg_run = sb.path.join("xdg-run");
+        std::fs::create_dir_all(&xdg_run).expect("mkdir xdg-run");
+        let xdg = support::forward_slash(&xdg_run);
+        let cfg = support::forward_slash(&sb.config_path);
+        let cli = http_client();
+        let mut watchdog = sb.spawn(
+            &["run", "-c", &cfg, "--debug"],
+            &sb.core_secret,
+            &[("XDG_RUNTIME_DIR", &xdg)],
+            &sb.core_log,
+        );
+        wait_reachable(&cli, &sb).await;
+        let watchdog_pid = watchdog.id().expect("watchdog pid");
+
+        // router 子进程出现并解析监听地址（子进程 stdout/stderr inherit → 日志）。
+        let hint = sb.path.clone();
+        let log = sb.core_log.clone();
+        let (router_pid, router_url) = wait_for(
+            "router child addr in log",
+            Duration::from_secs(30),
+            &hint,
+            move || {
+                let log = log.clone();
+                Box::pin(async move {
+                    let pid = router_child_pid(watchdog_pid)?;
+                    let text = std::fs::read_to_string(&log).ok()?;
+                    for line in text.lines().rev() {
+                        if line.contains("router listening")
+                            && let Some(idx) = line.find("addr=")
+                            && let Ok(addr) = line[idx + 5..]
+                                .split_whitespace()
+                                .next()?
+                                .parse::<std::net::SocketAddr>()
+                        {
+                            return Some((pid, format!("http://{addr}")));
+                        }
+                    }
+                    None
+                })
+            },
+        )
+        .await;
+        assert_eq!(
+            router_url,
+            format!("http://127.0.0.1:{router_port}"),
+            "router child must honor the pinned [router] listen"
+        );
+
+        // 经 webui BFF 建 provider：写入 core 状态库（core 是唯一写者）。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/providers", sb.webui_url()),
+            serde_json::json!({
+                "name": "stub",
+                "protocol": "anthropic",
+                "base_url_anthropic": format!("http://127.0.0.1:{stub}"),
+                "api_key": "sk-stub-e2e"
+            }),
+        )
+        .await
+        .expect("create provider via webui BFF");
+        assert_eq!(status, 201, "provider create: {body}");
+
+        // 订阅驱动：不重启任何进程，router 按新 provider 路由（改变通知 →
+        // StateSnapshot 拉取 → 热交换）。轮询直到首次命中。
+        wait_for(
+            "router routes the core-stored provider",
+            Duration::from_secs(60),
+            &hint,
+            move || {
+                let cli = cli.clone();
+                let url = format!("{router_url}/v1/messages");
+                Box::pin(async move {
+                    let Ok((status, body)) = post_json(
+                        &cli,
+                        &url,
+                        serde_json::json!({
+                            "model": "stub/stub-model",
+                            "max_tokens": 16,
+                            "messages": [{ "role": "user", "content": "hi" }]
+                        }),
+                    )
+                    .await
+                    else {
+                        return None;
+                    };
+                    (status == 200 && body["id"] == "msg_stub").then_some(body)
+                })
+            },
+        )
+        .await;
+        assert_eq!(
+            asked.lock().await.as_deref(),
+            Some("stub-model"),
+            "upstream must receive the namespace-rest model id"
+        );
+
+        // router 只是只读消费者：provider 文件从未被写（core 状态库是唯一真源）。
+        assert!(
+            !sb.path.join("providers.json").exists(),
+            "no provider file may be written in the core-owned topology"
+        );
+        // retire-legacy-state-json 5.3：三个 legacy 状态文件在进程级 e2e 里
+        // **一个都不该出现**——core 全程没有写过它们（状态库是唯一权威：文件既不
+        // 写、也不读、也不导入）。`providers.json` 是 router 侧的旧 overlay；
+        // `state.json` / `settings.json` 是 core 侧的旧运行态与卡片配置。
+        for legacy in ["state.json", "settings.json", "providers.json"] {
+            assert!(
+                !sb.path.join(legacy).exists(),
+                "legacy state file {legacy} must never be created (retire-legacy-state-json)"
+            );
+        }
+        // router 子进程全程未重启（同一 pid），且 pid 确是 router 子进程
+        // （cmdline 首参校验——进程树定位按 cmdline 子串匹配，先自证锚点）。
+        let pid_now = router_child_pid(watchdog_pid);
+        assert_eq!(
+            pid_now,
+            Some(router_pid),
+            "router must not restart for a provider change to take effect"
+        );
+        assert_router_child_cmdline(pid_now);
+        assert!(
+            watchdog.try_wait().expect("watchdog try_wait").is_none(),
+            "watchdog must stay up"
+        );
+    }
+
+    /// close-acceptance-blind-spots 盲区 2 进程级 e2e（spec 场景「未覆盖的继承
+    /// env 触发告警」）：shell 导出 `ANTHROPIC_BASE_URL` / `ANTHROPIC_MODEL` 后，
+    /// core 与 standalone webui 的启动日志各出现一条 env posture WARN，逐变量
+    /// 点名「继承自 shell、将在 Claude 子进程生效」。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn env_posture_warn_names_inherited_anthropic_vars() {
+        let sb = Sandbox::new("testsuite_e2e", "env-posture-warn");
+        let cli = http_client();
+        let inherited: &[(&str, &str)] = &[
+            ("ANTHROPIC_BASE_URL", "https://corp-gw.internal/anthropic"),
+            ("ANTHROPIC_MODEL", "corp-unrouted-model"),
+        ];
+        let _core = sb.spawn_core_extra(inherited);
+        let _webui = sb.spawn_webui_extra(&sb.core_secret, inherited);
+        wait_reachable(&cli, &sb).await;
+
+        for (who, log) in [
+            ("core", sb.core_log.clone()),
+            ("webui", sb.webui_log.clone()),
+        ] {
+            wait_log_contains(
+                &format!("{who} 启动日志出现 env posture 告警并点名两个继承变量"),
+                &log,
+                &[
+                    "env posture",
+                    "ANTHROPIC_BASE_URL",
+                    "ANTHROPIC_MODEL",
+                    "继承自 shell",
+                    "Claude 子进程生效",
+                ],
+            )
+            .await;
+        }
+    }
+
+    /// spec 场景「全覆盖时保持安静」的进程级反例：不继承任何被检变量时，core
+    /// 与 webui 的启动日志都不得出现 env posture 告警。七个被检变量显式置空
+    /// （空值 = 未继承），避免跑套件的 shell 恰好导出真实 `ANTHROPIC_*` 污染断言。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn env_posture_stays_silent_without_inherited_vars() {
+        let sb = Sandbox::new("testsuite_e2e", "env-posture-silent");
+        let cli = http_client();
+        let blanks: &[(&str, &str)] = &[
+            ("ANTHROPIC_BASE_URL", ""),
+            ("ANTHROPIC_AUTH_TOKEN", ""),
+            ("ANTHROPIC_MODEL", ""),
+            ("ANTHROPIC_DEFAULT_OPUS_MODEL", ""),
+            ("ANTHROPIC_DEFAULT_SONNET_MODEL", ""),
+            ("ANTHROPIC_DEFAULT_HAIKU_MODEL", ""),
+            ("ANTHROPIC_SMALL_FAST_MODEL", ""),
+        ];
+        let _core = sb.spawn_core_extra(blanks);
+        let _webui = sb.spawn_webui_extra(&sb.core_secret, blanks);
+        wait_reachable(&cli, &sb).await;
+
+        // posture 检测在启动早期执行；reachable 蕴含两边启动日志早已落盘。
+        for (who, log) in [("core", &sb.core_log), ("webui", &sb.webui_log)] {
+            let text = std::fs::read_to_string(log).unwrap_or_default();
+            assert!(
+                !text.contains("env posture"),
+                "{who} 启动日志不得出现 env posture 告警（无继承必须静默）:\n{text}"
+            );
+        }
+    }
 
     // ── extend-test-model-scenarios 3.1/3.2/3.9/3.13：场景模型驱动的工作台旅程 ──
 
@@ -3285,7 +3351,11 @@ async fn env_posture_stays_silent_without_inherited_vars() {
         sb.append_acp_args(&["--model", "test/tool-use"]);
         let _router = sb.spawn_router_debug();
         let base = format!("http://127.0.0.1:{}", sb.router_port);
-        wait_tcp(&format!("127.0.0.1:{}", sb.router_port), Duration::from_secs(30)).await;
+        wait_tcp(
+            &format!("127.0.0.1:{}", sb.router_port),
+            Duration::from_secs(30),
+        )
+        .await;
         // 真实登录态完全不参与：base_url 指 debug router、哑 token。
         let _core = sb.spawn_core_extra(&[
             ("ANTHROPIC_BASE_URL", base.as_str()),
@@ -3339,7 +3409,9 @@ async fn env_posture_stays_silent_without_inherited_vars() {
         // 更强的通过路径断言：真实 CLI 吃下场景模型的 tool_use、执行工具、
         // 回传 tool_result，场景模型的次轮终文本因此出现在会话转录里——
         // 真 CLI 的完整工具环确实由 `test/tool-use` 驱动（零真实外呼）。
-        let entries = fetch_session_entries(&cli, &detail_url).await.expect("session entries");
+        let entries = fetch_session_entries(&cli, &detail_url)
+            .await
+            .expect("session entries");
         let transcript: String = entries.iter().map(|(_, c)| c.as_str()).collect();
         assert!(
             transcript.contains("test provider: tool loop complete."),
@@ -3402,2147 +3474,2200 @@ async fn env_posture_stays_silent_without_inherited_vars() {
 mod channel_and_supervision {
     use super::*;
 
-/// A webui presenting a wrong SEBAS_CORE_SECRET must never fake a connected
-/// state: /health still serves, reachability stays false with a cause.
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn wrong_core_secret_refuses_connection() {
-    let sb = Sandbox::new("testsuite_e2e", "wrong-secret");
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui("definitely-not-the-secret");
+    /// A webui presenting a wrong SEBAS_CORE_SECRET must never fake a connected
+    /// state: /health still serves, reachability stays false with a cause.
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn wrong_core_secret_refuses_connection() {
+        let sb = Sandbox::new("testsuite_e2e", "wrong-secret");
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui("definitely-not-the-secret");
 
-    let cause = wait_unreachable_with_cause(&cli, &sb).await;
-    assert!(!cause.is_empty(), "unreachable cause must be reported");
+        let cause = wait_unreachable_with_cause(&cli, &sb).await;
+        assert!(!cause.is_empty(), "unreachable cause must be reported");
 
-    assert_eq!(
-        webui_healthy(&cli, &sb).await,
-        Some(true),
-        "webui must keep serving while unreachable"
-    );
-}
-
-/// Core lifecycle is honestly visible on the webui side: kill the core →
-/// reachability flips false with a cause; restart it → flips back to true.
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn reachability_flips_across_core_restart() {
-    let sb = Sandbox::new("testsuite_e2e", "restart");
-    let cli = http_client();
-    let mut core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-
-    core.kill().await.expect("kill core");
-    wait_unreachable_with_cause(&cli, &sb).await;
-    assert_eq!(
-        webui_healthy(&cli, &sb).await,
-        Some(true),
-        "webui must keep serving while the core is down"
-    );
-
-    let _core2 = sb.spawn_core();
-    wait_reachable(&cli, &sb).await;
-}
-
-/// Graceful exit (SIGTERM, unix-gated like sigterm_cleanup_test): the core
-/// removes the channel socket and dumps session state.
-#[cfg(unix)]
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn graceful_exit_removes_channel_socket() {
-    let sb = Sandbox::new("testsuite_e2e", "sigterm");
-    // SEBAS_TEST_SPAWN_SESSION=1 mints one fake-claude session at startup so
-    // the state dump has content — same affordance sigterm_cleanup_test uses.
-    let mut core = sb.spawn_core_extra(&[("SEBAS_TEST_SPAWN_SESSION", "1")]);
-    let pid = core.id().expect("core pid") as libc::pid_t;
-
-    let socket = sb.channel_path.clone();
-    let hint = sb.path.clone();
-    wait_for(
-        "channel socket to appear",
-        Duration::from_secs(15),
-        &hint,
-        move || {
-            let socket = socket.clone();
-            Box::pin(async move { socket.exists().then_some(()) })
-        },
-    )
-    .await;
-    // Give the affordance session time to register before the signal,
-    // mirroring sigterm_cleanup_test's child-registration budget.
-    tokio::time::sleep(Duration::from_millis(1500)).await;
-
-    // Reap the child in a side task; record how it exited.
-    let exit: Arc<tokio::sync::Mutex<Option<String>>> = Arc::default();
-    {
-        let exit = exit.clone();
-        tokio::spawn(async move {
-            let s = core
-                .wait()
-                .await
-                .map(|s| s.to_string())
-                .unwrap_or_else(|e| format!("wait error: {e}"));
-            *exit.lock().await = Some(s);
-        });
+        assert_eq!(
+            webui_healthy(&cli, &sb).await,
+            Some(true),
+            "webui must keep serving while unreachable"
+        );
     }
 
-    unsafe { libc::kill(pid, libc::SIGTERM) };
+    /// Core lifecycle is honestly visible on the webui side: kill the core →
+    /// reachability flips false with a cause; restart it → flips back to true.
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn reachability_flips_across_core_restart() {
+        let sb = Sandbox::new("testsuite_e2e", "restart");
+        let cli = http_client();
+        let mut core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
 
-    let exited = wait_for(
-        "core to exit after SIGTERM",
-        Duration::from_secs(20),
-        &hint,
-        move || {
-            let exit = exit.clone();
-            Box::pin(async move { exit.lock().await.clone() })
-        },
-    )
-    .await;
-    // ExitStatus Display is platform-dependent ("exit status: 0" on unix,
-    // "exit code: 0" on Windows) — accept either.
-    assert!(
-        exited.contains("exit status: 0") || exited.contains("exit code: 0"),
-        "graceful exit must succeed, got: {exited}"
-    );
-    assert!(
-        !sb.channel_path.exists(),
-        "channel socket must be removed on graceful exit"
-    );
-    // persist-session-map：会话映射按变更落库（projects.db），关停快照与
-    // 独立映射文件退休——优雅退出后**不得**存在 sessions.json
-    // （state-store「No separate session-map file exists」）。
-    assert!(
-        !sb.path.join("sessions.json").exists(),
-        "no separate session-map file may be written on shutdown"
-    );
-}
+        core.kill().await.expect("kill core");
+        wait_unreachable_with_cause(&cli, &sb).await;
+        assert_eq!(
+            webui_healthy(&cli, &sb).await,
+            Some(true),
+            "webui must keep serving while the core is down"
+        );
 
-/// persist-session-map 核心收益的**进程级**旅程（session-lifecycle「Unclean
-/// exit keeps the mapping」+ state-store「Session map survives unclean
-/// exit」）：会话经 HTTP 创建并对客户端可见（回合完成 = 每次变更已按变更
-/// 落库），core 随即被 SIGKILL——**无任何关停路径参与**——重启后映射完整。
-/// 分两段各自断言：杀后先直读 projects.db 钉「提交即持久」（SIGKILL 下库中
-/// 已有该行），再重启 core 钉「恢复正确」（同一会话身份 + desired_mode 原
-/// 样、恢复条目 Dormant、无独立映射文件）。旧实现（关停 dump）下同一旅程
-/// 在杀后段即失败：库中无行、重启后会话消失。
-#[cfg(unix)]
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn sigkill_committed_session_map_survives_restart() {
-    let sb = Sandbox::new("testsuite_e2e", "sigkill-session-map");
-    let cli = http_client();
-    let mut core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-
-    // 1) 建会话（desired mode = edit，fake-claude 完成一回合）。
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status, resp) = post_json(
-        &cli,
-        &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({
-            "project_id": project_id,
-            "prompt": "hello",
-            "agent": "claude",
-            "mode": "edit",
-        }),
-    )
-    .await
-    .expect("create session");
-    assert_eq!(status, 201, "create session: {resp}");
-    let encoded = resp["key"].as_str().expect("encoded session key").to_string();
-    let detail_url = format!("{}/api/sessions/{encoded}", sb.webui_url());
-    let hint = sb.path.clone();
-    let done = wait_for(
-        "the session turn to reach done (mapping observable = committed)",
-        Duration::from_secs(30),
-        &hint,
-        {
-            let cli = cli.clone();
-            let url = detail_url.clone();
-            move || {
-                let cli = cli.clone();
-                let url = url.clone();
-                Box::pin(async move {
-                    let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
-                    let slug = v["status_slug"].as_str()?;
-                    (slug == "done").then_some(v)
-                })
-            }
-        },
-    )
-    .await;
-    let reference = done["reference"].as_str().expect("raw reference").to_string();
-    let session_id_before = done["session_id"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .expect("active session carries a routing id")
-        .to_string();
-
-    // 2) SIGKILL：非优雅退出，不经任何关停路径。
-    core.kill().await.expect("SIGKILL core");
-
-    // 3) 杀后直读状态库：已提交行就在 projects.db（提交即持久，不靠关停），
-    //    且独立映射文件从未被创建。
-    {
-        use sebas_db::schema::open_and_sync;
-        let projects_db = sb.path.join("projects.db");
-        let mut conn = open_and_sync(&projects_db, sebas::sebas_state::repo::PROJECTS_TABLES)
-            .expect("reopen sandbox projects.db")
-            .0;
-        let rows = sebas_models::session_map::load_session_map(&mut conn)
-            .expect("load session_map after SIGKILL");
-        let row = rows
-            .iter()
-            .find(|r| r.thread_id.as_deref() == Some(reference.as_str()))
-            .expect("committed mapping row survives the unclean exit on disk");
-        assert_eq!(row.session_id, session_id_before, "session identity durable");
-        assert_eq!(row.desired_mode, "edit", "desired mode durable");
+        let _core2 = sb.spawn_core();
+        wait_reachable(&cli, &sb).await;
     }
-    assert!(
-        !sb.path.join("sessions.json").exists(),
-        "no separate session-map file may exist across an unclean exit"
-    );
 
-    // 4) 重启 core：会话仍列出，detail 可达，身份与 desired_mode 不回退，
-    //    恢复条目按 session-lifecycle 落 Dormant。
-    let _core2 = sb.spawn_core();
-    wait_reachable(&cli, &sb).await;
-    let restored = wait_for(
-        "the killed session to be listed again after restart",
-        Duration::from_secs(30),
-        &hint,
-        {
-            let cli = cli.clone();
-            let list_url = format!("{}/api/sessions", sb.webui_url());
-            let reference = reference.clone();
-            move || {
-                let cli = cli.clone();
-                let list_url = list_url.clone();
-                let reference = reference.clone();
-                Box::pin(async move {
-                    listed_row_by_reference(&cli, &list_url, &reference).await
-                })
-            }
-        },
-    )
-    .await;
-    assert_eq!(
-        restored["session_id"].as_str(),
-        Some(session_id_before.as_str()),
-        "restored mapping keeps the committed session identity"
-    );
-    let detail = cli
-        .get(&detail_url)
-        .send()
-        .await
-        .expect("detail after restart")
-        .json::<serde_json::Value>()
-        .await
-        .expect("detail json");
-    assert_eq!(
-        detail["desired_mode"].as_str(),
-        Some("edit"),
-        "desired mode survives the unclean exit"
-    );
-    assert_eq!(
-        detail["status_slug"].as_str(),
-        Some("dormant"),
-        "restored entries become Dormant (lazy respawn)"
-    );
-}
-
-/// fail-fast-on-startup-errors（tasks 2.3/4.2）：`sebas core` 对 garbage
-/// 配置在 ready 之前 fatal —— 进程以 EX_TEMPFAIL (75) 退出，stderr 最后一
-/// 行是 `startup-failure: <原因>` 摘要，且 `SEBAS_STARTUP_ERROR_FILE`（若
-/// 设置）被覆盖写入同一行。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn startup_failure_core_exits_75_with_summary() {
-    let sb = Sandbox::new("testsuite_e2e", "startup-failure-core");
-    // 覆写为 garbage 配置：TOML 解析必败 → ready 前 fatal。
-    std::fs::write(&sb.config_path, "not [ valid toml").expect("write garbage config");
-    let error_file = sb.path.join("startup-error.log");
-    let ef = support::forward_slash(&error_file);
-    let cfg = support::forward_slash(&sb.config_path);
-
-    let mut child = sb.spawn(
-        &["core", "-c", &cfg],
-        &sb.core_secret,
-        &[("SEBAS_STARTUP_ERROR_FILE", &ef)],
-        &sb.core_log,
-    );
-    let status = child.wait().await.expect("wait sebas core");
-    assert_eq!(
-        status.code(),
-        Some(sebas::startup_failure::EXIT_STARTUP_FAILURE),
-        "startup failure must exit 75 (EX_TEMPFAIL), got {status}"
-    );
-
-    // stderr 最后一行 = 摘要（单行，前缀固定）。
-    let log = std::fs::read_to_string(&sb.core_log).expect("read core log (stderr)");
-    let last = log
-        .lines()
-        .rev()
-        .find(|l| !l.trim().is_empty())
-        .expect("stderr not empty");
-    assert!(
-        last.starts_with("startup-failure: "),
-        "last stderr line must be the startup-failure summary, got: {last:?}"
-    );
-
-    // 错误摘要文件与 stderr 末行携带同一摘要。
-    let file = std::fs::read_to_string(&error_file)
-        .expect("SEBAS_STARTUP_ERROR_FILE must be written (overwrite)");
-    assert_eq!(
-        file.trim(),
-        last.trim(),
-        "error file must carry the same single-line summary as the stderr tail"
-    );
-}
-
-/// fail-fast-on-startup-errors（tasks 2.3/4.2）：watchdog 形态（`sebas run`）
-/// 对 garbage 配置同样在自身启动阶段 fatal → 75 + 摘要（config 解析发生在
-/// watchdog 进程内、任何子进程 spawn 之前）。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn startup_failure_run_exits_75_with_summary() {
-    let sb = Sandbox::new("testsuite_e2e", "startup-failure-run");
-    std::fs::write(&sb.config_path, "not [ valid toml").expect("write garbage config");
-    let error_file = sb.path.join("startup-error.log");
-    let ef = support::forward_slash(&error_file);
-    let cfg = support::forward_slash(&sb.config_path);
-
-    let mut child = sb.spawn(
-        &["run", "-c", &cfg],
-        &sb.core_secret,
-        &[("SEBAS_STARTUP_ERROR_FILE", &ef)],
-        &sb.core_log,
-    );
-    let status = child.wait().await.expect("wait sebas run");
-    assert_eq!(
-        status.code(),
-        Some(sebas::startup_failure::EXIT_STARTUP_FAILURE),
-        "watchdog startup failure must exit 75, got {status}"
-    );
-
-    let log = std::fs::read_to_string(&sb.core_log).expect("read run log (stderr)");
-    let last = log
-        .lines()
-        .rev()
-        .find(|l| !l.trim().is_empty())
-        .expect("stderr not empty");
-    assert!(
-        last.starts_with("startup-failure: "),
-        "last stderr line must be the startup-failure summary, got: {last:?}"
-    );
-    let file = std::fs::read_to_string(&error_file).expect("startup error file written");
-    assert_eq!(file.trim(), last.trim());
-}
-
-/// 5.1 无密钥装配旅程：两个进程都不带 `SEBAS_CORE_SECRET` —— core 自动
-/// 装配（生成密钥并写入 config 旁的 secret 文件）、webui 从文件发现密钥，
-/// reachable 之后完成一次完整会话往返（事故回归：发现路径必须承载真实
-/// 流量，而非仅握手成功）。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn no_secret_assembly_end_to_end() {
-    let sb = Sandbox::new("testsuite_e2e", "no-secret");
-    let cli = http_client();
-    let _core = sb.spawn_core_no_secret();
-    let _webui = sb.spawn_webui_no_secret();
-    wait_reachable(&cli, &sb).await;
-
-    // 装配产物：secret 文件存在、64 位 hex、unix 上 0600。
-    let secret_file = sb.secret_file();
-    let secret = std::fs::read_to_string(&secret_file).expect("core.secret written at arm time");
-    assert_eq!(
-        secret.trim().len(),
-        64,
-        "generated key must be 64 hex chars"
-    );
+    /// Graceful exit (SIGTERM, unix-gated like sigterm_cleanup_test): the core
+    /// removes the channel socket and dumps session state.
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(&secret_file)
-            .expect("stat secret file")
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode, 0o600, "secret file must be 0600, got {mode:o}");
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn graceful_exit_removes_channel_socket() {
+        let sb = Sandbox::new("testsuite_e2e", "sigterm");
+        // SEBAS_TEST_SPAWN_SESSION=1 mints one fake-claude session at startup so
+        // the state dump has content — same affordance sigterm_cleanup_test uses.
+        let mut core = sb.spawn_core_extra(&[("SEBAS_TEST_SPAWN_SESSION", "1")]);
+        let pid = core.id().expect("core pid") as libc::pid_t;
+
+        let socket = sb.channel_path.clone();
+        let hint = sb.path.clone();
+        wait_for(
+            "channel socket to appear",
+            Duration::from_secs(15),
+            &hint,
+            move || {
+                let socket = socket.clone();
+                Box::pin(async move { socket.exists().then_some(()) })
+            },
+        )
+        .await;
+        // Give the affordance session time to register before the signal,
+        // mirroring sigterm_cleanup_test's child-registration budget.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+
+        // Reap the child in a side task; record how it exited.
+        let exit: Arc<tokio::sync::Mutex<Option<String>>> = Arc::default();
+        {
+            let exit = exit.clone();
+            tokio::spawn(async move {
+                let s = core
+                    .wait()
+                    .await
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|e| format!("wait error: {e}"));
+                *exit.lock().await = Some(s);
+            });
+        }
+
+        unsafe { libc::kill(pid, libc::SIGTERM) };
+
+        let exited = wait_for(
+            "core to exit after SIGTERM",
+            Duration::from_secs(20),
+            &hint,
+            move || {
+                let exit = exit.clone();
+                Box::pin(async move { exit.lock().await.clone() })
+            },
+        )
+        .await;
+        // ExitStatus Display is platform-dependent ("exit status: 0" on unix,
+        // "exit code: 0" on Windows) — accept either.
+        assert!(
+            exited.contains("exit status: 0") || exited.contains("exit code: 0"),
+            "graceful exit must succeed, got: {exited}"
+        );
+        assert!(
+            !sb.channel_path.exists(),
+            "channel socket must be removed on graceful exit"
+        );
+        // persist-session-map：会话映射按变更落库（projects.db），关停快照与
+        // 独立映射文件退休——优雅退出后**不得**存在 sessions.json
+        // （state-store「No separate session-map file exists」）。
+        assert!(
+            !sb.path.join("sessions.json").exists(),
+            "no separate session-map file may be written on shutdown"
+        );
     }
 
-    // 完整会话往返（与带 env 用例同款断言）。
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status, body) = post_json(
+    /// persist-session-map 核心收益的**进程级**旅程（session-lifecycle「Unclean
+    /// exit keeps the mapping」+ state-store「Session map survives unclean
+    /// exit」）：会话经 HTTP 创建并对客户端可见（回合完成 = 每次变更已按变更
+    /// 落库），core 随即被 SIGKILL——**无任何关停路径参与**——重启后映射完整。
+    /// 分两段各自断言：杀后先直读 projects.db 钉「提交即持久」（SIGKILL 下库中
+    /// 已有该行），再重启 core 钉「恢复正确」（同一会话身份 + desired_mode 原
+    /// 样、恢复条目 Dormant、无独立映射文件）。旧实现（关停 dump）下同一旅程
+    /// 在杀后段即失败：库中无行、重启后会话消失。
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn sigkill_committed_session_map_survives_restart() {
+        let sb = Sandbox::new("testsuite_e2e", "sigkill-session-map");
+        let cli = http_client();
+        let mut core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
+
+        // 1) 建会话（desired mode = edit，fake-claude 完成一回合）。
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, resp) = post_json(
+            &cli,
+            &format!("{}/api/sessions", sb.webui_url()),
+            serde_json::json!({
+                "project_id": project_id,
+                "prompt": "hello",
+                "agent": "claude",
+                "mode": "edit",
+            }),
+        )
+        .await
+        .expect("create session");
+        assert_eq!(status, 201, "create session: {resp}");
+        let encoded = resp["key"]
+            .as_str()
+            .expect("encoded session key")
+            .to_string();
+        let detail_url = format!("{}/api/sessions/{encoded}", sb.webui_url());
+        let hint = sb.path.clone();
+        let done = wait_for(
+            "the session turn to reach done (mapping observable = committed)",
+            Duration::from_secs(30),
+            &hint,
+            {
+                let cli = cli.clone();
+                let url = detail_url.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        let slug = v["status_slug"].as_str()?;
+                        (slug == "done").then_some(v)
+                    })
+                }
+            },
+        )
+        .await;
+        let reference = done["reference"]
+            .as_str()
+            .expect("raw reference")
+            .to_string();
+        let session_id_before = done["session_id"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .expect("active session carries a routing id")
+            .to_string();
+
+        // 2) SIGKILL：非优雅退出，不经任何关停路径。
+        core.kill().await.expect("SIGKILL core");
+
+        // 3) 杀后直读状态库：已提交行就在 projects.db（提交即持久，不靠关停），
+        //    且独立映射文件从未被创建。
+        {
+            use sebas_db::schema::open_and_sync;
+            let projects_db = sb.path.join("projects.db");
+            let mut conn = open_and_sync(&projects_db, sebas::sebas_state::repo::PROJECTS_TABLES)
+                .expect("reopen sandbox projects.db")
+                .0;
+            let rows = sebas_models::session_map::load_session_map(&mut conn)
+                .expect("load session_map after SIGKILL");
+            let row = rows
+                .iter()
+                .find(|r| r.thread_id.as_deref() == Some(reference.as_str()))
+                .expect("committed mapping row survives the unclean exit on disk");
+            assert_eq!(
+                row.session_id, session_id_before,
+                "session identity durable"
+            );
+            assert_eq!(row.desired_mode, "edit", "desired mode durable");
+        }
+        assert!(
+            !sb.path.join("sessions.json").exists(),
+            "no separate session-map file may exist across an unclean exit"
+        );
+
+        // 4) 重启 core：会话仍列出，detail 可达，身份与 desired_mode 不回退，
+        //    恢复条目按 session-lifecycle 落 Dormant。
+        let _core2 = sb.spawn_core();
+        wait_reachable(&cli, &sb).await;
+        let restored = wait_for(
+            "the killed session to be listed again after restart",
+            Duration::from_secs(30),
+            &hint,
+            {
+                let cli = cli.clone();
+                let list_url = format!("{}/api/sessions", sb.webui_url());
+                let reference = reference.clone();
+                move || {
+                    let cli = cli.clone();
+                    let list_url = list_url.clone();
+                    let reference = reference.clone();
+                    Box::pin(
+                        async move { listed_row_by_reference(&cli, &list_url, &reference).await },
+                    )
+                }
+            },
+        )
+        .await;
+        assert_eq!(
+            restored["session_id"].as_str(),
+            Some(session_id_before.as_str()),
+            "restored mapping keeps the committed session identity"
+        );
+        let detail = cli
+            .get(&detail_url)
+            .send()
+            .await
+            .expect("detail after restart")
+            .json::<serde_json::Value>()
+            .await
+            .expect("detail json");
+        assert_eq!(
+            detail["desired_mode"].as_str(),
+            Some("edit"),
+            "desired mode survives the unclean exit"
+        );
+        assert_eq!(
+            detail["status_slug"].as_str(),
+            Some("dormant"),
+            "restored entries become Dormant (lazy respawn)"
+        );
+    }
+
+    /// fail-fast-on-startup-errors（tasks 2.3/4.2）：`sebas core` 对 garbage
+    /// 配置在 ready 之前 fatal —— 进程以 EX_TEMPFAIL (75) 退出，stderr 最后一
+    /// 行是 `startup-failure: <原因>` 摘要，且 `SEBAS_STARTUP_ERROR_FILE`（若
+    /// 设置）被覆盖写入同一行。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn startup_failure_core_exits_75_with_summary() {
+        let sb = Sandbox::new("testsuite_e2e", "startup-failure-core");
+        // 覆写为 garbage 配置：TOML 解析必败 → ready 前 fatal。
+        std::fs::write(&sb.config_path, "not [ valid toml").expect("write garbage config");
+        let error_file = sb.path.join("startup-error.log");
+        let ef = support::forward_slash(&error_file);
+        let cfg = support::forward_slash(&sb.config_path);
+
+        let mut child = sb.spawn(
+            &["core", "-c", &cfg],
+            &sb.core_secret,
+            &[("SEBAS_STARTUP_ERROR_FILE", &ef)],
+            &sb.core_log,
+        );
+        let status = child.wait().await.expect("wait sebas core");
+        assert_eq!(
+            status.code(),
+            Some(sebas::startup_failure::EXIT_STARTUP_FAILURE),
+            "startup failure must exit 75 (EX_TEMPFAIL), got {status}"
+        );
+
+        // stderr 最后一行 = 摘要（单行，前缀固定）。
+        let log = std::fs::read_to_string(&sb.core_log).expect("read core log (stderr)");
+        let last = log
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .expect("stderr not empty");
+        assert!(
+            last.starts_with("startup-failure: "),
+            "last stderr line must be the startup-failure summary, got: {last:?}"
+        );
+
+        // 错误摘要文件与 stderr 末行携带同一摘要。
+        let file = std::fs::read_to_string(&error_file)
+            .expect("SEBAS_STARTUP_ERROR_FILE must be written (overwrite)");
+        assert_eq!(
+            file.trim(),
+            last.trim(),
+            "error file must carry the same single-line summary as the stderr tail"
+        );
+    }
+
+    /// fail-fast-on-startup-errors（tasks 2.3/4.2）：watchdog 形态（`sebas run`）
+    /// 对 garbage 配置同样在自身启动阶段 fatal → 75 + 摘要（config 解析发生在
+    /// watchdog 进程内、任何子进程 spawn 之前）。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn startup_failure_run_exits_75_with_summary() {
+        let sb = Sandbox::new("testsuite_e2e", "startup-failure-run");
+        std::fs::write(&sb.config_path, "not [ valid toml").expect("write garbage config");
+        let error_file = sb.path.join("startup-error.log");
+        let ef = support::forward_slash(&error_file);
+        let cfg = support::forward_slash(&sb.config_path);
+
+        let mut child = sb.spawn(
+            &["run", "-c", &cfg],
+            &sb.core_secret,
+            &[("SEBAS_STARTUP_ERROR_FILE", &ef)],
+            &sb.core_log,
+        );
+        let status = child.wait().await.expect("wait sebas run");
+        assert_eq!(
+            status.code(),
+            Some(sebas::startup_failure::EXIT_STARTUP_FAILURE),
+            "watchdog startup failure must exit 75, got {status}"
+        );
+
+        let log = std::fs::read_to_string(&sb.core_log).expect("read run log (stderr)");
+        let last = log
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .expect("stderr not empty");
+        assert!(
+            last.starts_with("startup-failure: "),
+            "last stderr line must be the startup-failure summary, got: {last:?}"
+        );
+        let file = std::fs::read_to_string(&error_file).expect("startup error file written");
+        assert_eq!(file.trim(), last.trim());
+    }
+
+    /// 5.1 无密钥装配旅程：两个进程都不带 `SEBAS_CORE_SECRET` —— core 自动
+    /// 装配（生成密钥并写入 config 旁的 secret 文件）、webui 从文件发现密钥，
+    /// reachable 之后完成一次完整会话往返（事故回归：发现路径必须承载真实
+    /// 流量，而非仅握手成功）。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn no_secret_assembly_end_to_end() {
+        let sb = Sandbox::new("testsuite_e2e", "no-secret");
+        let cli = http_client();
+        let _core = sb.spawn_core_no_secret();
+        let _webui = sb.spawn_webui_no_secret();
+        wait_reachable(&cli, &sb).await;
+
+        // 装配产物：secret 文件存在、64 位 hex、unix 上 0600。
+        let secret_file = sb.secret_file();
+        let secret =
+            std::fs::read_to_string(&secret_file).expect("core.secret written at arm time");
+        assert_eq!(
+            secret.trim().len(),
+            64,
+            "generated key must be 64 hex chars"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&secret_file)
+                .expect("stat secret file")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "secret file must be 0600, got {mode:o}");
+        }
+
+        // 完整会话往返（与带 env 用例同款断言）。
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
         serde_json::json!({ "project_id": project_id.clone(), "prompt": "hello", "agent": "claude" }),
     )
     .await
     .expect("create session");
-    assert_eq!(status, 201, "create session: {body}");
-    let key = body["key"].as_str().expect("key in create response");
-    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
-    let hint = sb.path.clone();
-    let detail = wait_for(
-        "no-secret session turn to reach Done",
-        Duration::from_secs(25),
-        &hint,
-        move || {
-            let cli = cli.clone();
-            let url = detail_url.clone();
-            Box::pin(async move {
-                let v = cli
-                    .get(&url)
-                    .send()
-                    .await
-                    .ok()?
-                    .json::<serde_json::Value>()
-                    .await
-                    .ok()?;
-                let done = v["status_slug"].as_str() == Some("done")
-                    || v["status"]
-                        .as_str()
-                        .is_some_and(|s| s.eq_ignore_ascii_case("done"));
-                done.then_some(v)
+        assert_eq!(status, 201, "create session: {body}");
+        let key = body["key"].as_str().expect("key in create response");
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+        let hint = sb.path.clone();
+        let detail = wait_for(
+            "no-secret session turn to reach Done",
+            Duration::from_secs(25),
+            &hint,
+            move || {
+                let cli = cli.clone();
+                let url = detail_url.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    let done = v["status_slug"].as_str() == Some("done")
+                        || v["status"]
+                            .as_str()
+                            .is_some_and(|s| s.eq_ignore_ascii_case("done"));
+                    done.then_some(v)
+                })
+            },
+        )
+        .await;
+        let transcript = detail["entries"]
+            .as_array()
+            .map(|blocks| {
+                blocks
+                    .iter()
+                    .filter_map(|b| b["content"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("")
             })
-        },
-    )
-    .await;
-    let transcript = detail["entries"]
-        .as_array()
-        .map(|blocks| {
-            blocks
-                .iter()
-                .filter_map(|b| b["content"].as_str())
-                .collect::<Vec<_>>()
-                .join("")
-        })
-        .unwrap_or_default();
-    assert!(
-        transcript.contains("hello") && transcript.contains("world"),
-        "turn transcript must carry fake-claude's reply, got: {transcript:?}"
-    );
-}
+            .unwrap_or_default();
+        assert!(
+            transcript.contains("hello") && transcript.contains("world"),
+            "turn transcript must carry fake-claude's reply, got: {transcript:?}"
+        );
+    }
 
-/// 5.2 密钥轮换自愈旅程：core 每次启动自动生成新钥并覆写 secret 文件；
-/// kill → 同 config 重启（新钥）→ **不重启**的 webui 因每次连接重读文件
-/// 而恢复 reachable；宕机窗口内 cause 如实上报。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn secret_rotation_self_heal_across_core_restart() {
-    let sb = Sandbox::new("testsuite_e2e", "rotation");
-    let cli = http_client();
-    let mut core = sb.spawn_core_no_secret();
-    let mut webui = sb.spawn_webui_no_secret();
-    wait_reachable(&cli, &sb).await;
-    let key1 = std::fs::read_to_string(sb.secret_file()).expect("secret file after first arm");
+    /// 5.2 密钥轮换自愈旅程：core 每次启动自动生成新钥并覆写 secret 文件；
+    /// kill → 同 config 重启（新钥）→ **不重启**的 webui 因每次连接重读文件
+    /// 而恢复 reachable；宕机窗口内 cause 如实上报。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn secret_rotation_self_heal_across_core_restart() {
+        let sb = Sandbox::new("testsuite_e2e", "rotation");
+        let cli = http_client();
+        let mut core = sb.spawn_core_no_secret();
+        let mut webui = sb.spawn_webui_no_secret();
+        wait_reachable(&cli, &sb).await;
+        let key1 = std::fs::read_to_string(sb.secret_file()).expect("secret file after first arm");
 
-    core.kill().await.expect("kill core");
-    let cause = wait_unreachable_with_cause(&cli, &sb).await;
-    assert!(!cause.is_empty(), "downtime cause must be reported");
+        core.kill().await.expect("kill core");
+        let cause = wait_unreachable_with_cause(&cli, &sb).await;
+        assert!(!cause.is_empty(), "downtime cause must be reported");
 
-    // 同 config 重启：自动装配生成一把**新**钥（CSPRNG）。
-    let _core2 = sb.spawn_core_no_secret();
-    let hint = sb.path.clone();
-    let secret_file = sb.secret_file();
-    let key2 = wait_for(
-        "rotated secret file",
-        Duration::from_secs(15),
-        &hint,
-        move || {
-            let path = secret_file.clone();
-            let key1 = key1.clone();
-            Box::pin(async move {
-                let k2 = std::fs::read_to_string(&path).ok()?;
-                let changed = !k2.trim().is_empty() && k2.trim() != key1.trim();
-                changed.then_some(k2)
-            })
-        },
-    )
-    .await;
-    assert_eq!(key2.trim().len(), 64, "rotated key must be 64 hex chars");
+        // 同 config 重启：自动装配生成一把**新**钥（CSPRNG）。
+        let _core2 = sb.spawn_core_no_secret();
+        let hint = sb.path.clone();
+        let secret_file = sb.secret_file();
+        let key2 = wait_for(
+            "rotated secret file",
+            Duration::from_secs(15),
+            &hint,
+            move || {
+                let path = secret_file.clone();
+                let key1 = key1.clone();
+                Box::pin(async move {
+                    let k2 = std::fs::read_to_string(&path).ok()?;
+                    let changed = !k2.trim().is_empty() && k2.trim() != key1.trim();
+                    changed.then_some(k2)
+                })
+            },
+        )
+        .await;
+        assert_eq!(key2.trim().len(), 64, "rotated key must be 64 hex chars");
 
-    // webui 从未重启：只能靠文件重读自愈。
-    wait_reachable(&cli, &sb).await;
-    assert!(
-        webui.try_wait().expect("webui try_wait").is_none(),
-        "the webui must not have exited during the rotation"
-    );
-}
+        // webui 从未重启：只能靠文件重读自愈。
+        wait_reachable(&cli, &sb).await;
+        assert!(
+            webui.try_wait().expect("webui try_wait").is_none(),
+            "the webui must not have exited during the rotation"
+        );
+    }
 
-/// 5.3 监督重启恢复旅程：watchdog 形态（`sebas run`）拉起 core + webui
-/// 子进程；SIGKILL core **子进程** → supervisor 自动重启 → 未重启的
-/// webui 子进程恢复 reachable（收窄账本缺口 #3 的监督形态证据）。
-#[cfg(target_os = "linux")]
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn watchdog_supervised_core_recovery() {
-    let sb = Sandbox::new("testsuite_e2e", "watchdog-recovery");
-    sb.enable_supervised_core();
-    // 控制 socket（control.sock）缺省落 `<SEBAS_HOME>/run/`（unify-sebas-home；
-    // XDG_RUNTIME_DIR 不再参与）——SEBAS_HOME 已钉进沙箱，绝不触碰宿主机上
-    // 可能存在的真实实例控制面。
-    let xdg_run = sb.path.join("xdg-run");
-    std::fs::create_dir_all(&xdg_run).expect("mkdir xdg-run");
-    let xdg = support::forward_slash(&xdg_run);
-    let cfg = support::forward_slash(&sb.config_path);
-    let cli = http_client();
-    let mut watchdog = sb.spawn(
-        &["run", "-c", &cfg],
-        &sb.core_secret,
-        &[("XDG_RUNTIME_DIR", &xdg)],
-        &sb.core_log,
-    );
-    wait_reachable(&cli, &sb).await;
+    /// 5.3 监督重启恢复旅程：watchdog 形态（`sebas run`）拉起 core + webui
+    /// 子进程；SIGKILL core **子进程** → supervisor 自动重启 → 未重启的
+    /// webui 子进程恢复 reachable（收窄账本缺口 #3 的监督形态证据）。
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn watchdog_supervised_core_recovery() {
+        let sb = Sandbox::new("testsuite_e2e", "watchdog-recovery");
+        sb.enable_supervised_core();
+        // 控制 socket（control.sock）缺省落 `<SEBAS_HOME>/run/`（unify-sebas-home；
+        // XDG_RUNTIME_DIR 不再参与）——SEBAS_HOME 已钉进沙箱，绝不触碰宿主机上
+        // 可能存在的真实实例控制面。
+        let xdg_run = sb.path.join("xdg-run");
+        std::fs::create_dir_all(&xdg_run).expect("mkdir xdg-run");
+        let xdg = support::forward_slash(&xdg_run);
+        let cfg = support::forward_slash(&sb.config_path);
+        let cli = http_client();
+        let mut watchdog = sb.spawn(
+            &["run", "-c", &cfg],
+            &sb.core_secret,
+            &[("XDG_RUNTIME_DIR", &xdg)],
+            &sb.core_log,
+        );
+        wait_reachable(&cli, &sb).await;
 
-    let watchdog_pid = watchdog.id().expect("watchdog pid");
-    let hint = sb.path.clone();
-    let core_pid = wait_for(
-        "core child pid to appear",
-        Duration::from_secs(15),
-        &hint,
-        move || Box::pin(async move { find_child_pid(watchdog_pid, "core") }),
-    )
-    .await;
+        let watchdog_pid = watchdog.id().expect("watchdog pid");
+        let hint = sb.path.clone();
+        let core_pid = wait_for(
+            "core child pid to appear",
+            Duration::from_secs(15),
+            &hint,
+            move || Box::pin(async move { find_child_pid(watchdog_pid, "core") }),
+        )
+        .await;
 
-    unsafe { libc::kill(core_pid as libc::pid_t, libc::SIGKILL) };
-    wait_unreachable_with_cause(&cli, &sb).await;
+        unsafe { libc::kill(core_pid as libc::pid_t, libc::SIGKILL) };
+        wait_unreachable_with_cause(&cli, &sb).await;
 
-    // supervisor 自动重启：新 core 子进程（pid 变化）出现。
-    let new_pid = wait_for(
-        "supervisor to respawn the core child",
-        Duration::from_secs(45),
-        &hint,
-        move || {
-            Box::pin(async move { find_child_pid(watchdog_pid, "core").filter(|p| *p != core_pid) })
-        },
-    )
-    .await;
-    assert_ne!(new_pid, core_pid, "supervisor must spawn a fresh core");
+        // supervisor 自动重启：新 core 子进程（pid 变化）出现。
+        let new_pid = wait_for(
+            "supervisor to respawn the core child",
+            Duration::from_secs(45),
+            &hint,
+            move || {
+                Box::pin(
+                    async move { find_child_pid(watchdog_pid, "core").filter(|p| *p != core_pid) },
+                )
+            },
+        )
+        .await;
+        assert_ne!(new_pid, core_pid, "supervisor must spawn a fresh core");
 
-    // webui 子进程未重启即可恢复 reachable。
-    wait_reachable(&cli, &sb).await;
-    assert!(
-        watchdog.try_wait().expect("watchdog try_wait").is_none(),
-        "watchdog must stay up across the managed child crash"
-    );
-}
+        // webui 子进程未重启即可恢复 reachable。
+        wait_reachable(&cli, &sb).await;
+        assert!(
+            watchdog.try_wait().expect("watchdog try_wait").is_none(),
+            "watchdog must stay up across the managed child crash"
+        );
+    }
 }
 
 mod pending_and_queue {
     use super::*;
 
-/// workbench-turn-queue 2.3/5.2 + workbench-conversation-view BREAKING 更新：
-/// 忙中提交的进程级时序与丢弃记账。fake-claude 经 `--slow-ms` 在内容帧与
-/// result 之间停留——WORKING 窗口确定性的长：
-/// 1. 忙中 POST message → 200 且 payload.pending 可见该提交（disposition
-///    turn），条目序列里在跑回合的 prompt 不变（提交没有切开在跑输出，
-///    也没有提前进 transcript——`kind="prompt"` 的最后一条仍是首提交）；
-/// 2. 在跑回合结束后排队回合自动开轮：条目序列出现排队提交的 prompt 条目；
-/// 3. close 带队列的会话 → 响应 `discarded_pending` 点名丢弃条数，会话移除。
-/// （「输出不被切开」的结构性保证由引擎级单测
-/// tests/continue_session_test.rs 断言；本用例证可观察面。）
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn turn_queue_timing_and_dropped_accounting() {
-    let sb = Sandbox::new("testsuite_e2e", "turn-queue");
-    // 慢档只取 400ms：driver 的 watchdog 每秒探测、1.5s 内须应答——更大的
-    // 同步 sleep 会让 fake-claude 无法应答探测而被判挂起（会话被终结）。
-    // 提交面用 "stream" 场景：5 帧 × 250ms 停顿，turn_active 窗口 ≈1.6s，
-    // 且帧间 stdin 可读（watchdog 探测可被应答）。
-    sb.slow_fake_agent(400);
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
+    /// workbench-turn-queue 2.3/5.2 + workbench-conversation-view BREAKING 更新：
+    /// 忙中提交的进程级时序与丢弃记账。fake-claude 经 `--slow-ms` 在内容帧与
+    /// result 之间停留——WORKING 窗口确定性的长：
+    /// 1. 忙中 POST message → 200 且 payload.pending 可见该提交（disposition
+    ///    turn），条目序列里在跑回合的 prompt 不变（提交没有切开在跑输出，
+    ///    也没有提前进 transcript——`kind="prompt"` 的最后一条仍是首提交）；
+    /// 2. 在跑回合结束后排队回合自动开轮：条目序列出现排队提交的 prompt 条目；
+    /// 3. close 带队列的会话 → 响应 `discarded_pending` 点名丢弃条数，会话移除。
+    /// （「输出不被切开」的结构性保证由引擎级单测
+    /// tests/continue_session_test.rs 断言；本用例证可观察面。）
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn turn_queue_timing_and_dropped_accounting() {
+        let sb = Sandbox::new("testsuite_e2e", "turn-queue");
+        // 慢档只取 400ms：driver 的 watchdog 每秒探测、1.5s 内须应答——更大的
+        // 同步 sleep 会让 fake-claude 无法应答探测而被判挂起（会话被终结）。
+        // 提交面用 "stream" 场景：5 帧 × 250ms 停顿，turn_active 窗口 ≈1.6s，
+        // 且帧间 stdin 可读（watchdog 探测可被应答）。
+        sb.slow_fake_agent(400);
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
 
-    // 创建会话（首 prompt "stream" 触发流式场景）→ 等 WORKING 可见。
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status, body) = post_json(
+        // 创建会话（首 prompt "stream" 触发流式场景）→ 等 WORKING 可见。
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
         serde_json::json!({ "project_id": project_id.clone(), "prompt": "stream", "agent": "claude" }),
     )
     .await
     .expect("create session");
-    assert_eq!(status, 201, "create session: {body}");
-    let key = body["key"].as_str().expect("key").to_string();
-    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
-    let hint = sb.path.clone();
-    wait_for(
-        "first turn content to stream",
-        Duration::from_secs(40),
-        &hint,
-        {
-            let cli = cli.clone();
-            let url = detail_url.clone();
-            move || {
+        assert_eq!(status, 201, "create session: {body}");
+        let key = body["key"].as_str().expect("key").to_string();
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+        let hint = sb.path.clone();
+        wait_for(
+            "first turn content to stream",
+            Duration::from_secs(40),
+            &hint,
+            {
                 let cli = cli.clone();
-                let url = url.clone();
-                Box::pin(async move {
-                    let v = cli
-                        .get(&url)
-                        .send()
-                        .await
-                        .ok()?
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()?;
-                    // 只认 agent 内容帧（kind=content）：seed 的 prompt 条目
-                    // 在卡片 SEED 阶段就进 transcript——只等非空会在「开轮前」
-                    // 放行，忙中提交就会开新轮而不是排队（turn-queue 既有
-                    // 探测的边界收窄，fix-pending-queue-liveness 1.1 复用同
-                    // 一文件时顺带钉住）。
-                    let streamed = v["entries"]
-                        .as_array()
-                        .is_some_and(|b| b.iter().any(|e| e["kind"].as_str() == Some("content")));
-                    streamed.then_some(v)
-                })
-            }
-        },
-    )
-    .await;
+                let url = detail_url.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        // 只认 agent 内容帧（kind=content）：seed 的 prompt 条目
+                        // 在卡片 SEED 阶段就进 transcript——只等非空会在「开轮前」
+                        // 放行，忙中提交就会开新轮而不是排队（turn-queue 既有
+                        // 探测的边界收窄，fix-pending-queue-liveness 1.1 复用同
+                        // 一文件时顺带钉住）。
+                        let streamed = v["entries"].as_array().is_some_and(|b| {
+                            b.iter().any(|e| e["kind"].as_str() == Some("content"))
+                        });
+                        streamed.then_some(v)
+                    })
+                }
+            },
+        )
+        .await;
 
-    // 忙中提交 → 接受且入队：pending 携带该提交；条目序列里最后一条
-    // prompt 仍是首提交（排队提交未开轮、绝不提前进 transcript）。
-    let (status, resp) = post_json(
-        &cli,
-        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
-        serde_json::json!({ "message": "queued while busy" }),
-    )
-    .await
-    .expect("submit while busy");
-    assert_eq!(status, 200, "busy-time submission must be accepted: {resp}");
-    let mid = cli
-        .get(&detail_url)
-        .send()
+        // 忙中提交 → 接受且入队：pending 携带该提交；条目序列里最后一条
+        // prompt 仍是首提交（排队提交未开轮、绝不提前进 transcript）。
+        let (status, resp) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+            serde_json::json!({ "message": "queued while busy" }),
+        )
         .await
-        .expect("detail mid-turn")
-        .json::<serde_json::Value>()
-        .await
-        .expect("detail json");
-    let pending = mid["pending"].as_array().expect("pending list mid-turn");
-    assert_eq!(
-        pending.len(),
-        1,
-        "the busy-time submission rides in pending: {mid}"
-    );
-    assert_eq!(pending[0]["text"], "queued while busy");
-    assert_eq!(pending[0]["disposition"], "turn");
-    let prompts: Vec<&str> = mid["entries"]
-        .as_array()
-        .expect("entries mid-turn")
-        .iter()
-        .filter(|e| e["kind"].as_str() == Some("prompt"))
-        .filter_map(|e| e["content"].as_str())
-        .collect();
-    assert_eq!(
-        prompts.last().copied(),
-        Some("stream"),
-        "the running turn must be untouched by the submission: {mid}"
-    );
-    assert!(
-        !prompts.contains(&"queued while busy"),
-        "a queued submission must not appear as a started turn: {prompts:?}"
-    );
+        .expect("submit while busy");
+        assert_eq!(status, 200, "busy-time submission must be accepted: {resp}");
+        let mid = cli
+            .get(&detail_url)
+            .send()
+            .await
+            .expect("detail mid-turn")
+            .json::<serde_json::Value>()
+            .await
+            .expect("detail json");
+        let pending = mid["pending"].as_array().expect("pending list mid-turn");
+        assert_eq!(
+            pending.len(),
+            1,
+            "the busy-time submission rides in pending: {mid}"
+        );
+        assert_eq!(pending[0]["text"], "queued while busy");
+        assert_eq!(pending[0]["disposition"], "turn");
+        let prompts: Vec<&str> = mid["entries"]
+            .as_array()
+            .expect("entries mid-turn")
+            .iter()
+            .filter(|e| e["kind"].as_str() == Some("prompt"))
+            .filter_map(|e| e["content"].as_str())
+            .collect();
+        assert_eq!(
+            prompts.last().copied(),
+            Some("stream"),
+            "the running turn must be untouched by the submission: {mid}"
+        );
+        assert!(
+            !prompts.contains(&"queued while busy"),
+            "a queued submission must not appear as a started turn: {prompts:?}"
+        );
 
-    // 排队回合自动开轮并完成：条目序列出现排队提交的 prompt 条目。
-    wait_for(
-        "queued turn to run and settle",
-        Duration::from_secs(60),
-        &hint,
-        {
-            let cli = cli.clone();
-            let url = detail_url.clone();
-            move || {
+        // 排队回合自动开轮并完成：条目序列出现排队提交的 prompt 条目。
+        wait_for(
+            "queued turn to run and settle",
+            Duration::from_secs(60),
+            &hint,
+            {
                 let cli = cli.clone();
-                let url = url.clone();
-                Box::pin(async move {
-                    let v = cli
-                        .get(&url)
-                        .send()
-                        .await
-                        .ok()?
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()?;
-                    let queued_started = v["entries"].as_array().is_some_and(|entries| {
-                        entries.iter().any(|e| {
-                            e["kind"].as_str() == Some("prompt")
-                                && e["content"].as_str() == Some("queued while busy")
-                        })
-                    });
-                    let done = queued_started && v["status_slug"].as_str() == Some("done");
-                    done.then_some(v)
-                })
-            }
-        },
-    )
-    .await;
+                let url = detail_url.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        let queued_started = v["entries"].as_array().is_some_and(|entries| {
+                            entries.iter().any(|e| {
+                                e["kind"].as_str() == Some("prompt")
+                                    && e["content"].as_str() == Some("queued while busy")
+                            })
+                        });
+                        let done = queued_started && v["status_slug"].as_str() == Some("done");
+                        done.then_some(v)
+                    })
+                }
+            },
+        )
+        .await;
 
-    // 时序断言：turn-1 的全部输出条目必须完整地排在 turn-2 输出之前——
-    // 忙中提交绝不切开在跑回合的输出（可观察面证据；结构性保证由
-    // tests/continue_session_test.rs 的引擎级单测承载）。
-    let final_detail = cli
-        .get(&detail_url)
-        .send()
-        .await
-        .expect("final detail")
-        .json::<serde_json::Value>()
-        .await
-        .expect("final json");
-    let contents: Vec<String> = final_detail["entries"]
-        .as_array()
-        .expect("entries array")
-        .iter()
-        .filter_map(|b| b["content"].as_str().map(str::to_string))
-        .collect();
-    let last_chunk = contents
-        .iter()
-        .rposition(|c| c.contains("chunk"))
-        .expect("turn-1 streamed chunks");
-    let first_hello = contents
-        .iter()
-        .position(|c| c.contains("hello"))
-        .expect("turn-2 reply");
-    assert!(
-        last_chunk < first_hello,
-        "turn-2 output must not interleave turn-1 output: {contents:?}"
-    );
+        // 时序断言：turn-1 的全部输出条目必须完整地排在 turn-2 输出之前——
+        // 忙中提交绝不切开在跑回合的输出（可观察面证据；结构性保证由
+        // tests/continue_session_test.rs 的引擎级单测承载）。
+        let final_detail = cli
+            .get(&detail_url)
+            .send()
+            .await
+            .expect("final detail")
+            .json::<serde_json::Value>()
+            .await
+            .expect("final json");
+        let contents: Vec<String> = final_detail["entries"]
+            .as_array()
+            .expect("entries array")
+            .iter()
+            .filter_map(|b| b["content"].as_str().map(str::to_string))
+            .collect();
+        let last_chunk = contents
+            .iter()
+            .rposition(|c| c.contains("chunk"))
+            .expect("turn-1 streamed chunks");
+        let first_hello = contents
+            .iter()
+            .position(|c| c.contains("hello"))
+            .expect("turn-2 reply");
+        assert!(
+            last_chunk < first_hello,
+            "turn-2 output must not interleave turn-1 output: {contents:?}"
+        );
 
-    // close 记账：再造一个带队列的会话并关闭 → discarded_pending: 1。
-    // 用 "stall" 场景（一帧内容后子进程对 ACP 永久沉默、回合不收尾）：
-    // WORKING 窗口无限长，close 的丢弃记账不再与回合收尾/排队 drain 竞速
-    // （"stream" 的 800ms 窗口是既有的计时边沿，曾在并行负载下偶发把
-    // discarded 记成 0）。
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status, body) = post_json(
+        // close 记账：再造一个带队列的会话并关闭 → discarded_pending: 1。
+        // 用 "stall" 场景（一帧内容后子进程对 ACP 永久沉默、回合不收尾）：
+        // WORKING 窗口无限长，close 的丢弃记账不再与回合收尾/排队 drain 竞速
+        // （"stream" 的 800ms 窗口是既有的计时边沿，曾在并行负载下偶发把
+        // discarded 记成 0）。
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
         serde_json::json!({ "project_id": project_id.clone(), "prompt": "stall", "agent": "claude" }),
     )
     .await
     .expect("create second session");
-    assert_eq!(status, 201, "{body}");
-    let key2 = body["key"].as_str().expect("key").to_string();
-    let detail2 = format!("{}/api/sessions/{key2}", sb.webui_url());
-    wait_for(
-        "second session turn to be in flight",
-        Duration::from_secs(25),
-        &hint,
-        {
-            let cli = cli.clone();
-            let url = detail2.clone();
-            move || {
+        assert_eq!(status, 201, "{body}");
+        let key2 = body["key"].as_str().expect("key").to_string();
+        let detail2 = format!("{}/api/sessions/{key2}", sb.webui_url());
+        wait_for(
+            "second session turn to be in flight",
+            Duration::from_secs(25),
+            &hint,
+            {
                 let cli = cli.clone();
-                let url = url.clone();
+                let url = detail2.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        // 与 submit_turn 的 in-flight 判定同谓词：状态 working
+                        // 时提交才确定性入队（prompt-only 会开新轮——seed 的
+                        // prompt 条目在卡片 SEED 阶段就进 transcript）。
+                        let working = v["status_slug"].as_str() == Some("working");
+                        let content_seen = v["entries"].as_array().is_some_and(|b| {
+                            b.iter().any(|e| e["kind"].as_str() == Some("content"))
+                        });
+                        (working && content_seen).then_some(v)
+                    })
+                }
+            },
+        )
+        .await;
+        let (status, resp) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key2}/message", sb.webui_url()),
+            serde_json::json!({ "message": "will be dropped" }),
+        )
+        .await
+        .expect("queue for close");
+        assert_eq!(status, 200, "{resp}");
+        let (status, resp) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key2}/close", sb.webui_url()),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("close");
+        assert_eq!(status, 200, "close: {resp}");
+        assert_eq!(
+            resp["discarded_pending"].as_u64(),
+            Some(1),
+            "close must name the dropped submission count: {resp}"
+        );
+    }
+
+    /// （round5 1.1/1.2，core-session-channel「Session drive methods」内嵌场景）
+    /// 裸 core 内嵌 WebUI（`sebas core --webui`，复合后端 = acp 桥承载会话）下，
+    /// 排队提交的重排/移除必须到达承载子后端并成功，类型化拒绝原样透传
+    /// （unknown 404 / out_of_range 400），错误文案绝不自称「核心不可达」。
+    /// 修复前三个管理调用全部落复合层 trait 默认实现恒 503、文案谎报可达性。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn pending_management_reaches_the_host_backend_in_embedded_shape() {
+        let sb = Sandbox::new("testsuite_e2e", "embedded-pending");
+        sb.slow_fake_agent(400);
+        let cli = http_client();
+        let (_core, dashboard) = sb.spawn_core_inprocess_webui(&[]);
+        let base = format!("http://127.0.0.1:{dashboard}");
+        let hint = sb.path.clone();
+
+        // 内嵌形态的 dashboard 端口是旗标指定的 probed 端口（≠ sb.webui_port）。
+        let health_cli = cli.clone();
+        let health_url = base.clone();
+        let health_hint = hint.clone();
+        wait_for(
+            "in-process webui health",
+            Duration::from_secs(30),
+            &health_hint,
+            move || {
+                let cli = health_cli.clone();
+                let url = health_url.clone();
                 Box::pin(async move {
-                    let v = cli
-                        .get(&url)
+                    cli.get(format!("{url}/health"))
                         .send()
                         .await
                         .ok()?
-                        .json::<serde_json::Value>()
+                        .text()
                         .await
-                        .ok()?;
-                    // 与 submit_turn 的 in-flight 判定同谓词：状态 working
-                    // 时提交才确定性入队（prompt-only 会开新轮——seed 的
-                    // prompt 条目在卡片 SEED 阶段就进 transcript）。
-                    let working = v["status_slug"].as_str() == Some("working");
-                    let content_seen = v["entries"]
-                        .as_array()
-                        .is_some_and(|b| b.iter().any(|e| e["kind"].as_str() == Some("content")));
-                    (working && content_seen).then_some(v)
+                        .ok()
+                        .map(|b| b.trim() == "ok")
+                        .filter(|ok| *ok)
                 })
-            }
-        },
-    )
-    .await;
-    let (status, resp) = post_json(
-        &cli,
-        &format!("{}/api/sessions/{key2}/message", sb.webui_url()),
-        serde_json::json!({ "message": "will be dropped" }),
-    )
-    .await
-    .expect("queue for close");
-    assert_eq!(status, 200, "{resp}");
-    let (status, resp) = post_json(
-        &cli,
-        &format!("{}/api/sessions/{key2}/close", sb.webui_url()),
-        serde_json::json!({}),
-    )
-    .await
-    .expect("close");
-    assert_eq!(status, 200, "close: {resp}");
-    assert_eq!(
-        resp["discarded_pending"].as_u64(),
-        Some(1),
-        "close must name the dropped submission count: {resp}"
-    );
-}
+            },
+        )
+        .await;
 
-/// （round5 1.1/1.2，core-session-channel「Session drive methods」内嵌场景）
-/// 裸 core 内嵌 WebUI（`sebas core --webui`，复合后端 = acp 桥承载会话）下，
-/// 排队提交的重排/移除必须到达承载子后端并成功，类型化拒绝原样透传
-/// （unknown 404 / out_of_range 400），错误文案绝不自称「核心不可达」。
-/// 修复前三个管理调用全部落复合层 trait 默认实现恒 503、文案谎报可达性。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn pending_management_reaches_the_host_backend_in_embedded_shape() {
-    let sb = Sandbox::new("testsuite_e2e", "embedded-pending");
-    sb.slow_fake_agent(400);
-    let cli = http_client();
-    let (_core, dashboard) = sb.spawn_core_inprocess_webui(&[]);
-    let base = format!("http://127.0.0.1:{dashboard}");
-    let hint = sb.path.clone();
-
-    // 内嵌形态的 dashboard 端口是旗标指定的 probed 端口（≠ sb.webui_port）。
-    let health_cli = cli.clone();
-    let health_url = base.clone();
-    let health_hint = hint.clone();
-    wait_for("in-process webui health", Duration::from_secs(30), &health_hint, move || {
-        let cli = health_cli.clone();
-        let url = health_url.clone();
-        Box::pin(async move {
-            cli.get(format!("{url}/health"))
-                .send()
-                .await
-                .ok()?
-                .text()
-                .await
-                .ok()
-                .map(|b| b.trim() == "ok")
-                .filter(|ok| *ok)
-        })
-    })
-    .await;
-
-    // 项目注册走 dashboard 面（workspace root 已钉在沙箱目录，注册必定界内）。
-    let (pstatus, pbody) = post_json(
-        &cli,
-        &format!("{base}/api/projects"),
-        serde_json::json!({ "path": support::forward_slash(&sb.path) }),
-    )
-    .await
-    .expect("register scene project");
-    assert_eq!(pstatus, 201, "register scene project: {pbody}");
-    let project_id = pbody["id"].as_str().expect("project id").to_string();
-
-    let (detail_url, id_b, id_c) = queue_two_submissions(&cli, &base, &project_id, &hint).await;
-
-    // 重排：queued-c 移到队首 → 200 且响应携带重排后的全量队列
-    // （修复前：复合层缺转发恒 503「操作不可用: 此后端不承载待执行队列」，
-    // 且旧文案自称「核心不可达」）。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{detail_url}/pending/{id_c}/move"),
-        serde_json::json!({ "to_index": 0 }),
-    )
-    .await
-    .expect("move queued-c");
-    assert_eq!(status, 200, "move must reach the acp bridge: {body}");
-    assert_eq!(body["status"], "moved", "{body}");
-    let moved = body["pending"].as_array().expect("pending after move");
-    assert_eq!(moved[0]["text"], "queued-round5-c", "moved entry must lead: {body}");
-    assert_eq!(moved[1]["text"], "queued-round5-b", "{body}");
-
-    // 移除：queued-b 出队 → 200，剩余队列只含 queued-c。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{detail_url}/pending/{id_b}/remove"),
-        serde_json::json!({}),
-    )
-    .await
-    .expect("remove queued-b");
-    assert_eq!(status, 200, "remove must reach the acp bridge: {body}");
-    assert_eq!(body["status"], "removed", "{body}");
-    let left = body["pending"].as_array().expect("pending after remove");
-    assert_eq!(left.len(), 1, "{body}");
-    assert_eq!(left[0]["text"], "queued-round5-c", "{body}");
-
-    // 类型化拒绝透传：unknown id → 404（文案点名「不存在」，绝不 5xx、
-    // 绝不自称不可达）。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{detail_url}/pending/9999/remove"),
-        serde_json::json!({}),
-    )
-    .await
-    .expect("remove unknown id");
-    assert_eq!(status, 404, "unknown id must pass through typed: {body}");
-    let message = body["error"].as_str().unwrap_or_default();
-    assert!(message.contains("待执行提交不存在"), "{body}");
-    assert!(!message.contains("核心不可达"), "{body}");
-
-    // 越界重排 → 400（目标位置越界），同样诚实。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{detail_url}/pending/{id_c}/move"),
-        serde_json::json!({ "to_index": 9 }),
-    )
-    .await
-    .expect("move out of range");
-    assert_eq!(status, 400, "out-of-range must pass through typed: {body}");
-    let message = body["error"].as_str().unwrap_or_default();
-    assert!(message.contains("目标位置越界"), "{body}");
-    assert!(!message.contains("核心不可达"), "{body}");
-
-    // 全程 core 可达——以上失败没有一条可以伪装成「不可达」。
-    let (_status, summary) = get_json_status(&cli, &format!("{base}/api/summary"))
+        // 项目注册走 dashboard 面（workspace root 已钉在沙箱目录，注册必定界内）。
+        let (pstatus, pbody) = post_json(
+            &cli,
+            &format!("{base}/api/projects"),
+            serde_json::json!({ "path": support::forward_slash(&sb.path) }),
+        )
         .await
-        .expect("summary");
-    assert_eq!(
-        summary["reachability"]["ok"], true,
-        "the core was reachable the whole time: {summary}"
-    );
-}
+        .expect("register scene project");
+        assert_eq!(pstatus, 201, "register scene project: {pbody}");
+        let project_id = pbody["id"].as_str().expect("project id").to_string();
 
-/// （round5 1.1「any deployment shape」的 detached 半边）独立 webui + core
-/// 两进程形态下同一管理面契约：move/remove 经核心通道到达 core 侧引擎队列，
-/// 成功与类型化拒绝同样保真。内嵌形态（上一条）钉复合转发；这里钉「任何
-/// 部署形态」的另一半。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn pending_management_reaches_the_core_queue_in_detached_shape() {
-    let sb = Sandbox::new("testsuite_e2e", "detached-pending");
-    sb.slow_fake_agent(400);
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
+        let (detail_url, id_b, id_c) = queue_two_submissions(&cli, &base, &project_id, &hint).await;
 
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (detail_url, id_b, id_c) =
-        queue_two_submissions(&cli, &sb.webui_url(), &project_id, &sb.path).await;
-
-    // 重排 → 200（队列经核心通道在 core 侧翻转）。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{detail_url}/pending/{id_c}/move"),
-        serde_json::json!({ "to_index": 0 }),
-    )
-    .await
-    .expect("move queued-c");
-    assert_eq!(status, 200, "move must reach the core queue: {body}");
-    assert_eq!(body["pending"][0]["text"], "queued-round5-c", "{body}");
-
-    // 移除 → 200。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{detail_url}/pending/{id_b}/remove"),
-        serde_json::json!({}),
-    )
-    .await
-    .expect("remove queued-b");
-    assert_eq!(status, 200, "remove must reach the core queue: {body}");
-    let left = body["pending"].as_array().expect("pending after remove");
-    assert_eq!(left.len(), 1, "{body}");
-    assert_eq!(left[0]["text"], "queued-round5-c", "{body}");
-
-    // 类型化拒绝透传：unknown 404 / out_of_range 400，文案诚实。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{detail_url}/pending/9999/remove"),
-        serde_json::json!({}),
-    )
-    .await
-    .expect("remove unknown id");
-    assert_eq!(status, 404, "{body}");
-    assert!(body["error"].as_str().unwrap_or_default().contains("待执行提交不存在"), "{body}");
-    let (status, body) = post_json(
-        &cli,
-        &format!("{detail_url}/pending/{id_c}/move"),
-        serde_json::json!({ "to_index": 9 }),
-    )
-    .await
-    .expect("move out of range");
-    assert_eq!(status, 400, "{body}");
-    let message = body["error"].as_str().unwrap_or_default();
-    assert!(message.contains("目标位置越界"), "{body}");
-    assert!(!message.contains("核心不可达"), "{body}");
-}
-
-/// （round5 3.1，project-session-actions「label writes through any path
-/// update the row live」）被接受的 label 写入必须作为会话更新事件到达已
-/// 连接的客户端（rail 行名免刷新重取的触发器）——detached 形态下写入走
-/// 核心通道、事件经同一通道折返 /ws。列表行投影的 label 字段（重取的读源）
-/// 同步断言：设置与清空各走一轮。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn label_write_reaches_clients_as_session_update_without_reload() {
-    let sb = Sandbox::new("testsuite_e2e", "label-liveness");
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-
-    let project_id = scene_project_id(&cli, &sb).await;
-    // 先连 /ws 再写 label：帧必须在既有连接上到达（免刷新的证据本体）。
-    let mut ws = ws_connect(&sb.webui_url()).await;
-    // webui 启动会与 core 的 socket bind 竞速——首个流式订阅尝试可能失败、
-    // 经 1s 退避后才连上（claude_turn_streams 同款护栏）：`session.resync`
-    // 随每次订阅快照到达，等到它才说明 forwarder 已订阅、后续变更必达；
-    // 若 4s 内没等到（forwarder 在本连接订阅前就已连上，resync 已被广播
-    // 消费），订阅同样已就绪，继续即可。
-    let _ = tokio::time::timeout(Duration::from_secs(4), async {
-        loop {
-            let ev = next_ws_frame(&mut ws).await;
-            if ev["method"] == "session.resync" {
-                break;
-            }
-        }
-    })
-    .await;
-
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({
-            "project_id": project_id,
-            "prompt": "hello",
-            "agent": "claude"
-        }),
-    )
-    .await
-    .expect("create session");
-    assert_eq!(status, 201, "create session: {body}");
-    let key = body["key"].as_str().expect("key").to_string();
-    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
-    wait_turn_done(&cli, &sb, &detail_url).await;
-
-    // API 路径写入（rail 对话框与它共用同一 label API）。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{detail_url}/label"),
-        serde_json::json!({ "label": "发布清单会话" }),
-    )
-    .await
-    .expect("set label");
-    assert_eq!(status, 200, "set label: {body}");
-
-    // 更新帧到达：相位帧（session_id + 四相位键）。round5 6.3 起载荷扩展
-    // `label`（操作者命名随帧如实下发）——rail 的行名重取收窄直接消费该键
-    // （帧 label ≠ 行已知 label 才调度），断键即静默失活，必须在 wire 上钉住。
-    let frame = wait_session_updated_with_label(&mut ws, &key, Some("发布清单会话")).await;
-    let params = &frame["params"];
-    assert!(params["status_slug"].is_string(), "phase frame: {frame}");
-    assert!(params["turn_engaged"].is_boolean(), "phase frame: {frame}");
-    assert!(params["msg_count"].is_number(), "phase frame: {frame}");
-    assert!(params["pending"].is_array(), "phase frame: {frame}");
-
-    // 行投影（rail 重取的读源）已携带新 label。
-    let row = listed_row(&cli, &sb, &key).await;
-    assert_eq!(
-        row["label"], "发布清单会话",
-        "the accepted label must be on the row: {row}"
-    );
-
-    // 清空（API 置 null）同样广播 + 行投影回退。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{detail_url}/label"),
-        serde_json::json!({ "label": null }),
-    )
-    .await
-    .expect("clear label");
-    assert_eq!(status, 200, "clear label: {body}");
-    let frame = wait_session_updated_with_label(&mut ws, &key, None).await;
-    assert!(
-        frame["params"]["label"].is_null(),
-        "the cleared label must ride the frame as null (never a stale value): {frame}"
-    );
-    let row = listed_row(&cli, &sb, &key).await;
-    assert!(
-        row["label"].is_null(),
-        "the cleared label must leave the row: {row}"
-    );
-}
-
-/// （fix-webui-qa-defects-round5 1.2；断言按 6.1/3c review 的 wire 现状校准）
-/// 裸 core 复合后端下的待执行管理面：
-///
-/// - **重排诚实行为 (200)**：wire 上尚无优先提交入口（web_send_message →
-///   submit_turn 恒 priority=false，/btw 的优先位只在 feishu 入站生效），
-///   队列全普通项——move c → 0 是合法重排，得 200 且顺序生效。
-///   PriorityConflict 的 409 映射由 api.rs 的 FakeBackend 缝隙单测钉住；
-///   优先项 wire 入口落地后，本腿改回「越过优先项 must 409」。
-/// - **AlreadyStarted (409)**：等 c/b/p 依序投递完（id_p 离开 pending）→
-///   用陈旧的 p id 重试 remove → 状态层 delivered 集合里命中 →
-///   AlreadyStarted → 409。
-///
-/// 错误文案点名原因（该提交已开始执行）且绝不出现「核心不可达」
-/// 「操作不可用」等其它 5xx/4xx 顶替。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn pending_management_passes_typed_rejections_through_composite_409() {
-    let sb = Sandbox::new("testsuite_e2e", "embedded-pending-409");
-    sb.slow_fake_agent(400);
-    let cli = http_client();
-    let (_core, dashboard) = sb.spawn_core_inprocess_webui(&[]);
-    let base = format!("http://127.0.0.1:{dashboard}");
-    let hint = sb.path.clone();
-
-    // 内嵌形态 dashboard 等就绪。
-    let health_cli = cli.clone();
-    let health_url = base.clone();
-    let health_hint = hint.clone();
-    wait_for("in-process webui health", Duration::from_secs(30), &health_hint, move || {
-        let cli = health_cli.clone();
-        let url = health_url.clone();
-        Box::pin(async move {
-            cli.get(format!("{url}/health"))
-                .send()
-                .await
-                .ok()?
-                .text()
-                .await
-                .ok()
-                .map(|b| b.trim() == "ok")
-                .unwrap_or(false)
-                .then_some(())
-        })
-    })
-    .await;
-
-    // 注册项目（workspace root = 沙箱目录，注册必定界内）。
-    let (pstatus, pbody) = post_json(
-        &cli,
-        &format!("{base}/api/projects"),
-        serde_json::json!({ "path": support::forward_slash(&sb.path) }),
-    )
-    .await
-    .expect("register scene project");
-    assert_eq!(pstatus, 201, "register scene project: {pbody}");
-    let project_id = pbody["id"].as_str().expect("project id").to_string();
-
-    // 三条普通入栈（wire 上无优先提交入口，见段落注释）。
-    let (detail_url, _id_b, id_c, id_p) =
-        queue_three_pending(&cli, &base, &project_id, &hint).await;
-
-    // ── 重排诚实行为 → 200：队列全普通项，move c → 0 合法且顺序生效。──
-    let (status, body) = post_json(
-        &cli,
-        &format!("{detail_url}/pending/{id_c}/move"),
-        serde_json::json!({ "to_index": 0 }),
-    )
-    .await
-    .expect("move c to front");
-    assert_eq!(
-        status, 200,
-        "reordering plain submissions must succeed on the wire, got {body}"
-    );
-    let (_, detail) = get_json_status(&cli, &detail_url)
+        // 重排：queued-c 移到队首 → 200 且响应携带重排后的全量队列
+        // （修复前：复合层缺转发恒 503「操作不可用: 此后端不承载待执行队列」，
+        // 且旧文案自称「核心不可达」）。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{detail_url}/pending/{id_c}/move"),
+            serde_json::json!({ "to_index": 0 }),
+        )
         .await
-        .expect("detail after move");
-    let order: Vec<String> = detail["pending"]
-        .as_array()
-        .expect("pending list")
-        .iter()
-        .map(|p| p["text"].as_str().unwrap_or_default().to_string())
-        .collect();
-    assert_eq!(
-        order,
-        ["queued-round5-c", "queued-round5-b", "queued-round5-p"],
-        "move to front must take effect: {order:?}"
-    );
+        .expect("move queued-c");
+        assert_eq!(status, 200, "move must reach the acp bridge: {body}");
+        assert_eq!(body["status"], "moved", "{body}");
+        let moved = body["pending"].as_array().expect("pending after move");
+        assert_eq!(
+            moved[0]["text"], "queued-round5-c",
+            "moved entry must lead: {body}"
+        );
+        assert_eq!(moved[1]["text"], "queued-round5-b", "{body}");
 
-    // ── AlreadyStarted → 409：p 以普通项身份依序投递。轮询直到 id_p 离开
-    // pending（= 已 pop 投递），保留陈旧 id 重试 remove：delivered 集合命中
-    // → AlreadyStarted → 409。文案诚实性断言落在本错误腿上。
-    {
-        let poll_cli = cli.clone();
-        let poll_url = detail_url.clone();
-        wait_for("p to be delivered (leaves pending)", Duration::from_secs(60), &hint, move || {
-            let cli = poll_cli.clone();
-            let url = poll_url.clone();
-            Box::pin(async move {
-                let v = cli
-                    .get(&url)
-                    .send()
-                    .await
-                    .ok()?
-                    .json::<serde_json::Value>()
-                    .await
-                    .ok()?;
-                let delivered = v["pending"]
-                    .as_array()?
-                    .iter()
-                    .all(|p| p["id"].as_u64() != Some(id_p));
-                delivered.then_some(())
-            })
+        // 移除：queued-b 出队 → 200，剩余队列只含 queued-c。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{detail_url}/pending/{id_b}/remove"),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("remove queued-b");
+        assert_eq!(status, 200, "remove must reach the acp bridge: {body}");
+        assert_eq!(body["status"], "removed", "{body}");
+        let left = body["pending"].as_array().expect("pending after remove");
+        assert_eq!(left.len(), 1, "{body}");
+        assert_eq!(left[0]["text"], "queued-round5-c", "{body}");
+
+        // 类型化拒绝透传：unknown id → 404（文案点名「不存在」，绝不 5xx、
+        // 绝不自称不可达）。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{detail_url}/pending/9999/remove"),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("remove unknown id");
+        assert_eq!(status, 404, "unknown id must pass through typed: {body}");
+        let message = body["error"].as_str().unwrap_or_default();
+        assert!(message.contains("待执行提交不存在"), "{body}");
+        assert!(!message.contains("核心不可达"), "{body}");
+
+        // 越界重排 → 400（目标位置越界），同样诚实。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{detail_url}/pending/{id_c}/move"),
+            serde_json::json!({ "to_index": 9 }),
+        )
+        .await
+        .expect("move out of range");
+        assert_eq!(status, 400, "out-of-range must pass through typed: {body}");
+        let message = body["error"].as_str().unwrap_or_default();
+        assert!(message.contains("目标位置越界"), "{body}");
+        assert!(!message.contains("核心不可达"), "{body}");
+
+        // 全程 core 可达——以上失败没有一条可以伪装成「不可达」。
+        let (_status, summary) = get_json_status(&cli, &format!("{base}/api/summary"))
+            .await
+            .expect("summary");
+        assert_eq!(
+            summary["reachability"]["ok"], true,
+            "the core was reachable the whole time: {summary}"
+        );
+    }
+
+    /// （round5 1.1「any deployment shape」的 detached 半边）独立 webui + core
+    /// 两进程形态下同一管理面契约：move/remove 经核心通道到达 core 侧引擎队列，
+    /// 成功与类型化拒绝同样保真。内嵌形态（上一条）钉复合转发；这里钉「任何
+    /// 部署形态」的另一半。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn pending_management_reaches_the_core_queue_in_detached_shape() {
+        let sb = Sandbox::new("testsuite_e2e", "detached-pending");
+        sb.slow_fake_agent(400);
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
+
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (detail_url, id_b, id_c) =
+            queue_two_submissions(&cli, &sb.webui_url(), &project_id, &sb.path).await;
+
+        // 重排 → 200（队列经核心通道在 core 侧翻转）。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{detail_url}/pending/{id_c}/move"),
+            serde_json::json!({ "to_index": 0 }),
+        )
+        .await
+        .expect("move queued-c");
+        assert_eq!(status, 200, "move must reach the core queue: {body}");
+        assert_eq!(body["pending"][0]["text"], "queued-round5-c", "{body}");
+
+        // 移除 → 200。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{detail_url}/pending/{id_b}/remove"),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("remove queued-b");
+        assert_eq!(status, 200, "remove must reach the core queue: {body}");
+        let left = body["pending"].as_array().expect("pending after remove");
+        assert_eq!(left.len(), 1, "{body}");
+        assert_eq!(left[0]["text"], "queued-round5-c", "{body}");
+
+        // 类型化拒绝透传：unknown 404 / out_of_range 400，文案诚实。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{detail_url}/pending/9999/remove"),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("remove unknown id");
+        assert_eq!(status, 404, "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("待执行提交不存在"),
+            "{body}"
+        );
+        let (status, body) = post_json(
+            &cli,
+            &format!("{detail_url}/pending/{id_c}/move"),
+            serde_json::json!({ "to_index": 9 }),
+        )
+        .await
+        .expect("move out of range");
+        assert_eq!(status, 400, "{body}");
+        let message = body["error"].as_str().unwrap_or_default();
+        assert!(message.contains("目标位置越界"), "{body}");
+        assert!(!message.contains("核心不可达"), "{body}");
+    }
+
+    /// （round5 3.1，project-session-actions「label writes through any path
+    /// update the row live」）被接受的 label 写入必须作为会话更新事件到达已
+    /// 连接的客户端（rail 行名免刷新重取的触发器）——detached 形态下写入走
+    /// 核心通道、事件经同一通道折返 /ws。列表行投影的 label 字段（重取的读源）
+    /// 同步断言：设置与清空各走一轮。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn label_write_reaches_clients_as_session_update_without_reload() {
+        let sb = Sandbox::new("testsuite_e2e", "label-liveness");
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
+
+        let project_id = scene_project_id(&cli, &sb).await;
+        // 先连 /ws 再写 label：帧必须在既有连接上到达（免刷新的证据本体）。
+        let mut ws = ws_connect(&sb.webui_url()).await;
+        // webui 启动会与 core 的 socket bind 竞速——首个流式订阅尝试可能失败、
+        // 经 1s 退避后才连上（claude_turn_streams 同款护栏）：`session.resync`
+        // 随每次订阅快照到达，等到它才说明 forwarder 已订阅、后续变更必达；
+        // 若 4s 内没等到（forwarder 在本连接订阅前就已连上，resync 已被广播
+        // 消费），订阅同样已就绪，继续即可。
+        let _ = tokio::time::timeout(Duration::from_secs(4), async {
+            loop {
+                let ev = next_ws_frame(&mut ws).await;
+                if ev["method"] == "session.resync" {
+                    break;
+                }
+            }
         })
         .await;
-    }
-    let (status, body) = post_json(
-        &cli,
-        &format!("{detail_url}/pending/{id_p}/remove"),
-        serde_json::json!({}),
-    )
-    .await
-    .expect("remove already-started id");
-    assert_eq!(
-        status, 409,
-        "removing a delivered id must 409 (AlreadyStarted), got {body}"
-    );
-    let message = body["error"].as_str().unwrap_or_default();
-    assert!(
-        message.contains("该提交已开始执行"),
-        "AlreadyStarted message must name the cause: {message}"
-    );
-    assert!(!message.contains("核心不可达"), "{message}");
-    assert!(!message.contains("操作不可用"), "{message}");
 
-    // 全程 core 可达——以上两类失败没有一条可以伪装成「不可达」。
-    let (_status, summary) = get_json_status(&cli, &format!("{base}/api/summary"))
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions", sb.webui_url()),
+            serde_json::json!({
+                "project_id": project_id,
+                "prompt": "hello",
+                "agent": "claude"
+            }),
+        )
         .await
-        .expect("summary");
-    assert_eq!(
-        summary["reachability"]["ok"], true,
-        "the core was reachable the whole time: {summary}"
-    );
-}
+        .expect("create session");
+        assert_eq!(status, 201, "create session: {body}");
+        let key = body["key"].as_str().expect("key").to_string();
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+        wait_turn_done(&cli, &sb, &detail_url).await;
 
-/// （fix-webui-qa-defects-round5 1.3，core-session-channel 末段：错误文案
-/// 不再自称「核心不可达」）复合后端路由缺位的诚实失败 = HTTP 503 + 文案
-/// 「操作不可用: 此后端不承载待执行队列」——直接打不归 webui 路由的会话：
-/// 该键对应的 channel 后端无队列 / 该 channel 走 native 侧（不路由到 acp
-/// 桥）。这里通过在 feishu channel 上不存在会话的 known-format key 命中
-/// native 侧不可用分支（route() 路由到 NativeAgentBackend → trait 默认
-/// Unavailable），文字契约由 api.rs 透传。
-///
-/// 不创建 feishu 会话（feishu 通道默认 disabled，避免与既有沙箱冲突）；
-/// 只断言调用契约与文案形态——这与 1.2 表格里 FakeBackend 注入 Unavailable
-/// 的接口层单测是同形但反向验证：真实 InProcessBackend/NativeAgentBackend
-/// 路径里走出来的错误文本也得是「操作不可用」而非「核心不可达」。
-/// 键必须是 `agent-` 形引用（is_native 谓词），否则落 ACP 桥得 404 Unknown。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn pending_management_unavailable_uses_honest_cause_text() {
-    let sb = Sandbox::new("testsuite_e2e", "embedded-pending-unavailable");
-    sb.slow_fake_agent(400);
-    let cli = http_client();
-    let (_core, dashboard) = sb.spawn_core_inprocess_webui(&[]);
-    let base = format!("http://127.0.0.1:{dashboard}");
-    let hint = sb.path.clone();
+        // API 路径写入（rail 对话框与它共用同一 label API）。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{detail_url}/label"),
+            serde_json::json!({ "label": "发布清单会话" }),
+        )
+        .await
+        .expect("set label");
+        assert_eq!(status, 200, "set label: {body}");
 
-    let health_cli = cli.clone();
-    let health_url = base.clone();
-    let health_hint = hint.clone();
-    wait_for("in-process webui health", Duration::from_secs(30), &health_hint, move || {
-        let cli = health_cli.clone();
-        let url = health_url.clone();
-        Box::pin(async move {
-            cli.get(format!("{url}/health"))
-                .send()
-                .await
-                .ok()?
-                .text()
-                .await
-                .ok()
-                .map(|b| b.trim() == "ok")
-                .unwrap_or(false)
-                .then_some(())
-        })
-    })
-    .await;
+        // 更新帧到达：相位帧（session_id + 四相位键）。round5 6.3 起载荷扩展
+        // `label`（操作者命名随帧如实下发）——rail 的行名重取收窄直接消费该键
+        // （帧 label ≠ 行已知 label 才调度），断键即静默失活，必须在 wire 上钉住。
+        let frame = wait_session_updated_with_label(&mut ws, &key, Some("发布清单会话")).await;
+        let params = &frame["params"];
+        assert!(params["status_slug"].is_string(), "phase frame: {frame}");
+        assert!(params["turn_engaged"].is_boolean(), "phase frame: {frame}");
+        assert!(params["msg_count"].is_number(), "phase frame: {frame}");
+        assert!(params["pending"].is_array(), "phase frame: {frame}");
 
-    // 注册项目（让 create 不撞 scope 边界）。
-    let (pstatus, pbody) = post_json(
-        &cli,
-        &format!("{base}/api/projects"),
-        serde_json::json!({ "path": support::forward_slash(&sb.path) }),
-    )
-    .await
-    .expect("register scene project");
-    assert_eq!(pstatus, 201, "register scene project: {pbody}");
-    let project_id = pbody["id"].as_str().expect("project id").to_string();
-
-    // web channel 创建会话（走 acp 桥）→ 三条普通提交入栈，作为「acp 侧
-    // 队列照常可用」的对照面（本用例不需要优先项）。
-    let (detail_url, _id_b, _id_c, _id_p) =
-        queue_three_pending(&cli, &base, &project_id, &hint).await;
-
-    // 用合法编码 key 但绕开 webui 路由：直接对 feishu channel 编码键（沙箱
-    // feishu disabled，route() 落到 NativeAgentBackend）。round8 2.2 起 native
-    // 侧承载影子队列，pending/remove/move 对**未知会话**是类型化 UnknownSession
-    // （404「会话不存在」，与 ACP 面同词表）——不再是 trait 默认的 503
-    // 「此后端不承载待执行队列」（round5 时代的期望；本轮 D5 裁决以现行
-    // 契约为准，503 面由 session_backend 单测的 FakeBackend 承载）。
-    //
-    // 编码约定：「channel%00reference」；is_native（src/agent_backend.rs）
-    // 只认 feishu + `agent-` 前缀才路由 native 侧——引用缺前缀会落 ACP 桥
-    // （round5 6.1 修的键形状），故取一个不存在的 `agent-` 形 feishu 引用。
-    let feishu_encoded = "feishu%00agent-round5-native-pending";
-    for (op, suffix) in [("remove", "/remove"), ("move", "/move")] {
-        let url = format!("{base}/api/sessions/{feishu_encoded}/pending/1{suffix}");
-        let body = if op == "move" {
-            serde_json::json!({ "to_index": 0 })
-        } else {
-            serde_json::json!({})
-        };
-        let (status, body) = post_json(&cli, &url, body)
-            .await
-            .unwrap_or_else(|e| panic!("{op} feishu channel: {e}"));
+        // 行投影（rail 重取的读源）已携带新 label。
+        let row = listed_row(&cli, &sb, &key).await;
         assert_eq!(
-            status, 404,
-            "{op} on a native key with no live session must be a typed UnknownSession, got {body}"
+            row["label"], "发布清单会话",
+            "the accepted label must be on the row: {row}"
+        );
+
+        // 清空（API 置 null）同样广播 + 行投影回退。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{detail_url}/label"),
+            serde_json::json!({ "label": null }),
+        )
+        .await
+        .expect("clear label");
+        assert_eq!(status, 200, "clear label: {body}");
+        let frame = wait_session_updated_with_label(&mut ws, &key, None).await;
+        assert!(
+            frame["params"]["label"].is_null(),
+            "the cleared label must ride the frame as null (never a stale value): {frame}"
+        );
+        let row = listed_row(&cli, &sb, &key).await;
+        assert!(
+            row["label"].is_null(),
+            "the cleared label must leave the row: {row}"
+        );
+    }
+
+    /// （fix-webui-qa-defects-round5 1.2；断言按 6.1/3c review 的 wire 现状校准）
+    /// 裸 core 复合后端下的待执行管理面：
+    ///
+    /// - **重排诚实行为 (200)**：wire 上尚无优先提交入口（web_send_message →
+    ///   submit_turn 恒 priority=false，/btw 的优先位只在 feishu 入站生效），
+    ///   队列全普通项——move c → 0 是合法重排，得 200 且顺序生效。
+    ///   PriorityConflict 的 409 映射由 api.rs 的 FakeBackend 缝隙单测钉住；
+    ///   优先项 wire 入口落地后，本腿改回「越过优先项 must 409」。
+    /// - **AlreadyStarted (409)**：等 c/b/p 依序投递完（id_p 离开 pending）→
+    ///   用陈旧的 p id 重试 remove → 状态层 delivered 集合里命中 →
+    ///   AlreadyStarted → 409。
+    ///
+    /// 错误文案点名原因（该提交已开始执行）且绝不出现「核心不可达」
+    /// 「操作不可用」等其它 5xx/4xx 顶替。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn pending_management_passes_typed_rejections_through_composite_409() {
+        let sb = Sandbox::new("testsuite_e2e", "embedded-pending-409");
+        sb.slow_fake_agent(400);
+        let cli = http_client();
+        let (_core, dashboard) = sb.spawn_core_inprocess_webui(&[]);
+        let base = format!("http://127.0.0.1:{dashboard}");
+        let hint = sb.path.clone();
+
+        // 内嵌形态 dashboard 等就绪。
+        let health_cli = cli.clone();
+        let health_url = base.clone();
+        let health_hint = hint.clone();
+        wait_for(
+            "in-process webui health",
+            Duration::from_secs(30),
+            &health_hint,
+            move || {
+                let cli = health_cli.clone();
+                let url = health_url.clone();
+                Box::pin(async move {
+                    cli.get(format!("{url}/health"))
+                        .send()
+                        .await
+                        .ok()?
+                        .text()
+                        .await
+                        .ok()
+                        .map(|b| b.trim() == "ok")
+                        .unwrap_or(false)
+                        .then_some(())
+                })
+            },
+        )
+        .await;
+
+        // 注册项目（workspace root = 沙箱目录，注册必定界内）。
+        let (pstatus, pbody) = post_json(
+            &cli,
+            &format!("{base}/api/projects"),
+            serde_json::json!({ "path": support::forward_slash(&sb.path) }),
+        )
+        .await
+        .expect("register scene project");
+        assert_eq!(pstatus, 201, "register scene project: {pbody}");
+        let project_id = pbody["id"].as_str().expect("project id").to_string();
+
+        // 三条普通入栈（wire 上无优先提交入口，见段落注释）。
+        let (detail_url, _id_b, id_c, id_p) =
+            queue_three_pending(&cli, &base, &project_id, &hint).await;
+
+        // ── 重排诚实行为 → 200：队列全普通项，move c → 0 合法且顺序生效。──
+        let (status, body) = post_json(
+            &cli,
+            &format!("{detail_url}/pending/{id_c}/move"),
+            serde_json::json!({ "to_index": 0 }),
+        )
+        .await
+        .expect("move c to front");
+        assert_eq!(
+            status, 200,
+            "reordering plain submissions must succeed on the wire, got {body}"
+        );
+        let (_, detail) = get_json_status(&cli, &detail_url)
+            .await
+            .expect("detail after move");
+        let order: Vec<String> = detail["pending"]
+            .as_array()
+            .expect("pending list")
+            .iter()
+            .map(|p| p["text"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(
+            order,
+            ["queued-round5-c", "queued-round5-b", "queued-round5-p"],
+            "move to front must take effect: {order:?}"
+        );
+
+        // ── AlreadyStarted → 409：p 以普通项身份依序投递。轮询直到 id_p 离开
+        // pending（= 已 pop 投递），保留陈旧 id 重试 remove：delivered 集合命中
+        // → AlreadyStarted → 409。文案诚实性断言落在本错误腿上。
+        {
+            let poll_cli = cli.clone();
+            let poll_url = detail_url.clone();
+            wait_for(
+                "p to be delivered (leaves pending)",
+                Duration::from_secs(60),
+                &hint,
+                move || {
+                    let cli = poll_cli.clone();
+                    let url = poll_url.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        let delivered = v["pending"]
+                            .as_array()?
+                            .iter()
+                            .all(|p| p["id"].as_u64() != Some(id_p));
+                        delivered.then_some(())
+                    })
+                },
+            )
+            .await;
+        }
+        let (status, body) = post_json(
+            &cli,
+            &format!("{detail_url}/pending/{id_p}/remove"),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("remove already-started id");
+        assert_eq!(
+            status, 409,
+            "removing a delivered id must 409 (AlreadyStarted), got {body}"
         );
         let message = body["error"].as_str().unwrap_or_default();
         assert!(
-            message.contains("会话不存在"),
-            "{op} message must be the typed unknown-session rejection: {message}"
+            message.contains("该提交已开始执行"),
+            "AlreadyStarted message must name the cause: {message}"
         );
-        assert!(
-            !message.contains("核心不可达"),
-            "{op} message must NOT pretend the core is unreachable: {message}"
+        assert!(!message.contains("核心不可达"), "{message}");
+        assert!(!message.contains("操作不可用"), "{message}");
+
+        // 全程 core 可达——以上两类失败没有一条可以伪装成「不可达」。
+        let (_status, summary) = get_json_status(&cli, &format!("{base}/api/summary"))
+            .await
+            .expect("summary");
+        assert_eq!(
+            summary["reachability"]["ok"], true,
+            "the core was reachable the whole time: {summary}"
         );
     }
 
-    // 同一会话 web channel 路径上仍然 200（控制：复合后端按 key 路由成功）。
-    let (_status, summary) = get_json_status(&cli, &format!("{base}/api/summary"))
+    /// （fix-webui-qa-defects-round5 1.3，core-session-channel 末段：错误文案
+    /// 不再自称「核心不可达」）复合后端路由缺位的诚实失败 = HTTP 503 + 文案
+    /// 「操作不可用: 此后端不承载待执行队列」——直接打不归 webui 路由的会话：
+    /// 该键对应的 channel 后端无队列 / 该 channel 走 native 侧（不路由到 acp
+    /// 桥）。这里通过在 feishu channel 上不存在会话的 known-format key 命中
+    /// native 侧不可用分支（route() 路由到 NativeAgentBackend → trait 默认
+    /// Unavailable），文字契约由 api.rs 透传。
+    ///
+    /// 不创建 feishu 会话（feishu 通道默认 disabled，避免与既有沙箱冲突）；
+    /// 只断言调用契约与文案形态——这与 1.2 表格里 FakeBackend 注入 Unavailable
+    /// 的接口层单测是同形但反向验证：真实 InProcessBackend/NativeAgentBackend
+    /// 路径里走出来的错误文本也得是「操作不可用」而非「核心不可达」。
+    /// 键必须是 `agent-` 形引用（is_native 谓词），否则落 ACP 桥得 404 Unknown。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn pending_management_unavailable_uses_honest_cause_text() {
+        let sb = Sandbox::new("testsuite_e2e", "embedded-pending-unavailable");
+        sb.slow_fake_agent(400);
+        let cli = http_client();
+        let (_core, dashboard) = sb.spawn_core_inprocess_webui(&[]);
+        let base = format!("http://127.0.0.1:{dashboard}");
+        let hint = sb.path.clone();
+
+        let health_cli = cli.clone();
+        let health_url = base.clone();
+        let health_hint = hint.clone();
+        wait_for(
+            "in-process webui health",
+            Duration::from_secs(30),
+            &health_hint,
+            move || {
+                let cli = health_cli.clone();
+                let url = health_url.clone();
+                Box::pin(async move {
+                    cli.get(format!("{url}/health"))
+                        .send()
+                        .await
+                        .ok()?
+                        .text()
+                        .await
+                        .ok()
+                        .map(|b| b.trim() == "ok")
+                        .unwrap_or(false)
+                        .then_some(())
+                })
+            },
+        )
+        .await;
+
+        // 注册项目（让 create 不撞 scope 边界）。
+        let (pstatus, pbody) = post_json(
+            &cli,
+            &format!("{base}/api/projects"),
+            serde_json::json!({ "path": support::forward_slash(&sb.path) }),
+        )
         .await
-        .expect("summary");
-    assert_eq!(
-        summary["reachability"]["ok"], true,
-        "the core was reachable the whole time: {summary}"
-    );
-    let (_status, list) =
-        get_json_status(&cli, &format!("{base}/api/sessions"))
+        .expect("register scene project");
+        assert_eq!(pstatus, 201, "register scene project: {pbody}");
+        let project_id = pbody["id"].as_str().expect("project id").to_string();
+
+        // web channel 创建会话（走 acp 桥）→ 三条普通提交入栈，作为「acp 侧
+        // 队列照常可用」的对照面（本用例不需要优先项）。
+        let (detail_url, _id_b, _id_c, _id_p) =
+            queue_three_pending(&cli, &base, &project_id, &hint).await;
+
+        // 用合法编码 key 但绕开 webui 路由：直接对 feishu channel 编码键（沙箱
+        // feishu disabled，route() 落到 NativeAgentBackend）。round8 2.2 起 native
+        // 侧承载影子队列，pending/remove/move 对**未知会话**是类型化 UnknownSession
+        // （404「会话不存在」，与 ACP 面同词表）——不再是 trait 默认的 503
+        // 「此后端不承载待执行队列」（round5 时代的期望；本轮 D5 裁决以现行
+        // 契约为准，503 面由 session_backend 单测的 FakeBackend 承载）。
+        //
+        // 编码约定：「channel%00reference」；is_native（src/agent_backend.rs）
+        // 只认 feishu + `agent-` 前缀才路由 native 侧——引用缺前缀会落 ACP 桥
+        // （round5 6.1 修的键形状），故取一个不存在的 `agent-` 形 feishu 引用。
+        let feishu_encoded = "feishu%00agent-round5-native-pending";
+        for (op, suffix) in [("remove", "/remove"), ("move", "/move")] {
+            let url = format!("{base}/api/sessions/{feishu_encoded}/pending/1{suffix}");
+            let body = if op == "move" {
+                serde_json::json!({ "to_index": 0 })
+            } else {
+                serde_json::json!({})
+            };
+            let (status, body) = post_json(&cli, &url, body)
+                .await
+                .unwrap_or_else(|e| panic!("{op} feishu channel: {e}"));
+            assert_eq!(
+                status, 404,
+                "{op} on a native key with no live session must be a typed UnknownSession, got {body}"
+            );
+            let message = body["error"].as_str().unwrap_or_default();
+            assert!(
+                message.contains("会话不存在"),
+                "{op} message must be the typed unknown-session rejection: {message}"
+            );
+            assert!(
+                !message.contains("核心不可达"),
+                "{op} message must NOT pretend the core is unreachable: {message}"
+            );
+        }
+
+        // 同一会话 web channel 路径上仍然 200（控制：复合后端按 key 路由成功）。
+        let (_status, summary) = get_json_status(&cli, &format!("{base}/api/summary"))
+            .await
+            .expect("summary");
+        assert_eq!(
+            summary["reachability"]["ok"], true,
+            "the core was reachable the whole time: {summary}"
+        );
+        let (_status, list) = get_json_status(&cli, &format!("{base}/api/sessions"))
             .await
             .expect("session list");
-    let in_list = list["recent_sessions"]
-        .as_array()
-        .expect("rows")
-        .iter()
-        .any(|r| {
-            r["encoded_key"].as_str()
-                == Some(detail_url.rsplit('/').next().unwrap_or(""))
-        });
-    assert!(in_list, "the queued session must still be reachable by webui list");
-}
+        let in_list = list["recent_sessions"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .any(|r| {
+                r["encoded_key"].as_str() == Some(detail_url.rsplit('/').next().unwrap_or(""))
+            });
+        assert!(
+            in_list,
+            "the queued session must still be reachable by webui list"
+        );
+    }
 }
 
 mod mode_and_model {
     use super::*;
 
-/// （add-agent-mode-selection）mode 透传：带 mode 的创建把映射后的
-/// `--permission-mode` 写进子进程 argv；缺省 mode 的对照会话不带该参数；
-/// 未知 mode 创建 400。数据源是 fake-claude journal（argv/meta），全程零真
-/// 模型调用。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn mode_threads_to_agent_argv() {
-    let sb = Sandbox::new("testsuite_e2e", "mode-argv");
-    let journal = sb.journal_fake_agent();
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
+    /// （add-agent-mode-selection）mode 透传：带 mode 的创建把映射后的
+    /// `--permission-mode` 写进子进程 argv；缺省 mode 的对照会话不带该参数；
+    /// 未知 mode 创建 400。数据源是 fake-claude journal（argv/meta），全程零真
+    /// 模型调用。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn mode_threads_to_agent_argv() {
+        let sb = Sandbox::new("testsuite_e2e", "mode-argv");
+        let journal = sb.journal_fake_agent();
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
 
-    // 对照会话：不带 mode → argv 无 --permission-mode。
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status, body) = post_json(
+        // 对照会话：不带 mode → argv 无 --permission-mode。
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
         serde_json::json!({ "project_id": project_id.clone(), "prompt": "hello", "agent": "claude" }),
     )
     .await
     .expect("create default session");
-    assert_eq!(status, 201, "create default session: {body}");
+        assert_eq!(status, 201, "create default session: {body}");
 
-    // mode=allow → argv 含 --permission-mode bypassPermissions。
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status, body) = post_json(
+        // mode=allow → argv 含 --permission-mode bypassPermissions。
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
         serde_json::json!({ "project_id": project_id.clone(), "prompt": "hello", "agent": "claude", "mode": "allow" }),
     )
     .await
     .expect("create allow session");
-    assert_eq!(status, 201, "create allow session: {body}");
+        assert_eq!(status, 201, "create allow session: {body}");
 
-    // 未知 mode → 400（词汇校验，不静默降级）。
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status, body) = post_json(
+        // 未知 mode → 400（词汇校验，不静默降级）。
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
         serde_json::json!({ "project_id": project_id.clone(), "prompt": "x", "agent": "claude", "mode": "plan" }),
     )
     .await
     .expect("create unknown-mode session");
-    assert_eq!(status, 400, "unknown mode must be rejected: {body}");
+        assert_eq!(status, 400, "unknown mode must be rejected: {body}");
 
-    // 两个子进程各追加一条 argv meta。
-    wait_for(
-        "both fake-claude turns to finish (journal has 2 argv metas)",
-        Duration::from_secs(30),
-        &sb.path.clone(),
-        {
-            let journal = journal.clone();
-            move || {
+        // 两个子进程各追加一条 argv meta。
+        wait_for(
+            "both fake-claude turns to finish (journal has 2 argv metas)",
+            Duration::from_secs(30),
+            &sb.path.clone(),
+            {
                 let journal = journal.clone();
-                Box::pin(async move {
-                    let Ok(content) = std::fs::read_to_string(&journal) else {
-                        return None;
-                    };
-                    let metas = content
-                        .lines()
-                        .filter(|l| l.contains("\"dir\":\"meta\""))
-                        .count();
-                    (metas >= 2).then_some(())
-                })
-            }
-        },
-    )
-    .await;
+                move || {
+                    let journal = journal.clone();
+                    Box::pin(async move {
+                        let Ok(content) = std::fs::read_to_string(&journal) else {
+                            return None;
+                        };
+                        let metas = content
+                            .lines()
+                            .filter(|l| l.contains("\"dir\":\"meta\""))
+                            .count();
+                        (metas >= 2).then_some(())
+                    })
+                }
+            },
+        )
+        .await;
 
-    let content =
-        std::fs::read_to_string(sb.path.join("fake-claude-journal.jsonl")).expect("journal");
-    let argvs: Vec<Vec<String>> = content
-        .lines()
-        .filter(|l| l.contains("\"dir\":\"meta\""))
-        .map(|l| {
-            let v: serde_json::Value = serde_json::from_str(l).expect("journal meta parses");
-            v["msg"]["argv"]
-                .as_array()
-                .expect("argv array")
-                .iter()
-                .map(|a| a.as_str().expect("argv str").to_string())
-                .collect()
-        })
-        .collect();
-    assert_eq!(argvs.len(), 2, "two child spawns journaled: {argvs:?}");
+        let content =
+            std::fs::read_to_string(sb.path.join("fake-claude-journal.jsonl")).expect("journal");
+        let argvs: Vec<Vec<String>> = content
+            .lines()
+            .filter(|l| l.contains("\"dir\":\"meta\""))
+            .map(|l| {
+                let v: serde_json::Value = serde_json::from_str(l).expect("journal meta parses");
+                v["msg"]["argv"]
+                    .as_array()
+                    .expect("argv array")
+                    .iter()
+                    .map(|a| a.as_str().expect("argv str").to_string())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(argvs.len(), 2, "two child spawns journaled: {argvs:?}");
 
-    let with_flag = argvs
-        .iter()
-        .find(|a| a.iter().any(|t| t == "--permission-mode"))
-        .expect("allow session must carry --permission-mode");
-    let idx = with_flag
-        .iter()
-        .position(|t| t == "--permission-mode")
-        .unwrap();
-    assert_eq!(
-        with_flag.get(idx + 1).map(String::as_str),
-        Some("bypassPermissions"),
-        "allow maps to bypassPermissions on the child argv"
-    );
-    assert!(
-        argvs
+        let with_flag = argvs
             .iter()
-            .any(|a| !a.iter().any(|t| t == "--permission-mode")),
-        "default session must not carry --permission-mode"
-    );
-}
-
-/// （add-agent-mode-selection）中途切换：POST /api/sessions/{key}/mode 把
-/// 期望值送达运行中的 fake-claude（journal 记录运行时 set_permission_mode），
-/// 快照 desired/effective 跟随更新；切到 allow 后 `perm` 场景免审批直接
-/// 完成（行为级对照：ask 下同场景会停在审批等待）。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn mode_mid_session_switch() {
-    let sb = Sandbox::new("testsuite_e2e", "mode-switch");
-    let journal = sb.journal_fake_agent();
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "project_id": project_id.clone(), "prompt": "hello", "agent": "claude" }),
-    )
-    .await
-    .expect("create session");
-    assert_eq!(status, 201, "create session: {body}");
-    let key = body["key"].as_str().expect("key").to_string();
-    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
-
-    // 等首回合完成。
-    wait_for(
-        "first turn Done",
-        Duration::from_secs(25),
-        &sb.path.clone(),
-        {
-            let cli = cli.clone();
-            let url = detail_url.clone();
-            move || {
-                let cli = cli.clone();
-                let url = url.clone();
-                Box::pin(async move {
-                    let v = cli
-                        .get(&url)
-                        .send()
-                        .await
-                        .ok()?
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()?;
-                    let done = v["status_slug"].as_str() == Some("done")
-                        || v["status"]
-                            .as_str()
-                            .is_some_and(|s| s.eq_ignore_ascii_case("done"));
-                    done.then_some(())
-                })
-            }
-        },
-    )
-    .await;
-
-    // 切到 allow：命令送达 = 200；执行体接受经 ModeChanged 反馈。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions/{key}/mode", sb.webui_url()),
-        serde_json::json!({ "mode": "allow" }),
-    )
-    .await
-    .expect("switch mode");
-    assert_eq!(status, 200, "mode switch: {body}");
-
-    // journal 记录运行时切换（SDK set_permission_mode → "bypassPermissions"）。
-    wait_for(
-        "runtime mode_change journaled",
-        Duration::from_secs(10),
-        &sb.path.clone(),
-        {
-            let journal = journal.clone();
-            move || {
-                let journal = journal.clone();
-                Box::pin(async move {
-                    let Ok(content) = std::fs::read_to_string(&journal) else {
-                        return None;
-                    };
-                    content
-                        .lines()
-                        .any(|l| l.contains("mode_change") && l.contains("bypassPermissions"))
-                        .then_some(())
-                })
-            }
-        },
-    )
-    .await;
-
-    // 快照：desired=allow 且 effective 落定为 allow（ModeChanged → 映射）。
-    wait_for(
-        "snapshot reflects effective mode",
-        Duration::from_secs(10),
-        &sb.path.clone(),
-        {
-            let cli = cli.clone();
-            let url = detail_url.clone();
-            move || {
-                let cli = cli.clone();
-                let url = url.clone();
-                Box::pin(async move {
-                    let v = cli
-                        .get(&url)
-                        .send()
-                        .await
-                        .ok()?
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()?;
-                    let ok = v["desired_mode"].as_str() == Some("allow")
-                        && v["effective_mode"].as_str() == Some("allow");
-                    ok.then_some(())
-                })
-            }
-        },
-    )
-    .await;
-
-    // 行为级：allow 模式下 perm 场景免审批直接完成。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
-        serde_json::json!({ "message": "perm" }),
-    )
-    .await
-    .expect("send perm");
-    assert_eq!(status, 200, "send perm: {body}");
-    let detail = wait_for(
-        "perm turn completes without gating",
-        Duration::from_secs(25),
-        &sb.path.clone(),
-        {
-            let cli = cli.clone();
-            let url = detail_url.clone();
-            move || {
-                let cli = cli.clone();
-                let url = url.clone();
-                Box::pin(async move {
-                    let v = cli
-                        .get(&url)
-                        .send()
-                        .await
-                        .ok()?
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()?;
-                    let done = v["status_slug"].as_str() == Some("done")
-                        || v["status"]
-                            .as_str()
-                            .is_some_and(|s| s.eq_ignore_ascii_case("done"));
-                    done.then_some(v)
-                })
-            }
-        },
-    )
-    .await;
-    let transcript = detail["entries"]
-        .as_array()
-        .map(|blocks| {
-            blocks
-                .iter()
-                .filter_map(|b| b["content"].as_str())
-                .collect::<Vec<_>>()
-                .join("")
-        })
-        .unwrap_or_default();
-    assert!(
-        transcript.contains("perm done"),
-        "allow session must run the gated tool without approval, got: {transcript:?}"
-    );
-}
-
-/// session-slash-commands 5.2：命令广告与透传的进程级旅程（Windows 可跑）。
-///
-/// fake-claude 带 `--advertise-commands`：
-/// 1. initialize 握手的命令表经 `AcpEvent::AvailableCommands` → 引擎物化 →
-///    会话 detail 的 `available_commands`（goal 带参数提示 + 说明、compact
-///    裸命令）——面板的数据源在进程级可见；
-/// 2. `/goal some-condition`、`/compact` 两条提交 200 接受后**原样**到达
-///    stub（journal in 帧断言原文，回合各收敛到 Done）。
-/// 前端「未广告命令拦截」是组件行为（vitest 已覆盖）——后端契约只有一条：
-/// 透传无损。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn slash_commands_advertise_and_reach_stub() {
-    let sb = Sandbox::new("testsuite_e2e", "slash-commands");
-    let journal = sb.advertising_journal_fake_agent();
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-
-    // 1) 创建 acp（claude 驱动）会话——仓库现状的真实请求形状。
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "project_id": project_id.clone(), "prompt": "hello", "agent": "claude" }),
-    )
-    .await
-    .expect("create session");
-    assert_eq!(status, 201, "create session: {body}");
-    let key = body["key"].as_str().expect("key").to_string();
-    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
-
-    // 2) 首回合 Done 且命令表已物化（空表不插键——键在场即非空）。
-    let detail = wait_for(
-        "session detail to advertise the stub command table",
-        Duration::from_secs(25),
-        &sb.path.clone(),
-        {
-            let cli = cli.clone();
-            let url = detail_url.clone();
-            move || {
-                let cli = cli.clone();
-                let url = url.clone();
-                Box::pin(async move {
-                    let v = cli
-                        .get(&url)
-                        .send()
-                        .await
-                        .ok()?
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()?;
-                    let done = v["status_slug"].as_str() == Some("done");
-                    let advertised = v["available_commands"]
-                        .as_array()
-                        .is_some_and(|c| !c.is_empty());
-                    (done && advertised).then_some(v)
-                })
-            }
-        },
-    )
-    .await;
-    let commands = detail["available_commands"]
-        .as_array()
-        .expect("command table");
-    let find = |name: &str| {
-        commands
+            .find(|a| a.iter().any(|t| t == "--permission-mode"))
+            .expect("allow session must carry --permission-mode");
+        let idx = with_flag
             .iter()
-            .find(|c| c["name"].as_str() == Some(name))
-            .unwrap_or_else(|| panic!("command {name} must be advertised: {commands:?}"))
-    };
-    let goal = find("goal");
-    assert_eq!(
-        goal["hint"], "<condition>",
-        "claude argumentHint must map to the panel's param hint"
-    );
-    assert_eq!(
-        goal["description"], "Track a goal across turns",
-        "panel description must survive the chain"
-    );
-    let compact = find("compact");
-    assert_eq!(
-        compact["description"], "Clear conversation context",
-        "compact (universal built-in) must be advertised too"
-    );
-
-    // 3) `/goal some-condition`：200 接受 → journal in 帧原文到达 stub →
-    //    回合收敛（stub 对未知文本走 hello 场景应答）。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
-        serde_json::json!({ "message": "/goal some-condition" }),
-    )
-    .await
-    .expect("send slash command");
-    assert_eq!(status, 200, "slash submission must be accepted: {body}");
-    wait_for(
-        "slash command to reach the stub verbatim (journal in-frame)",
-        Duration::from_secs(25),
-        &sb.path.clone(),
-        {
-            let journal = journal.clone();
-            move || {
-                let journal = journal.clone();
-                Box::pin(async move {
-                    let Ok(content) = std::fs::read_to_string(&journal) else {
-                        return None;
-                    };
-                    content
-                        .lines()
-                        .any(|l| {
-                            l.contains("\"dir\":\"in\"") && l.contains("\"/goal some-condition\"")
-                        })
-                        .then_some(())
-                })
-            }
-        },
-    )
-    .await;
-    wait_turn_done(&cli, &sb, &detail_url).await;
-
-    // 4) `/compact`：同款透传（universal built-in 不被任何一侧改写）。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
-        serde_json::json!({ "message": "/compact" }),
-    )
-    .await
-    .expect("send /compact");
-    assert_eq!(status, 200, "{body}");
-    wait_for(
-        "/compact to reach the stub verbatim (journal in-frame)",
-        Duration::from_secs(25),
-        &sb.path.clone(),
-        {
-            let journal = journal.clone();
-            move || {
-                let journal = journal.clone();
-                Box::pin(async move {
-                    let Ok(content) = std::fs::read_to_string(&journal) else {
-                        return None;
-                    };
-                    content
-                        .lines()
-                        .any(|l| l.contains("\"dir\":\"in\"") && l.contains("\"/compact\""))
-                        .then_some(())
-                })
-            }
-        },
-    )
-    .await;
-    wait_turn_done(&cli, &sb, &detail_url).await;
-}
-
-/// （workbench-composer-input-polish 2.2/2.3）claude 会话的模型面与切换链路：
-/// 内置回退表随快照可达（available_models 含 default/fable/opus/sonnet/haiku
-/// ——add-claude-model-slots D3 起内置表升级含 fable），
-/// current 从 spawn 缺省被帧观察覆盖为 fake 的真实模型；POST /model 把控制
-/// 请求送达 stub（journal 记 model_change），快照乐观跟随，后续回合帧确认
-/// 不回跳。全程零真模型调用。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn claude_model_surface_reaches_snapshot_and_switch_round_trips() {
-    let sb = Sandbox::new("testsuite_e2e", "claude-model-surface");
-    let journal = sb.journal_fake_agent();
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "project_id": project_id.clone(), "prompt": "hello", "agent": "claude" }),
-    )
-    .await
-    .expect("create session");
-    assert_eq!(status, 201, "create session: {body}");
-    let key = body["key"].as_str().expect("key").to_string();
-    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
-
-    // 1) 首回合 Done 后：别名表随快照可达，current 已被 init 帧观察覆盖
-    //    （fake 报 "fake"）——快照拼装与覆盖次序的进程级证据。
-    let detail = wait_for(
-        "claude model surface to reach the snapshot (alias table + observed current)",
-        Duration::from_secs(25),
-        &sb.path.clone(),
-        {
-            let cli = cli.clone();
-            let url = detail_url.clone();
-            move || {
-                let cli = cli.clone();
-                let url = url.clone();
-                Box::pin(async move {
-                    let v = cli
-                        .get(&url)
-                        .send()
-                        .await
-                        .ok()?
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()?;
-                    let done = v["status_slug"].as_str() == Some("done");
-                    let models = v["available_models"].as_array()?;
-                    let aliased = ["default", "fable", "opus", "sonnet", "haiku"]
-                        .iter()
-                        .all(|a| models.iter().any(|m| m.as_str() == Some(*a)));
-                    let observed = v["current_model"].as_str() == Some("fake");
-                    (done && aliased && observed).then_some(v)
-                })
-            }
-        },
-    )
-    .await;
-    assert_eq!(
-        detail["current_model"], "fake",
-        "frame observation must overwrite the spawn-time default: {detail}"
-    );
-
-    // 2) 切换到 "opus"：webui 只投递（200）→ 驱动 set_model 控制请求 →
-    //    乐观 ModelChanged → 快照 current 同步。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions/{key}/model", sb.webui_url()),
-        serde_json::json!({ "model_id": "opus" }),
-    )
-    .await
-    .expect("switch model");
-    assert_eq!(status, 200, "model switch must be delivered: {body}");
-    wait_for(
-        "current_model to follow the optimistic switch",
-        Duration::from_secs(15),
-        &sb.path.clone(),
-        {
-            let cli = cli.clone();
-            let url = detail_url.clone();
-            move || {
-                let cli = cli.clone();
-                let url = url.clone();
-                Box::pin(async move {
-                    let v = cli
-                        .get(&url)
-                        .send()
-                        .await
-                        .ok()?
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()?;
-                    (v["current_model"].as_str() == Some("opus")).then_some(v)
-                })
-            }
-        },
-    )
-    .await;
-    wait_for(
-        "set_model control request to reach the stub (journal model_change)",
-        Duration::from_secs(15),
-        &sb.path.clone(),
-        {
-            let journal = journal.clone();
-            move || {
-                let journal = journal.clone();
-                Box::pin(async move {
-                    let Ok(content) = std::fs::read_to_string(&journal) else {
-                        return None;
-                    };
-                    content
-                        .lines()
-                        .any(|l| l.contains("model_change") && l.contains("\"model\":\"opus\""))
-                        .then_some(())
-                })
-            }
-        },
-    )
-    .await;
-
-    // 3) 下一回合：assistant 帧报告已切换的模型（fake 行为）→ 观察值与
-    //    乐观值一致，current 不回跳（帧确认半边）。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
-        serde_json::json!({ "message": "hello" }),
-    )
-    .await
-    .expect("follow-up message");
-    assert_eq!(status, 200, "{body}");
-    wait_turn_done(&cli, &sb, &detail_url).await;
-    let after = get_json_status(&cli, &detail_url)
-        .await
-        .expect("detail after the confirming turn")
-        .1;
-    assert_eq!(
-        after["current_model"], "opus",
-        "confirmed switch must survive the confirming frames: {after}"
-    );
-    // 无映射的 claude agent（沙箱 config 未配 models）→ 内置回退表恰好五项
-    // （add-claude-model-slots D3 起含 fable）。
-    let mut models: Vec<String> = after["available_models"]
-        .as_array()
-        .expect("model list survives")
-        .iter()
-        .map(|m| m.as_str().expect("model id string").to_string())
-        .collect();
-    models.sort();
-    assert_eq!(
-        models,
-        vec!["default", "fable", "haiku", "opus", "sonnet"],
-        "an unmapped claude session exposes exactly the built-in fallback table: {after}"
-    );
-}
-
-/// （add-claude-model-slots 5.1）档位映射旅程：config `[acp.agents.claude.models]`
-/// 配好映射（opus/sonnet 启用、sonnet 默认）→ 会话模型菜单恰为 `default` +
-/// 启用档（强弱序）→ 切到启用档生效（控制请求送达 stub，journal 记 model_change）；
-/// 同沙箱里未配映射的 claude 会话菜单为内置五项。全程零真模型调用。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn claude_slot_mapping_drives_session_menu_and_switch() {
-    let sb = Sandbox::new("testsuite_e2e", "claude-slot-mapping");
-    // 映射会话的 config 种子：opus/sonnet 启用、sonnet 默认。
-    sb.set_agent_claude_models(&[("opus", "opus-x"), ("sonnet", "sonnet-y")], "sonnet");
-    // 未配映射的对照 claude agent（同 fake 桩路径，无 models 键）。
-    {
-        let toml = std::fs::read_to_string(&sb.config_path).expect("read config");
-        let plain = format!(
-            "\n[acp.agents.claude-plain]\ndriver = \"claude\"\npath = \"{}\"\nsessions_dir = \"{}\"\nwork_dir = \"{}\"\n",
-            forward_slash(Path::new(env!("CARGO_BIN_EXE_fake-claude"))),
-            forward_slash(&sb.path.join("claude-sessions")),
-            forward_slash(&sb.path.join("work")),
+            .position(|t| t == "--permission-mode")
+            .unwrap();
+        assert_eq!(
+            with_flag.get(idx + 1).map(String::as_str),
+            Some("bypassPermissions"),
+            "allow maps to bypassPermissions on the child argv"
         );
-        std::fs::write(&sb.config_path, toml + &plain).expect("write config");
+        assert!(
+            argvs
+                .iter()
+                .any(|a| !a.iter().any(|t| t == "--permission-mode")),
+            "default session must not carry --permission-mode"
+        );
     }
-    let journal = sb.journal_fake_agent();
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
 
-    // 1) 映射会话：菜单恰为 default + 启用档（强弱序），current 被帧观察覆盖。
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status, body) = post_json(
+    /// （add-agent-mode-selection）中途切换：POST /api/sessions/{key}/mode 把
+    /// 期望值送达运行中的 fake-claude（journal 记录运行时 set_permission_mode），
+    /// 快照 desired/effective 跟随更新；切到 allow 后 `perm` 场景免审批直接
+    /// 完成（行为级对照：ask 下同场景会停在审批等待）。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn mode_mid_session_switch() {
+        let sb = Sandbox::new("testsuite_e2e", "mode-switch");
+        let journal = sb.journal_fake_agent();
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
+
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "hello", "agent": "claude" }),
+    )
+    .await
+    .expect("create session");
+        assert_eq!(status, 201, "create session: {body}");
+        let key = body["key"].as_str().expect("key").to_string();
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+
+        // 等首回合完成。
+        wait_for(
+            "first turn Done",
+            Duration::from_secs(25),
+            &sb.path.clone(),
+            {
+                let cli = cli.clone();
+                let url = detail_url.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        let done = v["status_slug"].as_str() == Some("done")
+                            || v["status"]
+                                .as_str()
+                                .is_some_and(|s| s.eq_ignore_ascii_case("done"));
+                        done.then_some(())
+                    })
+                }
+            },
+        )
+        .await;
+
+        // 切到 allow：命令送达 = 200；执行体接受经 ModeChanged 反馈。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/mode", sb.webui_url()),
+            serde_json::json!({ "mode": "allow" }),
+        )
+        .await
+        .expect("switch mode");
+        assert_eq!(status, 200, "mode switch: {body}");
+
+        // journal 记录运行时切换（SDK set_permission_mode → "bypassPermissions"）。
+        wait_for(
+            "runtime mode_change journaled",
+            Duration::from_secs(10),
+            &sb.path.clone(),
+            {
+                let journal = journal.clone();
+                move || {
+                    let journal = journal.clone();
+                    Box::pin(async move {
+                        let Ok(content) = std::fs::read_to_string(&journal) else {
+                            return None;
+                        };
+                        content
+                            .lines()
+                            .any(|l| l.contains("mode_change") && l.contains("bypassPermissions"))
+                            .then_some(())
+                    })
+                }
+            },
+        )
+        .await;
+
+        // 快照：desired=allow 且 effective 落定为 allow（ModeChanged → 映射）。
+        wait_for(
+            "snapshot reflects effective mode",
+            Duration::from_secs(10),
+            &sb.path.clone(),
+            {
+                let cli = cli.clone();
+                let url = detail_url.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        let ok = v["desired_mode"].as_str() == Some("allow")
+                            && v["effective_mode"].as_str() == Some("allow");
+                        ok.then_some(())
+                    })
+                }
+            },
+        )
+        .await;
+
+        // 行为级：allow 模式下 perm 场景免审批直接完成。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+            serde_json::json!({ "message": "perm" }),
+        )
+        .await
+        .expect("send perm");
+        assert_eq!(status, 200, "send perm: {body}");
+        let detail = wait_for(
+            "perm turn completes without gating",
+            Duration::from_secs(25),
+            &sb.path.clone(),
+            {
+                let cli = cli.clone();
+                let url = detail_url.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        let done = v["status_slug"].as_str() == Some("done")
+                            || v["status"]
+                                .as_str()
+                                .is_some_and(|s| s.eq_ignore_ascii_case("done"));
+                        done.then_some(v)
+                    })
+                }
+            },
+        )
+        .await;
+        let transcript = detail["entries"]
+            .as_array()
+            .map(|blocks| {
+                blocks
+                    .iter()
+                    .filter_map(|b| b["content"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .unwrap_or_default();
+        assert!(
+            transcript.contains("perm done"),
+            "allow session must run the gated tool without approval, got: {transcript:?}"
+        );
+    }
+
+    /// session-slash-commands 5.2：命令广告与透传的进程级旅程（Windows 可跑）。
+    ///
+    /// fake-claude 带 `--advertise-commands`：
+    /// 1. initialize 握手的命令表经 `AcpEvent::AvailableCommands` → 引擎物化 →
+    ///    会话 detail 的 `available_commands`（goal 带参数提示 + 说明、compact
+    ///    裸命令）——面板的数据源在进程级可见；
+    /// 2. `/goal some-condition`、`/compact` 两条提交 200 接受后**原样**到达
+    ///    stub（journal in 帧断言原文，回合各收敛到 Done）。
+    /// 前端「未广告命令拦截」是组件行为（vitest 已覆盖）——后端契约只有一条：
+    /// 透传无损。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn slash_commands_advertise_and_reach_stub() {
+        let sb = Sandbox::new("testsuite_e2e", "slash-commands");
+        let journal = sb.advertising_journal_fake_agent();
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
+
+        // 1) 创建 acp（claude 驱动）会话——仓库现状的真实请求形状。
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "hello", "agent": "claude" }),
+    )
+    .await
+    .expect("create session");
+        assert_eq!(status, 201, "create session: {body}");
+        let key = body["key"].as_str().expect("key").to_string();
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+
+        // 2) 首回合 Done 且命令表已物化（空表不插键——键在场即非空）。
+        let detail = wait_for(
+            "session detail to advertise the stub command table",
+            Duration::from_secs(25),
+            &sb.path.clone(),
+            {
+                let cli = cli.clone();
+                let url = detail_url.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        let done = v["status_slug"].as_str() == Some("done");
+                        let advertised = v["available_commands"]
+                            .as_array()
+                            .is_some_and(|c| !c.is_empty());
+                        (done && advertised).then_some(v)
+                    })
+                }
+            },
+        )
+        .await;
+        let commands = detail["available_commands"]
+            .as_array()
+            .expect("command table");
+        let find = |name: &str| {
+            commands
+                .iter()
+                .find(|c| c["name"].as_str() == Some(name))
+                .unwrap_or_else(|| panic!("command {name} must be advertised: {commands:?}"))
+        };
+        let goal = find("goal");
+        assert_eq!(
+            goal["hint"], "<condition>",
+            "claude argumentHint must map to the panel's param hint"
+        );
+        assert_eq!(
+            goal["description"], "Track a goal across turns",
+            "panel description must survive the chain"
+        );
+        let compact = find("compact");
+        assert_eq!(
+            compact["description"], "Clear conversation context",
+            "compact (universal built-in) must be advertised too"
+        );
+
+        // 3) `/goal some-condition`：200 接受 → journal in 帧原文到达 stub →
+        //    回合收敛（stub 对未知文本走 hello 场景应答）。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+            serde_json::json!({ "message": "/goal some-condition" }),
+        )
+        .await
+        .expect("send slash command");
+        assert_eq!(status, 200, "slash submission must be accepted: {body}");
+        wait_for(
+            "slash command to reach the stub verbatim (journal in-frame)",
+            Duration::from_secs(25),
+            &sb.path.clone(),
+            {
+                let journal = journal.clone();
+                move || {
+                    let journal = journal.clone();
+                    Box::pin(async move {
+                        let Ok(content) = std::fs::read_to_string(&journal) else {
+                            return None;
+                        };
+                        content
+                            .lines()
+                            .any(|l| {
+                                l.contains("\"dir\":\"in\"")
+                                    && l.contains("\"/goal some-condition\"")
+                            })
+                            .then_some(())
+                    })
+                }
+            },
+        )
+        .await;
+        wait_turn_done(&cli, &sb, &detail_url).await;
+
+        // 4) `/compact`：同款透传（universal built-in 不被任何一侧改写）。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+            serde_json::json!({ "message": "/compact" }),
+        )
+        .await
+        .expect("send /compact");
+        assert_eq!(status, 200, "{body}");
+        wait_for(
+            "/compact to reach the stub verbatim (journal in-frame)",
+            Duration::from_secs(25),
+            &sb.path.clone(),
+            {
+                let journal = journal.clone();
+                move || {
+                    let journal = journal.clone();
+                    Box::pin(async move {
+                        let Ok(content) = std::fs::read_to_string(&journal) else {
+                            return None;
+                        };
+                        content
+                            .lines()
+                            .any(|l| l.contains("\"dir\":\"in\"") && l.contains("\"/compact\""))
+                            .then_some(())
+                    })
+                }
+            },
+        )
+        .await;
+        wait_turn_done(&cli, &sb, &detail_url).await;
+    }
+
+    /// （workbench-composer-input-polish 2.2/2.3）claude 会话的模型面与切换链路：
+    /// 内置回退表随快照可达（available_models 含 default/fable/opus/sonnet/haiku
+    /// ——add-claude-model-slots D3 起内置表升级含 fable），
+    /// current 从 spawn 缺省被帧观察覆盖为 fake 的真实模型；POST /model 把控制
+    /// 请求送达 stub（journal 记 model_change），快照乐观跟随，后续回合帧确认
+    /// 不回跳。全程零真模型调用。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn claude_model_surface_reaches_snapshot_and_switch_round_trips() {
+        let sb = Sandbox::new("testsuite_e2e", "claude-model-surface");
+        let journal = sb.journal_fake_agent();
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
+
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "hello", "agent": "claude" }),
+    )
+    .await
+    .expect("create session");
+        assert_eq!(status, 201, "create session: {body}");
+        let key = body["key"].as_str().expect("key").to_string();
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+
+        // 1) 首回合 Done 后：别名表随快照可达，current 已被 init 帧观察覆盖
+        //    （fake 报 "fake"）——快照拼装与覆盖次序的进程级证据。
+        let detail = wait_for(
+            "claude model surface to reach the snapshot (alias table + observed current)",
+            Duration::from_secs(25),
+            &sb.path.clone(),
+            {
+                let cli = cli.clone();
+                let url = detail_url.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        let done = v["status_slug"].as_str() == Some("done");
+                        let models = v["available_models"].as_array()?;
+                        let aliased = ["default", "fable", "opus", "sonnet", "haiku"]
+                            .iter()
+                            .all(|a| models.iter().any(|m| m.as_str() == Some(*a)));
+                        let observed = v["current_model"].as_str() == Some("fake");
+                        (done && aliased && observed).then_some(v)
+                    })
+                }
+            },
+        )
+        .await;
+        assert_eq!(
+            detail["current_model"], "fake",
+            "frame observation must overwrite the spawn-time default: {detail}"
+        );
+
+        // 2) 切换到 "opus"：webui 只投递（200）→ 驱动 set_model 控制请求 →
+        //    乐观 ModelChanged → 快照 current 同步。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/model", sb.webui_url()),
+            serde_json::json!({ "model_id": "opus" }),
+        )
+        .await
+        .expect("switch model");
+        assert_eq!(status, 200, "model switch must be delivered: {body}");
+        wait_for(
+            "current_model to follow the optimistic switch",
+            Duration::from_secs(15),
+            &sb.path.clone(),
+            {
+                let cli = cli.clone();
+                let url = detail_url.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        (v["current_model"].as_str() == Some("opus")).then_some(v)
+                    })
+                }
+            },
+        )
+        .await;
+        wait_for(
+            "set_model control request to reach the stub (journal model_change)",
+            Duration::from_secs(15),
+            &sb.path.clone(),
+            {
+                let journal = journal.clone();
+                move || {
+                    let journal = journal.clone();
+                    Box::pin(async move {
+                        let Ok(content) = std::fs::read_to_string(&journal) else {
+                            return None;
+                        };
+                        content
+                            .lines()
+                            .any(|l| l.contains("model_change") && l.contains("\"model\":\"opus\""))
+                            .then_some(())
+                    })
+                }
+            },
+        )
+        .await;
+
+        // 3) 下一回合：assistant 帧报告已切换的模型（fake 行为）→ 观察值与
+        //    乐观值一致，current 不回跳（帧确认半边）。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+            serde_json::json!({ "message": "hello" }),
+        )
+        .await
+        .expect("follow-up message");
+        assert_eq!(status, 200, "{body}");
+        wait_turn_done(&cli, &sb, &detail_url).await;
+        let after = get_json_status(&cli, &detail_url)
+            .await
+            .expect("detail after the confirming turn")
+            .1;
+        assert_eq!(
+            after["current_model"], "opus",
+            "confirmed switch must survive the confirming frames: {after}"
+        );
+        // 无映射的 claude agent（沙箱 config 未配 models）→ 内置回退表恰好五项
+        // （add-claude-model-slots D3 起含 fable）。
+        let mut models: Vec<String> = after["available_models"]
+            .as_array()
+            .expect("model list survives")
+            .iter()
+            .map(|m| m.as_str().expect("model id string").to_string())
+            .collect();
+        models.sort();
+        assert_eq!(
+            models,
+            vec!["default", "fable", "haiku", "opus", "sonnet"],
+            "an unmapped claude session exposes exactly the built-in fallback table: {after}"
+        );
+    }
+
+    /// （add-claude-model-slots 5.1）档位映射旅程：config `[acp.agents.claude.models]`
+    /// 配好映射（opus/sonnet 启用、sonnet 默认）→ 会话模型菜单恰为 `default` +
+    /// 启用档（强弱序）→ 切到启用档生效（控制请求送达 stub，journal 记 model_change）；
+    /// 同沙箱里未配映射的 claude 会话菜单为内置五项。全程零真模型调用。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn claude_slot_mapping_drives_session_menu_and_switch() {
+        let sb = Sandbox::new("testsuite_e2e", "claude-slot-mapping");
+        // 映射会话的 config 种子：opus/sonnet 启用、sonnet 默认。
+        sb.set_agent_claude_models(&[("opus", "opus-x"), ("sonnet", "sonnet-y")], "sonnet");
+        // 未配映射的对照 claude agent（同 fake 桩路径，无 models 键）。
+        {
+            let toml = std::fs::read_to_string(&sb.config_path).expect("read config");
+            let plain = format!(
+                "\n[acp.agents.claude-plain]\ndriver = \"claude\"\npath = \"{}\"\nsessions_dir = \"{}\"\nwork_dir = \"{}\"\n",
+                forward_slash(Path::new(env!("CARGO_BIN_EXE_fake-claude"))),
+                forward_slash(&sb.path.join("claude-sessions")),
+                forward_slash(&sb.path.join("work")),
+            );
+            std::fs::write(&sb.config_path, toml + &plain).expect("write config");
+        }
+        let journal = sb.journal_fake_agent();
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
+
+        // 1) 映射会话：菜单恰为 default + 启用档（强弱序），current 被帧观察覆盖。
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
         serde_json::json!({ "project_id": project_id.clone(), "prompt": "hello", "agent": "claude" }),
     )
     .await
     .expect("create mapped session");
-    assert_eq!(status, 201, "create mapped session: {body}");
-    let key = body["key"].as_str().expect("key").to_string();
-    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
-    let detail = wait_for(
-        "the mapped session menu to reach the snapshot (default + enabled slots)",
-        Duration::from_secs(25),
-        &sb.path.clone(),
-        {
-            let cli = cli.clone();
-            let url = detail_url.clone();
-            move || {
+        assert_eq!(status, 201, "create mapped session: {body}");
+        let key = body["key"].as_str().expect("key").to_string();
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+        let detail = wait_for(
+            "the mapped session menu to reach the snapshot (default + enabled slots)",
+            Duration::from_secs(25),
+            &sb.path.clone(),
+            {
                 let cli = cli.clone();
-                let url = url.clone();
-                Box::pin(async move {
-                    let v = cli
-                        .get(&url)
-                        .send()
-                        .await
-                        .ok()?
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()?;
-                    let done = v["status_slug"].as_str() == Some("done");
-                    let models: Vec<String> = v["available_models"]
-                        .as_array()?
-                        .iter()
-                        .map(|m| m.as_str().unwrap_or_default().to_string())
-                        .collect();
-                    let mapped = models == vec!["default", "opus", "sonnet"];
-                    (done && mapped).then_some(v)
-                })
-            }
-        },
-    )
-    .await;
-    assert_eq!(
-        detail["available_models"],
-        serde_json::json!(["default", "opus", "sonnet"]),
-        "a mapped claude session exposes exactly `default` + enabled slots (strength order): {detail}"
-    );
-    // 停用档（fable/haiku）不得出现。
-    assert!(
-        !detail["available_models"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|m| m.as_str() == Some("fable") || m.as_str() == Some("haiku")),
-        "disabled slots must not be offered: {detail}"
-    );
-    // 映射派生的模型 env 真到达子进程（journal meta_env）——config 种子行
-    // （id = "claude"）的映射经 spawn 装配点注入。
-    {
-        let content = std::fs::read_to_string(&journal).expect("journal");
-        let line = content
-            .lines()
-            .find(|l| l.contains("\"dir\":\"meta_env\""))
-            .expect("a meta_env line must be journaled at child startup");
-        let meta: serde_json::Value = serde_json::from_str(line).expect("meta_env parses");
-        let env = &meta["msg"]["env"];
+                let url = detail_url.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        let done = v["status_slug"].as_str() == Some("done");
+                        let models: Vec<String> = v["available_models"]
+                            .as_array()?
+                            .iter()
+                            .map(|m| m.as_str().unwrap_or_default().to_string())
+                            .collect();
+                        let mapped = models == vec!["default", "opus", "sonnet"];
+                        (done && mapped).then_some(v)
+                    })
+                }
+            },
+        )
+        .await;
         assert_eq!(
-            env["ANTHROPIC_MODEL"].as_str(),
-            Some("sonnet-y"),
-            "config-seeded mapping drives ANTHROPIC_MODEL: {meta}"
+            detail["available_models"],
+            serde_json::json!(["default", "opus", "sonnet"]),
+            "a mapped claude session exposes exactly `default` + enabled slots (strength order): {detail}"
         );
-        assert_eq!(env["ANTHROPIC_DEFAULT_OPUS_MODEL"].as_str(), Some("opus-x"));
-        assert_eq!(env["ANTHROPIC_DEFAULT_SONNET_MODEL"].as_str(), Some("sonnet-y"));
-        assert_eq!(
-            env["CLAUDE_CODE_SUBAGENT_MODEL"].as_str(),
-            Some("sonnet-y"),
-            "weakest enabled slot (sonnet) → SUBAGENT"
-        );
+        // 停用档（fable/haiku）不得出现。
         assert!(
-            env["ANTHROPIC_DEFAULT_HAIKU_MODEL"].is_null(),
-            "disabled slot must not be injected: {meta}"
+            !detail["available_models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m.as_str() == Some("fable") || m.as_str() == Some("haiku")),
+            "disabled slots must not be offered: {detail}"
         );
-    }
-
-    // 2) 切档生效：POST /model 投递（200）→ 控制请求送达 stub（journal
-    //    model_change）→ 快照乐观跟随。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions/{key}/model", sb.webui_url()),
-        serde_json::json!({ "model_id": "opus" }),
-    )
-    .await
-    .expect("switch to an enabled slot");
-    assert_eq!(status, 200, "slot switch must be delivered: {body}");
-    wait_for(
-        "the set_model control request to reach the stub (journal model_change)",
-        Duration::from_secs(15),
-        &sb.path.clone(),
+        // 映射派生的模型 env 真到达子进程（journal meta_env）——config 种子行
+        // （id = "claude"）的映射经 spawn 装配点注入。
         {
-            let journal = journal.clone();
-            move || {
+            let content = std::fs::read_to_string(&journal).expect("journal");
+            let line = content
+                .lines()
+                .find(|l| l.contains("\"dir\":\"meta_env\""))
+                .expect("a meta_env line must be journaled at child startup");
+            let meta: serde_json::Value = serde_json::from_str(line).expect("meta_env parses");
+            let env = &meta["msg"]["env"];
+            assert_eq!(
+                env["ANTHROPIC_MODEL"].as_str(),
+                Some("sonnet-y"),
+                "config-seeded mapping drives ANTHROPIC_MODEL: {meta}"
+            );
+            assert_eq!(env["ANTHROPIC_DEFAULT_OPUS_MODEL"].as_str(), Some("opus-x"));
+            assert_eq!(
+                env["ANTHROPIC_DEFAULT_SONNET_MODEL"].as_str(),
+                Some("sonnet-y")
+            );
+            assert_eq!(
+                env["CLAUDE_CODE_SUBAGENT_MODEL"].as_str(),
+                Some("sonnet-y"),
+                "weakest enabled slot (sonnet) → SUBAGENT"
+            );
+            assert!(
+                env["ANTHROPIC_DEFAULT_HAIKU_MODEL"].is_null(),
+                "disabled slot must not be injected: {meta}"
+            );
+        }
+
+        // 2) 切档生效：POST /model 投递（200）→ 控制请求送达 stub（journal
+        //    model_change）→ 快照乐观跟随。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/model", sb.webui_url()),
+            serde_json::json!({ "model_id": "opus" }),
+        )
+        .await
+        .expect("switch to an enabled slot");
+        assert_eq!(status, 200, "slot switch must be delivered: {body}");
+        wait_for(
+            "the set_model control request to reach the stub (journal model_change)",
+            Duration::from_secs(15),
+            &sb.path.clone(),
+            {
                 let journal = journal.clone();
-                Box::pin(async move {
-                    let Ok(content) = std::fs::read_to_string(&journal) else {
-                        return None;
-                    };
-                    content
-                        .lines()
-                        .any(|l| l.contains("model_change") && l.contains("\"model\":\"opus\""))
-                        .then_some(())
-                })
-            }
-        },
-    )
-    .await;
-    let switched = wait_for(
-        "the snapshot to follow the optimistic slot switch",
-        Duration::from_secs(15),
-        &sb.path.clone(),
-        {
-            let cli = cli.clone();
-            let url = detail_url.clone();
-            move || {
+                move || {
+                    let journal = journal.clone();
+                    Box::pin(async move {
+                        let Ok(content) = std::fs::read_to_string(&journal) else {
+                            return None;
+                        };
+                        content
+                            .lines()
+                            .any(|l| l.contains("model_change") && l.contains("\"model\":\"opus\""))
+                            .then_some(())
+                    })
+                }
+            },
+        )
+        .await;
+        let switched = wait_for(
+            "the snapshot to follow the optimistic slot switch",
+            Duration::from_secs(15),
+            &sb.path.clone(),
+            {
                 let cli = cli.clone();
-                let url = url.clone();
-                Box::pin(async move {
-                    let v = cli
-                        .get(&url)
-                        .send()
-                        .await
-                        .ok()?
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()?;
-                    (v["current_model"].as_str() == Some("opus")).then_some(v)
-                })
-            }
-        },
-    )
-    .await;
-    assert_eq!(switched["current_model"], "opus", "{switched}");
+                let url = detail_url.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        (v["current_model"].as_str() == Some("opus")).then_some(v)
+                    })
+                }
+            },
+        )
+        .await;
+        assert_eq!(switched["current_model"], "opus", "{switched}");
 
-    // 3) 未配映射的 claude agent：菜单为内置回退表五项。
-    let (status, body) = post_json(
+        // 3) 未配映射的 claude agent：菜单为内置回退表五项。
+        let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
         serde_json::json!({ "project_id": project_id, "prompt": "hello", "agent": "claude-plain" }),
     )
     .await
     .expect("create unmapped session");
-    assert_eq!(status, 201, "create unmapped session: {body}");
-    let plain_key = body["key"].as_str().expect("key").to_string();
-    let plain_url = format!("{}/api/sessions/{plain_key}", sb.webui_url());
-    let plain = wait_for(
-        "the unmapped claude session to expose the built-in fallback table",
-        Duration::from_secs(25),
-        &sb.path.clone(),
-        {
-            let cli = cli.clone();
-            let url = plain_url.clone();
-            move || {
+        assert_eq!(status, 201, "create unmapped session: {body}");
+        let plain_key = body["key"].as_str().expect("key").to_string();
+        let plain_url = format!("{}/api/sessions/{plain_key}", sb.webui_url());
+        let plain = wait_for(
+            "the unmapped claude session to expose the built-in fallback table",
+            Duration::from_secs(25),
+            &sb.path.clone(),
+            {
                 let cli = cli.clone();
-                let url = url.clone();
-                Box::pin(async move {
-                    let v = cli
-                        .get(&url)
-                        .send()
-                        .await
-                        .ok()?
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()?;
-                    let done = v["status_slug"].as_str() == Some("done");
-                    let models: Vec<String> = v["available_models"]
-                        .as_array()?
-                        .iter()
-                        .map(|m| m.as_str().unwrap_or_default().to_string())
-                        .collect();
-                    let builtin = models == vec!["default", "fable", "opus", "sonnet", "haiku"];
-                    (done && builtin).then_some(v)
-                })
-            }
-        },
-    )
-    .await;
-    assert_eq!(
-        plain["available_models"],
-        serde_json::json!(["default", "fable", "opus", "sonnet", "haiku"]),
-        "an unmapped claude agent exposes the built-in fallback table: {plain}"
-    );
-}
+                let url = plain_url.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        let done = v["status_slug"].as_str() == Some("done");
+                        let models: Vec<String> = v["available_models"]
+                            .as_array()?
+                            .iter()
+                            .map(|m| m.as_str().unwrap_or_default().to_string())
+                            .collect();
+                        let builtin = models == vec!["default", "fable", "opus", "sonnet", "haiku"];
+                        (done && builtin).then_some(v)
+                    })
+                }
+            },
+        )
+        .await;
+        assert_eq!(
+            plain["available_models"],
+            serde_json::json!(["default", "fable", "opus", "sonnet", "haiku"]),
+            "an unmapped claude agent exposes the built-in fallback table: {plain}"
+        );
+    }
 
     /// 3.7（make-pi-the-builtin-agent 5.5 迁移）：模型切换生效 journey——会话
     /// 先以 `scenario/text` 完成一回合（无工具环），经用户面
@@ -5624,12 +5749,10 @@ async fn claude_slot_mapping_drives_session_menu_and_switch() {
         );
 
         // 切前后两回合各自的形状都保留在转录里（不是覆盖）。
-        let entries = fetch_session_entries(
-            &cli,
-            &format!("{}/api/sessions/{key}", sb.webui_url()),
-        )
-        .await
-        .expect("session entries");
+        let entries =
+            fetch_session_entries(&cli, &format!("{}/api/sessions/{key}", sb.webui_url()))
+                .await
+                .expect("session entries");
         let transcript: String = entries.iter().map(|(_, c)| c.as_str()).collect();
         assert!(
             transcript.contains("pi echo: first turn")
@@ -5685,8 +5808,8 @@ async fn claude_slot_mapping_drives_session_menu_and_switch() {
         } else {
             "fake-acp-agent"
         };
-        let fake_acp = std::path::PathBuf::from(env!("CARGO_BIN_EXE_sebas"))
-            .with_file_name(fake_acp_name);
+        let fake_acp =
+            std::path::PathBuf::from(env!("CARGO_BIN_EXE_sebas")).with_file_name(fake_acp_name);
         assert!(
             fake_acp.exists(),
             "找不到 {}：先构建它——cargo build -p sebas-acp --bin fake-acp-agent",
@@ -5863,15 +5986,15 @@ async fn claude_slot_mapping_drives_session_menu_and_switch() {
         )
         .await
         .expect("follow-up after rejection");
-        assert_eq!(status, 200, "session must stay writable after rejection: {body}");
+        assert_eq!(
+            status, 200,
+            "session must stay writable after rejection: {body}"
+        );
         wait_turn_done(&cli, &sb, &detail_url).await;
         let entries = fetch_session_entries(&cli, &detail_url)
             .await
             .expect("entries after the follow-up turn");
-        let echoes = entries
-            .iter()
-            .filter(|(_, c)| c.contains("echo:"))
-            .count();
+        let echoes = entries.iter().filter(|(_, c)| c.contains("echo:")).count();
         assert!(
             echoes >= 2,
             "the follow-up turn must complete with its own echo (rejection entry: {rejection}); entries: {entries:?}"
@@ -5886,7 +6009,9 @@ async fn claude_slot_mapping_drives_session_menu_and_switch() {
             "a model rejection must never surface as an operator interrupt: {entries:?}"
         );
         assert!(
-            !entries.iter().any(|(_, c)| c.contains("回合停滞被强制收尾")),
+            !entries
+                .iter()
+                .any(|(_, c)| c.contains("回合停滞被强制收尾")),
             "the stall watchdog must not be the closer here: {entries:?}"
         );
         let core_log = std::fs::read_to_string(&sb.core_log).unwrap_or_default();
@@ -5900,2656 +6025,2726 @@ async fn claude_slot_mapping_drives_session_menu_and_switch() {
 mod sandbox_and_state_dir {
     use super::*;
 
-/// add-workspace-root 4.3：workspace root 执法的进程级旅程——「注册后收紧根」
-/// 变体，Windows 可跑（只重启 webui 单进程，不依赖 unix 信号）。
-///
-/// webui 以 env 携带更窄的根重启（`SEBAS_WORKSPACE_ROOT` > `[workspace] root`），
-/// core 与其上的会话原地不动：注册过的项目就此成为「越界历史项目」。覆盖：
-/// 1) 注册越界 → 400「路径超出允许范围」，越界 + 不存在同文案（范围判定
-///    先行于存在性，不借文案差异探测根外目录）；
-/// 2) 越界历史项目从 GET /api/projects 隐藏，branch 探测按不可达；
-/// 3) 绑定它的会话 detail / message / switch 400 拒绝，archive / close 放行
-///    （围栏不锁垃圾）；
-/// 4) 全程 GET /api/summary 健康（沙箱没有被执法误伤）。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn workspace_root_enforcement_after_tightening() {
-    let mut sb = Sandbox::new("testsuite_e2e", "workspace-root");
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let mut webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
+    /// add-workspace-root 4.3：workspace root 执法的进程级旅程——「注册后收紧根」
+    /// 变体，Windows 可跑（只重启 webui 单进程，不依赖 unix 信号）。
+    ///
+    /// webui 以 env 携带更窄的根重启（`SEBAS_WORKSPACE_ROOT` > `[workspace] root`），
+    /// core 与其上的会话原地不动：注册过的项目就此成为「越界历史项目」。覆盖：
+    /// 1) 注册越界 → 400「路径超出允许范围」，越界 + 不存在同文案（范围判定
+    ///    先行于存在性，不借文案差异探测根外目录）；
+    /// 2) 越界历史项目从 GET /api/projects 隐藏，branch 探测按不可达；
+    /// 3) 绑定它的会话 detail / message / switch 400 拒绝，archive / close 放行
+    ///    （围栏不锁垃圾）；
+    /// 4) 全程 GET /api/summary 健康（沙箱没有被执法误伤）。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn workspace_root_enforcement_after_tightening() {
+        let mut sb = Sandbox::new("testsuite_e2e", "workspace-root");
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let mut webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
 
-    // 界内注册（沙箱 work 目录）+ 两个绑定它的 0-turn 占位会话。占位形态
-    // 足够：执法看的是快照上的 project_dir，与有没有跑过 turn 无关。
-    let work_dir = sb.path.join("work");
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/projects", sb.webui_url()),
-        serde_json::json!({ "path": support::forward_slash(&work_dir) }),
-    )
-    .await
-    .expect("register in-scope project");
-    assert_eq!(status, 201, "in-scope register: {body}");
-    let project_id = body["id"].as_str().expect("project id").to_string();
-
-    let key_a = create_project_placeholder(&cli, &sb, &project_id, "a").await;
-    let key_b = create_project_placeholder(&cli, &sb, &project_id, "b").await;
-
-    // 收紧前 detail 可读——证明下面的 400 来自收紧，不是占位形态本身。
-    let (status, detail_before) =
-        get_json_status(&cli, &format!("{}/api/sessions/{key_a}", sb.webui_url()))
-            .await
-            .expect("detail before tightening");
-    assert_eq!(
-        status, 200,
-        "detail must read fine while in scope: {detail_before}"
-    );
-
-    // 收紧根：只重启 webui（新端口避免复绑等待），core 与会话不动。
-    webui.kill().await.expect("kill webui");
-    let scope = sb.path.join("scope");
-    std::fs::create_dir_all(&scope).expect("mkdir scope");
-    let new_port = free_port();
-    let config = std::fs::read_to_string(&sb.config_path).expect("read config");
-    let patched = config.replace(
-        &format!("port = {}", sb.webui_port),
-        &format!("port = {new_port}"),
-    );
-    assert_ne!(patched, config, "[watchdog.webui] port line not found");
-    std::fs::write(&sb.config_path, patched).expect("write config");
-    sb.webui_port = new_port;
-    let scope_s = support::forward_slash(&scope);
-    let _webui2 = sb.spawn(
-        &["webui", "-c", &support::forward_slash(&sb.config_path)],
-        &sb.core_secret,
-        &[("SEBAS_WORKSPACE_ROOT", &scope_s)],
-        &sb.webui_log,
-    );
-    wait_reachable(&cli, &sb).await;
-
-    // 1) 越界注册 400：界内已存在的 work 与「越界 + 不存在」的幽灵同文案。
-    let (status, oob) = post_json(
-        &cli,
-        &format!("{}/api/projects", sb.webui_url()),
-        serde_json::json!({ "path": support::forward_slash(&work_dir) }),
-    )
-    .await
-    .expect("register out-of-scope existing");
-    assert_eq!(status, 400, "out-of-scope register must 400: {oob}");
-    let oob_msg = oob["error"].as_str().expect("error text").to_string();
-    assert!(
-        oob_msg.contains("路径超出允许范围"),
-        "unexpected rejection text: {oob_msg}"
-    );
-    let ghost = sb.path.join("ghost-never-created");
-    let (status, ghost_body) = post_json(
-        &cli,
-        &format!("{}/api/projects", sb.webui_url()),
-        serde_json::json!({ "path": support::forward_slash(&ghost) }),
-    )
-    .await
-    .expect("register out-of-scope nonexistent");
-    assert_eq!(
-        status, 400,
-        "nonexistent out-of-scope must 400: {ghost_body}"
-    );
-    assert_eq!(
-        ghost_body["error"], oob["error"],
-        "越界 + 不存在必须同文案（范围先行于存在性）: {ghost_body} vs {oob}"
-    );
-
-    // 对照：界内注册照常成功——400 是执法，不是项目面坏了。
-    let inside = scope.join("inside");
-    std::fs::create_dir_all(&inside).expect("mkdir inside");
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/projects", sb.webui_url()),
-        serde_json::json!({ "path": support::forward_slash(&inside) }),
-    )
-    .await
-    .expect("register in-scope control");
-    assert_eq!(status, 201, "in-scope register after tightening: {body}");
-    let inside_id = body["id"].as_str().expect("control project id").to_string();
-
-    // 2) 越界历史项目从列表隐藏；branch 探测按不可达。
-    let projects = cli
-        .get(format!("{}/api/projects", sb.webui_url()))
-        .send()
+        // 界内注册（沙箱 work 目录）+ 两个绑定它的 0-turn 占位会话。占位形态
+        // 足够：执法看的是快照上的 project_dir，与有没有跑过 turn 无关。
+        let work_dir = sb.path.join("work");
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/projects", sb.webui_url()),
+            serde_json::json!({ "path": support::forward_slash(&work_dir) }),
+        )
         .await
-        .expect("list projects")
-        .json::<serde_json::Value>()
-        .await
-        .expect("projects json");
-    let listed = projects.to_string();
-    assert!(
-        !listed.contains(&project_id),
-        "越界历史项目必须从列表隐藏: {projects}"
-    );
-    assert!(
-        listed.contains(&inside_id),
-        "界内对照项目必须在列: {projects}"
-    );
-    let branch = cli
-        .get(format!(
-            "{}/api/projects/{project_id}/branch",
-            sb.webui_url()
-        ))
-        .send()
-        .await
-        .expect("branch probe")
-        .json::<serde_json::Value>()
-        .await
-        .expect("branch json");
-    assert_eq!(
-        branch["accessible"], false,
-        "越界项目的 branch 探测必须按不可达: {branch}"
-    );
-    assert!(
-        branch["branch"].is_null(),
-        "越界项目不得泄漏分支名: {branch}"
-    );
+        .expect("register in-scope project");
+        assert_eq!(status, 201, "in-scope register: {body}");
+        let project_id = body["id"].as_str().expect("project id").to_string();
 
-    // 3) 会话面：detail / message / switch 拒绝（同一文案），archive /
-    //    close 放行（围栏不锁垃圾）。
-    let out_of_scope = |what: &str, body: serde_json::Value| {
-        assert!(
-            body["error"]
-                .as_str()
-                .unwrap_or_default()
-                .starts_with("项目目录超出允许范围"),
-            "{what} must carry the typed rejection: {body}"
+        let key_a = create_project_placeholder(&cli, &sb, &project_id, "a").await;
+        let key_b = create_project_placeholder(&cli, &sb, &project_id, "b").await;
+
+        // 收紧前 detail 可读——证明下面的 400 来自收紧，不是占位形态本身。
+        let (status, detail_before) =
+            get_json_status(&cli, &format!("{}/api/sessions/{key_a}", sb.webui_url()))
+                .await
+                .expect("detail before tightening");
+        assert_eq!(
+            status, 200,
+            "detail must read fine while in scope: {detail_before}"
         );
-    };
-    let (status, body) = get_json_status(&cli, &format!("{}/api/sessions/{key_a}", sb.webui_url()))
+
+        // 收紧根：只重启 webui（新端口避免复绑等待），core 与会话不动。
+        webui.kill().await.expect("kill webui");
+        let scope = sb.path.join("scope");
+        std::fs::create_dir_all(&scope).expect("mkdir scope");
+        let new_port = free_port();
+        let config = std::fs::read_to_string(&sb.config_path).expect("read config");
+        let patched = config.replace(
+            &format!("port = {}", sb.webui_port),
+            &format!("port = {new_port}"),
+        );
+        assert_ne!(patched, config, "[watchdog.webui] port line not found");
+        std::fs::write(&sb.config_path, patched).expect("write config");
+        sb.webui_port = new_port;
+        let scope_s = support::forward_slash(&scope);
+        let _webui2 = sb.spawn(
+            &["webui", "-c", &support::forward_slash(&sb.config_path)],
+            &sb.core_secret,
+            &[("SEBAS_WORKSPACE_ROOT", &scope_s)],
+            &sb.webui_log,
+        );
+        wait_reachable(&cli, &sb).await;
+
+        // 1) 越界注册 400：界内已存在的 work 与「越界 + 不存在」的幽灵同文案。
+        let (status, oob) = post_json(
+            &cli,
+            &format!("{}/api/projects", sb.webui_url()),
+            serde_json::json!({ "path": support::forward_slash(&work_dir) }),
+        )
         .await
-        .expect("detail out-of-scope");
-    assert_eq!(
-        status, 400,
-        "detail on out-of-scope session must 400: {body}"
-    );
-    out_of_scope("detail", body);
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions/{key_a}/message", sb.webui_url()),
-        serde_json::json!({ "message": "hello" }),
-    )
-    .await
-    .expect("message out-of-scope");
-    assert_eq!(
-        status, 400,
-        "message on out-of-scope session must 400: {body}"
-    );
-    out_of_scope("message", body);
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions/{key_a}/switch", sb.webui_url()),
-        serde_json::json!({}),
-    )
-    .await
-    .expect("switch out-of-scope");
-    assert_eq!(
-        status, 400,
-        "switch on out-of-scope session must 400: {body}"
-    );
-    out_of_scope("switch", body);
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions/{key_a}/archive", sb.webui_url()),
-        serde_json::json!({}),
-    )
-    .await
-    .expect("archive out-of-scope session");
-    assert_eq!(status, 200, "archive must pass the fence: {body}");
-    assert_eq!(body["status"], "archived", "{body}");
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions/{key_b}/close", sb.webui_url()),
-        serde_json::json!({}),
-    )
-    .await
-    .expect("close out-of-scope session");
-    assert_eq!(status, 200, "close must pass the fence: {body}");
-    assert_eq!(body["status"], "closed", "{body}");
-
-    // 4) 全程健康：执法没有伤到沙箱本身的可用面。
-    let summary = cli
-        .get(format!("{}/api/summary", sb.webui_url()))
-        .send()
+        .expect("register out-of-scope existing");
+        assert_eq!(status, 400, "out-of-scope register must 400: {oob}");
+        let oob_msg = oob["error"].as_str().expect("error text").to_string();
+        assert!(
+            oob_msg.contains("路径超出允许范围"),
+            "unexpected rejection text: {oob_msg}"
+        );
+        let ghost = sb.path.join("ghost-never-created");
+        let (status, ghost_body) = post_json(
+            &cli,
+            &format!("{}/api/projects", sb.webui_url()),
+            serde_json::json!({ "path": support::forward_slash(&ghost) }),
+        )
         .await
-        .expect("summary")
-        .json::<serde_json::Value>()
+        .expect("register out-of-scope nonexistent");
+        assert_eq!(
+            status, 400,
+            "nonexistent out-of-scope must 400: {ghost_body}"
+        );
+        assert_eq!(
+            ghost_body["error"], oob["error"],
+            "越界 + 不存在必须同文案（范围先行于存在性）: {ghost_body} vs {oob}"
+        );
+
+        // 对照：界内注册照常成功——400 是执法，不是项目面坏了。
+        let inside = scope.join("inside");
+        std::fs::create_dir_all(&inside).expect("mkdir inside");
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/projects", sb.webui_url()),
+            serde_json::json!({ "path": support::forward_slash(&inside) }),
+        )
         .await
-        .expect("summary json");
-    assert_eq!(
-        summary["reachability"]["ok"], true,
-        "sandbox must stay healthy: {summary}"
-    );
-}
+        .expect("register in-scope control");
+        assert_eq!(status, 201, "in-scope register after tightening: {body}");
+        let inside_id = body["id"].as_str().expect("control project id").to_string();
 
-/// cli-service RENAMED「Sebas home derives every file location」的旅程级
-/// 机械化（unify-sebas-home 5.2，原 `single_state_dir_journey_pins_every_
-/// state_location` 扩族版）：只钉正名 `SEBAS_HOME`（HOME 一并钉进沙箱 =
-/// fake 操作员主目录），config 特意不带 channel_path / [media] download_dir
-/// / usage_db 三个键——它们的派生形态正是断言面。四进程完整旅程：core 免
-/// `-c`（auto-arm）+ webui 免 `-c`（secret 文件发现）+ router --debug（免
-/// 密订阅派生 socket）+ 真 sebas-node 免 `--state-dir` 配对。随后断言——
-/// 1. config 缺省解析：core/webui 都不带 `-c`，靠 `<SEBAS_HOME>/config.toml`
-///    起来（webui 端口在场上 = 配置已加载）；auto-arm 的 core.secret 落在
-///    缺省 config 同目录 = home 根；
-/// 2. 四库三 json 全在 home 内且域分离：settings/projects/auth/usage 四库
-///    + archive/nodes 两 json 实物（services.json 本拓扑无 watchdog 写入者
-///    ——映射表派生断言兜底，实物由 watchdog 覆盖层旅程负责）；
-/// 3. `run/`（派生 core.sock 在场、SIGTERM 后移除）、`cache/downloads`
-///    （core 的 config 可写性校验建出）、`node/`（节点的派生状态目录）都在
-///    home 内；
-/// 4. fake 主目录无痕（无 `.sebas/`）、退休名（sebas.db / projects.json）
-///    无处出现、启动日志无别名/退休变量告警（别名另行专测）；
-/// 5. router 订阅侧（5.4 复核的套件内证据）：config 无 channel_path 时
-///    router 按同一映射表派生 `<home>/run/core.sock` 订阅成功。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn sebas_home_journey_pins_every_file_location() {
-    let sb = Sandbox::new_derived_home("testsuite_e2e", "home");
-    sb.enable_node_link_derived_registry();
-    let cli = http_client();
-    let mut core = sb.spawn_core_default_config_no_secret();
-    let _webui = sb.spawn_webui_default_config_no_secret();
-    wait_reachable(&cli, &sb).await;
+        // 2) 越界历史项目从列表隐藏；branch 探测按不可达。
+        let projects = cli
+            .get(format!("{}/api/projects", sb.webui_url()))
+            .send()
+            .await
+            .expect("list projects")
+            .json::<serde_json::Value>()
+            .await
+            .expect("projects json");
+        let listed = projects.to_string();
+        assert!(
+            !listed.contains(&project_id),
+            "越界历史项目必须从列表隐藏: {projects}"
+        );
+        assert!(
+            listed.contains(&inside_id),
+            "界内对照项目必须在列: {projects}"
+        );
+        let branch = cli
+            .get(format!(
+                "{}/api/projects/{project_id}/branch",
+                sb.webui_url()
+            ))
+            .send()
+            .await
+            .expect("branch probe")
+            .json::<serde_json::Value>()
+            .await
+            .expect("branch json");
+        assert_eq!(
+            branch["accessible"], false,
+            "越界项目的 branch 探测必须按不可达: {branch}"
+        );
+        assert!(
+            branch["branch"].is_null(),
+            "越界项目不得泄漏分支名: {branch}"
+        );
 
-    // 1) config 缺省解析 + secret 锚定：免密 core 起来 = `<SEBAS_HOME>/
-    //    config.toml` 被读走（webui 端口来自该文件）；auto-arm 把钥匙写在
-    //    缺省 config 同目录 = home 根（webui 能连上 = 发现自这个文件）。
-    let secret_file = sb.path.join("core.secret");
-    assert!(
-        secret_file.exists(),
-        "auto-arm must write core.secret next to the default config (home root)"
-    );
+        // 3) 会话面：detail / message / switch 拒绝（同一文案），archive /
+        //    close 放行（围栏不锁垃圾）。
+        let out_of_scope = |what: &str, body: serde_json::Value| {
+            assert!(
+                body["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .starts_with("项目目录超出允许范围"),
+                "{what} must carry the typed rejection: {body}"
+            );
+        };
+        let (status, body) =
+            get_json_status(&cli, &format!("{}/api/sessions/{key_a}", sb.webui_url()))
+                .await
+                .expect("detail out-of-scope");
+        assert_eq!(
+            status, 400,
+            "detail on out-of-scope session must 400: {body}"
+        );
+        out_of_scope("detail", body);
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key_a}/message", sb.webui_url()),
+            serde_json::json!({ "message": "hello" }),
+        )
+        .await
+        .expect("message out-of-scope");
+        assert_eq!(
+            status, 400,
+            "message on out-of-scope session must 400: {body}"
+        );
+        out_of_scope("message", body);
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key_a}/switch", sb.webui_url()),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("switch out-of-scope");
+        assert_eq!(
+            status, 400,
+            "switch on out-of-scope session must 400: {body}"
+        );
+        out_of_scope("switch", body);
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key_a}/archive", sb.webui_url()),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("archive out-of-scope session");
+        assert_eq!(status, 200, "archive must pass the fence: {body}");
+        assert_eq!(body["status"], "archived", "{body}");
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key_b}/close", sb.webui_url()),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("close out-of-scope session");
+        assert_eq!(status, 200, "close must pass the fence: {body}");
+        assert_eq!(body["status"], "closed", "{body}");
 
-    // auth.db 的写入者是 webui 用户库；`auth = false` 的沙箱不开它——经
-    // CLI 供应一个用户（AGENTS.md 菜谱同款）让派生 `<home>/auth.db` 有实物
-    // （auth 子命令无 `-c`：用户库纯由 SEBAS_HOME 派生）。
-    let auth_log = sb.path.join("auth-cli.log");
-    let mut auth = sb.spawn(
-        &["auth", "add", "admin", "--password", "admin-pass-9"],
-        &sb.core_secret,
-        &[],
-        &auth_log,
-    );
-    let auth_exit = auth.wait().await.expect("auth add exit");
-    assert!(
-        auth_exit.success(),
-        "sebas auth add must succeed against the derived <home>/auth.db"
-    );
+        // 4) 全程健康：执法没有伤到沙箱本身的可用面。
+        let summary = cli
+            .get(format!("{}/api/summary", sb.webui_url()))
+            .send()
+            .await
+            .expect("summary")
+            .json::<serde_json::Value>()
+            .await
+            .expect("summary json");
+        assert_eq!(
+            summary["reachability"]["ok"], true,
+            "sandbox must stay healthy: {summary}"
+        );
+    }
 
-    // 5) router：无 channel_path 键 → 订阅侧按同一映射表派生 run/core.sock；
-    //    免密 → 钥匙经 secret 文件发现（core 换钥自愈的同一机制）。
-    let _router = sb.spawn_router_debug_no_secret();
-    let router_addr = wait_router_addr(&sb).await;
-    {
+    /// cli-service RENAMED「Sebas home derives every file location」的旅程级
+    /// 机械化（unify-sebas-home 5.2，原 `single_state_dir_journey_pins_every_
+    /// state_location` 扩族版）：只钉正名 `SEBAS_HOME`（HOME 一并钉进沙箱 =
+    /// fake 操作员主目录），config 特意不带 channel_path / [media] download_dir
+    /// / usage_db 三个键——它们的派生形态正是断言面。四进程完整旅程：core 免
+    /// `-c`（auto-arm）+ webui 免 `-c`（secret 文件发现）+ router --debug（免
+    /// 密订阅派生 socket）+ 真 sebas-node 免 `--state-dir` 配对。随后断言——
+    /// 1. config 缺省解析：core/webui 都不带 `-c`，靠 `<SEBAS_HOME>/config.toml`
+    ///    起来（webui 端口在场上 = 配置已加载）；auto-arm 的 core.secret 落在
+    ///    缺省 config 同目录 = home 根；
+    /// 2. 四库三 json 全在 home 内且域分离：settings/projects/auth/usage 四库
+    ///    + archive/nodes 两 json 实物（services.json 本拓扑无 watchdog 写入者
+    ///    ——映射表派生断言兜底，实物由 watchdog 覆盖层旅程负责）；
+    /// 3. `run/`（派生 core.sock 在场、SIGTERM 后移除）、`cache/downloads`
+    ///    （core 的 config 可写性校验建出）、`node/`（节点的派生状态目录）都在
+    ///    home 内；
+    /// 4. fake 主目录无痕（无 `.sebas/`）、退休名（sebas.db / projects.json）
+    ///    无处出现、启动日志无别名/退休变量告警（别名另行专测）；
+    /// 5. router 订阅侧（5.4 复核的套件内证据）：config 无 channel_path 时
+    ///    router 按同一映射表派生 `<home>/run/core.sock` 订阅成功。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn sebas_home_journey_pins_every_file_location() {
+        let sb = Sandbox::new_derived_home("testsuite_e2e", "home");
+        sb.enable_node_link_derived_registry();
+        let cli = http_client();
+        let mut core = sb.spawn_core_default_config_no_secret();
+        let _webui = sb.spawn_webui_default_config_no_secret();
+        wait_reachable(&cli, &sb).await;
+
+        // 1) config 缺省解析 + secret 锚定：免密 core 起来 = `<SEBAS_HOME>/
+        //    config.toml` 被读走（webui 端口来自该文件）；auto-arm 把钥匙写在
+        //    缺省 config 同目录 = home 根（webui 能连上 = 发现自这个文件）。
+        let secret_file = sb.path.join("core.secret");
+        assert!(
+            secret_file.exists(),
+            "auto-arm must write core.secret next to the default config (home root)"
+        );
+
+        // auth.db 的写入者是 webui 用户库；`auth = false` 的沙箱不开它——经
+        // CLI 供应一个用户（AGENTS.md 菜谱同款）让派生 `<home>/auth.db` 有实物
+        // （auth 子命令无 `-c`：用户库纯由 SEBAS_HOME 派生）。
+        let auth_log = sb.path.join("auth-cli.log");
+        let mut auth = sb.spawn(
+            &["auth", "add", "admin", "--password", "admin-pass-9"],
+            &sb.core_secret,
+            &[],
+            &auth_log,
+        );
+        let auth_exit = auth.wait().await.expect("auth add exit");
+        assert!(
+            auth_exit.success(),
+            "sebas auth add must succeed against the derived <home>/auth.db"
+        );
+
+        // 5) router：无 channel_path 键 → 订阅侧按同一映射表派生 run/core.sock；
+        //    免密 → 钥匙经 secret 文件发现（core 换钥自愈的同一机制）。
+        let _router = sb.spawn_router_debug_no_secret();
+        let router_addr = wait_router_addr(&sb).await;
+        {
+            let hint = sb.path.clone();
+            let log = sb.router_log.clone();
+            wait_for(
+                "router to subscribe on the derived <home>/run/core.sock",
+                Duration::from_secs(20),
+                &hint,
+                move || {
+                    let log = log.clone();
+                    Box::pin(async move {
+                        let text = std::fs::read_to_string(&log).ok()?;
+                        text.contains("core channel subscribed").then_some(())
+                    })
+                },
+            )
+            .await;
+        }
+        // router 自有库无 usage_db 键 → 派生 `<home>/usage.db`：跑一回合让行落库。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{router_addr}/v1/messages"),
+            serde_json::json!({
+                "model": "test",
+                "max_tokens": 16,
+                "messages": [{ "role": "user", "content": "hi" }]
+            }),
+        )
+        .await
+        .expect("router debug test turn");
+        assert_eq!(status, 200, "debug test provider must answer: {body}");
+
+        // 项目注册（core projects.db 的 add 写入）。
+        let project_id = scene_project_id(&cli, &sb).await;
+        assert!(!project_id.is_empty(), "project registered");
+
+        // provider put（core settings.db 的 PersistedState 事务写入）。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/providers", sb.webui_url()),
+            serde_json::json!({
+                "name": "pinned",
+                "protocol": "anthropic",
+                "base_url_anthropic": "http://127.0.0.1:9",
+                "api_key": "sk-sandbox-dummy"
+            }),
+        )
+        .await
+        .expect("create provider");
+        assert_eq!(status, 201, "provider create: {body}");
+
+        // fake-claude 会话回合（完整旅程）→ archive（archive.json 的写入者）。
+        let (s, resp) = post_json(
+            &cli,
+            &format!("{}/api/sessions", sb.webui_url()),
+            serde_json::json!({ "project_id": project_id, "prompt": "hello", "agent": "claude" }),
+        )
+        .await
+        .expect("create session");
+        assert_eq!(s, 201, "create session: {resp}");
+        let key = resp["key"].as_str().expect("session key").to_string();
+        let detail = state_dir_wait_done(&cli, &sb, &key).await;
+        assert_eq!(detail["status_slug"], "done", "turn must complete");
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/archive", sb.webui_url()),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("archive session");
+        assert_eq!(status, 200, "archive: {body}");
+
+        // 节点配对：注册表落派生 `<home>/nodes.json`，节点状态目录落派生
+        // `<home>/node/`（--state-dir/--state_dir env/config 键三层全缺席）。
+        let token = wait_bootstrap_token(&sb).await;
+        let _node = sb.spawn_node_home("home-journey-node", Some(&token));
+        wait_node_status(&cli, &sb, "home-journey-node", "online").await;
+
+        // cache/downloads：core 启动的 config 可写性校验把派生 media 目录建出来。
+        let cache_downloads = sb.path.join("cache/downloads");
+        assert!(
+            cache_downloads.is_dir(),
+            "core's config validation must materialize <home>/cache/downloads"
+        );
+        // run/：派生 socket 在场（0700 目录 + 0600 socket 的形态断言在单测侧；
+        // 这里证实物与位置）。Windows 侧 IPC 是按路径映射的命名管道
+        // （sebas_ipc::bind → `\\.\pipe\sebas/<路径>`），路径本身不落文件——
+        // 派生目录 `<home>/run/` 就是文件系统侧的见证，管道名以该路径为键。
+        #[cfg(unix)]
+        let derived_socket = sb.path.join("run/core.sock");
+        #[cfg(unix)]
+        assert!(
+            derived_socket.exists(),
+            "the derived channel socket must live at <home>/run/core.sock"
+        );
+        #[cfg(windows)]
+        assert!(
+            sb.path.join("run").is_dir(),
+            "the derived run/ dir (named-pipe namespace key <home>/run/core.sock) must exist"
+        );
+        // node/：真节点的派生状态目录（身份已写入）。
+        let node_dir = sb.path.join("node");
+        assert!(
+            node_dir.is_dir(),
+            "the node state dir must derive to <home>/node"
+        );
+
+        // 映射表派生断言：全族 15 行——含本拓扑没有写入者的 services.json 与
+        // upgrade/（实物分别由 watchdog 覆盖层旅程 / 真实升级负责，派生归属性
+        // 在这里机械化）。
+        for p in [
+            sebas_domain::state_paths::StatePath::SettingsDb,
+            sebas_domain::state_paths::StatePath::ProjectsDb,
+            sebas_domain::state_paths::StatePath::AuthDb,
+            sebas_domain::state_paths::StatePath::UsageDb,
+            sebas_domain::state_paths::StatePath::Archive,
+            sebas_domain::state_paths::StatePath::ProjectRegistry,
+            sebas_domain::state_paths::StatePath::NodeRegistry,
+            sebas_domain::state_paths::StatePath::ServicesOverride,
+            sebas_domain::state_paths::StatePath::ConfigDefault,
+            sebas_domain::state_paths::StatePath::CoreSecretDefault,
+            sebas_domain::state_paths::StatePath::ChannelSocket,
+            sebas_domain::state_paths::StatePath::ControlSocket,
+            sebas_domain::state_paths::StatePath::MediaDownloads,
+            sebas_domain::state_paths::StatePath::NodeStateDir,
+            sebas_domain::state_paths::StatePath::UpgradeDataDir,
+        ] {
+            let derived = p.derived_in(&sb.path);
+            assert_eq!(
+                derived,
+                sb.path.join(p.rel_path()),
+                "{p:?} must derive inside the sebas home"
+            );
+        }
+
+        // SIGTERM core：优雅退出（state-store 通道生命周期）。
+        #[cfg(unix)]
+        {
+            let pid = core.id().expect("core pid");
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        }
+        #[cfg(not(unix))]
+        core.kill().await.expect("kill core");
+        let _ = core.wait().await;
+        assert!(
+            !sb.channel_path.exists(),
+            "graceful exit must remove the derived channel socket"
+        );
+
+        // ── 机械断言：全部状态产物都在钉住的 home 内 ──
+        let files = state_dir_walk(&sb.path);
+        // fake 主目录无痕：HOME 钉在沙箱，HOME 兜底的任何写都会露形为
+        // `<沙箱>/.sebas/...`——其不存在 = 旅程中没有一处状态逃出派生 home。
+        assert!(
+            files.iter().all(|f| !f.starts_with(".sebas/")),
+            "no state may escape into a home-relative .sebas: {files:?}"
+        );
+        // 退休名从不被创建（任何层级、任何子目录）。
+        assert!(
+            files
+                .iter()
+                .all(|f| !f.ends_with("/sebas.db") && f != "sebas.db"),
+            "the retired single-DB file name must never appear: {files:?}"
+        );
+        // migrate-project-registry 7.1：注册表落 `projects.db`，**`projects.json`
+        // 全程未被创建**。
+        assert!(
+            files
+                .iter()
+                .all(|f| !f.ends_with("/projects.json") && f != "projects.json"),
+            "the retired project-registry file must never be created: {files:?}"
+        );
+        // 启动日志安静面：正名钉法下不得出现别名/退休变量告警（别名形态另行
+        // 专测 legacy_alias_state_dir_still_works_and_warns）。
+        let core_log_text = std::fs::read_to_string(&sb.core_log).unwrap_or_default();
+        assert!(
+            !core_log_text.contains("SEBAS_STATE_DIR"),
+            "canonical pin must not emit alias or retired-var warnings: {}",
+            sb.core_log.display()
+        );
+        // 1) 四库在场且域分离。
+        let settings_db = sb.path.join("settings.db");
+        let projects_db = sb.path.join("projects.db");
+        let auth_db = sb.path.join("auth.db");
+        let usage_db = sb.path.join("usage.db");
+        assert!(settings_db.exists(), "settings.db must exist in the home");
+        assert!(projects_db.exists(), "projects.db must exist in the home");
+        assert!(
+            auth_db.exists(),
+            "auth.db (webui user store) must exist in the home"
+        );
+        assert!(
+            usage_db.exists(),
+            "usage.db (router) must derive into the home"
+        );
+        assert_eq!(
+            state_dir_table_count(&settings_db, &["providers", "model_aliases", "settings"]),
+            3,
+            "settings.db carries exactly the bounded configuration tables"
+        );
+        assert_eq!(
+            state_dir_table_count(&settings_db, &["projects", "session_map"]),
+            0,
+            "settings.db must not carry any user-data tables"
+        );
+        assert_eq!(
+            state_dir_table_count(&projects_db, &["projects", "session_map"]),
+            2,
+            "projects.db carries exactly the growing user-data tables"
+        );
+        assert_eq!(
+            state_dir_table_count(&projects_db, &["providers", "model_aliases", "settings"]),
+            0,
+            "projects.db must not carry any configuration tables"
+        );
+        // 2) 数据落在正确的库里。
+        {
+            let conn = rusqlite::Connection::open_with_flags(
+                &settings_db,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .unwrap();
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM providers WHERE id = 'pinned'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "provider row must live in settings.db");
+        }
+        {
+            let conn = rusqlite::Connection::open_with_flags(
+                &projects_db,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .unwrap();
+            let n: i64 = conn
+                .query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
+                .unwrap();
+            assert!(n >= 1, "project row must live in projects.db");
+            // 节点的正式列与稳定 id 都在库里（migrate-project-registry 1.1/2.4）：
+            // id 是移除/重排/项目级默认 agent 的寻址键，落库时就该有值——只在读
+            // 路径回填会让按 id 的 UPDATE 全部匹配 0 行却返回 Ok（假装成功）。
+            let (id, node_id, path): (Option<String>, String, String) = conn
+                .query_row(
+                    "SELECT id, node_id, path FROM projects ORDER BY added_at LIMIT 1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            assert!(
+                path.contains("home"),
+                "registered scene project row: {path}"
+            );
+            assert_eq!(node_id, "local", "本机项目落 node_id = local");
+            assert!(
+                id.as_deref().is_some_and(|i| i.starts_with("proj-")),
+                "注册即落库稳定 id（不得留 NULL 等读路径回填）: {id:?}"
+            );
+        }
+        // 三 json 之二：archive（会话归档登记册）与 nodes（节点链路注册表，
+        // 注册表键未钉 → 派生缺省）都落 home 根。
+        let archive_json = sb.path.join("archive.json");
+        let nodes_json = sb.path.join("nodes.json");
+        assert!(
+            archive_json.exists(),
+            "the archive registry must derive into the home root"
+        );
+        assert!(
+            nodes_json.exists(),
+            "the node-link registry must derive into the home root when unpinned"
+        );
+    }
+
+    /// cli-service「the legacy alias still works but warns」（unify-sebas-home
+    /// 5.3）的进程级固化：**只钉旧名 `SEBAS_STATE_DIR`**（兼容别名）跑冒烟旅程
+    /// ——解析与正名逐落点等价（冒烟全绿 = 行为等价的证据），启动日志点名
+    /// `SEBAS_HOME` 为正名，且没有冲突告警（正名缺席 ≠ 冲突态）。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn legacy_alias_state_dir_still_works_and_warns() {
+        let mut sb = Sandbox::new("testsuite_e2e", "alias");
+        sb.pin_home_via_legacy_alias();
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
+
+        // 冒烟：项目注册 + fake-claude 一回合 Done——别名下的解析与正名完全
+        // 等价（路径解析共用同一映射表，SEBAS_STATE_DIR 只是 home 的别名来源）。
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (s, resp) = post_json(
+            &cli,
+            &format!("{}/api/sessions", sb.webui_url()),
+            serde_json::json!({ "project_id": project_id, "prompt": "hello", "agent": "claude" }),
+        )
+        .await
+        .expect("create session");
+        assert_eq!(s, 201, "create session under the legacy alias: {resp}");
+        let key = resp["key"].as_str().expect("session key").to_string();
+        let detail = state_dir_wait_done(&cli, &sb, &key).await;
+        assert_eq!(detail["status_slug"], "done", "turn must complete");
+
+        // 落点等价的实物证据：两库照常落在别名目录（= 沙箱目录）。
+        assert!(
+            sb.path.join("settings.db").exists(),
+            "settings.db must resolve from the alias dir exactly as from SEBAS_HOME"
+        );
+        assert!(
+            sb.path.join("projects.db").exists(),
+            "projects.db must resolve from the alias dir exactly as from SEBAS_HOME"
+        );
+
+        // 启动 warn：core 的启动日志点名正名 SEBAS_HOME（run.rs 的别名检出）。
         let hint = sb.path.clone();
-        let log = sb.router_log.clone();
+        let log = sb.core_log.clone();
         wait_for(
-            "router to subscribe on the derived <home>/run/core.sock",
-            Duration::from_secs(20),
+            "core logs the legacy-alias warning naming SEBAS_HOME",
+            Duration::from_secs(10),
             &hint,
             move || {
                 let log = log.clone();
                 Box::pin(async move {
                     let text = std::fs::read_to_string(&log).ok()?;
-                    text.contains("core channel subscribed").then_some(())
+                    (text.contains("SEBAS_STATE_DIR")
+                        && text.contains("SEBAS_HOME")
+                        && text.contains("旧名"))
+                    .then_some(())
                 })
             },
         )
         .await;
-    }
-    // router 自有库无 usage_db 键 → 派生 `<home>/usage.db`：跑一回合让行落库。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{router_addr}/v1/messages"),
-        serde_json::json!({
-            "model": "test",
-            "max_tokens": 16,
-            "messages": [{ "role": "user", "content": "hi" }]
-        }),
-    )
-    .await
-    .expect("router debug test turn");
-    assert_eq!(status, 200, "debug test provider must answer: {body}");
-
-    // 项目注册（core projects.db 的 add 写入）。
-    let project_id = scene_project_id(&cli, &sb).await;
-    assert!(!project_id.is_empty(), "project registered");
-
-    // provider put（core settings.db 的 PersistedState 事务写入）。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/providers", sb.webui_url()),
-        serde_json::json!({
-            "name": "pinned",
-            "protocol": "anthropic",
-            "base_url_anthropic": "http://127.0.0.1:9",
-            "api_key": "sk-sandbox-dummy"
-        }),
-    )
-    .await
-    .expect("create provider");
-    assert_eq!(status, 201, "provider create: {body}");
-
-    // fake-claude 会话回合（完整旅程）→ archive（archive.json 的写入者）。
-    let (s, resp) = post_json(
-        &cli,
-        &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "project_id": project_id, "prompt": "hello", "agent": "claude" }),
-    )
-    .await
-    .expect("create session");
-    assert_eq!(s, 201, "create session: {resp}");
-    let key = resp["key"].as_str().expect("session key").to_string();
-    let detail = state_dir_wait_done(&cli, &sb, &key).await;
-    assert_eq!(detail["status_slug"], "done", "turn must complete");
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions/{key}/archive", sb.webui_url()),
-        serde_json::json!({}),
-    )
-    .await
-    .expect("archive session");
-    assert_eq!(status, 200, "archive: {body}");
-
-    // 节点配对：注册表落派生 `<home>/nodes.json`，节点状态目录落派生
-    // `<home>/node/`（--state-dir/--state_dir env/config 键三层全缺席）。
-    let token = wait_bootstrap_token(&sb).await;
-    let _node = sb.spawn_node_home("home-journey-node", Some(&token));
-    wait_node_status(&cli, &sb, "home-journey-node", "online").await;
-
-    // cache/downloads：core 启动的 config 可写性校验把派生 media 目录建出来。
-    let cache_downloads = sb.path.join("cache/downloads");
-    assert!(
-        cache_downloads.is_dir(),
-        "core's config validation must materialize <home>/cache/downloads"
-    );
-    // run/：派生 socket 在场（0700 目录 + 0600 socket 的形态断言在单测侧；
-    // 这里证实物与位置）。Windows 侧 IPC 是按路径映射的命名管道
-    // （sebas_ipc::bind → `\\.\pipe\sebas/<路径>`），路径本身不落文件——
-    // 派生目录 `<home>/run/` 就是文件系统侧的见证，管道名以该路径为键。
-    #[cfg(unix)]
-    let derived_socket = sb.path.join("run/core.sock");
-    #[cfg(unix)]
-    assert!(
-        derived_socket.exists(),
-        "the derived channel socket must live at <home>/run/core.sock"
-    );
-    #[cfg(windows)]
-    assert!(
-        sb.path.join("run").is_dir(),
-        "the derived run/ dir (named-pipe namespace key <home>/run/core.sock) must exist"
-    );
-    // node/：真节点的派生状态目录（身份已写入）。
-    let node_dir = sb.path.join("node");
-    assert!(
-        node_dir.is_dir(),
-        "the node state dir must derive to <home>/node"
-    );
-
-    // 映射表派生断言：全族 15 行——含本拓扑没有写入者的 services.json 与
-    // upgrade/（实物分别由 watchdog 覆盖层旅程 / 真实升级负责，派生归属性
-    // 在这里机械化）。
-    for p in [
-        sebas_domain::state_paths::StatePath::SettingsDb,
-        sebas_domain::state_paths::StatePath::ProjectsDb,
-        sebas_domain::state_paths::StatePath::AuthDb,
-        sebas_domain::state_paths::StatePath::UsageDb,
-        sebas_domain::state_paths::StatePath::Archive,
-        sebas_domain::state_paths::StatePath::ProjectRegistry,
-        sebas_domain::state_paths::StatePath::NodeRegistry,
-        sebas_domain::state_paths::StatePath::ServicesOverride,
-        sebas_domain::state_paths::StatePath::ConfigDefault,
-        sebas_domain::state_paths::StatePath::CoreSecretDefault,
-        sebas_domain::state_paths::StatePath::ChannelSocket,
-        sebas_domain::state_paths::StatePath::ControlSocket,
-        sebas_domain::state_paths::StatePath::MediaDownloads,
-        sebas_domain::state_paths::StatePath::NodeStateDir,
-        sebas_domain::state_paths::StatePath::UpgradeDataDir,
-    ] {
-        let derived = p.derived_in(&sb.path);
-        assert_eq!(
-            derived,
-            sb.path.join(p.rel_path()),
-            "{p:?} must derive inside the sebas home"
+        // 且只是别名提示，不是冲突告警（正名缺席）。
+        let core_log_text = std::fs::read_to_string(&sb.core_log).unwrap_or_default();
+        assert!(
+            !core_log_text.contains("同时设置"),
+            "alias-only posture must not emit the both-set conflict warning"
         );
     }
 
-    // SIGTERM core：优雅退出（state-store 通道生命周期）。
-    #[cfg(unix)]
-    {
-        let pid = core.id().expect("core pid");
-        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
-    }
-    #[cfg(not(unix))]
-    core.kill().await.expect("kill core");
-    let _ = core.wait().await;
-    assert!(
-        !sb.channel_path.exists(),
-        "graceful exit must remove the derived channel socket"
-    );
+    /// cli-service「the retired database variable has no effect」（任务 6.1 的
+    /// 进程级固化）：导出 `SEBAS_STATE_DB` 启动 core——分层库照常从状态目录
+    /// 解析并创建、退休路径从不被创建、启动日志对残留值给出点名提示。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn retired_state_db_var_is_warned_and_ignored() {
+        let sb = Sandbox::new("testsuite_e2e", "retired-var");
+        let retired_path = sb.path.join("sebas.db");
+        let retired = retired_path.to_string_lossy().into_owned();
+        let cli = http_client();
+        let _core = sb.spawn_core_extra(&[("SEBAS_STATE_DB", &retired)]);
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
 
-    // ── 机械断言：全部状态产物都在钉住的 home 内 ──
-    let files = state_dir_walk(&sb.path);
-    // fake 主目录无痕：HOME 钉在沙箱，HOME 兜底的任何写都会露形为
-    // `<沙箱>/.sebas/...`——其不存在 = 旅程中没有一处状态逃出派生 home。
-    assert!(
-        files.iter().all(|f| !f.starts_with(".sebas/")),
-        "no state may escape into a home-relative .sebas: {files:?}"
-    );
-    // 退休名从不被创建（任何层级、任何子目录）。
-    assert!(
-        files.iter().all(|f| !f.ends_with("/sebas.db") && f != "sebas.db"),
-        "the retired single-DB file name must never appear: {files:?}"
-    );
-    // migrate-project-registry 7.1：注册表落 `projects.db`，**`projects.json`
-    // 全程未被创建**。
-    assert!(
-        files
-            .iter()
-            .all(|f| !f.ends_with("/projects.json") && f != "projects.json"),
-        "the retired project-registry file must never be created: {files:?}"
-    );
-    // 启动日志安静面：正名钉法下不得出现别名/退休变量告警（别名形态另行
-    // 专测 legacy_alias_state_dir_still_works_and_warns）。
-    let core_log_text = std::fs::read_to_string(&sb.core_log).unwrap_or_default();
-    assert!(
-        !core_log_text.contains("SEBAS_STATE_DIR"),
-        "canonical pin must not emit alias or retired-var warnings: {}",
-        sb.core_log.display()
-    );
-    // 1) 四库在场且域分离。
-    let settings_db = sb.path.join("settings.db");
-    let projects_db = sb.path.join("projects.db");
-    let auth_db = sb.path.join("auth.db");
-    let usage_db = sb.path.join("usage.db");
-    assert!(settings_db.exists(), "settings.db must exist in the home");
-    assert!(projects_db.exists(), "projects.db must exist in the home");
-    assert!(auth_db.exists(), "auth.db (webui user store) must exist in the home");
-    assert!(usage_db.exists(), "usage.db (router) must derive into the home");
-    assert_eq!(
-        state_dir_table_count(&settings_db, &["providers", "model_aliases", "settings"]),
-        3,
-        "settings.db carries exactly the bounded configuration tables"
-    );
-    assert_eq!(
-        state_dir_table_count(&settings_db, &["projects", "session_map"]),
-        0,
-        "settings.db must not carry any user-data tables"
-    );
-    assert_eq!(
-        state_dir_table_count(&projects_db, &["projects", "session_map"]),
-        2,
-        "projects.db carries exactly the growing user-data tables"
-    );
-    assert_eq!(
-        state_dir_table_count(&projects_db, &["providers", "model_aliases", "settings"]),
-        0,
-        "projects.db must not carry any configuration tables"
-    );
-    // 2) 数据落在正确的库里。
-    {
-        let conn = rusqlite::Connection::open_with_flags(
-            &settings_db,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        // 退休变量被点名提示（run.rs 的启动 warn）。
+        let hint = sb.path.clone();
+        let log = sb.core_log.clone();
+        wait_for(
+            "core logs the retired-variable warning",
+            Duration::from_secs(10),
+            &hint,
+            move || {
+                let log = log.clone();
+                Box::pin(async move {
+                    let text = std::fs::read_to_string(&log).ok()?;
+                    (text.contains("SEBAS_STATE_DB") && text.contains("退休")).then_some(())
+                })
+            },
         )
-        .unwrap();
-        let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM providers WHERE id = 'pinned'", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(n, 1, "provider row must live in settings.db");
+        .await;
+
+        // 退休路径从不被创建；分层库照常解析。
+        assert!(
+            !retired_path.exists(),
+            "the retired variable's path must never be created: {}",
+            retired_path.display()
+        );
+        assert!(
+            sb.path.join("settings.db").exists(),
+            "settings.db resolves from the state dir"
+        );
+        assert!(
+            sb.path.join("projects.db").exists(),
+            "projects.db resolves from the state dir"
+        );
     }
-    {
-        let conn = rusqlite::Connection::open_with_flags(
-            &projects_db,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .unwrap();
-        let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
-            .unwrap();
-        assert!(n >= 1, "project row must live in projects.db");
-        // 节点的正式列与稳定 id 都在库里（migrate-project-registry 1.1/2.4）：
-        // id 是移除/重排/项目级默认 agent 的寻址键，落库时就该有值——只在读
-        // 路径回填会让按 id 的 UPDATE 全部匹配 0 行却返回 Ok（假装成功）。
-        let (id, node_id, path): (Option<String>, String, String) = conn
-            .query_row(
-                "SELECT id, node_id, path FROM projects ORDER BY added_at LIMIT 1",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+
+    /// state-store「Environment override relocates the database」的进程级：
+    /// `SEBAS_PROJECTS_DB` 只搬走 projects.db——项目注册的真实写入落在覆盖
+    /// 路径上，派生路径不再建库，settings.db 与其余落点照常在状态目录内。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn projects_db_override_relocates_only_that_database() {
+        let sb = Sandbox::new("testsuite_e2e", "projects-override");
+        let elsewhere = sb.path.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).expect("mkdir elsewhere");
+        let override_path = elsewhere.join("proj.db");
+        let override_str = override_path.to_string_lossy().into_owned();
+
+        let cli = http_client();
+        let mut core = sb.spawn_core_extra(&[("SEBAS_PROJECTS_DB", &override_str)]);
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
+
+        // 项目注册：经 core 通道写 projects 域——写的就是覆盖路径上的库。
+        let project_id = scene_project_id(&cli, &sb).await;
+        assert!(!project_id.is_empty(), "project registered");
+
+        #[cfg(unix)]
+        {
+            let pid = core.id().expect("core pid");
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        }
+        #[cfg(not(unix))]
+        core.kill().await.expect("kill core");
+        let _ = core.wait().await;
+
+        // 覆盖路径收到真实的库（projects 表里是刚注册的行）。
+        assert!(
+            override_path.exists(),
+            "the override path owns the projects db"
+        );
+        {
+            let conn = rusqlite::Connection::open_with_flags(
+                &override_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
             )
             .unwrap();
-        assert!(path.contains("home"), "registered scene project row: {path}");
-        assert_eq!(node_id, "local", "本机项目落 node_id = local");
+            let n: i64 = conn
+                .query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
+                .unwrap();
+            assert!(n >= 1, "registered project must land in the relocated db");
+        }
+        // 派生路径不再建库；settings.db 照常在状态目录内。
         assert!(
-            id.as_deref().is_some_and(|i| i.starts_with("proj-")),
-            "注册即落库稳定 id（不得留 NULL 等读路径回填）: {id:?}"
+            !sb.path.join("projects.db").exists(),
+            "the derived projects.db must not be created when overridden"
+        );
+        assert!(
+            sb.path.join("settings.db").exists(),
+            "settings.db stays in the state dir"
         );
     }
-    // 三 json 之二：archive（会话归档登记册）与 nodes（节点链路注册表，
-    // 注册表键未钉 → 派生缺省）都落 home 根。
-    let archive_json = sb.path.join("archive.json");
-    let nodes_json = sb.path.join("nodes.json");
-    assert!(
-        archive_json.exists(),
-        "the archive registry must derive into the home root"
-    );
-    assert!(
-        nodes_json.exists(),
-        "the node-link registry must derive into the home root when unpinned"
-    );
-}
 
-/// cli-service「the legacy alias still works but warns」（unify-sebas-home
-/// 5.3）的进程级固化：**只钉旧名 `SEBAS_STATE_DIR`**（兼容别名）跑冒烟旅程
-/// ——解析与正名逐落点等价（冒烟全绿 = 行为等价的证据），启动日志点名
-/// `SEBAS_HOME` 为正名，且没有冲突告警（正名缺席 ≠ 冲突态）。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn legacy_alias_state_dir_still_works_and_warns() {
-    let mut sb = Sandbox::new("testsuite_e2e", "alias");
-    sb.pin_home_via_legacy_alias();
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
+    /// watchdog spec「sandboxed watchdog does not touch the operator's
+    /// directory」+「a runtime override survives a watchdog restart」+「the
+    /// watchdog acquires no persistence layer」+「core still ignores the
+    /// override layer」的进程级旅程：监督形态下经 webui admin 控制面（HTTP，
+    /// 非浏览器）做 ServiceSet——services.json 落在状态目录内且是普通 JSON
+    /// 文件（非 SQLite）；core 的停用请求被拒、core 子进程照常存活；watchdog
+    /// 重启后 router 的期望态从文件读回、spawn 决策照旧。
+    #[cfg(target_os = "linux")] // find_child_pid 走 /proc/<pid>/cmdline
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn watchdog_service_override_lives_in_state_dir_and_survives_restart() {
+        let sb = Sandbox::new("testsuite_e2e", "watchdog-state-dir");
+        sb.enable_supervised_core();
+        // 控制 socket（control.sock）缺省落 `<SEBAS_HOME>/run/`——SEBAS_HOME 已
+        // 钉进沙箱（XDG_RUNTIME_DIR 不再参与解析，保留注入无害）。
+        let xdg_run = sb.path.join("xdg-run");
+        std::fs::create_dir_all(&xdg_run).expect("mkdir xdg-run");
+        let xdg = support::forward_slash(&xdg_run);
+        let cfg = support::forward_slash(&sb.config_path);
+        let cli = http_client();
+        // 不带 --debug：router 初值 = config 开关（默认关）→ 初始无 router 子进程，
+        // 让「enable 持久化 + 重启后读回」有干净的起点。
+        let mut watchdog = sb.spawn(
+            &["run", "-c", &cfg],
+            &sb.core_secret,
+            &[("XDG_RUNTIME_DIR", &xdg)],
+            &sb.core_log,
+        );
+        wait_reachable(&cli, &sb).await;
+        let watchdog_pid = watchdog.id().expect("watchdog pid");
+        let hint = sb.path.clone();
 
-    // 冒烟：项目注册 + fake-claude 一回合 Done——别名下的解析与正名完全
-    // 等价（路径解析共用同一映射表，SEBAS_STATE_DIR 只是 home 的别名来源）。
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (s, resp) = post_json(
-        &cli,
-        &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "project_id": project_id, "prompt": "hello", "agent": "claude" }),
-    )
-    .await
-    .expect("create session");
-    assert_eq!(s, 201, "create session under the legacy alias: {resp}");
-    let key = resp["key"].as_str().expect("session key").to_string();
-    let detail = state_dir_wait_done(&cli, &sb, &key).await;
-    assert_eq!(detail["status_slug"], "done", "turn must complete");
+        // admin 控制面在场（standalone webui 持 ControlRpcAdminAdapter）。
+        let services_url = format!("{}/api/admin/services", sb.webui_url());
+        let services: serde_json::Value = cli
+            .get(&services_url)
+            .send()
+            .await
+            .expect("GET admin services")
+            .json()
+            .await
+            .expect("admin services json");
+        assert_eq!(
+            services["adapter_ok"], true,
+            "the supervised webui must carry the control adapter: {services}"
+        );
 
-    // 落点等价的实物证据：两库照常落在别名目录（= 沙箱目录）。
-    assert!(
-        sb.path.join("settings.db").exists(),
-        "settings.db must resolve from the alias dir exactly as from SEBAS_HOME"
-    );
-    assert!(
-        sb.path.join("projects.db").exists(),
-        "projects.db must resolve from the alias dir exactly as from SEBAS_HOME"
-    );
+        // 初始无 router 子进程（config 默认关、无覆盖层）。
+        assert!(
+            find_child_pid(watchdog_pid, "router").is_none(),
+            "router must not spawn while its desired state is off"
+        );
 
-    // 启动 warn：core 的启动日志点名正名 SEBAS_HOME（run.rs 的别名检出）。
-    let hint = sb.path.clone();
-    let log = sb.core_log.clone();
-    wait_for(
-        "core logs the legacy-alias warning naming SEBAS_HOME",
-        Duration::from_secs(10),
-        &hint,
-        move || {
-            let log = log.clone();
-            Box::pin(async move {
-                let text = std::fs::read_to_string(&log).ok()?;
-                (text.contains("SEBAS_STATE_DIR")
-                    && text.contains("SEBAS_HOME")
-                    && text.contains("旧名"))
-                .then_some(())
-            })
-        },
-    )
-    .await;
-    // 且只是别名提示，不是冲突告警（正名缺席）。
-    let core_log_text = std::fs::read_to_string(&sb.core_log).unwrap_or_default();
-    assert!(
-        !core_log_text.contains("同时设置"),
-        "alias-only posture must not emit the both-set conflict warning"
-    );
-}
-
-/// cli-service「the retired database variable has no effect」（任务 6.1 的
-/// 进程级固化）：导出 `SEBAS_STATE_DB` 启动 core——分层库照常从状态目录
-/// 解析并创建、退休路径从不被创建、启动日志对残留值给出点名提示。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn retired_state_db_var_is_warned_and_ignored() {
-    let sb = Sandbox::new("testsuite_e2e", "retired-var");
-    let retired_path = sb.path.join("sebas.db");
-    let retired = retired_path.to_string_lossy().into_owned();
-    let cli = http_client();
-    let _core = sb.spawn_core_extra(&[("SEBAS_STATE_DB", &retired)]);
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-
-    // 退休变量被点名提示（run.rs 的启动 warn）。
-    let hint = sb.path.clone();
-    let log = sb.core_log.clone();
-    wait_for("core logs the retired-variable warning", Duration::from_secs(10), &hint, move || {
-        let log = log.clone();
-        Box::pin(async move {
-            let text = std::fs::read_to_string(&log).ok()?;
-            (text.contains("SEBAS_STATE_DB") && text.contains("退休")).then_some(())
-        })
-    })
-    .await;
-
-    // 退休路径从不被创建；分层库照常解析。
-    assert!(
-        !retired_path.exists(),
-        "the retired variable's path must never be created: {}",
-        retired_path.display()
-    );
-    assert!(sb.path.join("settings.db").exists(), "settings.db resolves from the state dir");
-    assert!(sb.path.join("projects.db").exists(), "projects.db resolves from the state dir");
-}
-
-/// state-store「Environment override relocates the database」的进程级：
-/// `SEBAS_PROJECTS_DB` 只搬走 projects.db——项目注册的真实写入落在覆盖
-/// 路径上，派生路径不再建库，settings.db 与其余落点照常在状态目录内。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn projects_db_override_relocates_only_that_database() {
-    let sb = Sandbox::new("testsuite_e2e", "projects-override");
-    let elsewhere = sb.path.join("elsewhere");
-    std::fs::create_dir_all(&elsewhere).expect("mkdir elsewhere");
-    let override_path = elsewhere.join("proj.db");
-    let override_str = override_path.to_string_lossy().into_owned();
-
-    let cli = http_client();
-    let mut core = sb.spawn_core_extra(&[("SEBAS_PROJECTS_DB", &override_str)]);
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-
-    // 项目注册：经 core 通道写 projects 域——写的就是覆盖路径上的库。
-    let project_id = scene_project_id(&cli, &sb).await;
-    assert!(!project_id.is_empty(), "project registered");
-
-    #[cfg(unix)]
-    {
-        let pid = core.id().expect("core pid");
-        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
-    }
-    #[cfg(not(unix))]
-    core.kill().await.expect("kill core");
-    let _ = core.wait().await;
-
-    // 覆盖路径收到真实的库（projects 表里是刚注册的行）。
-    assert!(override_path.exists(), "the override path owns the projects db");
-    {
-        let conn = rusqlite::Connection::open_with_flags(
-            &override_path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        // ServiceSet(router on, persist)：写覆盖层 + 拉起 router 子进程。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{services_url}/router/enable"),
+            serde_json::json!({}),
         )
-        .unwrap();
-        let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
-            .unwrap();
-        assert!(n >= 1, "registered project must land in the relocated db");
+        .await
+        .expect("enable router");
+        assert_eq!(status, 200, "router enable: {body}");
+
+        // 覆盖层落在状态目录内（派生落点——不是操作员配置目录）。
+        let services_json = sb.path.join("services.json");
+        wait_for(
+            "services.json to appear in the state dir",
+            Duration::from_secs(10),
+            &hint,
+            {
+                let services_json = services_json.clone();
+                move || {
+                    let services_json = services_json.clone();
+                    Box::pin(async move { services_json.exists().then_some(()) })
+                }
+            },
+        )
+        .await;
+        let raw = std::fs::read_to_string(&services_json).expect("read services.json");
+        // 普通文件、非任何数据库形态（watchdog 不引入持久层）。
+        assert!(
+            !raw.starts_with("SQLite format 3"),
+            "the override layer must stay a plain file"
+        );
+        let table: serde_json::Value = serde_json::from_str(&raw).expect("services.json parses");
+        assert_eq!(table["router"], "on", "recorded override: {table}");
+
+        // router 子进程被拉起。
+        wait_for("router child to spawn", Duration::from_secs(20), &hint, {
+            move || {
+                let pid = find_child_pid(watchdog_pid, "router");
+                Box::pin(async move { pid.map(|p| p as u64) })
+            }
+        })
+        .await;
+
+        let (core_status, core_body) = post_json(
+            &cli,
+            &format!("{services_url}/core/disable"),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("disable core");
+        assert_ne!(
+            core_status, 200,
+            "core must reject being disabled via the override layer: {core_body}"
+        );
+        assert!(
+            core_body["error"].as_str().is_some_and(|e| !e.is_empty()),
+            "the rejection must name its cause: {core_body}"
+        );
+        assert!(
+            find_child_pid(watchdog_pid, "core").is_some(),
+            "core must stay supervised"
+        );
+
+        // watchdog 重启：router 的期望态从 services.json 读回——spawn 决策照旧。
+        unsafe { libc::kill(watchdog_pid as libc::pid_t, libc::SIGTERM) };
+        let _ = watchdog.wait().await;
+        // 旧 webui 子进程随监督关闭退出——等端口真正释放再起新 watchdog。
+        wait_for(
+            "old webui port to be released",
+            Duration::from_secs(15),
+            &hint,
+            {
+                let cli = cli.clone();
+                let url = format!("{}/health", sb.webui_url());
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    Box::pin(async move { cli.get(&url).send().await.is_err().then_some(()) })
+                }
+            },
+        )
+        .await;
+
+        let watchdog2 = sb.spawn(
+            &["run", "-c", &cfg],
+            &sb.core_secret,
+            &[("XDG_RUNTIME_DIR", &xdg)],
+            &sb.core_log,
+        );
+        wait_reachable(&cli, &sb).await;
+        let watchdog2_pid = watchdog2.id().expect("watchdog2 pid");
+        let _router_pid = wait_for(
+            "router child respawned from the override file",
+            Duration::from_secs(20),
+            &hint,
+            {
+                move || {
+                    let pid = find_child_pid(watchdog2_pid, "router");
+                    Box::pin(async move { pid.map(|p| p as u64) })
+                }
+            },
+        )
+        .await;
+        // core 子进程照常无条件拉起（覆盖层从未被写入 core，重启后也不读它）。
+        assert!(
+            find_child_pid(watchdog2_pid, "core").is_some(),
+            "core must be spawned unconditionally after restart"
+        );
+
+        // 全程无 `.sebas` 逃逸（HOME 钉在沙箱）。
+        let files = state_dir_walk(&sb.path);
+        assert!(
+            files.iter().all(|f| !f.starts_with(".sebas/")),
+            "watchdog must not write outside the state dir: {files:?}"
+        );
     }
-    // 派生路径不再建库；settings.db 照常在状态目录内。
-    assert!(
-        !sb.path.join("projects.db").exists(),
-        "the derived projects.db must not be created when overridden"
-    );
-    assert!(sb.path.join("settings.db").exists(), "settings.db stays in the state dir");
-}
-
-/// watchdog spec「sandboxed watchdog does not touch the operator's
-/// directory」+「a runtime override survives a watchdog restart」+「the
-/// watchdog acquires no persistence layer」+「core still ignores the
-/// override layer」的进程级旅程：监督形态下经 webui admin 控制面（HTTP，
-/// 非浏览器）做 ServiceSet——services.json 落在状态目录内且是普通 JSON
-/// 文件（非 SQLite）；core 的停用请求被拒、core 子进程照常存活；watchdog
-/// 重启后 router 的期望态从文件读回、spawn 决策照旧。
-#[cfg(target_os = "linux")] // find_child_pid 走 /proc/<pid>/cmdline
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn watchdog_service_override_lives_in_state_dir_and_survives_restart() {
-    let sb = Sandbox::new("testsuite_e2e", "watchdog-state-dir");
-    sb.enable_supervised_core();
-    // 控制 socket（control.sock）缺省落 `<SEBAS_HOME>/run/`——SEBAS_HOME 已
-    // 钉进沙箱（XDG_RUNTIME_DIR 不再参与解析，保留注入无害）。
-    let xdg_run = sb.path.join("xdg-run");
-    std::fs::create_dir_all(&xdg_run).expect("mkdir xdg-run");
-    let xdg = support::forward_slash(&xdg_run);
-    let cfg = support::forward_slash(&sb.config_path);
-    let cli = http_client();
-    // 不带 --debug：router 初值 = config 开关（默认关）→ 初始无 router 子进程，
-    // 让「enable 持久化 + 重启后读回」有干净的起点。
-    let mut watchdog = sb.spawn(
-        &["run", "-c", &cfg],
-        &sb.core_secret,
-        &[("XDG_RUNTIME_DIR", &xdg)],
-        &sb.core_log,
-    );
-    wait_reachable(&cli, &sb).await;
-    let watchdog_pid = watchdog.id().expect("watchdog pid");
-    let hint = sb.path.clone();
-
-    // admin 控制面在场（standalone webui 持 ControlRpcAdminAdapter）。
-    let services_url = format!("{}/api/admin/services", sb.webui_url());
-    let services: serde_json::Value = cli
-        .get(&services_url)
-        .send()
-        .await
-        .expect("GET admin services")
-        .json()
-        .await
-        .expect("admin services json");
-    assert_eq!(
-        services["adapter_ok"], true,
-        "the supervised webui must carry the control adapter: {services}"
-    );
-
-    // 初始无 router 子进程（config 默认关、无覆盖层）。
-    assert!(
-        find_child_pid(watchdog_pid, "router").is_none(),
-        "router must not spawn while its desired state is off"
-    );
-
-    // ServiceSet(router on, persist)：写覆盖层 + 拉起 router 子进程。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{services_url}/router/enable"),
-        serde_json::json!({}),
-    )
-    .await
-    .expect("enable router");
-    assert_eq!(status, 200, "router enable: {body}");
-
-    // 覆盖层落在状态目录内（派生落点——不是操作员配置目录）。
-    let services_json = sb.path.join("services.json");
-    wait_for("services.json to appear in the state dir", Duration::from_secs(10), &hint, {
-        let services_json = services_json.clone();
-        move || {
-            let services_json = services_json.clone();
-            Box::pin(async move { services_json.exists().then_some(()) })
-        }
-    })
-    .await;
-    let raw = std::fs::read_to_string(&services_json).expect("read services.json");
-    // 普通文件、非任何数据库形态（watchdog 不引入持久层）。
-    assert!(
-        !raw.starts_with("SQLite format 3"),
-        "the override layer must stay a plain file"
-    );
-    let table: serde_json::Value = serde_json::from_str(&raw).expect("services.json parses");
-    assert_eq!(table["router"], "on", "recorded override: {table}");
-
-    // router 子进程被拉起。
-    wait_for("router child to spawn", Duration::from_secs(20), &hint, {
-        move || {
-            let pid = find_child_pid(watchdog_pid, "router");
-            Box::pin(async move { pid.map(|p| p as u64) })
-        }
-    })
-    .await;
-
-    let (core_status, core_body) = post_json(
-        &cli,
-        &format!("{services_url}/core/disable"),
-        serde_json::json!({}),
-    )
-    .await
-    .expect("disable core");
-    assert_ne!(
-        core_status, 200,
-        "core must reject being disabled via the override layer: {core_body}"
-    );
-    assert!(
-        core_body["error"].as_str().is_some_and(|e| !e.is_empty()),
-        "the rejection must name its cause: {core_body}"
-    );
-    assert!(
-        find_child_pid(watchdog_pid, "core").is_some(),
-        "core must stay supervised"
-    );
-
-    // watchdog 重启：router 的期望态从 services.json 读回——spawn 决策照旧。
-    unsafe { libc::kill(watchdog_pid as libc::pid_t, libc::SIGTERM) };
-    let _ = watchdog.wait().await;
-    // 旧 webui 子进程随监督关闭退出——等端口真正释放再起新 watchdog。
-    wait_for("old webui port to be released", Duration::from_secs(15), &hint, {
-        let cli = cli.clone();
-        let url = format!("{}/health", sb.webui_url());
-        move || {
-            let cli = cli.clone();
-            let url = url.clone();
-            Box::pin(async move { cli.get(&url).send().await.is_err().then_some(()) })
-        }
-    })
-    .await;
-
-    let watchdog2 = sb.spawn(
-        &["run", "-c", &cfg],
-        &sb.core_secret,
-        &[("XDG_RUNTIME_DIR", &xdg)],
-        &sb.core_log,
-    );
-    wait_reachable(&cli, &sb).await;
-    let watchdog2_pid = watchdog2.id().expect("watchdog2 pid");
-    let _router_pid = wait_for("router child respawned from the override file", Duration::from_secs(20), &hint, {
-        move || {
-            let pid = find_child_pid(watchdog2_pid, "router");
-            Box::pin(async move { pid.map(|p| p as u64) })
-        }
-    })
-    .await;
-    // core 子进程照常无条件拉起（覆盖层从未被写入 core，重启后也不读它）。
-    assert!(
-        find_child_pid(watchdog2_pid, "core").is_some(),
-        "core must be spawned unconditionally after restart"
-    );
-
-    // 全程无 `.sebas` 逃逸（HOME 钉在沙箱）。
-    let files = state_dir_walk(&sb.path);
-    assert!(
-        files.iter().all(|f| !f.starts_with(".sebas/")),
-        "watchdog must not write outside the state dir: {files:?}"
-    );
-}
 }
 
 mod streaming_and_transcript {
     use super::*;
 
-/// workbench-live-conversation-flow 2.1/7.1：回合内容实时流式的进程级
-/// 旅程——订阅 `/ws` 后提交一条消息，`turn.append` 帧（合并窗批帧，条目
-/// position 单调）必须在回合结束前/后到达，且内容覆盖操作员 prompt 与
-/// agent 回复。快照重取收敛由组件测试覆盖，这里只钉传输契约。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn turn_appends_stream_over_ws() {
-    use futures_util::StreamExt;
-    use tokio_tungstenite::tungstenite::Message;
+    /// workbench-live-conversation-flow 2.1/7.1：回合内容实时流式的进程级
+    /// 旅程——订阅 `/ws` 后提交一条消息，`turn.append` 帧（合并窗批帧，条目
+    /// position 单调）必须在回合结束前/后到达，且内容覆盖操作员 prompt 与
+    /// agent 回复。快照重取收敛由组件测试覆盖，这里只钉传输契约。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn turn_appends_stream_over_ws() {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::Message;
 
-    let sb = Sandbox::new("testsuite_e2e", "turn-append-ws");
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
+        let sb = Sandbox::new("testsuite_e2e", "turn-append-ws");
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
 
-    // 创建并等首回合收敛（fake-claude 对任意 prompt 回 "hello world"）。
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status, body) = post_json(
+        // 创建并等首回合收敛（fake-claude 对任意 prompt 回 "hello world"）。
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
         serde_json::json!({ "project_id": project_id.clone(), "prompt": "stream me", "agent": "claude" }),
     )
     .await
     .expect("create session");
-    assert_eq!(status, 201, "create session: {body}");
-    let key = body["key"].as_str().expect("key").to_string();
+        assert_eq!(status, 201, "create session: {body}");
+        let key = body["key"].as_str().expect("key").to_string();
 
-    // 先订阅（快照帧先行），再提交第二条消息——帧在提交之后到达证明是
-    // 推送而非轮询假象。
-    let ws_url = sb.webui_url().replace("http://", "ws://") + "/ws";
-    let (mut ws, _resp) = tokio_tungstenite::connect_async(&ws_url)
+        // 先订阅（快照帧先行），再提交第二条消息——帧在提交之后到达证明是
+        // 推送而非轮询假象。
+        let ws_url = sb.webui_url().replace("http://", "ws://") + "/ws";
+        let (mut ws, _resp) = tokio_tungstenite::connect_async(&ws_url)
+            .await
+            .expect("ws connect");
+        // 排干订阅快照帧。
+        let _ = tokio::time::timeout(Duration::from_secs(5), ws.next()).await;
+
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+            serde_json::json!({ "message": "second turn please" }),
+        )
         .await
-        .expect("ws connect");
-    // 排干订阅快照帧。
-    let _ = tokio::time::timeout(Duration::from_secs(5), ws.next()).await;
+        .expect("send message");
+        assert_eq!(status, 200, "send: {body}");
 
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
-        serde_json::json!({ "message": "second turn please" }),
-    )
-    .await
-    .expect("send message");
-    assert_eq!(status, 200, "send: {body}");
-
-    // 收 8 秒帧：必须出现 turn.append，且条目含 prompt 与 agent 内容。
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
-    let mut prompt_seen = false;
-    let mut agent_seen = false;
-    while tokio::time::Instant::now() < deadline {
-        let frame = match tokio::time::timeout(Duration::from_secs(2), ws.next()).await {
-            Ok(Some(Ok(Message::Text(text)))) => text,
-            Ok(Some(Ok(_))) => continue,
-            Ok(Some(Err(e))) => panic!("ws read failed: {e}"),
-            Ok(None) => panic!("ws closed early"),
-            Err(_) => break, // 2s 无帧：回合内容已全部到齐（或超时判负）
-        };
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&frame) else {
-            continue;
-        };
-        if v["method"] != "turn.append" {
-            continue;
-        }
-        let entries = v["params"]["entries"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
-        for e in &entries {
-            let kind = e["kind"].as_str().unwrap_or("");
-            let content = e["content"].as_str().unwrap_or("");
-            if kind == "prompt" && content.contains("second turn please") {
-                prompt_seen = true;
+        // 收 8 秒帧：必须出现 turn.append，且条目含 prompt 与 agent 内容。
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+        let mut prompt_seen = false;
+        let mut agent_seen = false;
+        while tokio::time::Instant::now() < deadline {
+            let frame = match tokio::time::timeout(Duration::from_secs(2), ws.next()).await {
+                Ok(Some(Ok(Message::Text(text)))) => text,
+                Ok(Some(Ok(_))) => continue,
+                Ok(Some(Err(e))) => panic!("ws read failed: {e}"),
+                Ok(None) => panic!("ws closed early"),
+                Err(_) => break, // 2s 无帧：回合内容已全部到齐（或超时判负）
+            };
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&frame) else {
+                continue;
+            };
+            if v["method"] != "turn.append" {
+                continue;
             }
-            if kind == "content" && !content.is_empty() && e["position"].as_u64().unwrap_or(0) > 1 {
-                agent_seen = true;
+            let entries = v["params"]["entries"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            for e in &entries {
+                let kind = e["kind"].as_str().unwrap_or("");
+                let content = e["content"].as_str().unwrap_or("");
+                if kind == "prompt" && content.contains("second turn please") {
+                    prompt_seen = true;
+                }
+                if kind == "content"
+                    && !content.is_empty()
+                    && e["position"].as_u64().unwrap_or(0) > 1
+                {
+                    agent_seen = true;
+                }
+            }
+            if prompt_seen && agent_seen {
+                break;
             }
         }
-        if prompt_seen && agent_seen {
-            break;
-        }
+        assert!(prompt_seen, "prompt entry must stream over ws");
+        assert!(agent_seen, "agent content must stream over ws");
+        let _ = ws.close(None).await;
     }
-    assert!(prompt_seen, "prompt entry must stream over ws");
-    assert!(agent_seen, "agent content must stream over ws");
-    let _ = ws.close(None).await;
-}
 
-/// fix-pending-queue-liveness 1.1/4.1：停滞看门狗自愈。
-///
-/// fake-claude 的 `stall` 场景：首帧内容让卡片 FSM 进 WORKING（回合确实在
-/// 跑），随后子进程**活着但对 ACP 完全沉默**（liveness 探测照常应答——驱动
-/// 的 hang 升级链因此不触发）。这是「队列前进 100% 依赖终态事件」的结构性
-/// 缺陷的进程级复现：忙中提交入队后，旧引擎永不 drain。
-///
-/// 修复后：`[dispatch] turn_stall_timeout = 2` 的看门狗在阈值后强制收尾
-/// 停滞回合（SEED/WORKING → DONE）、drain 队头，队列自愈前进；core.log 留
-/// 有点名会话与释放条目数的 warn（TurnStalled 通知事实，前端据此弹分级
-/// 通知——呈现链路由 webui api/ws 单测钉住）。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn stalled_turn_force_settles_and_the_queue_self_heals() {
-    let sb = Sandbox::new("testsuite_e2e", "turn-stall");
-    sb.set_turn_stall_timeout(2);
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
+    /// fix-pending-queue-liveness 1.1/4.1：停滞看门狗自愈。
+    ///
+    /// fake-claude 的 `stall` 场景：首帧内容让卡片 FSM 进 WORKING（回合确实在
+    /// 跑），随后子进程**活着但对 ACP 完全沉默**（liveness 探测照常应答——驱动
+    /// 的 hang 升级链因此不触发）。这是「队列前进 100% 依赖终态事件」的结构性
+    /// 缺陷的进程级复现：忙中提交入队后，旧引擎永不 drain。
+    ///
+    /// 修复后：`[dispatch] turn_stall_timeout = 2` 的看门狗在阈值后强制收尾
+    /// 停滞回合（SEED/WORKING → DONE）、drain 队头，队列自愈前进；core.log 留
+    /// 有点名会话与释放条目数的 warn（TurnStalled 通知事实，前端据此弹分级
+    /// 通知——呈现链路由 webui api/ws 单测钉住）。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn stalled_turn_force_settles_and_the_queue_self_heals() {
+        let sb = Sandbox::new("testsuite_e2e", "turn-stall");
+        sb.set_turn_stall_timeout(2);
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
 
-    // 创建会话（"stall" → 一帧内容后子进程沉默）→ 等首帧内容上屏。
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status, body) = post_json(
+        // 创建会话（"stall" → 一帧内容后子进程沉默）→ 等首帧内容上屏。
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
         serde_json::json!({ "project_id": project_id.clone(), "prompt": "stall", "agent": "claude" }),
     )
     .await
     .expect("create session");
-    assert_eq!(status, 201, "create session: {body}");
-    let key = body["key"].as_str().expect("key").to_string();
-    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
-    let hint = sb.path.clone();
-    wait_for(
-        "first turn content to stream",
-        Duration::from_secs(40),
-        &hint,
-        {
-            let cli = cli.clone();
-            let url = detail_url.clone();
-            move || {
+        assert_eq!(status, 201, "create session: {body}");
+        let key = body["key"].as_str().expect("key").to_string();
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+        let hint = sb.path.clone();
+        wait_for(
+            "first turn content to stream",
+            Duration::from_secs(40),
+            &hint,
+            {
                 let cli = cli.clone();
-                let url = url.clone();
-                Box::pin(async move {
-                    let v = cli
-                        .get(&url)
-                        .send()
-                        .await
-                        .ok()?
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()?;
-                    let streamed = v["entries"].as_array().is_some_and(|b| !b.is_empty());
-                    streamed.then_some(v)
-                })
-            }
-        },
-    )
-    .await;
+                let url = detail_url.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        let streamed = v["entries"].as_array().is_some_and(|b| !b.is_empty());
+                        streamed.then_some(v)
+                    })
+                }
+            },
+        )
+        .await;
 
-    // 忙中提交 → 入队；且引擎事实 turn_engaged=true 随 payload 下发
-    // （提交控件的排队/停止形态数据源）。
-    let (status, resp) = post_json(
-        &cli,
-        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
-        serde_json::json!({ "message": "queued while stalled" }),
-    )
-    .await
-    .expect("submit while stalled");
-    assert_eq!(status, 200, "busy-time submission must be accepted: {resp}");
-    let mid: serde_json::Value = cli
-        .get(&detail_url)
-        .send()
+        // 忙中提交 → 入队；且引擎事实 turn_engaged=true 随 payload 下发
+        // （提交控件的排队/停止形态数据源）。
+        let (status, resp) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+            serde_json::json!({ "message": "queued while stalled" }),
+        )
         .await
-        .expect("detail mid-stall")
-        .json()
-        .await
-        .expect("detail json");
-    assert_eq!(
-        mid["turn_engaged"], true,
-        "a stalled-but-engaged turn must report turn_engaged: {mid}"
-    );
-    assert_eq!(
-        mid["pending"].as_array().map(|p| p.len()),
-        Some(1),
-        "the submission rides in pending behind the stalled turn: {mid}"
-    );
+        .expect("submit while stalled");
+        assert_eq!(status, 200, "busy-time submission must be accepted: {resp}");
+        let mid: serde_json::Value = cli
+            .get(&detail_url)
+            .send()
+            .await
+            .expect("detail mid-stall")
+            .json()
+            .await
+            .expect("detail json");
+        assert_eq!(
+            mid["turn_engaged"], true,
+            "a stalled-but-engaged turn must report turn_engaged: {mid}"
+        );
+        assert_eq!(
+            mid["pending"].as_array().map(|p| p.len()),
+            Some(1),
+            "the submission rides in pending behind the stalled turn: {mid}"
+        );
 
-    // 看门狗收尾 + 队列自愈：queued 提交开轮（prompt 进 transcript、
-    // pending 清空），transcript 就地点名收尾原因。
-    wait_for(
-        "watchdog to settle the stalled turn and start the queued one",
-        Duration::from_secs(45),
-        &hint,
-        {
-            let cli = cli.clone();
-            let url = detail_url.clone();
-            move || {
+        // 看门狗收尾 + 队列自愈：queued 提交开轮（prompt 进 transcript、
+        // pending 清空），transcript 就地点名收尾原因。
+        wait_for(
+            "watchdog to settle the stalled turn and start the queued one",
+            Duration::from_secs(45),
+            &hint,
+            {
                 let cli = cli.clone();
-                let url = url.clone();
-                Box::pin(async move {
-                    let v = cli
-                        .get(&url)
-                        .send()
-                        .await
-                        .ok()?
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()?;
-                    let drained = v["pending"].as_array().map(|p| p.is_empty()) == Some(true);
-                    let queued_started = v["entries"].as_array().is_some_and(|entries| {
-                        entries.iter().any(|e| {
-                            e["kind"].as_str() == Some("prompt")
-                                && e["content"].as_str() == Some("queued while stalled")
-                        })
-                    });
-                    let explained = v["entries"].as_array().is_some_and(|entries| {
-                        entries.iter().any(|e| {
-                            e["element_type"].as_str() == Some("error")
-                                && e["content"]
-                                    .as_str()
-                                    .is_some_and(|c| c.contains("回合停滞被强制收尾"))
-                        })
-                    });
-                    (drained && queued_started && explained).then_some(v)
-                })
-            }
-        },
-    )
-    .await;
+                let url = detail_url.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        let drained = v["pending"].as_array().map(|p| p.is_empty()) == Some(true);
+                        let queued_started = v["entries"].as_array().is_some_and(|entries| {
+                            entries.iter().any(|e| {
+                                e["kind"].as_str() == Some("prompt")
+                                    && e["content"].as_str() == Some("queued while stalled")
+                            })
+                        });
+                        let explained = v["entries"].as_array().is_some_and(|entries| {
+                            entries.iter().any(|e| {
+                                e["element_type"].as_str() == Some("error")
+                                    && e["content"]
+                                        .as_str()
+                                        .is_some_and(|c| c.contains("回合停滞被强制收尾"))
+                            })
+                        });
+                        (drained && queued_started && explained).then_some(v)
+                    })
+                }
+            },
+        )
+        .await;
 
-    // 通知事实可达：core.log 的 warn 点名会话与释放条目数（TurnStalled
-    // 事件的发射点）。
-    wait_for(
-        "core.log to carry the stall warning",
-        Duration::from_secs(10),
-        &hint,
-        {
-            let log = sb.core_log.clone();
-            move || {
-                let log = log.clone();
-                Box::pin(async move {
-                    let text = std::fs::read_to_string(&log).ok()?;
-                    text.contains("turn stalled").then_some(())
-                })
-            }
-        },
-    )
-    .await;
-}
+        // 通知事实可达：core.log 的 warn 点名会话与释放条目数（TurnStalled
+        // 事件的发射点）。
+        wait_for(
+            "core.log to carry the stall warning",
+            Duration::from_secs(10),
+            &hint,
+            {
+                let log = sb.core_log.clone();
+                move || {
+                    let log = log.clone();
+                    Box::pin(async move {
+                        let text = std::fs::read_to_string(&log).ok()?;
+                        text.contains("turn stalled").then_some(())
+                    })
+                }
+            },
+        )
+        .await;
+    }
 
-/// fix-pending-queue-liveness 1.1（泊车豁免半边）：泊在权限请求上的回合
-/// **不计时**——超过 `turn_stall_timeout` 后看门狗不得收尾，排队提交保持
-/// 入栈（等的是操作者的批复，不是引擎的假设）。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn parked_permission_does_not_trip_the_stall_guard() {
-    let sb = Sandbox::new("testsuite_e2e", "turn-stall-parked");
-    sb.set_turn_stall_timeout(2);
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
+    /// fix-pending-queue-liveness 1.1（泊车豁免半边）：泊在权限请求上的回合
+    /// **不计时**——超过 `turn_stall_timeout` 后看门狗不得收尾，排队提交保持
+    /// 入栈（等的是操作者的批复，不是引擎的假设）。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn parked_permission_does_not_trip_the_stall_guard() {
+        let sb = Sandbox::new("testsuite_e2e", "turn-stall-parked");
+        sb.set_turn_stall_timeout(2);
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
 
-    // "perm" → Bash 工具调用被 PreToolUse 审批泊住（等 hook 决定）。
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status, body) = post_json(
+        // "perm" → Bash 工具调用被 PreToolUse 审批泊住（等 hook 决定）。
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
         serde_json::json!({ "project_id": project_id.clone(), "prompt": "perm", "agent": "claude" }),
     )
     .await
     .expect("create session");
-    assert_eq!(status, 201, "create session: {body}");
-    let key = body["key"].as_str().expect("key").to_string();
-    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
-    let hint = sb.path.clone();
+        assert_eq!(status, 201, "create session: {body}");
+        let key = body["key"].as_str().expect("key").to_string();
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+        let hint = sb.path.clone();
 
-    // 忙中提交（泊车中 turn 在飞）→ 入队。
-    wait_for(
-        "permission prompt to park the turn (tool entry visible)",
-        Duration::from_secs(40),
-        &hint,
-        {
-            let cli = cli.clone();
-            let url = detail_url.clone();
-            move || {
+        // 忙中提交（泊车中 turn 在飞）→ 入队。
+        wait_for(
+            "permission prompt to park the turn (tool entry visible)",
+            Duration::from_secs(40),
+            &hint,
+            {
                 let cli = cli.clone();
-                let url = url.clone();
-                Box::pin(async move {
-                    let v = cli
-                        .get(&url)
-                        .send()
-                        .await
-                        .ok()?
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()?;
-                    let tool_seen = v["entries"].as_array().is_some_and(|entries| {
-                        entries
-                            .iter()
-                            .any(|e| e["element_type"].as_str() == Some("tool"))
-                    });
-                    tool_seen.then_some(v)
-                })
-            }
-        },
-    )
-    .await;
-    let (status, resp) = post_json(
-        &cli,
-        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
-        serde_json::json!({ "message": "queued behind the permission" }),
-    )
-    .await
-    .expect("submit while parked");
-    assert_eq!(
-        status, 200,
-        "parked-time submission must be accepted: {resp}"
-    );
-
-    // 静置越过阈值（2s ×3 + 扫描间隔余量）：看门狗不得收尾。
-    tokio::time::sleep(Duration::from_secs(9)).await;
-    let after: serde_json::Value = cli
-        .get(&detail_url)
-        .send()
+                let url = detail_url.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        let tool_seen = v["entries"].as_array().is_some_and(|entries| {
+                            entries
+                                .iter()
+                                .any(|e| e["element_type"].as_str() == Some("tool"))
+                        });
+                        tool_seen.then_some(v)
+                    })
+                }
+            },
+        )
+        .await;
+        let (status, resp) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+            serde_json::json!({ "message": "queued behind the permission" }),
+        )
         .await
-        .expect("detail after the window")
-        .json()
-        .await
-        .expect("detail json");
-    assert_eq!(
-        after["pending"].as_array().map(|p| p.len()),
-        Some(1),
-        "the guard must not fire while a permission is parked: {after}"
-    );
-    assert!(
-        !after["status_slug"].as_str().is_some_and(|s| s == "done"),
-        "the parked turn must stay in flight: {after}"
-    );
-    let log = std::fs::read_to_string(&sb.core_log).unwrap_or_default();
-    assert!(
-        !log.contains("turn stalled"),
-        "no stall warning may be logged for a parked session"
-    );
-}
+        .expect("submit while parked");
+        assert_eq!(
+            status, 200,
+            "parked-time submission must be accepted: {resp}"
+        );
 
-/// allow_once：只放行本次，回合完成且 transcript 记录执行痕迹。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn permission_loop_allow_once_over_core_channel() {
-    let sb = Sandbox::new("testsuite_e2e", "perm-loop-allow");
-    pin_absolute_channel(&sb);
-    let _core = sb.spawn_core();
-    wait_channel_accept(&sb).await;
-    let reader = open_subscriber(&sb).await;
-    drive_parked_perm_to_decision(&sb, reader, PermissionDecision::AllowOnce, "perm done").await;
-}
+        // 静置越过阈值（2s ×3 + 扫描间隔余量）：看门狗不得收尾。
+        tokio::time::sleep(Duration::from_secs(9)).await;
+        let after: serde_json::Value = cli
+            .get(&detail_url)
+            .send()
+            .await
+            .expect("detail after the window")
+            .json()
+            .await
+            .expect("detail json");
+        assert_eq!(
+            after["pending"].as_array().map(|p| p.len()),
+            Some(1),
+            "the guard must not fire while a permission is parked: {after}"
+        );
+        assert!(
+            !after["status_slug"].as_str().is_some_and(|s| s == "done"),
+            "the parked turn must stay in flight: {after}"
+        );
+        let log = std::fs::read_to_string(&sb.core_log).unwrap_or_default();
+        assert!(
+            !log.contains("turn stalled"),
+            "no stall warning may be logged for a parked session"
+        );
+    }
 
-/// deny：回合完成且 transcript 记录拒绝语义——fail-closed 的应答半边。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn permission_loop_deny_over_core_channel() {
-    let sb = Sandbox::new("testsuite_e2e", "perm-loop-deny");
-    pin_absolute_channel(&sb);
-    let _core = sb.spawn_core();
-    wait_channel_accept(&sb).await;
-    let reader = open_subscriber(&sb).await;
-    drive_parked_perm_to_decision(&sb, reader, PermissionDecision::Deny, "denied by fake").await;
-}
+    /// allow_once：只放行本次，回合完成且 transcript 记录执行痕迹。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn permission_loop_allow_once_over_core_channel() {
+        let sb = Sandbox::new("testsuite_e2e", "perm-loop-allow");
+        pin_absolute_channel(&sb);
+        let _core = sb.spawn_core();
+        wait_channel_accept(&sb).await;
+        let reader = open_subscriber(&sb).await;
+        drive_parked_perm_to_decision(&sb, reader, PermissionDecision::AllowOnce, "perm done")
+            .await;
+    }
 
-/// allow_session：放行本次 + 会话切 auto——同 key 的第二个 "perm" 回合
-/// **不再泊车**（无新 ApprovalRequested），直接执行完成。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn permission_loop_allow_session_switches_auto_over_core_channel() {
-    let sb = Sandbox::new("testsuite_e2e", "perm-loop-session");
-    pin_absolute_channel(&sb);
-    let _core = sb.spawn_core();
-    wait_channel_accept(&sb).await;
-    let reader = open_subscriber(&sb).await;
-    let key = ChannelKey::feishu("oc_perm_loop", None);
-    drive_parked_perm_to_decision(&sb, reader, PermissionDecision::AllowSession, "perm done").await;
+    /// deny：回合完成且 transcript 记录拒绝语义——fail-closed 的应答半边。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn permission_loop_deny_over_core_channel() {
+        let sb = Sandbox::new("testsuite_e2e", "perm-loop-deny");
+        pin_absolute_channel(&sb);
+        let _core = sb.spawn_core();
+        wait_channel_accept(&sb).await;
+        let reader = open_subscriber(&sb).await;
+        drive_parked_perm_to_decision(&sb, reader, PermissionDecision::Deny, "denied by fake")
+            .await;
+    }
 
-    // 第二回合：mode 已 auto → fake-claude 跳过 hook 直接执行。泊住的回合
-    // 永远写不出第二个 tool_result，所以「第二个 marker 到账」同时就是
-    // 「未再泊车」的对账——mode 没切上时这里 30s 超时爆掉。
-    let resp = raw_channel_request(
-        &sb.channel_path,
-        &sb.core_secret,
-        &CoreChannelRequest::EnsureMessage {
-            key: key.clone(),
-            message: "perm".into(),
-            attachments: vec![],
-        },
-    )
-    .await;
-    assert!(
-        matches!(resp, CoreChannelResponse::Ok),
-        "second ensure must be accepted: {resp:?}"
-    );
-    wait_turn_marker(&sb, &key, "perm done", 2).await;
-}
+    /// allow_session：放行本次 + 会话切 auto——同 key 的第二个 "perm" 回合
+    /// **不再泊车**（无新 ApprovalRequested），直接执行完成。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn permission_loop_allow_session_switches_auto_over_core_channel() {
+        let sb = Sandbox::new("testsuite_e2e", "perm-loop-session");
+        pin_absolute_channel(&sb);
+        let _core = sb.spawn_core();
+        wait_channel_accept(&sb).await;
+        let reader = open_subscriber(&sb).await;
+        let key = ChannelKey::feishu("oc_perm_loop", None);
+        drive_parked_perm_to_decision(&sb, reader, PermissionDecision::AllowSession, "perm done")
+            .await;
 
-/// fix-webui-streaming-liveness 6.1：claude 会话流式 e2e（回合进行中分多次帧
-/// 到达，非一次整块）。fake-claude "drip" 场景以 400ms 间隔发 3 个
-/// partial-stream 文本块——每个都落在独立的 core-channel 合并窗（250ms）里，
-/// webui WS 因此收到**多帧**；首帧到达时刻的 HTTP 快照证明内容在回合内可见
-/// （状态仍 working），最终 transcript 与帧序列对账一致且**逐字各一次**——
-/// partial 流 + 完整帧不产生重复（driver 1.3 的进程级证据）。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn claude_turn_streams_multiple_frames_to_the_webui() {
-    let sb = Sandbox::new("testsuite_e2e", "claude-drip");
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
+        // 第二回合：mode 已 auto → fake-claude 跳过 hook 直接执行。泊住的回合
+        // 永远写不出第二个 tool_result，所以「第二个 marker 到账」同时就是
+        // 「未再泊车」的对账——mode 没切上时这里 30s 超时爆掉。
+        let resp = raw_channel_request(
+            &sb.channel_path,
+            &sb.core_secret,
+            &CoreChannelRequest::EnsureMessage {
+                key: key.clone(),
+                message: "perm".into(),
+                attachments: vec![],
+            },
+        )
+        .await;
+        assert!(
+            matches!(resp, CoreChannelResponse::Ok),
+            "second ensure must be accepted: {resp:?}"
+        );
+        wait_turn_marker(&sb, &key, "perm done", 2).await;
+    }
 
-    // 先连 WS，再建会话：订阅先于一切落账，首帧起不漏。webui 启动会与
-    // core 的 socket bind 竞速——首个流式订阅尝试可能失败、经 1s 退避后才
-    // 连上；`session.resync` 随每次订阅快照到达，等到它（或短超时内没等到
-    // = 订阅已在前置检查期间上线，不会再来）再创建会话。
-    let mut ws: WsStream = ws_connect(&sb.webui_url()).await;
-    let _ = tokio::time::timeout(Duration::from_secs(4), async {
-        loop {
-            let ev = next_ws_frame(&mut ws).await;
-            if ev["method"] == "session.resync" {
-                break;
+    /// fix-webui-streaming-liveness 6.1：claude 会话流式 e2e（回合进行中分多次帧
+    /// 到达，非一次整块）。fake-claude "drip" 场景以 400ms 间隔发 3 个
+    /// partial-stream 文本块——每个都落在独立的 core-channel 合并窗（250ms）里，
+    /// webui WS 因此收到**多帧**；首帧到达时刻的 HTTP 快照证明内容在回合内可见
+    /// （状态仍 working），最终 transcript 与帧序列对账一致且**逐字各一次**——
+    /// partial 流 + 完整帧不产生重复（driver 1.3 的进程级证据）。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn claude_turn_streams_multiple_frames_to_the_webui() {
+        let sb = Sandbox::new("testsuite_e2e", "claude-drip");
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
+
+        // 先连 WS，再建会话：订阅先于一切落账，首帧起不漏。webui 启动会与
+        // core 的 socket bind 竞速——首个流式订阅尝试可能失败、经 1s 退避后才
+        // 连上；`session.resync` 随每次订阅快照到达，等到它（或短超时内没等到
+        // = 订阅已在前置检查期间上线，不会再来）再创建会话。
+        let mut ws: WsStream = ws_connect(&sb.webui_url()).await;
+        let _ = tokio::time::timeout(Duration::from_secs(4), async {
+            loop {
+                let ev = next_ws_frame(&mut ws).await;
+                if ev["method"] == "session.resync" {
+                    break;
+                }
             }
-        }
-    })
-    .await;
+        })
+        .await;
 
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status, body) = post_json(
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
         serde_json::json!({ "project_id": project_id.clone(), "prompt": "drip", "agent": "claude" }),
     )
     .await
     .expect("create session");
-    assert_eq!(status, 201, "create session: {body}");
-    let key = body["key"].as_str().expect("key").to_string();
-    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+        assert_eq!(status, 201, "create session: {body}");
+        let key = body["key"].as_str().expect("key").to_string();
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
 
-    // 回合收尾由 HTTP 轮询判定（claude kind 收尾无 transcript 标记帧）。
-    let (done_tx, mut done_rx) = tokio::sync::oneshot::channel::<serde_json::Value>();
-    let poll_cli = cli.clone();
-    let poll_url = detail_url.clone();
-    tokio::spawn(async move {
-        loop {
-            if let Ok(v) = poll_cli.get(&poll_url).send().await
-                && let Ok(j) = v.json::<serde_json::Value>().await
-                && j["status_slug"].as_str() == Some("done")
-            {
-                let _ = done_tx.send(j);
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    });
-
-    // 读帧：记录每个 turn.append 的 content 帧内容；首帧到达即抓一份 HTTP
-    // 快照（回合必须仍在飞、transcript 已有首块）。
-    let mut frames: Vec<Vec<String>> = Vec::new();
-    let mut mid_turn: Option<serde_json::Value> = None;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
-    loop {
-        tokio::select! {
-            _ = tokio::time::sleep_until(deadline) => {
-                panic!("timed out waiting for the drip turn; frames so far: {frames:?}")
-            }
-            done = &mut done_rx => {
-                let done = done.expect("done watcher alive");
-                assert_eq!(
-                    done["status_slug"].as_str(),
-                    Some("done"),
-                    "turn must end Done: {done}"
-                );
-                break;
-            }
-            ev = next_ws_frame(&mut ws) => {
-                let ev = ev;
-                if ev["method"] == "turn.append"
-                    && ev["params"]["session_id"] == key.as_str()
+        // 回合收尾由 HTTP 轮询判定（claude kind 收尾无 transcript 标记帧）。
+        let (done_tx, mut done_rx) = tokio::sync::oneshot::channel::<serde_json::Value>();
+        let poll_cli = cli.clone();
+        let poll_url = detail_url.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Ok(v) = poll_cli.get(&poll_url).send().await
+                    && let Ok(j) = v.json::<serde_json::Value>().await
+                    && j["status_slug"].as_str() == Some("done")
                 {
-                    let texts = append_frame_texts(&ev);
-                    if !texts.is_empty() {
-                        if mid_turn.is_none() {
-                            let snap: serde_json::Value = cli
-                                .get(&detail_url)
-                                .send()
-                                .await
-                                .expect("mid-turn detail")
-                                .json()
-                                .await
-                                .expect("mid-turn json");
-                            assert_eq!(
-                                snap["status_slug"].as_str(), Some("working"),
-                                "the first streamed frame must arrive while the turn is in flight: {snap}"
-                            );
-                            let streamed: String = snap["entries"]
-                                .as_array()
-                                .map(|b| {
-                                    b.iter()
-                                        .filter(|e| e["kind"].as_str() == Some("content"))
-                                        .filter_map(|e| e["content"].as_str())
-                                        .collect::<Vec<_>>()
-                                        .join("")
-                                })
-                                .unwrap_or_default();
-                            assert!(
-                                streamed.contains("drip0"),
-                                "the first chunk must already be visible mid-turn: {streamed:?}"
-                            );
-                            mid_turn = Some(snap);
+                    let _ = done_tx.send(j);
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        });
+
+        // 读帧：记录每个 turn.append 的 content 帧内容；首帧到达即抓一份 HTTP
+        // 快照（回合必须仍在飞、transcript 已有首块）。
+        let mut frames: Vec<Vec<String>> = Vec::new();
+        let mut mid_turn: Option<serde_json::Value> = None;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => {
+                    panic!("timed out waiting for the drip turn; frames so far: {frames:?}")
+                }
+                done = &mut done_rx => {
+                    let done = done.expect("done watcher alive");
+                    assert_eq!(
+                        done["status_slug"].as_str(),
+                        Some("done"),
+                        "turn must end Done: {done}"
+                    );
+                    break;
+                }
+                ev = next_ws_frame(&mut ws) => {
+                    let ev = ev;
+                    if ev["method"] == "turn.append"
+                        && ev["params"]["session_id"] == key.as_str()
+                    {
+                        let texts = append_frame_texts(&ev);
+                        if !texts.is_empty() {
+                            if mid_turn.is_none() {
+                                let snap: serde_json::Value = cli
+                                    .get(&detail_url)
+                                    .send()
+                                    .await
+                                    .expect("mid-turn detail")
+                                    .json()
+                                    .await
+                                    .expect("mid-turn json");
+                                assert_eq!(
+                                    snap["status_slug"].as_str(), Some("working"),
+                                    "the first streamed frame must arrive while the turn is in flight: {snap}"
+                                );
+                                let streamed: String = snap["entries"]
+                                    .as_array()
+                                    .map(|b| {
+                                        b.iter()
+                                            .filter(|e| e["kind"].as_str() == Some("content"))
+                                            .filter_map(|e| e["content"].as_str())
+                                            .collect::<Vec<_>>()
+                                            .join("")
+                                    })
+                                    .unwrap_or_default();
+                                assert!(
+                                    streamed.contains("drip0"),
+                                    "the first chunk must already be visible mid-turn: {streamed:?}"
+                                );
+                                mid_turn = Some(snap);
+                            }
+                            frames.push(texts);
                         }
-                        frames.push(texts);
                     }
                 }
             }
         }
-    }
 
-    // 收尾竞速窗口：最后一个 content 帧可能与 done 信号同时就绪（250ms 合
-    // 并窗的冲刷略迟于状态翻转），短暂排水补齐「逐字各一次」的对账——多帧
-    // 断言只用 done 之前到达的帧，不受此处影响。
-    let drain_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-    while let Ok(ev) = tokio::time::timeout_at(drain_deadline, next_ws_frame(&mut ws)).await {
-        if ev["method"] == "turn.append" && ev["params"]["session_id"] == key.as_str() {
-            let texts = append_frame_texts(&ev);
-            if !texts.is_empty() {
-                frames.push(texts);
+        // 收尾竞速窗口：最后一个 content 帧可能与 done 信号同时就绪（250ms 合
+        // 并窗的冲刷略迟于状态翻转），短暂排水补齐「逐字各一次」的对账——多帧
+        // 断言只用 done 之前到达的帧，不受此处影响。
+        let drain_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while let Ok(ev) = tokio::time::timeout_at(drain_deadline, next_ws_frame(&mut ws)).await {
+            if ev["method"] == "turn.append" && ev["params"]["session_id"] == key.as_str() {
+                let texts = append_frame_texts(&ev);
+                if !texts.is_empty() {
+                    frames.push(texts);
+                }
             }
         }
+
+        // 核心断言：**多帧**、且每帧只是回合的一部分——不是一次整块。
+        assert!(
+            frames.len() >= 2,
+            "the turn must stream as multiple turn.append frames, got {frames:?}"
+        );
+        let all: String = frames.concat().concat();
+        assert_eq!(
+            all, "drip0 drip1 drip2 ",
+            "frames must carry the partial-stream chunks in order, each exactly once: {frames:?}"
+        );
+
+        // 快照面对账：transcript = prompt + 3 个内容条目（不多不少——完整
+        // assistant 帧的文本块被 driver 跳过，无重复）。
+        let detail: serde_json::Value = cli
+            .get(&detail_url)
+            .send()
+            .await
+            .expect("final detail")
+            .json()
+            .await
+            .expect("final json");
+        let entries = detail["entries"].as_array().expect("entries");
+        let contents: Vec<&str> = entries
+            .iter()
+            .filter_map(|e| e["content"].as_str())
+            .collect();
+        assert_eq!(
+            contents,
+            vec!["drip", "drip0 ", "drip1 ", "drip2 "],
+            "transcript must reconcile with the streamed frames, no duplication: {contents:?}"
+        );
     }
 
-    // 核心断言：**多帧**、且每帧只是回合的一部分——不是一次整块。
-    assert!(
-        frames.len() >= 2,
-        "the turn must stream as multiple turn.append frames, got {frames:?}"
-    );
-    let all: String = frames.concat().concat();
-    assert_eq!(
-        all, "drip0 drip1 drip2 ",
-        "frames must carry the partial-stream chunks in order, each exactly once: {frames:?}"
-    );
+    /// add-conversation-streaming-journey（进程级补测，后端侧活性）：`--delta-gap-ms`
+    /// 让桩的文本 delta **按墙钟时间散开**发出，driver → core channel → webui 逐帧
+    /// 转推，因此 webui `/ws` 上 `turn.append` 的**到达时刻**随时间散开，而非收尾
+    /// 一次性整块。这是浏览器 DOM 用例（`conversation-streaming.spec.ts`）的后端侧
+    /// 互补：浏览器侧证「增量正文在回合中已上屏」，此处证「帧本身就是随时间到的」，
+    /// 与前端渲染管线无关。
+    ///
+    /// 判别力/余量：`drip` 触发词的缺省段间静默是 400ms；本用例把 `--delta-gap-ms`
+    /// 调到 700ms，断言首/末增量帧的到达差 ≥ 0.5s——背靠背会塌进同一 250ms 合并窗
+    /// （到达差 ≈0），故该阈值足以区分「随时间散开」与「一次整块」。阈值不追硬边界：
+    /// 700ms 间隔正常给出 ~1.4s，即便合并窗被负载拖到吃掉一整个 gap 仍有 ~0.7s；
+    /// 「flag 生效 vs 缺省 400ms」的更锐判别由姊妹用例
+    /// `claude_delta_gap_spaces_the_default_scenario_deltas` 的整帧计数承担
+    /// （默认场景 N=0 时两段必然并成一帧）。帧间静默 700ms 仍小于 driver 控制探针
+    /// 的 1.5s 应答预算（`sebas-acp/src/claude/driver.rs` 的 `timeout(1500ms, probe)`），
+    /// 回合须照常收敛 Done——这也是增量 spec「间隔落在挂起探测预算内」的进程级证据。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn claude_delta_gap_spreads_ws_frame_arrivals_over_time() {
+        let sb = Sandbox::new("testsuite_e2e", "delta-gap-spread");
+        // 桩的段间静默 700ms（缺省 0 = 背靠背；drip 触发词缺省 400ms）。
+        sb.append_acp_args(&["--delta-gap-ms", "700"]);
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
 
-    // 快照面对账：transcript = prompt + 3 个内容条目（不多不少——完整
-    // assistant 帧的文本块被 driver 跳过，无重复）。
-    let detail: serde_json::Value = cli
-        .get(&detail_url)
-        .send()
-        .await
-        .expect("final detail")
-        .json()
-        .await
-        .expect("final json");
-    let entries = detail["entries"].as_array().expect("entries");
-    let contents: Vec<&str> = entries
-        .iter()
-        .filter_map(|e| e["content"].as_str())
-        .collect();
-    assert_eq!(
-        contents,
-        vec!["drip", "drip0 ", "drip1 ", "drip2 "],
-        "transcript must reconcile with the streamed frames, no duplication: {contents:?}"
-    );
-}
-
-/// add-conversation-streaming-journey（进程级补测，后端侧活性）：`--delta-gap-ms`
-/// 让桩的文本 delta **按墙钟时间散开**发出，driver → core channel → webui 逐帧
-/// 转推，因此 webui `/ws` 上 `turn.append` 的**到达时刻**随时间散开，而非收尾
-/// 一次性整块。这是浏览器 DOM 用例（`conversation-streaming.spec.ts`）的后端侧
-/// 互补：浏览器侧证「增量正文在回合中已上屏」，此处证「帧本身就是随时间到的」，
-/// 与前端渲染管线无关。
-///
-/// 判别力/余量：`drip` 触发词的缺省段间静默是 400ms；本用例把 `--delta-gap-ms`
-/// 调到 700ms，断言首/末增量帧的到达差 ≥ 0.5s——背靠背会塌进同一 250ms 合并窗
-/// （到达差 ≈0），故该阈值足以区分「随时间散开」与「一次整块」。阈值不追硬边界：
-/// 700ms 间隔正常给出 ~1.4s，即便合并窗被负载拖到吃掉一整个 gap 仍有 ~0.7s；
-/// 「flag 生效 vs 缺省 400ms」的更锐判别由姊妹用例
-/// `claude_delta_gap_spaces_the_default_scenario_deltas` 的整帧计数承担
-/// （默认场景 N=0 时两段必然并成一帧）。帧间静默 700ms 仍小于 driver 控制探针
-/// 的 1.5s 应答预算（`sebas-acp/src/claude/driver.rs` 的 `timeout(1500ms, probe)`），
-/// 回合须照常收敛 Done——这也是增量 spec「间隔落在挂起探测预算内」的进程级证据。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn claude_delta_gap_spreads_ws_frame_arrivals_over_time() {
-    let sb = Sandbox::new("testsuite_e2e", "delta-gap-spread");
-    // 桩的段间静默 700ms（缺省 0 = 背靠背；drip 触发词缺省 400ms）。
-    sb.append_acp_args(&["--delta-gap-ms", "700"]);
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-
-    // 同既有 drip 用例：先订阅、等 `session.resync`（订阅上线的信号）再建会话。
-    let mut ws: WsStream = ws_connect(&sb.webui_url()).await;
-    let _ = tokio::time::timeout(Duration::from_secs(4), async {
-        loop {
-            let ev = next_ws_frame(&mut ws).await;
-            if ev["method"] == "session.resync" {
-                break;
+        // 同既有 drip 用例：先订阅、等 `session.resync`（订阅上线的信号）再建会话。
+        let mut ws: WsStream = ws_connect(&sb.webui_url()).await;
+        let _ = tokio::time::timeout(Duration::from_secs(4), async {
+            loop {
+                let ev = next_ws_frame(&mut ws).await;
+                if ev["method"] == "session.resync" {
+                    break;
+                }
             }
-        }
-    })
-    .await;
+        })
+        .await;
 
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status, body) = post_json(
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
         serde_json::json!({ "project_id": project_id.clone(), "prompt": "drip", "agent": "claude" }),
     )
     .await
     .expect("create session");
-    assert_eq!(status, 201, "create session: {body}");
-    let key = body["key"].as_str().expect("key").to_string();
-    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+        assert_eq!(status, 201, "create session: {body}");
+        let key = body["key"].as_str().expect("key").to_string();
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
 
-    // 状态收敛由 HTTP 轮询判定（与既有 drip 用例同款：claude kind 收尾无
-    // transcript 标记帧）。
-    let (done_tx, mut done_rx) = tokio::sync::oneshot::channel::<serde_json::Value>();
-    let poll_cli = cli.clone();
-    let poll_url = detail_url.clone();
-    tokio::spawn(async move {
+        // 状态收敛由 HTTP 轮询判定（与既有 drip 用例同款：claude kind 收尾无
+        // transcript 标记帧）。
+        let (done_tx, mut done_rx) = tokio::sync::oneshot::channel::<serde_json::Value>();
+        let poll_cli = cli.clone();
+        let poll_url = detail_url.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Ok(v) = poll_cli.get(&poll_url).send().await
+                    && let Ok(j) = v.json::<serde_json::Value>().await
+                    && j["status_slug"].as_str() == Some("done")
+                {
+                    let _ = done_tx.send(j);
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        });
+
+        // 记录每个 content `turn.append` 帧的**到达时刻**与文本。
+        let mut arrivals: Vec<(tokio::time::Instant, Vec<String>)> = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
         loop {
-            if let Ok(v) = poll_cli.get(&poll_url).send().await
-                && let Ok(j) = v.json::<serde_json::Value>().await
-                && j["status_slug"].as_str() == Some("done")
-            {
-                let _ = done_tx.send(j);
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    });
-
-    // 记录每个 content `turn.append` 帧的**到达时刻**与文本。
-    let mut arrivals: Vec<(tokio::time::Instant, Vec<String>)> = Vec::new();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
-    loop {
-        tokio::select! {
-            _ = tokio::time::sleep_until(deadline) => {
-                panic!("timed out waiting for the delta-gap turn; arrivals so far: {arrivals:?}")
-            }
-            done = &mut done_rx => {
-                let done = done.expect("done watcher alive");
-                assert_eq!(
-                    done["status_slug"].as_str(),
-                    Some("done"),
-                    "turn must end Done even with 700ms frame silence: {done}"
-                );
-                break;
-            }
-            ev = next_ws_frame(&mut ws) => {
-                if ev["method"] == "turn.append" && ev["params"]["session_id"] == key.as_str() {
-                    let texts = append_frame_texts(&ev);
-                    if !texts.is_empty() {
-                        arrivals.push((tokio::time::Instant::now(), texts));
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => {
+                    panic!("timed out waiting for the delta-gap turn; arrivals so far: {arrivals:?}")
+                }
+                done = &mut done_rx => {
+                    let done = done.expect("done watcher alive");
+                    assert_eq!(
+                        done["status_slug"].as_str(),
+                        Some("done"),
+                        "turn must end Done even with 700ms frame silence: {done}"
+                    );
+                    break;
+                }
+                ev = next_ws_frame(&mut ws) => {
+                    if ev["method"] == "turn.append" && ev["params"]["session_id"] == key.as_str() {
+                        let texts = append_frame_texts(&ev);
+                        if !texts.is_empty() {
+                            arrivals.push((tokio::time::Instant::now(), texts));
+                        }
                     }
                 }
             }
         }
-    }
 
-    // 收尾竞速窗口：最后一个 content 帧可能与 done 同时就绪（250ms 合并窗的
-    // 冲刷略迟于状态翻转），短暂排水补齐内容对账。
-    let drain_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-    while let Ok(ev) = tokio::time::timeout_at(drain_deadline, next_ws_frame(&mut ws)).await {
-        if ev["method"] == "turn.append" && ev["params"]["session_id"] == key.as_str() {
-            let texts = append_frame_texts(&ev);
-            if !texts.is_empty() {
-                arrivals.push((tokio::time::Instant::now(), texts));
+        // 收尾竞速窗口：最后一个 content 帧可能与 done 同时就绪（250ms 合并窗的
+        // 冲刷略迟于状态翻转），短暂排水补齐内容对账。
+        let drain_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while let Ok(ev) = tokio::time::timeout_at(drain_deadline, next_ws_frame(&mut ws)).await {
+            if ev["method"] == "turn.append" && ev["params"]["session_id"] == key.as_str() {
+                let texts = append_frame_texts(&ev);
+                if !texts.is_empty() {
+                    arrivals.push((tokio::time::Instant::now(), texts));
+                }
             }
         }
+
+        // 内容对账：3 段正文、按序、逐字各一次（与既有 drip 用例同款）。
+        let all: String = arrivals
+            .iter()
+            .flat_map(|(_, texts)| texts.iter().cloned())
+            .collect();
+        assert_eq!(
+            all, "drip0 drip1 drip2 ",
+            "chunks must arrive in order, each exactly once: {arrivals:?}"
+        );
+        assert!(
+            arrivals.len() >= 2,
+            "the turn must arrive as multiple frames: {arrivals:?}"
+        );
+
+        // 时间散开（本用例的核心断言）：首末 content 帧的**到达差** ≥ 500ms——帧是
+        // 随时间到的，不是收尾一次整块（背靠背会塌进同一 250ms 合并窗，到差≈0）。
+        // 阈值刻意留足余量：700ms 间隔下正常 ~1.4s；即便合并窗被负载拖到吃掉一整
+        // 个 gap（首两段并成一帧），仍有 ~0.7s。**不追硬边界**——「flag 生效 vs
+        // 缺省 400ms」的判别由下面默认场景用例的整帧计数承担（N=0 必然并成一帧）。
+        let first = arrivals.first().expect("at least one arrival").0;
+        let last = arrivals.last().expect("at least one arrival").0;
+        let spread = last.duration_since(first);
+        assert!(
+            spread >= Duration::from_millis(500),
+            "chunk arrivals must spread over time with --delta-gap-ms 700 (>=0.5s first->last), got {spread:?}: {arrivals:?}"
+        );
+        let _ = ws.close(None).await;
     }
 
-    // 内容对账：3 段正文、按序、逐字各一次（与既有 drip 用例同款）。
-    let all: String = arrivals
-        .iter()
-        .flat_map(|(_, texts)| texts.iter().cloned())
-        .collect();
-    assert_eq!(
-        all, "drip0 drip1 drip2 ",
-        "chunks must arrive in order, each exactly once: {arrivals:?}"
-    );
-    assert!(
-        arrivals.len() >= 2,
-        "the turn must arrive as multiple frames: {arrivals:?}"
-    );
+    /// add-conversation-streaming-journey（进程级补测，默认场景半边）：`--delta-gap-ms`
+    /// 的作用面是**默认场景**（`emit_default_text` 的两段 "hello "/"world"）与 drip
+    /// 触发词前两段间距。缺省（0）时两段背靠背发出、落在同一 250ms 合并窗里，webui
+    /// 面通常只见**一帧**；本用例置 700ms，断言两段正文以**两个分开的帧**、相隔
+    /// ≥ 400ms 到达——这是 task 1.1「默认场景相邻文本 delta 之间 sleep N」经 argv
+    /// 到桩、再经整条后端链路可见的进程级证据（桩单测只覆盖到 stdout 帧序/时序）。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn claude_delta_gap_spaces_the_default_scenario_deltas() {
+        let sb = Sandbox::new("testsuite_e2e", "delta-gap-default");
+        sb.append_acp_args(&["--delta-gap-ms", "700"]);
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
 
-    // 时间散开（本用例的核心断言）：首末 content 帧的**到达差** ≥ 500ms——帧是
-    // 随时间到的，不是收尾一次整块（背靠背会塌进同一 250ms 合并窗，到差≈0）。
-    // 阈值刻意留足余量：700ms 间隔下正常 ~1.4s；即便合并窗被负载拖到吃掉一整
-    // 个 gap（首两段并成一帧），仍有 ~0.7s。**不追硬边界**——「flag 生效 vs
-    // 缺省 400ms」的判别由下面默认场景用例的整帧计数承担（N=0 必然并成一帧）。
-    let first = arrivals.first().expect("at least one arrival").0;
-    let last = arrivals.last().expect("at least one arrival").0;
-    let spread = last.duration_since(first);
-    assert!(
-        spread >= Duration::from_millis(500),
-        "chunk arrivals must spread over time with --delta-gap-ms 700 (>=0.5s first->last), got {spread:?}: {arrivals:?}"
-    );
-    let _ = ws.close(None).await;
-}
-
-/// add-conversation-streaming-journey（进程级补测，默认场景半边）：`--delta-gap-ms`
-/// 的作用面是**默认场景**（`emit_default_text` 的两段 "hello "/"world"）与 drip
-/// 触发词前两段间距。缺省（0）时两段背靠背发出、落在同一 250ms 合并窗里，webui
-/// 面通常只见**一帧**；本用例置 700ms，断言两段正文以**两个分开的帧**、相隔
-/// ≥ 400ms 到达——这是 task 1.1「默认场景相邻文本 delta 之间 sleep N」经 argv
-/// 到桩、再经整条后端链路可见的进程级证据（桩单测只覆盖到 stdout 帧序/时序）。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn claude_delta_gap_spaces_the_default_scenario_deltas() {
-    let sb = Sandbox::new("testsuite_e2e", "delta-gap-default");
-    sb.append_acp_args(&["--delta-gap-ms", "700"]);
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-
-    let mut ws: WsStream = ws_connect(&sb.webui_url()).await;
-    let _ = tokio::time::timeout(Duration::from_secs(4), async {
-        loop {
-            let ev = next_ws_frame(&mut ws).await;
-            if ev["method"] == "session.resync" {
-                break;
+        let mut ws: WsStream = ws_connect(&sb.webui_url()).await;
+        let _ = tokio::time::timeout(Duration::from_secs(4), async {
+            loop {
+                let ev = next_ws_frame(&mut ws).await;
+                if ev["method"] == "session.resync" {
+                    break;
+                }
             }
-        }
-    })
-    .await;
+        })
+        .await;
 
-    // "gap please" 不是任何触发词 → 走 default 场景（hello/world 两段）。
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status, body) = post_json(
+        // "gap please" 不是任何触发词 → 走 default 场景（hello/world 两段）。
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
         serde_json::json!({ "project_id": project_id.clone(), "prompt": "gap please", "agent": "claude" }),
     )
     .await
     .expect("create session");
-    assert_eq!(status, 201, "create session: {body}");
-    let key = body["key"].as_str().expect("key").to_string();
-    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+        assert_eq!(status, 201, "create session: {body}");
+        let key = body["key"].as_str().expect("key").to_string();
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
 
-    let (done_tx, mut done_rx) = tokio::sync::oneshot::channel::<serde_json::Value>();
-    let poll_cli = cli.clone();
-    let poll_url = detail_url.clone();
-    tokio::spawn(async move {
+        let (done_tx, mut done_rx) = tokio::sync::oneshot::channel::<serde_json::Value>();
+        let poll_cli = cli.clone();
+        let poll_url = detail_url.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Ok(v) = poll_cli.get(&poll_url).send().await
+                    && let Ok(j) = v.json::<serde_json::Value>().await
+                    && j["status_slug"].as_str() == Some("done")
+                {
+                    let _ = done_tx.send(j);
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        });
+
+        let mut arrivals: Vec<(tokio::time::Instant, Vec<String>)> = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
         loop {
-            if let Ok(v) = poll_cli.get(&poll_url).send().await
-                && let Ok(j) = v.json::<serde_json::Value>().await
-                && j["status_slug"].as_str() == Some("done")
-            {
-                let _ = done_tx.send(j);
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    });
-
-    let mut arrivals: Vec<(tokio::time::Instant, Vec<String>)> = Vec::new();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
-    loop {
-        tokio::select! {
-            _ = tokio::time::sleep_until(deadline) => {
-                panic!("timed out waiting for the default-scenario turn; arrivals so far: {arrivals:?}")
-            }
-            done = &mut done_rx => {
-                let done = done.expect("done watcher alive");
-                assert_eq!(done["status_slug"].as_str(), Some("done"), "turn must end Done: {done}");
-                break;
-            }
-            ev = next_ws_frame(&mut ws) => {
-                if ev["method"] == "turn.append" && ev["params"]["session_id"] == key.as_str() {
-                    let texts = append_frame_texts(&ev);
-                    if !texts.is_empty() {
-                        arrivals.push((tokio::time::Instant::now(), texts));
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => {
+                    panic!("timed out waiting for the default-scenario turn; arrivals so far: {arrivals:?}")
+                }
+                done = &mut done_rx => {
+                    let done = done.expect("done watcher alive");
+                    assert_eq!(done["status_slug"].as_str(), Some("done"), "turn must end Done: {done}");
+                    break;
+                }
+                ev = next_ws_frame(&mut ws) => {
+                    if ev["method"] == "turn.append" && ev["params"]["session_id"] == key.as_str() {
+                        let texts = append_frame_texts(&ev);
+                        if !texts.is_empty() {
+                            arrivals.push((tokio::time::Instant::now(), texts));
+                        }
                     }
                 }
             }
         }
-    }
 
-    let drain_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-    while let Ok(ev) = tokio::time::timeout_at(drain_deadline, next_ws_frame(&mut ws)).await {
-        if ev["method"] == "turn.append" && ev["params"]["session_id"] == key.as_str() {
-            let texts = append_frame_texts(&ev);
-            if !texts.is_empty() {
-                arrivals.push((tokio::time::Instant::now(), texts));
-            }
-        }
-    }
-
-    let all: String = arrivals
-        .iter()
-        .flat_map(|(_, texts)| texts.iter().cloned())
-        .collect();
-    assert_eq!(
-        all, "hello world",
-        "default scenario text must be intact and each chunk once: {arrivals:?}"
-    );
-    assert!(
-        arrivals.len() >= 2,
-        "with --delta-gap-ms 700 the two default-scenario deltas must land in separate frames (0 = back-to-back coalesced): {arrivals:?}"
-    );
-    let spread = arrivals
-        .last()
-        .expect("arrivals")
-        .0
-        .duration_since(arrivals.first().expect("arrivals").0);
-    assert!(
-        spread >= Duration::from_millis(400),
-        "the two default-scenario deltas must be temporally separated, got {spread:?}: {arrivals:?}"
-    );
-    let _ = ws.close(None).await;
-}
-
-/// fix-webui-streaming-liveness 6.2（make-pi-the-builtin-agent 5.5 迁移）：
-/// 内置 PI 槽位会话在 webui 面逐 delta 到达。fake pi 桩的 `scenario/drip` 按
-/// 400ms 间隔吐 4 个 text_delta——pi 驱动逐 delta 映射为 `TextDelta`、引擎逐
-/// 条落账并广播，webui WS 在回合收尾（相位帧 done）之前收到**多帧**增量；最终
-/// transcript 与帧序列对账一致、逐字各一次。
-///
-/// 旧内核装配（本地 SSE 上游 + `SEBAS_AGENT_PROVIDER_BASE_URL`）改经内置 PI
-/// 槽位 + fake pi 桩。**收尾标记改相位帧**（pi 路径无「🗒 turn summary」内核
-/// 摘要条目）。
-#[cfg(unix)]
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn native_turn_streams_deltas_to_the_webui() {
-    let (sb, _core, _webui) = spawn_pi_scenario_stack("native-drip", "drip").await;
-    let cli = http_client();
-    let mut ws = ws_subscribe(&sb).await;
-
-    let project_id = scene_project_id(&cli, &sb).await;
-    let key = pi_create_session(&cli, &sb, &project_id, "hi", None).await;
-    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
-
-    // 读帧到收尾（相位帧 done / turn_engaged 转 false），随后短排空补齐本回合
-    // 尾巴（相位帧与正文 turn.append 走两条独立广播，最后一个 delta 可能略迟）。
-    let mut frames: Vec<Vec<String>> = Vec::new();
-    let mut mid_turn: Option<String> = None;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
-    let mut settled = false;
-    loop {
-        let read_deadline = if settled {
-            (tokio::time::Instant::now() + Duration::from_millis(1200)).min(deadline)
-        } else {
-            deadline
-        };
-        let ev = match tokio::time::timeout_at(read_deadline, next_ws_frame(&mut ws)).await {
-            Ok(ev) => ev,
-            Err(_) => {
-                if settled {
-                    break;
+        let drain_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while let Ok(ev) = tokio::time::timeout_at(drain_deadline, next_ws_frame(&mut ws)).await {
+            if ev["method"] == "turn.append" && ev["params"]["session_id"] == key.as_str() {
+                let texts = append_frame_texts(&ev);
+                if !texts.is_empty() {
+                    arrivals.push((tokio::time::Instant::now(), texts));
                 }
-                panic!("timed out waiting for pi turn frames");
             }
-        };
-        if !frame_targets_session(&ev, &key) {
-            continue;
         }
-        let method = ev["method"].as_str().unwrap_or_default();
-        if method == "session.updated"
-            && ev["params"]["status_slug"].as_str() == Some("done")
-            && ev["params"]["turn_engaged"].as_bool() != Some(true)
-        {
-            settled = true;
-            continue;
-        }
-        if method != "turn.append" {
-            continue;
-        }
-        let texts = append_frame_texts(&ev);
-        if texts.is_empty() {
-            continue;
-        }
-        if mid_turn.is_none() {
-            // 首 delta 帧到达即抓 HTTP 快照：transcript 只有已到部分
-            // ——正文在回合内可见，不是收尾一次性整块。
-            let snap: serde_json::Value = cli
-                .get(&detail_url)
-                .send()
-                .await
-                .expect("mid-turn detail")
-                .json()
-                .await
-                .expect("mid-turn json");
-            let streamed: String = snap["entries"]
-                .as_array()
-                .map(|b| {
-                    b.iter()
-                        .filter(|e| e["kind"].as_str() == Some("content"))
-                        .filter_map(|e| e["content"].as_str())
-                        .collect::<Vec<_>>()
-                        .join("")
-                })
-                .unwrap_or_default();
-            assert!(
-                streamed.contains("alpha ") && !streamed.contains("end"),
-                "mid-turn transcript must show the leading deltas only: {streamed:?}"
-            );
-            mid_turn = Some(streamed);
-        }
-        frames.push(texts);
+
+        let all: String = arrivals
+            .iter()
+            .flat_map(|(_, texts)| texts.iter().cloned())
+            .collect();
+        assert_eq!(
+            all, "hello world",
+            "default scenario text must be intact and each chunk once: {arrivals:?}"
+        );
+        assert!(
+            arrivals.len() >= 2,
+            "with --delta-gap-ms 700 the two default-scenario deltas must land in separate frames (0 = back-to-back coalesced): {arrivals:?}"
+        );
+        let spread = arrivals
+            .last()
+            .expect("arrivals")
+            .0
+            .duration_since(arrivals.first().expect("arrivals").0);
+        assert!(
+            spread >= Duration::from_millis(400),
+            "the two default-scenario deltas must be temporally separated, got {spread:?}: {arrivals:?}"
+        );
+        let _ = ws.close(None).await;
     }
 
-    // 多帧逐 delta；帧内容拼起来恰好是桩的 4 段（各一次、有序）。
-    assert!(
-        frames.len() >= 2,
-        "pi deltas must arrive as multiple turn.append frames, got {frames:?}"
-    );
-    let all: String = frames.concat().concat();
-    assert_eq!(
-        all, "alpha beta gamma end",
-        "frames must carry every delta exactly once, in order: {frames:?}"
-    );
-    assert!(
-        mid_turn.is_some(),
-        "the mid-turn snapshot must have been taken"
-    );
+    /// fix-webui-streaming-liveness 6.2（make-pi-the-builtin-agent 5.5 迁移）：
+    /// 内置 PI 槽位会话在 webui 面逐 delta 到达。fake pi 桩的 `scenario/drip` 按
+    /// 400ms 间隔吐 4 个 text_delta——pi 驱动逐 delta 映射为 `TextDelta`、引擎逐
+    /// 条落账并广播，webui WS 在回合收尾（相位帧 done）之前收到**多帧**增量；最终
+    /// transcript 与帧序列对账一致、逐字各一次。
+    ///
+    /// 旧内核装配（本地 SSE 上游 + `SEBAS_AGENT_PROVIDER_BASE_URL`）改经内置 PI
+    /// 槽位 + fake pi 桩。**收尾标记改相位帧**（pi 路径无「🗒 turn summary」内核
+    /// 摘要条目）。
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn native_turn_streams_deltas_to_the_webui() {
+        let (sb, _core, _webui) = spawn_pi_scenario_stack("native-drip", "drip").await;
+        let cli = http_client();
+        let mut ws = ws_subscribe(&sb).await;
 
-    // 快照面对账：transcript 与帧序列完全一致（正文四段）。
-    let detail: serde_json::Value = cli
-        .get(&detail_url)
-        .send()
-        .await
-        .expect("final detail")
-        .json()
-        .await
-        .expect("final json");
-    let transcript: String = detail["entries"]
-        .as_array()
-        .map(|b| {
-            b.iter()
-                .filter(|e| e["kind"].as_str() == Some("content"))
-                .filter_map(|e| e["content"].as_str())
-                .collect::<Vec<_>>()
-                .join("")
-        })
-        .unwrap_or_default();
-    assert_eq!(
-        transcript, "alpha beta gamma end",
-        "pi transcript must reconcile with the streamed deltas exactly once: {transcript:?}"
-    );
-    assert_eq!(
-        detail["status_slug"].as_str(),
-        Some("done"),
-        "the turn must settle done: {detail}"
-    );
-}
+        let project_id = scene_project_id(&cli, &sb).await;
+        let key = pi_create_session(&cli, &sb, &project_id, "hi", None).await;
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
 
-/// fix-webui-streaming-liveness 6.3（HTTP 级钉住的两条）：大会话（1200 条
-/// transcript）下 `GET /api/summary` 恒为 KB 级（<100KB）且不内嵌 entries，
-/// 响应体积不随流式条目数线性增长（流式中途与收尾后两次采样同为 KB 级）；
-/// 正文只走 detail 游标路径——`entries_after=<cursor>` 只回尾部条目。
-/// （headless Chrome 的 long-task 采样不在 HTTP 断言能力内，另行执行。）
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn summary_stays_small_while_transcript_is_large() {
-    let sb = Sandbox::new("testsuite_e2e", "summary-flood");
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
+        // 读帧到收尾（相位帧 done / turn_engaged 转 false），随后短排空补齐本回合
+        // 尾巴（相位帧与正文 turn.append 走两条独立广播，最后一个 delta 可能略迟）。
+        let mut frames: Vec<Vec<String>> = Vec::new();
+        let mut mid_turn: Option<String> = None;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+        let mut settled = false;
+        loop {
+            let read_deadline = if settled {
+                (tokio::time::Instant::now() + Duration::from_millis(1200)).min(deadline)
+            } else {
+                deadline
+            };
+            let ev = match tokio::time::timeout_at(read_deadline, next_ws_frame(&mut ws)).await {
+                Ok(ev) => ev,
+                Err(_) => {
+                    if settled {
+                        break;
+                    }
+                    panic!("timed out waiting for pi turn frames");
+                }
+            };
+            if !frame_targets_session(&ev, &key) {
+                continue;
+            }
+            let method = ev["method"].as_str().unwrap_or_default();
+            if method == "session.updated"
+                && ev["params"]["status_slug"].as_str() == Some("done")
+                && ev["params"]["turn_engaged"].as_bool() != Some(true)
+            {
+                settled = true;
+                continue;
+            }
+            if method != "turn.append" {
+                continue;
+            }
+            let texts = append_frame_texts(&ev);
+            if texts.is_empty() {
+                continue;
+            }
+            if mid_turn.is_none() {
+                // 首 delta 帧到达即抓 HTTP 快照：transcript 只有已到部分
+                // ——正文在回合内可见，不是收尾一次性整块。
+                let snap: serde_json::Value = cli
+                    .get(&detail_url)
+                    .send()
+                    .await
+                    .expect("mid-turn detail")
+                    .json()
+                    .await
+                    .expect("mid-turn json");
+                let streamed: String = snap["entries"]
+                    .as_array()
+                    .map(|b| {
+                        b.iter()
+                            .filter(|e| e["kind"].as_str() == Some("content"))
+                            .filter_map(|e| e["content"].as_str())
+                            .collect::<Vec<_>>()
+                            .join("")
+                    })
+                    .unwrap_or_default();
+                assert!(
+                    streamed.contains("alpha ") && !streamed.contains("end"),
+                    "mid-turn transcript must show the leading deltas only: {streamed:?}"
+                );
+                mid_turn = Some(streamed);
+            }
+            frames.push(texts);
+        }
 
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status, body) = post_json(
+        // 多帧逐 delta；帧内容拼起来恰好是桩的 4 段（各一次、有序）。
+        assert!(
+            frames.len() >= 2,
+            "pi deltas must arrive as multiple turn.append frames, got {frames:?}"
+        );
+        let all: String = frames.concat().concat();
+        assert_eq!(
+            all, "alpha beta gamma end",
+            "frames must carry every delta exactly once, in order: {frames:?}"
+        );
+        assert!(
+            mid_turn.is_some(),
+            "the mid-turn snapshot must have been taken"
+        );
+
+        // 快照面对账：transcript 与帧序列完全一致（正文四段）。
+        let detail: serde_json::Value = cli
+            .get(&detail_url)
+            .send()
+            .await
+            .expect("final detail")
+            .json()
+            .await
+            .expect("final json");
+        let transcript: String = detail["entries"]
+            .as_array()
+            .map(|b| {
+                b.iter()
+                    .filter(|e| e["kind"].as_str() == Some("content"))
+                    .filter_map(|e| e["content"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .unwrap_or_default();
+        assert_eq!(
+            transcript, "alpha beta gamma end",
+            "pi transcript must reconcile with the streamed deltas exactly once: {transcript:?}"
+        );
+        assert_eq!(
+            detail["status_slug"].as_str(),
+            Some("done"),
+            "the turn must settle done: {detail}"
+        );
+    }
+
+    /// fix-webui-streaming-liveness 6.3（HTTP 级钉住的两条）：大会话（1200 条
+    /// transcript）下 `GET /api/summary` 恒为 KB 级（<100KB）且不内嵌 entries，
+    /// 响应体积不随流式条目数线性增长（流式中途与收尾后两次采样同为 KB 级）；
+    /// 正文只走 detail 游标路径——`entries_after=<cursor>` 只回尾部条目。
+    /// （headless Chrome 的 long-task 采样不在 HTTP 断言能力内，另行执行。）
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn summary_stays_small_while_transcript_is_large() {
+        let sb = Sandbox::new("testsuite_e2e", "summary-flood");
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
+
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
         serde_json::json!({ "project_id": project_id.clone(), "prompt": "flood", "agent": "claude" }),
     )
     .await
     .expect("create session");
-    assert_eq!(status, 201, "create session: {body}");
-    let key = body["key"].as_str().expect("key").to_string();
-    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
-    let summary_url = format!("{}/api/summary", sb.webui_url());
-    let hint = sb.path.clone();
+        assert_eq!(status, 201, "create session: {body}");
+        let key = body["key"].as_str().expect("key").to_string();
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+        let summary_url = format!("{}/api/summary", sb.webui_url());
+        let hint = sb.path.clone();
 
-    async fn summary_size(cli: &reqwest::Client, url: &str) -> (usize, serde_json::Value) {
-        let resp = cli.get(url).send().await.expect("summary");
-        let bytes = resp.bytes().await.expect("summary body");
-        let size = bytes.len();
-        let v = serde_json::from_slice(&bytes).expect("summary json");
-        (size, v)
+        async fn summary_size(cli: &reqwest::Client, url: &str) -> (usize, serde_json::Value) {
+            let resp = cli.get(url).send().await.expect("summary");
+            let bytes = resp.bytes().await.expect("summary body");
+            let size = bytes.len();
+            let v = serde_json::from_slice(&bytes).expect("summary json");
+            (size, v)
+        }
+
+        // 回合收尾：1200 条全部落账。1200 个 back-to-back 的 delta 在几秒内跑完
+        // ——「working + 已有 content」的采样窗可能比 wait_for 的轮询间隔还短，
+        // 所以这里的判据只看条目数（done 同样满足），不与状态位竞速。
+        wait_for(
+            "flood turn to land 1201 entries",
+            Duration::from_secs(90),
+            &hint,
+            {
+                let cli = cli.clone();
+                let url = detail_url.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        let n = v["entries"].as_array().map(|b| b.len()).unwrap_or(0);
+                        (n >= 1201).then_some(v)
+                    })
+                }
+            },
+        )
+        .await;
+
+        // 收尾后采样：summary 体积与条目数无关（1200 条仍 <100KB）。
+        let (final_size, final_summary) = summary_size(&cli, &summary_url).await;
+        assert!(
+            final_size < 100 * 1024,
+            "post-turn summary must stay <100KB with 1200 entries, got {final_size} bytes"
+        );
+        assert_eq!(
+            final_summary["active_session_key"].as_str(),
+            Some(key.as_str()),
+            "summary must still name the focused session"
+        );
+        assert!(
+            final_summary["active_session"].get("entries").is_none(),
+            "summary must not embed the transcript (D3 split)"
+        );
+
+        // 正文只走 detail：全量 ≥1200 条；游标增量只回尾部（响应有界）。
+        let full: serde_json::Value = cli
+            .get(&detail_url)
+            .send()
+            .await
+            .expect("full detail")
+            .json()
+            .await
+            .expect("full json");
+        let entries = full["entries"].as_array().expect("entries");
+        assert!(
+            entries.len() >= 1200,
+            "the flood turn must land >=1200 entries, got {}",
+            entries.len()
+        );
+        let cursor = entries.len() as u64 - 300;
+        let tail: serde_json::Value = cli
+            .get(format!("{detail_url}?entries_after={cursor}"))
+            .send()
+            .await
+            .expect("cursor detail")
+            .json()
+            .await
+            .expect("cursor json");
+        let tail_entries = tail["entries"].as_array().expect("tail entries");
+        assert_eq!(
+            tail_entries.len() as u64,
+            entries.len() as u64 - 1 - cursor,
+            "the cursor fetch must return exactly the entries after the cursor"
+        );
+        assert_eq!(
+            tail_entries[0]["position"].as_u64(),
+            Some(cursor + 1),
+            "cursor fetch starts strictly after the cursor"
+        );
+        assert_eq!(
+            tail_entries.last().unwrap()["position"].as_u64(),
+            Some(entries.len() as u64 - 1),
+        );
     }
 
-    // 回合收尾：1200 条全部落账。1200 个 back-to-back 的 delta 在几秒内跑完
-    // ——「working + 已有 content」的采样窗可能比 wait_for 的轮询间隔还短，
-    // 所以这里的判据只看条目数（done 同样满足），不与状态位竞速。
-    wait_for(
-        "flood turn to land 1201 entries",
-        Duration::from_secs(90),
-        &hint,
-        {
-            let cli = cli.clone();
-            let url = detail_url.clone();
-            move || {
-                let cli = cli.clone();
-                let url = url.clone();
-                Box::pin(async move {
-                    let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
-                    let n = v["entries"]
-                        .as_array()
-                        .map(|b| b.len())
-                        .unwrap_or(0);
-                    (n >= 1201).then_some(v)
-                })
-            }
-        },
-    )
-    .await;
+    // ---------------------------------------------------------------------------
+    // fix-webui-qa-defects 2.4 的进程级回归（本 change
+    // fix-webui-approval-restore-and-session-identity 7.2 遗留债）：归档 → 恢复 →
+    // rail 可见、转写完整、History 清空——纯 HTTP 面钉同一契约（浏览器级旅程由
+    // testsuite-webui 的 archive-restore.spec / archive-identity.spec 承担）。
+    // ---------------------------------------------------------------------------
+    /// 归档恢复全契约：完整回合 → 归档（活动列表退场、条目带全量转写快照 +
+    /// agent 身份）→ 恢复（行重建回原项目、转写完整、History 清空、可继续对话、
+    /// 身份原样带回）。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn archive_restore_rebuilds_row_transcript_and_clears_history() {
+        let sb = Sandbox::new("testsuite_e2e", "archive-restore");
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
 
-    // 收尾后采样：summary 体积与条目数无关（1200 条仍 <100KB）。
-    let (final_size, final_summary) = summary_size(&cli, &summary_url).await;
-    assert!(
-        final_size < 100 * 1024,
-        "post-turn summary must stay <100KB with 1200 entries, got {final_size} bytes"
-    );
-    assert_eq!(
-        final_summary["active_session_key"].as_str(),
-        Some(key.as_str()),
-        "summary must still name the focused session"
-    );
-    assert!(
-        final_summary["active_session"].get("entries").is_none(),
-        "summary must not embed the transcript (D3 split)"
-    );
+        // 完整回合先落地：归档快照与恢复重建都必须带走它。
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions", sb.webui_url()),
+            serde_json::json!({
+                "project_id": project_id.clone(),
+                "prompt": "archive-me",
+                "agent": "claude"
+            }),
+        )
+        .await
+        .expect("create session");
+        assert_eq!(status, 201, "create session: {body}");
+        let key = body["key"].as_str().expect("key").to_string();
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+        wait_turn_done(&cli, &sb, &detail_url).await;
+        let (_status, before) = get_json_status(&cli, &detail_url)
+            .await
+            .expect("detail before archive");
+        let entries_before = before["entries"].as_array().expect("entries").len();
+        assert!(entries_before > 0, "the turn must have landed: {before}");
 
-    // 正文只走 detail：全量 ≥1200 条；游标增量只回尾部（响应有界）。
-    let full: serde_json::Value = cli
-        .get(&detail_url)
-        .send()
+        // 归档：行退出活动列表；条目携带全量转写快照 + 归档时刻的身份
+        // （本 change 3.1：agent_kind 随 SessionInfo 落档）。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/archive", sb.webui_url()),
+            serde_json::json!({}),
+        )
         .await
-        .expect("full detail")
-        .json()
-        .await
-        .expect("full json");
-    let entries = full["entries"].as_array().expect("entries");
-    assert!(
-        entries.len() >= 1200,
-        "the flood turn must land >=1200 entries, got {}",
-        entries.len()
-    );
-    let cursor = entries.len() as u64 - 300;
-    let tail: serde_json::Value = cli
-        .get(format!("{detail_url}?entries_after={cursor}"))
-        .send()
-        .await
-        .expect("cursor detail")
-        .json()
-        .await
-        .expect("cursor json");
-    let tail_entries = tail["entries"].as_array().expect("tail entries");
-    assert_eq!(
-        tail_entries.len() as u64,
-        entries.len() as u64 - 1 - cursor,
-        "the cursor fetch must return exactly the entries after the cursor"
-    );
-    assert_eq!(
-        tail_entries[0]["position"].as_u64(),
-        Some(cursor + 1),
-        "cursor fetch starts strictly after the cursor"
-    );
-    assert_eq!(
-        tail_entries.last().unwrap()["position"].as_u64(),
-        Some(entries.len() as u64 - 1),
-    );
-}
+        .expect("archive");
+        assert_eq!(status, 200, "archive: {body}");
+        assert_eq!(body["status"], "archived", "{body}");
 
-// ---------------------------------------------------------------------------
-// fix-webui-qa-defects 2.4 的进程级回归（本 change
-// fix-webui-approval-restore-and-session-identity 7.2 遗留债）：归档 → 恢复 →
-// rail 可见、转写完整、History 清空——纯 HTTP 面钉同一契约（浏览器级旅程由
-// testsuite-webui 的 archive-restore.spec / archive-identity.spec 承担）。
-// ---------------------------------------------------------------------------
-/// 归档恢复全契约：完整回合 → 归档（活动列表退场、条目带全量转写快照 +
-/// agent 身份）→ 恢复（行重建回原项目、转写完整、History 清空、可继续对话、
-/// 身份原样带回）。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn archive_restore_rebuilds_row_transcript_and_clears_history() {
-    let sb = Sandbox::new("testsuite_e2e", "archive-restore");
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-
-    // 完整回合先落地：归档快照与恢复重建都必须带走它。
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({
-            "project_id": project_id.clone(),
-            "prompt": "archive-me",
-            "agent": "claude"
-        }),
-    )
-    .await
-    .expect("create session");
-    assert_eq!(status, 201, "create session: {body}");
-    let key = body["key"].as_str().expect("key").to_string();
-    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
-    wait_turn_done(&cli, &sb, &detail_url).await;
-    let (_status, before) = get_json_status(&cli, &detail_url)
-        .await
-        .expect("detail before archive");
-    let entries_before = before["entries"].as_array().expect("entries").len();
-    assert!(entries_before > 0, "the turn must have landed: {before}");
-
-    // 归档：行退出活动列表；条目携带全量转写快照 + 归档时刻的身份
-    // （本 change 3.1：agent_kind 随 SessionInfo 落档）。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions/{key}/archive", sb.webui_url()),
-        serde_json::json!({}),
-    )
-    .await
-    .expect("archive");
-    assert_eq!(status, 200, "archive: {body}");
-    assert_eq!(body["status"], "archived", "{body}");
-
-    let (_, list) = get_json_status(&cli, &format!("{}/api/sessions", sb.webui_url()))
-        .await
-        .expect("session list after archive");
-    assert!(
-        list["recent_sessions"]
-            .as_array()
-            .is_none_or(|rows| rows
+        let (_, list) = get_json_status(&cli, &format!("{}/api/sessions", sb.webui_url()))
+            .await
+            .expect("session list after archive");
+        assert!(
+            list["recent_sessions"].as_array().is_none_or(|rows| rows
                 .iter()
                 .all(|r| r["encoded_key"].as_str() != Some(key.as_str()))),
-        "the archived session must leave the active list: {list}"
-    );
+            "the archived session must leave the active list: {list}"
+        );
 
-    let (_, archive) = get_json_status(&cli, &format!("{}/api/archive", sb.webui_url()))
+        let (_, archive) = get_json_status(&cli, &format!("{}/api/archive", sb.webui_url()))
+            .await
+            .expect("archive list after archive");
+        let entries = archive["archived_sessions"].as_array().expect("entries");
+        assert_eq!(
+            entries.len(),
+            1,
+            "History holds exactly the new entry: {archive}"
+        );
+        let entry = &entries[0];
+        // axum percent-decodes path params, so the entry stores the RAW key
+        // (literal NUL) while the create response carries the encoded form.
+        let raw_key = key.replace("%00", "\u{0}");
+        assert_eq!(
+            entry["session_key"].as_str(),
+            Some(raw_key.as_str()),
+            "{entry}"
+        );
+        assert_eq!(
+            entry["transcript"].as_array().map(Vec::len),
+            Some(entries_before),
+            "the snapshot must carry the full transcript: {entry}"
+        );
+        assert_eq!(
+            entry["agent_kind"].as_str(),
+            Some("claude"),
+            "the entry must carry the agent identity: {entry}"
+        );
+
+        // 恢复：行重建回原项目（rail 可见）、转写完整、History 清空。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/restore", sb.webui_url()),
+            serde_json::json!({}),
+        )
         .await
-        .expect("archive list after archive");
-    let entries = archive["archived_sessions"].as_array().expect("entries");
-    assert_eq!(entries.len(), 1, "History holds exactly the new entry: {archive}");
-    let entry = &entries[0];
-    // axum percent-decodes path params, so the entry stores the RAW key
-    // (literal NUL) while the create response carries the encoded form.
-    let raw_key = key.replace("%00", "\u{0}");
-    assert_eq!(entry["session_key"].as_str(), Some(raw_key.as_str()), "{entry}");
-    assert_eq!(
-        entry["transcript"].as_array().map(Vec::len),
-        Some(entries_before),
-        "the snapshot must carry the full transcript: {entry}"
-    );
-    assert_eq!(
-        entry["agent_kind"].as_str(),
-        Some("claude"),
-        "the entry must carry the agent identity: {entry}"
-    );
+        .expect("restore");
+        assert_eq!(status, 200, "restore: {body}");
+        assert_eq!(body["status"], "restored", "{body}");
 
-    // 恢复：行重建回原项目（rail 可见）、转写完整、History 清空。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions/{key}/restore", sb.webui_url()),
-        serde_json::json!({}),
-    )
-    .await
-    .expect("restore");
-    assert_eq!(status, 200, "restore: {body}");
-    assert_eq!(body["status"], "restored", "{body}");
-
-    let (_, list) = get_json_status(&cli, &format!("{}/api/sessions", sb.webui_url()))
-        .await
-        .expect("session list after restore");
-    let row = list["recent_sessions"]
-        .as_array()
-        .expect("rows")
-        .iter()
-        .find(|r| r["encoded_key"].as_str() == Some(key.as_str()))
-        .unwrap_or_else(|| panic!("the rebuilt session must be listed again: {list}"));
-    assert_eq!(
-        row["project_id"].as_str(),
-        Some(project_id.as_str()),
-        "the row must be back under its original project: {row}"
-    );
-
-    let (_status, after) = get_json_status(&cli, &detail_url)
-        .await
-        .expect("detail after restore");
-    assert_eq!(
-        after["entries"].as_array().map(Vec::len),
-        Some(entries_before),
-        "the rebuilt session must expose the SAME transcript: {after}"
-    );
-    // （3.2）身份随恢复链路原样带回。
-    assert_eq!(
-        after["agent_kind"].as_str(),
-        Some("claude"),
-        "the restored session must keep its agent identity: {after}"
-    );
-
-    let (_, archive) = get_json_status(&cli, &format!("{}/api/archive", sb.webui_url()))
-        .await
-        .expect("archive list after restore");
-    assert!(
-        archive["archived_sessions"]
-            .as_array()
-            .is_none_or(|rows| rows.is_empty()),
-        "History must be cleared after a successful restore: {archive}"
-    );
-
-    // 可写：恢复后的会话照常对话（Resume 路径完成完整回合）。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
-        serde_json::json!({ "message": "still here" }),
-    )
-    .await
-    .expect("message after restore");
-    assert_eq!(status, 200, "the restored session must be writable: {body}");
-    wait_turn_done(&cli, &sb, &detail_url).await;
-    let (_status, grown) = get_json_status(&cli, &detail_url)
-        .await
-        .expect("detail after follow-up");
-    assert!(
-        grown["entries"].as_array().expect("entries").len() > entries_before,
-        "the follow-up must append on top of the restored transcript: {grown}"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// fix-webui-qa-defects-round4 的进程级回归：升级击杀保留会话（1.2/1.3）、
-// 接收回执阶段可取消（2.3/2.4）、归档恢复命名来源保留（3.1）。单元/路由层
-// 契约已由 sebas-dispatch / sebas-webui 各自的测试钉住；这里补「真 core 子
-// 进程 + 真 fake-claude 驱动」一层的 API 面证据。浏览器级 GUI 旅程由
-// testsuite-webui 承担（review 阶段单独执行，不在本套件）。
-// ---------------------------------------------------------------------------
-/// （round4 1.2/1.3，session-lifecycle「Escalation kill keeps the session
-/// browsable」+ acp-driver「Escalation finalizes the turn without erasing the
-/// session」）P0 进程级复现：fake-claude 在 `hang` 后沉默（活着、探测照答），
-/// `SEBAS_HANG_TIMEOUT_SECS=2` 让击杀阶梯秒级走完；`--ignore-interrupt` 让
-/// fake 扛住 interrupt → 驱动必走完整阶梯（interrupt×3 → disconnect →
-/// drop ≈SIGKILL）并以 terminal Error 收尾。修复前该会话从 /api/sessions
-/// 整行消失、详情 404；修复后必须：列表含行（dormant）、详情 200 且末回合
-/// 是携带升级原因的错误条目、击杀前产物保留可回看、排队提交经
-/// `session.pending_dropped` 逐条如实上报后清空、全程无 `session.removed`。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn escalation_kill_keeps_the_session_on_the_api_surface() {
-    let sb = Sandbox::new("testsuite_e2e", "escalation-kill");
-    sb.append_acp_args(&["--ignore-interrupt"]);
-    let cli = http_client();
-    // 2s hang 阈值：阶梯 ≈ 2s 探测 + 3×2s interrupt 宽限 + 5s SIGKILL 宽限
-    // ≈ 13s；给 90s 余量等退役（首回合的正常输出远快于阈值，不误杀）。
-    let _core = sb.spawn_core_extra(&[("SEBAS_HANG_TIMEOUT_SECS", "2")]);
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-
-    // 先落一个完整回合：击杀前的产出必须保留（spec「the operator can see
-    // what happened and what was produced before the hang」）。
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({
-            "project_id": project_id.clone(),
-            "prompt": "hello",
-            "agent": "claude"
-        }),
-    )
-    .await
-    .expect("create session");
-    assert_eq!(status, 201, "create session: {body}");
-    let key = body["key"].as_str().expect("key").to_string();
-    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
-    wait_turn_done(&cli, &sb, &detail_url).await;
-    let (_status, before) = get_json_status(&cli, &detail_url)
-        .await
-        .expect("detail before the hang");
-    let entries_before = before["entries"].as_array().expect("entries").len();
-    assert!(entries_before > 0, "the first turn must have landed: {before}");
-
-    // hang 提交：fake 永不再出帧 → 接收回执相位一直挂着，直到阶梯击杀。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{detail_url}/message"),
-        serde_json::json!({ "message": "hang" }),
-    )
-    .await
-    .expect("hang message");
-    assert_eq!(status, 200, "hang message: {body}");
-
-    // WS 先连上再排队提交：pending_dropped 帧 = not-executed 上报的进程级
-    // 证据（上报发生在退役之前，同一连接 wire 保序，必在 dormant Updated
-    // 之前到达）。阶梯静默窗 ≈ 11-13s，超过 next_ws_frame 的 15s 单帧超时
-    // 余量太窄——这里用放宽版读帧（唯一 deadline 由本任务掌控）。
-    let mut ws: WsStream = ws_connect(&sb.webui_url()).await;
-    let ws_task = tokio::spawn(async move {
-        use futures_util::StreamExt;
-        // 放宽版读帧：唯一 deadline 由调用方给定（阶梯静默窗 ≈ 11-13s，
-        // next_ws_frame 的 15s 单帧超时余量太窄）。
-        async fn read_frame(
-            ws: &mut WsStream,
-            deadline: tokio::time::Instant,
-        ) -> Option<serde_json::Value> {
-            loop {
-                let msg = tokio::time::timeout_at(deadline, ws.next())
-                    .await
-                    .ok()??
-                    .ok()?;
-                match msg {
-                    tokio_tungstenite::tungstenite::Message::Text(text) => {
-                        return serde_json::from_str::<serde_json::Value>(&text).ok();
-                    }
-                    _ => continue,
-                }
-            }
-        }
-        let mut dropped_frame = None;
-        let mut removed_frame = None;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
-        loop {
-            // pending_dropped 之后再排 5s：给（不该出现的）session.removed
-            // 留出到达窗口，然后收尾。
-            let step = if dropped_frame.is_some() {
-                tokio::time::Instant::now() + Duration::from_secs(5)
-            } else {
-                deadline
-            };
-            match read_frame(&mut ws, step).await {
-                Some(ev) => {
-                    let method = ev["method"].as_str().unwrap_or_default().to_string();
-                    if method == "session.removed" {
-                        removed_frame = Some(ev);
-                        break;
-                    }
-                    if method == "session.pending_dropped" {
-                        dropped_frame = Some(ev);
-                    }
-                }
-                None => break,
-            }
-        }
-        (dropped_frame, removed_frame)
-    });
-
-    // 击杀前排队第二条提交：接收回执相位 = 在飞 → 必须入队（200），且在
-    // 详情 pending 里可见（seed_card 在提交返回前同步落账，无竞态窗口）。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{detail_url}/message"),
-        serde_json::json!({ "message": "queued while hung" }),
-    )
-    .await
-    .expect("queue during hang");
-    assert_eq!(
-        status, 200,
-        "a submission during the hang must be accepted: {body}"
-    );
-    wait_for(
-        "the queued submission to show up in the detail pending view",
-        Duration::from_secs(10),
-        &sb.path.clone(),
-        {
-            let cli = cli.clone();
-            let url = detail_url.clone();
-            move || {
-                let cli = cli.clone();
-                let url = url.clone();
-                Box::pin(async move {
-                    let v = cli
-                        .get(&url)
-                        .send()
-                        .await
-                        .ok()?
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()?;
-                    (v["pending"].as_array()?.len() == 1).then_some(())
-                })
-            }
-        },
-    )
-    .await;
-
-    // 等阶梯走完、terminal Error 退役：行转 dormant（修复前：整行消失）。
-    wait_for(
-        "the escalation kill to retire the row to dormant",
-        Duration::from_secs(90),
-        &sb.path.clone(),
-        {
-            let cli = cli.clone();
-            let url = detail_url.clone();
-            move || {
-                let cli = cli.clone();
-                let url = url.clone();
-                Box::pin(async move {
-                    let v = cli
-                        .get(&url)
-                        .send()
-                        .await
-                        .ok()?
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()?;
-                    (v["status"].as_str() == Some("dormant")).then_some(())
-                })
-            }
-        },
-    )
-    .await;
-
-    // 列表仍含该行（dormant 态），行名保留首 prompt 预览——不退化为短 id。
-    let (_status, list) = get_json_status(&cli, &format!("{}/api/sessions", sb.webui_url()))
-        .await
-        .expect("session list after the kill");
-    let row = list["recent_sessions"]
-        .as_array()
-        .expect("rows")
-        .iter()
-        .find(|r| r["encoded_key"].as_str() == Some(key.as_str()))
-        .unwrap_or_else(|| panic!("the killed session must stay listed: {list}"));
-    assert_eq!(row["status"], "dormant", "the retired row reports dormant: {row}");
-    // （fix-webui-qa-round6 2.1 回归更新）行名恒锚**首条** prompt："hang" 是
-    // 第二条消息，绝不移动行名（旧断言钉的是 user_prompt 漂移行为——正是
-    // 本 change 删除的缺陷形态；修复后实际值就是首条 "hello"）。
-    assert_eq!(
-        row["prompt_preview"], "hello",
-        "the row name must survive card-state teardown anchored to the first prompt: {row}"
-    );
-
-    // 详情 200：击杀前产物保留 + hang 的 prompt 条目 + 携带升级原因的错误
-    // 条目收尾；pending 已随退役清空。
-    let (status, after) = get_json_status(&cli, &detail_url)
-        .await
-        .expect("detail after the kill");
-    assert_eq!(status, 200, "the retired session must stay retrievable");
-    let entries = after["entries"].as_array().expect("entries");
-    assert!(
-        entries.len() >= entries_before + 2,
-        "pre-kill transcript + the hang prompt + the error entry must all be there: {after}"
-    );
-    assert!(
-        entries[..entries_before]
-            .iter()
-            .any(|e| e["kind"].as_str() == Some("prompt")),
-        "the pre-kill turn must remain browsable: {after}"
-    );
-    let last = entries.last().expect("non-empty after the kill");
-    assert_eq!(
-        last["element_type"], "error",
-        "the killed turn must be finalized with a visible error entry: {after}"
-    );
-    assert!(
-        last["content"].as_str().is_some_and(|c| c.contains("agent hung")),
-        "the escalation cause must ride the error entry: {last:?}"
-    );
-    assert!(
-        after["pending"].as_array().is_some_and(Vec::is_empty),
-        "the released queue must be empty on the retired row: {after}"
-    );
-
-    // WS 证据：pending_dropped 携带被释放提交原文；且无 session.removed
-    // （记录移除不得被广播——Removed 只属于操作者显式 close）。
-    let (dropped_frame, removed_frame) = ws_task.await.expect("ws task alive");
-    let dropped_frame = dropped_frame
-        .expect("pending_dropped must be announced: the drop is never silent");
-    assert_eq!(
-        dropped_frame["params"]["session_id"],
-        key.as_str(),
-        "{dropped_frame}"
-    );
-    assert_eq!(
-        dropped_frame["params"]["dropped"][0]["text"],
-        "queued while hung",
-        "the queued submission must be reported as not executed: {dropped_frame}"
-    );
-    assert!(
-        removed_frame.is_none(),
-        "a session.removed frame must NOT be broadcast for a terminal teardown: {removed_frame:?}"
-    );
-
-    // 驱动日志：阶梯确实走过（不是别的原因杀的）。
-    let core_log = std::fs::read_to_string(&sb.core_log).unwrap_or_default();
-    assert!(
-        core_log.contains("escalating (interrupt 1/3)"),
-        "the kill ladder must have run: {}",
-        sb.core_log.display()
-    );
-
-    // 「下一消息 fresh spawn」：对退役记录再发一条消息——既有 Dormant→resume
-    // 路径（load 被拒时诚实回退）孵化全新会话并完成完整回合；保留记录 ≠
-    // 留下一个不能再说话的坑。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{detail_url}/message"),
-        serde_json::json!({ "message": "hello again" }),
-    )
-    .await
-    .expect("follow-up after the kill");
-    assert_eq!(
-        status, 200,
-        "the retired record must stay messageable (fresh spawn): {body}"
-    );
-    wait_turn_done(&cli, &sb, &detail_url).await;
-    let (_status, grown) = get_json_status(&cli, &detail_url)
-        .await
-        .expect("detail after the follow-up");
-    assert!(
-        grown["entries"].as_array().expect("entries").len() > entries.len(),
-        "the fresh turn must append on top of the preserved transcript: {grown}"
-    );
-}
-
-/// （round4 2.3/2.4，agent-workbench「accepted receipt without agent output
-/// offers stop」的引擎半边进程级旅程）提交被接受、agent 首帧未落的接收回执
-/// 相位里，取消必须可达成（修复前该相位 interrupt 被 409 Idle 顶回，操作员
-/// 在 600s 看门狗兜底前无自助手段）：cancel 200 → 回合以「回合被停止」错误
-/// 条目收尾（驱动按既有取消语义重生子进程，会话保持 active）→ 会话仍可
-/// 继续对话。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn receipt_phase_cancel_stops_the_turn_and_the_session_stays_talkative() {
-    let sb = Sandbox::new("testsuite_e2e", "receipt-cancel");
-    let cli = http_client();
-    // 默认 5 分钟 hang 阈值：取消必须远早于阶梯，可靠复现「回执窗口内的
-    // 自助停止」。
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({
-            "project_id": project_id.clone(),
-            "prompt": "hello",
-            "agent": "claude"
-        }),
-    )
-    .await
-    .expect("create session");
-    assert_eq!(status, 201, "create session: {body}");
-    let key = body["key"].as_str().expect("key").to_string();
-    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
-    wait_turn_done(&cli, &sb, &detail_url).await;
-
-    // hang 提交：提交已接受、fake 永不出帧 → 接收回执相位在 API 面可见
-    // （turn_engaged=true 且最新转录条目仍是操作员提交）。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{detail_url}/message"),
-        serde_json::json!({ "message": "hang" }),
-    )
-    .await
-    .expect("hang message");
-    assert_eq!(status, 200, "hang message: {body}");
-    wait_for(
-        "the receipt phase to show on the API face",
-        Duration::from_secs(15),
-        &sb.path.clone(),
-        {
-            let cli = cli.clone();
-            let url = detail_url.clone();
-            move || {
-                let cli = cli.clone();
-                let url = url.clone();
-                Box::pin(async move {
-                    let v = cli
-                        .get(&url)
-                        .send()
-                        .await
-                        .ok()?
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()?;
-                    let entries = v["entries"].as_array()?;
-                    let last = entries.last()?;
-                    let receipt = v.get("turn_engaged").and_then(serde_json::Value::as_bool)
-                        == Some(true)
-                        && last["kind"].as_str() == Some("prompt")
-                        && last["content"].as_str() == Some("hang");
-                    receipt.then_some(())
-                })
-            }
-        },
-    )
-    .await;
-
-    // 停止：该相位必须可取消（修复前 409 Idle）。
-    let resp = cli
-        .post(format!("{detail_url}/cancel"))
-        .send()
-        .await
-        .expect("cancel during the receipt phase");
-    let status = resp.status().as_u16();
-    let body: serde_json::Value = resp.json().await.expect("cancel body");
-    assert_eq!(
-        status,
-        200,
-        "the accepted-receipt phase must be cancellable, not 409: {body}"
-    );
-    assert_eq!(body["status"], "cancelled", "{body}");
-
-    // 回合收尾：fake 被 interrupt 以错误结果退场 → 驱动按既有取消语义重生
-    // 子进程并发布 Finished——回合以「回合被停止」错误条目收尾，会话保持
-    // active（respawn 的活子进程，不是终态拆除）。
-    wait_for(
-        "the cancelled turn to settle with its stop entry",
-        Duration::from_secs(30),
-        &sb.path.clone(),
-        {
-            let cli = cli.clone();
-            let url = detail_url.clone();
-            move || {
-                let cli = cli.clone();
-                let url = url.clone();
-                Box::pin(async move {
-                    let v = cli
-                        .get(&url)
-                        .send()
-                        .await
-                        .ok()?
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()?;
-                    let settled = v["status_slug"].as_str() == Some("done")
-                        && v.get("turn_engaged").is_none();
-                    settled.then_some(())
-                })
-            }
-        },
-    )
-    .await;
-    let (_status, settled) = get_json_status(&cli, &detail_url)
-        .await
-        .expect("detail after cancel");
-    // （fix-webui-qa-round12 5.2，D5 裁决）session-lifecycle spec「取消最终
-    // 生效并留痕：the transcript shows the turn was stopped」——呈现形态是
-    // 中性 notice（round8 7.3：操作者停止不是失败，error 红泡语义废除），
-    // 不再要求 error 条目。
-    assert!(
-        settled["entries"]
-            .as_array()
-            .expect("entries")
-            .iter()
-            .any(|e| e["element_type"].as_str() == Some("notice")
-                && e["content"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .contains("回合已取消")),
-        "the stopped turn must leave a visible stop notice: {settled}"
-    );
-
-    // 会话仍可对话：下一条消息孵化全新会话并完成完整回合（「下一消息
-    // fresh spawn」的可观察语义不变）。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{detail_url}/message"),
-        serde_json::json!({ "message": "hello again" }),
-    )
-    .await
-    .expect("follow-up after cancel");
-    assert_eq!(status, 200, "the session must stay talkative: {body}");
-    wait_turn_done(&cli, &sb, &detail_url).await;
-    let (_status, grown) = get_json_status(&cli, &detail_url)
-        .await
-        .expect("detail after the follow-up");
-    assert!(
-        grown["entries"].as_array().expect("entries").len()
-            > settled["entries"].as_array().expect("entries").len(),
-        "the follow-up turn must append on top of the preserved transcript: {grown}"
-    );
-}
-
-/// （round4 3.1，project-session-actions「restore preserves the row name」）
-/// 归档→恢复 API 面：命名来源（操作者 label + 首 prompt 预览）随归档快照
-/// 落档、随恢复迁回——恢复后的行两个来源与归档前逐一相同，不退化为短 id。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn archive_restore_preserves_the_row_naming_sources() {
-    let sb = Sandbox::new("testsuite_e2e", "restore-naming");
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({
-            "project_id": project_id.clone(),
-            "prompt": "run the release checklist",
-            "agent": "claude"
-        }),
-    )
-    .await
-    .expect("create session");
-    assert_eq!(status, 201, "create session: {body}");
-    let key = body["key"].as_str().expect("key").to_string();
-    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
-    wait_turn_done(&cli, &sb, &detail_url).await;
-
-    // 给会话设一个操作者 label：两个命名来源同时在场（label 第一顺位、
-    // preview 第二顺位），恢复后都必须原样回来。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{detail_url}/label"),
-        serde_json::json!({ "label": "发布清单会话" }),
-    )
-    .await
-    .expect("set label");
-    assert_eq!(status, 200, "set label: {body}");
-
-    // 归档前行命名面：preview 来自首条消息、label 来自操作者。
-    let row_field = |list: &serde_json::Value, field: &str| {
-        list["recent_sessions"]
+        let (_, list) = get_json_status(&cli, &format!("{}/api/sessions", sb.webui_url()))
+            .await
+            .expect("session list after restore");
+        let row = list["recent_sessions"]
             .as_array()
             .expect("rows")
             .iter()
             .find(|r| r["encoded_key"].as_str() == Some(key.as_str()))
-            .unwrap_or_else(|| panic!("the session must be listed: {list}"))[field]
-            .clone()
-    };
-    let (_status, list) = get_json_status(&cli, &format!("{}/api/sessions", sb.webui_url()))
-        .await
-        .expect("session list before archive");
-    assert_eq!(
-        row_field(&list, "prompt_preview"),
-        "run the release checklist",
-        "the first prompt must name the row before archival: {list}"
-    );
-    assert_eq!(
-        row_field(&list, "label"),
-        "发布清单会话",
-        "the operator label must be on the row before archival: {list}"
-    );
+            .unwrap_or_else(|| panic!("the rebuilt session must be listed again: {list}"));
+        assert_eq!(
+            row["project_id"].as_str(),
+            Some(project_id.as_str()),
+            "the row must be back under its original project: {row}"
+        );
 
-    // 归档：条目携带两个命名来源（迁移载体）。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{detail_url}/archive"),
-        serde_json::json!({}),
-    )
-    .await
-    .expect("archive");
-    assert_eq!(status, 200, "archive: {body}");
-    let (_, archive) = get_json_status(&cli, &format!("{}/api/archive", sb.webui_url()))
-        .await
-        .expect("archive list");
-    let entry = &archive["archived_sessions"].as_array().expect("entries")[0];
-    assert_eq!(
-        entry["prompt_preview"].as_str(),
-        Some("run the release checklist"),
-        "the snapshot must carry the first-prompt preview: {entry}"
-    );
-    assert_eq!(
-        entry["operator_label"].as_str(),
-        Some("发布清单会话"),
-        "the snapshot must carry the operator label: {entry}"
-    );
+        let (_status, after) = get_json_status(&cli, &detail_url)
+            .await
+            .expect("detail after restore");
+        assert_eq!(
+            after["entries"].as_array().map(Vec::len),
+            Some(entries_before),
+            "the rebuilt session must expose the SAME transcript: {after}"
+        );
+        // （3.2）身份随恢复链路原样带回。
+        assert_eq!(
+            after["agent_kind"].as_str(),
+            Some("claude"),
+            "the restored session must keep its agent identity: {after}"
+        );
 
-    // 恢复：两个命名来源迁回映射——行与归档前同名，绝不退化短 id。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{detail_url}/restore"),
-        serde_json::json!({}),
-    )
-    .await
-    .expect("restore");
-    assert_eq!(status, 200, "restore: {body}");
-    let (_status, list) = get_json_status(&cli, &format!("{}/api/sessions", sb.webui_url()))
-        .await
-        .expect("session list after restore");
-    assert_eq!(
-        row_field(&list, "label"),
-        "发布清单会话",
-        "the operator label must survive the restore: {list}"
-    );
-    assert_eq!(
-        row_field(&list, "prompt_preview"),
-        "run the release checklist",
-        "the first-prompt preview must survive the restore: {list}"
-    );
-    assert_eq!(
-        row_field(&list, "status"),
-        "dormant",
-        "the restored row is a dormant record: {list}"
-    );
+        let (_, archive) = get_json_status(&cli, &format!("{}/api/archive", sb.webui_url()))
+            .await
+            .expect("archive list after restore");
+        assert!(
+            archive["archived_sessions"]
+                .as_array()
+                .is_none_or(|rows| rows.is_empty()),
+            "History must be cleared after a successful restore: {archive}"
+        );
 
-    // 恢复后的会话照常可写（顺带钉住恢复行的 detail 可达性）。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{detail_url}/message"),
-        serde_json::json!({ "message": "still named" }),
-    )
-    .await
-    .expect("message after restore");
-    assert_eq!(status, 200, "the restored session must be writable: {body}");
-    wait_turn_done(&cli, &sb, &detail_url).await;
-}
+        // 可写：恢复后的会话照常对话（Resume 路径完成完整回合）。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+            serde_json::json!({ "message": "still here" }),
+        )
+        .await
+        .expect("message after restore");
+        assert_eq!(status, 200, "the restored session must be writable: {body}");
+        wait_turn_done(&cli, &sb, &detail_url).await;
+        let (_status, grown) = get_json_status(&cli, &detail_url)
+            .await
+            .expect("detail after follow-up");
+        assert!(
+            grown["entries"].as_array().expect("entries").len() > entries_before,
+            "the follow-up must append on top of the restored transcript: {grown}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // fix-webui-qa-defects-round4 的进程级回归：升级击杀保留会话（1.2/1.3）、
+    // 接收回执阶段可取消（2.3/2.4）、归档恢复命名来源保留（3.1）。单元/路由层
+    // 契约已由 sebas-dispatch / sebas-webui 各自的测试钉住；这里补「真 core 子
+    // 进程 + 真 fake-claude 驱动」一层的 API 面证据。浏览器级 GUI 旅程由
+    // testsuite-webui 承担（review 阶段单独执行，不在本套件）。
+    // ---------------------------------------------------------------------------
+    /// （round4 1.2/1.3，session-lifecycle「Escalation kill keeps the session
+    /// browsable」+ acp-driver「Escalation finalizes the turn without erasing the
+    /// session」）P0 进程级复现：fake-claude 在 `hang` 后沉默（活着、探测照答），
+    /// `SEBAS_HANG_TIMEOUT_SECS=2` 让击杀阶梯秒级走完；`--ignore-interrupt` 让
+    /// fake 扛住 interrupt → 驱动必走完整阶梯（interrupt×3 → disconnect →
+    /// drop ≈SIGKILL）并以 terminal Error 收尾。修复前该会话从 /api/sessions
+    /// 整行消失、详情 404；修复后必须：列表含行（dormant）、详情 200 且末回合
+    /// 是携带升级原因的错误条目、击杀前产物保留可回看、排队提交经
+    /// `session.pending_dropped` 逐条如实上报后清空、全程无 `session.removed`。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn escalation_kill_keeps_the_session_on_the_api_surface() {
+        let sb = Sandbox::new("testsuite_e2e", "escalation-kill");
+        sb.append_acp_args(&["--ignore-interrupt"]);
+        let cli = http_client();
+        // 2s hang 阈值：阶梯 ≈ 2s 探测 + 3×2s interrupt 宽限 + 5s SIGKILL 宽限
+        // ≈ 13s；给 90s 余量等退役（首回合的正常输出远快于阈值，不误杀）。
+        let _core = sb.spawn_core_extra(&[("SEBAS_HANG_TIMEOUT_SECS", "2")]);
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
+
+        // 先落一个完整回合：击杀前的产出必须保留（spec「the operator can see
+        // what happened and what was produced before the hang」）。
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions", sb.webui_url()),
+            serde_json::json!({
+                "project_id": project_id.clone(),
+                "prompt": "hello",
+                "agent": "claude"
+            }),
+        )
+        .await
+        .expect("create session");
+        assert_eq!(status, 201, "create session: {body}");
+        let key = body["key"].as_str().expect("key").to_string();
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+        wait_turn_done(&cli, &sb, &detail_url).await;
+        let (_status, before) = get_json_status(&cli, &detail_url)
+            .await
+            .expect("detail before the hang");
+        let entries_before = before["entries"].as_array().expect("entries").len();
+        assert!(
+            entries_before > 0,
+            "the first turn must have landed: {before}"
+        );
+
+        // hang 提交：fake 永不再出帧 → 接收回执相位一直挂着，直到阶梯击杀。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{detail_url}/message"),
+            serde_json::json!({ "message": "hang" }),
+        )
+        .await
+        .expect("hang message");
+        assert_eq!(status, 200, "hang message: {body}");
+
+        // WS 先连上再排队提交：pending_dropped 帧 = not-executed 上报的进程级
+        // 证据（上报发生在退役之前，同一连接 wire 保序，必在 dormant Updated
+        // 之前到达）。阶梯静默窗 ≈ 11-13s，超过 next_ws_frame 的 15s 单帧超时
+        // 余量太窄——这里用放宽版读帧（唯一 deadline 由本任务掌控）。
+        let mut ws: WsStream = ws_connect(&sb.webui_url()).await;
+        let ws_task = tokio::spawn(async move {
+            use futures_util::StreamExt;
+            // 放宽版读帧：唯一 deadline 由调用方给定（阶梯静默窗 ≈ 11-13s，
+            // next_ws_frame 的 15s 单帧超时余量太窄）。
+            async fn read_frame(
+                ws: &mut WsStream,
+                deadline: tokio::time::Instant,
+            ) -> Option<serde_json::Value> {
+                loop {
+                    let msg = tokio::time::timeout_at(deadline, ws.next())
+                        .await
+                        .ok()??
+                        .ok()?;
+                    match msg {
+                        tokio_tungstenite::tungstenite::Message::Text(text) => {
+                            return serde_json::from_str::<serde_json::Value>(&text).ok();
+                        }
+                        _ => continue,
+                    }
+                }
+            }
+            let mut dropped_frame = None;
+            let mut removed_frame = None;
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+            loop {
+                // pending_dropped 之后再排 5s：给（不该出现的）session.removed
+                // 留出到达窗口，然后收尾。
+                let step = if dropped_frame.is_some() {
+                    tokio::time::Instant::now() + Duration::from_secs(5)
+                } else {
+                    deadline
+                };
+                match read_frame(&mut ws, step).await {
+                    Some(ev) => {
+                        let method = ev["method"].as_str().unwrap_or_default().to_string();
+                        if method == "session.removed" {
+                            removed_frame = Some(ev);
+                            break;
+                        }
+                        if method == "session.pending_dropped" {
+                            dropped_frame = Some(ev);
+                        }
+                    }
+                    None => break,
+                }
+            }
+            (dropped_frame, removed_frame)
+        });
+
+        // 击杀前排队第二条提交：接收回执相位 = 在飞 → 必须入队（200），且在
+        // 详情 pending 里可见（seed_card 在提交返回前同步落账，无竞态窗口）。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{detail_url}/message"),
+            serde_json::json!({ "message": "queued while hung" }),
+        )
+        .await
+        .expect("queue during hang");
+        assert_eq!(
+            status, 200,
+            "a submission during the hang must be accepted: {body}"
+        );
+        wait_for(
+            "the queued submission to show up in the detail pending view",
+            Duration::from_secs(10),
+            &sb.path.clone(),
+            {
+                let cli = cli.clone();
+                let url = detail_url.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        (v["pending"].as_array()?.len() == 1).then_some(())
+                    })
+                }
+            },
+        )
+        .await;
+
+        // 等阶梯走完、terminal Error 退役：行转 dormant（修复前：整行消失）。
+        wait_for(
+            "the escalation kill to retire the row to dormant",
+            Duration::from_secs(90),
+            &sb.path.clone(),
+            {
+                let cli = cli.clone();
+                let url = detail_url.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        (v["status"].as_str() == Some("dormant")).then_some(())
+                    })
+                }
+            },
+        )
+        .await;
+
+        // 列表仍含该行（dormant 态），行名保留首 prompt 预览——不退化为短 id。
+        let (_status, list) = get_json_status(&cli, &format!("{}/api/sessions", sb.webui_url()))
+            .await
+            .expect("session list after the kill");
+        let row = list["recent_sessions"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .find(|r| r["encoded_key"].as_str() == Some(key.as_str()))
+            .unwrap_or_else(|| panic!("the killed session must stay listed: {list}"));
+        assert_eq!(
+            row["status"], "dormant",
+            "the retired row reports dormant: {row}"
+        );
+        // （fix-webui-qa-round6 2.1 回归更新）行名恒锚**首条** prompt："hang" 是
+        // 第二条消息，绝不移动行名（旧断言钉的是 user_prompt 漂移行为——正是
+        // 本 change 删除的缺陷形态；修复后实际值就是首条 "hello"）。
+        assert_eq!(
+            row["prompt_preview"], "hello",
+            "the row name must survive card-state teardown anchored to the first prompt: {row}"
+        );
+
+        // 详情 200：击杀前产物保留 + hang 的 prompt 条目 + 携带升级原因的错误
+        // 条目收尾；pending 已随退役清空。
+        let (status, after) = get_json_status(&cli, &detail_url)
+            .await
+            .expect("detail after the kill");
+        assert_eq!(status, 200, "the retired session must stay retrievable");
+        let entries = after["entries"].as_array().expect("entries");
+        assert!(
+            entries.len() >= entries_before + 2,
+            "pre-kill transcript + the hang prompt + the error entry must all be there: {after}"
+        );
+        assert!(
+            entries[..entries_before]
+                .iter()
+                .any(|e| e["kind"].as_str() == Some("prompt")),
+            "the pre-kill turn must remain browsable: {after}"
+        );
+        let last = entries.last().expect("non-empty after the kill");
+        assert_eq!(
+            last["element_type"], "error",
+            "the killed turn must be finalized with a visible error entry: {after}"
+        );
+        assert!(
+            last["content"]
+                .as_str()
+                .is_some_and(|c| c.contains("agent hung")),
+            "the escalation cause must ride the error entry: {last:?}"
+        );
+        assert!(
+            after["pending"].as_array().is_some_and(Vec::is_empty),
+            "the released queue must be empty on the retired row: {after}"
+        );
+
+        // WS 证据：pending_dropped 携带被释放提交原文；且无 session.removed
+        // （记录移除不得被广播——Removed 只属于操作者显式 close）。
+        let (dropped_frame, removed_frame) = ws_task.await.expect("ws task alive");
+        let dropped_frame =
+            dropped_frame.expect("pending_dropped must be announced: the drop is never silent");
+        assert_eq!(
+            dropped_frame["params"]["session_id"],
+            key.as_str(),
+            "{dropped_frame}"
+        );
+        assert_eq!(
+            dropped_frame["params"]["dropped"][0]["text"], "queued while hung",
+            "the queued submission must be reported as not executed: {dropped_frame}"
+        );
+        assert!(
+            removed_frame.is_none(),
+            "a session.removed frame must NOT be broadcast for a terminal teardown: {removed_frame:?}"
+        );
+
+        // 驱动日志：阶梯确实走过（不是别的原因杀的）。
+        let core_log = std::fs::read_to_string(&sb.core_log).unwrap_or_default();
+        assert!(
+            core_log.contains("escalating (interrupt 1/3)"),
+            "the kill ladder must have run: {}",
+            sb.core_log.display()
+        );
+
+        // 「下一消息 fresh spawn」：对退役记录再发一条消息——既有 Dormant→resume
+        // 路径（load 被拒时诚实回退）孵化全新会话并完成完整回合；保留记录 ≠
+        // 留下一个不能再说话的坑。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{detail_url}/message"),
+            serde_json::json!({ "message": "hello again" }),
+        )
+        .await
+        .expect("follow-up after the kill");
+        assert_eq!(
+            status, 200,
+            "the retired record must stay messageable (fresh spawn): {body}"
+        );
+        wait_turn_done(&cli, &sb, &detail_url).await;
+        let (_status, grown) = get_json_status(&cli, &detail_url)
+            .await
+            .expect("detail after the follow-up");
+        assert!(
+            grown["entries"].as_array().expect("entries").len() > entries.len(),
+            "the fresh turn must append on top of the preserved transcript: {grown}"
+        );
+    }
+
+    /// （round4 2.3/2.4，agent-workbench「accepted receipt without agent output
+    /// offers stop」的引擎半边进程级旅程）提交被接受、agent 首帧未落的接收回执
+    /// 相位里，取消必须可达成（修复前该相位 interrupt 被 409 Idle 顶回，操作员
+    /// 在 600s 看门狗兜底前无自助手段）：cancel 200 → 回合以「回合被停止」错误
+    /// 条目收尾（驱动按既有取消语义重生子进程，会话保持 active）→ 会话仍可
+    /// 继续对话。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn receipt_phase_cancel_stops_the_turn_and_the_session_stays_talkative() {
+        let sb = Sandbox::new("testsuite_e2e", "receipt-cancel");
+        let cli = http_client();
+        // 默认 5 分钟 hang 阈值：取消必须远早于阶梯，可靠复现「回执窗口内的
+        // 自助停止」。
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
+
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions", sb.webui_url()),
+            serde_json::json!({
+                "project_id": project_id.clone(),
+                "prompt": "hello",
+                "agent": "claude"
+            }),
+        )
+        .await
+        .expect("create session");
+        assert_eq!(status, 201, "create session: {body}");
+        let key = body["key"].as_str().expect("key").to_string();
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+        wait_turn_done(&cli, &sb, &detail_url).await;
+
+        // hang 提交：提交已接受、fake 永不出帧 → 接收回执相位在 API 面可见
+        // （turn_engaged=true 且最新转录条目仍是操作员提交）。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{detail_url}/message"),
+            serde_json::json!({ "message": "hang" }),
+        )
+        .await
+        .expect("hang message");
+        assert_eq!(status, 200, "hang message: {body}");
+        wait_for(
+            "the receipt phase to show on the API face",
+            Duration::from_secs(15),
+            &sb.path.clone(),
+            {
+                let cli = cli.clone();
+                let url = detail_url.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        let entries = v["entries"].as_array()?;
+                        let last = entries.last()?;
+                        let receipt = v.get("turn_engaged").and_then(serde_json::Value::as_bool)
+                            == Some(true)
+                            && last["kind"].as_str() == Some("prompt")
+                            && last["content"].as_str() == Some("hang");
+                        receipt.then_some(())
+                    })
+                }
+            },
+        )
+        .await;
+
+        // 停止：该相位必须可取消（修复前 409 Idle）。
+        let resp = cli
+            .post(format!("{detail_url}/cancel"))
+            .send()
+            .await
+            .expect("cancel during the receipt phase");
+        let status = resp.status().as_u16();
+        let body: serde_json::Value = resp.json().await.expect("cancel body");
+        assert_eq!(
+            status, 200,
+            "the accepted-receipt phase must be cancellable, not 409: {body}"
+        );
+        assert_eq!(body["status"], "cancelled", "{body}");
+
+        // 回合收尾：fake 被 interrupt 以错误结果退场 → 驱动按既有取消语义重生
+        // 子进程并发布 Finished——回合以「回合被停止」错误条目收尾，会话保持
+        // active（respawn 的活子进程，不是终态拆除）。
+        wait_for(
+            "the cancelled turn to settle with its stop entry",
+            Duration::from_secs(30),
+            &sb.path.clone(),
+            {
+                let cli = cli.clone();
+                let url = detail_url.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        let settled = v["status_slug"].as_str() == Some("done")
+                            && v.get("turn_engaged").is_none();
+                        settled.then_some(())
+                    })
+                }
+            },
+        )
+        .await;
+        let (_status, settled) = get_json_status(&cli, &detail_url)
+            .await
+            .expect("detail after cancel");
+        // （fix-webui-qa-round12 5.2，D5 裁决）session-lifecycle spec「取消最终
+        // 生效并留痕：the transcript shows the turn was stopped」——呈现形态是
+        // 中性 notice（round8 7.3：操作者停止不是失败，error 红泡语义废除），
+        // 不再要求 error 条目。
+        assert!(
+            settled["entries"]
+                .as_array()
+                .expect("entries")
+                .iter()
+                .any(|e| e["element_type"].as_str() == Some("notice")
+                    && e["content"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .contains("回合已取消")),
+            "the stopped turn must leave a visible stop notice: {settled}"
+        );
+
+        // 会话仍可对话：下一条消息孵化全新会话并完成完整回合（「下一消息
+        // fresh spawn」的可观察语义不变）。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{detail_url}/message"),
+            serde_json::json!({ "message": "hello again" }),
+        )
+        .await
+        .expect("follow-up after cancel");
+        assert_eq!(status, 200, "the session must stay talkative: {body}");
+        wait_turn_done(&cli, &sb, &detail_url).await;
+        let (_status, grown) = get_json_status(&cli, &detail_url)
+            .await
+            .expect("detail after the follow-up");
+        assert!(
+            grown["entries"].as_array().expect("entries").len()
+                > settled["entries"].as_array().expect("entries").len(),
+            "the follow-up turn must append on top of the preserved transcript: {grown}"
+        );
+    }
+
+    /// （round4 3.1，project-session-actions「restore preserves the row name」）
+    /// 归档→恢复 API 面：命名来源（操作者 label + 首 prompt 预览）随归档快照
+    /// 落档、随恢复迁回——恢复后的行两个来源与归档前逐一相同，不退化为短 id。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn archive_restore_preserves_the_row_naming_sources() {
+        let sb = Sandbox::new("testsuite_e2e", "restore-naming");
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
+
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions", sb.webui_url()),
+            serde_json::json!({
+                "project_id": project_id.clone(),
+                "prompt": "run the release checklist",
+                "agent": "claude"
+            }),
+        )
+        .await
+        .expect("create session");
+        assert_eq!(status, 201, "create session: {body}");
+        let key = body["key"].as_str().expect("key").to_string();
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+        wait_turn_done(&cli, &sb, &detail_url).await;
+
+        // 给会话设一个操作者 label：两个命名来源同时在场（label 第一顺位、
+        // preview 第二顺位），恢复后都必须原样回来。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{detail_url}/label"),
+            serde_json::json!({ "label": "发布清单会话" }),
+        )
+        .await
+        .expect("set label");
+        assert_eq!(status, 200, "set label: {body}");
+
+        // 归档前行命名面：preview 来自首条消息、label 来自操作者。
+        let row_field = |list: &serde_json::Value, field: &str| {
+            list["recent_sessions"]
+                .as_array()
+                .expect("rows")
+                .iter()
+                .find(|r| r["encoded_key"].as_str() == Some(key.as_str()))
+                .unwrap_or_else(|| panic!("the session must be listed: {list}"))[field]
+                .clone()
+        };
+        let (_status, list) = get_json_status(&cli, &format!("{}/api/sessions", sb.webui_url()))
+            .await
+            .expect("session list before archive");
+        assert_eq!(
+            row_field(&list, "prompt_preview"),
+            "run the release checklist",
+            "the first prompt must name the row before archival: {list}"
+        );
+        assert_eq!(
+            row_field(&list, "label"),
+            "发布清单会话",
+            "the operator label must be on the row before archival: {list}"
+        );
+
+        // 归档：条目携带两个命名来源（迁移载体）。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{detail_url}/archive"),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("archive");
+        assert_eq!(status, 200, "archive: {body}");
+        let (_, archive) = get_json_status(&cli, &format!("{}/api/archive", sb.webui_url()))
+            .await
+            .expect("archive list");
+        let entry = &archive["archived_sessions"].as_array().expect("entries")[0];
+        assert_eq!(
+            entry["prompt_preview"].as_str(),
+            Some("run the release checklist"),
+            "the snapshot must carry the first-prompt preview: {entry}"
+        );
+        assert_eq!(
+            entry["operator_label"].as_str(),
+            Some("发布清单会话"),
+            "the snapshot must carry the operator label: {entry}"
+        );
+
+        // 恢复：两个命名来源迁回映射——行与归档前同名，绝不退化短 id。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{detail_url}/restore"),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("restore");
+        assert_eq!(status, 200, "restore: {body}");
+        let (_status, list) = get_json_status(&cli, &format!("{}/api/sessions", sb.webui_url()))
+            .await
+            .expect("session list after restore");
+        assert_eq!(
+            row_field(&list, "label"),
+            "发布清单会话",
+            "the operator label must survive the restore: {list}"
+        );
+        assert_eq!(
+            row_field(&list, "prompt_preview"),
+            "run the release checklist",
+            "the first-prompt preview must survive the restore: {list}"
+        );
+        assert_eq!(
+            row_field(&list, "status"),
+            "dormant",
+            "the restored row is a dormant record: {list}"
+        );
+
+        // 恢复后的会话照常可写（顺带钉住恢复行的 detail 可达性）。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{detail_url}/message"),
+            serde_json::json!({ "message": "still named" }),
+        )
+        .await
+        .expect("message after restore");
+        assert_eq!(status, 200, "the restored session must be writable: {body}");
+        wait_turn_done(&cli, &sb, &detail_url).await;
+    }
 
     // ── extend-test-model-scenarios 3.3/3.4/3.5/3.6/3.8：呈现与流式旅程 ─────
 
@@ -8603,7 +8798,10 @@ async fn archive_restore_preserves_the_row_naming_sources() {
             "✓ **bash**",
             "pi done: mix it",
         ] {
-            assert!(joined.contains(needle), "mixed turn misses {needle:?}: {joined}");
+            assert!(
+                joined.contains(needle),
+                "mixed turn misses {needle:?}: {joined}"
+            );
         }
         assert!(
             !mixed.text_of_type("thinking").is_empty(),
@@ -8652,7 +8850,10 @@ async fn archive_restore_preserves_the_row_naming_sources() {
             trace.entries
         );
         assert_eq!(
-            trace.text_of_type("notice").matches("回合已结束且无输出").count(),
+            trace
+                .text_of_type("notice")
+                .matches("回合已结束且无输出")
+                .count(),
             1,
             "exactly one zero-output notice: {:?}",
             trace.entries
@@ -8868,12 +9069,15 @@ async fn archive_restore_preserves_the_row_naming_sources() {
     }
 
     /// GET /api/sessions 里目标会话的行投影（无则 None，配 wait_for 用）。
-    async fn session_row(
-        cli: &reqwest::Client,
-        url: &str,
-        key: &str,
-    ) -> Option<serde_json::Value> {
-        let v = cli.get(url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+    async fn session_row(cli: &reqwest::Client, url: &str, key: &str) -> Option<serde_json::Value> {
+        let v = cli
+            .get(url)
+            .send()
+            .await
+            .ok()?
+            .json::<serde_json::Value>()
+            .await
+            .ok()?;
         v["recent_sessions"]
             .as_array()?
             .iter()
@@ -9204,426 +9408,60 @@ async fn archive_restore_preserves_the_row_naming_sources() {
             );
         }
     }
-
 }
 
 mod scenario_projection {
     use super::*;
 
-// ── close-acceptance-blind-spots 1.3：fake-claude 全行为 mock 的进程级 e2e ──
-//
-// 场景用例即桩的验收（design Risks）：桩的行为由真实 core+webui 子进程反向
-// 断言，桩坏了套件红、不静默假绿。全部走一次性沙箱，零真模型调用。
-/// spec 场景「工具环场景」（close-acceptance-blind-spots 1.3）：tool-loop
-/// 桩发出 tool_use → 泊车审批由**测试侧**经 webui HTTP 应答 allow_once →
-/// tool_result → 环后正文 → Done。投影按 position 单调读出
-/// 「tool_use（📖 Bash）→ 工具执行（✓ Bash）→ 后续正文」三段序列；
-/// journal 逐行点名所用场景（design D4）。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn tool_loop_scenario_projects_tool_use_execution_and_post_tool_text() {
-    let sb = Sandbox::new("testsuite_e2e", "fake-tool-loop");
-    let journal = sb.path.join("fake-claude-journal.jsonl");
-    sb.append_acp_args(&[
-        "--scenario",
-        "tool-loop",
-        "--journal",
-        &support::forward_slash(&journal),
-    ]);
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
+    // ── close-acceptance-blind-spots 1.3：fake-claude 全行为 mock 的进程级 e2e ──
+    //
+    // 场景用例即桩的验收（design Risks）：桩的行为由真实 core+webui 子进程反向
+    // 断言，桩坏了套件红、不静默假绿。全部走一次性沙箱，零真模型调用。
+    /// spec 场景「工具环场景」（close-acceptance-blind-spots 1.3）：tool-loop
+    /// 桩发出 tool_use → 泊车审批由**测试侧**经 webui HTTP 应答 allow_once →
+    /// tool_result → 环后正文 → Done。投影按 position 单调读出
+    /// 「tool_use（📖 Bash）→ 工具执行（✓ Bash）→ 后续正文」三段序列；
+    /// journal 逐行点名所用场景（design D4）。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn tool_loop_scenario_projects_tool_use_execution_and_post_tool_text() {
+        let sb = Sandbox::new("testsuite_e2e", "fake-tool-loop");
+        let journal = sb.path.join("fake-claude-journal.jsonl");
+        sb.append_acp_args(&[
+            "--scenario",
+            "tool-loop",
+            "--journal",
+            &support::forward_slash(&journal),
+        ]);
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
 
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status, body) = post_json(
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
         serde_json::json!({ "project_id": project_id.clone(), "prompt": "run the loop", "agent": "claude" }),
     )
     .await
     .expect("create session");
-    assert_eq!(status, 201, "create session: {body}");
-    let key = body["key"].as_str().expect("key").to_string();
-    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+        assert_eq!(status, 201, "create session: {body}");
+        let key = body["key"].as_str().expect("key").to_string();
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
 
-    // 工具环的「测试侧」半边：等泊车审批出现在读模型，应答 allow_once。
-    let hint = sb.path.clone();
-    let request_id = wait_for(
-        "parked tool-loop approval",
-        Duration::from_secs(30),
-        &hint,
-        {
-            let cli = cli.clone();
-            let url = format!("{}/api/sessions/{key}/approvals", sb.webui_url());
-            move || {
-                let cli = cli.clone();
-                let url = url.clone();
-                Box::pin(async move {
-                    let v = cli
-                        .get(&url)
-                        .send()
-                        .await
-                        .ok()?
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()?;
-                    let approvals = v["approvals"].as_array()?;
-                    let first = approvals.first()?;
-                    Some(first["request_id"].as_str()?.to_string())
-                })
-            }
-        },
-    )
-    .await;
-    // wire 契约（session_backend.rs + frontend client.ts 562-571）：内嵌标签
-    // 枚举再套一层 `decision` 键——`{decision: {decision: "allow_once"}}`。
-    let (ans_status, ans_body) = post_json(
-        &cli,
-        &format!("{}/api/permissions/{}/answer", sb.webui_url(), request_id),
-        serde_json::json!({ "decision": { "decision": "allow_once" } }),
-    )
-    .await
-    .expect("answer parked approval");
-    assert_eq!(ans_status, 200, "answer must be delivered: {ans_body}");
-
-    wait_turn_done(&cli, &sb, &detail_url).await;
-
-    // 投影序列：tool_use（📖 Bash + 参数）→ 工具执行（✓ Bash + loop done）
-    // → 环后正文，条目顺序单调。
-    let (_status, detail) = get_json_status(&cli, &detail_url)
-        .await
-        .expect("session detail");
-    let entries = detail["entries"].as_array().cloned().unwrap_or_default();
-    let tool_start = entries.iter().position(|e| {
-        e["element_type"].as_str() == Some("tool")
-            && e["content"]
-                .as_str()
-                .is_some_and(|c| c.contains("📖 **Bash**") && c.contains("echo loop"))
-    })
-    .expect("tool_use entry (📖 Bash) must be in the projection");
-    let tool_end = entries
-        .iter()
-        .position(|e| {
-            e["element_type"].as_str() == Some("tool")
-                && e["content"]
-                    .as_str()
-                    .is_some_and(|c| c.contains("✓ **Bash**") && c.contains("loop done"))
-        })
-        .expect("tool execution entry (✓ Bash + loop done) must follow");
-    let post_text = entries
-        .iter()
-        .position(|e| e["element_type"].as_str() == Some("markdown") && e["content"].as_str() == Some("tool loop finished"))
-        .expect("post-tool text entry must close the loop");
-    assert!(
-        tool_start < tool_end && tool_end < post_text,
-        "projection must read tool_use → execution → post-tool text in order"
-    );
-
-    // journal 逐行携带场景名（D4）：桩进程写下的每一行都点名 tool-loop。
-    let lines = read_jsonl(&journal);
-    assert!(
-        !lines.is_empty(),
-        "stub journal must have lines: {}",
-        journal.display()
-    );
-    assert!(
-        lines
-            .iter()
-            .all(|l| l["scenario"].as_str() == Some("tool-loop")),
-        "every journal line must name the scenario: {lines:?}"
-    );
-}
-
-/// spec 场景「空响应场景」前半句（close-acceptance-blind-spots 1.3）：empty
-/// 桩正常结束回合、零输出——回合 Done 且投影无任何正文条目（只有操作者
-/// prompt）。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn empty_scenario_projects_zero_output_notice() {
-    let sb = Sandbox::new("testsuite_e2e", "fake-empty");
-    sb.append_acp_args(&["--scenario", "empty"]);
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "project_id": project_id.clone(), "prompt": "say nothing", "agent": "claude" }),
-    )
-    .await
-    .expect("create session");
-    assert_eq!(status, 201, "create session: {body}");
-    let key = body["key"].as_str().expect("key").to_string();
-    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
-
-    wait_turn_done(&cli, &sb, &detail_url).await;
-
-    let (_status, detail) = get_json_status(&cli, &detail_url)
-        .await
-        .expect("session detail");
-    let entries = detail["entries"].as_array().cloned().unwrap_or_default();
-    let notices: Vec<_> = entries
-        .iter()
-        .filter(|e| {
-            e["kind"].as_str() == Some("content")
-                && e["element_type"].as_str() == Some("notice")
-        })
-        .collect();
-    assert_eq!(
-        notices.len(),
-        1,
-        "a zero-output turn must project exactly one synthetic notice entry: {notices:?}"
-    );
-    assert_eq!(
-        detail["status_slug"].as_str(),
-        Some("done"),
-        "the empty turn must still end Done: {detail}"
-    );
-}
-
-/// 慢响应触发停滞自愈（close-acceptance-blind-spots 1.3）：slow 桩先静默
-/// `--delay-ms` 毫秒（静默期照常应答驱动探针——活着但对引擎沉默），delay
-/// 大于 `[dispatch] turn_stall_timeout` 时看门狗强制收尾：投影出现「回合停滞
-/// 被强制收尾」error 条目、会话到 Done，core.log 留 TurnStalled warn。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn slow_scenario_delay_trips_the_stall_watchdog() {
-    let sb = Sandbox::new("testsuite_e2e", "fake-slow-stall");
-    sb.set_turn_stall_timeout(2);
-    sb.append_acp_args(&["--scenario", "slow", "--delay-ms", "9000"]);
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "project_id": project_id.clone(), "prompt": "take your time", "agent": "claude" }),
-    )
-    .await
-    .expect("create session");
-    assert_eq!(status, 201, "create session: {body}");
-    let key = body["key"].as_str().expect("key").to_string();
-    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
-    let hint = sb.path.clone();
-
-    // 看门狗收尾：transcript 就地点名收尾原因，会话终态 Done。
-    wait_for(
-        "watchdog to settle the slow turn",
-        Duration::from_secs(30),
-        &hint,
-        {
-            let cli = cli.clone();
-            let url = detail_url.clone();
-            move || {
-                let cli = cli.clone();
-                let url = url.clone();
-                Box::pin(async move {
-                    let v = cli
-                        .get(&url)
-                        .send()
-                        .await
-                        .ok()?
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()?;
-                    let settled = v["entries"].as_array().is_some_and(|entries| {
-                        entries.iter().any(|e| {
-                            e["element_type"].as_str() == Some("error")
-                                && e["content"]
-                                    .as_str()
-                                    .is_some_and(|c| c.contains("回合停滞被强制收尾"))
-                        })
-                    });
-                    let done = v["status_slug"].as_str() == Some("done");
-                    (settled && done).then_some(v)
-                })
-            }
-        },
-    )
-    .await;
-
-    // 通知事实可达：core.log 的 TurnStalled warn（与 stalled_turn 用例同源）。
-    wait_log_contains(
-        "core.log to carry the stall warning",
-        &sb.core_log,
-        &["turn stalled"],
-    )
-    .await;
-}
-
-/// 错误响应场景（close-acceptance-blind-spots 1.3）：error 桩以 is_error
-/// result 帧模拟上游错误后退出——投影出现点名错误文案的 error 条目，会话
-/// 落终态（failed；映射随会话死亡 retired 后即 dormant），绝不静默。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn error_scenario_projects_an_error_entry() {
-    let sb = Sandbox::new("testsuite_e2e", "fake-error");
-    sb.append_acp_args(&["--scenario", "error"]);
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "project_id": project_id.clone(), "prompt": "explode please", "agent": "claude" }),
-    )
-    .await
-    .expect("create session");
-    assert_eq!(status, 201, "create session: {body}");
-    let key = body["key"].as_str().expect("key").to_string();
-    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
-    let hint = sb.path.clone();
-
-    wait_for(
-        "the upstream error entry to land in the projection",
-        Duration::from_secs(30),
-        &hint,
-        {
-            let cli = cli.clone();
-            let url = detail_url.clone();
-            move || {
-                let cli = cli.clone();
-                let url = url.clone();
-                Box::pin(async move {
-                    let v = cli
-                        .get(&url)
-                        .send()
-                        .await
-                        .ok()?
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()?;
-                    let errored = v["entries"].as_array().is_some_and(|entries| {
-                        entries.iter().any(|e| {
-                            e["element_type"].as_str() == Some("error")
-                                && e["content"]
-                                    .as_str()
-                                    .is_some_and(|c| c.contains("upstream error (fake)"))
-                        })
-                    });
-                    // 终态：映射收尾前瞬间是 failed，随会话死亡 retired 成
-                    // dormant（两个词都不是 working）——都在场才断言通过。
-                    let terminal = matches!(
-                        v["status_slug"].as_str(),
-                        Some("failed") | Some("dormant")
-                    );
-                    (errored && terminal).then_some(v)
-                })
-            }
-        },
-    )
-    .await;
-}
-
-/// 场景参数错误路径（close-acceptance-blind-spots 1.4 的进程级半边）：未知
-/// `--scenario` 值在桩解析期 exit(2)——子进程秒退，driver/manager 以终态
-/// 错误如实上报（投影 error 条目、会话 failed），绝不停在「握手成功后永远
-/// 沉默」的假绿形态。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn unknown_scenario_arg_fails_the_turn_loudly() {
-    let sb = Sandbox::new("testsuite_e2e", "fake-unknown-scenario");
-    sb.append_acp_args(&["--scenario", "no-such-scenario"]);
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "project_id": project_id.clone(), "prompt": "hello", "agent": "claude" }),
-    )
-    .await
-    .expect("create session");
-    assert_eq!(status, 201, "create session: {body}");
-    let key = body["key"].as_str().expect("key").to_string();
-    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
-    let hint = sb.path.clone();
-
-    wait_for(
-        "the dead-stub turn to surface a terminal error",
-        Duration::from_secs(45),
-        &hint,
-        {
-            let cli = cli.clone();
-            let url = detail_url.clone();
-            move || {
-                let cli = cli.clone();
-                let url = url.clone();
-                Box::pin(async move {
-                    let v = cli
-                        .get(&url)
-                        .send()
-                        .await
-                        .ok()?
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()?;
-                    let errored = v["entries"].as_array().is_some_and(|entries| {
-                        entries.iter().any(|e| e["element_type"].as_str() == Some("error"))
-                    });
-                    let failed = v["status_slug"].as_str() == Some("failed");
-                    (errored && failed).then_some(v)
-                })
-            }
-        },
-    )
-    .await;
-}
-
-// ── add-acp-stream-approval-journeys：ACP 桩 `parallel` 剧本的进程级旅程 ──
-//
-// 「并行审批」的驱动侧契约（桩的 wire 形态 + 驱动的泊车/决策路由）。全程经
-// webui 用户面（HTTP API：创建会话 / 读泊车审批 / 应答决定）驱动，不读内核
-// 内部状态；子进程是 fake-claude 桩，零真实上游外呼。
-//
-// ⚠ 实测事实（fix-webui-qa-round2 D-C5 补丁后已**反转**，如实改账）：上游
-// cc-agent-sdk 0.1.7 曾在 hook 回调分发处跨 await 持有回调表锁（第二条
-// hook_callback 的回调要等第一条决定返回），本仓 vendor 补丁（`query_full.rs`
-// 「clone 后先放锁再 await」）放开了并发——两条 hook_callback **同时在飞、
-// 同时泊车**自此成为常态（driver 单测 `out_of_order_decisions_route_to...`
-// 与 GUI 手测均实证）。早先「一次只泊一条」的观察只对补丁前的上游成立；
-// `parallel_scenario_reverse_order_answers_route_to_their_own_tool` 据此把
-// 「同一读模型快照同时列出两条 + 倒序应答各归其位」钉进进程级。本组用例
-// 断言「两个 request_id 各自独立泊车与决策、推进、终态正确」。
-
-/// 驱动一个 `parallel` 回合：按 `decisions`（工具名 → 决定）逐一「等新泊车 →
-/// 应答」。工具名匹配（而非泊车次序）保证即使 SDK 未来放开并发、或两条回调
-/// 的调度顺序反转，每个决定仍路由到正确的工具上。
-async fn drive_parallel_turn(
-    cli: &reqwest::Client,
-    sb: &Sandbox,
-    key: &str,
-    decisions: &[(&str, &str)],
-) -> (Vec<serde_json::Value>, serde_json::Value) {
-    let mut seen: Vec<String> = Vec::new();
-    let mut notices: Vec<serde_json::Value> = Vec::new();
-    for i in 0..decisions.len() {
-        let url = format!("{}/api/sessions/{key}/approvals", sb.webui_url());
-        let seen_snapshot = seen.clone();
-        let notice = wait_for(
-            &format!("parked parallel approval #{}", i + 1),
+        // 工具环的「测试侧」半边：等泊车审批出现在读模型，应答 allow_once。
+        let hint = sb.path.clone();
+        let request_id = wait_for(
+            "parked tool-loop approval",
             Duration::from_secs(30),
-            &sb.path,
+            &hint,
             {
                 let cli = cli.clone();
-                let url = url.clone();
+                let url = format!("{}/api/sessions/{key}/approvals", sb.webui_url());
                 move || {
                     let cli = cli.clone();
                     let url = url.clone();
-                    let seen = seen_snapshot.clone();
                     Box::pin(async move {
                         let v = cli
                             .get(&url)
@@ -9634,278 +9472,855 @@ async fn drive_parallel_turn(
                             .await
                             .ok()?;
                         let approvals = v["approvals"].as_array()?;
-                        approvals
-                            .iter()
-                            .find(|a| {
-                                let rid = a["request_id"].as_str().unwrap_or("");
-                                !rid.is_empty() && !seen.iter().any(|s| s == rid)
-                            })
-                            .cloned()
+                        let first = approvals.first()?;
+                        Some(first["request_id"].as_str()?.to_string())
                     })
                 }
             },
         )
         .await;
-        let request_id = notice["request_id"]
-            .as_str()
-            .expect("request_id")
-            .to_string();
-        let tool_name = notice["tool_name"].as_str().unwrap_or("").to_string();
-        let (_, decision) = decisions
-            .iter()
-            .find(|(tool, _)| *tool == tool_name)
-            .unwrap_or_else(|| panic!("no decision for parked tool {tool_name}: {notice}"));
-        let (status, body) = post_json(
-            cli,
-            &format!("{}/api/permissions/{request_id}/answer", sb.webui_url()),
-            serde_json::json!({ "decision": { "decision": decision } }),
+        // wire 契约（session_backend.rs + frontend client.ts 562-571）：内嵌标签
+        // 枚举再套一层 `decision` 键——`{decision: {decision: "allow_once"}}`。
+        let (ans_status, ans_body) = post_json(
+            &cli,
+            &format!("{}/api/permissions/{}/answer", sb.webui_url(), request_id),
+            serde_json::json!({ "decision": { "decision": "allow_once" } }),
         )
         .await
-        .unwrap_or_else(|e| panic!("answer parked approval {request_id}: {e}"));
-        assert_eq!(status, 200, "answer {request_id} must be delivered: {body}");
-        seen.push(request_id);
-        notices.push(notice);
-    }
-    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
-    wait_turn_done(cli, sb, &detail_url).await;
-    let (_status, detail) = get_json_status(cli, &detail_url)
-        .await
-        .expect("session detail");
-    (notices, detail)
-}
+        .expect("answer parked approval");
+        assert_eq!(ans_status, 200, "answer must be delivered: {ans_body}");
 
-/// 转录形状（id/时间戳除外）：`kind|element_type|content|title` 的有序序列 +
-/// 终态 slug。确定性复核（2.2）以它为两跑的比对口径。
-async fn parallel_turn_shape(
-    cli: &reqwest::Client,
-    sb: &Sandbox,
-    project_id: &str,
-    tag: &str,
-) -> (Vec<String>, String) {
-    let (status, body) = post_json(
+        wait_turn_done(&cli, &sb, &detail_url).await;
+
+        // 投影序列：tool_use（📖 Bash + 参数）→ 工具执行（✓ Bash + loop done）
+        // → 环后正文，条目顺序单调。
+        let (_status, detail) = get_json_status(&cli, &detail_url)
+            .await
+            .expect("session detail");
+        let entries = detail["entries"].as_array().cloned().unwrap_or_default();
+        let tool_start = entries
+            .iter()
+            .position(|e| {
+                e["element_type"].as_str() == Some("tool")
+                    && e["content"]
+                        .as_str()
+                        .is_some_and(|c| c.contains("📖 **Bash**") && c.contains("echo loop"))
+            })
+            .expect("tool_use entry (📖 Bash) must be in the projection");
+        let tool_end = entries
+            .iter()
+            .position(|e| {
+                e["element_type"].as_str() == Some("tool")
+                    && e["content"]
+                        .as_str()
+                        .is_some_and(|c| c.contains("✓ **Bash**") && c.contains("loop done"))
+            })
+            .expect("tool execution entry (✓ Bash + loop done) must follow");
+        let post_text = entries
+            .iter()
+            .position(|e| {
+                e["element_type"].as_str() == Some("markdown")
+                    && e["content"].as_str() == Some("tool loop finished")
+            })
+            .expect("post-tool text entry must close the loop");
+        assert!(
+            tool_start < tool_end && tool_end < post_text,
+            "projection must read tool_use → execution → post-tool text in order"
+        );
+
+        // journal 逐行携带场景名（D4）：桩进程写下的每一行都点名 tool-loop。
+        let lines = read_jsonl(&journal);
+        assert!(
+            !lines.is_empty(),
+            "stub journal must have lines: {}",
+            journal.display()
+        );
+        assert!(
+            lines
+                .iter()
+                .all(|l| l["scenario"].as_str() == Some("tool-loop")),
+            "every journal line must name the scenario: {lines:?}"
+        );
+    }
+
+    /// spec 场景「空响应场景」前半句（close-acceptance-blind-spots 1.3）：empty
+    /// 桩正常结束回合、零输出——回合 Done 且投影无任何正文条目（只有操作者
+    /// prompt）。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn empty_scenario_projects_zero_output_notice() {
+        let sb = Sandbox::new("testsuite_e2e", "fake-empty");
+        sb.append_acp_args(&["--scenario", "empty"]);
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
+
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "say nothing", "agent": "claude" }),
+    )
+    .await
+    .expect("create session");
+        assert_eq!(status, 201, "create session: {body}");
+        let key = body["key"].as_str().expect("key").to_string();
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+
+        wait_turn_done(&cli, &sb, &detail_url).await;
+
+        let (_status, detail) = get_json_status(&cli, &detail_url)
+            .await
+            .expect("session detail");
+        let entries = detail["entries"].as_array().cloned().unwrap_or_default();
+        let notices: Vec<_> = entries
+            .iter()
+            .filter(|e| {
+                e["kind"].as_str() == Some("content")
+                    && e["element_type"].as_str() == Some("notice")
+            })
+            .collect();
+        assert_eq!(
+            notices.len(),
+            1,
+            "a zero-output turn must project exactly one synthetic notice entry: {notices:?}"
+        );
+        assert_eq!(
+            detail["status_slug"].as_str(),
+            Some("done"),
+            "the empty turn must still end Done: {detail}"
+        );
+    }
+
+    /// 慢响应触发停滞自愈（close-acceptance-blind-spots 1.3）：slow 桩先静默
+    /// `--delay-ms` 毫秒（静默期照常应答驱动探针——活着但对引擎沉默），delay
+    /// 大于 `[dispatch] turn_stall_timeout` 时看门狗强制收尾：投影出现「回合停滞
+    /// 被强制收尾」error 条目、会话到 Done，core.log 留 TurnStalled warn。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn slow_scenario_delay_trips_the_stall_watchdog() {
+        let sb = Sandbox::new("testsuite_e2e", "fake-slow-stall");
+        sb.set_turn_stall_timeout(2);
+        sb.append_acp_args(&["--scenario", "slow", "--delay-ms", "9000"]);
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
+
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "take your time", "agent": "claude" }),
+    )
+    .await
+    .expect("create session");
+        assert_eq!(status, 201, "create session: {body}");
+        let key = body["key"].as_str().expect("key").to_string();
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+        let hint = sb.path.clone();
+
+        // 看门狗收尾：transcript 就地点名收尾原因，会话终态 Done。
+        wait_for(
+            "watchdog to settle the slow turn",
+            Duration::from_secs(30),
+            &hint,
+            {
+                let cli = cli.clone();
+                let url = detail_url.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        let settled = v["entries"].as_array().is_some_and(|entries| {
+                            entries.iter().any(|e| {
+                                e["element_type"].as_str() == Some("error")
+                                    && e["content"]
+                                        .as_str()
+                                        .is_some_and(|c| c.contains("回合停滞被强制收尾"))
+                            })
+                        });
+                        let done = v["status_slug"].as_str() == Some("done");
+                        (settled && done).then_some(v)
+                    })
+                }
+            },
+        )
+        .await;
+
+        // 通知事实可达：core.log 的 TurnStalled warn（与 stalled_turn 用例同源）。
+        wait_log_contains(
+            "core.log to carry the stall warning",
+            &sb.core_log,
+            &["turn stalled"],
+        )
+        .await;
+    }
+
+    /// 错误响应场景（close-acceptance-blind-spots 1.3）：error 桩以 is_error
+    /// result 帧模拟上游错误后退出——投影出现点名错误文案的 error 条目，会话
+    /// 落终态（failed；映射随会话死亡 retired 后即 dormant），绝不静默。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn error_scenario_projects_an_error_entry() {
+        let sb = Sandbox::new("testsuite_e2e", "fake-error");
+        sb.append_acp_args(&["--scenario", "error"]);
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
+
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "explode please", "agent": "claude" }),
+    )
+    .await
+    .expect("create session");
+        assert_eq!(status, 201, "create session: {body}");
+        let key = body["key"].as_str().expect("key").to_string();
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+        let hint = sb.path.clone();
+
+        wait_for(
+            "the upstream error entry to land in the projection",
+            Duration::from_secs(30),
+            &hint,
+            {
+                let cli = cli.clone();
+                let url = detail_url.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        let errored = v["entries"].as_array().is_some_and(|entries| {
+                            entries.iter().any(|e| {
+                                e["element_type"].as_str() == Some("error")
+                                    && e["content"]
+                                        .as_str()
+                                        .is_some_and(|c| c.contains("upstream error (fake)"))
+                            })
+                        });
+                        // 终态：映射收尾前瞬间是 failed，随会话死亡 retired 成
+                        // dormant（两个词都不是 working）——都在场才断言通过。
+                        let terminal =
+                            matches!(v["status_slug"].as_str(), Some("failed") | Some("dormant"));
+                        (errored && terminal).then_some(v)
+                    })
+                }
+            },
+        )
+        .await;
+    }
+
+    /// 场景参数错误路径（close-acceptance-blind-spots 1.4 的进程级半边）：未知
+    /// `--scenario` 值在桩解析期 exit(2)——子进程秒退，driver/manager 以终态
+    /// 错误如实上报（投影 error 条目、会话 failed），绝不停在「握手成功后永远
+    /// 沉默」的假绿形态。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn unknown_scenario_arg_fails_the_turn_loudly() {
+        let sb = Sandbox::new("testsuite_e2e", "fake-unknown-scenario");
+        sb.append_acp_args(&["--scenario", "no-such-scenario"]);
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
+
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "project_id": project_id.clone(), "prompt": "hello", "agent": "claude" }),
+    )
+    .await
+    .expect("create session");
+        assert_eq!(status, 201, "create session: {body}");
+        let key = body["key"].as_str().expect("key").to_string();
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+        let hint = sb.path.clone();
+
+        wait_for(
+            "the dead-stub turn to surface a terminal error",
+            Duration::from_secs(45),
+            &hint,
+            {
+                let cli = cli.clone();
+                let url = detail_url.clone();
+                move || {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        let errored = v["entries"].as_array().is_some_and(|entries| {
+                            entries
+                                .iter()
+                                .any(|e| e["element_type"].as_str() == Some("error"))
+                        });
+                        let failed = v["status_slug"].as_str() == Some("failed");
+                        (errored && failed).then_some(v)
+                    })
+                }
+            },
+        )
+        .await;
+    }
+
+    // ── add-acp-stream-approval-journeys：ACP 桩 `parallel` 剧本的进程级旅程 ──
+    //
+    // 「并行审批」的驱动侧契约（桩的 wire 形态 + 驱动的泊车/决策路由）。全程经
+    // webui 用户面（HTTP API：创建会话 / 读泊车审批 / 应答决定）驱动，不读内核
+    // 内部状态；子进程是 fake-claude 桩，零真实上游外呼。
+    //
+    // ⚠ 实测事实（fix-webui-qa-round2 D-C5 补丁后已**反转**，如实改账）：上游
+    // cc-agent-sdk 0.1.7 曾在 hook 回调分发处跨 await 持有回调表锁（第二条
+    // hook_callback 的回调要等第一条决定返回），本仓 vendor 补丁（`query_full.rs`
+    // 「clone 后先放锁再 await」）放开了并发——两条 hook_callback **同时在飞、
+    // 同时泊车**自此成为常态（driver 单测 `out_of_order_decisions_route_to...`
+    // 与 GUI 手测均实证）。早先「一次只泊一条」的观察只对补丁前的上游成立；
+    // `parallel_scenario_reverse_order_answers_route_to_their_own_tool` 据此把
+    // 「同一读模型快照同时列出两条 + 倒序应答各归其位」钉进进程级。本组用例
+    // 断言「两个 request_id 各自独立泊车与决策、推进、终态正确」。
+
+    /// 驱动一个 `parallel` 回合：按 `decisions`（工具名 → 决定）逐一「等新泊车 →
+    /// 应答」。工具名匹配（而非泊车次序）保证即使 SDK 未来放开并发、或两条回调
+    /// 的调度顺序反转，每个决定仍路由到正确的工具上。
+    async fn drive_parallel_turn(
+        cli: &reqwest::Client,
+        sb: &Sandbox,
+        key: &str,
+        decisions: &[(&str, &str)],
+    ) -> (Vec<serde_json::Value>, serde_json::Value) {
+        let mut seen: Vec<String> = Vec::new();
+        let mut notices: Vec<serde_json::Value> = Vec::new();
+        for i in 0..decisions.len() {
+            let url = format!("{}/api/sessions/{key}/approvals", sb.webui_url());
+            let seen_snapshot = seen.clone();
+            let notice = wait_for(
+                &format!("parked parallel approval #{}", i + 1),
+                Duration::from_secs(30),
+                &sb.path,
+                {
+                    let cli = cli.clone();
+                    let url = url.clone();
+                    move || {
+                        let cli = cli.clone();
+                        let url = url.clone();
+                        let seen = seen_snapshot.clone();
+                        Box::pin(async move {
+                            let v = cli
+                                .get(&url)
+                                .send()
+                                .await
+                                .ok()?
+                                .json::<serde_json::Value>()
+                                .await
+                                .ok()?;
+                            let approvals = v["approvals"].as_array()?;
+                            approvals
+                                .iter()
+                                .find(|a| {
+                                    let rid = a["request_id"].as_str().unwrap_or("");
+                                    !rid.is_empty() && !seen.iter().any(|s| s == rid)
+                                })
+                                .cloned()
+                        })
+                    }
+                },
+            )
+            .await;
+            let request_id = notice["request_id"]
+                .as_str()
+                .expect("request_id")
+                .to_string();
+            let tool_name = notice["tool_name"].as_str().unwrap_or("").to_string();
+            let (_, decision) = decisions
+                .iter()
+                .find(|(tool, _)| *tool == tool_name)
+                .unwrap_or_else(|| panic!("no decision for parked tool {tool_name}: {notice}"));
+            let (status, body) = post_json(
+                cli,
+                &format!("{}/api/permissions/{request_id}/answer", sb.webui_url()),
+                serde_json::json!({ "decision": { "decision": decision } }),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("answer parked approval {request_id}: {e}"));
+            assert_eq!(status, 200, "answer {request_id} must be delivered: {body}");
+            seen.push(request_id);
+            notices.push(notice);
+        }
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+        wait_turn_done(cli, sb, &detail_url).await;
+        let (_status, detail) = get_json_status(cli, &detail_url)
+            .await
+            .expect("session detail");
+        (notices, detail)
+    }
+
+    /// 转录形状（id/时间戳除外）：`kind|element_type|content|title` 的有序序列 +
+    /// 终态 slug。确定性复核（2.2）以它为两跑的比对口径。
+    async fn parallel_turn_shape(
+        cli: &reqwest::Client,
+        sb: &Sandbox,
+        project_id: &str,
+        tag: &str,
+    ) -> (Vec<String>, String) {
+        let (status, body) = post_json(
         cli,
         &format!("{}/api/sessions", sb.webui_url()),
         serde_json::json!({ "project_id": project_id, "prompt": "parallel", "agent": "claude" }),
     )
     .await
     .unwrap_or_else(|e| panic!("create {tag}: {e}"));
-    assert_eq!(status, 201, "create {tag}: {body}");
-    let key = body["key"].as_str().expect("key").to_string();
-    let (_notices, detail) = drive_parallel_turn(
-        cli,
-        sb,
-        &key,
-        &[("Bash", "allow_once"), ("Read", "allow_once")],
-    )
-    .await;
-    let shape = detail["entries"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .iter()
-        .map(|e| {
-            format!(
-                "{}|{}|{}|{}",
-                e["kind"].as_str().unwrap_or(""),
-                e["element_type"].as_str().unwrap_or(""),
-                e["content"].as_str().unwrap_or(""),
-                e["title"].as_str().unwrap_or("")
-            )
-        })
-        .collect();
-    (
-        shape,
-        detail["status_slug"].as_str().unwrap_or("").to_string(),
-    )
-}
+        assert_eq!(status, 201, "create {tag}: {body}");
+        let key = body["key"].as_str().expect("key").to_string();
+        let (_notices, detail) = drive_parallel_turn(
+            cli,
+            sb,
+            &key,
+            &[("Bash", "allow_once"), ("Read", "allow_once")],
+        )
+        .await;
+        let shape = detail["entries"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|e| {
+                format!(
+                    "{}|{}|{}|{}",
+                    e["kind"].as_str().unwrap_or(""),
+                    e["element_type"].as_str().unwrap_or(""),
+                    e["content"].as_str().unwrap_or(""),
+                    e["title"].as_str().unwrap_or("")
+                )
+            })
+            .collect();
+        (
+            shape,
+            detail["status_slug"].as_str().unwrap_or("").to_string(),
+        )
+    }
 
-/// add-acp-stream-approval-journeys 2.1（spec「并行权限环 journey 全绿」）：
-/// `parallel` 触发词会话提交一回合——驱动桩连发两个 hook_callback，驱动侧
-/// 两个审批请求各自独立泊车（两个不同 request_id，各自点名自己的工具与参数）、
-/// 经 webui 读模型逐一应答后回合推进至 Done，两条工具结果如实呈现。
-/// journal 单独钉死桩侧的 wire 契约：两条 hook_callback 帧在**任何决定回来
-/// 之前**就连发完毕（第二个发出时第一个仍待批）。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn parallel_scenario_parks_each_approval_and_settles_the_turn() {
-    let sb = Sandbox::new("testsuite_e2e", "fake-parallel");
-    let journal = sb.path.join("fake-claude-journal.jsonl");
-    sb.append_acp_args(&["--journal", &support::forward_slash(&journal)]);
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
+    /// add-acp-stream-approval-journeys 2.1（spec「并行权限环 journey 全绿」）：
+    /// `parallel` 触发词会话提交一回合——驱动桩连发两个 hook_callback，驱动侧
+    /// 两个审批请求各自独立泊车（两个不同 request_id，各自点名自己的工具与参数）、
+    /// 经 webui 读模型逐一应答后回合推进至 Done，两条工具结果如实呈现。
+    /// journal 单独钉死桩侧的 wire 契约：两条 hook_callback 帧在**任何决定回来
+    /// 之前**就连发完毕（第二个发出时第一个仍待批）。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn parallel_scenario_parks_each_approval_and_settles_the_turn() {
+        let sb = Sandbox::new("testsuite_e2e", "fake-parallel");
+        let journal = sb.path.join("fake-claude-journal.jsonl");
+        sb.append_acp_args(&["--journal", &support::forward_slash(&journal)]);
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
 
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status, body) = post_json(
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
         serde_json::json!({ "project_id": project_id, "prompt": "parallel", "agent": "claude" }),
     )
     .await
     .expect("create session");
-    assert_eq!(status, 201, "create session: {body}");
-    let key = body["key"].as_str().expect("key").to_string();
-
-    let (notices, detail) =
-        drive_parallel_turn(&cli, &sb, &key, &[("Bash", "allow_once"), ("Read", "allow_once")]).await;
-
-    // 两个审批请求各自独立泊车：两个不同 request_id，各自点名自己的工具/参数。
-    assert_eq!(notices.len(), 2, "both approvals must park: {notices:?}");
-    let ids: Vec<&str> = notices
-        .iter()
-        .filter_map(|n| n["request_id"].as_str())
-        .collect();
-    assert_eq!(ids.len(), 2);
-    assert_ne!(ids[0], ids[1], "each request must carry its own request_id");
-    let by_tool = |tool: &str| {
-        notices
-            .iter()
-            .find(|n| n["tool_name"] == tool)
-            .unwrap_or_else(|| panic!("no parked {tool}: {notices:?}"))
-    };
-    assert_eq!(by_tool("Bash")["args"]["command"], "echo first");
-    assert_eq!(
-        by_tool("Read")["args"]["file_path"],
-        "/tmp/fake-parallel.txt"
-    );
-
-    // 转录：两条工具结果如实呈现，各自与自己的工具配对。
-    let entries = detail["entries"].as_array().cloned().unwrap_or_default();
-    let has_tool_result = |tool: &str, result: &str| {
-        entries.iter().any(|e| {
-            e["element_type"].as_str() == Some("tool")
-                && e["content"].as_str().is_some_and(|c| {
-                    c.contains(&format!("✓ **{tool}**")) && c.contains(result)
-                })
-        })
-    };
-    assert!(has_tool_result("Bash", "Bash ok"), "Bash result: {entries:?}");
-    assert!(has_tool_result("Read", "Read ok"), "Read result: {entries:?}");
-    assert!(
-        entries.iter().any(|e| {
-            e["element_type"].as_str() == Some("markdown")
-                && e["content"].as_str() == Some("parallel tools finished")
-        }),
-        "post-loop text must close the turn: {entries:?}"
-    );
-    assert_eq!(
-        detail["status_slug"].as_str(),
-        Some("done"),
-        "turn must settle Done: {detail}"
-    );
-
-    // 桩的 wire 契约（journal 为据）：两条 hook_callback 帧连发——第二条落
-    // journal 时第一条尚无任何决定回来。
-    let lines = read_jsonl(&journal);
-    assert!(
-        !lines.is_empty(),
-        "stub journal must have lines: {}",
-        journal.display()
-    );
-    let is_hook_out = |l: &serde_json::Value| {
-        l["dir"] == "out"
-            && l["msg"]["type"] == "control_request"
-            && l["msg"]["request"]["subtype"] == "hook_callback"
-    };
-    let hook_lines: Vec<usize> = lines
-        .iter()
-        .enumerate()
-        .filter(|(_, l)| is_hook_out(l))
-        .map(|(i, _)| i)
-        .collect();
-    assert_eq!(hook_lines.len(), 2, "exactly two hook_callback frames: {lines:?}");
-    let first_decision = lines
-        .iter()
-        .position(|l| {
-            l["dir"] == "in"
-                && l["msg"]["type"] == "control_response"
-                && l["msg"]["response"]["response"]["hookSpecificOutput"]["permissionDecision"]
-                    .is_string()
-        })
-        .expect("a hook decision must reach the stub");
-    assert!(
-        hook_lines[1] < first_decision,
-        "the second hook_callback must be on the wire while the first is still undecided: {lines:?}"
-    );
-    let hook_ids: Vec<&str> = lines
-        .iter()
-        .filter(|l| is_hook_out(l))
-        .filter_map(|l| l["msg"]["request_id"].as_str())
-        .collect();
-    assert_ne!(hook_ids[0], hook_ids[1], "the two hook requests need distinct ids");
-    let hook_tools: Vec<&str> = lines
-        .iter()
-        .filter(|l| is_hook_out(l))
-        .filter_map(|l| l["msg"]["request"]["input"]["tool_name"].as_str())
-        .collect();
-    assert!(
-        hook_tools.contains(&"Bash") && hook_tools.contains(&"Read"),
-        "each hook_callback names its own tool: {hook_tools:?}"
-    );
-
-    // 零真实上游外呼：回合由桩驱动（argv 里就是 fake-claude），沙箱里没有
-    // router/上游；journal 里记到了 `parallel` 触发词这一操作者输入。
-    let trigger_seen = lines.iter().any(|l| {
-        l["dir"] == "in"
-            && l["msg"]["type"] == "user"
-            && match l.pointer("/msg/message/content") {
-                Some(serde_json::Value::String(s)) => s == "parallel",
-                Some(serde_json::Value::Array(b)) => {
-                    b.iter().filter_map(|x| x["text"].as_str()).collect::<Vec<_>>().join(" ")
-                        == "parallel"
-                }
-                _ => false,
-            }
-    });
-    assert!(
-        trigger_seen,
-        "the `parallel` trigger word must be recorded in the journal: {lines:?}"
-    );
-}
-
-/// add-acp-stream-approval-journeys 1.2（spec「决定组合逐请求生效」）：
-/// allow/allow、allow/deny、deny/deny 三种组合下，每个 tool_use 的 tool_result
-/// 与其自身收到的决定一致、互不影响；deny 不阻止另一工具的执行与回合收尾。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn parallel_scenario_decision_combinations_map_to_their_own_tool() {
-    let sb = Sandbox::new("testsuite_e2e", "fake-parallel-decisions");
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-    let project_id = scene_project_id(&cli, &sb).await;
-
-    for (combo, (bash_decision, read_decision)) in [
-        ("allow/allow", ("allow_once", "allow_once")),
-        ("allow/deny", ("allow_once", "deny")),
-        ("deny/deny", ("deny", "deny")),
-    ] {
-        let (status, body) = post_json(
-            &cli,
-            &format!("{}/api/sessions", sb.webui_url()),
-            serde_json::json!({ "project_id": project_id, "prompt": "parallel", "agent": "claude" }),
-        )
-        .await
-        .unwrap_or_else(|e| panic!("create session ({combo}): {e}"));
-        assert_eq!(status, 201, "create session ({combo}): {body}");
+        assert_eq!(status, 201, "create session: {body}");
         let key = body["key"].as_str().expect("key").to_string();
 
         let (notices, detail) = drive_parallel_turn(
             &cli,
             &sb,
             &key,
-            &[("Bash", bash_decision), ("Read", read_decision)],
+            &[("Bash", "allow_once"), ("Read", "allow_once")],
         )
         .await;
-        assert_eq!(notices.len(), 2, "{combo}: both tools must park");
+
+        // 两个审批请求各自独立泊车：两个不同 request_id，各自点名自己的工具/参数。
+        assert_eq!(notices.len(), 2, "both approvals must park: {notices:?}");
+        let ids: Vec<&str> = notices
+            .iter()
+            .filter_map(|n| n["request_id"].as_str())
+            .collect();
+        assert_eq!(ids.len(), 2);
+        assert_ne!(ids[0], ids[1], "each request must carry its own request_id");
+        let by_tool = |tool: &str| {
+            notices
+                .iter()
+                .find(|n| n["tool_name"] == tool)
+                .unwrap_or_else(|| panic!("no parked {tool}: {notices:?}"))
+        };
+        assert_eq!(by_tool("Bash")["args"]["command"], "echo first");
+        assert_eq!(
+            by_tool("Read")["args"]["file_path"],
+            "/tmp/fake-parallel.txt"
+        );
+
+        // 转录：两条工具结果如实呈现，各自与自己的工具配对。
+        let entries = detail["entries"].as_array().cloned().unwrap_or_default();
+        let has_tool_result = |tool: &str, result: &str| {
+            entries.iter().any(|e| {
+                e["element_type"].as_str() == Some("tool")
+                    && e["content"]
+                        .as_str()
+                        .is_some_and(|c| c.contains(&format!("✓ **{tool}**")) && c.contains(result))
+            })
+        };
+        assert!(
+            has_tool_result("Bash", "Bash ok"),
+            "Bash result: {entries:?}"
+        );
+        assert!(
+            has_tool_result("Read", "Read ok"),
+            "Read result: {entries:?}"
+        );
+        assert!(
+            entries.iter().any(|e| {
+                e["element_type"].as_str() == Some("markdown")
+                    && e["content"].as_str() == Some("parallel tools finished")
+            }),
+            "post-loop text must close the turn: {entries:?}"
+        );
         assert_eq!(
             detail["status_slug"].as_str(),
             Some("done"),
-            "{combo}: the turn must still settle after a deny"
+            "turn must settle Done: {detail}"
         );
 
+        // 桩的 wire 契约（journal 为据）：两条 hook_callback 帧连发——第二条落
+        // journal 时第一条尚无任何决定回来。
+        let lines = read_jsonl(&journal);
+        assert!(
+            !lines.is_empty(),
+            "stub journal must have lines: {}",
+            journal.display()
+        );
+        let is_hook_out = |l: &serde_json::Value| {
+            l["dir"] == "out"
+                && l["msg"]["type"] == "control_request"
+                && l["msg"]["request"]["subtype"] == "hook_callback"
+        };
+        let hook_lines: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| is_hook_out(l))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            hook_lines.len(),
+            2,
+            "exactly two hook_callback frames: {lines:?}"
+        );
+        let first_decision = lines
+            .iter()
+            .position(|l| {
+                l["dir"] == "in"
+                    && l["msg"]["type"] == "control_response"
+                    && l["msg"]["response"]["response"]["hookSpecificOutput"]["permissionDecision"]
+                        .is_string()
+            })
+            .expect("a hook decision must reach the stub");
+        assert!(
+            hook_lines[1] < first_decision,
+            "the second hook_callback must be on the wire while the first is still undecided: {lines:?}"
+        );
+        let hook_ids: Vec<&str> = lines
+            .iter()
+            .filter(|l| is_hook_out(l))
+            .filter_map(|l| l["msg"]["request_id"].as_str())
+            .collect();
+        assert_ne!(
+            hook_ids[0], hook_ids[1],
+            "the two hook requests need distinct ids"
+        );
+        let hook_tools: Vec<&str> = lines
+            .iter()
+            .filter(|l| is_hook_out(l))
+            .filter_map(|l| l["msg"]["request"]["input"]["tool_name"].as_str())
+            .collect();
+        assert!(
+            hook_tools.contains(&"Bash") && hook_tools.contains(&"Read"),
+            "each hook_callback names its own tool: {hook_tools:?}"
+        );
+
+        // 零真实上游外呼：回合由桩驱动（argv 里就是 fake-claude），沙箱里没有
+        // router/上游；journal 里记到了 `parallel` 触发词这一操作者输入。
+        let trigger_seen = lines.iter().any(|l| {
+            l["dir"] == "in"
+                && l["msg"]["type"] == "user"
+                && match l.pointer("/msg/message/content") {
+                    Some(serde_json::Value::String(s)) => s == "parallel",
+                    Some(serde_json::Value::Array(b)) => {
+                        b.iter()
+                            .filter_map(|x| x["text"].as_str())
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                            == "parallel"
+                    }
+                    _ => false,
+                }
+        });
+        assert!(
+            trigger_seen,
+            "the `parallel` trigger word must be recorded in the journal: {lines:?}"
+        );
+    }
+
+    /// add-acp-stream-approval-journeys 1.2（spec「决定组合逐请求生效」）：
+    /// allow/allow、allow/deny、deny/deny 三种组合下，每个 tool_use 的 tool_result
+    /// 与其自身收到的决定一致、互不影响；deny 不阻止另一工具的执行与回合收尾。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn parallel_scenario_decision_combinations_map_to_their_own_tool() {
+        let sb = Sandbox::new("testsuite_e2e", "fake-parallel-decisions");
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
+        let project_id = scene_project_id(&cli, &sb).await;
+
+        for (combo, (bash_decision, read_decision)) in [
+            ("allow/allow", ("allow_once", "allow_once")),
+            ("allow/deny", ("allow_once", "deny")),
+            ("deny/deny", ("deny", "deny")),
+        ] {
+            let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions", sb.webui_url()),
+            serde_json::json!({ "project_id": project_id, "prompt": "parallel", "agent": "claude" }),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("create session ({combo}): {e}"));
+            assert_eq!(status, 201, "create session ({combo}): {body}");
+            let key = body["key"].as_str().expect("key").to_string();
+
+            let (notices, detail) = drive_parallel_turn(
+                &cli,
+                &sb,
+                &key,
+                &[("Bash", bash_decision), ("Read", read_decision)],
+            )
+            .await;
+            assert_eq!(notices.len(), 2, "{combo}: both tools must park");
+            assert_eq!(
+                detail["status_slug"].as_str(),
+                Some("done"),
+                "{combo}: the turn must still settle after a deny"
+            );
+
+            let entries = detail["entries"].as_array().cloned().unwrap_or_default();
+            let tool_result = |tool: &str| -> String {
+                entries
+                    .iter()
+                    .filter(|e| e["element_type"].as_str() == Some("tool"))
+                    .filter_map(|e| e["content"].as_str())
+                    .find(|c| c.starts_with(&format!("✓ **{tool}**")))
+                    .unwrap_or_else(|| panic!("{combo}: no tool_result for {tool}: {entries:?}"))
+                    .to_string()
+            };
+            let want_bash = if bash_decision == "allow_once" {
+                "Bash ok"
+            } else {
+                "denied by fake"
+            };
+            let want_read = if read_decision == "allow_once" {
+                "Read ok"
+            } else {
+                "denied by fake"
+            };
+            let bash_entry = tool_result("Bash");
+            let read_entry = tool_result("Read");
+            assert!(
+                bash_entry.contains(want_bash),
+                "{combo}: Bash result must follow Bash's own decision: {bash_entry}"
+            );
+            assert!(
+                read_entry.contains(want_read),
+                "{combo}: Read result must follow Read's own decision: {read_entry}"
+            );
+            // deny 不阻止另一工具的执行，也不阻止回合收尾（环后正文在场）。
+            assert!(
+                entries
+                    .iter()
+                    .any(|e| e["content"].as_str() == Some("parallel tools finished")),
+                "{combo}: a deny must not stop the other tool or the turn close: {entries:?}"
+            );
+        }
+    }
+
+    /// add-acp-stream-approval-journeys 2.2（spec「重复执行旅程断言转录形状与终态
+    /// 一致」）：同一 journey 在同一沙箱内跑两次（各自独立会话），除 id/时间戳外
+    /// 转录形状与终态 slug 必须逐条一致——并发泊车/乱序决定的实现若有非确定性
+    /// 抖动（条目顺序、重复/丢段），这里当场爆。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn parallel_scenario_transcript_shape_is_deterministic_across_runs() {
+        let sb = Sandbox::new("testsuite_e2e", "fake-parallel-determinism");
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
+        let project_id = scene_project_id(&cli, &sb).await;
+
+        let (first, first_slug) = parallel_turn_shape(&cli, &sb, &project_id, "first run").await;
+        let (second, second_slug) = parallel_turn_shape(&cli, &sb, &project_id, "second run").await;
+        assert_eq!(first_slug, "done", "first run must settle Done");
+        assert_eq!(second_slug, "done", "second run must settle Done");
+        assert!(!first.is_empty(), "the transcript shape must not be empty");
+        assert_eq!(
+            first, second,
+            "the same parallel journey must produce an identical transcript shape (ids/timestamps aside)"
+        );
+    }
+
+    /// fix-parallel-approval-routing：并行泊车**同一快照共存** + **倒序应答**各归
+    /// 其位。既有 journey（`drive_parallel_turn`）按读模型枚举序逐一应答——「同一
+    /// 读模型快照同时列出两条」「先答枚举序靠后的」从未在进程级钉过；vendor D-C5
+    /// 补丁放开并发 hook 后两条同时在飞是常态，倒序应答正是原始缺陷（按待批队列
+    /// 序隐式配对）的最小复现形态。前端乱序合并/显示序由浏览器套件与单测守护，
+    /// 本用例钉的是 webui 应答端点 → core → dispatch → hook 回填的全链路由：
+    /// 每个决定只认 request_id，与应答顺序无关。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn parallel_scenario_reverse_order_answers_route_to_their_own_tool() {
+        let sb = Sandbox::new("testsuite_e2e", "fake-parallel-reverse");
+        let cli = http_client();
+        let _core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "project_id": project_id, "prompt": "parallel", "agent": "claude" }),
+    )
+    .await
+    .expect("create session");
+        assert_eq!(status, 201, "create session: {body}");
+        let key = body["key"].as_str().expect("key").to_string();
+
+        // 两条**同时**泊车：读模型的一个快照里同时列出（乱序决策的先决条件——
+        // 旧 journey 逐一找「未见过的」一条，从未断言共存）。
+        let approvals_url = format!("{}/api/sessions/{key}/approvals", sb.webui_url());
+        let both = wait_for(
+            "both parallel approvals parked in one snapshot",
+            Duration::from_secs(30),
+            &sb.path,
+            {
+                let cli = cli.clone();
+                let approvals_url = approvals_url.clone();
+                move || {
+                    let cli = cli.clone();
+                    let approvals_url = approvals_url.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&approvals_url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        let approvals = v["approvals"].as_array()?;
+                        (approvals.len() == 2).then(|| approvals.clone())
+                    })
+                }
+            },
+        )
+        .await;
+        assert_eq!(
+            both.len(),
+            2,
+            "both approvals must be listed together: {both:?}"
+        );
+        let ids: Vec<&str> = both
+            .iter()
+            .map(|n| n["request_id"].as_str().unwrap_or(""))
+            .collect();
+        assert_ne!(ids[0], ids[1], "each request carries its own request_id");
+        // 读模型枚举序 = request_id 字典序（与前端显示序同一键，倒序应答的参照）。
+        let mut sorted = ids.clone();
+        sorted.sort();
+        assert_eq!(
+            ids, sorted,
+            "the read model enumerates by request_id lexicographic: {both:?}"
+        );
+        let by_tool = |tool: &str| {
+            both.iter()
+                .find(|n| n["tool_name"] == tool)
+                .unwrap_or_else(|| panic!("no parked {tool}: {both:?}"))
+        };
+        assert_eq!(by_tool("Bash")["args"]["command"], "echo first");
+        assert_eq!(
+            by_tool("Read")["args"]["file_path"],
+            "/tmp/fake-parallel.txt"
+        );
+        let bash_id = by_tool("Bash")["request_id"]
+            .as_str()
+            .expect("bash request_id")
+            .to_string();
+        let read_id = by_tool("Read")["request_id"]
+            .as_str()
+            .expect("read request_id")
+            .to_string();
+
+        // 倒序应答：先答枚举序靠后的（Read → deny），再答靠前的（Bash → allow）。
+        let (st, b) = post_json(
+            &cli,
+            &format!("{}/api/permissions/{read_id}/answer", sb.webui_url()),
+            serde_json::json!({ "decision": { "decision": "deny" } }),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("answer {read_id}: {e}"));
+        assert_eq!(st, 200, "deny {read_id} must be delivered: {b}");
+        let (st, b) = post_json(
+            &cli,
+            &format!("{}/api/permissions/{bash_id}/answer", sb.webui_url()),
+            serde_json::json!({ "decision": { "decision": "allow_once" } }),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("answer {bash_id}: {e}"));
+        assert_eq!(st, 200, "allow {bash_id} must be delivered: {b}");
+
+        // 回合收敛，结果各归其位：Bash 被执行（自己的 allow），Read 被拒（自己的
+        // deny）——互换（按队列序配对的原始缺陷）在这里当场爆。
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+        wait_turn_done(&cli, &sb, &detail_url).await;
+        let (_status, detail) = get_json_status(&cli, &detail_url)
+            .await
+            .expect("session detail");
+        assert_eq!(
+            detail["status_slug"].as_str(),
+            Some("done"),
+            "turn must settle after the reversed answers: {detail}"
+        );
         let entries = detail["entries"].as_array().cloned().unwrap_or_default();
         let tool_result = |tool: &str| -> String {
             entries
@@ -9913,98 +10328,60 @@ async fn parallel_scenario_decision_combinations_map_to_their_own_tool() {
                 .filter(|e| e["element_type"].as_str() == Some("tool"))
                 .filter_map(|e| e["content"].as_str())
                 .find(|c| c.starts_with(&format!("✓ **{tool}**")))
-                .unwrap_or_else(|| panic!("{combo}: no tool_result for {tool}: {entries:?}"))
+                .unwrap_or_else(|| panic!("no tool_result for {tool}: {entries:?}"))
                 .to_string()
-        };
-        let want_bash = if bash_decision == "allow_once" {
-            "Bash ok"
-        } else {
-            "denied by fake"
-        };
-        let want_read = if read_decision == "allow_once" {
-            "Read ok"
-        } else {
-            "denied by fake"
         };
         let bash_entry = tool_result("Bash");
         let read_entry = tool_result("Read");
         assert!(
-            bash_entry.contains(want_bash),
-            "{combo}: Bash result must follow Bash's own decision: {bash_entry}"
+            bash_entry.contains("Bash ok"),
+            "Bash must follow ITS OWN allow despite the reversed answer order: {bash_entry}"
         );
         assert!(
-            read_entry.contains(want_read),
-            "{combo}: Read result must follow Read's own decision: {read_entry}"
+            read_entry.contains("denied by fake"),
+            "Read must follow ITS OWN deny despite the reversed answer order: {read_entry}"
         );
-        // deny 不阻止另一工具的执行，也不阻止回合收尾（环后正文在场）。
         assert!(
             entries
                 .iter()
                 .any(|e| e["content"].as_str() == Some("parallel tools finished")),
-            "{combo}: a deny must not stop the other tool or the turn close: {entries:?}"
+            "the reversed answer order must not stop the turn close: {entries:?}"
         );
     }
-}
 
-/// add-acp-stream-approval-journeys 2.2（spec「重复执行旅程断言转录形状与终态
-/// 一致」）：同一 journey 在同一沙箱内跑两次（各自独立会话），除 id/时间戳外
-/// 转录形状与终态 slug 必须逐条一致——并发泊车/乱序决定的实现若有非确定性
-/// 抖动（条目顺序、重复/丢段），这里当场爆。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn parallel_scenario_transcript_shape_is_deterministic_across_runs() {
-    let sb = Sandbox::new("testsuite_e2e", "fake-parallel-determinism");
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-    let project_id = scene_project_id(&cli, &sb).await;
+    /// fix-webui-qa-round6 1.1（permission-flow「每一轮工具环的审批请求都到达审批
+    /// 面」/「第二轮审批不丢（进程级）」）：同一 fake-claude 会话两轮 `perm`——
+    /// 首轮经读模型应答 allow_once 落定后，第二轮 `perm` 的待批**必须**再次出现
+    /// 在 approvals 读模型并可用同一面应答。回归钉：审批注册在「上一轮已有决策」
+    /// 后失效（第二轮 hook_callback 不再登记、读模型空表、回合永久 Waiting 仅
+    /// cancel 可解困）在这里当场爆。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn second_turn_permission_request_still_parks_and_is_decidable() {
+        let sb = Sandbox::new("testsuite_e2e", "fake-perm-second-turn");
+        let journal = sb.path.join("fake-claude-journal.jsonl");
+        sb.append_acp_args(&["--journal", &support::forward_slash(&journal)]);
+        let cli = http_client();
+        let _core = sb.spawn_core_extra(&[("RUST_LOG", "debug")]);
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
+        let project_id = scene_project_id(&cli, &sb).await;
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions", sb.webui_url()),
+            serde_json::json!({ "project_id": project_id, "prompt": "perm", "agent": "claude" }),
+        )
+        .await
+        .expect("create session");
+        assert_eq!(status, 201, "create session: {body}");
+        let key = body["key"].as_str().expect("key").to_string();
+        let approvals_url = format!("{}/api/sessions/{key}/approvals", sb.webui_url());
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
 
-    let (first, first_slug) = parallel_turn_shape(&cli, &sb, &project_id, "first run").await;
-    let (second, second_slug) = parallel_turn_shape(&cli, &sb, &project_id, "second run").await;
-    assert_eq!(first_slug, "done", "first run must settle Done");
-    assert_eq!(second_slug, "done", "second run must settle Done");
-    assert!(!first.is_empty(), "the transcript shape must not be empty");
-    assert_eq!(
-        first, second,
-        "the same parallel journey must produce an identical transcript shape (ids/timestamps aside)"
-    );
-}
-
-/// fix-parallel-approval-routing：并行泊车**同一快照共存** + **倒序应答**各归
-/// 其位。既有 journey（`drive_parallel_turn`）按读模型枚举序逐一应答——「同一
-/// 读模型快照同时列出两条」「先答枚举序靠后的」从未在进程级钉过；vendor D-C5
-/// 补丁放开并发 hook 后两条同时在飞是常态，倒序应答正是原始缺陷（按待批队列
-/// 序隐式配对）的最小复现形态。前端乱序合并/显示序由浏览器套件与单测守护，
-/// 本用例钉的是 webui 应答端点 → core → dispatch → hook 回填的全链路由：
-/// 每个决定只认 request_id，与应答顺序无关。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn parallel_scenario_reverse_order_answers_route_to_their_own_tool() {
-    let sb = Sandbox::new("testsuite_e2e", "fake-parallel-reverse");
-    let cli = http_client();
-    let _core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "project_id": project_id, "prompt": "parallel", "agent": "claude" }),
-    )
-    .await
-    .expect("create session");
-    assert_eq!(status, 201, "create session: {body}");
-    let key = body["key"].as_str().expect("key").to_string();
-
-    // 两条**同时**泊车：读模型的一个快照里同时列出（乱序决策的先决条件——
-    // 旧 journey 逐一找「未见过的」一条，从未断言共存）。
-    let approvals_url = format!("{}/api/sessions/{key}/approvals", sb.webui_url());
-    let both = wait_for(
-        "both parallel approvals parked in one snapshot",
-        Duration::from_secs(30),
-        &sb.path,
-        {
+        // 读模型行的取数器（review 补口）：待批行必须携带**完整语义**——
+        // request_id 之外还有 tool_name 与 args，审批卡的面就是从这行渲染的；
+        // 只断言 id 会让「行退化成裸 id」这类回归漏网。
+        let parked_row_of = {
             let cli = cli.clone();
             let approvals_url = approvals_url.clone();
             move || {
@@ -10020,641 +10397,506 @@ async fn parallel_scenario_reverse_order_answers_route_to_their_own_tool() {
                         .await
                         .ok()?;
                     let approvals = v["approvals"].as_array()?;
-                    (approvals.len() == 2).then(|| approvals.clone())
+                    // 恰一条：已决的首轮请求不得以任何形态残留读模型
+                    // （墓碑留在决策侧，读模型只列**当前泊车**）。
+                    (approvals.len() == 1).then(|| approvals[0].clone())
                 })
             }
-        },
-    )
-    .await;
-    assert_eq!(both.len(), 2, "both approvals must be listed together: {both:?}");
-    let ids: Vec<&str> = both
-        .iter()
-        .map(|n| n["request_id"].as_str().unwrap_or(""))
-        .collect();
-    assert_ne!(ids[0], ids[1], "each request carries its own request_id");
-    // 读模型枚举序 = request_id 字典序（与前端显示序同一键，倒序应答的参照）。
-    let mut sorted = ids.clone();
-    sorted.sort();
-    assert_eq!(
-        ids, sorted,
-        "the read model enumerates by request_id lexicographic: {both:?}"
-    );
-    let by_tool = |tool: &str| {
-        both.iter()
-            .find(|n| n["tool_name"] == tool)
-            .unwrap_or_else(|| panic!("no parked {tool}: {both:?}"))
-    };
-    assert_eq!(by_tool("Bash")["args"]["command"], "echo first");
-    assert_eq!(
-        by_tool("Read")["args"]["file_path"],
-        "/tmp/fake-parallel.txt"
-    );
-    let bash_id = by_tool("Bash")["request_id"]
-        .as_str()
-        .expect("bash request_id")
-        .to_string();
-    let read_id = by_tool("Read")["request_id"]
-        .as_str()
-        .expect("read request_id")
-        .to_string();
+        };
+        let assert_perm_row = |row: &serde_json::Value, turn: usize| {
+            assert_eq!(
+                row["tool_name"].as_str(),
+                Some("Bash"),
+                "turn {turn}: read-model row must name the gated tool: {row}"
+            );
+            let args = row["args"].to_string();
+            assert!(
+                args.contains("rm -rf"),
+                "turn {turn}: read-model row must carry the gated call's args: {row}"
+            );
+        };
 
-    // 倒序应答：先答枚举序靠后的（Read → deny），再答靠前的（Bash → allow）。
-    let (st, b) = post_json(
-        &cli,
-        &format!("{}/api/permissions/{read_id}/answer", sb.webui_url()),
-        serde_json::json!({ "decision": { "decision": "deny" } }),
-    )
-    .await
-    .unwrap_or_else(|e| panic!("answer {read_id}: {e}"));
-    assert_eq!(st, 200, "deny {read_id} must be delivered: {b}");
-    let (st, b) = post_json(
-        &cli,
-        &format!("{}/api/permissions/{bash_id}/answer", sb.webui_url()),
-        serde_json::json!({ "decision": { "decision": "allow_once" } }),
-    )
-    .await
-    .unwrap_or_else(|e| panic!("answer {bash_id}: {e}"));
-    assert_eq!(st, 200, "allow {bash_id} must be delivered: {b}");
-
-    // 回合收敛，结果各归其位：Bash 被执行（自己的 allow），Read 被拒（自己的
-    // deny）——互换（按队列序配对的原始缺陷）在这里当场爆。
-    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
-    wait_turn_done(&cli, &sb, &detail_url).await;
-    let (_status, detail) = get_json_status(&cli, &detail_url)
-        .await
-        .expect("session detail");
-    assert_eq!(
-        detail["status_slug"].as_str(),
-        Some("done"),
-        "turn must settle after the reversed answers: {detail}"
-    );
-    let entries = detail["entries"].as_array().cloned().unwrap_or_default();
-    let tool_result = |tool: &str| -> String {
-        entries
-            .iter()
-            .filter(|e| e["element_type"].as_str() == Some("tool"))
-            .filter_map(|e| e["content"].as_str())
-            .find(|c| c.starts_with(&format!("✓ **{tool}**")))
-            .unwrap_or_else(|| panic!("no tool_result for {tool}: {entries:?}"))
-            .to_string()
-    };
-    let bash_entry = tool_result("Bash");
-    let read_entry = tool_result("Read");
-    assert!(
-        bash_entry.contains("Bash ok"),
-        "Bash must follow ITS OWN allow despite the reversed answer order: {bash_entry}"
-    );
-    assert!(
-        read_entry.contains("denied by fake"),
-        "Read must follow ITS OWN deny despite the reversed answer order: {read_entry}"
-    );
-    assert!(
-        entries
-            .iter()
-            .any(|e| e["content"].as_str() == Some("parallel tools finished")),
-        "the reversed answer order must not stop the turn close: {entries:?}"
-    );
-}
-
-/// fix-webui-qa-round6 1.1（permission-flow「每一轮工具环的审批请求都到达审批
-/// 面」/「第二轮审批不丢（进程级）」）：同一 fake-claude 会话两轮 `perm`——
-/// 首轮经读模型应答 allow_once 落定后，第二轮 `perm` 的待批**必须**再次出现
-/// 在 approvals 读模型并可用同一面应答。回归钉：审批注册在「上一轮已有决策」
-/// 后失效（第二轮 hook_callback 不再登记、读模型空表、回合永久 Waiting 仅
-/// cancel 可解困）在这里当场爆。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn second_turn_permission_request_still_parks_and_is_decidable() {
-    let sb = Sandbox::new("testsuite_e2e", "fake-perm-second-turn");
-    let journal = sb.path.join("fake-claude-journal.jsonl");
-    sb.append_acp_args(&["--journal", &support::forward_slash(&journal)]);
-    let cli = http_client();
-    let _core = sb.spawn_core_extra(&[("RUST_LOG", "debug")]);
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-    let project_id = scene_project_id(&cli, &sb).await;
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "project_id": project_id, "prompt": "perm", "agent": "claude" }),
-    )
-    .await
-    .expect("create session");
-    assert_eq!(status, 201, "create session: {body}");
-    let key = body["key"].as_str().expect("key").to_string();
-    let approvals_url = format!("{}/api/sessions/{key}/approvals", sb.webui_url());
-    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
-
-    // 读模型行的取数器（review 补口）：待批行必须携带**完整语义**——
-    // request_id 之外还有 tool_name 与 args，审批卡的面就是从这行渲染的；
-    // 只断言 id 会让「行退化成裸 id」这类回归漏网。
-    let parked_row_of = {
-        let cli = cli.clone();
-        let approvals_url = approvals_url.clone();
-        move || {
-            let cli = cli.clone();
-            let approvals_url = approvals_url.clone();
-            Box::pin(async move {
-                let v = cli
-                    .get(&approvals_url)
-                    .send()
-                    .await
-                    .ok()?
-                    .json::<serde_json::Value>()
-                    .await
-                    .ok()?;
-                let approvals = v["approvals"].as_array()?;
-                // 恰一条：已决的首轮请求不得以任何形态残留读模型
-                // （墓碑留在决策侧，读模型只列**当前泊车**）。
-                (approvals.len() == 1).then(|| approvals[0].clone())
-            })
-        }
-    };
-    let assert_perm_row = |row: &serde_json::Value, turn: usize| {
-        assert_eq!(
-            row["tool_name"].as_str(),
-            Some("Bash"),
-            "turn {turn}: read-model row must name the gated tool: {row}"
-        );
-        let args = row["args"].to_string();
-        assert!(
-            args.contains("rm -rf"),
-            "turn {turn}: read-model row must carry the gated call's args: {row}"
-        );
-    };
-
-    // 首轮：待批出现 → allow_once → 回合落定（既有合同，照常工作）。
-    let first_row = wait_for(
-        "first perm approval parked",
-        Duration::from_secs(30),
-        &sb.path,
-        {
-            let parked_row_of = parked_row_of.clone();
-            move || {
+        // 首轮：待批出现 → allow_once → 回合落定（既有合同，照常工作）。
+        let first_row = wait_for(
+            "first perm approval parked",
+            Duration::from_secs(30),
+            &sb.path,
+            {
                 let parked_row_of = parked_row_of.clone();
-                Box::pin(async move { parked_row_of().await })
-            }
-        },
-    )
-    .await;
-    let first_id = first_row["request_id"]
-        .as_str()
-        .expect("first request_id")
-        .to_string();
-    assert_perm_row(&first_row, 1);
-    let (st, b) = post_json(
-        &cli,
-        &format!("{}/api/permissions/{}/answer", sb.webui_url(), first_id),
-        serde_json::json!({ "decision": { "decision": "allow_once" } }),
-    )
-    .await
-    .expect("answer first approval");
-    assert_eq!(st, 200, "first answer delivered: {b}");
-    wait_turn_done(&cli, &sb, &detail_url).await;
+                move || {
+                    let parked_row_of = parked_row_of.clone();
+                    Box::pin(async move { parked_row_of().await })
+                }
+            },
+        )
+        .await;
+        let first_id = first_row["request_id"]
+            .as_str()
+            .expect("first request_id")
+            .to_string();
+        assert_perm_row(&first_row, 1);
+        let (st, b) = post_json(
+            &cli,
+            &format!("{}/api/permissions/{}/answer", sb.webui_url(), first_id),
+            serde_json::json!({ "decision": { "decision": "allow_once" } }),
+        )
+        .await
+        .expect("answer first approval");
+        assert_eq!(st, 200, "first answer delivered: {b}");
+        wait_turn_done(&cli, &sb, &detail_url).await;
 
-    // 第二轮：同会话再发一次 `perm`。待批必须再次出现在读模型——这是本
-    // journey 的核心断言（修复前：返回空数组，回合停在 Waiting）。
-    let (st, b) = post_json(
-        &cli,
-        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
-        serde_json::json!({ "message": "perm" }),
-    )
-    .await
-    .expect("send second perm");
-    assert_eq!(st, 200, "second perm accepted: {b}");
+        // 第二轮：同会话再发一次 `perm`。待批必须再次出现在读模型——这是本
+        // journey 的核心断言（修复前：返回空数组，回合停在 Waiting）。
+        let (st, b) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+            serde_json::json!({ "message": "perm" }),
+        )
+        .await
+        .expect("send second perm");
+        assert_eq!(st, 200, "second perm accepted: {b}");
 
-    let second_row = wait_for(
-        "second perm approval parked",
-        Duration::from_secs(30),
-        &sb.path,
-        {
-            let parked_row_of = parked_row_of.clone();
-            let first_id = first_id.clone();
-            move || {
+        let second_row = wait_for(
+            "second perm approval parked",
+            Duration::from_secs(30),
+            &sb.path,
+            {
                 let parked_row_of = parked_row_of.clone();
                 let first_id = first_id.clone();
-                Box::pin(async move {
-                    let row = parked_row_of().await?;
-                    // fix-webui-qa-round6 1.2：第二轮的 request_id 必须是**新的
-                    // 一个**（桩的 tool_use_id 每轮复用 tc-1；修复后 driver 以会
-                    // 话内序号消歧，同 key 撞已决墓碑的旧缺陷在此当场爆）。
-                    let id = row["request_id"].as_str()?;
-                    (id != first_id).then_some(row)
-                })
-            }
-        },
-    )
-    .await;
-    let second_id = second_row["request_id"]
-        .as_str()
-        .expect("second request_id")
-        .to_string();
-    assert_perm_row(&second_row, 2);
+                move || {
+                    let parked_row_of = parked_row_of.clone();
+                    let first_id = first_id.clone();
+                    Box::pin(async move {
+                        let row = parked_row_of().await?;
+                        // fix-webui-qa-round6 1.2：第二轮的 request_id 必须是**新的
+                        // 一个**（桩的 tool_use_id 每轮复用 tc-1；修复后 driver 以会
+                        // 话内序号消歧，同 key 撞已决墓碑的旧缺陷在此当场爆）。
+                        let id = row["request_id"].as_str()?;
+                        (id != first_id).then_some(row)
+                    })
+                }
+            },
+        )
+        .await;
+        let second_id = second_row["request_id"]
+            .as_str()
+            .expect("second request_id")
+            .to_string();
+        assert_perm_row(&second_row, 2);
 
-    // 泊车可观察面的另一半（spec：read model + rail waiting badge）：第二轮
-    // 等待期间，会话行的状态词必须是 waiting（rail 行首圆点 + 「等待」徽标
-    // 都由它驱动）——「泊车了但看起来在跑/已完成」同为 violation。
-    let rows_url = format!("{}/api/sessions", sb.webui_url());
-    let parked_slug = wait_for(
-        "parked second turn to project the waiting slug",
-        Duration::from_secs(15),
-        &sb.path,
-        {
-            let cli = cli.clone();
-            let rows_url = rows_url.clone();
-            let key = key.clone();
-            move || {
+        // 泊车可观察面的另一半（spec：read model + rail waiting badge）：第二轮
+        // 等待期间，会话行的状态词必须是 waiting（rail 行首圆点 + 「等待」徽标
+        // 都由它驱动）——「泊车了但看起来在跑/已完成」同为 violation。
+        let rows_url = format!("{}/api/sessions", sb.webui_url());
+        let parked_slug = wait_for(
+            "parked second turn to project the waiting slug",
+            Duration::from_secs(15),
+            &sb.path,
+            {
                 let cli = cli.clone();
                 let rows_url = rows_url.clone();
                 let key = key.clone();
-                Box::pin(async move {
-                    let v = cli
-                        .get(&rows_url)
-                        .send()
-                        .await
-                        .ok()?
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()?;
-                    v["recent_sessions"]
+                move || {
+                    let cli = cli.clone();
+                    let rows_url = rows_url.clone();
+                    let key = key.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&rows_url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        v["recent_sessions"]
                         .as_array()?
                         .iter()
                         .find(|r| r["encoded_key"].as_str() == Some(key.as_str()))?
                         ["status_slug"]
                         .as_str()
                         .map(str::to_string)
-                })
-            }
-        },
-    )
-    .await;
-    assert_eq!(
-        parked_slug, "waiting",
-        "a parked approval turn must be observable as waiting on the rail row"
-    );
+                    })
+                }
+            },
+        )
+        .await;
+        assert_eq!(
+            parked_slug, "waiting",
+            "a parked approval turn must be observable as waiting on the rail row"
+        );
 
-    // 同一面可决策：allow_once → 泊住的 hook 复活 → 回合落定 + 环后正文。
-    let (st, b) = post_json(
-        &cli,
-        &format!("{}/api/permissions/{}/answer", sb.webui_url(), second_id),
-        serde_json::json!({ "decision": { "decision": "allow_once" } }),
-    )
-    .await
-    .expect("answer second approval");
-    assert_eq!(st, 200, "second answer delivered: {b}");
-    wait_turn_done(&cli, &sb, &detail_url).await;
-    let (_status, detail) = get_json_status(&cli, &detail_url)
+        // 同一面可决策：allow_once → 泊住的 hook 复活 → 回合落定 + 环后正文。
+        let (st, b) = post_json(
+            &cli,
+            &format!("{}/api/permissions/{}/answer", sb.webui_url(), second_id),
+            serde_json::json!({ "decision": { "decision": "allow_once" } }),
+        )
         .await
-        .expect("session detail");
-    let entries = detail["entries"].as_array().cloned().unwrap_or_default();
-    let perm_done = entries
-        .iter()
-        .filter(|e| e["element_type"].as_str() == Some("tool"))
-        .filter_map(|e| e["content"].as_str())
-        .filter(|c| c.contains("✓ **Bash**"))
-        .count();
-    assert!(
-        perm_done >= 2,
-        "both perm turns must have executed their tool after their own allow: {entries:?}"
-    );
-}
+        .expect("answer second approval");
+        assert_eq!(st, 200, "second answer delivered: {b}");
+        wait_turn_done(&cli, &sb, &detail_url).await;
+        let (_status, detail) = get_json_status(&cli, &detail_url)
+            .await
+            .expect("session detail");
+        let entries = detail["entries"].as_array().cloned().unwrap_or_default();
+        let perm_done = entries
+            .iter()
+            .filter(|e| e["element_type"].as_str() == Some("tool"))
+            .filter_map(|e| e["content"].as_str())
+            .filter(|c| c.contains("✓ **Bash**"))
+            .count();
+        assert!(
+            perm_done >= 2,
+            "both perm turns must have executed their tool after their own allow: {entries:?}"
+        );
+    }
 
-/// 直读沙箱 projects.db 里某会话的 checkpoint 行（杀前屏障与快照内容断言的
-/// 数据源）。**只读连接**：core 的单写 actor 在权，`open_and_sync` 的版本键
-/// 写入会撞「database is locked」；表已由 core 建好，纯 SELECT 无需同步。
-fn checkpoint_row_of(
-    db: &std::path::Path,
-    session_id: &str,
-) -> Option<sebas_models::checkpoint::SessionCheckpointRow> {
-    use sebas_db::record::Record;
-    let conn = rusqlite::Connection::open_with_flags(
-        db,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .unwrap_or_else(|e| panic!("open sandbox projects.db read-only: {e}"));
-    let mut stmt = conn
-        .prepare_cached(&format!(
-            "SELECT {} FROM session_checkpoints WHERE session_id = ?1",
-            sebas_models::checkpoint::SessionCheckpointRow::COLUMNS.join(", ")
-        ))
-        .expect("prepare checkpoint select");
-    stmt.query_row([session_id], |row| {
-        sebas_models::checkpoint::SessionCheckpointRow::from_row(row)
-    })
-    .ok()
-}
+    /// 直读沙箱 projects.db 里某会话的 checkpoint 行（杀前屏障与快照内容断言的
+    /// 数据源）。**只读连接**：core 的单写 actor 在权，`open_and_sync` 的版本键
+    /// 写入会撞「database is locked」；表已由 core 建好，纯 SELECT 无需同步。
+    fn checkpoint_row_of(
+        db: &std::path::Path,
+        session_id: &str,
+    ) -> Option<sebas_models::checkpoint::SessionCheckpointRow> {
+        use sebas_db::record::Record;
+        let conn =
+            rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap_or_else(|e| panic!("open sandbox projects.db read-only: {e}"));
+        let mut stmt = conn
+            .prepare_cached(&format!(
+                "SELECT {} FROM session_checkpoints WHERE session_id = ?1",
+                sebas_models::checkpoint::SessionCheckpointRow::COLUMNS.join(", ")
+            ))
+            .expect("prepare checkpoint select");
+        stmt.query_row([session_id], |row| {
+            sebas_models::checkpoint::SessionCheckpointRow::from_row(row)
+        })
+        .ok()
+    }
 
-/// fix-webui-qa-round9 1.4（session-transcript-durability，进程级）：fake-claude
-/// `perm` 泊车审批中**强杀** core（无任何优雅退出路径参与——support 的树杀
-/// 包装：Windows `taskkill /T /F`、unix SIGKILL 进程组，fake-claude 子进程随
-/// 树同死）→ 按原参数重启 → 三面状态自 checkpoint 回放：转录与会话级 usage
-/// 恢复（usage 非「未上报」）、待批审批在读模型恢复呈现且可决定、决定送达
-/// （core.log 留痕行出现 + 泊车登记解除）。
-///
-/// 已知语义按实际断言（截断诚实，不为「走完回合」伪造前提）：原回合的
-/// tool_result 因 ACP 子进程已死不可达——决定被接受并留痕，但转录**不**
-/// 出现 `perm done` / `denied by fake`；回合的最终归场（停滞收尾 / 人工
-/// 关闭）不在本用例预算内。
-#[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn parked_approval_transcript_and_usage_survive_a_hard_kill_restart() {
-    let sb = Sandbox::new("testsuite_e2e", "perm-hard-kill-restart");
-    let cli = http_client();
-    let core = sb.spawn_core();
-    let _webui = sb.spawn_webui(&sb.core_secret);
-    wait_reachable(&cli, &sb).await;
-    let project_id = scene_project_id(&cli, &sb).await;
+    /// fix-webui-qa-round9 1.4（session-transcript-durability，进程级）：fake-claude
+    /// `perm` 泊车审批中**强杀** core（无任何优雅退出路径参与——support 的树杀
+    /// 包装：Windows `taskkill /T /F`、unix SIGKILL 进程组，fake-claude 子进程随
+    /// 树同死）→ 按原参数重启 → 三面状态自 checkpoint 回放：转录与会话级 usage
+    /// 恢复（usage 非「未上报」）、待批审批在读模型恢复呈现且可决定、决定送达
+    /// （core.log 留痕行出现 + 泊车登记解除）。
+    ///
+    /// 已知语义按实际断言（截断诚实，不为「走完回合」伪造前提）：原回合的
+    /// tool_result 因 ACP 子进程已死不可达——决定被接受并留痕，但转录**不**
+    /// 出现 `perm done` / `denied by fake`；回合的最终归场（停滞收尾 / 人工
+    /// 关闭）不在本用例预算内。
+    #[tokio::test]
+    #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+    async fn parked_approval_transcript_and_usage_survive_a_hard_kill_restart() {
+        let sb = Sandbox::new("testsuite_e2e", "perm-hard-kill-restart");
+        let cli = http_client();
+        let core = sb.spawn_core();
+        let _webui = sb.spawn_webui(&sb.core_secret);
+        wait_reachable(&cli, &sb).await;
+        let project_id = scene_project_id(&cli, &sb).await;
 
-    // 1) 首轮 "hello" 完整走完：fake-claude 成功回合 #1 的 usage 恒为
-    //    in 100 / out 10——重启后「非未上报」断言的基准值。
-    let (status, body) = post_json(
-        &cli,
-        &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "project_id": project_id, "prompt": "hello", "agent": "claude" }),
-    )
-    .await
-    .expect("create session");
-    assert_eq!(status, 201, "create session: {body}");
-    let key = body["key"].as_str().expect("key").to_string();
-    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
-    wait_turn_done(&cli, &sb, &detail_url).await;
-    let (_, done) = get_json_status(&cli, &detail_url)
+        // 1) 首轮 "hello" 完整走完：fake-claude 成功回合 #1 的 usage 恒为
+        //    in 100 / out 10——重启后「非未上报」断言的基准值。
+        let (status, body) = post_json(
+            &cli,
+            &format!("{}/api/sessions", sb.webui_url()),
+            serde_json::json!({ "project_id": project_id, "prompt": "hello", "agent": "claude" }),
+        )
         .await
-        .expect("detail before the kill");
-    let session_id = done["session_id"]
-        .as_str()
-        .expect("active session carries a routing id (= checkpoint row key)")
-        .to_string();
-    let usage = &done["usage"];
-    assert_eq!(
-        [usage["total_input"].as_u64(), usage["total_output"].as_u64()],
-        [Some(100), Some(10)],
-        "first successful turn must carry the stub's turn-1 usage: {done}"
-    );
+        .expect("create session");
+        assert_eq!(status, 201, "create session: {body}");
+        let key = body["key"].as_str().expect("key").to_string();
+        let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+        wait_turn_done(&cli, &sb, &detail_url).await;
+        let (_, done) = get_json_status(&cli, &detail_url)
+            .await
+            .expect("detail before the kill");
+        let session_id = done["session_id"]
+            .as_str()
+            .expect("active session carries a routing id (= checkpoint row key)")
+            .to_string();
+        let usage = &done["usage"];
+        assert_eq!(
+            [
+                usage["total_input"].as_u64(),
+                usage["total_output"].as_u64()
+            ],
+            [Some(100), Some(10)],
+            "first successful turn must carry the stub's turn-1 usage: {done}"
+        );
 
-    // 2) 第二轮 "perm"：泊车出现在审批读模型（完整语义行）。
-    let (st, b) = post_json(
-        &cli,
-        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
-        serde_json::json!({ "message": "perm" }),
-    )
-    .await
-    .expect("send perm");
-    assert_eq!(st, 200, "perm accepted: {b}");
-    let approvals_url = format!("{}/api/sessions/{key}/approvals", sb.webui_url());
-    let approvals_of = {
-        let cli = cli.clone();
-        let approvals_url = approvals_url.clone();
-        move || {
+        // 2) 第二轮 "perm"：泊车出现在审批读模型（完整语义行）。
+        let (st, b) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+            serde_json::json!({ "message": "perm" }),
+        )
+        .await
+        .expect("send perm");
+        assert_eq!(st, 200, "perm accepted: {b}");
+        let approvals_url = format!("{}/api/sessions/{key}/approvals", sb.webui_url());
+        let approvals_of = {
             let cli = cli.clone();
             let approvals_url = approvals_url.clone();
-            Box::pin(async move {
-                let v = cli
-                    .get(&approvals_url)
-                    .send()
-                    .await
-                    .ok()?
-                    .json::<serde_json::Value>()
-                    .await
-                    .ok()?;
-                v["approvals"].as_array().cloned()
-            })
-        }
-    };
-    let parked = wait_for(
-        "perm approval parked before the kill",
-        Duration::from_secs(30),
-        &sb.path,
-        {
-            let approvals_of = approvals_of.clone();
-            move || {
-                let approvals_of = approvals_of.clone();
-                Box::pin(async move {
-                    let approvals = approvals_of().await?;
-                    (approvals.len() == 1).then(|| approvals[0].clone())
-                })
-            }
-        },
-    )
-    .await;
-    let request_id = parked["request_id"]
-        .as_str()
-        .expect("parked request_id")
-        .to_string();
-    assert_eq!(parked["tool_name"].as_str(), Some("Bash"), "{parked}");
-
-    // 3) 杀前屏障：泊车进入的事件驱动 checkpoint 已**提交**进 projects.db，
-    //    且快照携带泊车登记与转录。强杀没有优雅路径——行不在就杀，恢复
-    //    断言全靠运气，这里钉死顺序。行内容原样留存：重启后的恢复断言以
-    //    「回放 == 行」为契约（usage 投影按行的 usage_reported 门控推导，
-    //    不钉死具体数值——见下方已知语义备注）。
-    let projects_db = sb.path.join("projects.db");
-    let checkpoint = wait_for(
-        "the parked session's checkpoint row to commit before the kill",
-        Duration::from_secs(15),
-        &sb.path,
-        {
-            let projects_db = projects_db.clone();
-            let session_id = session_id.clone();
-            let request_id = request_id.clone();
-            move || {
-                let projects_db = projects_db.clone();
-                let session_id = session_id.clone();
-                let request_id = request_id.clone();
-                Box::pin(async move {
-                    let row = checkpoint_row_of(&projects_db, &session_id)?;
-                    (row.parked_json.contains(&request_id) && !row.transcript_json.is_empty())
-                        .then_some(row)
-                })
-            }
-        },
-    )
-    .await;
-    // 已知语义（实现者注明 + 本次实测核实）：每轮开轮 emit_turn_card 会重置
-    // 卡态（usage_total/usage_reported 归零），第二轮泊车中的即时 checkpoint
-    // 如实记录「未上报」——首轮已上报的 {100,10} 不在快照里。重启后恢复以
-    // 行为准（未上报 → detail usage null），本用例按此实际语义断言；
-    // 「usage 非未上报」跨轮保留是上报的缺口，见 review 报告。
-    let expect_usage_reported = checkpoint.usage_reported;
-
-    // 4) 强杀 core（fake-claude 子进程随树同死——tool_result 从此不可达）。
-    let pid = core.id().expect("core pid");
-    support::kill_tree(pid);
-
-    // 5) 按原参数重启（同 config、同 env 装配）。
-    let _core2 = sb.spawn_core();
-    wait_reachable(&cli, &sb).await;
-
-    // 6) 回放留痕：重启后的 core.log 出现完成行（restored=1：恰好该会话）。
-    wait_log_contains(
-        "checkpoint replay completion line in the restarted core log",
-        &sb.core_log,
-        &["session checkpoint 回放完成", "restored=1"],
-    )
-    .await;
-
-    // 7) 转录 + usage 恢复：detail 带首轮完整往返；usage 投影与 checkpoint
-    //    行一致（已上报 → {in,out}；未上报 → null，「不以 0 冒充」）。
-    let expected_usage = if expect_usage_reported {
-        serde_json::json!({
-            "total_input": checkpoint.usage_in,
-            "total_output": checkpoint.usage_out,
-        })
-    } else {
-        serde_json::Value::Null
-    };
-    let restored = wait_for(
-        "transcript and usage to replay from the checkpoint",
-        Duration::from_secs(30),
-        &sb.path,
-        {
-            let cli = cli.clone();
-            let detail_url = detail_url.clone();
             move || {
                 let cli = cli.clone();
-                let detail_url = detail_url.clone();
-                let expected_usage = expected_usage.clone();
+                let approvals_url = approvals_url.clone();
                 Box::pin(async move {
                     let v = cli
-                        .get(&detail_url)
+                        .get(&approvals_url)
                         .send()
                         .await
                         .ok()?
                         .json::<serde_json::Value>()
                         .await
                         .ok()?;
-                    let text = v["entries"]
-                        .as_array()?
+                    v["approvals"].as_array().cloned()
+                })
+            }
+        };
+        let parked = wait_for(
+            "perm approval parked before the kill",
+            Duration::from_secs(30),
+            &sb.path,
+            {
+                let approvals_of = approvals_of.clone();
+                move || {
+                    let approvals_of = approvals_of.clone();
+                    Box::pin(async move {
+                        let approvals = approvals_of().await?;
+                        (approvals.len() == 1).then(|| approvals[0].clone())
+                    })
+                }
+            },
+        )
+        .await;
+        let request_id = parked["request_id"]
+            .as_str()
+            .expect("parked request_id")
+            .to_string();
+        assert_eq!(parked["tool_name"].as_str(), Some("Bash"), "{parked}");
+
+        // 3) 杀前屏障：泊车进入的事件驱动 checkpoint 已**提交**进 projects.db，
+        //    且快照携带泊车登记与转录。强杀没有优雅路径——行不在就杀，恢复
+        //    断言全靠运气，这里钉死顺序。行内容原样留存：重启后的恢复断言以
+        //    「回放 == 行」为契约（usage 投影按行的 usage_reported 门控推导，
+        //    不钉死具体数值——见下方已知语义备注）。
+        let projects_db = sb.path.join("projects.db");
+        let checkpoint = wait_for(
+            "the parked session's checkpoint row to commit before the kill",
+            Duration::from_secs(15),
+            &sb.path,
+            {
+                let projects_db = projects_db.clone();
+                let session_id = session_id.clone();
+                let request_id = request_id.clone();
+                move || {
+                    let projects_db = projects_db.clone();
+                    let session_id = session_id.clone();
+                    let request_id = request_id.clone();
+                    Box::pin(async move {
+                        let row = checkpoint_row_of(&projects_db, &session_id)?;
+                        (row.parked_json.contains(&request_id) && !row.transcript_json.is_empty())
+                            .then_some(row)
+                    })
+                }
+            },
+        )
+        .await;
+        // 已知语义（实现者注明 + 本次实测核实）：每轮开轮 emit_turn_card 会重置
+        // 卡态（usage_total/usage_reported 归零），第二轮泊车中的即时 checkpoint
+        // 如实记录「未上报」——首轮已上报的 {100,10} 不在快照里。重启后恢复以
+        // 行为准（未上报 → detail usage null），本用例按此实际语义断言；
+        // 「usage 非未上报」跨轮保留是上报的缺口，见 review 报告。
+        let expect_usage_reported = checkpoint.usage_reported;
+
+        // 4) 强杀 core（fake-claude 子进程随树同死——tool_result 从此不可达）。
+        let pid = core.id().expect("core pid");
+        support::kill_tree(pid);
+
+        // 5) 按原参数重启（同 config、同 env 装配）。
+        let _core2 = sb.spawn_core();
+        wait_reachable(&cli, &sb).await;
+
+        // 6) 回放留痕：重启后的 core.log 出现完成行（restored=1：恰好该会话）。
+        wait_log_contains(
+            "checkpoint replay completion line in the restarted core log",
+            &sb.core_log,
+            &["session checkpoint 回放完成", "restored=1"],
+        )
+        .await;
+
+        // 7) 转录 + usage 恢复：detail 带首轮完整往返；usage 投影与 checkpoint
+        //    行一致（已上报 → {in,out}；未上报 → null，「不以 0 冒充」）。
+        let expected_usage = if expect_usage_reported {
+            serde_json::json!({
+                "total_input": checkpoint.usage_in,
+                "total_output": checkpoint.usage_out,
+            })
+        } else {
+            serde_json::Value::Null
+        };
+        let restored = wait_for(
+            "transcript and usage to replay from the checkpoint",
+            Duration::from_secs(30),
+            &sb.path,
+            {
+                let cli = cli.clone();
+                let detail_url = detail_url.clone();
+                move || {
+                    let cli = cli.clone();
+                    let detail_url = detail_url.clone();
+                    let expected_usage = expected_usage.clone();
+                    Box::pin(async move {
+                        let v = cli
+                            .get(&detail_url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        let text = v["entries"]
+                            .as_array()?
+                            .iter()
+                            .filter_map(|e| e["content"].as_str())
+                            .collect::<Vec<_>>()
+                            .join("");
+                        let usage = &v["usage"];
+                        (text.contains("hello")
+                            && text.contains("world")
+                            && *usage == expected_usage)
+                            .then_some(v)
+                    })
+                }
+            },
+        )
+        .await;
+        assert_eq!(
+            restored["status_slug"].as_str(),
+            Some("dormant"),
+            "restored session is Dormant (no ACP child revival): {restored}"
+        );
+
+        // 8) 待批审批恢复呈现：同一 request_id 重新列在读模型（完整语义行，
+        //    审查卡的面即数据源）。
+        let restored_row = wait_for(
+            "the replayed approval to re-enter the read model",
+            Duration::from_secs(20),
+            &sb.path,
+            {
+                let approvals_of = approvals_of.clone();
+                let request_id = request_id.clone();
+                move || {
+                    let approvals_of = approvals_of.clone();
+                    let request_id = request_id.clone();
+                    Box::pin(async move {
+                        approvals_of()
+                            .await?
+                            .into_iter()
+                            .find(|row| row["request_id"].as_str() == Some(request_id.as_str()))
+                    })
+                }
+            },
+        )
+        .await;
+        assert_eq!(restored_row["tool_name"].as_str(), Some("Bash"));
+        assert_eq!(
+            restored_row["args"]["command"].as_str(),
+            Some("rm -rf /"),
+            "replayed row must carry the gated call's args: {restored_row}"
+        );
+
+        // 9) 决定送达：deny → 200；core.log 留痕行（request_id + 决定 + 会话）；
+        //    泊车登记解除（读模型清空）。
+        let (st, b) = post_json(
+            &cli,
+            &format!("{}/api/permissions/{request_id}/answer", sb.webui_url()),
+            serde_json::json!({ "decision": { "decision": "deny" } }),
+        )
+        .await
+        .expect("answer the restored approval");
+        assert_eq!(st, 200, "restored approval must be decidable: {b}");
+        wait_log_contains(
+            "core answer trace line for the replayed request",
+            &sb.core_log,
+            &[
+                "approval answer accepted (acp)",
+                &request_id,
+                "decision=Deny",
+            ],
+        )
+        .await;
+        wait_for(
+            "parked registration to clear after the answer",
+            Duration::from_secs(15),
+            &sb.path,
+            {
+                let approvals_of = approvals_of.clone();
+                let request_id = request_id.clone();
+                move || {
+                    let approvals_of = approvals_of.clone();
+                    let request_id = request_id.clone();
+                    Box::pin(async move {
+                        approvals_of()
+                            .await?
+                            .iter()
+                            .all(|row| row["request_id"].as_str() != Some(request_id.as_str()))
+                            .then_some(())
+                    })
+                }
+            },
+        )
+        .await;
+
+        // 10) 截断诚实：原回合的 tool_result 不出现——决定已被接受并留痕，
+        //     但 ACP 子进程已死，执行体永远收不到批复（已知语义，按实断言）。
+        let entries_len_before = {
+            let (_st, after) = get_json_status(&cli, &detail_url)
+                .await
+                .expect("detail after the answer");
+            let text = after["entries"]
+                .as_array()
+                .map(|entries| {
+                    entries
                         .iter()
                         .filter_map(|e| e["content"].as_str())
                         .collect::<Vec<_>>()
-                        .join("");
-                    let usage = &v["usage"];
-                    (text.contains("hello")
-                        && text.contains("world")
-                        && *usage == expected_usage)
-                    .then_some(v)
+                        .join("")
                 })
-            }
-        },
-    )
-    .await;
-    assert_eq!(
-        restored["status_slug"].as_str(),
-        Some("dormant"),
-        "restored session is Dormant (no ACP child revival): {restored}"
-    );
+                .unwrap_or_default();
+            assert!(
+                !text.contains("perm done") && !text.contains("denied by fake"),
+                "the dead child's tool_result must not be faked into the transcript: {text:?}"
+            );
+            after["entries"].as_array().map(|e| e.len()).unwrap_or(0)
+        };
 
-    // 8) 待批审批恢复呈现：同一 request_id 重新列在读模型（完整语义行，
-    //    审查卡的面即数据源）。
-    let restored_row = wait_for(
-        "the replayed approval to re-enter the read model",
-        Duration::from_secs(20),
-        &sb.path,
-        {
-            let approvals_of = approvals_of.clone();
-            let request_id = request_id.clone();
-            move || {
-                let approvals_of = approvals_of.clone();
-                let request_id = request_id.clone();
-                Box::pin(async move {
-                    approvals_of().await?.into_iter().find(|row| {
-                        row["request_id"].as_str() == Some(request_id.as_str())
-                    })
-                })
-            }
-        },
-    )
-    .await;
-    assert_eq!(restored_row["tool_name"].as_str(), Some("Bash"));
-    assert_eq!(
-        restored_row["args"]["command"].as_str(),
-        Some("rm -rf /"),
-        "replayed row must carry the gated call's args: {restored_row}"
-    );
-
-    // 9) 决定送达：deny → 200；core.log 留痕行（request_id + 决定 + 会话）；
-    //    泊车登记解除（读模型清空）。
-    let (st, b) = post_json(
-        &cli,
-        &format!("{}/api/permissions/{request_id}/answer", sb.webui_url()),
-        serde_json::json!({ "decision": { "decision": "deny" } }),
-    )
-    .await
-    .expect("answer the restored approval");
-    assert_eq!(st, 200, "restored approval must be decidable: {b}");
-    wait_log_contains(
-        "core answer trace line for the replayed request",
-        &sb.core_log,
-        &["approval answer accepted (acp)", &request_id, "decision=Deny"],
-    )
-    .await;
-    wait_for(
-        "parked registration to clear after the answer",
-        Duration::from_secs(15),
-        &sb.path,
-        {
-            let approvals_of = approvals_of.clone();
-            let request_id = request_id.clone();
-            move || {
-                let approvals_of = approvals_of.clone();
-                let request_id = request_id.clone();
-                Box::pin(async move {
-                    approvals_of()
-                        .await?
-                        .iter()
-                        .all(|row| row["request_id"].as_str() != Some(request_id.as_str()))
-                        .then_some(())
-                })
-            }
-        },
-    )
-    .await;
-
-    // 10) 截断诚实：原回合的 tool_result 不出现——决定已被接受并留痕，
-    //     但 ACP 子进程已死，执行体永远收不到批复（已知语义，按实断言）。
-    let entries_len_before = {
-        let (_st, after) = get_json_status(&cli, &detail_url)
-            .await
-            .expect("detail after the answer");
-        let text = after["entries"]
-            .as_array()
-            .map(|entries| {
-                entries
-                    .iter()
-                    .filter_map(|e| e["content"].as_str())
-                    .collect::<Vec<_>>()
-                    .join("")
-            })
-            .unwrap_or_default();
-        assert!(
-            !text.contains("perm done") && !text.contains("denied by fake"),
-            "the dead child's tool_result must not be faked into the transcript: {text:?}"
-        );
-        after["entries"].as_array().map(|e| e.len()).unwrap_or(0)
-    };
-
-    // 11) 会话可继续对话（spec「checkpoint 截断诚实呈现」末段）：决定后
-    //     再发一条消息，Dormant 恢复行走激活路径拉起新子进程，新回合
-    //     正常完成（转录继续追加，不依赖旧子进程的 tool_result）。
-    let (st, b) = post_json(
-        &cli,
-        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
-        serde_json::json!({ "message": "hello" }),
-    )
-    .await
-    .expect("send follow-up message");
-    assert_eq!(st, 200, "follow-up accepted: {b}");
-    wait_turn_done(&cli, &sb, &detail_url).await;
-    let (_st, final_detail) = get_json_status(&cli, &detail_url)
+        // 11) 会话可继续对话（spec「checkpoint 截断诚实呈现」末段）：决定后
+        //     再发一条消息，Dormant 恢复行走激活路径拉起新子进程，新回合
+        //     正常完成（转录继续追加，不依赖旧子进程的 tool_result）。
+        let (st, b) = post_json(
+            &cli,
+            &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+            serde_json::json!({ "message": "hello" }),
+        )
         .await
-        .expect("final detail");
-    let entries_after = final_detail["entries"].as_array().map(|e| e.len()).unwrap_or(0);
-    assert!(
-        entries_after > entries_len_before,
-        "the follow-up turn must append transcript entries: before={entries_len_before} after={entries_after}"
-    );
-}
+        .expect("send follow-up message");
+        assert_eq!(st, 200, "follow-up accepted: {b}");
+        wait_turn_done(&cli, &sb, &detail_url).await;
+        let (_st, final_detail) = get_json_status(&cli, &detail_url)
+            .await
+            .expect("final detail");
+        let entries_after = final_detail["entries"]
+            .as_array()
+            .map(|e| e.len())
+            .unwrap_or(0);
+        assert!(
+            entries_after > entries_len_before,
+            "the follow-up turn must append transcript entries: before={entries_len_before} after={entries_after}"
+        );
+    }
 }
 
 // ── add-agent-settings-and-session-titles：agent 目录 journey（5.2）──────────
@@ -10695,10 +10937,19 @@ mod agent_catalog {
             .iter()
             .filter_map(|a| a["id"].as_str().map(str::to_string))
             .collect();
-        assert!(ids.iter().any(|i| i == "native"), "native is always present: {body}");
-        assert!(ids.iter().any(|i| i == "claude"), "config seed already listed: {body}");
+        assert!(
+            ids.iter().any(|i| i == "native"),
+            "native is always present: {body}"
+        );
+        assert!(
+            ids.iter().any(|i| i == "claude"),
+            "config seed already listed: {body}"
+        );
         let raw = body.to_string();
-        assert!(!raw.contains("\"driver\""), "catalog must not leak driver: {raw}");
+        assert!(
+            !raw.contains("\"driver\""),
+            "catalog must not leak driver: {raw}"
+        );
 
         // 同 id 再 create → 409（store 赢：种子行已受 Settings 管辖）。
         let (status, body) = post_json(
@@ -10739,8 +10990,19 @@ mod agent_catalog {
                     let cli = cli.clone();
                     let url = url.clone();
                     Box::pin(async move {
-                        let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
-                        v["agents"].as_array()?.iter().find(|a| a["id"] == "stub" && a["reachable"] == true).cloned()
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
+                        v["agents"]
+                            .as_array()?
+                            .iter()
+                            .find(|a| a["id"] == "stub" && a["reachable"] == true)
+                            .cloned()
                     })
                 }
             },
@@ -10769,7 +11031,9 @@ mod agent_catalog {
             .and_then(|a| a.iter().find(|a| a["id"] == "claude").cloned())
             .expect("config seed claude row");
         assert!(
-            claude_row.get("sessions_dir").is_some_and(|v| v.is_string()),
+            claude_row
+                .get("sessions_dir")
+                .is_some_and(|v| v.is_string()),
             "claude seed row carries its sessions_dir: {claude_row}"
         );
         // native 是内置保留 id（无 store 行）：不得被富化出 launch 键。
@@ -10807,7 +11071,9 @@ mod agent_catalog {
             .await
             .expect("delete agent");
         assert_eq!(resp.status().as_u16(), 200, "delete agent");
-        let (_status, body) = get_json_status(&cli, &agents_url).await.expect("catalog after delete");
+        let (_status, body) = get_json_status(&cli, &agents_url)
+            .await
+            .expect("catalog after delete");
         assert!(
             !body.to_string().contains("\"stub\""),
             "deleted agent leaves the catalog: {body}"
@@ -10824,7 +11090,10 @@ mod agent_catalog {
         )
         .await
         .expect("create session with the deleted agent");
-        assert_eq!(status, 201, "the row is created; the rejection rides the transcript: {body}");
+        assert_eq!(
+            status, 201,
+            "the row is created; the rejection rides the transcript: {body}"
+        );
         let key2 = body["key"].as_str().expect("key").to_string();
         let detail2 = format!("{}/api/sessions/{key2}", sb.webui_url());
         let hint = sb.path.clone();
@@ -10839,7 +11108,14 @@ mod agent_catalog {
                     let cli = cli.clone();
                     let url = url.clone();
                     Box::pin(async move {
-                        let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
                         // wire 契约（models.rs SessionStatus::derive）：SpawnFailed
                         // 相位的 detail slug 是 "failed"，typed 拒绝的原因原文在
                         // spawn_failure_reason——那里必须点名 id。
@@ -10855,9 +11131,15 @@ mod agent_catalog {
         .await;
 
         // 已建会话（第 3 步）保持 done，不受目录变更影响。
-        let (status, v) = get_json_status(&cli, &detail_url).await.expect("earlier session detail");
+        let (status, v) = get_json_status(&cli, &detail_url)
+            .await
+            .expect("earlier session detail");
         assert_eq!(status, 200);
-        assert_eq!(v["status_slug"].as_str(), Some("done"), "earlier session unaffected: {v}");
+        assert_eq!(
+            v["status_slug"].as_str(),
+            Some("done"),
+            "earlier session unaffected: {v}"
+        );
     }
 
     /// 8.2 沙箱真实升级路径演练（进程级固化）：带 `[acp.agents.claude]` 的
@@ -10911,7 +11193,8 @@ mod agent_catalog {
         // 补回来，既有数据不受影响。
         let settings_db = sb.path.join("settings.db");
         let conn = sebas_db::conn::open(&settings_db).expect("open settings.db");
-        conn.execute("DROP TABLE agents", []).expect("drop agents table");
+        conn.execute("DROP TABLE agents", [])
+            .expect("drop agents table");
         drop(conn);
 
         // 升级启动：旧 config（[acp.agents.claude] 原样在场）+ 旧状态目录。
@@ -10933,8 +11216,14 @@ mod agent_catalog {
                 .unwrap_or_else(|| panic!("{id} must be listed: {v}"))
         };
         let claude = find(&body, "claude");
-        assert_eq!(claude["reachable"], true, "seeded claude must probe: {claude}");
-        assert!(find(&body, "native").is_object(), "native survives the restart: {body}");
+        assert_eq!(
+            claude["reachable"], true,
+            "seeded claude must probe: {claude}"
+        );
+        assert!(
+            find(&body, "native").is_object(),
+            "native survives the restart: {body}"
+        );
 
         // 2) 旧会话可达：重启后仍在列表（persisted session map）、详情可读、
         // 归档前那回合的转写还在。注：preview 命名不随普通重启保留（row 的
@@ -10953,9 +11242,10 @@ mod agent_catalog {
             .unwrap_or_else(|| panic!("the legacy session must survive the restart: {list}"));
         assert_eq!(row["status_slug"].as_str(), Some("dormant"), "{row}");
         assert_eq!(row["agent_kind"].as_str(), Some("claude"), "{row}");
-        let (status, detail) = get_json_status(&cli, &format!("{}/api/sessions/{key}", sb.webui_url()))
-            .await
-            .expect("legacy session detail after restart");
+        let (status, detail) =
+            get_json_status(&cli, &format!("{}/api/sessions/{key}", sb.webui_url()))
+                .await
+                .expect("legacy session detail after restart");
         assert_eq!(status, 200, "{detail}");
         assert_eq!(
             detail["agent_kind"].as_str(),
@@ -10977,7 +11267,10 @@ mod agent_catalog {
                 .await
                 .expect("PUT /api/agents/claude");
             let status = resp.status().as_u16();
-            (status, resp.json::<serde_json::Value>().await.unwrap_or_default())
+            (
+                status,
+                resp.json::<serde_json::Value>().await.unwrap_or_default(),
+            )
         };
         assert_eq!(status, 200, "edit after upgrade: {body}");
         let (_, body) = get_json_status(&cli, &format!("{}/api/agents", sb.webui_url()))
@@ -11003,7 +11296,12 @@ mod agent_catalog {
         .expect("create post-upgrade session");
         assert_eq!(status, 201, "{body}");
         let key2 = body["key"].as_str().expect("key").to_string();
-        wait_turn_done(&cli, &sb, &format!("{}/api/sessions/{key2}", sb.webui_url())).await;
+        wait_turn_done(
+            &cli,
+            &sb,
+            &format!("{}/api/sessions/{key2}", sb.webui_url()),
+        )
+        .await;
     }
 
     /// fix-webui-qa-round14 4.8（D-4-4）：存量启动 path 以 `path_raw` 走完
@@ -11068,7 +11366,14 @@ mod agent_catalog {
                     let cli = cli.clone();
                     let url = url.clone();
                     Box::pin(async move {
-                        let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+                        let v = cli
+                            .get(&url)
+                            .send()
+                            .await
+                            .ok()?
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()?;
                         let ids: Vec<&str> = v["agents"]
                             .as_array()?
                             .iter()
@@ -11087,7 +11392,8 @@ mod agent_catalog {
                 .unwrap_or_else(|| panic!("{id} must be listed: {catalog}"))
         };
         assert_eq!(
-            row("stub-path")["path_raw"], fake,
+            row("stub-path")["path_raw"],
+            fake,
             "stored path must ride the catalog row: {}",
             row("stub-path")
         );
@@ -11129,7 +11435,12 @@ mod auto_title {
     async fn sandbox_with_title_provider(
         sub: &str,
         title_text: &str,
-    ) -> (Sandbox, reqwest::Client, tokio::process::Child, tokio::process::Child) {
+    ) -> (
+        Sandbox,
+        reqwest::Client,
+        tokio::process::Child,
+        tokio::process::Child,
+    ) {
         let sb = Sandbox::new("testsuite_e2e", sub);
         std::fs::write(
             sb.path.join("defaults.json"),
@@ -11181,9 +11492,10 @@ mod auto_title {
         let journal = sb.path.join("title-journal.jsonl");
 
         // defaults.json 已被首启导入：default selection 经 BFF 只读面如实可见。
-        let (_, defaults) = get_json_status(&cli, &format!("{}/api/provider-defaults", sb.webui_url()))
-            .await
-            .expect("provider defaults");
+        let (_, defaults) =
+            get_json_status(&cli, &format!("{}/api/provider-defaults", sb.webui_url()))
+                .await
+                .expect("provider defaults");
         assert_eq!(defaults["default_provider"], "titlep", "{defaults}");
         assert_eq!(defaults["default_model"], "title-model", "{defaults}");
 
@@ -11320,7 +11632,10 @@ mod auto_title {
         let lines = title_journal_lines(&journal);
         assert_eq!(lines.len(), 1, "exactly one title call: {lines:?}");
         let line = &lines[0];
-        assert!(line.contains("POST /v1/messages"), "anthropic slot first: {line}");
+        assert!(
+            line.contains("POST /v1/messages"),
+            "anthropic slot first: {line}"
+        );
         assert!(line.contains(r#""model":"title-model""#), "{line}");
         assert!(line.contains("x-api-key: sk-title-stub"), "{line}");
         assert!(line.contains("生成一个简短标题"), "{line}");
@@ -12322,8 +12637,7 @@ done
         )
         .expect("bridge is valid JSON");
         assert_eq!(
-            bridge["providers"]["anthropic"]["baseUrl"],
-            "https://pi-stub.example/anthropic",
+            bridge["providers"]["anthropic"]["baseUrl"], "https://pi-stub.example/anthropic",
             "桥的 anthropic.baseUrl 等于注册表端点: {bridge}"
         );
         assert_eq!(
@@ -12345,12 +12659,15 @@ done
             .map(str::to_string)
             .collect();
         assert!(
-            injected.iter().any(|l| l == "SEBAS_PI_KEY_0=sk-pi-injected"),
+            injected
+                .iter()
+                .any(|l| l == "SEBAS_PI_KEY_0=sk-pi-injected"),
             "SEBAS_PI_KEY_0 真值必须进 pi 子进程 env: {injected:?}"
         );
         assert!(
-            !injected.iter().any(|l| l.starts_with("ANTHROPIC_API_KEY=")
-                || l.starts_with("ANTHROPIC_BASE_URL=")),
+            !injected.iter().any(
+                |l| l.starts_with("ANTHROPIC_API_KEY=") || l.starts_with("ANTHROPIC_BASE_URL=")
+            ),
             "sebas 不得喷 ANTHROPIC_* env 给 pi: {injected:?}"
         );
 

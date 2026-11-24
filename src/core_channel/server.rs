@@ -644,7 +644,11 @@ async fn turn_coalescer(
             for ((channel, key), entries) in buf.drain() {
                 let _ = tx
                     .send(SessionStreamFrame::Turn {
-                        event: TurnStreamEvent { channel, key, entries },
+                        event: TurnStreamEvent {
+                            channel,
+                            key,
+                            entries,
+                        },
                     })
                     .await;
             }
@@ -986,6 +990,7 @@ async fn dispatch(
             mode,
             agent,
             node,
+            task_id,
         } => {
             // 远端项目（add-remote-execution-node 5.1/8.2）：路径可用性由**节点**
             // 判定，主控不做本地 stat——在别人的机器上 stat 本机路径毫无意义，
@@ -1025,7 +1030,12 @@ async fn dispatch(
                 .spawn_with(prompt, project_dir, &agent, model, mode, None)
                 .await
             {
-                Ok(key) => CoreChannelResponse::Spawned { key },
+                Ok(key) => {
+                    // （agent-task-center 1.2）任务关联随创建请求透传到映射
+                    // （core 不校验存在性）；None 时 helper 是 no-op。
+                    router.set_session_task_id(&key, task_id).await;
+                    CoreChannelResponse::Spawned { key }
+                }
                 Err(rejection) => CoreChannelResponse::Rejected { rejection },
             }
         }
@@ -1035,6 +1045,7 @@ async fn dispatch(
             mode,
             agent,
             node,
+            task_id,
         } => {
             if let Some(node_id) = node
                 .as_deref()
@@ -1071,7 +1082,10 @@ async fn dispatch(
                 .create_placeholder(project_dir, &agent, model, mode, None)
                 .await
             {
-                Ok(key) => CoreChannelResponse::Spawned { key },
+                Ok(key) => {
+                    router.set_session_task_id(&key, task_id).await;
+                    CoreChannelResponse::Spawned { key }
+                }
                 Err(rejection) => CoreChannelResponse::Rejected { rejection },
             }
         }
@@ -1506,10 +1520,16 @@ async fn dispatch(
             .await
             {
                 crate::usage_local::UsageQueryOutcome::Ok(payload) => {
-                    CoreChannelResponse::UsageTimeseries { status: 200, payload }
+                    CoreChannelResponse::UsageTimeseries {
+                        status: 200,
+                        payload,
+                    }
                 }
                 crate::usage_local::UsageQueryOutcome::RouterError { status, body } => {
-                    CoreChannelResponse::UsageTimeseries { status, payload: body }
+                    CoreChannelResponse::UsageTimeseries {
+                        status,
+                        payload: body,
+                    }
                 }
                 crate::usage_local::UsageQueryOutcome::RouterUnreachable { cause } => {
                     CoreChannelResponse::Rejected {
@@ -1926,11 +1946,10 @@ mod tests {
         // 先到的一帧可能是首个窗口批帧（时序），但 resync 必须在后续到达。
         let mut saw_resync = false;
         for _ in 0..4 {
-            let frame =
-                tokio::time::timeout(std::time::Duration::from_secs(5), out_rx.recv())
-                    .await
-                    .expect("frame timeout")
-                    .expect("coalescer alive");
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(5), out_rx.recv())
+                .await
+                .expect("frame timeout")
+                .expect("coalescer alive");
             match frame {
                 SessionStreamFrame::Resync => {
                     saw_resync = true;
@@ -1952,16 +1971,16 @@ mod tests {
         .unwrap();
         let mut resumed = false;
         for _ in 0..6 {
-            let frame =
-                tokio::time::timeout(std::time::Duration::from_secs(5), out_rx.recv())
-                    .await
-                    .expect("frame timeout")
-                    .expect("coalescer alive");
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(5), out_rx.recv())
+                .await
+                .expect("frame timeout")
+                .expect("coalescer alive");
             if let SessionStreamFrame::Turn { event } = frame
-                && event.entries.iter().any(|e| e.content == "after") {
-                    resumed = true;
-                    break;
-                }
+                && event.entries.iter().any(|e| e.content == "after")
+            {
+                resumed = true;
+                break;
+            }
         }
         assert!(resumed, "stream must resume with Turn frames after resync");
     }
@@ -2005,6 +2024,7 @@ mod tests {
             spawn_failure_reason: None,
             available_commands: Vec::new(),
             first_prompt_preview: None,
+            task_id: None,
         }
     }
 

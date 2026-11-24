@@ -110,6 +110,7 @@ mod tests {
                 mode: Some("allow".into()),
                 agent: "claudecode".into(),
                 node: None,
+                task_id: None,
             },
             CoreChannelRequest::CreatePlaceholder {
                 project_dir: Some("/tmp/p".into()),
@@ -117,6 +118,7 @@ mod tests {
                 mode: None,
                 agent: "claudecode".into(),
                 node: None,
+                task_id: None,
             },
             CoreChannelRequest::SetSessionModel {
                 key: key.clone(),
@@ -285,6 +287,7 @@ mod tests {
             label: None,
             available_commands: Vec::new(),
             first_prompt_preview: None,
+            task_id: None,
         };
         let frames = vec![
             SessionStreamFrame::Snapshot {

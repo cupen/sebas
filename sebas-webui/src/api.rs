@@ -33,6 +33,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 
 /// How often the server pings connected WebSocket clients to keep the
@@ -40,7 +41,7 @@ use tokio::time::MissedTickBehavior;
 const WS_PING_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Uniform JSON error body: `{ "error": "..." }` with a status code.
-fn api_error(status: StatusCode, message: impl Into<String>) -> Response {
+pub(crate) fn api_error(status: StatusCode, message: impl Into<String>) -> Response {
     (status, Json(json!({ "error": message.into() }))).into_response()
 }
 
@@ -253,8 +254,8 @@ pub async fn session_detail(
         .remote
         .as_ref()
         .map_or(info.parked_approvals, |r| r.parked_approvals);
-    let derived = SessionStatus::derive(&info.status, info.phase.as_ref())
-        .with_parked_approvals(parked);
+    let derived =
+        SessionStatus::derive(&info.status, info.phase.as_ref()).with_parked_approvals(parked);
 
     let mut data = json!({
         "channel": info.channel,
@@ -604,7 +605,11 @@ pub async fn usage_timeseries(
         Ok(payload) => Json(payload).into_response(),
         Err(crate::session_backend::UsageQueryError::RouterError { status, message }) => {
             let status = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
-            (status, Json(json!({"error": message, "cause": "router_error"}))).into_response()
+            (
+                status,
+                Json(json!({"error": message, "cause": "router_error"})),
+            )
+                .into_response()
         }
         Err(crate::session_backend::UsageQueryError::RouterUnreachable { cause }) => (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -846,16 +851,18 @@ pub(crate) fn enrich_agent_catalog_rows(
     agents: Vec<crate::agent_kinds::AgentKindInfo>,
     store_rows: &[serde_json::Value],
 ) -> Vec<serde_json::Value> {
-    let launch_by_id: std::collections::BTreeMap<String, serde_json::Map<String, serde_json::Value>> =
-        store_rows
-            .iter()
-            .filter_map(|r| {
-                r.get("id")
-                    .and_then(serde_json::Value::as_str)
-                    .map(|id| id.to_string())
-            })
-            .zip(store_rows.iter().filter_map(|r| r.as_object().cloned()))
-            .collect();
+    let launch_by_id: std::collections::BTreeMap<
+        String,
+        serde_json::Map<String, serde_json::Value>,
+    > = store_rows
+        .iter()
+        .filter_map(|r| {
+            r.get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(|id| id.to_string())
+        })
+        .zip(store_rows.iter().filter_map(|r| r.as_object().cloned()))
+        .collect();
     agents
         .into_iter()
         .map(|a| {
@@ -1392,7 +1399,8 @@ pub async fn create_session(
     };
     let (project_dir, node) = {
         // store 不可达 ≠ 「未知 project_id」：前者是 503 + cause，后者才是 400。
-        let entries = match projects_or_unavailable(&state, "无法确认项目是否已注册").await {
+        let entries = match projects_or_unavailable(&state, "无法确认项目是否已注册").await
+        {
             Ok(entries) => entries,
             Err(resp) => return resp,
         };
@@ -1821,10 +1829,7 @@ pub struct MkdirRequest {
 /// 无 core 参与。边界校验与 browse-dirs 同一单点（`fs::safe_path`，不得
 /// 旁路）；名称段拒绝空/`.`/`..`/路径分隔符；父必须已存在（拒绝 mkdir -p
 /// 式批量创建）。所有拒绝均为类型化 400（中文原因），文件系统零副作用。
-pub async fn mkdir(
-    State(state): State<WebUiState>,
-    Json(req): Json<MkdirRequest>,
-) -> Response {
+pub async fn mkdir(State(state): State<WebUiState>, Json(req): Json<MkdirRequest>) -> Response {
     match crate::fs::mkdir_in(&req.path, &req.name, &state.workspace_root) {
         Ok(resp) => (
             StatusCode::CREATED,
@@ -1949,8 +1954,9 @@ fn normalize_project_entries(mut projects: Vec<serde_json::Value>) -> Vec<serde_
     projects
 }
 
-/// 规范化一份 `{"projects": [...]}` 快照。
-fn normalize_project_rows(v: serde_json::Value) -> Vec<serde_json::Value> {
+/// 规范化一份 `{"projects": [...]}` 快照（任务中心的项目解析走同一
+/// 归一化，id 回填不漏任何读路径）。
+pub(crate) fn normalize_project_rows(v: serde_json::Value) -> Vec<serde_json::Value> {
     normalize_project_entries(
         v.get("projects")
             .and_then(serde_json::Value::as_array)
@@ -2429,7 +2435,8 @@ pub async fn projects_reorder(
     // 读当前列表 → 按新顺序重排（未知 id 落地为 add_time 顺序尾部）→ save。
     // store 不可达时拒绝：按空列表写回 = 抹掉注册表，绝不能拿「读不到」当
     // 「没有项目」。
-    let mut projects = match projects_or_unavailable(&state, "无法读取项目列表以重排").await {
+    let mut projects = match projects_or_unavailable(&state, "无法读取项目列表以重排").await
+    {
         Ok(projects) => projects,
         Err(resp) => return resp,
     };
@@ -2686,10 +2693,7 @@ pub async fn archive_session(State(state): State<WebUiState>, Path(key): Path<St
 /// 会话（Dormant 映射 + 转写回放），**成功后**才从归档删除条目——消费归档
 /// 与重建会话是同一结果的两半，重建失败时归档原样保留并返回 5xx，数据
 /// 不再有「归档删了、会话没回来」的丢失形态。
-pub async fn restore_session(
-    State(state): State<WebUiState>,
-    Path(key): Path<String>,
-) -> Response {
+pub async fn restore_session(State(state): State<WebUiState>, Path(key): Path<String>) -> Response {
     // 先读条目（删除动作推迟到重建成功之后）；未知 key 照旧 404。
     let Some(entry) = crate::archive::entry(&key) else {
         return api_error(StatusCode::NOT_FOUND, "Archived session not found");
@@ -2790,6 +2794,134 @@ fn rpc_handlers() -> HashMap<&'static str, RpcHandler> {
     handlers
 }
 
+/// （agent-task-center 4.2）任务事件 → WS 帧：`task_updated` 携带 journal
+/// 记录原文（含完整 issue 快照），`task_resync` 只点名项目（让前端全量
+/// 重取该项目的任务列表）。
+fn task_event_to_frame(event: crate::task_events::TaskEvent) -> WebUiEvent {
+    use crate::task_events::TaskEvent;
+    match event {
+        TaskEvent::Updated { project_id, record } => {
+            let crate::beads_client::BeadsEventRecord {
+                seq,
+                op,
+                issue_id,
+                actor,
+                issue,
+                comment,
+                ..
+            } = *record;
+            WebUiEvent::TaskUpdated {
+                project_id,
+                seq,
+                op,
+                issue_id,
+                actor,
+                issue: issue.map(Box::new),
+                comment,
+            }
+        }
+        TaskEvent::Resync { project_id } => WebUiEvent::TaskResync { project_id },
+    }
+}
+
+/// （agent-task-center 4.2）`tasks.watch` / `tasks.unwatch`：连接级任务
+/// 订阅。**不**进无状态 RPC 注册表——订阅是每条连接自己的转发任务集合，
+/// 连接断开即随之退出。
+///
+/// 返回 `None` = 不是任务方法（交给通用 RPC 分发）。
+async fn handle_task_watch(
+    state: &WebUiState,
+    codec: &dyn WsCodec,
+    raw: &str,
+    task_tx: &mpsc::Sender<crate::task_events::TaskEvent>,
+    forwards: &mut HashMap<String, tokio::task::JoinHandle<()>>,
+) -> Option<Frame> {
+    let Ok(Frame::Request(request)) = codec.decode(raw) else {
+        return None;
+    };
+    let is_watch = request.method == "tasks.watch";
+    let is_unwatch = request.method == "tasks.unwatch";
+    if !is_watch && !is_unwatch {
+        return None;
+    }
+    let Some(project_id) = request
+        .params
+        .get("project_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+    else {
+        return Some(Frame::Response(ResponseFrame::error(
+            request.id,
+            "invalid_params",
+            "project_id 必填",
+        )));
+    };
+    if is_unwatch {
+        if let Some(handle) = forwards.remove(&project_id) {
+            handle.abort();
+        }
+        return Some(Frame::Response(ResponseFrame::ok(
+            request.id,
+            json!({ "status": "stopped", "project_id": project_id }),
+        )));
+    }
+    let project = match crate::task_routes::lookup_project(state, &project_id).await {
+        Ok(project) => project,
+        Err((status, message)) => {
+            let code = if status == StatusCode::NOT_FOUND {
+                "project_not_found"
+            } else {
+                "project_unavailable"
+            };
+            return Some(Frame::Response(ResponseFrame::error(
+                request.id, code, message,
+            )));
+        }
+    };
+    // 订阅先于首次 HTTP 访问也要可用：惰性初始化在这里同一入口（幂等 +
+    // 按项目缓存，P3-2）。
+    if let Err(error) = state.tasks.ensure_ready(&project.id, &project.dir).await {
+        return Some(Frame::Response(ResponseFrame::error(
+            request.id,
+            "beads_init_failed",
+            error.to_string(),
+        )));
+    }
+    let mut rx = state.tasks.subscribe(&project.id, &project.dir).await;
+    let tx = task_tx.clone();
+    let forward_project = project.id.clone();
+    let handle = tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    if tx.send(event).await.is_err() {
+                        break;
+                    }
+                }
+                // 落后广播 = 丢了帧：发 resync 让前端全量重取，不断连。
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    let resync = crate::task_events::TaskEvent::Resync {
+                        project_id: forward_project.clone(),
+                    };
+                    if tx.send(resync).await.is_err() {
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+    if let Some(previous) = forwards.insert(project.id.clone(), handle) {
+        previous.abort();
+    }
+    Some(Frame::Response(ResponseFrame::ok(
+        request.id,
+        json!({ "status": "watching", "project_id": project.id }),
+    )))
+}
+
 /// Parse one client text frame and produce the reply frame, if any
 /// (add-ws-rpc-protocol D3). `Request`s dispatch through the handler
 /// registry; unknown methods get an `unknown_method` error Response with
@@ -2837,8 +2969,8 @@ fn session_phase_frame(info: &SessionInfo) -> crate::events::SessionPhaseFrame {
         .remote
         .as_ref()
         .map_or(info.parked_approvals, |r| r.parked_approvals);
-    let derived = SessionStatus::derive(&info.status, info.phase.as_ref())
-        .with_parked_approvals(parked);
+    let derived =
+        SessionStatus::derive(&info.status, info.phase.as_ref()).with_parked_approvals(parked);
     // （fix-webui-qa-findings DD2，fix-webui-qa-round6 2.1）行命名链的预览只
     // 认**首条消息锚定值**——first_prompt_preview（引擎在首条消息落转写时
     // 捕获并持久化）。user_prompt 回退已删除（crash/cancel 后它跟随最新回合
@@ -2967,6 +3099,10 @@ async fn ws_connection(state: WebUiState, socket: WebSocket) {
     // add-core-reachability-ws-push D3：可达性翻转推送支路。无翻转源的后端
     // （in-process 等）给立即关闭的接收端——Closed 后停用，与 turns 同语义。
     let mut reach_updates = Some(state.backend.reachability_updates());
+    // agent-task-center 4.2：任务事件支路。watch 的每个项目一条转发任务，
+    // 统一汇进这条连接级 mpsc——select 只有一条固定腿，订阅集合可动态增删。
+    let (task_tx, mut task_rx) = mpsc::channel::<crate::task_events::TaskEvent>(256);
+    let mut task_forwards: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
     let mut ping = tokio::time::interval(WS_PING_INTERVAL);
     ping.set_missed_tick_behavior(MissedTickBehavior::Delay);
     ping.reset();
@@ -3062,15 +3198,40 @@ async fn ws_connection(state: WebUiState, socket: WebSocket) {
                     }
                 }
             }
+            // agent-task-center 4.2：任务事件 → `task_updated` 通知帧。
+            task_event = task_rx.recv() => {
+                if let Some(event) = task_event {
+                    let text = codec.encode(&notification_frame(task_event_to_frame(event)));
+                    if sender.send(Message::Text(text.into())).await.is_err() {
+                        break;
+                    }
+                }
+            }
             frame = receiver.next() => {
                 match frame {
                     Some(Ok(msg)) => {
                         match msg {
                             Message::Close(_) => break,
                             Message::Text(text) => {
-                                // add-ws-rpc-protocol D3：客户端 Text 帧进入
-                                // RPC 分发；被忽略的帧不回写、不断连。
-                                if let Some(reply) =
+                                // agent-task-center 4.2：任务订阅是**连接级**
+                                // 状态（动态增删的转发任务），先于无状态 RPC
+                                // 注册表处理。
+                                if let Some(reply) = handle_task_watch(
+                                    &state,
+                                    &codec,
+                                    &text,
+                                    &task_tx,
+                                    &mut task_forwards,
+                                )
+                                .await
+                                {
+                                    let wire = codec.encode(&reply);
+                                    if sender.send(Message::Text(wire.into())).await.is_err() {
+                                        break;
+                                    }
+                                } else if let Some(reply) =
+                                    // add-ws-rpc-protocol D3：客户端 Text 帧进入
+                                    // RPC 分发；被忽略的帧不回写、不断连。
                                     handle_client_frame(&state, &codec, &handlers, &text).await
                                 {
                                     let wire = codec.encode(&reply);
@@ -3485,8 +3646,8 @@ mod ws_resync_tests {
     /// `session.resync` WS 帧，不再是静默丢弃。
     #[test]
     fn session_resync_maps_to_the_resync_frame() {
-        let frame = session_event_to_frame(SessionEvent::Resync)
-            .expect("Resync must produce a frame now");
+        let frame =
+            session_event_to_frame(SessionEvent::Resync).expect("Resync must produce a frame now");
         let wrapped = crate::events::notification_frame(frame);
         let crate::ws_rpc::Frame::Notification(notification) = wrapped else {
             panic!("resync must ride a Notification frame");
@@ -3529,7 +3690,10 @@ mod agent_catalog_enrichment_tests {
             Some("D:/tools/claude-custom.exe"),
             "存量启动 path 必须随 catalog 行下发"
         );
-        assert_eq!(row.get("driver_raw").and_then(|v| v.as_str()), Some("claude"));
+        assert_eq!(
+            row.get("driver_raw").and_then(|v| v.as_str()),
+            Some("claude")
+        );
         // 不在 store 快照里的行（内置 native）原样透传，无加键。
         assert!(enriched[1].get("path_raw").is_none());
     }
@@ -3613,6 +3777,7 @@ mod session_phase_frame_label_tests {
             parked_approvals: 0,
             label,
             first_prompt_preview: None,
+            task_id: None,
         }
     }
 
@@ -3667,15 +3832,15 @@ mod approvals_label_route_tests {
 
     use super::*;
     use crate::auth::AuthHandle;
+    use crate::models::RouterInfo;
     use crate::server::build_router_with_auth;
     use crate::session_backend::FakeBackend;
-    use sebas_dispatch::PendingApproval;
     use axum::body::Body;
     use axum::extract::ConnectInfo;
     use axum::http::Request;
     use http_body_util::BodyExt;
+    use sebas_dispatch::PendingApproval;
     use sebas_feishu::cards::CardConfig;
-    use crate::models::RouterInfo;
     use std::net::{IpAddr, SocketAddr};
     use std::sync::Arc;
     use tower::ServiceExt;
@@ -3704,22 +3869,13 @@ mod approvals_label_route_tests {
     async fn get(app: &axum::Router, uri: &str) -> (StatusCode, serde_json::Value) {
         let resp = app
             .clone()
-            .oneshot(
-                Request::builder()
-                    .uri(uri)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
             .await
             .unwrap();
         (resp.status(), json_of(resp).await)
     }
 
-    async fn post(
-        app: &axum::Router,
-        uri: &str,
-        body: String,
-    ) -> (StatusCode, serde_json::Value) {
+    async fn post(app: &axum::Router, uri: &str, body: String) -> (StatusCode, serde_json::Value) {
         let resp = app
             .clone()
             .oneshot(
@@ -3769,6 +3925,7 @@ mod approvals_label_route_tests {
                 parked_approvals: 0,
                 label: None,
                 first_prompt_preview: None,
+                task_id: None,
             }])
             .await;
         crate::routes::encode_session_key(&key)
@@ -3787,7 +3944,11 @@ mod approvals_label_route_tests {
                 args: serde_json::json!({"command": "ls"}),
             }],
         );
-        let (status, body) = get(&app(backend.clone()), &format!("/api/sessions/{encoded}/approvals")).await;
+        let (status, body) = get(
+            &app(backend.clone()),
+            &format!("/api/sessions/{encoded}/approvals"),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         let list = body["approvals"].as_array().expect("approvals array");
         assert_eq!(list.len(), 1);
@@ -3802,7 +3963,8 @@ mod approvals_label_route_tests {
         let backend = Arc::new(FakeBackend::new());
         let encoded = seed_session(backend.as_ref()).await;
         backend.set_pending_approvals(&encoded, Vec::new());
-        let (status, body) = get(&app(backend), &format!("/api/sessions/{encoded}/approvals")).await;
+        let (status, body) =
+            get(&app(backend), &format!("/api/sessions/{encoded}/approvals")).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
             body["approvals"].as_array().map(Vec::len),
@@ -3819,7 +3981,8 @@ mod approvals_label_route_tests {
             "web",
             "web-never-seeded",
         ));
-        let (status, _body) = get(&app(backend), &format!("/api/sessions/{encoded}/approvals")).await;
+        let (status, _body) =
+            get(&app(backend), &format!("/api/sessions/{encoded}/approvals")).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
@@ -3899,7 +4062,8 @@ mod approvals_label_route_tests {
         let (status, list) = get(&app(backend.clone()), "/api/sessions").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
-            row(&list)["label"], "发布清单会话",
+            row(&list)["label"],
+            "发布清单会话",
             "the accepted label must be on the row right after the write: {list}"
         );
 
@@ -3928,7 +4092,10 @@ mod approvals_label_route_tests {
     #[tokio::test]
     async fn pending_routes_pass_typed_rejections_through() {
         let cases = [
-            (crate::session_backend::PendingReason::Unknown, StatusCode::NOT_FOUND),
+            (
+                crate::session_backend::PendingReason::Unknown,
+                StatusCode::NOT_FOUND,
+            ),
             (
                 crate::session_backend::PendingReason::AlreadyStarted,
                 StatusCode::CONFLICT,
@@ -3973,7 +4140,8 @@ mod approvals_label_route_tests {
             &format!("/api/sessions/{encoded}/pending/7/remove"),
             &format!("/api/sessions/{encoded}/pending/7/move"),
         ] {
-            let (status, body) = post(&app(backend.clone()), uri, r#"{"to_index": 0}"#.into()).await;
+            let (status, body) =
+                post(&app(backend.clone()), uri, r#"{"to_index": 0}"#.into()).await;
             assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{uri}");
             let message = body["error"].as_str().unwrap_or_default();
             assert!(message.contains("此后端不承载待执行队列"), "{message}");
@@ -4017,6 +4185,7 @@ mod about_build_info_tests {
             workspace_root: std::env::current_dir().unwrap_or_else(|_| ".".into()),
             skills: Arc::new(UnwiredSkills),
             build,
+            tasks: Arc::new(crate::task_events::TaskEventHub::new()),
         }
     }
 
@@ -4045,7 +4214,11 @@ mod about_build_info_tests {
     async fn about_reports_unknown_fields_when_build_info_missing() {
         // 走 build_router 薄包装路径（BuildInfo::unknown）：spec「构建信息
         // 缺失时如实呈现 unknown」——四个字段必须**在场**且为 unknown。
-        let app = build_router(Arc::new(FakeBackend::new()), RouterInfo::default(), CardConfig::default());
+        let app = build_router(
+            Arc::new(FakeBackend::new()),
+            RouterInfo::default(),
+            CardConfig::default(),
+        );
         let resp = app
             .oneshot(
                 Request::builder()
@@ -4059,7 +4232,10 @@ mod about_build_info_tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         for field in ["version", "build_time", "git_branch", "git_hash"] {
-            assert_eq!(v[field], "unknown", "field {field} must surface unknown: {v}");
+            assert_eq!(
+                v[field], "unknown",
+                "field {field} must surface unknown: {v}"
+            );
         }
     }
 }

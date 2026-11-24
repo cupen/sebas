@@ -1126,7 +1126,10 @@ exit 0
             .find(|r| r["id"] == "opencode")
             .unwrap();
         let src = crate::agent_kinds::source_from_store_item(item).expect("probe source");
-        assert_eq!(src.command, vec![bin.to_string_lossy().to_string(), "acp".to_string()]);
+        assert_eq!(
+            src.command,
+            vec![bin.to_string_lossy().to_string(), "acp".to_string()]
+        );
         let info = crate::agent_kinds::discover_agent(&src).await;
         assert!(info.reachable, "private bin is reachable: {info:?}");
         assert_eq!(info.version.as_deref(), Some("2.0.8"));

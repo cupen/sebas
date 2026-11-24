@@ -20,7 +20,9 @@ use super::secret::ChannelSecret;
 use async_trait::async_trait;
 use sebas_channels::ChannelKey;
 use sebas_dispatch::TurnStreamEvent;
-use sebas_dispatch::{PendingApproval, PendingSubmission, SessionEvent, SessionInfo, SessionIdentity, TurnEntry};
+use sebas_dispatch::{
+    PendingApproval, PendingSubmission, SessionEvent, SessionIdentity, SessionInfo, TurnEntry,
+};
 use sebas_ipc::{ReadHalf, WriteHalf};
 use sebas_webui::session_backend::{
     CloseReport, PermissionDecision, PermissionNotice, Reachability, SessionBackend,
@@ -80,7 +82,8 @@ pub struct CoreChannelBackend {
     /// detached 拓扑下独立 webui 的 `execution_bodies()` 覆写从 core 的
     /// `StateSnapshot { domain: "agents" }` 载荷取值，本字段承载最近一次
     /// 成功读取（RPC 失败时保留上次已知值，避免瞬时抖动让 native 行闪灰）。
-    execution_bodies: std::sync::Mutex<Option<Vec<sebas_webui::session_backend::ExecutionBodyStatus>>>,
+    execution_bodies:
+        std::sync::Mutex<Option<Vec<sebas_webui::session_backend::ExecutionBodyStatus>>>,
 }
 
 impl CoreChannelBackend {
@@ -310,14 +313,19 @@ impl CoreChannelBackend {
         let map = payload.get("execution_bodies")?.as_object()?;
         let mut out: Vec<sebas_webui::session_backend::ExecutionBodyStatus> = map
             .iter()
-            .map(|(name, v)| sebas_webui::session_backend::ExecutionBodyStatus {
-                name: name.clone(),
-                ok: v.get("ok").and_then(serde_json::Value::as_bool).unwrap_or(false),
-                cause: v
-                    .get("cause")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string),
-            })
+            .map(
+                |(name, v)| sebas_webui::session_backend::ExecutionBodyStatus {
+                    name: name.clone(),
+                    ok: v
+                        .get("ok")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
+                    cause: v
+                        .get("cause")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                },
+            )
             .collect();
         // 确定性：native 优先，其余按名排序。
         out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -615,12 +623,15 @@ async fn handshake(
         return Err("core rejected channel handshake".into());
     }
     match ChannelHandshakeAck::from_line(line.trim()) {
-        Ok(ChannelHandshakeAck::Ok { version }) if version <= sebas_ipc::protocol::PROTOCOL_VERSION => {
+        Ok(ChannelHandshakeAck::Ok { version })
+            if version <= sebas_ipc::protocol::PROTOCOL_VERSION =>
+        {
             Ok(())
         }
         Ok(ack) => Err(format!(
             "core rejected channel handshake: {}",
-            ack.cause().unwrap_or_else(|| "unknown handshake response".into())
+            ack.cause()
+                .unwrap_or_else(|| "unknown handshake response".into())
         )),
         Err(_) => Err("core rejected channel handshake".into()),
     }
@@ -773,6 +784,9 @@ impl SessionBackend for CoreChannelBackend {
                 // 节点维度由调用方给出：`None`/`local` = 本机（与今日一致），
                 // 别的值由 core 经节点链路建立——client 自己不解析节点。
                 node,
+                // （agent-task-center 1.2）任务关联由 WebUI 创建请求携带；
+                // 继电器 1 的 webui 请求体尚未透传（见 change 6.1）。
+                task_id: None,
             })
             .await?
         {
@@ -836,6 +850,7 @@ impl SessionBackend for CoreChannelBackend {
                 mode,
                 agent: agent.to_string(),
                 node,
+                task_id: None,
             })
             .await?
         {
@@ -1097,9 +1112,7 @@ impl SessionBackend for CoreChannelBackend {
     ) -> Result<serde_json::Value, sebas_webui::session_backend::UsageQueryError> {
         use sebas_webui::session_backend::UsageQueryError;
         let rejection_err = |rejection: SessionRejection| match rejection {
-            SessionRejection::Unavailable { cause } => {
-                UsageQueryError::RouterUnreachable { cause }
-            }
+            SessionRejection::Unavailable { cause } => UsageQueryError::RouterUnreachable { cause },
             other => UsageQueryError::RouterUnreachable {
                 cause: format!("router_unreachable: usage 查询被拒绝: {other}"),
             },

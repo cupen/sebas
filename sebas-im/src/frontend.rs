@@ -710,9 +710,7 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
                 views
                     .values()
                     .filter(|v| {
-                        !v.frozen
-                            && v.session_id.is_some()
-                            && v.status == SessionPhase::Active
+                        !v.frozen && v.session_id.is_some() && v.status == SessionPhase::Active
                     })
                     .map(|v| (v.key.clone(), v.last_pos))
                     .collect()
@@ -1429,6 +1427,7 @@ mod tests {
             label: None,
             available_commands: Vec::new(),
             first_prompt_preview: None,
+            task_id: None,
         };
         fe.on_session_info(info.clone()).await;
         {
@@ -1674,6 +1673,7 @@ mod tests {
             label: None,
             available_commands: Vec::new(),
             first_prompt_preview: None,
+            task_id: None,
         })
         .await;
         fe.perm_cards
@@ -1875,6 +1875,7 @@ mod tests {
             label: None,
             available_commands: Vec::new(),
             first_prompt_preview: None,
+            task_id: None,
         }
     }
 

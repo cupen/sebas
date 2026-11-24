@@ -412,10 +412,7 @@ impl From<&sebas_dispatch::SessionInfo> for SessionRow {
             channel: info.channel.clone(),
             reference: info.key.clone(),
             session_id: info.session_id.clone(),
-            session_id_short: info
-                .session_id
-                .as_deref()
-                .map(|s| middle_truncate(s, 18)),
+            session_id_short: info.session_id.as_deref().map(|s| middle_truncate(s, 18)),
             status,
             status_label: derived.label(),
             status_slug: derived.slug(),
@@ -442,10 +439,7 @@ impl From<&sebas_dispatch::SessionInfo> for SessionRow {
             pending_count: info.pending.len(),
             remote: info.remote.clone(),
             desired_mode: info.desired_mode.as_str().to_string(),
-            effective_mode: info
-                .effective_mode
-                .as_ref()
-                .map(|m| m.as_str().to_string()),
+            effective_mode: info.effective_mode.as_ref().map(|m| m.as_str().to_string()),
             // rail-declutter-unread 1.2：未读徽标的服务端计数随行下发。
             msg_count: info.msg_count,
             // （session-parallel-liveness-and-unread-polish 1.3）spawn 失败
@@ -508,7 +502,12 @@ mod tests {
                 view.kind,
                 view.element_type
             ));
-            assert_eq!(view.kind, want_kind, "kind 渲染变了:\n{}", compared.join("\n"));
+            assert_eq!(
+                view.kind,
+                want_kind,
+                "kind 渲染变了:\n{}",
+                compared.join("\n")
+            );
             assert_eq!(
                 view.element_type,
                 want_element,
@@ -539,8 +538,8 @@ mod tests {
                 tool_use_id: None,
                 failure_class: None,
             };
-            let view = crate::models::ConversationEntryView::from(&entry)
-                .with_normalized_element_type();
+            let view =
+                crate::models::ConversationEntryView::from(&entry).with_normalized_element_type();
             assert_eq!(
                 view.element_type, raw,
                 "contract type {raw} must not be normalized to generic markdown"
@@ -555,9 +554,21 @@ mod tests {
     fn derives_every_status_row() {
         let cases = [
             (SessionPhase::Spawning, None, SessionStatus::Starting),
-            (SessionPhase::Active, Some(CardPhase::Get), SessionStatus::Queued),
-            (SessionPhase::Active, Some(CardPhase::OnIt), SessionStatus::Working),
-            (SessionPhase::Active, Some(CardPhase::Done), SessionStatus::Done),
+            (
+                SessionPhase::Active,
+                Some(CardPhase::Get),
+                SessionStatus::Queued,
+            ),
+            (
+                SessionPhase::Active,
+                Some(CardPhase::OnIt),
+                SessionStatus::Working,
+            ),
+            (
+                SessionPhase::Active,
+                Some(CardPhase::Done),
+                SessionStatus::Done,
+            ),
             (
                 SessionPhase::Active,
                 Some(CardPhase::CrossMark),
@@ -705,6 +716,7 @@ mod conversion_tests {
             parked_approvals: 0,
             label: Some("标签".into()),
             first_prompt_preview: None,
+            task_id: None,
         }
     }
 

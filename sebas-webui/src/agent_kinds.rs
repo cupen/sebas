@@ -107,15 +107,15 @@ pub async fn discover_agent(source: &AgentKindSource) -> AgentKindInfo {
     .await
     .ok()
     .filter(|o| o.status.success())
-        .map(|o| {
-            let out = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if out.is_empty() {
-                String::from_utf8_lossy(&o.stderr).trim().to_string()
-            } else {
-                out
-            }
-        })
-        .filter(|s| !s.is_empty());
+    .map(|o| {
+        let out = String::from_utf8_lossy(&o.stdout).trim().to_string();
+        if out.is_empty() {
+            String::from_utf8_lossy(&o.stderr).trim().to_string()
+        } else {
+            out
+        }
+    })
+    .filter(|s| !s.is_empty());
 
     AgentKindInfo {
         id: slug.to_string(),
@@ -189,7 +189,9 @@ fn sanitize_pi_auth_cause(raw: &str) -> String {
             let bare = tok.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
             !(bare.len() >= 3
                 && bare.contains('_')
-                && bare.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))
+                && bare
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))
         })
         .collect();
     let joined = cleaned.join(" ");
@@ -271,7 +273,10 @@ fn resolved_binary(exe: &str) -> Option<std::path::PathBuf> {
         .map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
         .unwrap_or_default();
     #[cfg(unix)]
-    return dirs.into_iter().map(|dir| dir.join(exe)).find(|p| is_executable(p));
+    return dirs
+        .into_iter()
+        .map(|dir| dir.join(exe))
+        .find(|p| is_executable(p));
     #[cfg(windows)]
     {
         let exts: Vec<String> = if std::path::Path::new(exe).extension().is_some() {
@@ -340,11 +345,7 @@ pub fn source_from_store_item(item: &serde_json::Value) -> Option<AgentKindSourc
         .unwrap_or_else(|| default_path_for_driver(&driver));
     let mut command = vec![path];
     if let Some(args) = item.get("args").and_then(serde_json::Value::as_array) {
-        command.extend(
-            args.iter()
-                .filter_map(|a| a.as_str())
-                .map(str::to_string),
-        );
+        command.extend(args.iter().filter_map(|a| a.as_str()).map(str::to_string));
     }
     if command[0].is_empty() {
         command.remove(0);
@@ -365,6 +366,16 @@ pub fn source_from_store_item(item: &serde_json::Value) -> Option<AgentKindSourc
 #[async_trait]
 pub trait AgentKindProvider: Send + Sync {
     async fn agent_kinds(&self) -> Vec<AgentKindInfo>;
+    /// 已配置的 agent id 集合（**不探测可达性**）：任务中心的 assignee /
+    /// reviewer 词表（agent-task-center 3.2）只需要 id，不必为一次校验
+    /// 逐个 spawn `<exe> --version`。
+    async fn agent_kind_ids(&self) -> Vec<String> {
+        self.agent_kinds()
+            .await
+            .into_iter()
+            .map(|kind| kind.id)
+            .collect()
+    }
     /// The kind a new session gets when the operator does not request one:
     /// config `[acp] default` at the assembly point, with the same historical
     /// `"claude"` fallback `AcpConfig::default_kind` applies when unset.
@@ -404,6 +415,13 @@ impl ConfigAgentKindProvider {
 impl AgentKindProvider for ConfigAgentKindProvider {
     async fn agent_kinds(&self) -> Vec<AgentKindInfo> {
         discover_all(&self.sources).await
+    }
+
+    async fn agent_kind_ids(&self) -> Vec<String> {
+        self.sources
+            .iter()
+            .map(|source| source.slug.clone())
+            .collect()
     }
 
     fn default_agent_kind(&self) -> String {
@@ -531,12 +549,20 @@ mod tests {
         };
 
         // ready → 无 cause。
-        let ready = make("ready-pi", "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 1.1.0; exit 0; fi\necho ready\n");
+        let ready = make(
+            "ready-pi",
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 1.1.0; exit 0; fi\necho ready\n",
+        );
         assert!(pi_auth_cause("pi", &ready).await.is_none(), "ready → None");
 
         // invalid → 可读 cause。
-        let invalid = make("invalid-pi", "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 1.1.0; exit 0; fi\necho invalid\n");
-        let cause = pi_auth_cause("pi", &invalid).await.expect("invalid → cause");
+        let invalid = make(
+            "invalid-pi",
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 1.1.0; exit 0; fi\necho invalid\n",
+        );
+        let cause = pi_auth_cause("pi", &invalid)
+            .await
+            .expect("invalid → cause");
         assert!(cause.contains("无效"), "invalid cause: {cause}");
 
         // 异常应答带 env 变量名 → 净化剔除，不泄漏实现标识。
@@ -558,7 +584,11 @@ mod tests {
     fn store_item_maps_to_probe_source() {
         let claude = serde_json::json!({"id": "seeded", "driver": "claude"});
         let src = source_from_store_item(&claude).unwrap();
-        assert_eq!(src.command, vec!["claude".to_string()], "claude 缺 path 走内置");
+        assert_eq!(
+            src.command,
+            vec!["claude".to_string()],
+            "claude 缺 path 走内置"
+        );
         assert_eq!(src.driver, "claude");
 
         let acp = serde_json::json!({
@@ -569,14 +599,19 @@ mod tests {
             "display": "Cursor",
         });
         let src = source_from_store_item(&acp).unwrap();
-        assert_eq!(src.command, vec!["cursor-agent".to_string(), "acp".to_string()]);
+        assert_eq!(
+            src.command,
+            vec!["cursor-agent".to_string(), "acp".to_string()]
+        );
         assert_eq!(src.display.as_deref(), Some("Cursor"));
 
         let empty = serde_json::json!({"id": "broken", "driver": "acp"});
         let src = source_from_store_item(&empty).unwrap();
         assert!(src.command.is_empty(), "acp 无 argv[0] = 空 argv");
-        assert!(source_from_store_item(&serde_json::json!({"driver": "acp"})).is_none(),
-            "缺 id 的条目不成源");
+        assert!(
+            source_from_store_item(&serde_json::json!({"driver": "acp"})).is_none(),
+            "缺 id 的条目不成源"
+        );
     }
 
     /// add-pi-install-recipe 2.3：path 缺省按 driver 取默认二进制名——pi 无

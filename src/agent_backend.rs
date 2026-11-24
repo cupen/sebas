@@ -23,11 +23,11 @@ use sebas_agent::session::{AgentEvent, SessionConfig, SessionHandle, SessionMana
 use sebas_agent::tools::ToolRegistry;
 use sebas_channels::ChannelKey;
 use sebas_channels::card::AppUsage;
-use sebas_domain::session::CardPhase;
 use sebas_dispatch::{
     PendingApproval, PendingSubmission, SessionEvent, SessionIdentity, SessionInfo, TurnEntry,
     TurnStreamEvent, count_chat_messages,
 };
+use sebas_domain::session::CardPhase;
 use sebas_webui::session_backend::{
     CloseReport, PermissionDecision, PermissionNotice, Reachability, SessionBackend,
     SessionRejection,
@@ -242,10 +242,10 @@ impl NativeSession {
             label: None,
             // （fix-webui-qa-round11 1.2）首条消息预览随行下发——行命名链的
             // 锚定数据源，native 会话首条消息后不再「未命名会话」。
-            first_prompt_preview: self
-                .first_prompt_preview
-                .clone()
-                .filter(|p| !p.is_empty()),
+            first_prompt_preview: self.first_prompt_preview.clone().filter(|p| !p.is_empty()),
+            // （agent-task-center 1.2）native 会话不承载任务关联（任务中心
+            // 走 ACP 会话；None 不上 wire）。
+            task_id: None,
         }
     }
 }
@@ -273,8 +273,7 @@ pub struct NativeAgentBackend {
     /// 经它重建审批面，不再依赖一次性 WS 推送（与 ACP 读模型同契约）——
     /// fake-provider 秒回的回合里推送会先于页面挂载到达，没有这层兜底，
     /// native 审批卡在竞态下永久丢失。
-    pending_approvals:
-        Arc<RwLock<HashMap<String, HashMap<String, PendingApproval>>>>,
+    pending_approvals: Arc<RwLock<HashMap<String, HashMap<String, PendingApproval>>>>,
     /// Why the native backend is unavailable (missing LLM credentials), if so.
     unavailable_cause: Option<String>,
     /// （wire-webui-sebas-agent-e2e）原生内核可供选择的模型 id 列表。来自
@@ -464,10 +463,7 @@ impl NativeAgentBackend {
     /// 落账 sink（run.rs 按 `SEBAS_AGENT_ROUTER_URL` 门控后传入；`None` =
     /// 经 router 的装配，不本地记）。幂等覆盖（重复 set 以最后一次为准）。
     pub fn set_local_usage(&self, sink: Option<crate::usage_local::LocalUsageSink>) {
-        *self
-            .local_usage
-            .write()
-            .unwrap_or_else(|e| e.into_inner()) = sink;
+        *self.local_usage.write().unwrap_or_else(|e| e.into_inner()) = sink;
     }
 
     /// 会话键编码走 `sebas-channels` 的唯一实现（canonical URL-safe
@@ -780,10 +776,9 @@ impl NativeAgentBackend {
                         // usage 如实透传（None = 只计请求数），终态取上面观察
                         // 到的收尾；sink 未装配（经 router）= 不本地记。
                         if let Some(sink) = &local_usage {
-                            let (status, error) = last_terminal.take().unwrap_or((
-                                crate::usage_local::TURN_STATUS_FINISHED,
-                                None,
-                            ));
+                            let (status, error) = last_terminal
+                                .take()
+                                .unwrap_or((crate::usage_local::TURN_STATUS_FINISHED, None));
                             sink.record(usage.clone().unwrap_or_default().into_turn_record(
                                 crate::usage_local::PROTOCOL_NATIVE,
                                 status,
@@ -940,9 +935,7 @@ impl NativeAgentBackend {
         let encoded = Self::encode_key(key);
         let mut g = self.sessions.write().await;
         let Some(session) = g.get_mut(&encoded) else {
-            return Err(SessionRejection::UnknownSession {
-                key: encoded,
-            });
+            return Err(SessionRejection::UnknownSession { key: encoded });
         };
         let from = session
             .current_model_override
@@ -1099,7 +1092,14 @@ impl SessionBackend for NativeAgentBackend {
             .clone();
         tokio::spawn(async move {
             Self::pump(
-                rx, pump_key, pump_encoded, sessions, events, turn_events, notices, pending,
+                rx,
+                pump_key,
+                pump_encoded,
+                sessions,
+                events,
+                turn_events,
+                notices,
+                pending,
                 pump_local_usage,
             )
             .await;
@@ -1266,7 +1266,11 @@ impl SessionBackend for NativeAgentBackend {
             let Some(session) = g.get_mut(&encoded) else {
                 return Err(SessionRejection::UnknownSession { key: encoded });
             };
-            let Some(pos) = session.pending_queue.iter().position(|p| p.id == pending_id) else {
+            let Some(pos) = session
+                .pending_queue
+                .iter()
+                .position(|p| p.id == pending_id)
+            else {
                 return Err(SessionRejection::PendingRejected {
                     reason: sebas_domain::session::PendingReason::Unknown,
                 });
@@ -1295,7 +1299,11 @@ impl SessionBackend for NativeAgentBackend {
             let Some(session) = g.get_mut(&encoded) else {
                 return Err(SessionRejection::UnknownSession { key: encoded });
             };
-            let Some(from) = session.pending_queue.iter().position(|p| p.id == pending_id) else {
+            let Some(from) = session
+                .pending_queue
+                .iter()
+                .position(|p| p.id == pending_id)
+            else {
                 return Err(SessionRejection::PendingRejected {
                     reason: sebas_domain::session::PendingReason::Unknown,
                 });
@@ -1919,7 +1927,9 @@ impl SessionBackend for DualSessionBackend {
         pending_id: u64,
         to_index: usize,
     ) -> Result<Vec<PendingSubmission>, SessionRejection> {
-        self.route(&key).move_pending(key, pending_id, to_index).await
+        self.route(&key)
+            .move_pending(key, pending_id, to_index)
+            .await
     }
 
     /// 会话命名（fix-webui-approval-restore-and-session-identity 5.1）：按 key
@@ -2088,7 +2098,10 @@ mod tests {
             notice.session_id
         );
         // 泊车审批读模型：决策前枚举到该请求，决策投递后清空。
-        let parked = backend.pending_approvals(key.clone()).await.expect("read model");
+        let parked = backend
+            .pending_approvals(key.clone())
+            .await
+            .expect("read model");
         assert_eq!(parked.len(), 1, "the gated call is parked");
         assert_eq!(parked[0].request_id, notice.request_id);
         assert_eq!(parked[0].tool_name, "bash");
@@ -2098,8 +2111,14 @@ mod tests {
                 .await,
             "answer must reach the pending request"
         );
-        let parked = backend.pending_approvals(key.clone()).await.expect("read model");
-        assert!(parked.is_empty(), "answered request must leave the registry");
+        let parked = backend
+            .pending_approvals(key.clone())
+            .await
+            .expect("read model");
+        assert!(
+            parked.is_empty(),
+            "answered request must leave the registry"
+        );
 
         // turn 收尾后的 transcript：策略事件 + 完成文本可见。
         let deadline = Duration::from_secs(10);
@@ -2194,7 +2213,10 @@ mod tests {
         let backend = NativeAgentBackend::with_manager(plain_manager());
         let ws = tempfile::tempdir().unwrap();
         let key = backend
-            .spawn("first message".into(), Some(ws.path().to_string_lossy().into()))
+            .spawn(
+                "first message".into(),
+                Some(ws.path().to_string_lossy().into()),
+            )
             .await
             .expect("spawn");
 
@@ -2451,7 +2473,7 @@ mod tests {
         // 不在场：探测源指向不存在的二进制。
         let absent = DualSessionBackend::new(acp, NativeAgentBackend::with_manager(manager()))
             .with_native_probe(frozen_probe(vec![
-                "sebas-definitely-not-a-pi-binary-xyz".into()
+                "sebas-definitely-not-a-pi-binary-xyz".into(),
             ]));
         let bodies = absent.execution_bodies().await.unwrap();
         let native = bodies.iter().find(|b| b.name == "native").unwrap();
@@ -2545,7 +2567,10 @@ mod tests {
         let acp_key = ChannelKey::new("web", "web-round5-pending");
         for op in [
             dual.remove_pending(acp_key.clone(), 7).await.err().unwrap(),
-            dual.move_pending(acp_key.clone(), 7, 0).await.err().unwrap(),
+            dual.move_pending(acp_key.clone(), 7, 0)
+                .await
+                .err()
+                .unwrap(),
         ] {
             assert!(
                 matches!(op, SessionRejection::PendingRejected { .. }),
@@ -2856,9 +2881,7 @@ mod tests {
     }
 
     /// 收集一轮的 turn 流（到 turn summary 收尾标记为止）。
-    async fn collect_turn(
-        turns: &mut broadcast::Receiver<TurnStreamEvent>,
-    ) -> Vec<TurnEntry> {
+    async fn collect_turn(turns: &mut broadcast::Receiver<TurnStreamEvent>) -> Vec<TurnEntry> {
         let deadline = Duration::from_secs(10);
         let mut streamed: Vec<TurnEntry> = Vec::new();
         loop {
@@ -3027,9 +3050,16 @@ mod tests {
 
         let streamed = collect_turn(&mut turns).await;
         // （fix-webui-qa-round8 2.1）spawn 的 prompt 条目先行：通知与摘要各后移一位。
-        assert_eq!(streamed.len(), 3, "prompt, notice then summary: {streamed:?}");
+        assert_eq!(
+            streamed.len(),
+            3,
+            "prompt, notice then summary: {streamed:?}"
+        );
         assert_eq!(streamed[0].kind, sebas_domain::session::TurnKind::Prompt);
-        assert_eq!(streamed[1].element_type, sebas_domain::vocabulary::TurnElementType::Notice);
+        assert_eq!(
+            streamed[1].element_type,
+            sebas_domain::vocabulary::TurnElementType::Notice
+        );
         assert_eq!(streamed[1].position, 1);
         assert!(
             streamed[1].content.contains("回合已结束且无输出"),
@@ -3101,7 +3131,11 @@ mod tests {
             .iter()
             .filter(|e| e.element_type == sebas_domain::vocabulary::TurnElementType::Tool)
             .collect();
-        assert_eq!(tools.len(), 2, "call + result both land as tool entries: {streamed:?}");
+        assert_eq!(
+            tools.len(),
+            2,
+            "call + result both land as tool entries: {streamed:?}"
+        );
         assert_eq!(
             tools[0].tool_use_id.as_deref(),
             Some("tc-read-9"),
@@ -3148,9 +3182,9 @@ mod tests {
                 ToolRegistry::with_sandbox(Duration::from_secs(10), SandboxMode::Firewall),
                 SessionConfig::default(),
             )
-            .with_policy(Arc::new(
-                sebas_agent::policy::PolicyEngine::new(Default::default()),
-            ))
+            .with_policy(Arc::new(sebas_agent::policy::PolicyEngine::new(
+                Default::default(),
+            )))
             .with_approver(sebas_agent::policy::ApproverHub::new())
         };
 
@@ -3182,7 +3216,8 @@ mod tests {
 
         // ── IM 桥面：prompt → 等落账。
         use sebas_dispatch::native_bridge::NativeSessionBridge;
-        let (router, mut out_rx) = sebas_dispatch::DispatchHandle::new(sebas_dispatch::state::SessionMap::new());
+        let (router, mut out_rx) =
+            sebas_dispatch::DispatchHandle::new(sebas_dispatch::state::SessionMap::new());
         tokio::spawn(async move { while out_rx.recv().await.is_some() {} });
         let bridge = crate::native_dispatch_bridge::DispatchNativeBridge::new(
             Arc::new(make_manager()),
@@ -3202,7 +3237,10 @@ mod tests {
         .expect("bridge session registered");
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                let turns = router.session_turns(&bridge_key, 0).await.unwrap_or_default();
+                let turns = router
+                    .session_turns(&bridge_key, 0)
+                    .await
+                    .unwrap_or_default();
                 let joined: String = turns.iter().map(|e| e.content.clone()).collect();
                 if joined.contains("chunk two") {
                     break;
@@ -3212,7 +3250,10 @@ mod tests {
         })
         .await
         .expect("bridge turn must complete");
-        let bridge_turns = router.session_turns(&bridge_key, 0).await.unwrap_or_default();
+        let bridge_turns = router
+            .session_turns(&bridge_key, 0)
+            .await
+            .unwrap_or_default();
 
         // ── 对账：两侧的流式内容条目（position/kind/element_type/content）
         // 全等；webui 面允许在此之外多出它独有的回合摘要呈现（🗒 SessionSummary，
@@ -3226,13 +3267,8 @@ mod tests {
             .collect();
         // position 不进内容对账：webui 面的 prompt 条目让内容条目整体后移
         // 一位（两侧各自单调），其余（kind/element_type/content）逐条全等。
-        let semantic_content = |e: &TurnEntry| {
-            (
-                e.kind.clone(),
-                e.element_type.clone(),
-                e.content.clone(),
-            )
-        };
+        let semantic_content =
+            |e: &TurnEntry| (e.kind.clone(), e.element_type.clone(), e.content.clone());
         assert_eq!(
             webui_content[..bridge_turns.len()]
                 .iter()
@@ -3335,8 +3371,10 @@ mod tests {
             .unwrap();
         let turns = backend.turns(key.clone(), 0).await.unwrap();
         assert!(
-            turns.iter().any(|t| t.kind == sebas_domain::session::TurnKind::Prompt
-                && t.content == "second message"),
+            turns
+                .iter()
+                .any(|t| t.kind == sebas_domain::session::TurnKind::Prompt
+                    && t.content == "second message"),
             "the appended submission lands a prompt entry: {turns:?}"
         );
         backend.close(key).await.unwrap();
@@ -3375,7 +3413,8 @@ mod tests {
             .find(|s| s.channel_key() == key)
             .expect("native session in snapshot");
         assert_eq!(
-            info.pending.len(), 2,
+            info.pending.len(),
+            2,
             "SessionInfo.pending exposes the shadow queue"
         );
 
@@ -3471,7 +3510,10 @@ mod tests {
             position_of("turn2 done"),
             position_of("turn3 done"),
         );
-        assert!(p1 < p2 && p2 < p3, "queue order must be respected: {p1} {p2} {p3}");
+        assert!(
+            p1 < p2 && p2 < p3,
+            "queue order must be respected: {p1} {p2} {p3}"
+        );
         let view = backend.pending(key.clone()).await.expect("pending read");
         assert!(view.is_empty(), "the queue drains after both turns");
         backend.close(key).await.unwrap();

@@ -21,7 +21,7 @@
 //!   指纹——归档语义不受影响（close 归档的快照落盘在 webui 侧照旧，回放
 //!   不复活已归档会话）。
 
-use super::{now_unix, DispatchHandle};
+use super::{DispatchHandle, now_unix};
 use crate::engine::stall::ParkedRequest;
 use sebas_channels::card::AppUsage;
 use sebas_domain::session::TurnEntry;
@@ -155,15 +155,15 @@ impl DispatchHandle {
     ) -> Option<SessionCheckpointSnapshot> {
         let transcript = self.turn_log.read().await.get(session_id).cloned();
         let parked = self.stall.parked_requests(session_id).await;
-        let (usage_in, usage_out, usage_reported) = match self.card_states.snapshot(session_id).await
-        {
-            Some(st) => (
-                st.usage_total.total_input,
-                st.usage_total.total_output,
-                st.usage_reported,
-            ),
-            None => (0, 0, false),
-        };
+        let (usage_in, usage_out, usage_reported) =
+            match self.card_states.snapshot(session_id).await {
+                Some(st) => (
+                    st.usage_total.total_input,
+                    st.usage_total.total_output,
+                    st.usage_reported,
+                ),
+                None => (0, 0, false),
+            };
         Some(SessionCheckpointSnapshot {
             transcript: transcript.unwrap_or_default(),
             parked,
@@ -334,7 +334,10 @@ mod tests {
     /// 夹具：全新内存引擎 + 带一个 Dormant 映射（session_id = "sess-ckpt"）
     /// 的句柄。库内行观察走全局槽的 `load_session_checkpoints`（引擎经
     /// [`install_fresh`] 装入槽，trait 对象读取即同一份状态）。
-    async fn fixture() -> (std::sync::Arc<DispatchHandle>, crate::test_engine::EngineGuard) {
+    async fn fixture() -> (
+        std::sync::Arc<DispatchHandle>,
+        crate::test_engine::EngineGuard,
+    ) {
         let guard = install_fresh();
         let (h, _rx) = DispatchHandle::new(SessionMap::default());
         let key = ChannelKey::web_new();
@@ -354,16 +357,10 @@ mod tests {
     }
 
     async fn seed_transcript(h: &DispatchHandle) {
-        h.push_transcript_entry(
-            "sess-ckpt",
-            TurnEntry::prompt(0, "帮我看看这个 bug"),
-        )
-        .await;
-        h.push_transcript_entry(
-            "sess-ckpt",
-            TurnEntry::markdown(1, "看过了，是越界。"),
-        )
-        .await;
+        h.push_transcript_entry("sess-ckpt", TurnEntry::prompt(0, "帮我看看这个 bug"))
+            .await;
+        h.push_transcript_entry("sess-ckpt", TurnEntry::markdown(1, "看过了，是越界。"))
+            .await;
     }
 
     /// 1.2 主张 1：写出行内容与内存态一致——转录条目、泊车登记、usage 全部
@@ -374,11 +371,20 @@ mod tests {
         let h = _h_arc.clone();
         seed_transcript(&h).await;
         h.stall
-            .note_permission_parked("sess-ckpt", "claude:tc-1", "Bash", serde_json::json!({"command": "ls"}))
+            .note_permission_parked(
+                "sess-ckpt",
+                "claude:tc-1",
+                "Bash",
+                serde_json::json!({"command": "ls"}),
+            )
             .await;
         h.card_states
             .apply("sess-ckpt", |st| {
-                st.usage_total = AppUsage { model: None, total_input: 120, total_output: 45 };
+                st.usage_total = AppUsage {
+                    model: None,
+                    total_input: 120,
+                    total_output: 45,
+                };
                 st.usage_reported = true;
             })
             .await;
@@ -414,14 +420,23 @@ mod tests {
         let _ = guard;
         h.card_states
             .apply("sess-ckpt", |st| {
-                st.usage_total = AppUsage { model: None, total_input: 120, total_output: 45 };
+                st.usage_total = AppUsage {
+                    model: None,
+                    total_input: 120,
+                    total_output: 45,
+                };
                 st.usage_reported = true;
             })
             .await;
 
-        h.emit_turn_card(key, "sess-ckpt", "第二轮".into(), None).await;
+        h.emit_turn_card(key, "sess-ckpt", "第二轮".into(), None)
+            .await;
 
-        let st = h.card_states.snapshot("sess-ckpt").await.expect("开轮后卡态在");
+        let st = h
+            .card_states
+            .snapshot("sess-ckpt")
+            .await
+            .expect("开轮后卡态在");
         assert_eq!(st.usage_total.total_input, 120, "会话累计跨轮保留");
         assert_eq!(st.usage_total.total_output, 45);
         assert!(st.usage_reported, "上报门控位跨轮保留");
@@ -438,16 +453,29 @@ mod tests {
         let h = _h_arc.clone();
         seed_transcript(&h).await;
 
-        assert_eq!(h.checkpoint_session_now("sess-ckpt").await, CheckpointOutcome::Written);
+        assert_eq!(
+            h.checkpoint_session_now("sess-ckpt").await,
+            CheckpointOutcome::Written
+        );
         let first = stored_rows().await;
         // 同内容再扫：Unchanged，行不动。
-        assert_eq!(h.checkpoint_session_now("sess-ckpt").await, CheckpointOutcome::Unchanged);
+        assert_eq!(
+            h.checkpoint_session_now("sess-ckpt").await,
+            CheckpointOutcome::Unchanged
+        );
         assert_eq!(stored_rows().await.len(), 1);
-        assert_eq!(stored_rows().await[0].transcript_json, first[0].transcript_json);
+        assert_eq!(
+            stored_rows().await[0].transcript_json,
+            first[0].transcript_json
+        );
 
         // 追加一条转录 → 内容变 → 再写。
-        h.push_transcript_entry("sess-ckpt", TurnEntry::markdown(2, "补充一点。")).await;
-        assert_eq!(h.checkpoint_session_now("sess-ckpt").await, CheckpointOutcome::Written);
+        h.push_transcript_entry("sess-ckpt", TurnEntry::markdown(2, "补充一点。"))
+            .await;
+        assert_eq!(
+            h.checkpoint_session_now("sess-ckpt").await,
+            CheckpointOutcome::Written
+        );
         let rows = stored_rows().await;
         assert_eq!(rows.len(), 1, "仍是一会话一行");
         let snap = SessionCheckpointSnapshot::from_row(rows[0].clone()).unwrap();
@@ -482,17 +510,22 @@ mod tests {
         let h = std::sync::Arc::new(h);
         for sid in ["sess-a", "sess-b"] {
             h.map
-                .insert(ChannelKey::web_new(), crate::state::Mapping::dormant(sid, 1))
+                .insert(
+                    ChannelKey::web_new(),
+                    crate::state::Mapping::dormant(sid, 1),
+                )
                 .await
                 .unwrap();
-            h.push_transcript_entry(sid, TurnEntry::prompt(0, "hi")).await;
+            h.push_transcript_entry(sid, TurnEntry::prompt(0, "hi"))
+                .await;
         }
         // 首轮：两个都脏 → 写 2。
         assert_eq!(h.checkpoint_dirty_sessions().await, 2);
         // 第二轮：全净 → 写 0。
         assert_eq!(h.checkpoint_dirty_sessions().await, 0);
         // 只动 sess-b → 写 1。
-        h.push_transcript_entry("sess-b", TurnEntry::markdown(1, "more")).await;
+        h.push_transcript_entry("sess-b", TurnEntry::markdown(1, "more"))
+            .await;
         assert_eq!(h.checkpoint_dirty_sessions().await, 1);
     }
 
@@ -538,7 +571,10 @@ mod tests {
         let parked = h.stall.parked_requests("sess-ckpt").await;
         assert_eq!(parked.len(), 1);
         assert_eq!(parked[0].request_id, "claude:tc-9");
-        assert_eq!(h.stall.parked_owner("claude:tc-9").await.as_deref(), Some("sess-ckpt"));
+        assert_eq!(
+            h.stall.parked_owner("claude:tc-9").await.as_deref(),
+            Some("sess-ckpt")
+        );
 
         // usage 回填：已上报会话的累计可见（快照投影非「未上报」）。
         let st = h.card_states.snapshot("sess-ckpt").await.unwrap();
@@ -608,13 +644,18 @@ mod tests {
         let (_h_arc, _guard) = fixture().await;
         let h = _h_arc.clone();
         seed_transcript(&h).await;
-        assert_eq!(h.checkpoint_session_now("sess-ckpt").await, CheckpointOutcome::Written);
+        assert_eq!(
+            h.checkpoint_session_now("sess-ckpt").await,
+            CheckpointOutcome::Written
+        );
         assert_eq!(stored_rows().await.len(), 1);
 
         let key = h.map.lookup_key_by_transcript("sess-ckpt").await.unwrap();
         assert_eq!(
             h.web_close_session(key).await,
-            crate::engine::CloseOutcome::Closed { discarded_pending: 0 }
+            crate::engine::CloseOutcome::Closed {
+                discarded_pending: 0
+            }
         );
         let rows = stored_rows().await;
         assert!(
@@ -630,10 +671,14 @@ mod tests {
         let _guard = crate::test_engine::install_none();
         let (h, _rx) = DispatchHandle::new(SessionMap::default());
         h.map
-            .insert(ChannelKey::web_new(), crate::state::Mapping::dormant("sess-x", 1))
+            .insert(
+                ChannelKey::web_new(),
+                crate::state::Mapping::dormant("sess-x", 1),
+            )
             .await
             .unwrap();
-        h.push_transcript_entry("sess-x", TurnEntry::prompt(0, "hi")).await;
+        h.push_transcript_entry("sess-x", TurnEntry::prompt(0, "hi"))
+            .await;
         assert_eq!(
             h.checkpoint_session_now("sess-x").await,
             CheckpointOutcome::EngineUnavailable
