@@ -1,9 +1,11 @@
+/* Floating settings window body (the Modal supplies the frame, title and
+ * close control). A fixed height keeps the section navigation and the content
+ * column independently scrollable instead of growing the window per section. */
 .workspace {
-  position: absolute;
-  inset: 0;
   display: flex;
+  height: min(720px, 78vh);
+  min-height: 380px;
   background: var(--sebas-bg, #141414);
-  z-index: 20;
 }
 
 .nav {
@@ -11,20 +13,10 @@
   flex-direction: column;
   gap: 12px;
   width: 190px;
-  padding: 16px;
+  flex: none;
+  padding: 14px 12px;
   border-right: 1px solid var(--sebas-border, #303030);
   overflow: auto;
-}
-
-.navHead {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.navTitle {
-  margin: 0 !important;
 }
 
 .navItem {
@@ -56,8 +48,53 @@
 .content {
   flex: 1;
   min-width: 0;
-  padding: 20px 24px;
+  padding: 16px 20px;
   overflow: auto;
+}
+
+/* Narrow windows: the section rail becomes a horizontal, scrollable row above
+ * the content (blueprint 375 settings), and every row keeps the 44px touch
+ * floor. */
+@media (max-width: 700px) {
+  .workspace {
+    height: min(640px, 76vh);
+    flex-direction: column;
+  }
+
+  .nav {
+    width: auto;
+    flex-direction: row;
+    gap: 4px;
+    padding: 8px;
+    border-right: 0;
+    border-bottom: 1px solid var(--sebas-border, #303030);
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .nav nav {
+    display: flex;
+    gap: 4px;
+  }
+
+  .navItem {
+    width: auto;
+    min-height: 44px;
+    padding: 0 12px;
+    white-space: nowrap;
+  }
+
+  .navFoot {
+    display: none;
+  }
+
+  .content {
+    padding: 12px;
+  }
+
+  .panel {
+    max-width: none;
+  }
 }
 
 .panel {

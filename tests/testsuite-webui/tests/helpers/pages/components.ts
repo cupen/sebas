@@ -309,7 +309,7 @@ export class SessionsPage {
   }
 }
 
-/** Settings workspace (opens from the rail footer). */
+/** Settings window (floating dialog, opens from the rail footer). */
 export class SettingsModal {
   readonly page: Page
   readonly host: Locator
@@ -320,7 +320,9 @@ export class SettingsModal {
     this.page = page
     this.host = page.getByRole('region', { name: '设置' })
     this.panel = this.host
-    this.closeButton = this.host.getByRole('button', { name: '关闭设置' })
+    // The close control belongs to the window chrome (Modal header), which is
+    // outside the labelled region.
+    this.closeButton = page.getByRole('dialog', { name: '设置' }).getByRole('button', { name: '关闭设置' })
   }
 
   async openViaSidebar(): Promise<void> {

@@ -74,14 +74,9 @@ export class ReactShell {
     return this.rail.getByRole('button', { name: /设\s*置/ })
   }
 
-  /** Theme segmented control (accessible name 主题). */
-  get themeGroup(): Locator {
-    return this.page.getByRole('radiogroup', { name: '主题' })
-  }
-
-  /** The clickable label of one theme choice (the radio input is not hittable). */
-  themeChoice(label: '系统' | '浅' | '深'): Locator {
-    return this.themeGroup.locator('.ant-segmented-item-label', { hasText: label })
+  /** The floating settings window (AntD Modal titled 设置). */
+  get settingsDialog(): Locator {
+    return this.page.getByRole('dialog', { name: '设置' })
   }
 
   get userMenu(): Locator {
@@ -121,12 +116,20 @@ export class ReactShell {
     return this.page.locator('html').getAttribute('data-theme')
   }
 
-  async setTheme(label: '系统' | '浅' | '深'): Promise<void> {
-    await this.themeChoice(label).click()
-    const expected = label === '系统' ? null : label === '浅' ? 'light' : 'dark'
+  async setTheme(label: '跟随系统' | '浅色' | '深色'): Promise<void> {
+    // Appearance lives in the settings window now (the rail switch is gone):
+    // drive the real journey instead of poking localStorage.
+    const settings = new ReactSettings(this.page)
+    await this.openSettings()
+    await settings.openSection('外观')
+    // Two-character CJK buttons carry an inter-character space in their
+    // accessible name (AntD typography): match through the shared helper.
+    await this.settings.getByRole('button', { name: cjk(label) }).click()
+    const expected = label === '跟随系统' ? null : label === '浅色' ? 'light' : 'dark'
     if (expected !== null) {
       await expect(this.page.locator('html')).toHaveAttribute('data-theme', expected)
     }
+    await settings.close()
   }
 }
 
@@ -411,6 +414,10 @@ export class ReactSettings {
     return this.page.getByRole('region', { name: '设置' })
   }
 
+  get dialog(): Locator {
+    return this.page.getByRole('dialog', { name: '设置' })
+  }
+
   get nav(): Locator {
     return this.region.getByRole('complementary', { name: '设置分区' })
   }
@@ -419,8 +426,9 @@ export class ReactSettings {
     return this.nav.getByRole('button', { name })
   }
 
+  /** The window's own close control (in the Modal header, outside the region). */
   get closeButton(): Locator {
-    return this.region.getByRole('button', { name: '关闭设置' })
+    return this.dialog.getByRole('button', { name: '关闭设置' })
   }
 
   async openSection(name: string): Promise<void> {

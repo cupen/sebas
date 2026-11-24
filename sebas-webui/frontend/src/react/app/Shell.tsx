@@ -7,7 +7,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from 'react'
-import { Button, Drawer, Dropdown, Segmented, Tag } from 'antd'
+import { Button, Drawer, Dropdown, Modal, Tag } from 'antd'
 import type { Role, SessionRow } from '../../api/client.js'
 import { sharedWs } from '../../api/shared-ws.js'
 import { notify, setFatal, setWsDown } from '../../notify.js'
@@ -23,7 +23,6 @@ import { useStore } from '../state/use-store.js'
 import { useRoute, navigate } from '../boundary/use-route.js'
 import { readRailCollapsed, writeRailCollapsed } from '../boundary/preferences.js'
 import { loadRailWidth, saveRailWidth } from '../../views/split-persist.js'
-import { useThemeMode } from '../theme/ThemeProvider.js'
 import { NoticeHost } from './NoticeHost.js'
 import { ProjectRail } from './ProjectRail.js'
 import { SessionCreateModal } from './SessionCreateModal.js'
@@ -87,7 +86,6 @@ export function resolveSessionKey(raw: string, rows: readonly SessionRow[]): str
 
 export function Shell({ auth, sessions, role, username }: ShellProps) {
   const { pathname, route } = useRoute()
-  const { mode, resolved, setMode } = useThemeMode()
   const summary = useStore(sessions.store, (state) => state.summary)
   const list = useStore(sessions.store, (state) => state.list)
   // 横幅聚焦标签与 rail 行同源（recent_sessions 的 WS 实时 status_slug）：
@@ -186,17 +184,19 @@ export function Shell({ auth, sessions, role, username }: ShellProps) {
 
   const closeSettings = useCallback(() => {
     setSettingsOpen(false)
+  }, [])
+
+  // Focus returns after the modal has finished unmounting; restoring earlier
+  // makes the closing dialog steal the focus straight back. The narrow drawer
+  // unmounts its own footer entry, so fall back to its visible menu trigger.
+  const restoreSettingsFocus = useCallback(() => {
     const saved = settingsReturnFocus.current
     settingsReturnFocus.current = null
-    // SettingsPage unmounts asynchronously; return focus after the tree has
-    // settled, and fall back to the narrow drawer's visible menu trigger.
-    window.setTimeout(() => {
-      const visible =
-        saved !== null && saved.isConnected && saved.getClientRects().length > 0
-          ? saved
-          : document.getElementById('nav-menu-toggle')
-      visible?.focus()
-    }, 0)
+    const visible =
+      saved !== null && saved.isConnected && saved.getClientRects().length > 0
+        ? saved
+        : document.getElementById('nav-menu-toggle')
+    visible?.focus()
   }, [])
 
   const toggleRail = useCallback(() => {
@@ -447,17 +447,6 @@ export function Shell({ auth, sessions, role, username }: ShellProps) {
           <span className={styles.navIcon} data-icon="⚙" aria-hidden="true" />
           <span className={styles.navLabel}>设置</span>
         </Button>
-        <Segmented
-          size="small"
-          aria-label="主题"
-          value={mode === 'system' ? 'system' : resolved}
-          options={[
-            { label: '系统', value: 'system' },
-            { label: '浅', value: 'light' },
-            { label: '深', value: 'dark' },
-          ]}
-          onChange={(value) => setMode(value === 'system' ? 'system' : (value as 'light' | 'dark'))}
-        />
         <Dropdown
           trigger={['click']}
           menu={{
@@ -576,13 +565,38 @@ export function Shell({ auth, sessions, role, username }: ShellProps) {
             {connected === null ? '连接中…' : connected ? '已连接' : '连接已断开'}
           </span>
         </header>
-        <main className={styles.content}>
-          {content}
-          {settingsOpen ? (
-            <SettingsPage role={role} username={username} onClose={closeSettings} />
-          ) : null}
-        </main>
+        <main className={styles.content}>{content}</main>
       </div>
+
+      {/* 设置是浮于工作台之上的独立窗口（无独立路由）：工作台保持在下面，
+       * 关闭后回到原会话与草稿。定位、宽度与窄屏分区横排在
+       * settings.module.css 里约束。 */}
+      <Modal
+        open={settingsOpen}
+        onCancel={closeSettings}
+        afterClose={restoreSettingsFocus}
+        footer={null}
+        title="设置"
+        closable={{ 'aria-label': '关闭设置' }}
+        width={980}
+        style={{ top: 40 }}
+        styles={{
+          // Full-bleed window: the settings surface owns the frame's insets so
+          // its section rail can reach the window edge instead of floating
+          // inside AntD's default 24px content padding.
+          container: { padding: 0 },
+          header: { padding: '14px 16px', marginBottom: 0 },
+          body: { padding: 0 },
+        }}
+        // A large window that scales from the centre reads as a "pop" and
+        // shifts measured geometry mid-animation: open it with a quiet fade
+        // (opacity only) instead of AntD's default zoom.
+        transitionName="sebas-settings-fade"
+        destroyOnHidden
+        focusable={{ focusTriggerAfterClose: false }}
+      >
+        <SettingsPage role={role} username={username} />
+      </Modal>
 
       <NoticeHost
         onRetry={() => {

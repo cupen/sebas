@@ -42,8 +42,18 @@ cd sebas-webui/frontend && pnpm dev:sandbox
 - `src/react/theme/ThemeProvider.tsx` 接管运行时写入，并把语义色板以 17 个
   `--sebas-*` 自定义属性内联，再在 AntD `ConfigProvider` 里换成同色 token；
 - `src/styles/tokens.css` 的浅色重映射只认 `:root[data-theme='light']`；
-- 模式（`system` / `dark` / `light`）由设置页持久化到 `localStorage['sebas:theme']`，
-  读写逻辑在 `src/react/boundary/preferences.ts`，`src/theme.ts` 只剩 `ThemeMode` 类型。
+- 模式（`system` / `dark` / `light`）只由**设置窗口 → 外观**分区切换（导航轨不设
+  主题快捷开关），持久化到 `localStorage['sebas:theme']`；读写逻辑在
+  `src/react/boundary/preferences.ts`，`src/theme.ts` 只剩 `ThemeMode` 类型。
+
+## 设置窗口
+
+设置是浮于工作台之上的独立窗口（AntD `Modal`，`Shell.tsx`），背景工作台与未发送
+草稿保持挂载；无独立路由，Esc / 关闭按钮 / 遮罩关闭后焦点归还「设置」入口。
+窗口内容在 `src/react/pages/SettingsPage.tsx`（分区导航 + 各区面板），窗口本体宽度
+980px、高度 `min(720px, 78vh)` 在 `settings.module.css`；≤700px 时分区导航横排为
+可滚动一行（行高 ≥44px）。打开/关闭用 `.sebas-settings-fade`（仅透明度，见
+`app.css`）而非 AntD 默认 zoom，避免大面板缩放。
 
 ## 代码分层
 

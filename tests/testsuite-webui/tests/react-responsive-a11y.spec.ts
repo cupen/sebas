@@ -6,7 +6,7 @@
  * 检查关键页面不产生意外横向溢出。
  *
  * 两个曾以 `test.fail()` 记录的缺陷已由实现修复并在此保留原断言：
- * 1) 设置工作区关闭后焦点归还「设置」入口；
+ * 1) 设置窗口关闭后焦点归还「设置」入口；
  * 2) reduced motion 下 AntD Drawer/mask 过渡为 0s（motion 令牌 + CSS）。
  */
 import { expect, test } from '@playwright/test'
@@ -188,7 +188,7 @@ test.describe('React 响应式与可访问性旅程', () => {
       expect(light.theme).toBe('light')
       expect(contrast(light.fg, light.bg)).toBeGreaterThanOrEqual(4.5)
 
-      await shell.setTheme('深')
+      await shell.setTheme('深色')
       const dark = await palette()
       expect(dark.theme).toBe('dark')
       expect(dark.bg).toBe('rgb(6, 8, 12)')

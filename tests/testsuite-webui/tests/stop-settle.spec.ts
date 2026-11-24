@@ -160,13 +160,12 @@ test.describe('停止收尾', () => {
         'no pending permission request',
       )
 
-      // UI face: the stale card stays visible but inert — deciding it answers
-      // 404; the React card surfaces the typed rejection inline.
-      await cards.deny().click()
-      await expect(cards.card().getByRole('alert')).toContainText(
-        'no pending permission request',
-        { timeout: 10_000 },
-      )
+      // UI face: the stale card stays visible but inert — its decision buttons
+      // are disabled（视觉验收 DEF-2）instead of inviting a decision that can
+      // only 404; the typed rejection itself is pinned on the API face above.
+      await expect(cards.card()).toBeVisible()
+      await expect(cards.deny()).toBeDisabled()
+      await expect(cards.allowOnce()).toBeDisabled()
 
       // Reload: no stop control (released → turn_engaged false), the stop
       // entry persists, and the decided/expired card is not resurrected.

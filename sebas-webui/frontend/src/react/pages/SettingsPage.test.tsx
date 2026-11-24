@@ -8,6 +8,7 @@ import {
   ModelsPanel,
   SELF_LOCK_TITLE,
   ServicesPanel,
+  SettingsPage,
   UsersPanel,
   WEAK_PASSWORD_TEXT,
   visibleSections,
@@ -384,6 +385,40 @@ describe('UsersPanel', () => {
     expect(remove).not.toHaveBeenCalled()
     fireEvent.click(within(dialog).getByRole('button', { name: /删\s*除/ }))
     await waitFor(() => expect(remove).toHaveBeenCalledWith(2))
+  })
+})
+
+describe('SettingsPage window body', () => {
+  it('renders the section rail and puts focus on the active section', async () => {
+    render(<SettingsPage role={null} username={null} />)
+    const region = screen.getByRole('region', { name: '设置' })
+    const nav = within(region).getByRole('complementary', { name: '设置分区' })
+    expect(within(nav).getAllByRole('button').map((button) => button.textContent)).toEqual([
+      '通用',
+      '外观',
+      '服务',
+      '模型',
+      '别名',
+      'Agent',
+      '技能',
+      '环境变量',
+      '关于',
+    ])
+    // The window chrome owns close/Esc; the body must not duplicate them.
+    expect(within(region).queryByRole('button', { name: '关闭设置' })).toBeNull()
+    await waitFor(() =>
+      expect(document.activeElement?.textContent).toBe('通用'),
+    )
+  })
+
+  it('switches sections on click and marks the active entry', () => {
+    render(<SettingsPage role={null} username={null} />)
+    const region = screen.getByRole('region', { name: '设置' })
+    const models = within(region).getByRole('button', { name: '模型' })
+    fireEvent.click(models)
+    expect(models.getAttribute('aria-current')).toBe('page')
+    expect(within(region).getByRole('button', { name: '通用' }).getAttribute('aria-current')).toBeNull()
+    expect(within(region).getByText('Provider 目录；凭据只显示是否已配置，config.toml 行为只读。')).toBeTruthy()
   })
 })
 

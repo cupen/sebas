@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   Alert,
   Button,
@@ -118,11 +118,15 @@ function writeRememberedSection(section: SettingsSectionId): void {
 export interface SettingsPageProps {
   role: Role | null
   username: string | null
-  onClose: () => void
 }
 
-/** Settings workspace: sections without a dedicated URL (3.6). */
-export function SettingsPage({ role, username, onClose }: SettingsPageProps) {
+/**
+ * Settings workspace: the floating window's body (sections without a dedicated
+ * URL, 3.6). The window chrome (title, close, Esc) belongs to the shell Modal;
+ * this component only owns the section navigation and the section content so
+ * the workbench underneath keeps its session and draft.
+ */
+export function SettingsPage({ role, username }: SettingsPageProps) {
   const sections = visibleSections(role)
   const remembered = rememberedSection()
   const [active, setActive] = useState<SettingsSectionId>(
@@ -131,14 +135,18 @@ export function SettingsPage({ role, username, onClose }: SettingsPageProps) {
   const [visited, setVisited] = useState<ReadonlySet<SettingsSectionId>>(
     () => new Set([remembered ?? sections[0]?.id ?? 'general']),
   )
+  const initialNavFocus = useRef<HTMLButtonElement | null>(null)
+  const focusPending = useRef(true)
 
+  // Keyboard-first entry: the dialog itself is not a useful stop, so the
+  // active section button takes focus once the window has mounted. Deferred a
+  // tick because AntD focuses its own panel first.
   useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
+    if (!focusPending.current) return
+    focusPending.current = false
+    const timer = window.setTimeout(() => initialNavFocus.current?.focus(), 0)
+    return () => window.clearTimeout(timer)
+  }, [])
 
   useEffect(() => {
     if (!sections.some((section) => section.id === active)) {
@@ -155,18 +163,11 @@ export function SettingsPage({ role, username, onClose }: SettingsPageProps) {
   return (
     <section className={styles.workspace} aria-label="设置">
       <aside className={styles.nav} aria-label="设置分区">
-        <div className={styles.navHead}>
-          <Typography.Title level={4} className={styles.navTitle}>
-            设置
-          </Typography.Title>
-          <Button size="small" onClick={onClose} aria-label="关闭设置">
-            关闭
-          </Button>
-        </div>
         <nav>
           {sections.map((section) => (
             <button
               key={section.id}
+              ref={active === section.id ? initialNavFocus : undefined}
               type="button"
               className={styles.navItem}
               aria-current={active === section.id ? 'page' : undefined}

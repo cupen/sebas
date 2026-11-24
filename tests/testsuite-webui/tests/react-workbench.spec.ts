@@ -7,7 +7,7 @@
  * `data-testid`。
  *
  * 覆盖：首屏骨架、项目上下文建房、深链切换不串话、归档/历史/恢复、
- * 审批单次允许、待执行提交的归档确认、Markdown 长内容、设置工作区不产生
+ * 审批单次允许、待执行提交的归档确认、Markdown 长内容、设置窗口不产生
  * 退休路由且不丢输入、会话总览/用量页。
  */
 import { expect, test } from '@playwright/test'
@@ -244,7 +244,7 @@ test.describe('React 工作台旅程', () => {
     })
   })
 
-  test.describe('长转录与设置工作区', () => {
+  test.describe('长转录与设置窗口', () => {
     test('rich markdown stays readable and never overflows the page', async ({ page }) => {
       await resetState(page.request)
       const { key } = await idleSession(page.request, 'idle markdown')
@@ -282,7 +282,7 @@ test.describe('React 工作台旅程', () => {
       expect(collector.clean()).toEqual([])
     })
 
-    test('settings is a workspace without a URL and preserves inputs and focus context', async ({
+    test('settings is a floating window without a URL and preserves inputs and focus context', async ({
       page,
     }) => {
       await resetState(page.request)
@@ -296,6 +296,10 @@ test.describe('React 工作台旅程', () => {
       await workbench.composerTextarea.fill('unsent draft')
 
       await shell.openSettings()
+      // A window over the workbench, not a takeover: the conversation and its
+      // composer stay mounted and visible underneath the mask.
+      await expect(shell.settingsDialog).toBeVisible()
+      await expect(workbench.composerTextarea).toBeVisible()
       // No resurrected /settings route.
       await expect(page).toHaveURL(new RegExp(`/sessions/${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`))
       await expect(settings.nav.getByRole('button', { name: '通用' })).toBeVisible()

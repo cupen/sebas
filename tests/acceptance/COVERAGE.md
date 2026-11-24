@@ -387,8 +387,8 @@ requirement），子功能 = 二层 `test.describe`，一行 = 一条用例；�
 | React 工作台旅程 | 归档与历史 | archives from the row menu, shows the read-only snapshot and restores | `react-workbench.spec.ts` | agent-workbench（delta）「归档保持安全语义」 |
 | React 工作台旅程 | 归档与历史 | archive confirmation names the pending submissions it will discard | `react-workbench.spec.ts` | agent-workbench（delta）「归档保持安全语义」 |
 | React 工作台旅程 | 审批与待办 | allow-once resolves only the current request and the turn completes | `react-workbench.spec.ts` | agent-workbench（delta）「并行审批逐一完成」（单请求半边） |
-| React 工作台旅程 | 长转录与设置工作区 | rich markdown stays readable and never overflows the page | `react-workbench.spec.ts` | agent-workbench（delta）「长转录阅读与输入」 |
-| React 工作台旅程 | 长转录与设置工作区 | settings is a workspace without a URL and preserves inputs and focus context | `react-workbench.spec.ts` | agent-workbench（delta）「设置中往返不丢工作上下文」 |
+| React 工作台旅程 | 长转录与设置窗口 | rich markdown stays readable and never overflows the page | `react-workbench.spec.ts` | agent-workbench（delta）「长转录阅读与输入」 |
+| React 工作台旅程 | 长转录与设置窗口 | settings is a floating window without a URL and preserves inputs and focus context | `react-workbench.spec.ts` | agent-workbench（delta）「设置中往返不丢工作上下文」 |
 | React 工作台旅程 | 设置关于与项目路径边界 | about renders instance and build truth from /api/about | `react-workbench.spec.ts` | 蓝图 §4.4「关于」、add-about-build-info |
 | React 工作台旅程 | 设置关于与项目路径边界 | manual project path outside the workspace states its reason and blocks submit | `react-workbench.spec.ts` | workspace-root「手填越界路径给出禁用原因」 |
 | React 工作台旅程 | 总览与用量 | sessions overview focuses a conversation; usage page keeps its controls | `react-workbench.spec.ts` | 会话管理覆盖「多会话切换」、usage-statistics「/usage」（语义等价迁移） |

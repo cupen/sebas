@@ -26,7 +26,7 @@
 - [x] 3.5 迁移会话创建、聚焦、命名、关闭、归档/恢复及确认交互，保持 agent/mode/model 请求形状；会话管理、连续深链和归档只读旅程通过。
 
 
-- [x] 3.6 分批迁移设置的 Services/Users/Models/Aliases/Agents/Skills/Env/Appearance 分区为无独立 URL 的工作区，保留草稿及 RBAC；各分区单元测试和对应浏览器旅程通过。
+- [x] 3.6 分批迁移设置的 Services/Users/Models/Aliases/Agents/Skills/Env/Appearance 分区为无独立 URL 的浮动窗口，保留草稿及 RBAC；各分区单元测试和对应浏览器旅程通过。
 
 ## 4. 对话核心与性能迁移
 

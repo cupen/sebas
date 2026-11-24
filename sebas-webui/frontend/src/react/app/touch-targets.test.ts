@@ -5,7 +5,7 @@
  * 断言对象是 CSS Modules 源码本身：vitest 不做真实布局（happy-dom 无排版、
  * CSS Modules 在测试里也不注入），所以量像素只能落到 Playwright；这里钉住
  * 的是「规则形态」——≤600px（Shell 唯一启用 Drawer 的档位）块内导航行、
- * 行操作与主题分段确有 44px 下限，且桌面紧凑密度（基础规则）没有被顺手放大。
+ * 行操作与弹层关闭钮确有 44px 下限，且桌面紧凑密度（基础规则）没有被顺手放大。
  *
  * 选择器只用类名与媒体条件，不做截图，也不依赖 hash 后的类名。
  */
@@ -17,10 +17,10 @@ import { describe, expect, it } from 'vitest'
 const here = dirname(fileURLToPath(import.meta.url))
 const read = (file: string): string => readFileSync(join(here, file), 'utf8')
 
-/** 取 `@media (max-width: 600px)` 块的正文（大括号配平）。 */
-function narrowBlock(source: string): string {
-  const start = source.indexOf('@media (max-width: 600px)')
-  expect(start, 'expected a @media (max-width: 600px) block').toBeGreaterThanOrEqual(0)
+/** 取 `@media (max-width: <px>px)` 块的正文（大括号配平）。 */
+function mediaBlock(source: string, maxWidth: number): string {
+  const start = source.indexOf(`@media (max-width: ${maxWidth}px)`)
+  expect(start, `expected a @media (max-width: ${maxWidth}px) block`).toBeGreaterThanOrEqual(0)
   const open = source.indexOf('{', start)
   expect(open).toBeGreaterThan(start)
   let depth = 0
@@ -32,6 +32,10 @@ function narrowBlock(source: string): string {
     }
   }
   throw new Error('unterminated @media block')
+}
+
+function narrowBlock(source: string): string {
+  return mediaBlock(source, 600)
 }
 
 /** 把一段 CSS 拆成 [选择器, 声明体] 对（本文件只用单层规则，无嵌套）。 */
@@ -110,16 +114,15 @@ describe('Drawer touch budget (≤600px)', () => {
     expect(bodyFor(narrowBlock(shell), '.navItem')).toMatch(/min-height:\s*44px/)
   })
 
-  it('grows the theme switch segments to 44px and centers the label box', () => {
-    const label = bodyFor(narrowBlock(shell), '.ant-segmented-item-label')
-    expect(label).toMatch(/min-height:\s*44px/)
-    expect(label).toMatch(/align-items:\s*center/)
-  })
-
-  it('grows the AntD drawer close control, which the global .ant-btn rule misses', () => {
+  it('grows the AntD drawer and modal close controls, which the global .ant-btn rule misses', () => {
     const close = bodyFor(narrowBlock(shell), '.ant-drawer-close')
     expect(close).toMatch(/min-width:\s*44px/)
     expect(close).toMatch(/min-height:\s*44px/)
+    // The settings window is a Modal now: its header close control needs the
+    // same floor on phones.
+    const modalBlock = narrowBlock(shell)
+    expect(bodyFor(modalBlock, '.ant-modal-close')).toMatch(/min-width:\s*44px/)
+    expect(bodyFor(modalBlock, '.ant-modal-close')).toMatch(/min-height:\s*44px/)
   })
 
   it('grows project rows, session rows, row actions and the archive toggle', () => {

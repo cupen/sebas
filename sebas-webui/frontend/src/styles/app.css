@@ -63,6 +63,38 @@ body {
   visibility: hidden;
 }
 
+/* Settings window motion (Shell.tsx `transitionName`). AntD's default modal
+ * zoom scales the whole surface from the centre — too theatrical for a
+ * full-height window, and a scale transform moves every measured box while it
+ * runs. A pure opacity fade keeps geometry stable and the transition quiet. */
+.sebas-settings-fade-appear,
+.sebas-settings-fade-enter {
+  opacity: 0;
+}
+.sebas-settings-fade-appear-active,
+.sebas-settings-fade-enter-active {
+  opacity: 1;
+  transition: opacity 180ms ease-out;
+}
+.sebas-settings-fade-leave {
+  opacity: 1;
+}
+.sebas-settings-fade-leave-active {
+  opacity: 0;
+  transition: opacity 140ms ease-in;
+}
+@media (prefers-reduced-motion: reduce) {
+  .sebas-settings-fade-appear,
+  .sebas-settings-fade-enter,
+  .sebas-settings-fade-appear-active,
+  .sebas-settings-fade-enter-active,
+  .sebas-settings-fade-leave,
+  .sebas-settings-fade-leave-active {
+    opacity: 1;
+    transition: none;
+  }
+}
+
 /* Quiet, dev-tool scrollbars. */
 * {
   scrollbar-width: thin;
