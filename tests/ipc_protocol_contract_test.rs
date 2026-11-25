@@ -31,7 +31,8 @@ fn fixture(name: &str) -> Value {
         .join(name);
     let raw = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("读取 fixture {} 失败: {e}", path.display()));
-    serde_json::from_str(&raw).unwrap_or_else(|e| panic!("fixture {} 不是合法 JSON: {e}", path.display()))
+    serde_json::from_str(&raw)
+        .unwrap_or_else(|e| panic!("fixture {} 不是合法 JSON: {e}", path.display()))
 }
 
 /// 一条钉住的载荷：字节 + 顶层字段名集合。
@@ -110,9 +111,7 @@ use sebas::core_channel::protocol::{
 };
 use sebas_channels::ChannelKey;
 use sebas_domain::node::NodeView;
-use sebas_domain::session::{
-    PermissionDecision, SessionEvent, SessionInfo, SessionRejection,
-};
+use sebas_domain::session::{PermissionDecision, SessionEvent, SessionInfo, SessionRejection};
 use sebas_domain::vocabulary::{CardPhase, SessionMode, SessionPhase};
 
 fn sample_info() -> SessionInfo {
@@ -140,6 +139,7 @@ fn sample_info() -> SessionInfo {
         parked_approvals: 0,
         label: Some("demo".into()),
         first_prompt_preview: None,
+        task_id: None,
         available_commands: Vec::new(),
     }
 }
@@ -158,6 +158,7 @@ fn core_channel_payloads() -> Vec<(String, String)> {
                 mode: Some("allow".into()),
                 agent: "claude".into(),
                 node: None,
+                task_id: None,
             }),
         ),
         (
@@ -429,14 +430,19 @@ fn node_link_version_rejection_still_names_both_versions() {
     // 未知拒绝码仍走 `#[serde(other)] Unknown`（前向容错不被本 change 削弱）。
     let unknown: RejectCode = serde_json::from_value(serde_json::json!("hibernate")).unwrap();
     assert_eq!(unknown, RejectCode::Unknown);
-    assert!(unknown.is_permanent(), "看不懂的拒绝按永久处理（不重试刷屏）");
+    assert!(
+        unknown.is_permanent(),
+        "看不懂的拒绝按永久处理（不重试刷屏）"
+    );
 }
 
 // ---------------------------------------------------------------------------
 // 5.3 webui WS 与 HTTP
 // ---------------------------------------------------------------------------
 
-use sebas_webui::ws_rpc::{Frame, JsonCodec, NotificationFrame, RequestFrame, ResponseFrame, WsCodec};
+use sebas_webui::ws_rpc::{
+    Frame, JsonCodec, NotificationFrame, RequestFrame, ResponseFrame, WsCodec,
+};
 
 /// 5.3：webui 面向浏览器的 WS 帧形状钉住——与既有
 /// `sebas-webui/tests/ws_rpc_contract_test.rs` **不冲突**（那边钉语义，
@@ -491,17 +497,18 @@ fn webui_http_payload_shapes_match_the_fixture_and_api_assertions() {
                 "sessions": 3,
             }),
         ),
-        (
-            "session_row",
-            serde_json::to_value(sample_info()).unwrap(),
-        ),
+        ("session_row", serde_json::to_value(sample_info()).unwrap()),
         (
             "rejection_body",
             serde_json::json!({"code": "unknown_session", "key": "oc_1"}),
         ),
     ];
     for (name, value) in &cases {
-        assert_pinned(pin(&pins, name), &serde_json::to_string(value).unwrap(), "webui-http");
+        assert_pinned(
+            pin(&pins, name),
+            &serde_json::to_string(value).unwrap(),
+            "webui-http",
+        );
     }
     // 与 api_endpoints_test 断言的口径对齐：`reachability.ok` 是布尔真值、
     // `execution_bodies` 逐执行体带 ok；形状被本 fixture 与那边一起钉住。

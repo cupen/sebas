@@ -157,9 +157,7 @@ fn migrate_once() {
                 legacy.display(),
                 resolved.display()
             );
-            *MIGRATION_NOTICE
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = Some(message);
+            *MIGRATION_NOTICE.lock().unwrap_or_else(|e| e.into_inner()) = Some(message);
         }
         MigrationOutcome::Failed => {
             tracing::warn!(
@@ -377,7 +375,18 @@ mod tests {
     fn add_and_list_entry() {
         let _lock = ARCHIVE_TEST_LOCK.lock().unwrap();
         let _p = test_path("add_and_list");
-        let entry = archive_session("sess_abc", "/home/user/proj", "My Session", None, Default::default(), 30, Vec::new(), None, None).unwrap();
+        let entry = archive_session(
+            "sess_abc",
+            "/home/user/proj",
+            "My Session",
+            None,
+            Default::default(),
+            30,
+            Vec::new(),
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(entry.session_key, "sess_abc");
         assert_eq!(entry.project_path, "/home/user/proj");
         assert_eq!(entry.label, "My Session");
@@ -394,7 +403,18 @@ mod tests {
     fn remove_entry() {
         let _lock = ARCHIVE_TEST_LOCK.lock().unwrap();
         let _p = test_path("remove_entry");
-        archive_session("sess_xyz", "/home/user/proj", "Test", None, Default::default(), 30, Vec::new(), None, None).unwrap();
+        archive_session(
+            "sess_xyz",
+            "/home/user/proj",
+            "Test",
+            None,
+            Default::default(),
+            30,
+            Vec::new(),
+            None,
+            None,
+        )
+        .unwrap();
         let restored = restore_session("sess_xyz");
         assert!(restored.is_some(), "must find the entry");
         assert_eq!(restored.unwrap().session_key, "sess_xyz");
@@ -417,9 +437,31 @@ mod tests {
         let _lock = ARCHIVE_TEST_LOCK.lock().unwrap();
         let _p = test_path("cleanup_expired");
         // Add an entry with 0-day retention — it should be expired immediately.
-        archive_session("sess_expired", "/home/user/proj", "Expired", None, Default::default(), 0, Vec::new(), None, None).unwrap();
+        archive_session(
+            "sess_expired",
+            "/home/user/proj",
+            "Expired",
+            None,
+            Default::default(),
+            0,
+            Vec::new(),
+            None,
+            None,
+        )
+        .unwrap();
         // Add one with a long retention.
-        archive_session("sess_kept", "/home/user/proj", "Kept", None, Default::default(), 999, Vec::new(), None, None).unwrap();
+        archive_session(
+            "sess_kept",
+            "/home/user/proj",
+            "Kept",
+            None,
+            Default::default(),
+            999,
+            Vec::new(),
+            None,
+            None,
+        )
+        .unwrap();
 
         let removed = cleanup_expired();
         assert_eq!(removed, 1, "the expired entry should be removed");
@@ -433,8 +475,29 @@ mod tests {
     fn duplicate_archive_rejected() {
         let _lock = ARCHIVE_TEST_LOCK.lock().unwrap();
         let _p = test_path("dup_rejected");
-        archive_session("sess_dup", "/home/user/proj", "First", None, Default::default(), 30, Vec::new(), None, None).unwrap();
-        let result = archive_session("sess_dup", "/home/user/proj", "Second", None, Default::default(), 30, Vec::new(), None, None);
+        archive_session(
+            "sess_dup",
+            "/home/user/proj",
+            "First",
+            None,
+            Default::default(),
+            30,
+            Vec::new(),
+            None,
+            None,
+        )
+        .unwrap();
+        let result = archive_session(
+            "sess_dup",
+            "/home/user/proj",
+            "Second",
+            None,
+            Default::default(),
+            30,
+            Vec::new(),
+            None,
+            None,
+        );
         assert!(result.is_err(), "duplicate must be rejected");
         assert!(result.unwrap_err().contains("已归档"));
     }
@@ -444,7 +507,18 @@ mod tests {
         let _lock = ARCHIVE_TEST_LOCK.lock().unwrap();
         let _p = test_path("is_archived");
         assert!(!is_archived("sess_check"), "must not find unarchived key");
-        archive_session("sess_check", "/home/user/proj", "Check", None, Default::default(), 30, Vec::new(), None, None).unwrap();
+        archive_session(
+            "sess_check",
+            "/home/user/proj",
+            "Check",
+            None,
+            Default::default(),
+            30,
+            Vec::new(),
+            None,
+            None,
+        )
+        .unwrap();
         assert!(is_archived("sess_check"), "must find archived key");
     }
 
@@ -484,7 +558,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let state_pin = std::env::temp_dir().join("sebas-archive-test/override_wins_state");
-        set_env("SEBAS_ARCHIVE_PATH", Some(dir.join("override.json").to_str().unwrap()));
+        set_env(
+            "SEBAS_ARCHIVE_PATH",
+            Some(dir.join("override.json").to_str().unwrap()),
+        );
         set_env("SEBAS_STATE_DIR", Some(state_pin.to_str().unwrap()));
         assert_eq!(resolved_archive_path(), dir.join("override.json"));
         set_env("SEBAS_ARCHIVE_PATH", None);
@@ -532,7 +609,10 @@ mod tests {
         std::fs::write(&legacy, r#"{"entries":[]}"#).unwrap();
         let resolved = dir.join("resolved/archive.json");
         assert_eq!(migrate(&resolved, &legacy), MigrationOutcome::Moved);
-        assert!(resolved.exists(), "resolved file must exist after migration");
+        assert!(
+            resolved.exists(),
+            "resolved file must exist after migration"
+        );
         assert!(!legacy.exists(), "legacy file must be gone after rename");
     }
 
@@ -581,7 +661,18 @@ mod tests {
             sebas_dispatch::TurnEntry::prompt(0, "hello"),
             sebas_dispatch::TurnEntry::markdown(1, "world"),
         ];
-        archive_session("sess_t", "/proj", "T", None, Default::default(), 30, transcript.clone(), None, None).unwrap();
+        archive_session(
+            "sess_t",
+            "/proj",
+            "T",
+            None,
+            Default::default(),
+            30,
+            transcript.clone(),
+            None,
+            None,
+        )
+        .unwrap();
         let entry = entry("sess_t").expect("entry must be found");
         assert_eq!(entry.transcript, transcript);
     }
@@ -599,8 +690,18 @@ mod tests {
             current_model: Some("claude-sonnet-4".into()),
             available_models: Some(vec!["claude-sonnet-4".into(), "claude-opus-4".into()]),
         };
-        archive_session("sess_id", "/proj", "T", Some("sid-1".into()), identity, 30, Vec::new(), None, None)
-            .unwrap();
+        archive_session(
+            "sess_id",
+            "/proj",
+            "T",
+            Some("sid-1".into()),
+            identity,
+            30,
+            Vec::new(),
+            None,
+            None,
+        )
+        .unwrap();
         let e = entry("sess_id").expect("entry must be found");
         assert_eq!(e.agent_kind.as_deref(), Some("claude"));
         assert_eq!(e.desired_mode.as_deref(), Some("auto"));
@@ -670,10 +771,19 @@ mod tests {
     fn legacy_archive_entry_without_naming_fields_deserializes() {
         let _lock = ARCHIVE_TEST_LOCK.lock().unwrap();
         let p = test_path("legacy_naming");
-        archive_session("sess_naming_omit", "/proj", "T", None, Default::default(), 30, Vec::new(), None, None)
-            .unwrap();
-        let raw =
-            std::fs::read_to_string(std::env::var("SEBAS_ARCHIVE_PATH").unwrap()).unwrap();
+        archive_session(
+            "sess_naming_omit",
+            "/proj",
+            "T",
+            None,
+            Default::default(),
+            30,
+            Vec::new(),
+            None,
+            None,
+        )
+        .unwrap();
+        let raw = std::fs::read_to_string(std::env::var("SEBAS_ARCHIVE_PATH").unwrap()).unwrap();
         assert!(
             !raw.contains("operator_label") && !raw.contains("prompt_preview"),
             "all-None naming sources must not serialize keys: {raw}"
@@ -700,8 +810,18 @@ mod tests {
     fn empty_identity_is_omitted_from_the_wire() {
         let _lock = ARCHIVE_TEST_LOCK.lock().unwrap();
         let _p = test_path("identity_omit");
-        archive_session("sess_omit", "/proj", "T", None, Default::default(), 30, Vec::new(), None, None)
-            .unwrap();
+        archive_session(
+            "sess_omit",
+            "/proj",
+            "T",
+            None,
+            Default::default(),
+            30,
+            Vec::new(),
+            None,
+            None,
+        )
+        .unwrap();
         let raw = std::fs::read_to_string(std::env::var("SEBAS_ARCHIVE_PATH").unwrap()).unwrap();
         assert!(
             !raw.contains("agent_kind"),

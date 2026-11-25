@@ -18,7 +18,7 @@ pub mod test_engine;
 
 pub use crate::engine::{
     DispatchHandle, MsgIdMap, Out, PendingApproval, RemoteSessionView, SessionEvent, SessionInfo,
-    TurnEntry, TurnStreamEvent, count_chat_messages,
+    SessionTerminalHook, SessionTerminalTask, TurnEntry, TurnStreamEvent, count_chat_messages,
 };
 /// 错误条目失败分类词表（fix-webui-qa-defects 5.1/5.2）：`TurnEntry
 /// ::failure_class` 的合法值。webui 标签映射与 wire 值同源。

@@ -503,6 +503,78 @@ env posture 结论。
   `.agents/skills` 当别名发现；opencode 全局发现路径就含 `~/.agents/skills`）
   ——本期方言表不加行，加行留给后续 change（design.md「方言矩阵调研」）。
 
+## Task center（agent-task-center）
+
+项目任务中心 = beads 做存储与协作引擎 + sebas 做薄封装（HTTP API + WS 推送
++ WebUI 看板）。**sebas 不重实现** beads 的 claim / lease / journal / comment：
+任务就是项目目录 `.beads/` 里的 issue，状态机 = beads 原生 `open →
+in_progress → closed` + `in-review` 标签（`in_review` 不是 status）。
+
+### 外部依赖：`bd` CLI ≥ 1.3.4
+
+- 二进制发现：`SEBAS_BD_BIN` 显式覆盖优先，缺省走 `PATH` 上的 `bd`
+  （已验证 `bd 1.3.4`，embedded Dolt 后端，无需 dolt 服务器）。
+- 装法（任选）：`CGO_ENABLED=0 go install -tags gms_pure_go
+  github.com/steveyegge/beads/cmd/bd@latest`（≥ 1.3.4；module path 是
+  `steveyegge/beads`，不是 GitHub 仓库 host `gastownhall/beads`——后者
+  `go install` 会报 module path 冲突）或发行包；装完 `bd --version` 自检。
+- `bd` 不在 PATH 时：任务面板内联显示安装指引（`bd_not_installed` 503），
+  其余 WebUI 面不受影响——不 panic、不假装空列表。
+- 总开关：`[service.webui] task_center_enabled = true`（默认 true；关闭时
+  任务面 503 并点名该键）。见 `config/config.toml.example`。
+- spike 结论与坑（`bd events tail <N>` 位置参数被静默忽略、journal 是
+  per-replica、`bd -C` 要求已是 workspace）：`openspec/changes/agent-task-center/spike-report.md`。
+
+### 沙箱菜谱补充（任务中心特有）
+
+1. **项目目录必须在仓库之外。** `bd init` 会**向上发现**祖先 `.beads`：
+   在 checkout 内（如 `target/tests/...`）init 会撞到操作员真实的 sebas
+   仓库库并中止，随后每条 `bd -C` 都写进**操作员真实库**（11.3 的红线）。
+   进程级任务中心旅程因此把项目目录放在 `/tmp/sebas-task-center-*`
+   一次性目录，并把 core/webui 的 `SEBAS_WORKSPACE_ROOT` 指过去；`SEBAS_HOME` /
+   `HOME` 仍由沙箱钉住，bd 全局状态（`~/.beads`、`~/.config/bd`、`~/.dolt`）
+   不出沙箱。
+2. **actor 钉定**：`BEADS_ACTOR=<name>` 决定 bd 的默认 actor（沙箱里钉成
+   固定人名，claim 的 assignee 断言才确定）；agent 侧用独立
+   `bd --actor <kind> …` 进程，竞速才真实。
+3. 一键入口：
+   - 进程级 e2e：`invoke testsuite-e2e --case task_center`（或
+     `cargo test --test testsuite_e2e_test task_center -- --ignored`）——
+     项目注册 → 面板首访（惰性 init）→ 建任务 → 认领 → 从任务开会话 →
+     fake-claude 回合 → 关闭会话 → 自动进评审 → reviewer 关闭。
+   - 验收旅程：`invoke testsuite-acceptance --case task_board`——完整看板
+     生命周期 + 人/agent 双主体认领竞速（输家 409 点名赢家）。
+   - 两条都用 fake-claude 桩，零真实凭据；`bd` 缺失时用例以明确 panic 报错。
+
+### 手动沙箱冒烟（人跑一遍完整旅程）
+
+```bash
+invoke testsuite-webui-sandbox --auth     # 端口 9879，登录 admin / admin
+```
+
+注册一个沙箱内项目 → 打开 Tasks 标签（首次访问自动 `bd init`）→ 新建任务
+→ 认领 → 从任务详情「Start a session for this task」→ 发一条消息
+（fake-claude 应答）→ 关闭会话 → 看板应自动把任务挪到 In review →
+以 reviewer 身份 Mark done → 任务落 Done / Cancelled 区。全程看板更新应
+亚秒（spec：p95 ≤ 500ms，300ms 轮询）。Ctrl-C 停止并清理沙箱目录。
+
+### Troubleshooting
+
+- **`bd events tail` 报 schema drift / 无法解析的行**：CLI 版本与 DB 的
+  journal schema 不匹配（升级或降级 `bd` 之后）。面板上点 **Refresh tasks**
+  （`POST /api/projects/{id}/tasks/refresh`）做一次全量 `bd list` 重载，
+  轮询循环按新 schema 继续；bug 面（不是版本漂移）再报 issue。
+- **`bd dolt pull` 之后任务缺失/陈旧**：journal 是 per-replica 的，远端
+  mutation 不在本机 journal 里。点 **Refresh tasks** 重新基线（全量重载 +
+  把事件游标钉到 journal 当前 head），这也是 spec「Cross-machine sync
+  requires re-baseline」的唯一入口。
+- **`bd` 不在 PATH**：面板内联显示安装指引（503 `bd_not_installed` + `bd`
+  stderr 原文）；装好后重开任务面板即可，无需重启 sebas。
+- **认领 409**：不是错误——beads 的原子 claim 单赢家，响应体 `holder`
+  点名持有者；`release` 后回公开队列。
+- **沙箱隔离自检**：任务中心旅程全部把项目目录钉在 `/tmp/sebas-task-center-*`，
+  真实 `~/.sebas` 与操作员 `bd` 数据零触碰（repo 的 `.beads` mtime 不变）。
+
 ## Non-Interactive Shell Commands
 
 `cp`, `mv`, and `rm` may be aliased to `-i` (interactive) mode on some

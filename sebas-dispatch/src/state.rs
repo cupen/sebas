@@ -184,6 +184,10 @@ pub struct Mapping {
     /// 两处都靠它保住 rail 行名不退化为短 id。`None` = 无迁移来源（旧行为）。
     /// 随映射行落库。
     pub prompt_preview: Option<String>,
+    /// （agent-task-center 1.2）该会话推进的 beads 任务 id（如 `bd-42`）。
+    /// `None` = 非任务会话。core 只透传、不校验任务存在性——任务有效性由
+    /// WebUI HTTP 层裁决（beads 不在 core 域内）。随映射行落库。
+    pub task_id: Option<String>,
 }
 
 impl Mapping {
@@ -205,6 +209,7 @@ impl Mapping {
             available_commands: Vec::new(),
             label: None,
             prompt_preview: None,
+            task_id: None,
         }
     }
 
@@ -228,6 +233,7 @@ impl Mapping {
             available_commands: Vec::new(),
             label: None,
             prompt_preview: None,
+            task_id: None,
         }
     }
 
@@ -250,6 +256,7 @@ impl Mapping {
             available_commands: Vec::new(),
             label: None,
             prompt_preview: None,
+            task_id: None,
         }
     }
 
@@ -293,6 +300,7 @@ impl Mapping {
             available_commands: Vec::new(),
             label: None,
             prompt_preview: None,
+            task_id: None,
         }
     }
 
@@ -314,6 +322,7 @@ impl Mapping {
             available_commands: Vec::new(),
             label: None,
             prompt_preview: None,
+            task_id: None,
         }
     }
 
@@ -337,8 +346,9 @@ impl Mapping {
     /// 行为不变）。`Spawning` 占位无可寻址 transcript。
     pub fn transcript_id(&self) -> Option<&str> {
         match &self.state {
-            MappingState::Active { session_id }
-            | MappingState::Dormant { session_id } => Some(session_id),
+            MappingState::Active { session_id } | MappingState::Dormant { session_id } => {
+                Some(session_id)
+            }
             MappingState::SpawnFailed { session_id, .. } => Some(session_id),
             MappingState::Spawning { .. } => None,
         }
@@ -843,6 +853,25 @@ impl SessionMap {
         self.persist_upsert(key).await;
     }
 
+    /// （agent-task-center 1.2）记录会话推进的 beads 任务 id（创建时透传，
+    /// core 不校验任务存在性）。置定即落库；无映射时返回 `false`。
+    pub async fn set_task_id(&self, key: &ChannelKey, task_id: Option<String>) -> bool {
+        let hit = {
+            let mut g = self.inner.write().await;
+            match g.get_mut(key) {
+                Some(m) => {
+                    m.task_id = task_id;
+                    true
+                }
+                None => false,
+            }
+        };
+        if hit {
+            self.persist_upsert(key).await;
+        }
+        hit
+    }
+
     pub async fn get(&self, key: &ChannelKey) -> Option<Mapping> {
         self.inner.read().await.get(key).cloned()
     }
@@ -995,8 +1024,7 @@ impl SessionMap {
                     m.last_active_unix = crate::engine::now_unix();
                 }
                 None => {
-                    let mut m =
-                        Mapping::dormant(session_id.to_string(), crate::engine::now_unix());
+                    let mut m = Mapping::dormant(session_id.to_string(), crate::engine::now_unix());
                     m.acp_session_id = acp_session_id;
                     // 身份随记录一起留存（源映射可能已经被替换/移除，取到就带上）。
                     if let Some(src) = g.get(source) {
@@ -1469,6 +1497,7 @@ pub fn session_map_row(key: &ChannelKey, m: &Mapping) -> Option<SessionMapRow> {
         desired_mode: m.desired_mode.as_str().to_string(),
         label: m.label.clone(),
         prompt_preview: m.prompt_preview.clone(),
+        task_id: m.task_id.clone(),
         awaiting_first_prompt: is_placeholder,
     })
 }
@@ -1510,6 +1539,7 @@ pub fn mapping_from_row(row: SessionMapRow) -> Option<(ChannelKey, Mapping)> {
         m.project_dir = row.project_dir.clone();
         m.label = row.label.clone();
         m.prompt_preview = row.prompt_preview.clone();
+        m.task_id = row.task_id.clone();
         m
     } else {
         let mut m = Mapping::dormant(row.session_id, row.last_active_unix);
@@ -1522,6 +1552,7 @@ pub fn mapping_from_row(row: SessionMapRow) -> Option<(ChannelKey, Mapping)> {
         m.project_dir = row.project_dir;
         m.label = row.label;
         m.prompt_preview = row.prompt_preview;
+        m.task_id = row.task_id;
         m
     };
     Some((key, m))
@@ -1552,7 +1583,11 @@ mod tests {
         m.project_dir = Some("/tmp/proj-label".into());
         m.label = Some("重构计划".into());
         let row = session_map_row(&key, &m).expect("persistable");
-        assert_eq!(row.label.as_deref(), Some("重构计划"), "label must be persisted");
+        assert_eq!(
+            row.label.as_deref(),
+            Some("重构计划"),
+            "label must be persisted"
+        );
 
         let (back_key, back) = mapping_from_row(row).expect("addressable");
         assert_eq!(back_key, key);
@@ -1573,6 +1608,7 @@ mod tests {
             desired_mode: crate::engine::ask_mode().as_str().to_string(),
             label: None,
             prompt_preview: None,
+            task_id: None,
             awaiting_first_prompt: false,
         };
         let (_, old_m) = mapping_from_row(bare).unwrap();
@@ -1605,8 +1641,8 @@ mod tests {
         let mut bare = Mapping::dormant("s2", 2);
         bare.pending_kind = None;
         bare.project_dir = Some("/tmp/proj-bare".into());
-        let (_, restored_bare) = mapping_from_row(session_map_row(&bare_key, &bare).unwrap())
-            .unwrap();
+        let (_, restored_bare) =
+            mapping_from_row(session_map_row(&bare_key, &bare).unwrap()).unwrap();
         assert_eq!(restored_bare.pending_kind, None);
     }
 
@@ -1617,12 +1653,9 @@ mod tests {
     async fn auto_title_writes_only_while_label_is_empty() {
         let map = SessionMap::new();
         let key = ChannelKey::new("web", "web-auto-title");
-        map.insert(
-            key.clone(),
-            Mapping::dormant("s-auto-title", 1),
-        )
-        .await
-        .expect("fresh key inserts");
+        map.insert(key.clone(), Mapping::dormant("s-auto-title", 1))
+            .await
+            .expect("fresh key inserts");
 
         // label 为空 → 落。
         assert!(map.set_label_if_empty(&key, "自动标题".into()).await);
@@ -1701,8 +1734,7 @@ mod tests {
         // Active / Dormant / 0-turn 占位可持久。
         assert!(session_map_row(&key, &Mapping::active("s-a")).is_some());
         assert!(session_map_row(&key, &Mapping::dormant("s-d", 1)).is_some());
-        let placeholder =
-            Mapping::spawning_with(Some("claude".into()), None, None, true);
+        let placeholder = Mapping::spawning_with(Some("claude".into()), None, None, true);
         let row = session_map_row(&key, &placeholder).unwrap();
         assert_eq!(row.session_id, "", "占位行落空 session_id");
         assert!(row.awaiting_first_prompt);
@@ -1733,6 +1765,7 @@ mod tests {
             desired_mode: crate::engine::ask_mode().as_str().to_string(),
             label: None,
             prompt_preview: None,
+            task_id: None,
             awaiting_first_prompt: false,
         };
         assert!(mapping_from_row(orphan_row).is_none());
@@ -1759,6 +1792,7 @@ mod tests {
             desired_mode: crate::engine::ask_mode().as_str().to_string(),
             label: None,
             prompt_preview: None,
+            task_id: None,
             awaiting_first_prompt: false,
         }];
         let map = SessionMap::restore_rows(rows, 8);
@@ -2181,6 +2215,7 @@ mod spawning_settle_tests {
             desired_mode: crate::engine::ask_mode().as_str().to_string(),
             label: None,
             prompt_preview: None,
+            task_id: None,
             awaiting_first_prompt: false,
         };
         let mut placeholder = base("web", "web-restore-sp");
@@ -2260,7 +2295,12 @@ mod spawning_settle_tests {
         // 占位标记已消费：重新进入 spawn 流程（spec 允许的落定形态），后续
         // 消息在 spawn 窗口内走 staging，不再误判成占位首条消息二次 spawn。
         assert!(
-            !router.map.get(&sp_key).await.unwrap().awaiting_first_prompt(),
+            !router
+                .map
+                .get(&sp_key)
+                .await
+                .unwrap()
+                .awaiting_first_prompt(),
             "占位标记必须被重投消费"
         );
         // 对照：dormant 会话的恢复不受落定影响（不阻塞、不误伤）。
@@ -2295,7 +2335,9 @@ mod spawning_settle_tests {
             panic!("expected WebSpawn")
         };
         // 泵侧失败臂的既有收敛路径（agent 配置缺失 = unknown agent kind）。
-        router.fail_spawn(&key, "unknown agent kind \"ghost\"").await;
+        router
+            .fail_spawn(&key, "unknown agent kind \"ghost\"")
+            .await;
 
         let m = router.map.get(&key).await.unwrap();
         let reason = m
@@ -2311,7 +2353,10 @@ mod spawning_settle_tests {
         // 合成错误条目在会话投影（合成 transcript id 名下）可读。
         let turns = router.session_turns(&key, 0).await.expect("transcript");
         assert_eq!(turns.len(), 1, "合成错误条目恰好一条");
-        assert_eq!(turns[0].element_type, sebas_domain::session::TurnElementType::Error);
+        assert_eq!(
+            turns[0].element_type,
+            sebas_domain::session::TurnElementType::Error
+        );
         assert!(turns[0].content.contains("spawn failed"));
 
         // 对外状态面不再是 spawning。

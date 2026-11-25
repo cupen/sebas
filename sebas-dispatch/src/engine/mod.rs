@@ -36,11 +36,11 @@ use crate::cards::CardConfig;
 use crate::commands::{Command, RouterAction};
 use crate::crud::ProviderForms;
 use crate::state::{Mapping, SessionMap};
-use sebas_domain::session::{CardPhase, SessionMode, TurnElementType, TurnKind};
 use sebas_acp::claude::manager::SessionManager;
 use sebas_acp::claude::session::{AcpCommand, AcpEvent};
 use sebas_channels::card::{AppUsage, ChannelCard, TurnChrome};
 use sebas_channels::key::ChannelKey;
+use sebas_domain::session::{CardPhase, SessionMode, TurnElementType, TurnKind};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -226,7 +226,7 @@ pub enum CloseOutcome {
 pub const AUTO_MODE: &str = "auto";
 // 控制面缺省 mode 词表（design D5b）随会话域迁往 `sebas_domain::session`
 // （add-domain-layer 3.1），原位再导出保持既有路径可解析。
-pub use sebas_domain::session::{ask_mode, ASK_MODE};
+pub use sebas_domain::session::{ASK_MODE, ask_mode};
 
 /// claude 驱动 SetMode 失败时非终态 `Error` 消息的稳定后缀（「…模式未变」，
 /// 见 `sebas-acp/src/claude/driver.rs` 的 SetMode 臂）。dispatch 据此把
@@ -372,7 +372,8 @@ pub struct DispatchHandle {
     /// 会话不复活历史用量）。纯内存、不持久化——重启恢复走 checkpoint
     /// restore 链路（session_id 不变的场景），幸存者只覆盖同进程内的
     /// crash→resume 窗口。
-    usage_survivors: Arc<tokio::sync::Mutex<HashMap<ChannelKey, (crate::card_state::CardUsage, bool)>>>,
+    usage_survivors:
+        Arc<tokio::sync::Mutex<HashMap<ChannelKey, (crate::card_state::CardUsage, bool)>>>,
     /// （add-local-usage-statistics 2.3）**本回合** usage 累计器
     /// （routing session_id → 累计）：`UsageUpdate` 逐帧累加（四类 token，
     /// None 保 None——「从未上报」不冒充零），回合终态（Finished / 回合收尾
@@ -384,7 +385,39 @@ pub struct DispatchHandle {
     /// `None` = 未接线，结算零动作）。钩子必须非阻塞（core 侧实现是
     /// 有界通道的 `try_send`——满载只丢统计，绝不阻塞事件流）。
     usage_recorder: std::sync::RwLock<Option<UsageRecorderHook>>,
+    /// （agent-task-center 5.1/5.2）会话终态 → 任务联动钩子（core 装配时
+    /// 注入；`None` = 未接线，联动零动作）。引擎在调用前已完成「Closed/
+    /// Exited + 最后一轮正常完成 + 该任务是本会话最新」三重裁决——钩子只需
+    /// 执行 `bd update --add-label in-review`，且必须非阻塞（实现方自行
+    /// spawn 异步任务）。
+    terminal_hook: std::sync::RwLock<Option<SessionTerminalHook>>,
+    /// （agent-task-center 5.2）最近一次收尾回合的状态码（routing session_id
+    /// → 200/499/500），供会话终结缺口判定「最后一轮是否正常完成」。纯内存、
+    /// 随会话终结清除（防复用 id 继承 stale 事实）。
+    last_turn_status: Arc<RwLock<HashMap<String, u16>>>,
 }
+
+/// （agent-task-center 5.2）会话终态联动上下文：引擎已完成全部裁决条件，
+/// 钩子只需按 `task_id` 给任务加 `in-review` 标签。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionTerminalTask {
+    /// 会话所属通道（`web` / …）。
+    pub channel: String,
+    /// 会话引用（ChannelKey.reference）。
+    pub key: String,
+    /// 该会话推进的 beads 任务 id（非空——空串/None 不会走到钩子）。
+    pub task_id: String,
+    /// 执行 `bd` 的项目目录（会话从属项目；`None` 时钩子只能记日志）。
+    pub project_dir: Option<String>,
+    /// 落 `bd` 审计的操作者身份：会话绑定的 agent kind（如 `claude`）。
+    pub actor: Option<String>,
+    /// 终态来源：`closed`（操作者显式关闭）/ `exited`（子进程死亡确认）。
+    pub reason: &'static str,
+}
+
+/// 会话终态联动钩子形状。
+pub type SessionTerminalHook = std::sync::Arc<dyn Fn(SessionTerminalTask) + Send + Sync>;
+
 
 /// 本地落账钩子形状：回合结算时收到恰好一条记录（design D5）。
 pub type UsageRecorderHook = std::sync::Arc<dyn Fn(sebas_domain::usage::UsageRecord) + Send + Sync>;
@@ -420,9 +453,9 @@ impl Clone for DispatchHandle {
             turn_events: self.turn_events.clone(),
             turn_log: self.turn_log.clone(),
             stall: self.stall.clone(),
-                cancelled_turns: self.cancelled_turns.clone(),
-                pending_model_switches: self.pending_model_switches.clone(),
-                checkpoints: self.checkpoints.clone(),
+            cancelled_turns: self.cancelled_turns.clone(),
+            pending_model_switches: self.pending_model_switches.clone(),
+            checkpoints: self.checkpoints.clone(),
             usage_survivors: self.usage_survivors.clone(),
             turn_usage: self.turn_usage.clone(),
             usage_recorder: std::sync::RwLock::new(
@@ -431,6 +464,13 @@ impl Clone for DispatchHandle {
                     .unwrap_or_else(|e| e.into_inner())
                     .clone(),
             ),
+            terminal_hook: std::sync::RwLock::new(
+                self.terminal_hook
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone(),
+            ),
+            last_turn_status: self.last_turn_status.clone(),
         }
     }
 }
@@ -514,6 +554,8 @@ impl DispatchHandle {
                 usage_survivors: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
                 turn_usage: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
                 usage_recorder: std::sync::RwLock::new(None),
+                terminal_hook: std::sync::RwLock::new(None),
+                last_turn_status: Arc::new(RwLock::new(HashMap::new())),
             },
             rx,
         )
@@ -598,9 +640,8 @@ impl DispatchHandle {
                     // 空串归 None（fix-webui-approval-restore-and-session-identity
                     // review 4）：种子卡态的默认空 prompt 投成 Some("") 会让
                     // rail 行名闪现空串窗口（`??` 链不跳过空串）。
-                    let receipt =
-                        st.status_emoji == crate::card_state::phase::SEED
-                            && !st.user_prompt.is_empty();
+                    let receipt = st.status_emoji == crate::card_state::phase::SEED
+                        && !st.user_prompt.is_empty();
                     let prompt = if st.user_prompt.is_empty() {
                         // （round4 1.2/3.1）卡态无预览时回退命名迁移位——
                         // terminal teardown 退役 / 归档恢复重建的行不丢行名。
@@ -661,10 +702,7 @@ impl DispatchHandle {
                     });
                 (msg_count, anchored)
             }
-            None => (
-                0,
-                m.prompt_preview.clone().filter(|p| !p.is_empty()),
-            ),
+            None => (0, m.prompt_preview.clone().filter(|p| !p.is_empty())),
         };
         // fix-pending-queue-liveness 2.3（design D3）：「回合占用」的引擎事实
         // ——WORKING 相位 ∨ 接收回执相位（round4 2.2：提交已接受、prompt 已
@@ -739,6 +777,9 @@ impl DispatchHandle {
             // （fix-webui-qa-findings DD2）首条消息预览随快照/事件下发（行
             // 命名链的锚定数据源；None 不上 wire）。
             first_prompt_preview,
+            // （agent-task-center 1.2）会话推进的 beads 任务 id 随快照/事件
+            // 透传（None 不上 wire）。
+            task_id: m.task_id.clone(),
         })
     }
 
@@ -950,8 +991,7 @@ impl DispatchHandle {
                         error = %e,
                         "restore: spawning 相位会话重投失败，落 spawn-failed 终态"
                     );
-                    self.fail_spawn(&key, &format!("恢复重投失败: {e}"))
-                        .await;
+                    self.fail_spawn(&key, &format!("恢复重投失败: {e}")).await;
                 }
             }
         }
@@ -1133,6 +1173,16 @@ impl DispatchHandle {
     /// 「死亡已确认」的会话。映射已不在场（显式 close / 正常 terminal error
     /// 已拆）→ 幂等 no-op。
     pub async fn finalize_dead_child(&self, session_id: &str) {
+        // （agent-task-center 5.2）死亡瞬间的回合事实必须在 `drop_card` 之前
+        // 取走——drop_card 会抹掉卡态，之后的相位检查恒为「无回合」。在飞
+        // 回合 = 本回合没有正常收尾，不构成任务推进。
+        let turn_was_open = {
+            use crate::card_state::phase::{SEED, WORKING};
+            self.card_states
+                .status_emoji(session_id)
+                .await
+                .is_some_and(|emoji| matches!(emoji.as_str(), SEED | WORKING))
+        };
         self.drop_card(session_id).await;
         let Some(key) = self.map.lookup_key_by_session(session_id).await else {
             tracing::debug!(%session_id, "channel closed after teardown; nothing live to finalize");
@@ -1158,13 +1208,23 @@ impl DispatchHandle {
             self.flush_card(session_id).await;
         }
         // ② Active → Dormant 退役（与 terminal-error teardown 同语义）。
+        // （agent-task-center 5.1/5.2）退役前完成联动裁决：子进程死亡确认是
+        // 本地引擎的 `Exited` 终态对应事实。
+        if let Some(mapping) = self.map.get(&key).await {
+            self.notify_task_advance(&key, &mapping, turn_was_open, "exited")
+                .await;
+        }
         let preview = self
             .card_states
             .snapshot(session_id)
             .await
             .map(|st| st.user_prompt)
             .filter(|p| !p.is_empty());
-        let retired = self.map.retire_to_record(session_id, preview).await.is_some();
+        let retired = self
+            .map
+            .retire_to_record(session_id, preview)
+            .await
+            .is_some();
         // ③ 死亡会话的随行状态清空。
         let _ = self.auto_mode_switches.take(session_id).await;
         self.msgid.drop(session_id).await;
@@ -1557,11 +1617,9 @@ impl DispatchHandle {
                 // 供前端二级折叠收起时显示。
                 // fold-tool-calls-into-process-tree 2.3：上游 call id 一并
                 // 落进转录条目——前端按 id 把调用与结果精确配对成一块。
-                let mut entry = TurnEntry::tool(
-                    0,
-                    format!("📖 **{tool_name}**\n```json\n{args_str}\n```"),
-                )
-                .with_title(events::tool_entry_title(false, tool_name, Some(args)));
+                let mut entry =
+                    TurnEntry::tool(0, format!("📖 **{tool_name}**\n```json\n{args_str}\n```"))
+                        .with_title(events::tool_entry_title(false, tool_name, Some(args)));
                 if let Some(id) = tool_use_id {
                     entry = entry.with_tool_use_id(id.clone());
                 }
@@ -1577,9 +1635,8 @@ impl DispatchHandle {
                 // 带 `✓ ` 前缀；ToolEnd wire 不携带 args，传 None → 标题退化
                 // 为 `✓ {tool}`。fold-tool-calls-into-process-tree 2.3：结果
                 // 条目携带与配对调用相等的 id（合并块的 ✓/✗ 章数据源）。
-                let mut entry =
-                    TurnEntry::tool(0, format!("✓ **{tool_name}**\n{result}"))
-                        .with_title(events::tool_entry_title(true, tool_name, None));
+                let mut entry = TurnEntry::tool(0, format!("✓ **{tool_name}**\n{result}"))
+                    .with_title(events::tool_entry_title(true, tool_name, None));
                 if let Some(id) = tool_use_id {
                     entry = entry.with_tool_use_id(id.clone());
                 }
@@ -1764,8 +1821,11 @@ impl DispatchHandle {
         if turn_has_visible_output(&segment) || segment.iter().any(is_zero_output_notice) {
             return;
         }
-        self.transcript_push(session_id, TurnEntry::notice(0, ZERO_OUTPUT_NOTICE.to_string()))
-            .await;
+        self.transcript_push(
+            session_id,
+            TurnEntry::notice(0, ZERO_OUTPUT_NOTICE.to_string()),
+        )
+        .await;
         tracing::info!(
             session_id = %session_id,
             "turn finished with no visible output; appended a synthetic notice entry (close-acceptance-blind-spots)"
@@ -2113,11 +2173,7 @@ impl DispatchHandle {
     pub async fn apply_model_changed(&self, session_id: &str, model_id: &str) {
         if let Some(key) = self.map.lookup_key_by_session(session_id).await {
             let previous = self.map.get(&key).await.and_then(|m| m.current_model);
-            let operator_switch = self
-                .pending_model_switches
-                .write()
-                .await
-                .remove(session_id);
+            let operator_switch = self.pending_model_switches.write().await.remove(session_id);
             self.map.set_current_model(&key, model_id.to_string()).await;
             if operator_switch.is_some() && previous.as_deref() != Some(model_id) {
                 self.transcript_push(
@@ -2284,6 +2340,19 @@ impl DispatchHandle {
         }
     }
 
+    /// （agent-task-center 1.2）把创建请求携带的 beads 任务 id 记到会话映射
+    /// 上并广播 `Updated`——会话行/详情立即可见该关联。core 只透传、不校验
+    /// 任务存在性（beads 不在 core 域内，有效性由 WebUI HTTP 层裁决）。
+    /// `None` = 非任务会话，无事可做（不产生多余的落库/广播）。
+    pub async fn set_session_task_id(&self, key: &ChannelKey, task_id: Option<String>) {
+        if task_id.is_none() {
+            return;
+        }
+        if self.map.set_task_id(key, task_id).await {
+            self.publish_updated(key).await;
+        }
+    }
+
     /// 从归档条目重建会话（fix-webui-qa-defects 2.1，design D1）：以原 key
     /// 重建 `Dormant` 映射（惰性激活——首条消息走既有 resume 语义，agent
     /// 无法 load 时如实回退新会话），并把归档转写条目回放进 turn 存储，使
@@ -2411,7 +2480,9 @@ impl DispatchHandle {
         self.mark_cancelled_turn(&sid).await;
         self.emit(Out::SendAcp {
             session_id: sid.clone(),
-            cmd: AcpCommand::Cancel { session_id: sid.clone() },
+            cmd: AcpCommand::Cancel {
+                session_id: sid.clone(),
+            },
         })
         .await;
         self.release_parked_approvals(&sid).await;
@@ -2455,12 +2526,11 @@ impl DispatchHandle {
     /// `append_zero_output_notice_if_empty` 的回合切片判定同源。
     async fn current_turn_anchor(&self, session_id: &str) -> Option<u64> {
         let g = self.turn_log.read().await;
-        g.get(session_id)
-            .and_then(|log| {
-                log.iter()
-                    .rposition(|e| e.kind == TurnKind::Prompt)
-                    .map(|i| log[i].position)
-            })
+        g.get(session_id).and_then(|log| {
+            log.iter()
+                .rposition(|e| e.kind == TurnKind::Prompt)
+                .map(|i| log[i].position)
+        })
     }
 
     /// Send a message to an existing session from the WebUI. Returns
@@ -2547,8 +2617,7 @@ impl DispatchHandle {
                         .apply(&sid, |st| {
                             if matches!(
                                 st.status_emoji.as_str(),
-                                crate::card_state::phase::DONE
-                                    | crate::card_state::phase::FAILED
+                                crate::card_state::phase::DONE | crate::card_state::phase::FAILED
                             ) {
                                 st.status_emoji = crate::card_state::phase::WORKING.into();
                                 true
@@ -2707,6 +2776,23 @@ impl DispatchHandle {
         };
         let session_id_opt = mapping.session_id().map(|s| s.to_string());
 
+        // （agent-task-center 5.1/5.2）显式关闭 = 终态 `Closed`。映射与卡态
+        // 还在场时完成联动裁决（判断「最新会话」与读最后一轮状态都需要它们）。
+        // 在飞回合（SEED/WORKING）说明本回合没有正常收尾——关闭不是成功推进。
+        {
+            use crate::card_state::phase::{SEED, WORKING};
+            let turn_in_flight = match &session_id_opt {
+                Some(sid) => {
+                    self.card_states
+                        .apply(sid, |st| matches!(st.status_emoji.as_str(), SEED | WORKING))
+                        .await
+                }
+                None => false,
+            };
+            self.notify_task_advance(&key, &mapping, turn_in_flight, "closed")
+                .await;
+        }
+
         // fix-webui-qa-round9 1.3（session-transcript-durability）：close 删除
         // 对应 checkpoint 行——归档会话重启后不复活、不与归档条目重复计数
         // （spec「归档语义不受影响」）。用 transcript 寻址 id：Dormant 映射
@@ -2768,6 +2854,10 @@ impl DispatchHandle {
         let mut active = self.active_session.write().await;
         if active.as_ref() == Some(&key) {
             *active = None;
+        }
+        // （agent-task-center 5.2）会话终态事实随拆除清空——复用 id 不继承。
+        if let Some(sid) = &session_id_opt {
+            self.last_turn_status.write().await.remove(sid);
         }
         CloseOutcome::Closed { discarded_pending }
     }
@@ -2970,6 +3060,90 @@ impl DispatchHandle {
             .unwrap_or_else(|e| e.into_inner()) = Some(hook);
     }
 
+    /// （agent-task-center 5.1/5.2）会话终态联动钩子装配点：core 在 run.rs
+    /// 注入——引擎裁决「Closed/Exited + 最后一轮正常完成 + 本任务是该会话
+    /// 最新」后调用。幂等覆盖；钩子实现必须非阻塞（fire-and-forget）。
+    pub fn set_session_terminal_hook(&self, hook: SessionTerminalHook) {
+        *self
+            .terminal_hook
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Some(hook);
+    }
+
+    /// 该任务是本会话（`key`）是否为其最新推进会话：任务下没有别的会话有
+    /// 更新的活跃时刻即为真。表里没有 `created_at`，以 `last_active_unix`
+    /// 作为「新近度」事实源（与 rail/快照排序同口径）。
+    async fn is_latest_session_for_task(&self, key: &ChannelKey, task_id: &str) -> bool {
+        let mut newest_other: Option<i64> = None;
+        for (other_key, mapping) in self.map.snapshot_all().await {
+            if &other_key == key || mapping.task_id.as_deref() != Some(task_id) {
+                continue;
+            }
+            newest_other =
+                Some(newest_other.map_or(mapping.last_active_unix, |n| n.max(mapping.last_active_unix)));
+        }
+        let Some(newest_other) = newest_other else {
+            return true;
+        };
+        let this = self
+            .map
+            .get(key)
+            .await
+            .map(|m| m.last_active_unix)
+            .unwrap_or(i64::MIN);
+        this >= newest_other
+    }
+
+    /// 会话终结时的任务联动裁决 + 钩子调用（agent-task-center 5.2）。
+    ///
+    /// 必须在映射移除**之前**调用：最新会话判定与 task_id 都从映射读。
+    /// 只有全部条件满足才触发——有在飞回合（`turn_in_flight`）、最后一轮
+    /// 不是正常完成（非 200）、非任务会话、或存在更新的同任务会话，一律
+    /// 不动（spec 四条反例场景）。钩子缺失 = 未接线，零动作。
+    async fn notify_task_advance(
+        &self,
+        key: &ChannelKey,
+        mapping: &crate::state::Mapping,
+        turn_in_flight: bool,
+        reason: &'static str,
+    ) {
+        if turn_in_flight {
+            return;
+        }
+        let Some(task_id) = mapping.task_id.clone().filter(|t| !t.trim().is_empty()) else {
+            return;
+        };
+        let last_status = match mapping.transcript_id() {
+            Some(sid) => self
+                .last_turn_status
+                .read()
+                .await
+                .get(sid)
+                .copied(),
+            None => None,
+        };
+        if last_status != Some(sebas_domain::usage::TURN_STATUS_FINISHED) {
+            return;
+        }
+        if !self.is_latest_session_for_task(key, &task_id).await {
+            return;
+        }
+        let hook = self
+            .terminal_hook
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let Some(hook) = hook else { return };
+        hook(SessionTerminalTask {
+            channel: key.channel_str().to_string(),
+            key: key.reference.clone(),
+            task_id,
+            project_dir: mapping.project_dir.clone(),
+            actor: mapping.pending_kind.clone(),
+            reason,
+        });
+    }
+
     /// `UsageUpdate` 帧的本回合累计（apply_event 单点调用）。逐字段 `None`
     /// 保 `None`：本回合从未上报的计数在结算行里仍是 NULL。
     async fn accumulate_turn_usage(&self, session_id: &str, usage: &sebas_acp::TurnUsage) {
@@ -2988,6 +3162,13 @@ impl DispatchHandle {
     /// 条目被消费（不存在 = 无开轮记录或已结算 → 不产行，防 Error+Finished
     /// 配对双计）。钩子未装配（im-only router / 单测）时同样只消费不产行。
     async fn settle_turn_usage(&self, session_id: &str, status: u16, error: Option<String>) {
+        // （agent-task-center 5.2）最后一轮收尾状态随结算落定（与 usage 累计器
+        // 是否存在无关——取消/失败回合同样要如实记录，绝不让前一轮的 200
+        // 冒充本轮结果）。
+        self.last_turn_status
+            .write()
+            .await
+            .insert(session_id.to_string(), status);
         let acc = self.turn_usage.lock().await.remove(session_id);
         let Some(acc) = acc else { return };
         let hook = self
@@ -3039,7 +3220,12 @@ impl DispatchHandle {
             // fix-webui-qa-defects 3.1（design D2）：0-turn 占位不构成在飞回合
             // ——占位旗标仍在的映射（未经首条消息/激活消费）绝不强收、绝不向
             // 其 transcript 注入合成错误。真实回合的判定在旗标翻转后照常。
-            if self.map.get(&key).await.is_some_and(|m| m.awaiting_first_prompt()) {
+            if self
+                .map
+                .get(&key)
+                .await
+                .is_some_and(|m| m.awaiting_first_prompt())
+            {
                 continue;
             }
             let phase = self.card_states.status_emoji(&sid).await;
@@ -3193,8 +3379,12 @@ pub use sebas_channels::key::encode_session_key as encode_key;
 /// 非 wire 形态的输入可达（wire 上的键全部出自 [`encode_key`]，必有 NUL），
 /// 收敛后行为与旧手写实现逐字节一致（黄金样本钉）。
 pub fn decode_key(encoded: &str) -> Option<ChannelKey> {
-    sebas_channels::key::decode_session_key(encoded)
-        .or_else(|| Some(ChannelKey::feishu(&sebas_channels::key::percent_decode(encoded)?, None)))
+    sebas_channels::key::decode_session_key(encoded).or_else(|| {
+        Some(ChannelKey::feishu(
+            &sebas_channels::key::percent_decode(encoded)?,
+            None,
+        ))
+    })
 }
 
 fn extract_session_id(event: &AcpEvent) -> &str {

@@ -111,4 +111,26 @@ describe('SessionCreateModal', () => {
     )
     expect(onCreated).toHaveBeenCalledWith('oc_new')
   })
+
+  it('retitles for a task and cancel creates nothing (agent-task-center 8.5)', async () => {
+    const createSession = vi.fn()
+    const onClose = vi.fn()
+    render(
+      <SessionCreateModal
+        open
+        projectId="p1"
+        projects={projects}
+        task={{ id: 'bd-42', title: '补齐看板' }}
+        onClose={onClose}
+        onCreated={() => {}}
+        loadAgents={async () => ({ agents })}
+        loadCatalog={async () => catalog}
+        createSession={createSession}
+      />,
+    )
+    await waitFor(() => expect(screen.getByText('推进任务 bd-42：补齐看板')).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: /取\s*消$/ }))
+    expect(onClose).toHaveBeenCalled()
+    expect(createSession).not.toHaveBeenCalled()
+  })
 })

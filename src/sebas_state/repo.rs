@@ -17,8 +17,8 @@
 use rusqlite::Connection;
 use sebas_db::schema::TableSchema;
 use sebas_models::provider::{ModelAliasRow, ProviderRow};
-use sebas_models::setting::SettingRow;
 use sebas_models::runtime_state::{self, RuntimeStateRow};
+use sebas_models::setting::SettingRow;
 
 // ---- Table schemas (sqlite-auto-schema-sync) ----
 
@@ -150,6 +150,9 @@ pub static PROJECTS_TABLES: &[TableSchema] = &[
             label                 TEXT,
             prompt_preview        TEXT,
             awaiting_first_prompt INTEGER NOT NULL,
+            -- agent-task-center 1.1：会话推进的 beads 任务 id（可空；core 只
+            -- 透传，任务存在性由 WebUI 层校验）。
+            task_id               TEXT,
             PRIMARY KEY (chat_id, thread_id)
         );",
         index_ddls: &[],
@@ -203,7 +206,7 @@ pub static USAGE_LOCAL_TABLES: &[TableSchema] = &[TableSchema {
         ts                    TEXT NOT NULL
     );",
     index_ddls: &[
-        "CREATE INDEX IF NOT EXISTS idx_local_usage_records_ts ON local_usage_records(ts);"
+        "CREATE INDEX IF NOT EXISTS idx_local_usage_records_ts ON local_usage_records(ts);",
     ],
     columns: crate::usage_local::LocalUsageRow::schema_columns(),
 }];
@@ -237,9 +240,7 @@ pub fn load_persisted_state(
     // 读 model_aliases——行经 ModelAliasRow（BTreeMap 吸收顺序差异）。
     let mut model_aliases: BTreeMap<String, sebas_dispatch::state_store::ModelAliasEntry> =
         BTreeMap::new();
-    for row in
-        ModelAliasRow::all(conn).map_err(|e| format!("查询 model_aliases 失败: {e}"))?
-    {
+    for row in ModelAliasRow::all(conn).map_err(|e| format!("查询 model_aliases 失败: {e}"))? {
         model_aliases.insert(
             row.alias,
             sebas_dispatch::state_store::ModelAliasEntry {
@@ -342,8 +343,8 @@ pub fn update_persisted_state(
 pub fn load_settings(
     conn: &mut Connection,
 ) -> Result<Option<sebas_feishu::cards::CardConfig>, String> {
-    let row = SettingRow::find(conn, "card_config")
-        .map_err(|e| format!("读取 card_config 失败: {e}"))?;
+    let row =
+        SettingRow::find(conn, "card_config").map_err(|e| format!("读取 card_config 失败: {e}"))?;
     match row {
         Some(row) => serde_json::from_str(&row.value)
             .map(Some)
@@ -375,15 +376,16 @@ pub fn save_settings(
 
 /// 全部 agent 行（snapshot 投影源；行序按 id 字典序由调用方排序）。
 pub fn load_agents(conn: &mut Connection) -> Result<Vec<sebas_models::agent::AgentRow>, String> {
-    let mut rows = sebas_models::agent::AgentRow::all(conn)
-        .map_err(|e| format!("查询 agents 失败: {e}"))?;
+    let mut rows =
+        sebas_models::agent::AgentRow::all(conn).map_err(|e| format!("查询 agents 失败: {e}"))?;
     rows.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(rows)
 }
 
 /// 单行 upsert（put op 的存储半边；created_at/updated_at 由行自带）。
 pub fn save_agent(conn: &mut Connection, row: sebas_models::agent::AgentRow) -> Result<(), String> {
-    row.save(conn).map_err(|e| format!("写入 agent {} 失败: {e}", row.id))
+    row.save(conn)
+        .map_err(|e| format!("写入 agent {} 失败: {e}", row.id))
 }
 
 /// 按 id 软删除（墓碑，与 providers 表的 deleted 同款机制）：行保留
@@ -511,7 +513,10 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(node, "local", "node_id 默认值必须是 local（旧行自动归本机）");
+        assert_eq!(
+            node, "local",
+            "node_id 默认值必须是 local（旧行自动归本机）"
+        );
 
         // node_id NOT NULL：显式 NULL 必须被拒。
         let null_node = conn.execute(
@@ -768,11 +773,18 @@ mod tests {
             .map(|e| e.path())
             .filter(|p| {
                 p.file_name()
-                    .map(|n| n.to_string_lossy().ends_with(sebas_db::schema::BACKUP_SUFFIX))
+                    .map(|n| {
+                        n.to_string_lossy()
+                            .ends_with(sebas_db::schema::BACKUP_SUFFIX)
+                    })
                     .unwrap_or(false)
             })
             .collect();
-        assert_eq!(backups.len(), 1, "破坏性迁移前留有 .pre-sync 备份: {backups:?}");
+        assert_eq!(
+            backups.len(),
+            1,
+            "破坏性迁移前留有 .pre-sync 备份: {backups:?}"
+        );
 
         // settings.db 完全不受影响：重开后配置仍在。
         let (mut conn, outcome) = open_and_sync(&settings_path, SETTINGS_TABLES).unwrap();
@@ -967,6 +979,7 @@ mod tests {
                     ("label", "TEXT"),
                     ("prompt_preview", "TEXT"),
                     ("awaiting_first_prompt", "INTEGER"),
+                    ("task_id", "TEXT"),
                 ],
             ),
         ];
@@ -1103,11 +1116,7 @@ mod tests {
         std::fs::read_dir(dir)
             .unwrap()
             .filter_map(Result::ok)
-            .filter(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .ends_with(suffix)
-            })
+            .filter(|e| e.file_name().to_string_lossy().ends_with(suffix))
             .count()
     }
 
@@ -1182,7 +1191,11 @@ mod tests {
             })
             .unwrap();
         assert_eq!(name, "keep", "改名后 settings.db 存量行保值");
-        assert_eq!(snapshot(&projects_path), projects_before, "settings.db 迁移不得触碰 projects.db");
+        assert_eq!(
+            snapshot(&projects_path),
+            projects_before,
+            "settings.db 迁移不得触碰 projects.db"
+        );
         drop(conn);
 
         // ---- settings.db：类型变更（settings.value TEXT vs live INTEGER）----
@@ -1208,10 +1221,19 @@ mod tests {
             "settings.db 的类型不符应事务内重建"
         );
         let value: String = conn
-            .query_row("SELECT value FROM settings WHERE key = 'k'", [], |r| r.get(0))
+            .query_row("SELECT value FROM settings WHERE key = 'k'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
-        assert_eq!(value, "42", "重建按列名拷贝（INTEGER 42 经 TEXT 亲和转 '42'）");
-        assert_eq!(snapshot(&projects_path), projects_before, "settings.db 迁移不得触碰 projects.db");
+        assert_eq!(
+            value, "42",
+            "重建按列名拷贝（INTEGER 42 经 TEXT 亲和转 '42'）"
+        );
+        assert_eq!(
+            snapshot(&projects_path),
+            projects_before,
+            "settings.db 迁移不得触碰 projects.db"
+        );
         drop(conn);
 
         // ---- settings.db：删列（providers.stale 无引用）----
@@ -1231,7 +1253,11 @@ mod tests {
             },
             "settings.db 的多余列应原位 DROP"
         );
-        assert!(!sqlite_columns(&conn, "providers").iter().any(|c| c == "stale"));
+        assert!(
+            !sqlite_columns(&conn, "providers")
+                .iter()
+                .any(|c| c == "stale")
+        );
         drop(conn);
 
         // ---- projects.db：改名（projects.name ← title）----
@@ -1253,10 +1279,16 @@ mod tests {
             "projects.db 的声明改名应原位执行"
         );
         let name: String = conn
-            .query_row("SELECT name FROM projects WHERE id = 'id1'", [], |r| r.get(0))
+            .query_row("SELECT name FROM projects WHERE id = 'id1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(name, "proj", "改名后 projects.db 存量行保值");
-        assert_eq!(snapshot(&settings_path), settings_before, "projects.db 迁移不得触碰 settings.db");
+        assert_eq!(
+            snapshot(&settings_path),
+            settings_before,
+            "projects.db 迁移不得触碰 settings.db"
+        );
         drop(conn);
 
         // ---- projects.db：类型变更（projects.name TEXT vs live INTEGER）----
@@ -1299,7 +1331,11 @@ mod tests {
             })
             .unwrap();
         assert_eq!(name, "42", "重建按列名拷贝并保留唯一索引");
-        assert_eq!(snapshot(&settings_path), settings_before, "projects.db 迁移不得触碰 settings.db");
+        assert_eq!(
+            snapshot(&settings_path),
+            settings_before,
+            "projects.db 迁移不得触碰 settings.db"
+        );
         // 再开一次必须 UpToDate：重建后的实表布局与注册 DDL 逐列自洽
         // （`name` 已是 TEXT）——比读 pragma 元数据更强，且不引入表结构
         // diff 原语（机械门禁只允许 sebas-db 一份）。
@@ -1328,7 +1364,11 @@ mod tests {
             },
             "projects.db 的多余列应原位 DROP"
         );
-        assert!(!sqlite_columns(&conn, "session_map").iter().any(|c| c == "stale"));
+        assert!(
+            !sqlite_columns(&conn, "session_map")
+                .iter()
+                .any(|c| c == "stale")
+        );
         let sid: String = conn
             .query_row(
                 "SELECT session_id FROM session_map WHERE chat_id = 'web'",
@@ -1340,11 +1380,17 @@ mod tests {
 
         // 两库各自留下一份破坏性迁移前的备份，互不覆盖（各自库旁一份）。
         assert_eq!(
-            temp_file_count(dir.path(), &format!("settings.db{}", sebas_db::schema::BACKUP_SUFFIX)),
+            temp_file_count(
+                dir.path(),
+                &format!("settings.db{}", sebas_db::schema::BACKUP_SUFFIX)
+            ),
             1
         );
         assert_eq!(
-            temp_file_count(dir.path(), &format!("projects.db{}", sebas_db::schema::BACKUP_SUFFIX)),
+            temp_file_count(
+                dir.path(),
+                &format!("projects.db{}", sebas_db::schema::BACKUP_SUFFIX)
+            ),
             1
         );
     }
@@ -1358,8 +1404,8 @@ mod active_record_tests {
     use rusqlite::Connection;
     use sebas_db::record::{delete_sql, select_sql, upsert_sql};
     use sebas_db::schema::open_and_sync;
-    use sebas_models::provider::{ModelAliasRow, ProviderRow};
     use sebas_models::project::ProjectRow;
+    use sebas_models::provider::{ModelAliasRow, ProviderRow};
     use sebas_models::session_map::{self, SessionMapRow};
     use sebas_models::setting::SettingRow;
     use tempfile::tempdir;
@@ -1427,8 +1473,9 @@ mod active_record_tests {
             upsert_sql::<SessionMapRow>(),
             "INSERT INTO session_map (chat_id, thread_id, session_id, last_active_unix, \
              project_dir, acp_session_id, current_model, pending_kind, pending_model, \
-             pending_mode, desired_mode, label, prompt_preview, awaiting_first_prompt) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
+             pending_mode, desired_mode, label, prompt_preview, awaiting_first_prompt, \
+             task_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15) \
              ON CONFLICT(chat_id, thread_id) \
              DO UPDATE SET session_id = excluded.session_id, \
              last_active_unix = excluded.last_active_unix, project_dir = excluded.project_dir, \
@@ -1436,7 +1483,7 @@ mod active_record_tests {
              pending_kind = excluded.pending_kind, pending_model = excluded.pending_model, \
              pending_mode = excluded.pending_mode, desired_mode = excluded.desired_mode, \
              label = excluded.label, prompt_preview = excluded.prompt_preview, \
-             awaiting_first_prompt = excluded.awaiting_first_prompt"
+             awaiting_first_prompt = excluded.awaiting_first_prompt, task_id = excluded.task_id"
         );
 
         // find / delete 的 SQL 形状同样来自生成器（单列主键形态）。
@@ -1499,7 +1546,10 @@ mod active_record_tests {
             created_at: 42,
         };
         row.save(&conn).unwrap();
-        assert_eq!(ModelAliasRow::find(&conn, "my-claude").unwrap().unwrap(), row);
+        assert_eq!(
+            ModelAliasRow::find(&conn, "my-claude").unwrap().unwrap(),
+            row
+        );
         assert!(ModelAliasRow::delete(&conn, "my-claude").unwrap());
         assert!(ModelAliasRow::find(&conn, "my-claude").unwrap().is_none());
     }
@@ -1507,7 +1557,10 @@ mod active_record_tests {
     #[test]
     fn setting_row_save_find_round_trip() {
         let (_dir, conn) = settings_db();
-        let row = SettingRow { key: "k".into(), value: "v".into() };
+        let row = SettingRow {
+            key: "k".into(),
+            value: "v".into(),
+        };
         row.save(&conn).unwrap();
         assert_eq!(SettingRow::find(&conn, "k").unwrap().unwrap(), row);
         assert_eq!(SettingRow::all(&conn).unwrap(), vec![row.clone()]);
@@ -1555,11 +1608,14 @@ mod active_record_tests {
             label: Some("重构计划".into()),
             prompt_preview: None,
             awaiting_first_prompt: false,
+            task_id: None,
         };
         row.save(&conn).unwrap();
         // 复合主键：find_by / delete_by（按全部键列）。
         assert_eq!(
-            SessionMapRow::find_by(&conn, "web", Some("web-1")).unwrap().unwrap(),
+            SessionMapRow::find_by(&conn, "web", Some("web-1"))
+                .unwrap()
+                .unwrap(),
             row
         );
         assert_eq!(
@@ -1577,8 +1633,84 @@ mod active_record_tests {
             vec![updated]
         );
         assert!(SessionMapRow::delete_by(&conn, "web", Some("web-1")).unwrap());
-        assert!(SessionMapRow::find_by(&conn, "web", Some("web-1")).unwrap().is_none());
+        assert!(
+            SessionMapRow::find_by(&conn, "web", Some("web-1"))
+                .unwrap()
+                .is_none()
+        );
         assert!(session_map::load_session_map(&mut conn).unwrap().is_empty());
+    }
+
+    /// agent-task-center 1.1：改造前的 session_map 库（无 `task_id` 列）打开时
+    /// 原地 `ALTER TABLE session_map ADD COLUMN task_id TEXT`——存量行数据不动，
+    /// 新列为 NULL（可空列，旧数据无需回填）。
+    #[test]
+    fn session_map_gains_nullable_task_id_column_in_place() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("projects.db");
+        {
+            let conn = sebas_db::conn::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE session_map (
+                    chat_id               TEXT NOT NULL,
+                    thread_id             TEXT,
+                    session_id            TEXT NOT NULL,
+                    last_active_unix      INTEGER NOT NULL,
+                    project_dir           TEXT,
+                    acp_session_id        TEXT,
+                    current_model         TEXT,
+                    pending_kind          TEXT,
+                    pending_model         TEXT,
+                    pending_mode          TEXT,
+                    desired_mode          TEXT NOT NULL,
+                    label                 TEXT,
+                    prompt_preview        TEXT,
+                    awaiting_first_prompt INTEGER NOT NULL,
+                    PRIMARY KEY (chat_id, thread_id)
+                );
+                CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                INSERT INTO schema_meta (key, value) VALUES
+                    ('version_format', 'date'),
+                    ('version', '20260924');
+                INSERT INTO session_map (
+                    chat_id, thread_id, session_id, last_active_unix,
+                    desired_mode, awaiting_first_prompt
+                ) VALUES ('web', 'web-old', 's-old', 100, 'ask', 0);",
+            )
+            .unwrap();
+        }
+
+        let (conn, outcome) = open_and_sync(&db_path, PROJECTS_TABLES).unwrap();
+        assert_eq!(
+            outcome,
+            sebas_db::schema::SyncOutcome::Synced {
+                added_columns: 1,
+                renamed: 0,
+                rebuilt: 0,
+                dropped: 0,
+            },
+            "session_map 缺 task_id 应原地补可空列"
+        );
+        // 存量行保留，新列取 NULL（列存在性由下面的 SELECT 直接证明——表结构
+        // diff 原语只允许存在于 sebas-db，本 crate 不得再写一份）。
+        let (sid, task_id): (String, Option<String>) = conn
+            .query_row(
+                "SELECT session_id, task_id FROM session_map WHERE chat_id = 'web'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(sid, "s-old", "存量行数据不动");
+        assert_eq!(task_id, None, "补出的可空列取 NULL");
+        // 版本戳随迁移更新。
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM schema_meta WHERE key = 'version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, sebas_db::schema::SCHEMA_VERSION);
     }
 
     /// retire-schema-reset：改造前的 5 列 session_map 库在新注册表下打开——
@@ -1626,8 +1758,7 @@ mod active_record_tests {
         let before_bytes = std::fs::read(&db_path).unwrap();
         let before_mtime = std::fs::metadata(&db_path).unwrap().modified().unwrap();
 
-        let err = open_and_sync(&db_path, PROJECTS_TABLES)
-            .expect_err("非空无默认的缺列必须拒启动");
+        let err = open_and_sync(&db_path, PROJECTS_TABLES).expect_err("非空无默认的缺列必须拒启动");
         assert!(
             err.contains("desired_mode") && err.contains("非空"),
             "诊断要点名不可迁移的缺列: {err}"
@@ -1672,7 +1803,6 @@ mod active_record_tests {
             "拒启动路径不得留下重置或备份产物: {leftovers:?}"
         );
     }
-
 }
 
 // 下沉说明：StateWriter 的启动接入点在 src/run.rs（经本模块的域接线包装）；
@@ -1681,12 +1811,12 @@ mod active_record_tests {
 #[cfg(test)]
 mod writer_wiring_tests {
     use super::{
-        SETTINGS_TABLES, TableSchema, delete_agent, load_agents, load_persisted_state,
-        save_agent,
+        PROJECTS_TABLES, SETTINGS_TABLES, TableSchema, delete_agent, load_agents,
+        load_persisted_state, save_agent,
     };
     use crate::sebas_state::writer::StateWriter;
-    use sebas_dispatch::state_store::StateStoreEngine;
     use sebas_db::schema::open_and_sync;
+    use sebas_dispatch::state_store::StateStoreEngine;
     use tempfile::tempdir;
 
     /// 两库各自 open：settings.db 拿到三张表 + schema_meta，projects.db
@@ -1697,23 +1827,20 @@ mod writer_wiring_tests {
         let settings_path = dir.path().join("settings.db");
         let projects_path = dir.path().join("projects.db");
 
-        let settings =
-            StateWriter::start_settings(settings_path.clone()).expect("settings writer");
-        let projects =
-            StateWriter::start_projects(projects_path.clone()).expect("projects writer");
+        let settings = StateWriter::start_settings(settings_path.clone()).expect("settings writer");
+        let projects = StateWriter::start_projects(projects_path.clone()).expect("projects writer");
 
         let settings_tables: Vec<String> = settings
             .handle()
             .exec(|conn| {
                 let mut stmt = conn
-                    .prepare(
-                        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name",
-                    )
+                    .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
                     .map_err(|e| e.to_string())?;
                 let rows = stmt
                     .query_map([], |r| r.get::<_, String>(0))
                     .map_err(|e| e.to_string())?;
-                rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+                rows.collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| e.to_string())
             })
             .await
             .unwrap();
@@ -1732,14 +1859,13 @@ mod writer_wiring_tests {
             .handle()
             .exec(|conn| {
                 let mut stmt = conn
-                    .prepare(
-                        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name",
-                    )
+                    .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
                     .map_err(|e| e.to_string())?;
                 let rows = stmt
                     .query_map([], |r| r.get::<_, String>(0))
                     .map_err(|e| e.to_string())?;
-                rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+                rows.collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| e.to_string())
             })
             .await
             .unwrap();
@@ -1760,13 +1886,15 @@ mod writer_wiring_tests {
             projects.handle().clone(),
         );
         engine
-            .add_project(sebas_models::project::LOCAL_NODE_ID, "/tmp/two-db", "two-db", 1)
+            .add_project(
+                sebas_models::project::LOCAL_NODE_ID,
+                "/tmp/two-db",
+                "two-db",
+                1,
+            )
             .await
             .unwrap();
-        engine
-            .save_settings(serde_json::json!({}))
-            .await
-            .unwrap();
+        engine.save_settings(serde_json::json!({})).await.unwrap();
         assert_eq!(engine.load_projects().await.unwrap().len(), 1);
         assert!(engine.load_settings().await.unwrap().is_some());
     }
@@ -1844,7 +1972,10 @@ mod writer_wiring_tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].id, "seeded");
         assert!(delete_agent(&mut conn, "seeded").unwrap());
-        assert!(!delete_agent(&mut conn, "seeded").unwrap(), "二次删除如实报不存在");
+        assert!(
+            !delete_agent(&mut conn, "seeded").unwrap(),
+            "二次删除如实报不存在"
+        );
         // 软删墓碑：行保留（deleted=1）——目录/解析/种子导入视其不存在，
         // config 种子 agent 的删除因此可粘住（重启不被回填）。
         let rows = load_agents(&mut conn).unwrap();
@@ -1877,7 +2008,10 @@ mod writer_wiring_tests {
             "加表走 Synced，实际 {outcome:?}"
         );
         let state = load_persisted_state(&mut conn).unwrap();
-        assert_eq!(state, sebas_dispatch::state_store::PersistedState::default());
+        assert_eq!(
+            state,
+            sebas_dispatch::state_store::PersistedState::default()
+        );
         assert!(load_agents(&mut conn).unwrap().is_empty(), "新表为空但可读");
 
         // 补表后再写一行 + 再开一次 = UpToDate（幂等稳定）。

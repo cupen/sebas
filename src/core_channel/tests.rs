@@ -422,6 +422,7 @@ async fn create_placeholder_wires_a_zero_turn_session() {
             Some("m-free".into()),
             None,
             None,
+            None,
         )
         .await
         .expect("placeholder created");
@@ -460,6 +461,7 @@ async fn create_placeholder_wires_a_zero_turn_session() {
             .create_placeholder(
                 Some("/nonexistent-sebas-p2".into()),
                 "opencode",
+                None,
                 None,
                 None,
                 None
@@ -503,7 +505,7 @@ async fn placeholder_without_kind_or_model_spawns_on_first_message() {
     let backend = CoreChannelBackend::new(core.path.clone(), SECRET.into());
 
     let key = backend
-        .create_placeholder(Some("/tmp".into()), "claudecode", None, None, None)
+        .create_placeholder(Some("/tmp".into()), "claudecode", None, None, None, None)
         .await
         .expect("placeholder created");
 

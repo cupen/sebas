@@ -132,6 +132,26 @@ pub enum WebUiEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         cause: Option<String>,
     },
+    /// （agent-task-center 4.2）beads journal 的一条新记录：`task_updated`
+    /// 携带**完整 issue 快照**（`issue`），前端直接替换本地任务状态，无需
+    /// 回查 `bd show`（design D5）。`seq`/`op`/`actor` 透传 journal 原文。
+    #[serde(rename = "task_updated")]
+    TaskUpdated {
+        project_id: String,
+        seq: i64,
+        op: String,
+        issue_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        actor: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        issue: Option<Box<crate::beads_client::BeadsIssue>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        comment: Option<crate::beads_client::BeadsComment>,
+    },
+    /// （agent-task-center 4.2）订阅落后广播（丢帧）：前端全量重取该项目
+    /// 的任务列表，不因陈旧游标永久缺失。
+    #[serde(rename = "task_resync")]
+    TaskResync { project_id: String },
 }
 
 /// add-ws-rpc-protocol：事件统一包进 Notification 封套——`method` = 原
@@ -402,5 +422,51 @@ mod tests {
             notification.params,
             json!({ "ok": false, "kind": "startup_failed", "cause": "core startup failed: bad config" })
         );
+    }
+
+    /// agent-task-center 4.2：`task_updated` 帧 = journal 记录原文 + project_id，
+    /// `issue` 是完整快照（前端直接替换，不回查）；`task_resync` 只点名项目。
+    #[test]
+    fn task_frames_carry_the_journal_snapshot() {
+        let issue = crate::beads_client::BeadsIssue {
+            id: "tsk-1".into(),
+            title: "Fix the thing".into(),
+            status: "in_progress".into(),
+            assignee: Some("claude".into()),
+            labels: vec!["in-review".into()],
+            metadata: Some(json!({"reviewer": "admin"})),
+            ..Default::default()
+        };
+        let frame = super::notification_frame(WebUiEvent::TaskUpdated {
+            project_id: "proj-1".into(),
+            seq: 42,
+            op: "update".into(),
+            issue_id: "tsk-1".into(),
+            actor: Some("claude".into()),
+            issue: Some(Box::new(issue.clone())),
+            comment: None,
+        });
+        let crate::ws_rpc::Frame::Notification(notification) = frame else {
+            panic!("events must wrap into a Notification");
+        };
+        assert_eq!(notification.method, "task_updated");
+        assert_eq!(notification.params["project_id"], "proj-1");
+        assert_eq!(notification.params["seq"], 42);
+        assert_eq!(notification.params["issue"]["id"], "tsk-1");
+        assert_eq!(notification.params["issue"]["labels"], json!(["in-review"]));
+        assert!(
+            notification.params.get("comment").is_none(),
+            "None 载荷不上 wire: {}",
+            notification.params
+        );
+
+        let frame = super::notification_frame(WebUiEvent::TaskResync {
+            project_id: "proj-1".into(),
+        });
+        let crate::ws_rpc::Frame::Notification(notification) = frame else {
+            panic!("events must wrap into a Notification");
+        };
+        assert_eq!(notification.method, "task_resync");
+        assert_eq!(notification.params, json!({ "project_id": "proj-1" }));
     }
 }

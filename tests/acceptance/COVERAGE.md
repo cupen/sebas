@@ -325,6 +325,7 @@ CLI、真实模型跑分、watchdog spawn-fail 进程级注入等）不变。
 | agent-bench | ✅ | sebas-agent bench 内联测试；🚫 真实模型跑分豁免 |
 | agent-core | ✅ | sebas-agent 91 项内联测试（policy/tools/turn loop/budgets/streaming）|
 | agent-driver | ✅ | sebas-webui `agent_kinds_test`、src `agent_backend` 内联测试 |
+| agent-task-center | ✅ | 任务中心（beads 薄封装）：J `task_board_lifecycle_and_claim_race_journey`（完整看板生命周期 + 人/agent 双主体认领竞速，输家 409 点名赢家、看板显示赢家）；E `task_center_lifecycle_journey`（项目注册 → 面板首访惰性 `bd init` → 建任务 → 认领 → 从任务开会话 → fake-claude 回合 → 关闭会话 → 自动进评审 → reviewer 关闭）；fixture 级 `sebas-webui/tests/task_center_api_test.rs`（假 bd：词表 400 / claim 409 / reviewer 403 / refresh）、`task_center_integration_test.rs`（真 bd + WS `task_updated` 推送）、`task_terminal_hook_integration_test.rs`（终态联动 7 例）；🚫 跨机 `bd dolt pull` 同步（v1 单机边界，Refresh tasks 重新基线兜底） |
 | channels | ✅ | sebas-channels crate 测试 |
 | cli-service | ✅ | `config_test`、`config_env_test`、`daemon_path_repro_test`、src `cli` 内联测试；E: startup_failure（fail-fast-on-startup-errors：garbage config → 退出码 75 + stderr 末行 `startup-failure:` 摘要 + `SEBAS_STARTUP_ERROR_FILE`，core 与 run 双形态，`testsuite_e2e_test`）|
 | core-session-channel | ✅ | 见核心簇⑤ |

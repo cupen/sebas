@@ -15,8 +15,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use sebas_channels::card::AppUsage;
 use sebas_channels::ChannelKey;
+use sebas_channels::card::AppUsage;
 
 // 会话词汇的收敛定义（type-session-vocabularies）住在 [`crate::vocabulary`]；
 // 这里原位再导出，`sebas_domain::session::*` 这条既有公开路径零改动。
@@ -242,6 +242,12 @@ pub struct SessionInfo {
     /// `#[serde(default, skip_serializing_if)]` 兼容旧快照/旧事件。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_prompt_preview: Option<String>,
+    /// （agent-task-center 1.2）该会话推进的 beads 任务 id（如 `bd-42`）；
+    /// `None` = 非任务会话。core 只透传、不校验任务存在性——任务有效性由
+    /// WebUI HTTP 层在创建前裁决。`#[serde(default, skip_serializing_if)]`
+    /// 兼容旧快照/旧事件：None 不上 wire，老字节形状零变化（协议演进规则 1）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
 }
 
 /// （3.2，design D5b）`desired_mode` 的反序列化兼容：旧 core-channel 报文
@@ -426,12 +432,7 @@ impl TurnEntry {
     /// 前端据此渲染为带计数的错误气泡而非普通 markdown。（kind 词汇收敛为
     /// prompt|content 两值是 workbench-conversation-view 的 delta 契约。）
     pub fn error(position: u64, content: impl Into<String>) -> Self {
-        Self::new(
-            position,
-            TurnKind::Content,
-            TurnElementType::Error,
-            content,
-        )
+        Self::new(position, TurnKind::Content, TurnElementType::Error, content)
     }
 
     /// 零输出回合的合成提示条目（close-acceptance-blind-spots 4.1，design
@@ -655,6 +656,7 @@ mod tests {
             parked_approvals: 0,
             label: None,
             first_prompt_preview: None,
+            task_id: None,
         };
         let v = serde_json::to_value(&info).unwrap();
         assert_eq!(v["channel"], "web");
@@ -874,17 +876,28 @@ mod webui_wire_tests {
     #[test]
     fn session_rejection_code_tags_are_pinned() {
         let cases = [
-            (SessionRejection::UnknownSession { key: "k".into() }, "unknown_session"),
+            (
+                SessionRejection::UnknownSession { key: "k".into() },
+                "unknown_session",
+            ),
             (SessionRejection::UnusableProjectDir, "unusable_project_dir"),
             (SessionRejection::Capacity { limit: 1 }, "capacity"),
-            (SessionRejection::Unavailable { cause: "c".into() }, "unavailable"),
             (
-                SessionRejection::BackendUnavailable { backend: "b".into(), cause: "c".into() },
+                SessionRejection::Unavailable { cause: "c".into() },
+                "unavailable",
+            ),
+            (
+                SessionRejection::BackendUnavailable {
+                    backend: "b".into(),
+                    cause: "c".into(),
+                },
                 "backend_unavailable",
             ),
             (SessionRejection::QueueFull { limit: 2 }, "queue_full"),
             (
-                SessionRejection::PendingRejected { reason: PendingReason::Unknown },
+                SessionRejection::PendingRejected {
+                    reason: PendingReason::Unknown,
+                },
                 "pending_rejected",
             ),
             (SessionRejection::Idle { key: "k".into() }, "idle_session"),

@@ -105,9 +105,10 @@ fn key_arg_from_args(args: &serde_json::Value) -> Option<String> {
     let obj = args.as_object()?;
     for key in KEY_ARG_PREFERRED {
         if let Some(s) = obj.get(key).and_then(|v| v.as_str())
-            && !s.is_empty() {
-                return Some(s.to_string());
-            }
+            && !s.is_empty()
+        {
+            return Some(s.to_string());
+        }
     }
     obj.values()
         .find_map(|v| v.as_str())
@@ -132,11 +133,7 @@ fn truncate_chars(s: &str, max: usize) -> String {
 /// （fold-tool-calls-into-process-tree 3.1）公开为**可复用入口**：native
 /// 载体的两个投影点（根 crate `agent_backend` / `native_dispatch_bridge`）
 /// 升一等 tool 条目时复用本规则，不复制键序表。
-pub fn tool_entry_title(
-    done: bool,
-    tool_name: &str,
-    args: Option<&serde_json::Value>,
-) -> String {
+pub fn tool_entry_title(done: bool, tool_name: &str, args: Option<&serde_json::Value>) -> String {
     let mut title = match args.and_then(key_arg_from_args) {
         Some(arg) => format!("{tool_name} · {arg}"),
         None => tool_name.to_string(),
@@ -206,6 +203,7 @@ mod tests {
                 },
             ],
             first_prompt_preview: None,
+            task_id: None,
         };
         let cases = vec![
             SessionEvent::Created {
@@ -280,6 +278,7 @@ mod tests {
             // session-slash-commands：无发现能力会话的命令表恒空。
             available_commands: Vec::new(),
             first_prompt_preview: None,
+            task_id: None,
         };
         assert_eq!(info.channel, "feishu");
         assert_eq!(info.key, "oc_x\0t1");
@@ -309,7 +308,10 @@ mod tests {
         let back: TurnEntry = serde_json::from_str(legacy).unwrap();
         assert_eq!(back.title, None);
         assert_eq!(back.position, 4);
-        assert_eq!(back.element_type, sebas_domain::session::TurnElementType::Tool);
+        assert_eq!(
+            back.element_type,
+            sebas_domain::session::TurnElementType::Tool
+        );
 
         // 带 title：完整往返。
         let titled = TurnEntry::tool(0, "📖 **Read**").with_title(tool_entry_title(
@@ -446,9 +448,10 @@ fn session_info_usage_field_is_additive() {
         turn_engaged: false,
         spawn_failure_reason: None,
         parked_approvals: 0,
-            label: None,
+        label: None,
         available_commands: Vec::new(),
         first_prompt_preview: None,
+        task_id: None,
     };
     let json = serde_json::to_string(&full).unwrap();
     let back: SessionInfo = serde_json::from_str(&json).unwrap();
@@ -493,13 +496,14 @@ fn session_info_available_commands_field_is_additive() {
         turn_engaged: true,
         spawn_failure_reason: None,
         parked_approvals: 0,
-            label: None,
+        label: None,
         available_commands: vec![sebas_acp::AvailableCommand {
             name: "goal".into(),
             description: "Set a goal".into(),
             hint: Some("<condition>".into()),
         }],
         first_prompt_preview: None,
+        task_id: None,
     };
     let json = serde_json::to_string(&full).unwrap();
     let back: SessionInfo = serde_json::from_str(&json).unwrap();
@@ -670,9 +674,10 @@ fn session_info_turn_engaged_field_is_additive() {
         turn_engaged: true,
         spawn_failure_reason: None,
         parked_approvals: 0,
-            label: None,
+        label: None,
         available_commands: Vec::new(),
         first_prompt_preview: None,
+        task_id: None,
     };
     let json = serde_json::to_string(&engaged).unwrap();
     let back: SessionInfo = serde_json::from_str(&json).unwrap();

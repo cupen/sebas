@@ -132,6 +132,12 @@ pub enum CoreChannelRequest {
         /// 旧客户端不发这个字段，语义就是本机，不需要新协议版本。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         node: Option<String>,
+        /// （agent-task-center 1.2）该会话推进的 beads 任务 id（如 `bd-42`；
+        /// None = 非任务会话）。core 只透传、不校验任务存在性——任务有效性
+        /// 由 WebUI HTTP 层在创建前裁决。`#[serde(default, skip_serializing_if)]`
+        /// 兼容旧客户端：缺省 None，wire 老字节形状零变化（协议演进规则 1）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_id: Option<String>,
     },
     /// Create a 0-turn placeholder session WITHOUT spawning an agent child
     /// (P2 fix: an empty prompt must not reach the agent — opencode hangs on
@@ -155,6 +161,9 @@ pub enum CoreChannelRequest {
         /// 目标执行节点，语义与 `Spawn.node` 一致。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         node: Option<String>,
+        /// 该会话推进的 beads 任务 id，语义与 `Spawn.task_id` 一致。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_id: Option<String>,
     },
     /// 中程切换会话模型（add-acp-model-selection）：`session/set_config_option`。
     SetSessionModel { key: ChannelKey, model_id: String },
@@ -237,7 +246,10 @@ pub enum CoreChannelRequest {
     PendingApprovals { key: ChannelKey },
     /// 设置/清空会话 label（fix-webui-approval-restore-and-session-identity
     /// 5.1，design D6）；`None` = 清空。
-    SetSessionLabel { key: ChannelKey, label: Option<String> },
+    SetSessionLabel {
+        key: ChannelKey,
+        label: Option<String>,
+    },
     /// Start the event stream (see module docs for the frame order).
     Subscribe,
     /// Snapshot a domain of the core state store (add-state-store).
@@ -285,7 +297,10 @@ pub enum CoreChannelRequest {
     /// wire（老字节形状零变化）。
     UsageTimeseries {
         /// 聚合来源：`"router"` | `"local"` | `"all"`（缺省 all 合计）。
-        #[serde(default = "default_usage_source", skip_serializing_if = "is_default_source")]
+        #[serde(
+            default = "default_usage_source",
+            skip_serializing_if = "is_default_source"
+        )]
         source: String,
         /// 聚合粒度，`"day"`（缺省）| `"hour"`；非法拼写由取数端 400。
         #[serde(default = "default_usage_granularity")]
@@ -709,7 +724,10 @@ mod tests {
     #[test]
     fn handshake_ack_carries_the_local_version() {
         let ack = ChannelHandshakeAck::ok();
-        assert_eq!(ack.to_line().unwrap(), "{\"handshake\":\"ok\",\"version\":1}\n");
+        assert_eq!(
+            ack.to_line().unwrap(),
+            "{\"handshake\":\"ok\",\"version\":1}\n"
+        );
         assert!(ack.is_ok());
         roundtrip(&ack);
     }
@@ -732,7 +750,10 @@ mod tests {
         );
         assert!(!ack.is_ok());
         let cause = ack.cause().expect("rejection must carry a cause");
-        assert!(cause.contains("client=9"), "拒绝文本须指名客户端版本: {cause}");
+        assert!(
+            cause.contains("client=9"),
+            "拒绝文本须指名客户端版本: {cause}"
+        );
         assert!(
             cause.contains(&format!("supported={PROTOCOL_VERSION}")),
             "拒绝文本须指名本端支持版本: {cause}"

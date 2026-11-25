@@ -19,12 +19,12 @@
 //!    canonical `TurnEntry` 在**序列化层**逐字节对齐（单测只钉了逐字段
 //!    等价；序列化形状等价是更强断言——单侧加字段即失败）。
 
-use sebas_channels::key::{decode_session_key, encode_session_key};
 use sebas_channels::ChannelKey;
+use sebas_channels::key::{decode_session_key, encode_session_key};
 use sebas_domain::node::NodeView;
 use sebas_domain::session::{
-    PermissionDecision, PermissionNotice, PendingApproval, PendingDisposition, PendingReason,
-    PendingSubmission, RemoteSessionView, SessionEvent, SessionIdentity, SessionInfo,
+    PendingApproval, PendingDisposition, PendingReason, PendingSubmission, PermissionDecision,
+    PermissionNotice, RemoteSessionView, SessionEvent, SessionIdentity, SessionInfo,
     SessionRejection, TurnEntry, TurnStreamEvent,
 };
 
@@ -66,6 +66,7 @@ fn domain_session_info(channel: &str, reference: &str) -> SessionInfo {
         parked_approvals: 0,
         label: None,
         first_prompt_preview: None,
+        task_id: None,
     }
 }
 
@@ -100,9 +101,7 @@ fn codec_outputs_are_byte_identical_across_consumer_paths() {
         );
 
         // webui 呈现行（From<&SessionInfo> 内部走 encode_channel_key）。
-        let row = sebas_webui::models::SessionRow::from(&domain_session_info(
-            channel, reference,
-        ));
+        let row = sebas_webui::models::SessionRow::from(&domain_session_info(channel, reference));
         assert_eq!(
             row.encoded_key, canonical,
             "webui 会话行偏离唯一实现: {channel}/{reference}"
@@ -152,9 +151,16 @@ fn core_channel_vocabulary_round_trips_through_domain_paths_alone() {
 
     // SessionEvent 全变体（type tag + 载荷往返）。
     let events = vec![
-        SessionEvent::Created { session: info.clone() },
-        SessionEvent::Updated { session: info.clone() },
-        SessionEvent::Removed { channel: "web".into(), key: "web-1".into() },
+        SessionEvent::Created {
+            session: info.clone(),
+        },
+        SessionEvent::Updated {
+            session: info.clone(),
+        },
+        SessionEvent::Removed {
+            channel: "web".into(),
+            key: "web-1".into(),
+        },
         SessionEvent::PendingDropped {
             channel: "web".into(),
             key: "web-1".into(),
@@ -166,13 +172,21 @@ fn core_channel_vocabulary_round_trips_through_domain_paths_alone() {
                 priority: false,
             }],
         },
-        SessionEvent::TurnStalled { channel: "web".into(), key: "web-1".into(), released: 2 },
+        SessionEvent::TurnStalled {
+            channel: "web".into(),
+            key: "web-1".into(),
+            released: 2,
+        },
         SessionEvent::Resync,
     ];
     for e in &events {
         let v = serde_json::to_value(e).unwrap();
-        assert_eq!(v["type"], serde_json::from_value::<SessionEvent>(v.clone()).unwrap()
-            .tag_name());
+        assert_eq!(
+            v["type"],
+            serde_json::from_value::<SessionEvent>(v.clone())
+                .unwrap()
+                .tag_name()
+        );
         let back: SessionEvent = serde_json::from_value(v).unwrap();
         assert_eq!(&back, e);
     }
@@ -243,17 +257,28 @@ fn core_channel_vocabulary_round_trips_through_domain_paths_alone() {
 
     // 类型化拒绝全变体（code tag 词表）。
     let rejections = vec![
-        (SessionRejection::UnknownSession { key: "k".into() }, "unknown_session"),
+        (
+            SessionRejection::UnknownSession { key: "k".into() },
+            "unknown_session",
+        ),
         (SessionRejection::UnusableProjectDir, "unusable_project_dir"),
         (SessionRejection::Capacity { limit: 7 }, "capacity"),
-        (SessionRejection::Unavailable { cause: "c".into() }, "unavailable"),
         (
-            SessionRejection::BackendUnavailable { backend: "b".into(), cause: "c".into() },
+            SessionRejection::Unavailable { cause: "c".into() },
+            "unavailable",
+        ),
+        (
+            SessionRejection::BackendUnavailable {
+                backend: "b".into(),
+                cause: "c".into(),
+            },
             "backend_unavailable",
         ),
         (SessionRejection::QueueFull { limit: 3 }, "queue_full"),
         (
-            SessionRejection::PendingRejected { reason: PendingReason::AlreadyStarted },
+            SessionRejection::PendingRejected {
+                reason: PendingReason::AlreadyStarted,
+            },
             "pending_rejected",
         ),
         (SessionRejection::Idle { key: "k".into() }, "idle_session"),

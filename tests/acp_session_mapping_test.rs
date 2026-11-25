@@ -16,7 +16,7 @@
 use sebas_acp::claude::manager::SessionManager;
 use sebas_channels::{ChannelEvent, ChannelKey};
 use sebas_dispatch::engine::{DispatchHandle, Out};
-use sebas_dispatch::state::{session_map_row, MappingState, SessionMap};
+use sebas_dispatch::state::{MappingState, SessionMap, session_map_row};
 use sebas_models::session_map::SessionMapRow;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -59,6 +59,7 @@ fn dormant_row(session_id: &str) -> SessionMapRow {
         label: None,
         prompt_preview: None,
         awaiting_first_prompt: false,
+        task_id: None,
     }
 }
 

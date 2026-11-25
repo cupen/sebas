@@ -198,12 +198,17 @@ The WebUI backend SHALL poll `bd events tail --since <last_seq>` every 300ms wit
 
 ### Requirement: Linked session list shows the task's execution history
 
-The task detail page SHALL list every session whose `session_map.task_id` equals the task's beads issue id, ordered by `created_at DESC`. Each entry SHALL show the session title, bound agent kind, current phase, and created_at; clicking an entry SHALL switch the stage to the conversation view focused on that session.
+The task detail page SHALL list every session whose `session_map.task_id` equals the task's beads issue id, ordered by `last_active_unix DESC` (matching the rail's liveness-based ordering, since `session_map` does not carry a `created_at` column). Each entry SHALL show the session title, bound agent kind, current phase, and last-active timestamp; clicking an entry SHALL switch the stage to the conversation view focused on that session. The list SHALL be sourced from the live `/api/sessions` snapshot filtered by `task_id`; archived sessions (which live in `archive.json` without a `task_id` field) SHALL NOT appear in this list — the list is "live sessions linked to this task", not a permanent execution history.
 
-#### Scenario: Sessions are listed newest-first
+#### Scenario: Sessions are listed newest-active-first
 
-- **WHEN** a task has been advanced by three sessions at different times
-- **THEN** the sidebar lists all three, newest first, each with title/agent/phase/timestamp
+- **WHEN** a task has been advanced by three live sessions with different `last_active_unix` values
+- **THEN** the sidebar lists all three, most-recently-active first, each with title/agent/phase/timestamp
+
+#### Scenario: Archived sessions are excluded
+
+- **WHEN** a session linked to a task is archived
+- **THEN** it no longer appears in the task's linked-session list (it lives in the archive, which does not carry task linkage)
 
 #### Scenario: Clicking a session jumps to the conversation
 
@@ -212,27 +217,36 @@ The task detail page SHALL list every session whose `session_map.task_id` equals
 
 ### Requirement: Session-terminal hook advances task
 
-When a session with a non-empty `task_id` enters a terminal phase (`Closed` or `Exited`) AND the session's last completed turn finished normally (`stop_reason = end_turn`, not `cancelled`, not an error), the WebUI backend SHALL invoke `bd update <task_id> --add-label in-review` for the linked task. Sessions ending in `Failed` or `Terminated` SHALL NOT trigger the label. The hook SHALL only fire for the task's most-recently-created session (older sessions terminating MUST NOT retroactively change task state).
+When a session with a non-empty `task_id` enters a terminal phase (`Closed` or `Exited`) AND the session's last completed turn finished normally (`stop_reason = end_turn`, not `cancelled`, not an error), the WebUI backend SHALL invoke `bd update <task_id> --add-label in-review` for the linked task. Sessions ending in `Failed` or `Terminated` SHALL NOT trigger the label. The hook SHALL only fire for the task's most-recently-active session, judged by `last_active_unix` (older sessions terminating MUST NOT retroactively change task state).
+
+**Known boundary**: `last_active_unix` is second-granularity; if two linked sessions share the same value the hook may fire from both. This is acceptable for v1 because the resulting `bd update --add-label in-review` is idempotent (adding an existing label is a no-op). A strict monotonic ordering (a dedicated creation-sequence column) is deferred to a later change.
+
+The hook SHALL be fire-and-forget: spawned asynchronously with errors logged, never blocking the session lifecycle main loop. The `bd --actor` for the hook SHALL be the session's bound agent kind (the executor advancing the task), not the operator's login name; when no agent kind is bound, the flag SHALL be omitted and beads falls back to its default actor resolution.
 
 #### Scenario: Normal completion advances the task to review
 
-- **WHEN** the most recent session for a task reaches `Closed` after a successful turn
+- **WHEN** the most recently active session for a task reaches `Closed` after a successful turn
 - **THEN** the linked task gains the `in-review` label and moves to the `In review` column
 
 #### Scenario: Failed session does not advance
 
-- **WHEN** the most recent session for a task reaches `Failed`
+- **WHEN** the most recently active session for a task reaches `Failed`
 - **THEN** the task remains `in_progress` with no `in-review` label
 
 #### Scenario: Manually closed session without a successful turn does not advance
 
-- **WHEN** the most recent session for a task is closed by the operator before any turn completes normally
+- **WHEN** the most recently active session for a task is closed by the operator before any turn completes normally
 - **THEN** the task remains `in_progress`
 
 #### Scenario: Older session terminating does not affect task state
 
-- **WHEN** a task has two linked sessions A (older) and B (newer, still active), and A reaches `Closed`
+- **WHEN** a task has two linked sessions A (less recently active) and B (more recently active, still active), and A reaches `Closed`
 - **THEN** the task state is unchanged; only B's terminal transition matters
+
+#### Scenario: Hook does not block the lifecycle main loop
+
+- **WHEN** the hook fires
+- **THEN** the session lifecycle manager continues processing other events immediately; hook failures are logged, not propagated
 
 ### Requirement: Single-machine multi-agent scope (v1)
 

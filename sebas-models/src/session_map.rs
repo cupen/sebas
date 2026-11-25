@@ -57,6 +57,10 @@ pub struct SessionMapRow {
     pub prompt_preview: Option<String>,
     /// 0-turn 占位身份标记（true + 空 session_id = 等待首条消息的占位）。
     pub awaiting_first_prompt: bool,
+    /// （agent-task-center 1.1）该会话推进的 beads 任务 id（如 `bd-42`）。
+    /// `None` = 非任务会话。core 只透传、不校验任务存在性（任务有效性由
+    /// WebUI HTTP 层裁决，beads 不在 core 域内）。
+    pub task_id: Option<String>,
 }
 
 /// 加载会话映射 (用于恢复；无排序语义，与既有行为一致)。

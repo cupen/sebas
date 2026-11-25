@@ -199,7 +199,10 @@ impl TryFrom<UserRow> for UserRecord {
         Ok(UserRecord {
             id: row.id.ok_or_else(|| corrupt("id 列为 NULL".into()))?,
             username: row.username,
-            role: row.role.parse().map_err(|e| corrupt(format!("role: {e}")))?,
+            role: row
+                .role
+                .parse()
+                .map_err(|e| corrupt(format!("role: {e}")))?,
             iterations: row.iterations as u32,
             salt: hex::decode(&row.salt_hex).map_err(|e| corrupt(format!("salt_hex: {e}")))?,
             hash: hex::decode(&row.hash_hex).map_err(|e| corrupt(format!("hash_hex: {e}")))?,

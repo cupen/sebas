@@ -41,7 +41,7 @@ use crate::conn;
 /// 当前 schema 版本 (sqlite-auto-schema-sync D4): 日期常量, 改 schema 时
 /// bump, 不是 wall-clock。作用是诊断"这库是哪个 schema 日期的"——**纯诊断**,
 /// 不触发任何同步动作 (retire-schema-reset D6)。
-pub const SCHEMA_VERSION: &str = "20260924";
+pub const SCHEMA_VERSION: &str = "20261124";
 
 /// 版本键的格式标识。缺失/未知**不再重置**：WARN + 照常按结构 reconcile
 /// （为发布后的迁移机制预留格式位）。
@@ -200,7 +200,10 @@ enum PlanAction<'a> {
     /// 整表缺失 → 按注册 DDL 建表。
     CreateTable(&'a TableSchema),
     /// 上一轮未完成重建遗留的临时表（同事务里先清掉）。
-    DropOrphanTemp { table: &'a str, temp: String },
+    DropOrphanTemp {
+        table: &'a str,
+        temp: String,
+    },
     Add {
         table: &'a str,
         col: &'a SchemaColumn,
@@ -211,7 +214,10 @@ enum PlanAction<'a> {
         new: &'a str,
     },
     /// 类型不符 / 受限删列 → 覆盖式重建（数据按列名交集保全）。
-    Rebuild { table: &'a TableSchema, reason: String },
+    Rebuild {
+        table: &'a TableSchema,
+        reason: String,
+    },
     Drop {
         table: &'a str,
         name: String,
@@ -278,16 +284,17 @@ fn plan_table<'a>(
         .map_err(|e| format!("读取 {} 表结构失败: {e}", table.name))?;
 
     if live.is_empty() {
-        info!(table = table.name, "注册表缺失: 按注册 DDL 建表（不触碰其它表）");
+        info!(
+            table = table.name,
+            "注册表缺失: 按注册 DDL 建表（不触碰其它表）"
+        );
         plan.actions.push(PlanAction::CreateTable(table));
         return Ok(());
     }
 
     // 上一轮未完成重建的临时表（单事务不可能提交过，但作为兜底仍先清掉）。
     let temp = temp_table_name(table.name);
-    if user_table_exists(conn, &temp)
-        .map_err(|e| format!("检查临时表 {temp} 失败: {e}"))?
-    {
+    if user_table_exists(conn, &temp).map_err(|e| format!("检查临时表 {temp} 失败: {e}"))? {
         warn!(
             table = table.name,
             temp = %temp,
@@ -330,10 +337,7 @@ fn plan_table<'a>(
     // ---- 缺列 / 类型不符 / 多余列 ----
     let mut missing: Vec<&'a SchemaColumn> = Vec::new();
     for col in table.columns {
-        if !live
-            .iter()
-            .any(|l| effective_name(l, &renames) == col.name)
-        {
+        if !live.iter().any(|l| effective_name(l, &renames) == col.name) {
             missing.push(col);
         }
     }
@@ -549,9 +553,8 @@ fn column_is_referenced(conn: &Connection, table: &str, column: &str) -> Result<
 fn backup_database(conn: &Connection, db_path: &Path) -> Result<PathBuf, String> {
     let target = db_sidecar_path(db_path, BACKUP_SUFFIX);
     if target.exists() {
-        std::fs::remove_file(&target).map_err(|e| {
-            format!("无法覆盖既有备份 {}: {e}", target.display())
-        })?;
+        std::fs::remove_file(&target)
+            .map_err(|e| format!("无法覆盖既有备份 {}: {e}", target.display()))?;
     }
     let target_str = target.to_string_lossy().to_string();
     conn.execute("VACUUM INTO ?1", rusqlite::params![target_str])
@@ -577,10 +580,9 @@ fn execute_plan(conn: &mut Connection, plan: &Plan) -> Result<(), String> {
             .map_err(|e| format!("关闭外键约束失败（重建前置）: {e}"))?;
     }
     let result = run_in_transaction(conn, plan, fk_off);
-    if fk_off
-        && let Err(e) = conn.execute_batch("PRAGMA foreign_keys = ON") {
-            warn!(error = %e, "恢复外键约束失败（连接即将关闭，不影响已提交结果）");
-        }
+    if fk_off && let Err(e) = conn.execute_batch("PRAGMA foreign_keys = ON") {
+        warn!(error = %e, "恢复外键约束失败（连接即将关闭，不影响已提交结果）");
+    }
     result
 }
 
@@ -594,8 +596,13 @@ fn run_in_transaction(
         .map_err(|e| format!("schema 迁移事务开始失败: {e}"))?;
 
     for (idx, action) in plan.actions.iter().enumerate() {
-        apply_action(&tx, action)
-            .map_err(|e| format!("schema 迁移第 {} 步失败（{}）: {e}", idx + 1, action.label()))?;
+        apply_action(&tx, action).map_err(|e| {
+            format!(
+                "schema 迁移第 {} 步失败（{}）: {e}",
+                idx + 1,
+                action.label()
+            )
+        })?;
     }
 
     // 重建后校验外键完整性（design D3 第 10 步）：违规即回滚拒启动，绝不带病提交。
@@ -1072,10 +1079,7 @@ mod tests {
             name: "beta",
             create_table_ddl: "create table beta (k TEXT PRIMARY KEY, v TEXT NOT NULL);",
             index_ddls: &[],
-            columns: &[
-                col!("k", "TEXT", None, true),
-                col!("v", "TEXT", None, true),
-            ],
+            columns: &[col!("k", "TEXT", None, true), col!("v", "TEXT", None, true)],
         },
     ];
 
@@ -1201,7 +1205,10 @@ mod tests {
 
         assert_eq!(outcome, SyncOutcome::FreshCreated);
         let tables = table_names(&conn);
-        assert!(tables.iter().any(|t| t == "alpha"), "缺表 alpha: {tables:?}");
+        assert!(
+            tables.iter().any(|t| t == "alpha"),
+            "缺表 alpha: {tables:?}"
+        );
         assert!(tables.iter().any(|t| t == "schema_meta"));
         assert_eq!(meta_get(&conn, "version_format").as_deref(), Some("date"));
         assert_eq!(meta_get(&conn, "version").as_deref(), Some(SCHEMA_VERSION));
@@ -1305,7 +1312,10 @@ mod tests {
 
         let names = column_names(&conn, "alpha");
         assert!(names.iter().any(|c| c == "name"), "新列名应在: {names:?}");
-        assert!(!names.iter().any(|c| c == "title"), "旧列名应消失: {names:?}");
+        assert!(
+            !names.iter().any(|c| c == "title"),
+            "旧列名应消失: {names:?}"
+        );
         let (name, score): (String, i64) = conn
             .query_row("SELECT name, score FROM alpha WHERE id = 'a1'", [], |r| {
                 Ok((r.get(0)?, r.get(1)?))
@@ -1356,7 +1366,11 @@ mod tests {
             .unwrap();
         assert_eq!(name, "keep", "其余行的数据不受影响");
         assert_eq!(tag, None, "补出的可空列取 NULL");
-        assert_eq!(backup_files(dir.path()).len(), 1, "删列是破坏性步骤，必须先备份");
+        assert_eq!(
+            backup_files(dir.path()).len(),
+            1,
+            "删列是破坏性步骤，必须先备份"
+        );
     }
 
     /// 场景「Type change rebuilds the table without losing rows」。
@@ -1401,10 +1415,15 @@ mod tests {
                 Ok((r.get(0)?, r.get(1)?))
             })
             .unwrap();
-        assert_eq!(name, "42", "存量行按列名拷贝（INTEGER 42 经 TEXT 亲和转成 '42'）");
+        assert_eq!(
+            name, "42",
+            "存量行按列名拷贝（INTEGER 42 经 TEXT 亲和转成 '42'）"
+        );
         assert_eq!(score, 7, "其余列数据逐行保全");
         assert!(
-            index_names(&conn, "alpha").iter().any(|i| i == "idx_alpha_note"),
+            index_names(&conn, "alpha")
+                .iter()
+                .any(|i| i == "idx_alpha_note"),
             "重建后按注册索引段重建索引"
         );
         assert!(
@@ -1459,7 +1478,10 @@ mod tests {
             "无引用的多余列走 DROP COLUMN 快路径"
         );
         let names = column_names(&conn, "alpha");
-        assert!(!names.iter().any(|c| c == "note"), "被删列应消失: {names:?}");
+        assert!(
+            !names.iter().any(|c| c == "note"),
+            "被删列应消失: {names:?}"
+        );
         let (name, score): (String, i64) = conn
             .query_row("SELECT name, score FROM alpha WHERE id = 'a1'", [], |r| {
                 Ok((r.get(0)?, r.get(1)?))
@@ -1503,7 +1525,10 @@ mod tests {
             "被索引引用的多余列升级为重建"
         );
         let names = column_names(&conn, "alpha");
-        assert!(!names.iter().any(|c| c == "note"), "被删列应消失: {names:?}");
+        assert!(
+            !names.iter().any(|c| c == "note"),
+            "被删列应消失: {names:?}"
+        );
         let (name, score): (String, i64) = conn
             .query_row("SELECT name, score FROM alpha WHERE id = 'a1'", [], |r| {
                 Ok((r.get(0)?, r.get(1)?))
@@ -1512,7 +1537,9 @@ mod tests {
         assert_eq!(name, "keep", "重建按列名交集保住其余列");
         assert_eq!(score, 7);
         assert!(
-            !index_names(&conn, "alpha").iter().any(|i| i == "idx_alpha_note"),
+            !index_names(&conn, "alpha")
+                .iter()
+                .any(|i| i == "idx_alpha_note"),
             "随旧表丢弃的索引不复活（注册清单里没有它）"
         );
         assert_eq!(backup_files(dir.path()).len(), 1);
@@ -1555,11 +1582,8 @@ mod tests {
         let (dir, path) = temp_db("badformat.db");
         {
             let (conn, _) = open_and_sync(&path, TEST_TABLES).unwrap();
-            conn.execute(
-                "INSERT INTO alpha (id, name) VALUES ('a1', 'keep')",
-                [],
-            )
-            .unwrap();
+            conn.execute("INSERT INTO alpha (id, name) VALUES ('a1', 'keep')", [])
+                .unwrap();
             meta_set(&conn, "version_format", "semver");
         }
 
@@ -1634,15 +1658,16 @@ mod tests {
         {
             let (conn, _) = open_and_sync(&path, TEST_TABLES).unwrap();
             meta_set(&conn, "version", "19990101");
-            conn.execute(
-                "INSERT INTO alpha (id, name) VALUES ('a1', 'keepme')",
-                [],
-            )
-            .unwrap();
+            conn.execute("INSERT INTO alpha (id, name) VALUES ('a1', 'keepme')", [])
+                .unwrap();
         }
 
         let (conn, outcome) = open_and_sync(&path, TEST_TABLES).unwrap();
-        assert_eq!(outcome, SyncOutcome::UpToDate, "结构一致时版本值不同绝不动作");
+        assert_eq!(
+            outcome,
+            SyncOutcome::UpToDate,
+            "结构一致时版本值不同绝不动作"
+        );
         let value: String = conn
             .query_row("SELECT name FROM alpha WHERE id = 'a1'", [], |r| r.get(0))
             .unwrap();
@@ -1656,12 +1681,18 @@ mod tests {
     #[test]
     fn unaddable_missing_column_refuses_startup_without_touching_db() {
         let (_dir, path) = temp_db("unaddable.db");
-        seed_alpha(&path, "INSERT INTO alpha (id, name, note, score) VALUES ('a1', 'keep', NULL, 7);");
+        seed_alpha(
+            &path,
+            "INSERT INTO alpha (id, name, note, score) VALUES ('a1', 'keep', NULL, 7);",
+        );
         let before = snapshot(&path);
 
-        let err = open_and_sync(&path, UNADDABLE_ALPHA_TABLES)
-            .expect_err("非空无默认的缺列必须拒启动");
-        assert!(err.contains("req") && err.contains("非空"), "诊断要点名表列: {err}");
+        let err =
+            open_and_sync(&path, UNADDABLE_ALPHA_TABLES).expect_err("非空无默认的缺列必须拒启动");
+        assert!(
+            err.contains("req") && err.contains("非空"),
+            "诊断要点名表列: {err}"
+        );
         assert_eq!(snapshot(&path), before, "拒启动时数据库字节与 mtime 都不变");
     }
 
@@ -1669,13 +1700,15 @@ mod tests {
     #[test]
     fn backup_failure_blocks_destructive_migration() {
         let (_dir, path) = temp_db("backupfail.db");
-        seed_alpha(&path, "INSERT INTO alpha (id, name, note, score) VALUES ('a1', 'keep', 'n', 7);");
+        seed_alpha(
+            &path,
+            "INSERT INTO alpha (id, name, note, score) VALUES ('a1', 'keep', 'n', 7);",
+        );
         // 让备份目标无法写入：同名位置放一个目录（删除/覆盖都会失败）。
         std::fs::create_dir(db_sidecar_path(&path, BACKUP_SUFFIX)).unwrap();
         let before = snapshot(&path);
 
-        let err = open_and_sync(&path, DROP_NOTE_TABLES)
-            .expect_err("备份失败必须阻断破坏性迁移");
+        let err = open_and_sync(&path, DROP_NOTE_TABLES).expect_err("备份失败必须阻断破坏性迁移");
         assert!(
             err.contains(BACKUP_SUFFIX) && err.contains("备份失败"),
             "诊断要点名备份失败: {err}"
@@ -1716,8 +1749,7 @@ mod tests {
         }
         let before = snapshot(&path);
 
-        let err = open_and_sync(&path, CHECKED_ALPHA_TABLES)
-            .expect_err("中途失败必须拒启动");
+        let err = open_and_sync(&path, CHECKED_ALPHA_TABLES).expect_err("中途失败必须拒启动");
         assert!(
             err.contains("1 步失败") && err.contains("重建表"),
             "诊断要点名失败步骤: {err}"
@@ -1976,10 +2008,7 @@ mod tests {
         let (dir, path) = temp_db("corrupt2.db");
         std::fs::write(&path, b"this is definitely not a sqlite database").unwrap();
 
-        assert!(
-            open_and_sync(&path, TEST_TABLES).is_err(),
-            "损坏库必须拒启"
-        );
+        assert!(open_and_sync(&path, TEST_TABLES).is_err(), "损坏库必须拒启");
         assert!(reset_files(dir.path()).is_empty(), "不得有隔离产物");
         assert!(backup_files(dir.path()).is_empty(), "不得有备份产物");
     }
@@ -2022,12 +2051,7 @@ mod tests {
             "动作序列必须按 改名 → 补列 → 删列 排列"
         );
         assert_eq!(
-            (
-                plan.added_columns,
-                plan.renamed,
-                plan.rebuilt,
-                plan.dropped
-            ),
+            (plan.added_columns, plan.renamed, plan.rebuilt, plan.dropped),
             (1, 1, 0, 1),
             "结构化计数与动作序列一致"
         );
@@ -2112,7 +2136,10 @@ mod tests {
         );
 
         let err = create_table_ddl_with_name(ddl, "other_table", "x").expect_err("名字不符应报错");
-        assert!(err.contains("usage_records") && err.contains("other_table"), "{err}");
+        assert!(
+            err.contains("usage_records") && err.contains("other_table"),
+            "{err}"
+        );
     }
 
     #[test]

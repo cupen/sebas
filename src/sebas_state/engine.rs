@@ -105,7 +105,9 @@ impl StateStoreEngine for DbStateEngine {
     }
 
     async fn load_projects(&self) -> Result<Vec<ProjectRow>, String> {
-        self.projects()?.exec(sebas_models::project::load_projects).await
+        self.projects()?
+            .exec(sebas_models::project::load_projects)
+            .await
     }
 
     async fn save_projects(&self, projects: Vec<ProjectRow>) -> Result<(), String> {
@@ -120,9 +122,7 @@ impl StateStoreEngine for DbStateEngine {
         let id = id.to_string();
         let agent = agent.to_string();
         self.projects()?
-            .exec(move |conn| {
-                sebas_models::project::set_project_default_agent(conn, &id, &agent)
-            })
+            .exec(move |conn| sebas_models::project::set_project_default_agent(conn, &id, &agent))
             .await?;
         sebas_dispatch::state_store::notify_change("projects");
         Ok(())
@@ -304,7 +304,8 @@ mod tests {
             .trim()
             .to_string();
 
-        let engine = DbStateEngine::with_unavailable_projects(settings.handle().clone(), projects_cause);
+        let engine =
+            DbStateEngine::with_unavailable_projects(settings.handle().clone(), projects_cause);
 
         // 项目面：每个方法都如实拒绝并点名原因，不拿空表冒充现状。
         let err = engine.load_projects().await.unwrap_err();
@@ -313,15 +314,14 @@ mod tests {
             err.contains(&format!("{}", blocked.display())) || err.contains("初始化失败"),
             "错误要点名原因: {err}"
         );
-        assert!(engine
-            .add_project("local", "/tmp/p", "p", 1)
-            .await
-            .is_err());
+        assert!(engine.add_project("local", "/tmp/p", "p", 1).await.is_err());
         assert!(engine.remove_project("/tmp/p").await.is_err());
-        assert!(engine
-            .set_project_default_agent("proj-x", "claude")
-            .await
-            .is_err());
+        assert!(
+            engine
+                .set_project_default_agent("proj-x", "claude")
+                .await
+                .is_err()
+        );
         assert!(engine.save_projects(vec![]).await.is_err());
 
         // 设置面：完全不受影响。
@@ -331,7 +331,10 @@ mod tests {
             .expect("settings domain keeps working");
         assert!(engine.load_settings().await.unwrap().is_some());
         let state = engine.load_persisted_state().await;
-        assert_eq!(state.mode, sebas_dispatch::provider_state::ProviderMode::Off);
+        assert_eq!(
+            state.mode,
+            sebas_dispatch::provider_state::ProviderMode::Off
+        );
     }
 
     /// persist-session-map 2.1/2.2：会话映射的引擎读写经 projects 库单写
@@ -342,7 +345,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let settings = StateWriter::start_settings(dir.path().join("settings.db")).unwrap();
         let projects = StateWriter::start_projects(dir.path().join("projects.db")).unwrap();
-        let engine = DbStateEngine::with_projects(settings.handle().clone(), projects.handle().clone());
+        let engine =
+            DbStateEngine::with_projects(settings.handle().clone(), projects.handle().clone());
 
         let entry = SessionMapRow {
             chat_id: "web".into(),
@@ -358,6 +362,7 @@ mod tests {
             desired_mode: "edit".into(),
             label: Some("映射行".into()),
             prompt_preview: None,
+            task_id: None,
             awaiting_first_prompt: false,
         };
         engine.save_session_entry(entry.clone()).await.unwrap();

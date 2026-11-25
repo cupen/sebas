@@ -46,6 +46,7 @@ fn dormant_row(session_id: &str) -> SessionMapRow {
         label: None,
         prompt_preview: None,
         awaiting_first_prompt: false,
+        task_id: None,
     }
 }
 

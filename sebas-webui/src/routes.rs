@@ -1,12 +1,12 @@
 //! Route handlers: pure helpers for the JSON API + the router BFF proxies.
 
 use crate::models::{SessionRow, SessionStatus};
-use sebas_domain::session::SessionPhase;
 use crate::server::WebUiState;
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
 use sebas_channels::key::ChannelKey;
 use sebas_dispatch::SessionInfo;
+use sebas_domain::session::SessionPhase;
 
 // ---- Helper functions ----
 
@@ -114,9 +114,7 @@ pub(crate) fn session_summary(info: &SessionInfo) -> serde_json::Value {
 
 // 会话键编解码唯一实现在 `sebas_channels::key`（add-domain-layer 2.2/2.3）；
 // 既有调用点（`crate::routes::*`）经原位再导出零改动。
-pub(crate) use sebas_channels::key::{
-    decode_session_key, encode_channel_key, encode_session_key,
-};
+pub(crate) use sebas_channels::key::{decode_session_key, encode_channel_key, encode_session_key};
 
 /// Format a unix timestamp as a relative time string.
 pub(crate) fn format_relative_time(unix_ts: i64) -> String {
@@ -859,11 +857,7 @@ fn stored_agents(snapshot: &serde_json::Value) -> Vec<serde_json::Map<String, se
     snapshot
         .get("agents")
         .and_then(serde_json::Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_object().cloned())
-                .collect()
-        })
+        .map(|a| a.iter().filter_map(|v| v.as_object().cloned()).collect())
         .unwrap_or_default()
 }
 
@@ -888,7 +882,10 @@ const AGENT_WRITABLE_FIELDS: &[&str] = &[
 /// 的编辑路径）。显式 `null` = 清除该可选槽位。身份/账目键（id/source/
 /// created_at/updated_at）是只读投影——即使存量条目带有它们，合并结果也只
 /// 含 launch 字段（core 侧 mutation 以同词表校验）。
-fn merge_agent_item(stored: &serde_json::Map<String, serde_json::Value>, body: serde_json::Value) -> Result<serde_json::Value, String> {
+fn merge_agent_item(
+    stored: &serde_json::Map<String, serde_json::Value>,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, String> {
     let body_obj = body
         .as_object()
         .ok_or_else(|| "agent 载荷必须是对象".to_string())?;
@@ -927,7 +924,10 @@ pub async fn agent_create(
     else {
         return bad_request("缺少 id 字段").into_response();
     };
-    if stored_agents(&snapshot).iter().any(|r| r.get("id").and_then(serde_json::Value::as_str) == Some(id.as_str())) {
+    if stored_agents(&snapshot)
+        .iter()
+        .any(|r| r.get("id").and_then(serde_json::Value::as_str) == Some(id.as_str()))
+    {
         return conflict(format!("agent '{id}' 已存在"));
     }
     let mut item = body;
@@ -996,7 +996,10 @@ pub async fn agent_update(
 
 /// DELETE /api/agents/{id}：删除 + core 侧清除项目默认引用（删除守卫在
 /// agents 域 mutation 内）。未知 id → 404；`native` → 400。
-pub async fn agent_delete(State(state): State<WebUiState>, Path(id): Path<String>) -> axum::response::Response {
+pub async fn agent_delete(
+    State(state): State<WebUiState>,
+    Path(id): Path<String>,
+) -> axum::response::Response {
     let Some(snapshot) = agents_snapshot(&state).await else {
         return err_503_core_unreachable();
     };
@@ -1183,6 +1186,7 @@ mod usage_projection_tests {
             parked_approvals: 0,
             label: None,
             first_prompt_preview: None,
+            task_id: None,
         }
     }
 
@@ -1210,7 +1214,10 @@ mod usage_projection_tests {
     fn rail_row_omits_usage_key_when_unreported() {
         let none = crate::models::SessionRow::from(&session_info(None));
         let v = serde_json::to_value(&none).unwrap();
-        assert!(v.get("usage").is_none(), "None 不上 wire（skip_serializing_if）");
+        assert!(
+            v.get("usage").is_none(),
+            "None 不上 wire（skip_serializing_if）"
+        );
 
         let some = crate::models::SessionRow::from(&session_info(Some(AppUsage {
             model: None,

@@ -21,7 +21,7 @@ pub const BRANCH_TTL_SECS: u64 = 30;
 
 // 规范项目记录（migrate-project-registry 2.1）：`ProjectEntry` 与
 // `ProjectRow` 合一后，这里经 `sebas_models` 再导出保持既有公开路径。
-pub use sebas_models::project::{ProjectEntry, LOCAL_NODE_ID};
+pub use sebas_models::project::{LOCAL_NODE_ID, ProjectEntry};
 
 /// Deterministic project id: `proj-` + first 12 hex of SHA-256 over the
 /// canonicalised path. Same path → same id across restarts and registry
@@ -160,15 +160,26 @@ mod tests {
         let e = validate_remote_path(
             "dev-box",
             "/srv/repo",
-            NodePathCheck { exists: false, is_dir: false, within_workspace: true },
+            NodePathCheck {
+                exists: false,
+                is_dir: false,
+                within_workspace: true,
+            },
         )
         .unwrap_err();
-        assert!(e.contains("dev-box") && e.contains("/srv/repo") && e.contains("不存在"), "{e}");
+        assert!(
+            e.contains("dev-box") && e.contains("/srv/repo") && e.contains("不存在"),
+            "{e}"
+        );
 
         let e = validate_remote_path(
             "dev-box",
             "/srv/repo",
-            NodePathCheck { exists: true, is_dir: false, within_workspace: true },
+            NodePathCheck {
+                exists: true,
+                is_dir: false,
+                within_workspace: true,
+            },
         )
         .unwrap_err();
         assert!(e.contains("不是目录"), "{e}");
@@ -179,7 +190,11 @@ mod tests {
         let e = validate_remote_path(
             "dev-box",
             "/srv/repo",
-            NodePathCheck { exists: false, is_dir: false, within_workspace: false },
+            NodePathCheck {
+                exists: false,
+                is_dir: false,
+                within_workspace: false,
+            },
         )
         .unwrap_err();
         assert!(e.contains("workspace"), "范围判定先行于存在性: {e}");
@@ -189,14 +204,20 @@ mod tests {
     #[test]
     fn node_check_unavailable_is_not_reported_as_a_bad_path() {
         let msg = node_check_unavailable("dev-box", "/srv/repo", "节点离线");
-        assert!(msg.contains("无法") && msg.contains("dev-box") && msg.contains("离线"), "{msg}");
+        assert!(
+            msg.contains("无法") && msg.contains("dev-box") && msg.contains("离线"),
+            "{msg}"
+        );
     }
 
     #[test]
     fn empty_node_id_is_rejected_by_registration_callers() {
         // 空节点标识的拒绝在 api 层入口（add_on 已并入 state 方法调用方）；
         // 派生公式对空节点标识退化为本机公式——不允许远端走本机公式。
-        assert_eq!(project_id_for_on("", "/srv/repo"), project_id_for("/srv/repo"));
+        assert_eq!(
+            project_id_for_on("", "/srv/repo"),
+            project_id_for("/srv/repo")
+        );
     }
 
     #[test]

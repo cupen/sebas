@@ -699,7 +699,11 @@ listen = "127.0.0.1:{router_port}"
     /// `--state-dir`**、env 钉正名 `SEBAS_HOME`——状态目录落到派生锚
     /// `<home>/node/`（`--state-dir` > `SEBAS_NODE_DIR` > `[node] state_dir`
     /// 链上三层全缺席，第四层派生锚正是本用例的证据面）。
-    pub fn spawn_node_home(&self, node_id: &str, join_token: Option<&str>) -> tokio::process::Child {
+    pub fn spawn_node_home(
+        &self,
+        node_id: &str,
+        join_token: Option<&str>,
+    ) -> tokio::process::Child {
         let log = self.path.join("node.log");
         let log_file = std::fs::OpenOptions::new()
             .create(true)
@@ -1435,13 +1439,9 @@ pub async fn scene_project_id(cli: &reqwest::Client, sb: &Sandbox) -> String {
         if c.is_empty() { path } else { c }
     };
     let projects_url = format!("{}/api/projects", sb.webui_url());
-    let (status, body) = post_json(
-        cli,
-        &projects_url,
-        serde_json::json!({ "path": path }),
-    )
-    .await
-    .unwrap_or_else(|e| panic!("register scene project: {e}"));
+    let (status, body) = post_json(cli, &projects_url, serde_json::json!({ "path": path }))
+        .await
+        .unwrap_or_else(|e| panic!("register scene project: {e}"));
     if status == 201 {
         return body["id"].as_str().expect("project id").to_string();
     }
@@ -1772,7 +1772,9 @@ pub async fn spawn_sse_stub_upstream(chunks: &[&str], spacing_ms: u64) -> u16 {
                     )
                     .await;
                 let _ = sock
-                    .write_all(frame(serde_json::json!({"type":"message_stop"}).to_string()).as_bytes())
+                    .write_all(
+                        frame(serde_json::json!({"type":"message_stop"}).to_string()).as_bytes(),
+                    )
                     .await;
                 let _ = sock.shutdown().await;
             });
@@ -1799,12 +1801,14 @@ pub async fn ws_connect(base: &str) -> WsStream {
 /// Next JSON frame from the socket (text payloads only; control frames are
 /// skipped). Hard timeout so a bug surfaces as a failure, not a hang.
 pub async fn next_ws_frame(
-    ws: &mut (impl futures_util::StreamExt<
+    ws: &mut (
+             impl futures_util::StreamExt<
         Item = Result<
             tokio_tungstenite::tungstenite::Message,
             tokio_tungstenite::tungstenite::Error,
         >,
-    > + Unpin),
+    > + Unpin
+         ),
 ) -> serde_json::Value {
     let msg = tokio::time::timeout(Duration::from_secs(15), ws.next())
         .await
@@ -1812,8 +1816,9 @@ pub async fn next_ws_frame(
         .expect("websocket stream ended")
         .expect("websocket error");
     match msg {
-        tokio_tungstenite::tungstenite::Message::Text(text) => serde_json::from_str(&text)
-            .expect("ws frame must be envelope JSON"),
+        tokio_tungstenite::tungstenite::Message::Text(text) => {
+            serde_json::from_str(&text).expect("ws frame must be envelope JSON")
+        }
         _ => Box::pin(next_ws_frame(ws)).await,
     }
 }

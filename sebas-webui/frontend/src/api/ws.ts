@@ -142,6 +142,26 @@ export interface WsEvents {
     kind?: 'startup_failed' | 'auth_rejected' | 'disconnected'
     cause?: string
   }
+  /**
+   * （agent-task-center 4.2/7.5）beads journal 的一条新记录：`issue` 是变更后
+   * 的**完整快照**——前端直接替换本地任务状态，不做 `bd show` 回查。非
+   * dotted 事件名（spec 原文词表）。
+   */
+  task_updated: {
+    type: 'task_updated'
+    project_id: string
+    seq: number
+    op: string
+    issue_id: string
+    actor?: string | null
+    issue?: import('./client.js').BeadsIssue | null
+    comment?: import('./client.js').BeadsComment | null
+  }
+  /**
+   * （agent-task-center 4.2/7.5）订阅落后（丢帧）或需要收敛：前端全量重取
+   * 该项目的任务列表（`tasksList`），不因陈旧游标永久缺失。
+   */
+  task_resync: { type: 'task_resync'; project_id: string }
 }
 
 export type WsEvent = WsEvents[keyof WsEvents]
@@ -169,6 +189,8 @@ const EVENTS = {
   'permission.requested': true,
   'turn.append': true,
   'core.reachability': true,
+  task_updated: true,
+  task_resync: true,
 }
 
 export type WsEventHandler = (event: WsEvent) => void

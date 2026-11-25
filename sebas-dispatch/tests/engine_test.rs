@@ -88,6 +88,7 @@ async fn dormant_mapping_emits_spawn_resume() {
             label: None,
             prompt_preview: None,
             awaiting_first_prompt: false,
+            task_id: None,
         }],
         usize::MAX,
     );
@@ -157,7 +158,9 @@ async fn assistant_text_after_tool_result_lands_in_order() {
         .insert(key.clone(), Mapping::active("s-posttool"))
         .await
         .unwrap();
-    router.seed_card("s-posttool".to_string(), "perm".into()).await;
+    router
+        .seed_card("s-posttool".to_string(), "perm".into())
+        .await;
 
     let sid = "s-posttool";
     for evt in [
@@ -216,7 +219,9 @@ async fn tool_entries_carry_tool_use_id_and_structured_titles() {
         .insert(key.clone(), Mapping::active("s-toolid"))
         .await
         .unwrap();
-    router.seed_card("s-toolid".to_string(), "perm".into()).await;
+    router
+        .seed_card("s-toolid".to_string(), "perm".into())
+        .await;
 
     let sid = "s-toolid";
     for evt in [
@@ -291,7 +296,9 @@ async fn compact_command_leaves_a_transcript_receipt_before_forwarding() {
         .unwrap()
         .unwrap();
     match out {
-        Out::SendAcp { session_id, cmd, .. } => {
+        Out::SendAcp {
+            session_id, cmd, ..
+        } => {
             assert_eq!(session_id, "s-compact");
             match cmd {
                 AcpCommand::ContinueSession { prompt, .. } => {
@@ -312,5 +319,8 @@ async fn compact_command_leaves_a_transcript_receipt_before_forwarding() {
         sebas_domain::vocabulary::TurnKind::Prompt,
         "the receipt is a prompt entry (opens the operator turn)"
     );
-    assert_eq!(turns[0].content, "/compact", "receipt carries the verbatim command");
+    assert_eq!(
+        turns[0].content, "/compact",
+        "receipt carries the verbatim command"
+    );
 }

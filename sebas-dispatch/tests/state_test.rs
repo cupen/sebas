@@ -22,6 +22,7 @@ fn feishu_row(thread: &str, session_id: &str) -> SessionMapRow {
         label: None,
         prompt_preview: None,
         awaiting_first_prompt: false,
+        task_id: None,
     }
 }
 
@@ -41,11 +42,7 @@ async fn row_round_trip_restores_dormant() {
     m.insert(k.clone(), Mapping::active("s1")).await.unwrap();
 
     // 行化（与写库路径同一转换）→ 恢复。
-    let row = sebas_dispatch::state::session_map_row(
-        &k,
-        &m.get(&k).await.unwrap(),
-    )
-    .unwrap();
+    let row = sebas_dispatch::state::session_map_row(&k, &m.get(&k).await.unwrap()).unwrap();
     let m2 = SessionMap::restore_rows(vec![row], usize::MAX);
     let got = m2.get(&k).await.unwrap();
     // Restored entries come back DORMANT (openspec/specs/session-lifecycle/spec.md):

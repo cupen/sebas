@@ -88,6 +88,13 @@ pub struct WebUiState {
     /// 构建信息（add-about-build-info D1）：装配点传入，`/api/about` 只读
     /// 透出；最小装配按 [`BuildInfo::unknown`] 退化。
     pub build: BuildInfo,
+    /// 任务中心（agent-task-center）：每项目 beads 事件泵 + `bd` 客户端。
+    /// 进程级共享——同一项目多个 WS 订阅者复用一条泵（fan-out）。
+    pub tasks: Arc<crate::task_events::TaskEventHub>,
+    /// 任务中心开关（agent-task-center 11.1）：`[service.webui]
+    /// task_center_enabled`，默认 true。关闭时任务面（HTTP + WS 订阅）
+    /// 503 并点名配置键，其余 WebUI 面不受影响。
+    pub task_center_enabled: bool,
 }
 
 /// 便捷装配形态（测试 / 最小入口）的 workspace root 缺省：进程 cwd 回退、
@@ -114,6 +121,7 @@ pub fn build_router(
         fallback_workspace_root(),
         Arc::new(UnwiredSkills),
         BuildInfo::unknown(),
+        true,
     )
 }
 
@@ -136,6 +144,7 @@ pub fn build_router_with_agent_kind_provider(
         fallback_workspace_root(),
         Arc::new(UnwiredSkills),
         BuildInfo::unknown(),
+        true,
     )
 }
 
@@ -157,6 +166,7 @@ pub fn build_router_with_admin_adapter(
         fallback_workspace_root(),
         Arc::new(UnwiredSkills),
         BuildInfo::unknown(),
+        true,
     )
 }
 
@@ -181,6 +191,7 @@ pub fn build_router_with_auth(
         fallback_workspace_root(),
         Arc::new(UnwiredSkills),
         BuildInfo::unknown(),
+        true,
     )
 }
 
@@ -206,6 +217,7 @@ pub fn build_router_with_workspace_root(
         workspace_root,
         Arc::new(UnwiredSkills),
         BuildInfo::unknown(),
+        true,
     )
 }
 
@@ -232,6 +244,7 @@ pub fn build_router_with_skills(
         workspace_root,
         skills,
         BuildInfo::unknown(),
+        true,
     )
 }
 
@@ -247,6 +260,7 @@ fn build_router_full(
     workspace_root: std::path::PathBuf,
     skills: Arc<dyn SkillsService>,
     build: BuildInfo,
+    task_center_enabled: bool,
 ) -> Router {
     let state = WebUiState {
         backend,
@@ -259,6 +273,8 @@ fn build_router_full(
         workspace_root,
         skills,
         build,
+        tasks: Arc::new(crate::task_events::TaskEventHub::new()),
+        task_center_enabled,
     };
 
     // Core SPA + API + WS routes, bound to WebUiState.
@@ -344,6 +360,44 @@ fn build_router_full(
         // 落库，重启保留）。
         .route("/api/projects/{id}/rename", post(api::projects_rename))
         .route("/api/projects/{id}/branch", get(api::projects_branch))
+        // agent-task-center 3.1~3.10：项目任务中心（beads 薄封装）。
+        // 静态段 `refresh` 与 `{task_id}` 并存——axum 0.8 静态段优先。
+        .route(
+            "/api/projects/{id}/tasks",
+            get(crate::task_routes::tasks_list).post(crate::task_routes::tasks_create),
+        )
+        .route(
+            "/api/projects/{id}/tasks/refresh",
+            post(crate::task_routes::tasks_refresh),
+        )
+        .route(
+            "/api/projects/{id}/tasks/{task_id}",
+            get(crate::task_routes::tasks_show),
+        )
+        .route(
+            "/api/projects/{id}/tasks/{task_id}/claim",
+            post(crate::task_routes::tasks_claim),
+        )
+        .route(
+            "/api/projects/{id}/tasks/{task_id}/release",
+            post(crate::task_routes::tasks_release),
+        )
+        .route(
+            "/api/projects/{id}/tasks/{task_id}/assign",
+            post(crate::task_routes::tasks_assign),
+        )
+        .route(
+            "/api/projects/{id}/tasks/{task_id}/review",
+            post(crate::task_routes::tasks_review),
+        )
+        .route(
+            "/api/projects/{id}/tasks/{task_id}/close",
+            post(crate::task_routes::tasks_close),
+        )
+        .route(
+            "/api/projects/{id}/tasks/{task_id}/comment",
+            post(crate::task_routes::tasks_comment),
+        )
         // add-agent-skills 5.1：skills 管理面（列表 / 详情 / 只删仓 / 投影）。
         // static `sync` 与 `{name}` 不同方法不冲突，静态段优先匹配。
         .route("/api/skills", get(crate::skills::skills_list))
@@ -676,6 +730,7 @@ pub async fn run(
         // 薄包装拿不到根 build.rs 注入值（option_env! 按编译 crate 求值，
         // add-about-build-info D1）——BuildInfo 只能按 unknown 诚实退化。
         BuildInfo::unknown(),
+        true,
     )
     .await;
 }
@@ -702,6 +757,7 @@ pub async fn run_with_admin_adapter(
         Arc::new(UnwiredSkills),
         // 同 `run`：薄包装按 unknown 退化（add-about-build-info D1）。
         BuildInfo::unknown(),
+        true,
     )
     .await;
 }
@@ -729,6 +785,7 @@ pub async fn run_with_admin_adapter_and_auth(
     archive_retention_days: u64,
     skills: Arc<dyn SkillsService>,
     build: BuildInfo,
+    task_center_enabled: bool,
 ) {
     run_full(
         backend,
@@ -742,6 +799,7 @@ pub async fn run_with_admin_adapter_and_auth(
         workspace_root,
         skills,
         build,
+        task_center_enabled,
     )
     .await;
 }
@@ -769,6 +827,7 @@ async fn run_full(
     workspace_root: std::path::PathBuf,
     skills: Arc<dyn SkillsService>,
     build: BuildInfo,
+    task_center_enabled: bool,
 ) {
     let addr = listener.local_addr().expect("bound listener");
     // 引导用户：就绪日志直接给出可点开的访问地址 + 按鉴权形态的下一步提示。
@@ -798,6 +857,7 @@ async fn run_full(
         workspace_root,
         skills,
         build,
+        task_center_enabled,
     );
     tracing::info!(%url, hint, "webui dashboard started");
     if let Err(e) = serve(
@@ -1620,8 +1680,8 @@ mod auth_guard_tests {
             ("DELETE", "/api/agents/probe", None),
         ] {
             for (who, cookie) in [("member", &bob), ("viewer", &vic)] {
-                let (status, body) = req(app.clone(), method, uri, Some(cookie), None, body.clone())
-                    .await;
+                let (status, body) =
+                    req(app.clone(), method, uri, Some(cookie), None, body.clone()).await;
                 assert_eq!(
                     status,
                     StatusCode::FORBIDDEN,
@@ -1629,8 +1689,8 @@ mod auth_guard_tests {
                 );
             }
             for (who, cookie) in [("root", &alice), ("admin", &ada)] {
-                let (status, body) = req(app.clone(), method, uri, Some(cookie), None, body.clone())
-                    .await;
+                let (status, body) =
+                    req(app.clone(), method, uri, Some(cookie), None, body.clone()).await;
                 assert_eq!(
                     status,
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -1646,7 +1706,8 @@ mod auth_guard_tests {
             ("member", &bob),
             ("viewer", &vic),
         ] {
-            let (status, body) = req(app.clone(), "GET", "/api/agents", Some(cookie), None, None).await;
+            let (status, body) =
+                req(app.clone(), "GET", "/api/agents", Some(cookie), None, None).await;
             assert_eq!(
                 status,
                 StatusCode::OK,
@@ -2056,6 +2117,7 @@ mod workspace_root_tests {
             parked_approvals: 0,
             label: None,
             first_prompt_preview: None,
+            task_id: None,
         }
     }
 
@@ -2263,7 +2325,8 @@ mod workspace_root_tests {
             t.outside.path().to_str().unwrap(),
         );
         let body = serde_json::json!({ "project_id": legacy, "agent": "claude" });
-        let (status, resp) = req(app.clone(), "POST", "/api/sessions", Some(body.to_string())).await;
+        let (status, resp) =
+            req(app.clone(), "POST", "/api/sessions", Some(body.to_string())).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{resp}");
         assert!(
             resp["error"]
@@ -2295,7 +2358,8 @@ mod workspace_root_tests {
         let inside = t.allowed.path().join("repo");
         std::fs::create_dir_all(inside.join(".git")).unwrap();
         std::fs::write(inside.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
-        let in_scope = backend.seed_project(crate::projects::LOCAL_NODE_ID, inside.to_str().unwrap());
+        let in_scope =
+            backend.seed_project(crate::projects::LOCAL_NODE_ID, inside.to_str().unwrap());
         // 越界遗留项目：目录真实存在，但探测必须按不可达处理（不暴露存在性）。
         let out_scope = backend.seed_project(
             crate::projects::LOCAL_NODE_ID,
@@ -2456,13 +2520,13 @@ mod workspace_root_tests {
             let app = app_with_workspace_root(t.allowed.path().to_path_buf());
             let (status, resp) = req(app, "POST", "/api/fs/mkdir", Some(body.to_string())).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "resp: {resp}");
-            let msg = resp["error"].as_str().expect("typed error body").to_string();
+            let msg = resp["error"]
+                .as_str()
+                .expect("typed error body")
+                .to_string();
             assert!(msg.contains(&expected), "got: {msg}");
         }
-        assert!(
-            !outside_dir.exists(),
-            "越界请求不得在树外产生任何副作用"
-        );
+        assert!(!outside_dir.exists(), "越界请求不得在树外产生任何副作用");
         // 根下除既有 sub 外无新增条目。
         assert_eq!(std::fs::read_dir(t.allowed.path()).unwrap().count(), 1);
     }
@@ -2597,7 +2661,8 @@ mod system_dir_denylist_tests {
         let (app, backend) = app_and_backend_with_workspace_root(std::path::PathBuf::from("/"));
         backend.enable_projects_store();
         let body = serde_json::json!({ "path": "/usr" });
-        let (status, resp) = req(app.clone(), "POST", "/api/projects", Some(body.to_string())).await;
+        let (status, resp) =
+            req(app.clone(), "POST", "/api/projects", Some(body.to_string())).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "resp: {resp}");
         let msg = resp["error"].as_str().unwrap_or_default();
         assert!(msg.contains("系统目录不可注册"), "got: {msg}");
@@ -2606,7 +2671,11 @@ mod system_dir_denylist_tests {
         let legit = tempfile::tempdir().unwrap();
         let body = serde_json::json!({ "path": legit.path().to_str().unwrap() });
         let (status, _) = req(app, "POST", "/api/projects", Some(body.to_string())).await;
-        assert_eq!(status, StatusCode::CREATED, "subtree of /tmp registers fine");
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "subtree of /tmp registers fine"
+        );
     }
 
     /// 2.3 判定先行次序：root 收窄到普通 tempdir 后，root 外的系统目录
@@ -2770,7 +2839,10 @@ mod restore_route_tests {
             session_id,
             sebas_dispatch::SessionIdentity::default(),
             30,
-            vec![TurnEntry::prompt(0, "hello"), TurnEntry::markdown(1, "world")],
+            vec![
+                TurnEntry::prompt(0, "hello"),
+                TurnEntry::markdown(1, "world"),
+            ],
             None,
             None,
         )
@@ -2800,7 +2872,12 @@ mod restore_route_tests {
         let (_path, _raw_key, url) = seed_archive(dir.path(), Some("old-sid".into()));
 
         let backend = Arc::new(FakeBackend::new());
-        let (status, resp) = req(app(backend.clone()), "POST", &format!("/api/sessions/{url}/restore")).await;
+        let (status, resp) = req(
+            app(backend.clone()),
+            "POST",
+            &format!("/api/sessions/{url}/restore"),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK, "resp: {resp}");
         assert_eq!(resp["status"], "restored");
 
@@ -2832,12 +2909,20 @@ mod restore_route_tests {
 
         let backend = Arc::new(FakeBackend::new());
         backend.set_reachable(false, "core down");
-        let (status, resp) =
-            req(app(backend.clone()), "POST", &format!("/api/sessions/{url}/restore")).await;
+        let (status, resp) = req(
+            app(backend.clone()),
+            "POST",
+            &format!("/api/sessions/{url}/restore"),
+        )
+        .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "resp: {resp}");
 
         // 归档原样保留：文件未动、条目仍在（数据没有可逆丢失）。
-        assert_eq!(archive_snapshot(&path), before, "archive.json must be byte-identical");
+        assert_eq!(
+            archive_snapshot(&path),
+            before,
+            "archive.json must be byte-identical"
+        );
         assert!(
             crate::archive::entry(raw_key.as_str()).is_some(),
             "the archive entry must survive a failed rebuild"
@@ -2859,7 +2944,12 @@ mod restore_route_tests {
         // 会话键编码走唯一实现（add-domain-layer 2.3）。
         let encoded = sebas_channels::key::encode_channel_key("web", "web-ghost");
         let backend = Arc::new(FakeBackend::new());
-        let (status, _) = req(app(backend), "POST", &format!("/api/sessions/{encoded}/restore")).await;
+        let (status, _) = req(
+            app(backend),
+            "POST",
+            &format!("/api/sessions/{encoded}/restore"),
+        )
+        .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         // SAFETY: test_env_lock。
         unsafe {
