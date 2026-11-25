@@ -1,6 +1,6 @@
 import { useEffect, useMemo, type ReactNode } from 'react'
 import { Button, Card, Empty, Spin, Tag, Typography } from 'antd'
-import { api, type Role } from '../../api/client.js'
+import { api, type Role, type SessionRow } from '../../api/client.js'
 import { armOpeningSeam, peekOpeningSeam, readAnchorCount } from '../../views/unread-cursor.js'
 import { ConversationStore } from '../state/conversation-store.js'
 import type { SessionStore } from '../state/session-store.js'
@@ -15,6 +15,8 @@ import styles from './workbench.module.css'
 export type { StageTab }
 
 const NO_AGENTS: ReadonlySet<string> = new Set()
+/** `useSyncExternalStore` 快照必须稳定：缺省列表用模块级常量，不每次新建。 */
+const EMPTY_ROWS: SessionRow[] = []
 
 export interface WorkbenchHomeProps {
   sessionKey: string | null
@@ -58,7 +60,7 @@ export function WorkbenchHome({
 }: WorkbenchHomeProps) {
   const summary = useStore(sessions.store, (state) => state.summary)
   const projects = useStore(sessions.store, (state) => state.projects)
-  const sessionRows = useStore(sessions.store, (state) => state.list?.recent_sessions ?? [])
+  const sessionRows = useStore(sessions.store, (state) => state.list?.recent_sessions ?? EMPTY_ROWS)
   const conversation = useMemo(
     () => new ConversationStore({ session: (key) => api.session(key) }),
     [],

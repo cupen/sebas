@@ -3,7 +3,7 @@ import type { BeadsIssue, SessionRow } from '../../api/client.js'
 import { renderMarkdown } from '../../components/markdown.js'
 import { relativeFromIso, reviewerOf } from './principals.js'
 import { ACTION_LABEL, availableActions, isAgentCaller, type TaskActionName, type TaskViewer } from './actions.js'
-import { taskColumn } from './task-store.js'
+import { taskColumn, labelsOf } from './task-store.js'
 import { CommentStream } from './CommentStream.js'
 import { LinkedSessionList } from './LinkedSessionList.js'
 import styles from './tasks.module.css'
@@ -134,7 +134,7 @@ export function TaskDetail({
               <dt>更新</dt>
               <dd>{relativeFromIso(issue.updated_at)}</dd>
               <dt>标签</dt>
-              <dd>{issue.labels.length === 0 ? '无' : issue.labels.join('、')}</dd>
+              <dd>{labelsOf(issue).length === 0 ? '无' : labelsOf(issue).join('、')}</dd>
             </dl>
           </section>
 

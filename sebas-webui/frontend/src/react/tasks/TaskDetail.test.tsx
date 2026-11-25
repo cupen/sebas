@@ -114,6 +114,15 @@ describe('TaskDetail', () => {
     expect(meta.textContent).toContain('待认领')
   })
 
+  it('renders 无 when the wire omits the labels key (P0-2)', () => {
+    renderDetail(issue({ status: 'in_progress', labels: undefined }))
+    const meta = screen.getByTestId('task-metadata')
+    const label = meta.querySelectorAll('dd')[5]
+    expect(label?.textContent).toBe('无')
+    // 无标签仍按进行中归类，操作按钮不受影响。
+    expect(screen.getByTestId('task-action-review')).toBeTruthy()
+  })
+
   it('offers claim only for an unassigned task', () => {
     const handlers = renderDetail(issue())
     expect(screen.getByTestId('task-action-claim')).toBeTruthy()

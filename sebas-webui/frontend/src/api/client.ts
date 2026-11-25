@@ -1645,7 +1645,11 @@ export interface BeadsIssue {
   /** beads 原生 status：`open` / `in_progress` / `closed`。 */
   status: string
   assignee?: string | null
-  labels: string[]
+  /**
+   * 后端 `#[serde(skip_serializing_if = "Vec::is_empty")]`：无标签任务在 wire
+   * 上**没有该键**（不是空数组）——所有消费点必须 nullish 兜底。
+   */
+  labels?: string[]
   /** `reviewer` 存在 issue metadata 里（design D4）。 */
   metadata?: { reviewer?: string | null } | null
   /** `bd show --include-comments` 才携带评论正文。 */

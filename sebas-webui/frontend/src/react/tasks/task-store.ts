@@ -60,6 +60,11 @@ function bucket(projectId: string): ProjectTasks {
   }
 }
 
+/** 看板列判定用的标签集合兜底（wire 缺省该键 = 无标签，不是空数组）。 */
+export function labelsOf(issue: BeadsIssue): string[] {
+  return issue.labels ?? []
+}
+
 /** 任务所在看板列（spec 三列 + 折叠 Done/Cancelled）。 */
 export type TaskColumn = 'unassigned' | 'in_progress' | 'in_review' | 'done' | 'cancelled'
 
@@ -67,7 +72,7 @@ export function taskColumn(issue: BeadsIssue): TaskColumn {
   if (issue.status === 'closed') {
     return issue.close_reason === 'cancelled' ? 'cancelled' : 'done'
   }
-  if (issue.labels.includes('in-review')) return 'in_review'
+  if (labelsOf(issue).includes('in-review')) return 'in_review'
   if (issue.status === 'in_progress' || (issue.assignee ?? '').trim() !== '') {
     return 'in_progress'
   }

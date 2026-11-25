@@ -54,6 +54,15 @@ describe('taskColumn', () => {
     expect(taskColumn(issue('e', { status: 'closed' }))).toBe('done')
     expect(taskColumn(issue('f', { status: 'closed', close_reason: 'cancelled' }))).toBe('cancelled')
   })
+
+  it('tolerates the wire omitting labels for a task without any (P0-2)', () => {
+    // 后端 `skip_serializing_if = "Vec::is_empty"`：无标签任务没有 labels 键。
+    const bare: BeadsIssue = { id: 'bd-bare', title: '无标签', status: 'open' }
+    expect(taskColumn(bare)).toBe('unassigned')
+    expect(taskColumn({ ...bare, status: 'in_progress' })).toBe('in_progress')
+    expect(taskColumn({ ...bare, assignee: 'claude' })).toBe('in_progress')
+    expect(taskColumn({ ...bare, labels: [] })).toBe('unassigned')
+  })
 })
 
 describe('TaskStore', () => {
