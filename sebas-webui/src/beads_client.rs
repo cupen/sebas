@@ -22,7 +22,7 @@ pub const BD_BIN_ENV: &str = "SEBAS_BD_BIN";
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// 单次 `bd events tail` 的超时（design D5：200ms，防偶发慢查询卡轮询）。
-pub const EVENTS_TAIL_TIMEOUT: Duration = Duration::from_millis(200);
+pub const EVENTS_TAIL_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// `bd` 调用失败的类型化分类（task 1.4）。
 #[derive(Debug, thiserror::Error)]
